@@ -1,0 +1,32 @@
+chunk_duration_sec: 300
+trim_samples_start: 0
+trim_samples_end: 0
+
+lowpass_hz: 5.0
+filter_order: 3
+
+window_sec: 20
+step_sec: 5
+
+r_low: 0.2
+r_high: 0.8
+g_min: 0.1
+
+baseline_method: uv_globalfit_percentile_session
+baseline_percentile: 10
+
+npm_time_axis: system_timestamp
+sampling_rate_hz_fallback: 40.0
+timestamp_cv_max: 0.05
+duration_tolerance_frac: 0.1
+qc_max_chunk_fail_fraction: 0.5
+
+# Channels
+rwd_time_col: "Time(s)"
+uv_suffix: "-410"
+sig_suffix: "-470"
+
+npm_system_ts_col: "SystemTimestamp"
+npm_led_col: "LedState"
+npm_region_prefix: "Region"
+npm_region_suffix: "G"

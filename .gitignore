@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.log
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project Outputs & Temporary Data
+tests/out_*/
+tests/syn_*/
+out/
+debug_output/
+*.parquet
+
+# Scripts (Utility/generated)
+create_digest.py
+verify_digest.py
+verify_digest_debug.py
+project_digest.txt
+
+# Agentic
+.gemini/

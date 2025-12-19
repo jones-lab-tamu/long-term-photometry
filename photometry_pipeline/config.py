@@ -1,0 +1,62 @@
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Literal
+import yaml
+import os
+
+@dataclass
+class Config:
+    # chunking & timing
+    chunk_duration_sec: float = 600.0
+    trim_samples_start: int = 0
+    trim_samples_end: int = 0
+    
+    # filters
+    lowpass_hz: float = 1.0
+    filter_order: int = 3
+    
+    # regression
+    window_sec: float = 60.0
+    step_sec: float = 10.0
+    r_low: float = 0.2
+    r_high: float = 0.8
+    g_min: float = 0.2
+    
+    # baseline
+    baseline_method: Literal['uv_raw_percentile_session', 'uv_globalfit_percentile_session'] = 'uv_raw_percentile_session'
+    baseline_percentile: float = 10.0
+    
+    # npm specific
+    npm_time_axis: Literal['system_timestamp', 'computer_timestamp'] = 'system_timestamp'
+    
+    # system
+    sampling_rate_hz_fallback: float = 40.0
+    timestamp_cv_max: float = 0.02
+    duration_tolerance_frac: float = 0.02
+    qc_max_chunk_fail_fraction: float = 0.20
+    
+    # peak detection (exposed params per user request)
+    peak_threshold_method: str = 'mean_plus_k_std'
+    peak_threshold_k: float = 2.0
+    peak_min_distance_sec: float = 1.0
+    
+    # channel identifiers - MUST be provided in config (no defaults for these essentially)
+    rwd_time_col: str = "Time(s)" # Default often seen, but user should override
+    uv_suffix: str = "-410"
+    sig_suffix: str = "-470"
+    
+    npm_frame_col: str = "FrameCounter"
+    npm_system_ts_col: str = "SystemTimestamp"
+    npm_computer_ts_col: str = "ComputerTimestamp"
+    npm_led_col: str = "LedState"
+    npm_region_prefix: str = "Region"
+    npm_region_suffix: str = "G"
+
+    @classmethod
+    def from_yaml(cls, path: str) -> 'Config':
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Config file not found: {path}")
+        
+        with open(path, 'r') as f:
+            data = yaml.safe_load(f)
+        
+        return cls(**data)

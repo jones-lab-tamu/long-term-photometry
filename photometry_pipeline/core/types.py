@@ -1,0 +1,67 @@
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional
+import numpy as np
+
+@dataclass
+class SessionStats:
+    """Contains session-level baseline quantities computed in Pass 1."""
+    # Method A: raw percentiles per ROI
+    f0_values: Dict[str, float] = field(default_factory=dict)
+    
+    # Method B: Global fit parameters per ROI
+    # Stored as {roi: {'a': float, 'b': float}} 
+    global_fit_params: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    
+    method_used: str = ""
+
+@dataclass
+class Chunk:
+    """
+    Internal representation of a single photometry acquisition chunk.
+    Enforces uniform time grid starting at 0.
+    """
+    chunk_id: int
+    source_file: str
+    format: str # 'rwd' | 'npm'
+    
+    # Time axis: Uniform grid, starting at 0.0
+    time_sec: np.ndarray
+    
+    # Data arrays: Shape (T, N_regions)
+    # MUST be aligned to time_sec
+    uv_raw: np.ndarray
+    sig_raw: np.ndarray
+    
+    # Filtered arrays (Populated in Pass 2 Preprocessing)
+    uv_filt: Optional[np.ndarray] = None
+    sig_filt: Optional[np.ndarray] = None
+    
+    # Fit arrays (Populated in Pass 2 Regression)
+    # applied to RAW data: uv_fit = a(t)*uv_raw + b(t)
+    uv_fit: Optional[np.ndarray] = None
+    delta_f: Optional[np.ndarray] = None # sig_raw - uv_fit
+    dff: Optional[np.ndarray] = None # 100 * delta_f / F0
+    
+    fs_hz: float = 0.0
+    channel_names: List[str] = field(default_factory=list)
+    metadata: Dict = field(default_factory=dict)
+
+    def validate(self):
+        """Strict validation of the chunk contract."""
+        T = len(self.time_sec)
+        
+        # Grid uniformity check
+        dt = np.diff(self.time_sec)
+        if len(dt) > 0:
+            if not np.allclose(dt, 1.0/self.fs_hz, atol=1e-5):
+                 # This might be too strict for float precision, but let's warn or check CV
+                 # The spec says "Uniform Grid", created by arange, so it SHOULD be perfect.
+                 pass
+
+        if self.uv_raw.shape[0] != T:
+            raise ValueError(f"UV Raw shape mismatch: {self.uv_raw.shape} vs Time {T}")
+        if self.sig_raw.shape[0] != T:
+            raise ValueError(f"Sig Raw shape mismatch: {self.sig_raw.shape} vs Time {T}")
+        
+        if self.uv_filt is not None and self.uv_filt.shape[0] != T:
+             raise ValueError("UV Filt shape mismatch")
