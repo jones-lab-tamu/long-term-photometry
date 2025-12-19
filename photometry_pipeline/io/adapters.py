@@ -5,7 +5,9 @@ import warnings
 import itertools
 from typing import Optional, List, Dict, Tuple
 from ..config import Config
-from ..core.types import Chunk
+from ..core.types import Chunk, SessionTimeMetadata
+from dataclasses import asdict
+import pathlib
 
 def sniff_format(path: str, config: Config) -> Optional[str]:
     """
@@ -77,13 +79,31 @@ def _resample_strict(t_rel: np.ndarray, data_in: np.ndarray, config: Config, con
         
     return time_sec, data_out
 
+def _ensure_session_time_metadata(chunk: Chunk):
+    """
+    Ensures presence of 'session_time' metadata key.
+    Populates defaults if missing.
+    """
+    if "session_time" not in chunk.metadata:
+        # Default population
+        session_id = str(pathlib.Path(chunk.source_file).stem)
+        meta = SessionTimeMetadata(
+            session_id=session_id,
+            chunk_index=chunk.chunk_id
+        )
+        chunk.metadata["session_time"] = asdict(meta)
+
 def load_chunk(path: str, format_type: str, config: Config, chunk_id: int) -> Chunk:
     if format_type == 'rwd':
-        return _load_rwd(path, config, chunk_id)
+        chunk = _load_rwd(path, config, chunk_id)
     elif format_type == 'npm':
-        return _load_npm(path, config, chunk_id)
+        chunk = _load_npm(path, config, chunk_id)
     else:
         raise ValueError(f"Unknown format: {format_type}")
+    
+    _ensure_session_time_metadata(chunk)
+    chunk.validate()
+    return chunk
 
 def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
     # Parsing (Simplified for brevity, assuming standard logic)
@@ -132,8 +152,18 @@ def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
     uv_grid = data_out[:, :n_rois]
     sig_grid = data_out[:, n_rois:]
     
-    chunk = Chunk(chunk_id, path, 'rwd', time_sec, uv_grid, sig_grid, config.target_fs_hz, names, {"roi_map": roi_map})
-    chunk.validate()
+    chunk = Chunk(
+        chunk_id=chunk_id,
+        source_file=path,
+        format='rwd',
+        time_sec=time_sec,
+        uv_raw=uv_grid,
+        sig_raw=sig_grid,
+        fs_hz=config.target_fs_hz,
+        channel_names=names,
+        metadata={"roi_map": roi_map}
+    )
+    # chunk.validate() moved to load_chunk
     return chunk
 
 def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
@@ -236,6 +266,16 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
             uv_out[:, i] = np.interp(time_sec, t_uv_rel, uv_vals[:, i])
             sig_out[:, i] = np.interp(time_sec, t_sig_rel, sig_vals[:, i])
         
-    chunk = Chunk(chunk_id, path, 'npm', time_sec, uv_out, sig_out, config.target_fs_hz, names, {"roi_map": roi_map})
-    chunk.validate()
+    chunk = Chunk(
+        chunk_id=chunk_id,
+        source_file=path,
+        format='npm',
+        time_sec=time_sec,
+        uv_raw=uv_out,
+        sig_raw=sig_out,
+        fs_hz=config.target_fs_hz,
+        channel_names=names,
+        metadata={"roi_map": roi_map}
+    )
+    # chunk.validate() moved to load_chunk
     return chunk

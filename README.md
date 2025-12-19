@@ -9,7 +9,28 @@ This pipeline implements a strict **two-pass streaming architecture** to process
 1.  **Unified Internal Representation**: All inputs are converted to a uniform time grid (default 40Hz).
 2.  **Strict Separation of Concerns**: Artifact correction (dynamic regression) is decoupled from baseline normalization (session-level F0).
 3.  **Two-Pass Logic**:
+    *   **Pass 1**: Computes session-wide baseline statistics (F0) without loading the entire session into memory.
     *   **Pass 2**: Streams data again to apply artifact correction, normalization, and feature extraction.
+
+## Analytical Contract (Strict Mode and Signal Semantics)
+
+*   **Strict mode guarantees**:
+    *   timestamps are strictly increasing (per channel where relevant)
+    *   resampling onto a fixed grid of length round(chunk_duration_sec * target_fs_hz)
+    *   no extrapolation beyond available data (strict start/end coverage enforced)
+    *   NPM UV and SIG are validated independently (per-channel checks)
+*   **Strict mode does NOT guarantee**:
+    *   no tonic–phasic decomposition (not implemented yet)
+    *   no Bayesian or probabilistic artifact correction (not implemented yet)
+    *   no event-triggered analysis framework (not a current goal)
+*   **Signal definitions**:
+    *   `uv_raw`: raw isosbestic channel on the canonical grid
+    *   `sig_raw`: raw calcium-dependent channel on the canonical grid
+    *   `uv_fit`: estimated artifact component derived from uv_filt fit to sig_filt (artifact estimate only)
+    *   `delta_f`: sig_raw - uv_fit (artifact-corrected numerator only, not normalized)
+    *   `F0`: a separate baseline reference used ONLY for normalization (placeholder, policy defined later)
+*   **Tonic policy statement**:
+    *   "Slow tonic structure is preserved by preprocessing, but explicit tonic–phasic decomposition is not yet implemented."
 
 **Strict Mode Note**: Strict NPM now enforces per-channel monotonicity pre-alignment and computes t0 from earliest valid timestamps, preventing silent misalignment when CSV rows are unsorted.
 

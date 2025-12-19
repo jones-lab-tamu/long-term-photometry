@@ -11,7 +11,12 @@ class Config:
     trim_samples_end: int = 0
     
     seed: int = 0
-    allow_partial_final_chunk: bool = False
+    
+    # Config Parameters Used by Strict Mode
+    allow_partial_final_chunk: bool = False # If False, enforces strict grid coverage & reciprocity
+    # chunk_duration_sec : Defines strict grid length
+    # target_fs_hz       : Defines strict grid spacing
+    # npm_*              : Used for strict time axis parsing
     
     # filters
     target_fs_hz: float = 40.0

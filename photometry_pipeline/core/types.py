@@ -15,6 +15,16 @@ class SessionStats:
     method_used: str = ""
 
 @dataclass
+class SessionTimeMetadata:
+    """Minimal time semantics for CT/ZT alignment."""
+    session_id: str = ""
+    session_start_iso: str = "" # ISO-8601
+    chunk_index: int = 0
+    zt0_iso: str = "" # ISO-8601 of lights-on
+    zt_offset_hours: float = float('nan')
+    notes: str = ""
+
+@dataclass
 class Chunk:
     """
     Internal representation of a single photometry acquisition chunk.
