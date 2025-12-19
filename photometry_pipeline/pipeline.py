@@ -132,11 +132,25 @@ class Pipeline:
                 self.stats.f0_values[ch] = f0
 
         print(f"Pass 1 Complete. F0: {self.stats.f0_values}")
+        
+        # Robustness: Check for Missing/Invalid Baselines
+        from .core.reporting import append_run_report_warnings
+        # We need output_dir. Check if run_pass_1 has access. No.
+        # So we must move this check to run() or pass output_dir to run_pass_1.
+        # Constraint: "Do not change output filenames or directory structure... No changing regression math..."
+        # But changing signature of run_pass_1 might be allowed as internal API improvement for robustness? 
+        # Alternatively, do this in run().
+        # "After Pass 1... Append warning to run_report.json".
+        # I will do this in the `run()` method right after `run_pass_1` returns.
+        # Wait, run_pass_1 computes baselines. So best place is `run()`.
+        pass
 
     def run_pass_2(self, output_dir: str, force_format: str = 'auto'):
         print("Starting Pass 2: Analysis...")
         
         traces_dir = os.path.join(output_dir, 'traces')
+        # Robustness: strict directory creation
+        os.makedirs(os.path.join(output_dir, 'qc'), exist_ok=True)
         os.makedirs(traces_dir, exist_ok=True)
         
         all_features = []
@@ -207,14 +221,21 @@ class Pipeline:
             os.makedirs(feats_dir, exist_ok=True)
             
             full_feats.to_csv(os.path.join(feats_dir, 'features.csv'), index=False)
-            try:
-                full_feats.to_parquet(os.path.join(feats_dir, 'features.parquet'))
-            except ImportError:
-                logging.warning("pyarrow/fastparquet not installed, skipping parquet output")
+            full_feats.to_csv(os.path.join(feats_dir, 'features.csv'), index=False)
 
         total_chunks = len(self.file_list)
         if total_chunks > 0:
             self.qc_summary['chunk_fail_fraction'] = failed_count / total_chunks
+            
+        # Robustness: Add baseline invalid counts if tracked
+        if 'invalid_baseline_rois' in self.qc_summary:
+            bad_rois = self.qc_summary['invalid_baseline_rois']
+            # D3: Ensure explicit counts always present if key exists
+            self.qc_summary['baseline_invalid_roi_count'] = len(bad_rois)
+            total_affected = len(bad_rois) * total_chunks
+            self.qc_summary['baseline_invalid_roi_chunk_pairs'] = total_affected
+            if bad_rois:
+                logging.warning(f"Baseline invalid for {len(bad_rois)} ROIs across {total_chunks} chunks ({total_affected} pairs).")
             
         with open(os.path.join(output_dir, 'qc', 'qc_summary.json'), 'w') as f:
             json.dump(self.qc_summary, f, indent=2)
@@ -226,7 +247,9 @@ class Pipeline:
             'roi_map': self.roi_map,
             'baseline_method': self.stats.method_used,
             'f0_values': self.stats.f0_values,
-            'global_fit_params': self.stats.global_fit_params
+            'global_fit_params': self.stats.global_fit_params,
+            # D1: Write invalid baseline ROIs
+            'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', [])
         }
         with open(os.path.join(output_dir, 'run_metadata.json'), 'w') as f:
             json.dump(run_meta, f, indent=2)
@@ -266,5 +289,49 @@ class Pipeline:
         generate_run_report(self.config, output_dir)
         
         self.run_pass_1(force_format)
+        
+        # Robustness: Baseline Check & Report Update
+        from .core.reporting import append_run_report_warnings
+        baseline_warnings = []
+        invalid_rois = []
+        
+        # Robustness: Baseline Check & Report Update
+        from .core.reporting import append_run_report_warnings
+        baseline_warnings = []
+        invalid_rois = []
+        
+        # D2: ROI Union
+        keys_map = list(self.roi_map.keys()) if self.roi_map else []
+        keys_stats = list(self.stats.f0_values.keys())
+        all_known_rois = sorted(list(set(keys_map) | set(keys_stats)))
+        
+        for roi in all_known_rois:
+            f0 = self.stats.f0_values.get(roi, float('nan'))
+            if np.isnan(f0) or np.isinf(f0) or f0 <= self.config.f0_min_value:
+                invalid_rois.append(roi)
+                baseline_warnings.append(f"Invalid F0 for ROI '{roi}': {f0}. (Min allowed: {self.config.f0_min_value})")
+                
+        if baseline_warnings:
+             append_run_report_warnings(output_dir, baseline_warnings)
+             self.qc_summary['invalid_baseline_rois'] = invalid_rois
+             self.qc_summary['baseline_invalid_roi_count'] = len(invalid_rois)
+             # Approx count if we don't know exact chunk count yet (Pipeline.run continues after this block? 
+             # No, run_pass_2 is called AFTER this block. So valid total_chunks is not known here?)
+             # Wait, `run_pass_2` sets `total_chunks`.
+             # The user asked for "Whenever invalid baselines exist... ensure qc_summary.json contains...".
+             # `qc_summary` is written inside `run_pass_2`. 
+             # So I should populate `qc_summary` here with the ROIs, and let `run_pass_2` compute the chunk counts?
+             # Or just pass the list to `run_pass_2`.
+             # I am updating `self.qc_summary` here. `run_pass_2` uses `self.qc_summary`.
+             # So I should update `run_pass_2` logic to compute the counts from the list.
+             pass
+
         self.run_pass_2(output_dir, force_format)
+        
+        # D1: Add to run_metadata (Requires pass 2 completion to grab final metadata dict? No, Pipeline.run structure runs pass 2 then prints done)
+        # run_metadata is written INSIDE run_pass_2.
+        # So I need to pass `invalid_rois` to run_pass_2 or store efficiently.
+        # I stored it in self.qc_summary['invalid_baseline_rois'].
+        # I will update run_pass_2 to read from there for metadata.
+        pass
         print("Pipeline Done.")

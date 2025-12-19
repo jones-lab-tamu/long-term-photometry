@@ -276,23 +276,56 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
     else:
         # Permissive Mode (Original/Fallback)
         
-        # Overlap (Legacy t0 logic)
-        t0 = max(t_uv[0], t_sig[0])
+        # C: Finite-Safe Permissive Check
+        mask_uv_fin = np.isfinite(t_uv)
+        mask_sig_fin = np.isfinite(t_sig)
         
-        t_uv_rel = t_uv - t0
-        t_sig_rel = t_sig - t0
+        t_uv_f = t_uv[mask_uv_fin]
+        t_sig_f = t_sig[mask_sig_fin]
+        
+        if len(t_uv_f) < 2 or len(t_sig_f) < 2:
+             raise ValueError(f"NPM Permissive: Insufficient finite data in {path}")
+
+        if np.any(np.diff(t_uv_f) <= 0):
+             raise ValueError(f"NPM Permissive: UV timestamps not strictly increasing (finite subset) in {path}")
+        if np.any(np.diff(t_sig_f) <= 0):
+             raise ValueError(f"NPM Permissive: SIG timestamps not strictly increasing (finite subset) in {path}")
+
+        # Overlap uses validated finite starts
+        t0 = max(t_uv_f[0], t_sig_f[0])
         
         # Grid Construction
         n_target = int(np.round(config.chunk_duration_sec * config.target_fs_hz))
         time_sec = np.arange(n_target) / config.target_fs_hz
         
-        # Allows extrapolation using negative times if present
+        # Bounds logic (using finite support)
+        # Note: relative to t0
+        uv_min_t, uv_max_t = t_uv_f[0] - t0, t_uv_f[-1] - t0
+        sig_min_t, sig_max_t = t_sig_f[0] - t0, t_sig_f[-1] - t0
+        
+        # Interpolate
         uv_out = np.zeros((n_target, n_rois))
         sig_out = np.zeros((n_target, n_rois))
         
+        # Prepare relative arrays from FULL (non-finite preserved for shape? No, interp needs valid xp)
+        # Actually interp needs xp to be increasing. Non-finite in xp breaks it?
+        # Standard np.interp expects increasing xp.
+        # So we MUST use t_uv_f for xp. And corresponding values.
+        
+        uv_vals_f = uv_vals[mask_uv_fin]
+        sig_vals_f = sig_vals[mask_sig_fin]
+        
+        t_uv_rel = t_uv_f - t0
+        t_sig_rel = t_sig_f - t0
+        
         for i in range(n_rois):
-            uv_out[:, i] = np.interp(time_sec, t_uv_rel, uv_vals[:, i])
-            sig_out[:, i] = np.interp(time_sec, t_sig_rel, sig_vals[:, i])
+            # UV
+            val_uv = np.interp(time_sec, t_uv_rel, uv_vals_f[:, i], left=np.nan, right=np.nan)
+            uv_out[:, i] = val_uv
+            
+            # SIG
+            val_sig = np.interp(time_sec, t_sig_rel, sig_vals_f[:, i], left=np.nan, right=np.nan)
+            sig_out[:, i] = val_sig
         
     chunk = Chunk(
         chunk_id=chunk_id,

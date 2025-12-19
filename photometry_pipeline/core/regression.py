@@ -5,6 +5,27 @@ from typing import Tuple, Optional
 from ..config import Config
 from .types import Chunk
 
+def _get_window_indices(center: int, window_samples: int, n_samples: int) -> Optional[Tuple[int, int]]:
+    """
+    Returns (start, end) such that end - start == window_samples.
+    Centered at center. Returns None if window exceeds boundaries [0, n_samples].
+    """
+    half = window_samples // 2
+    start = center - half
+    end = start + window_samples
+    
+    if start < 0 or end > n_samples:
+        return None
+        
+    return start, end
+
+# In fit_chunk_dynamic loop:
+# for c in centers:
+#    indices = _get_window_indices(c, window_samples, n_samples)
+#    if indices is None: continue
+#    start, end = indices
+
+
 def fit_chunk_dynamic(chunk: Chunk, config: Config) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Performs dynamic windowed regression with NaN robustness.
@@ -55,8 +76,10 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config) -> Tuple[Optional[np.ndarray
             var_floor = 1e-9
         
         for c in centers:
-            start = c - half_window
-            end = c + half_window
+            indices = _get_window_indices(c, window_samples, n_samples)
+            if indices is None:
+                continue
+            start, end = indices
             
             u_win = u_f[start:end]
             s_win = s_f[start:end]

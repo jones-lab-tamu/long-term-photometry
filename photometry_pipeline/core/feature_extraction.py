@@ -51,7 +51,18 @@ def extract_features(chunk: Chunk, config: Config) -> pd.DataFrame:
             sigma = np.std(clean_trace)
             mad = np.median(np.abs(clean_trace - med))
             
-            thresh = mu + config.peak_threshold_k * sigma
+            if config.peak_threshold_method == 'mean_std':
+                thresh = mu + config.peak_threshold_k * sigma
+            elif config.peak_threshold_method == 'percentile':
+                # B1: Use clean_trace (finite only)
+                thresh = np.nanpercentile(clean_trace, config.peak_threshold_percentile)
+                # B2: No silent inf. Raise ValueError if NaN.
+                if np.isnan(thresh):
+                    raise ValueError(f"Feature Extraction Error: Percentile threshold is NaN for ROI '{roi}' (Chunk {chunk.chunk_id}).")
+            else:
+                # B3: Strict support only
+                raise ValueError(f"Unknown peak_threshold_method: {config.peak_threshold_method}. Supported: ['mean_std', 'percentile']")
+                
             dist_samples = int(config.peak_min_distance_sec * chunk.fs_hz)
             
             # Segment iteration

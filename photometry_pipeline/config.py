@@ -34,7 +34,9 @@ class Config:
     
     # baseline
     baseline_method: Literal['uv_raw_percentile_session', 'uv_globalfit_percentile_session'] = 'uv_raw_percentile_session'
+    baseline_method: Literal['uv_raw_percentile_session', 'uv_globalfit_percentile_session'] = 'uv_raw_percentile_session'
     baseline_percentile: float = 10.0
+    f0_min_value: float = 1e-9
     
     # npm specific
     npm_time_axis: Literal['system_timestamp', 'computer_timestamp'] = 'system_timestamp'
@@ -47,7 +49,9 @@ class Config:
     
     # peak detection (exposed params per user request)
     peak_threshold_method: str = 'mean_plus_k_std'
+    peak_threshold_method: str = 'mean_std'
     peak_threshold_k: float = 2.0
+    peak_threshold_percentile: float = 95.0
     peak_min_distance_sec: float = 1.0
     
     # channel identifiers - MUST be provided in config (no defaults for these essentially)

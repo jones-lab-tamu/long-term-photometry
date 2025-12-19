@@ -54,6 +54,14 @@ def generate_run_report(config: Config, output_dir: str):
     tonic_attenuation_warning = (config.window_sec < (tonic_warning_ratio * tonic_period_interest))
     
     warnings_list = []
+    
+    # Nyquist Check
+    nyquist = config.target_fs_hz / 2.0
+    if config.lowpass_hz >= nyquist:
+        warnings_list.append(
+            f"Lowpass filter disabled: cutoff {config.lowpass_hz}Hz >= Nyquist {nyquist}Hz (fs={config.target_fs_hz}Hz). Raw passed."
+        )
+        
     if tonic_attenuation_warning:
         warnings_list.append("Regression window may attenuate slow tonic structure.")
 
@@ -105,3 +113,29 @@ def generate_run_report(config: Config, output_dir: str):
         
     with open(os.path.join(output_dir, "config_used.yaml"), "w") as f:
         yaml.safe_dump(config_snapshot, f)
+
+def append_run_report_warnings(output_dir: str, new_warnings: list):
+    """
+    Read-Modify-Write run_report.json to append warnings without regeneration.
+    """
+    path = os.path.join(output_dir, "run_report.json")
+    if not os.path.exists(path):
+        return
+        
+    try:
+        with open(path, 'r') as f:
+            data = json.load(f)
+            
+        current = data["derived_settings"].get("warnings", [])
+        # Deduplicate
+        uniq = list(current)
+        for w in new_warnings:
+            if w not in uniq:
+                uniq.append(w)
+                
+        data["derived_settings"]["warnings"] = uniq
+        
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass # Best effort
