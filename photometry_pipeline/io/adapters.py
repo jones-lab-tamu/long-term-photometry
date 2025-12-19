@@ -81,17 +81,45 @@ def _resample_strict(t_rel: np.ndarray, data_in: np.ndarray, config: Config, con
 
 def _ensure_session_time_metadata(chunk: Chunk):
     """
-    Ensures presence of 'session_time' metadata key.
-    Populates defaults if missing.
+    Ensures 'session_time' metadata key exists and strictly adheres to SessionTimeMetadata schema.
+    Backfills missing keys with defaults.
+    Always enforces session_id and chunk_index.
     """
+    # Explicit schema definition to avoid dataclass instantiation assumptions
+    default_dict = {
+        "session_id": "",
+        "session_start_iso": "",
+        "chunk_index": -1,
+        "zt0_iso": "",
+        "zt_offset_hours": float("nan"),
+        "notes": ""
+    }
+    
+    # 1. Ensure dict exists
     if "session_time" not in chunk.metadata:
-        # Default population
-        session_id = str(pathlib.Path(chunk.source_file).stem)
-        meta = SessionTimeMetadata(
-            session_id=session_id,
-            chunk_index=chunk.chunk_id
-        )
-        chunk.metadata["session_time"] = asdict(meta)
+        chunk.metadata["session_time"] = default_dict.copy()
+    
+    meta = chunk.metadata["session_time"]
+    if not isinstance(meta, dict):
+        # Recovery if it's somehow not a dict (cleanup)
+        meta = default_dict.copy()
+        chunk.metadata["session_time"] = meta
+        
+    # 2. Backfill missing keys
+    for k, v in default_dict.items():
+        if k not in meta:
+            meta[k] = v
+            
+    # 3. Enforce derived identity fields
+    # "Any user-provided fields... do NOT overwrite... expect session_id/chunk_index"
+    # Actually, instructions say "Always set session_id, chunk_index... do NOT overwrite other..."
+    # So we ALWAYS overwrite these two.
+    meta["session_id"] = str(pathlib.Path(chunk.source_file).stem)
+    meta["chunk_index"] = chunk.chunk_id
+    
+    # Ensure zt_offset_hours is explicitly NaN if default (it is in our defaults, but ensure type safety)
+    if "zt_offset_hours" in meta and (meta["zt_offset_hours"] is None or meta["zt_offset_hours"] == ""):
+         meta["zt_offset_hours"] = float('nan')
 
 def load_chunk(path: str, format_type: str, config: Config, chunk_id: int) -> Chunk:
     if format_type == 'rwd':

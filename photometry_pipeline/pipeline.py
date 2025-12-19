@@ -12,6 +12,8 @@ from .config import Config
 from .core.types import Chunk, SessionStats
 from .io.adapters import load_chunk, sniff_format
 from .core import preprocessing, regression, normalization, feature_extraction, baseline
+from .core.reporting import generate_run_report
+from .viz import plots
 
 class Pipeline:
     def __init__(self, config: Config):
@@ -139,12 +141,17 @@ class Pipeline:
         
         all_features = []
         failed_count = 0
+        first_success_chunk = None
         
         print("Pass 2 (Analysis)...")
         for i, fpath in enumerate(self.file_list):
             try:
                 fmt = self._get_format(fpath, force_format)
                 chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                
+                # Capture ROI map if missing (e.g. if Pass 1 failed or skipped)
+                if not self.roi_map and chunk.metadata.get("roi_map"):
+                    self.roi_map = chunk.metadata["roi_map"]
                 
                 chunk.uv_filt = preprocessing.lowpass_filter(chunk.uv_raw, chunk.fs_hz, self.config)
                 chunk.sig_filt = preprocessing.lowpass_filter(chunk.sig_raw, chunk.fs_hz, self.config)
@@ -173,6 +180,21 @@ class Pipeline:
                 trace_df = pd.DataFrame(trace_data)
                 trace_path = os.path.join(traces_dir, f"chunk_{i:04d}.csv")
                 trace_df.to_csv(trace_path, index=False)
+                
+                # VIZ: Plot Set A & D (First SUCCESSFUL Chunk Only)
+                if first_success_chunk is None:
+                    first_success_chunk = chunk
+                    viz_dir = os.path.join(output_dir, 'viz')
+                    os.makedirs(viz_dir, exist_ok=True)
+                    plots.set_style()
+                    for roi in chunk.channel_names:
+                        try:
+                            # A: Single Session Raw
+                            plots.plot_single_session_raw(chunk, roi, viz_dir)
+                            # D: Correction Impact (Use full chunk as interval)
+                            plots.plot_correction_impact(chunk, roi, slice(None), viz_dir)
+                        except Exception as e:
+                            logging.warning(f"Viz failure (chunk {i}) {roi}: {e}")
                 
             except Exception as e:
                 logging.error(f"Failed chunk {i} ({fpath}): {e}")
@@ -209,15 +231,40 @@ class Pipeline:
         with open(os.path.join(output_dir, 'run_metadata.json'), 'w') as f:
             json.dump(run_meta, f, indent=2)
             
-        with open(os.path.join(output_dir, 'config_used.yaml'), 'w') as f:
-            yaml.dump(self.config.__dict__, f)
-            
         if self.qc_summary['chunk_fail_fraction'] > self.config.qc_max_chunk_fail_fraction:
             logging.error(f"High failure rate: {self.qc_summary['chunk_fail_fraction']:.2%}")
-            
+
+        # -----------------------------
+        # VIZ: Canonical Visualization
+        # -----------------------------
+        print("Generating visualizations...")
+        plots.set_style()
+        viz_dir = os.path.join(output_dir, 'viz')
+        os.makedirs(viz_dir, exist_ok=True)
+        
+        # Get ROIs from stats or first chunk
+        rois = list(self.stats.f0_values.keys()) if self.stats.f0_values else []
+        if not rois and self.roi_map: rois = list(self.roi_map.keys())
+
+        # Trace files list
+        trace_files = sorted([f for f in os.listdir(traces_dir) if f.endswith('.csv')])
+        
+        for roi in rois:
+            try:
+                # Plot B: Continuous
+                plots.plot_continuous_multiday(traces_dir, roi, viz_dir, trace_files)
+                # Plot C: Stacked
+                plots.plot_stacked_session(traces_dir, roi, viz_dir, trace_files)
+            except Exception as e:
+                logging.warning(f"Viz failure for {roi}: {e}")
+                
     def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv"):
         os.makedirs(os.path.join(output_dir, 'qc'), exist_ok=True)
         self.discover_files(input_dir, recursive, glob_pattern)
+        
+        # 1. Run Report (Pre-Analysis)
+        generate_run_report(self.config, output_dir)
+        
         self.run_pass_1(force_format)
         self.run_pass_2(output_dir, force_format)
         print("Pipeline Done.")
