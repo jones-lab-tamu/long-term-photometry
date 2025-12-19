@@ -1,3 +1,4 @@
+
 import numpy as np
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
@@ -5,88 +6,65 @@ from ..config import Config
 from .types import SessionStats
 
 @dataclass
-class ReservoirSampler:
+class DeterministicReservoir:
     """
-    Fixed-size reservoir sampling for session-wide percentile estimation.
+    Seeded, deterministic reservoir sampler.
+    Guarantees identical outputs for identical input sequences.
     """
-    capacity: int = 200_000 # Enough for ~1.5h at 40Hz.
-    # If session is longer, we downsample representation.
-    # For median/percentile, 200k points is plenty for statistical stability.
+    seed: int
+    capacity: int = 200_000
     
-    buffer: Dict[str, np.ndarray] = field(default_factory=dict) # channel -> array
+    buffer: Dict[str, np.ndarray] = field(default_factory=dict)
     count: Dict[str, int] = field(default_factory=dict)
+    _rng: np.random.Generator = field(init=False)
     
+    def __post_init__(self):
+        self._rng = np.random.default_rng(self.seed)
+        
     def add(self, channel: str, data: np.ndarray):
-        """Streaming reservoir update."""
         if channel not in self.buffer:
             self.buffer[channel] = np.zeros(self.capacity, dtype=np.float32)
             self.count[channel] = 0
             
         n = len(data)
-        if n == 0:
-            return
-            
-        current_count = self.count[channel]
+        if n == 0: return
         
-        # If buffer not full, fill it
-        if current_count < self.capacity:
-            available = self.capacity - current_count
-            take = min(n, available)
-            self.buffer[channel][current_count : current_count+take] = data[:take]
+        current = self.count[channel]
+        
+        if current < self.capacity:
+            take = min(n, self.capacity - current)
+            self.buffer[channel][current:current+take] = data[:take]
             self.count[channel] += take
             
-            # If we still have data left, handle reservoir logic
-            remaining_data = data[take:]
-            remaining_n = len(remaining_data)
-            if remaining_n > 0:
-                self._reservoir_update(channel, remaining_data, current_count + take)
+            remaining = data[take:]
+            if len(remaining) > 0:
+                self._update_existing(channel, remaining)
         else:
-             self._reservoir_update(channel, data, current_count)
-
-    def _reservoir_update(self, channel: str, data: np.ndarray, total_seen: int):
-        # Algorithm L or simple replacement
-        # Simple R: for each new item i at index k (where k is global index),
-        # probability of keeping is capacity/k.
-        # Vectorized implementation: generate random indices for all new items?
-        # Efficient approach for large blocks:
-        # for each item in data:
-        #   m = total_seen + i + 1
-        #   if random < capacity/m:
-        #       replace random slot
+            self._update_existing(channel, data)
+            
+    def _update_existing(self, channel: str, data: np.ndarray):
+        total_seen = self.count[channel]
+        n_new = len(data)
         
-        # This is slow in python loops. Vectorized approx:
-        # Generate randoms for all new items
-        n = len(data)
-        # We need to process sequentially to respect probability? 
-        # Actually for global distribution, order doesn't matter much.
-        # But let's be rigorous.
+        probs = self._rng.random(n_new)
+        denominators = np.arange(total_seen + 1, total_seen + n_new + 1)
+        threshs = self.capacity / denominators
         
-        # We can just randomly select which specific items from 'data' to keep?
-        # No, that's not quite reservoir sampling.
-        # Correct way for block updates:
+        mask = probs < threshs
+        n_replace = np.sum(mask)
         
-        start_n = total_seen
-        # Generate probabilities for each item being included: P = capacity / (start_n + i + 1)
-        # Logic:
-        # 1. Decide how many items from this block enter the reservoir.
-        # This is hyper-geometric? Too complex.
-        
-        # Simple loop is safest:
-        for val in data:
-            start_n += 1
-            if np.random.rand() < (self.capacity / start_n):
-                idx = np.random.randint(0, self.capacity)
-                self.buffer[channel][idx] = val
-        
-        self.count[channel] = start_n
+        if n_replace > 0:
+            replace_indices = self._rng.integers(0, self.capacity, size=n_replace)
+            vals_to_insert = data[mask]
+            self.buffer[channel][replace_indices] = vals_to_insert
+            
+        self.count[channel] += n_new
 
     def get_percentile(self, channel: str, p: float) -> float:
         if channel not in self.buffer or self.count[channel] == 0:
             return np.nan
-        
-        n_valid = min(self.count[channel], self.capacity)
-        view = self.buffer[channel][:n_valid]
-        return np.percentile(view, p)
+        valid = min(self.count[channel], self.capacity)
+        return np.percentile(self.buffer[channel][:valid], p)
 
 @dataclass
 class GlobalFitAccumulator:
@@ -105,7 +83,6 @@ class GlobalFitAccumulator:
             }
         
         s = self.stats[channel]
-        # Ignore NaNs?
         valid = np.isfinite(uv) & np.isfinite(sig)
         u_clean = uv[valid]
         s_clean = sig[valid]
@@ -117,8 +94,6 @@ class GlobalFitAccumulator:
         s['sum_us'] += np.sum(u_clean * s_clean)
 
     def solve(self) -> Dict[str, Dict[str, float]]:
-        # OLS: a = (n*Σxy - ΣxΣy) / (n*Σxx - (Σx)^2)
-        # b = (Σy - aΣx)/n
         results = {}
         for ch, s in self.stats.items():
             n = s['n']
@@ -130,7 +105,7 @@ class GlobalFitAccumulator:
             den = n * s['sum_uu'] - s['sum_u']**2
             
             if abs(den) < 1e-9:
-                a = 0.0 # Vertical or singular
+                a = 0.0 
             else:
                 a = num / den
                 
@@ -138,4 +113,3 @@ class GlobalFitAccumulator:
             results[ch] = {'a': a, 'b': b}
             
         return results
-

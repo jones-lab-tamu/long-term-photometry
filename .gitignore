@@ -22,6 +22,7 @@ tests/syn_*/
 out/
 debug_output/
 *.parquet
+*.csv
 
 # Scripts (Utility/generated)
 create_digest.py

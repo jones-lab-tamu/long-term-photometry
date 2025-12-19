@@ -10,7 +10,11 @@ class Config:
     trim_samples_start: int = 0
     trim_samples_end: int = 0
     
+    seed: int = 0
+    allow_partial_final_chunk: bool = False
+    
     # filters
+    target_fs_hz: float = 40.0
     lowpass_hz: float = 1.0
     filter_order: int = 3
     
@@ -20,6 +24,8 @@ class Config:
     r_low: float = 0.2
     r_high: float = 0.8
     g_min: float = 0.2
+    min_samples_per_window: int = 0  # 0 implies dynamic 80%
+    min_valid_windows: int = 5
     
     # baseline
     baseline_method: Literal['uv_raw_percentile_session', 'uv_globalfit_percentile_session'] = 'uv_raw_percentile_session'

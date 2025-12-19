@@ -29,12 +29,12 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Running Analysis
-
-The main entry point is `analyze_photometry.py`.
+### 3. Run Analysis
+Run the pipeline on an input folder containing CSV chunks.
+**Note**: You must provide a strict configuration file (see `config.py` defaults or `tests/strict_config.yaml`).
 
 ```bash
-python analyze_photometry.py --input /path/to/session_folder --out /path/to/output_folder --format rwd --config config.yaml
+python analyze_photometry.py --input data/session_01 --out output/session_01 --config config.yaml
 ```
 
 **Arguments:**

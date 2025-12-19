@@ -158,6 +158,7 @@ class SyntheticGenerator:
         
         for chunk_idx in range(self.args.n_chunks):
             print(f"Generating Chunk {chunk_idx}...")
+            print(f"DEBUG: n_rois={self.n_rois}")
             
             # 1. Generate Base Artifact High Res
             artifact_raw = self.generate_artifact_raw()
@@ -207,6 +208,11 @@ class SyntheticGenerator:
                     "b_sig": b_sig, "noise_sig": noise_sig, "s_shared": s_shared,
                     "sig_no_art": sig_no_art, "n_ev": n_ev
                 })
+                print(f"DEBUG: Appended component {i}")
+                
+            print(f"DEBUG: roi_components size: {len(roi_components)}")
+                
+            # 3. Artifact Variance Scaling (Locked Logic)
                 
             # 3. Artifact Variance Scaling (Locked Logic)
             # Compute median fraction m
@@ -258,6 +264,11 @@ class SyntheticGenerator:
                     # Artifact for fraction must match SIG indices (1::2)
                     art_final_check = artifact_final[1::2]
 
+                chunk_data["rois"].append({
+                    "uv": uv_out,
+                    "sig": sig_out
+                })
+
                 corr, _ = scipy.stats.pearsonr(uv_check, sig_check)
                 
                 # Re-calc final fraction
@@ -288,8 +299,10 @@ class SyntheticGenerator:
             df["TimeStamp"] = data["time_rwd"] * 1000.0
             df["Events"] = 0
             for i, roi in enumerate(data["rois"]):
+                print(f"DEBUG: Adding ROI {i}")
                 df[f"CH{i+1}-410"] = roi["uv"]
                 df[f"CH{i+1}-470"] = roi["sig"]
+            print(f"DEBUG: DF size {len(df)}, columns: {df.columns.tolist()}")
             df.to_csv(path, index=False)
             
         elif self.args.format == "npm":

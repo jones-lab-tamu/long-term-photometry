@@ -1,85 +1,50 @@
+
 import numpy as np
-import pandas as pd
 from scipy.stats import pearsonr
-from typing import Tuple, Dict, Optional
+from typing import Tuple, Optional
 from ..config import Config
 from .types import Chunk
 
-def fit_chunk_dynamic(chunk: Chunk, config: Config) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+def fit_chunk_dynamic(chunk: Chunk, config: Config) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
-    Performs dynamic windowed regression.
-    Uses FILTERED data for fits.
-    Applies parameters to RAW data.
-    
-    Returns:
-       uv_fit, delta_f, dff (None here, separate step), fit_params
-       
-    Strict Spec Implementation:
-    - sliding windows (center aligned)
-    - OLS
-    - r gating
-    - variance floor -> invalid window
-    - slope clamping (p5-p95)
-    - linear interp of a(t), b(t)
-    - apply to raw
+    Performs dynamic windowed regression with NaN robustness.
     """
-    
-    # Check if we have filtered data
     if chunk.uv_filt is None or chunk.sig_filt is None:
         raise ValueError("Dynamic regression requires filtered arrays")
         
     n_samples = len(chunk.time_sec)
     n_rois = chunk.uv_filt.shape[1]
-    
-    uv_filt = chunk.uv_filt
-    sig_filt = chunk.sig_filt
-    
-    uv_raw = chunk.uv_raw
-    sig_raw = chunk.sig_raw
-    
     fs = chunk.fs_hz
     
-    # Outputs
-    uv_fit_all = np.zeros_like(uv_raw) * np.nan
-    delta_f_all = np.zeros_like(sig_raw) * np.nan
-    
-    # Parameters for features/debugging? Not strictly required by spec output schema but good to have
-    # We apply per ROI
+    uv_fit_all = np.zeros_like(chunk.uv_filt) * np.nan
+    delta_f_all = np.zeros_like(chunk.sig_filt) * np.nan
     
     window_samples = int(config.window_sec * fs)
     step_samples = int(config.step_sec * fs)
     half_window = window_samples // 2
     
-    # Center points for windows
-    # Range: from half_window to n_samples - half_window
+    # Min samples config
+    min_samples = config.min_samples_per_window
+    if min_samples <= 0:
+        min_samples = int(window_samples * 0.8)
+    
     if window_samples > n_samples:
-         # Chunk too short for even one window?
-         # Spec: "if valid windows >= 10: clamp... else ROI FAILS"
-         # If < 1 window, ROI FAILS immediately.
-         centers = []
-    else:
-        centers = np.arange(half_window, n_samples - half_window, step_samples)
+        return uv_fit_all, delta_f_all 
         
-    # We iterate ROIs
+    centers = np.arange(half_window, n_samples - half_window, step_samples)
+    
     for r_idx in range(n_rois):
-        u_f = uv_filt[:, r_idx]
-        s_f = sig_filt[:, r_idx]
+        u_f = chunk.uv_filt[:, r_idx]
+        s_f = chunk.sig_filt[:, r_idx]
+        u_r = chunk.uv_raw[:, r_idx]
+        s_r = chunk.sig_raw[:, r_idx]
         
-        u_r = uv_raw[:, r_idx]
-        s_r = sig_raw[:, r_idx]
-        
-        # Variance floor check (Session level? No, spec says "median(uv_filt_chunk)^2")
-        # "var_floor = 1e-6 * median(uv_filt_chunk)^2"
-        # "if var(uv_filt_window) < var_floor -> window invalid"
-        
-        med_sq = np.median(u_f)**2
+        # Variance floor
+        med_sq = np.nanmedian(u_f)**2
         var_floor = 1e-6 * med_sq
         
-        a_vals = []
-        b_vals = []
-        t_centers_valid = []
+        stats = [] # (t, a_gated, u_mean, s_mean)
         
-        # Pass 1: Collect Fits
         for c in centers:
             start = c - half_window
             end = c + half_window
@@ -87,91 +52,71 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config) -> Tuple[Optional[np.ndarray
             u_win = u_f[start:end]
             s_win = s_f[start:end]
             
-            # Variance check
-            if np.var(u_win) < var_floor:
-                continue # Invalid window
+            # Mask NaNs
+            m = np.isfinite(u_win) & np.isfinite(s_win)
+            if np.sum(m) < min_samples:
+                continue
                 
-            # OLS
-            # sig = a*uv + b
-            # a = cov(u,s)/var(u)
-            # b = mean(s) - a*mean(u)
-            # Or use polyfit(deg=1)
+            u_w = u_win[m]
+            s_w = s_win[m]
             
-            slope, intercept = np.polyfit(u_win, s_win, 1)
-            
-            # Pearson r
-            r, _ = pearsonr(u_win, s_win)
-            
-            # Gating
-            # r <= r_low -> g = g_min
-            # r >= r_high -> g = 1
-            # else linear
-            
-            g = 1.0
-            if r <= config.r_low:
-                g = config.g_min
-            elif r >= config.r_high:
+            if np.var(u_w) < var_floor:
+                continue
+                
+            try:
+                cov = np.cov(u_w, s_w, bias=True)
+                var_u = cov[0,0]
+                cov_us = cov[0,1]
+                
+                if var_u == 0: continue
+                
+                slope = cov_us / var_u
+                
+                with np.errstate(all='ignore'):
+                    r, _ = pearsonr(u_w, s_w)
+                
+                if not np.isfinite(r): continue
+                
+                # Gating
                 g = 1.0
-            else:
-                # Linear interp
-                # slope = (1 - g_min) / (r_high - r_low)
-                # g = g_min + slope * (r - r_low)
-                m_g = (1.0 - config.g_min) / (config.r_high - config.r_low)
-                g = config.g_min + m_g * (r - config.r_low)
+                if r <= config.r_low:
+                    g = config.g_min
+                elif r >= config.r_high:
+                    g = 1.0
+                else:
+                    g = config.g_min + ((1.0 - config.g_min) / (config.r_high - config.r_low)) * (r - config.r_low)
+                    
+                a_gated = g * slope
                 
-            a_gated = g * slope
-            b_gated = np.mean(s_win) - a_gated * np.mean(u_win)
-            
-            a_vals.append(a_gated)
-            b_vals.append(b_gated)
-            t_centers_valid.append(c) # store index
-            
-        # Slope Clamping
-        # "if valid windows >= 10"
-        if len(a_vals) < 10:
-            # ROI FAILS
-            # Outputs remain Nan
+                stats.append((c, a_gated, np.mean(u_w), np.mean(s_w)))
+                
+            except Exception:
+                continue
+                
+        if len(stats) < config.min_valid_windows:
             continue
             
-        a_arr = np.array(a_vals)
-        b_arr = np.array(b_vals)
+        stats_arr = np.array(stats)
+        t_valid = stats_arr[:, 0]
+        a_valid = stats_arr[:, 1]
+        u_means = stats_arr[:, 2]
+        s_means = stats_arr[:, 3]
         
-        p5 = np.percentile(a_arr, 5)
-        p95 = np.percentile(a_arr, 95)
+        # Clamping
+        p5 = np.percentile(a_valid, 5)
+        p95 = np.percentile(a_valid, 95)
+        a_clamped = np.clip(a_valid, p5, p95)
         
-        # clamp slopes
-        a_clamped = np.clip(a_arr, p5, p95)
+        # Update b
+        b_clamped = s_means - a_clamped * u_means
         
-        # Recompute b? Spec implies we clamp 'a' and 'b' moves? 
-        # Actually spec says: "clamp slopes to [p5, p95]", doesn't mention b.
-        # But b = mean(s) - a*mean(u). If a changes, b should change to maintain center?
-        # Usually yes. But spec is silent. 
-        # "Interpolate a(t), b(t)" implies we interpolate the values we computed.
-        # If we clamp A, and don't update B, the line pivot changes.
-        # Let's assume we just clamp A and keep B as is? Or recompute B?
-        # "Gating... 4) a = g*a_hat 5) b = mean - a*mean". Gating updates B.
-        # Clamping is a post-hoc filter on 'a'. 
-        # Logic suggests if we force 'a', we should re-estimate 'b' or accept the shift.
-        # Given "Strict Spec", and it says "clamp slopes", and nothing else...
-        # I will just clamp 'a' and leave 'b'. This might introduce jumps. 
-        # But if the slope is clamped, maybe it was an outlier anyway.
-        # Let's strictly follow: "clamp slopes to [p5, p95]". 
-        # It doesn't say "recompute b".
+        # Interpolate
+        t_indices = np.arange(n_samples).astype(float)
         
-        # Interpolate a(t), b(t) to full length
-        # "linear between window centers, hold constant at edges"
+        a_smooth = np.interp(t_indices, t_valid, a_clamped)
+        b_smooth = np.interp(t_indices, t_valid, b_clamped)
         
-        t_indices = np.arange(n_samples)
-        
-        # np.interp uses constant extrapolation by default if we don't specify left/right? 
-        # No, np.interp holds constant! "left: Value to return for x < xp[0], default is fp[0]."
-        # Perfect.
-        
-        a_smooth = np.interp(t_indices, t_centers_valid, a_clamped)
-        b_smooth = np.interp(t_indices, t_centers_valid, b_arr)
-        
-        # Apply to RAW
-        # uv_fit = a(t) * uv_raw + b(t)
+        # Apply Raw
         uv_fit_roi = a_smooth * u_r + b_smooth
         delta_f_roi = s_r - uv_fit_roi
         
