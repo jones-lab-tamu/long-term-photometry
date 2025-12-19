@@ -9,8 +9,9 @@ This pipeline implements a strict **two-pass streaming architecture** to process
 1.  **Unified Internal Representation**: All inputs are converted to a uniform time grid (default 40Hz).
 2.  **Strict Separation of Concerns**: Artifact correction (dynamic regression) is decoupled from baseline normalization (session-level F0).
 3.  **Two-Pass Logic**:
-    *   **Pass 1**: Computes session-wide baseline statistics (F0) without loading the entire session into memory.
     *   **Pass 2**: Streams data again to apply artifact correction, normalization, and feature extraction.
+
+**Strict Mode Note**: Strict NPM now enforces per-channel monotonicity pre-alignment and computes t0 from earliest valid timestamps, preventing silent misalignment when CSV rows are unsorted.
 
 ## Installation
 
@@ -41,7 +42,7 @@ python analyze_photometry.py --input data/session_01 --out output/session_01 --c
 *   `--input`: Path to folder containing chunked CSV files.
 *   `--out`: Output directory.
 *   `--format`: `rwd` or `npm`.
-*   `--config` (Optional): Path to YAML config. Uses defaults if omitted.
+*   `--config`: Path to YAML config (Required).
 *   `--overwrite`: Force overwrite of existing output.
 
 ### Output Structure
