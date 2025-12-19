@@ -1,97 +1,161 @@
 # Photometry Pipeline V1
 
-A robust, lab-default, long-term fiber photometry analysis pipeline in Python.
+A strict, chunk-streaming fiber photometry analysis pipeline for long-term recordings, designed to fail loudly on data or configuration violations rather than silently produce invalid results.
 
-## Overview
+## What Does This Do?
 
-This pipeline implements a strict **two-pass streaming architecture** to process chunked photometry recordings (RWD or NPM formats). It is designed for scalability and scientific reproducibility, enforcing:
+This software processes raw fiber photometry recordings into artifact-corrected, normalized signals (ΔF/F) and summary features. It is built specifically for long recordings that cannot be loaded into memory at once and for datasets where timestamp irregularities, drift, or partial corruption are common.
 
-1.  **Unified Internal Representation**: All inputs are converted to a uniform time grid (default 40Hz).
-2.  **Strict Separation of Concerns**: Artifact correction (dynamic regression) is decoupled from baseline normalization (session-level F0).
-3.  **Two-Pass Logic**:
-    *   **Pass 1**: Computes session-wide baseline statistics (F0) without loading the entire session into memory.
-    *   **Pass 2**: Streams data again to apply artifact correction, normalization, and feature extraction.
+Core problems addressed:
 
-## Analytical Contract (Strict Mode and Signal Semantics)
+1. **Motion and Drift Artifacts**  
+   Long recordings exhibit drift and motion artifacts. This pipeline removes them using isosbestic correction, fitting a control channel to the signal channel and subtracting the estimated artifact.
 
-*   **Strict mode guarantees**:
-    *   timestamps are strictly increasing (per channel where relevant)
-    *   resampling onto a fixed grid of length round(chunk_duration_sec * target_fs_hz)
-    *   no extrapolation beyond available data (strict start/end coverage enforced)
-    *   NPM UV and SIG are validated independently (per-channel checks)
-*   **Strict mode does NOT guarantee**:
-    *   no tonic–phasic decomposition (not implemented yet)
-    *   no Bayesian or probabilistic artifact correction (not implemented yet)
-    *   no event-triggered analysis framework (not a current goal)
-*   **Signal definitions**:
-    *   `uv_raw`: raw isosbestic channel on the canonical grid
-    *   `sig_raw`: raw calcium-dependent channel on the canonical grid
-    *   `uv_fit`: estimated artifact component derived from uv_filt fit to sig_filt (artifact estimate only)
-    *   `delta_f`: sig_raw - uv_fit (artifact-corrected numerator only, not normalized)
-    *   `F0`: a separate baseline reference used ONLY for normalization (placeholder, policy defined later)
-*   **Tonic policy statement**:
-    *   "Slow tonic structure is preserved by preprocessing, but explicit tonic–phasic decomposition is not yet implemented."
+2. **Scalability for Long Recordings**  
+   Recordings spanning hours to days are processed as independent chunks. Data are streamed from disk and never fully loaded into RAM.
 
-**Strict Mode Note**: Strict NPM now enforces per-channel monotonicity pre-alignment and computes t0 from earliest valid timestamps, preventing silent misalignment when CSV rows are unsorted.
+3. **Strict Correctness Guarantees**  
+   The pipeline enforces explicit contracts on timestamps, baselines, and numerical validity. If these contracts are violated, the pipeline raises errors or records warnings rather than fabricating data.
 
-## Installation
+## High-Level Architecture (Two-Pass System)
 
-Requires Python 3.9+.
+The analysis proceeds in two distinct passes over the input data.
+
+### Pass 1: Session-Wide Baseline Estimation
+
+**Goal**  
+Estimate a stable session-wide baseline fluorescence (F0) for each ROI.
+
+**Method**  
+Each chunk is read sequentially. For each ROI, values are added to a deterministic reservoir sampler (seeded). A configured percentile of this reservoir is used as F0.
+
+**Why This Exists**  
+ΔF/F normalization requires a global baseline, but long recordings cannot be held in memory. Reservoir sampling provides a memory-bounded estimate.
+
+**Failure Handling**  
+If F0 is NaN, infinite, or below a minimum threshold, the ROI is flagged as invalid. Invalid baselines are recorded in run metadata and QC artifacts.
+
+### Pass 2: Artifact Correction, Normalization, and Feature Extraction
+
+For each chunk:
+
+1. The chunk is loaded and validated.
+2. Timestamps are resampled onto a uniform grid at `target_fs_hz` for `chunk_duration_sec`.
+3. Raw signals are low-pass filtered if enabled.
+4. **Dynamic isosbestic regression** is performed using a sliding window:
+   - Regression is computed on filtered signals.
+   - The fitted artifact is applied to raw signals.
+5. Artifact-corrected ΔF is computed.
+6. ΔF/F is computed using the Pass 1 baseline.
+7. Per-chunk, per-ROI features are extracted.
+8. Traces, features, QC information, and visualizations are written to disk.
+
+If regression fails for a given ROI or window, outputs for that ROI are set to NaN and recorded in QC logs.
+
+## Supported Input Formats
+
+Input data must be provided as CSV files representing sequential chunks.
+
+### RWD Format
+- Columns include a time column (for example `Time(s)`) and paired UV and signal columns per ROI.
+- UV and signal channels are matched by suffix.
+
+### NPM Format
+- Multi-row format with interleaved LED states.
+- Uses explicit timestamp and LED columns defined in the configuration.
+- Supports strict and permissive handling of partial chunks.
+
+## Running the Pipeline
+
+### Installation
+Requires Python 3.9 or newer.
 
 ```bash
-# Create virtual environment
 python -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-
-# Install dependencies
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-**Note**: `pyarrow` is required for Parquet output support.
-
-## Usage
-
-### 3. Run Analysis
-Run the pipeline on an input folder containing CSV chunks.
-**Note**: You must provide a strict configuration file (see `config.py` defaults or `tests/strict_config.yaml`).
+### Command Line Usage
 
 ```bash
-python analyze_photometry.py --input data/session_01 --out output/session_01 --config config.yaml
+python analyze_photometry.py \
+  --input "C:/Path/To/Data" \
+  --out "C:/Path/To/Output" \
+  --config config.yaml
 ```
 
 **Arguments:**
-*   `--input`: Path to folder containing chunked CSV files.
+
+*   `--input`: Folder containing chunk CSV files.
 *   `--out`: Output directory.
-*   `--format`: `rwd` or `npm`.
-*   `--config`: Path to YAML config (Required).
-*   `--overwrite`: Force overwrite of existing output.
+*   `--config`: Path to YAML configuration file.
+*   `--format`: auto, rwd, or npm (optional).
+*   `--recursive`: Search input folder recursively (optional).
+*   `--glob`: File glob pattern (optional).
 
-### Output Structure
+## Configuration (`config.yaml`)
+All numerical behavior is controlled via configuration.
 
-```
-output_folder/
-├── run_metadata.json       # Session params, F0 values, Global Fit coeffs
-├── config_used.yaml        # Copy of effective configuration
-├── traces/                 # Per-chunk CSVs with trace data
-│   ├── chunk_0000.csv
-│   └── ...
-├── features/               # Extracted features
-│   ├── features.parquet    # Efficient binary format
-│   └── features.csv        # Summary CSV
-└── qc/
-    └── qc_summary.json     # Quality control stats (failed chunks, ROIs)
-```
+**Key parameters:**
 
-## Synthetic Data Generator
+*   `target_fs_hz`: Output sampling rate used for resampling chunks.
+*   `chunk_duration_sec`: Duration of each chunk after resampling.
+*   `lowpass_hz`: Low-pass filter cutoff frequency. If set to 0 or ≥ Nyquist, filtering is disabled and a warning is recorded.
+*   `baseline_method`: Method for F0 estimation, for example percentile of raw UV or global-fit UV.
+*   `baseline_percentile`: Percentile used to compute F0.
+*   `f0_min_value`: Minimum allowed F0 before an ROI is flagged invalid.
+*   `window_sec`: Sliding window length for dynamic regression.
+*   `peak_threshold_method`: "mean_std" or "percentile".
+*   `peak_threshold_k`: Number of standard deviations above the mean when using "mean_std".
+*   `peak_threshold_percentile`: Percentile used when "percentile" mode is selected.
+*   `allow_partial_final_chunk`: Controls strict versus permissive handling of incomplete coverage.
 
-A strict validation tool included in `tests/generate_synthetic_session.py` generates data with known ground-truth properties (GCaMP events, shared artifacts, drift).
+## Strict vs Permissive Behavior
 
-```bash
-python tests/generate_synthetic_session.py --format rwd --out tests/syn_data --n_chunks 5 --chunk_duration_sec 600 --fs_hz 40 --seed 42
-```
+### Strict Mode (`allow_partial_final_chunk = False`)
+*   Timestamps must be strictly increasing and finite.
+*   Full temporal coverage is required.
+*   Missing coverage or invalid timestamps cause hard failure.
 
-Use this to verify pipeline correctness (artifact rejection, event recovery) under controlled conditions.
+### Permissive Mode (`allow_partial_final_chunk = True`)
+*   Timestamps must still be strictly increasing and finite.
+*   Partial coverage is allowed.
+*   Samples outside measured time support are filled with NaN, never extrapolated.
 
-## License
+## Outputs
+After a successful run, the output directory contains:
 
-Internal Research Use.
+*   **`traces/`**: One CSV per chunk with columns:
+    *   `time_sec`
+    *   `{ROI}_uv_raw`
+    *   `{ROI}_sig_raw`
+    *   `{ROI}_uv_fit`
+    *   `{ROI}_deltaF`
+    *   `{ROI}_dff`
+
+*   **`features/`**:
+    *   `features.csv`: Per-chunk, per-ROI summary including mean, median, standard deviation, MAD, peak_count, AUC.
+
+*   **`qc/qc_summary.json`**:
+    *   Quality control summary including failed chunks, invalid baseline ROIs, baseline invalid ROI counts, chunk failure fraction.
+
+*   **`run_metadata.json`**:
+    *   Machine-readable record of configuration values, baseline method, F0 values, invalid baseline ROIs.
+
+*   **`run_report.json`**:
+    *   Human-readable report describing derived settings, strictness assumptions, warnings such as Nyquist violations or invalid baselines.
+
+*   **`viz/`**:
+    *   Automatically generated diagnostic plots for raw signals, correction impact, and continuous multi-chunk traces.
+
+## Safety and Failure Philosophy
+This pipeline is intentionally conservative.
+
+It will fail or warn if:
+*   timestamps are non-monotonic or non-finite
+*   baselines are invalid
+*   regression windows are ill-posed
+*   percentile thresholds cannot be computed safely
+
+If outputs are produced, they satisfy the declared analytical contract.
