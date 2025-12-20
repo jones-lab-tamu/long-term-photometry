@@ -9,6 +9,36 @@ from ..core.types import Chunk, SessionTimeMetadata
 from dataclasses import asdict
 import pathlib
 
+
+def discover_rwd_chunks(root_path: str) -> List[str]:
+    """
+    Discovers RWD chunks as timestamped subdirectories containing 'fluorescence.csv'.
+    
+    Rules:
+    - Scans immediate subdirectories of root_path.
+    - Valid chunk: subdirectory with 'fluorescence.csv'.
+    - Sorting: Lexicographical by directory name (YYYY_MM_DD-HH_MM_SS).
+    - Ignores: outputs.csv, events.csv, fluorescence-unaligned.csv.
+    """
+    if not os.path.isdir(root_path):
+        raise ValueError(f"RWD Discovery: Root path must be a directory: {root_path}")
+        
+    chunks = []
+    
+    # Iterate immediate children
+    with os.scandir(root_path) as it:
+        entries = sorted([e for e in it if e.is_dir()], key=lambda x: x.name)
+        
+        for entry in entries:
+            target_file = os.path.join(entry.path, "fluorescence.csv")
+            if os.path.isfile(target_file):
+                chunks.append(target_file)
+                
+    if not chunks:
+        raise ValueError(f"RWD Discovery: No valid RWD chunk directories found in {root_path} (subfolders must contain fluorescence.csv)")
+        
+    return chunks
+
 def sniff_format(path: str, config: Config) -> Optional[str]:
     """
     Detects if a file is 'rwd' or 'npm' based on header/column analysis.

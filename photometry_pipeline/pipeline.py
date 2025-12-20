@@ -27,8 +27,12 @@ class Pipeline:
         }
         self.roi_map = {}
 
-    def discover_files(self, input_path: str, recursive: bool = False, file_glob: str = "*.csv"):
-        if os.path.isfile(input_path):
+    def discover_files(self, input_path: str, recursive: bool = False, file_glob: str = "*.csv", force_format: str = 'auto'):
+        if force_format == 'rwd':
+            # RWD Discovery: Treat input_path as root containing timestamped subdirectories
+            from .io.adapters import discover_rwd_chunks
+            self.file_list = discover_rwd_chunks(input_path)
+        elif os.path.isfile(input_path):
             self.file_list = [input_path]
         else:
             if recursive:
@@ -283,7 +287,7 @@ class Pipeline:
                 
     def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv"):
         os.makedirs(os.path.join(output_dir, 'qc'), exist_ok=True)
-        self.discover_files(input_dir, recursive, glob_pattern)
+        self.discover_files(input_dir, recursive, glob_pattern, force_format=force_format)
         
         # 1. Run Report (Pre-Analysis)
         generate_run_report(self.config, output_dir)
