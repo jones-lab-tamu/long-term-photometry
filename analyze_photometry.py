@@ -12,10 +12,13 @@ def main():
     parser.add_argument('--out', required=True, help="Output directory")
     parser.add_argument('--format', choices=['auto', 'rwd', 'npm'], default='auto', help="Force input format")
     parser.add_argument('--recursive', action='store_true', help="Search input recursively")
-    parser.add_argument('--file-glob', default="*.csv", help="Glob pattern for CSV files")
+    parser.add_argument('--file-glob', dest='file_glob', default="*.csv", help="Glob pattern for CSV files (alias: --glob)")
+    parser.add_argument('--glob', dest='file_glob', help="Alias for --file-glob")
     parser.add_argument('--overwrite', action='store_true', help="Overwrite output directory")
     
     args = parser.parse_args()
+    
+    # No active_glob logic needed, argparse handles dest='file_glob'
     
     # Logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

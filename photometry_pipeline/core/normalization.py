@@ -1,7 +1,9 @@
 import numpy as np
 from .types import Chunk, SessionStats
 
-def compute_dff(chunk: Chunk, stats: SessionStats) -> np.ndarray:
+from ..config import Config
+
+def compute_dff(chunk: Chunk, stats: SessionStats, config: Config) -> np.ndarray:
     """
     Computes dF/F0 using session-level baselines.
     dff = 100 * deltaF / F0
@@ -16,7 +18,7 @@ def compute_dff(chunk: Chunk, stats: SessionStats) -> np.ndarray:
         channel = chunk.channel_names[i]
         if channel in stats.f0_values:
             f0 = stats.f0_values[channel]
-            if f0 > 1e-9: # Avoid div by zero
+            if f0 > config.f0_min_value: 
                  # delta_f can be NaN if regression failed
                  dff[:, i] = 100.0 * chunk.delta_f[:, i] / f0
             else:

@@ -15,7 +15,9 @@ Core problems addressed:
    Recordings spanning hours to days are processed as independent chunks. Data are streamed from disk and never fully loaded into RAM.
 
 3. **Strict Correctness Guarantees**  
-   The pipeline enforces explicit contracts on timestamps, baselines, and numerical validity. If these contracts are violated, the pipeline raises errors or records warnings rather than fabricating data.
+   
+
+The pipeline enforces explicit contracts on timestamps, baselines, and numerical validity. If these contracts are violated, the pipeline raises errors or records warnings rather than fabricating data.
 
 ## High-Level Architecture (Two-Pass System)
 
@@ -92,7 +94,7 @@ python analyze_photometry.py \
 *   `--config`: Path to YAML configuration file.
 *   `--format`: auto, rwd, or npm (optional).
 *   `--recursive`: Search input folder recursively (optional).
-*   `--glob`: File glob pattern (optional).
+*   `--glob`: File glob pattern (optional). Alias: `--file-glob`.
 
 ## Configuration (`config.yaml`)
 All numerical behavior is controlled via configuration.
@@ -159,3 +161,20 @@ It will fail or warn if:
 *   percentile thresholds cannot be computed safely
 
 If outputs are produced, they satisfy the declared analytical contract.
+
+### Tonic/Phasic Analysis Tool
+
+To run the pipeline and generate paper-ready plots separating Tonic (baseline trend) and Phasic (fast event) components:
+
+```bash
+python tools/run_cli_and_make_tonic_phasic_plots.py \
+  --input "C:/Path/To/Data" \
+  --out "C:/Path/To/Output" \
+  --config config.yaml \
+  --tonic-percentile 5.0 --phasic-highpass-hz 0.01
+```
+
+**Outputs:**
+- Generates `tonic_{ROI}.png` and `phasic_{ROI}.png` in `{output_dir}/paper_plots`.
+- Saves reproducible parameters in `plot_params_{ROI}.json`.
+- Runs the standard pipeline first, then post-processes the traces.

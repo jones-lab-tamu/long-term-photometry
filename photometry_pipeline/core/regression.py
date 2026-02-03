@@ -107,8 +107,12 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config) -> Tuple[Optional[np.ndarray
             slope = cov_us / var_u
             
             # Pearson
-            with np.errstate(all='ignore'):
-                r, _ = pearsonr(u_w, s_w)
+            try:
+                with np.errstate(all='ignore'):
+                    r, _ = pearsonr(u_w, s_w)
+            except Exception:
+                # If pearsonr fails (e.g. constant input despite variance check), skip
+                continue
             
             if not np.isfinite(r): continue
             

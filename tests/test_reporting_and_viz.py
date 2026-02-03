@@ -128,9 +128,14 @@ class TestReportingAndViz(unittest.TestCase):
             shutil.rmtree(iso_dir)
         os.makedirs(iso_dir, exist_ok=True)
         
-        # 2. Create files
-        file0 = os.path.join(iso_dir, "0000_corrupt.csv")
-        file1 = os.path.join(iso_dir, "0001_valid.csv")
+        # 2. Create chunks (RWD requires subdirectories with fluorescence.csv)
+        fn0 = os.path.join(iso_dir, "chunk_0000")
+        fn1 = os.path.join(iso_dir, "chunk_0001")
+        os.makedirs(fn0, exist_ok=True)
+        os.makedirs(fn1, exist_ok=True)
+        
+        file0 = os.path.join(fn0, "fluorescence.csv")
+        file1 = os.path.join(fn1, "fluorescence.csv")
         
         with open(file0, 'w') as f:
             f.write("GARBAGE\n")
@@ -156,7 +161,7 @@ class TestReportingAndViz(unittest.TestCase):
             qc = json.load(f)
             
         failed_files = [x['file'] for x in qc['failed_chunks']]
-        self.assertTrue(any("0000_corrupt.csv" in f for f in failed_files))
+        self.assertTrue(any("chunk_0000" in f for f in failed_files))
         
 if __name__ == '__main__':
     unittest.main()

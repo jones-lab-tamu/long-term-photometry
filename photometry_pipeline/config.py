@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import dataclasses
 from typing import List, Optional, Dict, Literal
 import yaml
 import os
@@ -34,7 +35,6 @@ class Config:
     
     # baseline
     baseline_method: Literal['uv_raw_percentile_session', 'uv_globalfit_percentile_session'] = 'uv_raw_percentile_session'
-    baseline_method: Literal['uv_raw_percentile_session', 'uv_globalfit_percentile_session'] = 'uv_raw_percentile_session'
     baseline_percentile: float = 10.0
     f0_min_value: float = 1e-9
     
@@ -48,7 +48,6 @@ class Config:
     qc_max_chunk_fail_fraction: float = 0.20
     
     # peak detection (exposed params per user request)
-    peak_threshold_method: str = 'mean_plus_k_std'
     peak_threshold_method: str = 'mean_std'
     peak_threshold_k: float = 2.0
     peak_threshold_percentile: float = 95.0
@@ -73,5 +72,29 @@ class Config:
         
         with open(path, 'r') as f:
             data = yaml.safe_load(f)
+            
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            raise ValueError("Config YAML must be a mapping/dict.")
+            
+        # Strict Validation
+        valid_keys = {f.name for f in dataclasses.fields(cls)}
+        unknown = set(data.keys()) - valid_keys
+        if unknown:
+            raise ValueError(f"Unknown config keys: {unknown}")
+            
+        # Enum Validation
+        if 'baseline_method' in data:
+            if data['baseline_method'] not in {'uv_raw_percentile_session', 'uv_globalfit_percentile_session'}:
+                raise ValueError(f"Invalid baseline_method: {data['baseline_method']}. Allowed: {{'uv_raw_percentile_session', 'uv_globalfit_percentile_session'}}")
+                
+        if 'npm_time_axis' in data:
+            if data['npm_time_axis'] not in {'system_timestamp', 'computer_timestamp'}:
+                raise ValueError(f"Invalid npm_time_axis: {data['npm_time_axis']}. Allowed: {{'system_timestamp', 'computer_timestamp'}}")
+                
+        if 'peak_threshold_method' in data:
+            if data['peak_threshold_method'] not in {'mean_std', 'percentile'}:
+                raise ValueError(f"Invalid peak_threshold_method: {data['peak_threshold_method']}. Allowed: {{'mean_std', 'percentile'}}")
         
         return cls(**data)

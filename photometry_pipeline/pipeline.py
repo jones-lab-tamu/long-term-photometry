@@ -12,7 +12,7 @@ from .config import Config
 from .core.types import Chunk, SessionStats
 from .io.adapters import load_chunk, sniff_format
 from .core import preprocessing, regression, normalization, feature_extraction, baseline
-from .core.reporting import generate_run_report
+from .core.reporting import generate_run_report, append_run_report_warnings
 from .viz import plots
 
 class Pipeline:
@@ -147,7 +147,7 @@ class Pipeline:
         # "After Pass 1... Append warning to run_report.json".
         # I will do this in the `run()` method right after `run_pass_1` returns.
         # Wait, run_pass_1 computes baselines. So best place is `run()`.
-        pass
+        # End Pass 1
 
     def run_pass_2(self, output_dir: str, force_format: str = 'auto'):
         print("Starting Pass 2: Analysis...")
@@ -178,7 +178,7 @@ class Pipeline:
                 chunk.uv_fit = uv_fit
                 chunk.delta_f = delta_f
                 
-                chunk.dff = normalization.compute_dff(chunk, self.stats)
+                chunk.dff = normalization.compute_dff(chunk, self.stats, self.config)
                 
                 feats_df = feature_extraction.extract_features(chunk, self.config)
                 all_features.append(feats_df)
@@ -225,7 +225,6 @@ class Pipeline:
             os.makedirs(feats_dir, exist_ok=True)
             
             full_feats.to_csv(os.path.join(feats_dir, 'features.csv'), index=False)
-            full_feats.to_csv(os.path.join(feats_dir, 'features.csv'), index=False)
 
         total_chunks = len(self.file_list)
         if total_chunks > 0:
@@ -252,6 +251,13 @@ class Pipeline:
             'baseline_method': self.stats.method_used,
             'f0_values': self.stats.f0_values,
             'global_fit_params': self.stats.global_fit_params,
+            # Validation Metadata for Paper Alignment
+            'f0_source': self.stats.method_used,
+            'phasic_uv_fit_method': 'dynamic', # Strict requirement for this pipeline version
+            'f0_is_from_uv_fit': False,        # Constraint: explicit separation
+            'regression_window_sec': self.config.window_sec,
+            'regression_step_sec': self.config.step_sec,
+            'regression_mode': 'dynamic',
             # D1: Write invalid baseline ROIs
             'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', [])
         }
@@ -294,15 +300,12 @@ class Pipeline:
         
         self.run_pass_1(force_format)
         
-        # Robustness: Baseline Check & Report Update
-        from .core.reporting import append_run_report_warnings
         baseline_warnings = []
         invalid_rois = []
         
-        # Robustness: Baseline Check & Report Update
-        from .core.reporting import append_run_report_warnings
-        baseline_warnings = []
-        invalid_rois = []
+        # Robustness: Always track these keys
+        self.qc_summary['invalid_baseline_rois'] = []
+        self.qc_summary['baseline_invalid_roi_count'] = 0
         
         # D2: ROI Union
         keys_map = list(self.roi_map.keys()) if self.roi_map else []
@@ -319,23 +322,7 @@ class Pipeline:
              append_run_report_warnings(output_dir, baseline_warnings)
              self.qc_summary['invalid_baseline_rois'] = invalid_rois
              self.qc_summary['baseline_invalid_roi_count'] = len(invalid_rois)
-             # Approx count if we don't know exact chunk count yet (Pipeline.run continues after this block? 
-             # No, run_pass_2 is called AFTER this block. So valid total_chunks is not known here?)
-             # Wait, `run_pass_2` sets `total_chunks`.
-             # The user asked for "Whenever invalid baselines exist... ensure qc_summary.json contains...".
-             # `qc_summary` is written inside `run_pass_2`. 
-             # So I should populate `qc_summary` here with the ROIs, and let `run_pass_2` compute the chunk counts?
-             # Or just pass the list to `run_pass_2`.
-             # I am updating `self.qc_summary` here. `run_pass_2` uses `self.qc_summary`.
-             # So I should update `run_pass_2` logic to compute the counts from the list.
-             pass
 
         self.run_pass_2(output_dir, force_format)
         
-        # D1: Add to run_metadata (Requires pass 2 completion to grab final metadata dict? No, Pipeline.run structure runs pass 2 then prints done)
-        # run_metadata is written INSIDE run_pass_2.
-        # So I need to pass `invalid_rois` to run_pass_2 or store efficiently.
-        # I stored it in self.qc_summary['invalid_baseline_rois'].
-        # I will update run_pass_2 to read from there for metadata.
-        pass
         print("Pipeline Done.")
