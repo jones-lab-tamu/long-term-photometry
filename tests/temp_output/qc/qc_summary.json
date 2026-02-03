@@ -1,8 +1,0 @@
-{
-  "failed_chunks": [],
-  "chunk_fail_fraction": 0.0,
-  "roi_failures": {},
-  "invalid_baseline_rois": [],
-  "baseline_invalid_roi_count": 0,
-  "baseline_invalid_roi_chunk_pairs": 0
-}
