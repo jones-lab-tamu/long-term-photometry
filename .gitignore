@@ -19,6 +19,7 @@ Thumbs.db
 # Project Outputs & Temporary Data
 tests/out_*/
 tests/syn_*/
+tests/
 out/
 debug_output/
 *.parquet
