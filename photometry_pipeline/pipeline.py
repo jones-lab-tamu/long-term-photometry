@@ -315,6 +315,40 @@ class Pipeline:
                 trace_path = os.path.join(traces_dir, f"chunk_{i:04d}.csv")
                 trace_df.to_csv(trace_path, index=False)
                 
+                if self.mode == 'phasic':
+                    # Strict Verification Artifacts (Step 2 of Protocol)
+                    inter_dir = os.path.join(self.output_dir, 'phasic_intermediates')
+                    os.makedirs(inter_dir, exist_ok=True)
+                    
+                    for r_idx, roi in enumerate(chunk.channel_names):
+                        # 1. CSV
+                        meta_df = pd.DataFrame({
+                            'time_sec': chunk.time_sec,
+                            'sig_raw': chunk.sig_raw[:, r_idx],
+                            'iso_raw': chunk.uv_raw[:, r_idx],
+                            'fit_ref': chunk.uv_fit[:, r_idx] if chunk.uv_fit is not None else np.nan,
+                            'residual': chunk.delta_f[:, r_idx] if chunk.delta_f is not None else np.nan,
+                            'dff': chunk.dff[:, r_idx] if chunk.dff is not None else np.nan
+                        })
+                        # Filename: chunk_XXX_{roi}.csv to handle multi-roi
+                        # User requested chunk_XXX.csv but implied per-ROI columns or structure. 
+                        # To be safe for multi-ROI, we must distinguish.
+                        # We will use chunk_0000_Region0.csv pattern.
+                        csv_path = os.path.join(inter_dir, f"chunk_{i:04d}_{roi}.csv")
+                        meta_df.to_csv(csv_path, index=False)
+                        
+                        # 2. Meta JSON
+                        meta = {
+                            'fs_hz': float(chunk.fs_hz),
+                            'fit_method': 'dynamic_windowed' if self.config.window_sec > 0 else 'global', # Simplified
+                            'window_sec': self.config.window_sec,
+                            'peak_method': self.config.peak_threshold_method,
+                            'peak_k': self.config.peak_threshold_k
+                        }
+                        json_path = os.path.join(inter_dir, f"chunk_{i:04d}_{roi}_meta.json")
+                        with open(json_path, 'w') as f:
+                            json.dump(meta, f, indent=2)
+
                 # VIZ: Plot Set A & D (First SUCCESSFUL Chunk Only)
                 if first_success_chunk is None:
                     first_success_chunk = chunk
@@ -410,6 +444,7 @@ class Pipeline:
                 logging.warning(f"Viz failure for {roi}: {e}")
                 
     def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv"):
+        self.output_dir = output_dir
         os.makedirs(os.path.join(output_dir, 'qc'), exist_ok=True)
         self.discover_files(input_dir, recursive, glob_pattern, force_format=force_format)
         
