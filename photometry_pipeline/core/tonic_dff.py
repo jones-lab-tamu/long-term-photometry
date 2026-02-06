@@ -153,14 +153,17 @@ def compute_session_tonic_df_from_global(sig: np.ndarray, uv: np.ndarray, iso_fi
         'tonic_scalar': np.nan,
         'df': np.full_like(sig, np.nan),
         'valid_mask': np.zeros_like(sig, dtype=bool),
-        'success': False
+        'success': False,
+        'reason': 'Unknown'
     }
     
     # Validation mask
     # 1. Finite values (iso_fit doesn't need to be positive for additive, just finite)
     mask = np.isfinite(sig) & np.isfinite(uv) & np.isfinite(iso_fit)
     
-    if np.sum(mask) == 0:
+    n_valid = np.sum(mask)
+    if n_valid == 0:
+        results['reason'] = 'No valid (finite) samples found in chunk'
         return results
         
     df = np.full_like(sig, np.nan)
@@ -170,6 +173,11 @@ def compute_session_tonic_df_from_global(sig: np.ndarray, uv: np.ndarray, iso_fi
     df_finite = df[mask]
     if len(df_finite) < 10:
         scalar = np.nan
+        # We still return success if we have valid samples, just scalar is nan?
+        # Requirement says "Return success=False ONLY IF n_valid == 0" essentially.
+        # But if scalar is NaN, is that a success?
+        # The downstream logic might expect scalar.
+        # But for 'df' computation, we succeeded.
     else:
         scalar = np.percentile(df_finite, percentile)
         
@@ -177,6 +185,7 @@ def compute_session_tonic_df_from_global(sig: np.ndarray, uv: np.ndarray, iso_fi
     results['df'] = df
     results['valid_mask'] = mask
     results['success'] = True
+    results['reason'] = ''
     
     return results
 

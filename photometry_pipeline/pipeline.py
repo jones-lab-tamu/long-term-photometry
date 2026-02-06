@@ -15,6 +15,14 @@ from .core import preprocessing, regression, normalization, feature_extraction, 
 from .core.reporting import generate_run_report, append_run_report_warnings
 from .viz import plots
 
+# Helper for robust config access (Dict vs Attribute)
+def _get_cfg_value(cfg, key, default):
+    if hasattr(cfg, key):
+        return getattr(cfg, key)
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return default
+
 class Pipeline:
     def __init__(self, config: Config, mode: str = 'phasic'):
         self.config = config
@@ -222,12 +230,32 @@ class Pipeline:
                       reason = res.get('reason', 'Unknown failure in compute_session_tonic_df_from_global')
                       raise RuntimeError(f"Chunk {i}, ROI {roi}: Tonic DF compute failed. Reason: {reason}")
                   
+                  # NaN Fraction Check (Tolerance)
+                  valid_mask = res.get('valid_mask')
+                  if valid_mask is None:
+                      raise RuntimeError(f"Chunk {i}, ROI {roi}: Missing valid_mask from tonic DF result.")
+
+                  n_total = len(valid_mask)
+                  n_valid = int(np.sum(valid_mask))
+                  frac_invalid = 1.0 - (n_valid / float(n_total)) if n_total > 0 else 1.0
+                       
+                  allowed_raw = _get_cfg_value(self.config, 'tonic_allowed_nan_frac', 0.0)
+                  try:
+                      allowed = float(allowed_raw)
+                  except (ValueError, TypeError):
+                      raise RuntimeError(f"Invalid tonic_allowed_nan_frac={allowed_raw!r} (type {type(allowed_raw).__name__}), must be a float")
+
+                  if frac_invalid > allowed:
+                      raise RuntimeError(f"Chunk {i}, ROI {roi}: Tonic NaN fraction ({frac_invalid:.4f}) exceeds allowed ({allowed}).")
+
                   chunk.delta_f[:, r_idx] = res['df']
          
+         
          # Invariant Post-Check: Ensure no NaNs in explicitly computed ROIs
-         for r_idx, roi in enumerate(chunk.channel_names):
-             if np.any(np.isnan(chunk.delta_f[:, r_idx])):
-                 raise RuntimeError(f"Chunk {i}, ROI {roi}: Tonic delta_f contains NaNs after computation. Strict invariant violated.")
+         # RELAXED for Nan-Tolerance Logic: normalization.compute_dff will handle excessive NaN checking.
+         # for r_idx, roi in enumerate(chunk.channel_names):
+         #     if np.any(np.isnan(chunk.delta_f[:, r_idx])):
+         #         raise RuntimeError(f"Chunk {i}, ROI {roi}: Tonic delta_f contains NaNs after computation. Strict invariant violated.")
 
          # Compute dFF (using normalization.compute_dff which uses chunk.delta_f / F0)
          chunk.dff = normalization.compute_dff(chunk, self.stats, self.config)
