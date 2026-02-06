@@ -16,10 +16,12 @@ from .core.reporting import generate_run_report, append_run_report_warnings
 from .viz import plots
 
 class Pipeline:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, mode: str = 'phasic'):
         self.config = config
+        self.mode = mode
         self.file_list = []
         self.stats = SessionStats()
+        self.stats.tonic_fit_params = {} # ROI -> {slope, intercept} (Ad-hoc extension)
         self.qc_summary = {
             'failed_chunks': [],
             'chunk_fail_fraction': 0.0,
@@ -147,7 +149,88 @@ class Pipeline:
         # "After Pass 1... Append warning to run_report.json".
         # I will do this in the `run()` method right after `run_pass_1` returns.
         # Wait, run_pass_1 computes baselines. So best place is `run()`.
+        # TONIC MODE: PASS 1c (Global Robust Fit)
+        if self.mode == 'tonic':
+            print("Pass 1c (Tonic Global Fit accumulation)...")
+            from .core.tonic_dff import compute_global_iso_fit_robust
+            
+            # Aggregate data per channel for robust fit
+            # We must fit on FULL dataset to satisfy requirement: "fit exactly once... using full arrays"
+            # Using basic list accumulator (memory constrained? RWD 48h ~ 3.5e6 samples -> ~28MB per float64 column. Fine.)
+            acc_uv = {}
+            acc_sig = {}
+            
+            for i, fpath in enumerate(self.file_list):
+                 try:
+                    fmt = self._get_format(fpath, force_format)
+                    chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                    for ch_idx, ch_name in enumerate(chunk.channel_names):
+                        if ch_name not in acc_uv:
+                            acc_uv[ch_name] = []
+                            acc_sig[ch_name] = []
+                        acc_uv[ch_name].append(chunk.uv_raw[:, ch_idx])
+                        acc_sig[ch_name].append(chunk.sig_raw[:, ch_idx])
+                 except Exception:
+                     continue
+            
+            # Solve
+            for ch in acc_uv.keys():
+                uv_full = np.concatenate(acc_uv[ch])
+                sig_full = np.concatenate(acc_sig[ch])
+                slope, intercept, ok, n_used = compute_global_iso_fit_robust(uv_full, sig_full)
+                if ok:
+                    self.stats.tonic_fit_params[ch] = {'slope': slope, 'intercept': intercept}
+                    print(f"  Tonic Fit ({ch}): slope={slope:.4f}, int={intercept:.4f} (N={n_used})")
+                else:
+                    logging.warning(f"  Tonic Fit ({ch}) FAILED.")
+            
         # End Pass 1
+
+    # Helper for Unit Testing / Invariant Enforcement
+    def _process_chunk_tonic(self, chunk: Chunk, i: int):
+         # Explicit Global Fit Application
+         from .core.tonic_dff import apply_global_fit, compute_session_tonic_df_from_global
+         
+         if not hasattr(self.stats, 'tonic_fit_params'):
+             raise RuntimeError("Tonic mode active but tonic_fit_params missing!")
+             
+         chunk.uv_fit = np.full_like(chunk.uv_raw, np.nan)
+         chunk.delta_f = np.full_like(chunk.sig_raw, np.nan)
+         chunk.dff = np.full_like(chunk.sig_raw, np.nan) # Derived from delta_f/F0 below
+         
+         # Provenance: Print exactly once per run
+         if not getattr(self.stats, '_provenance_printed_tonic', False):
+             print(f"Tonic iso-fit source: global robust fit (entire recording). Dynamic uv_fit ignored.")
+             self.stats._provenance_printed_tonic = True
+         
+         # Check for missing params (Invariant A: No silent NaNs)
+         missing_rois = [r for r in chunk.channel_names if r not in self.stats.tonic_fit_params]
+         if missing_rois:
+             raise RuntimeError(f"Chunk {i}: Missing tonic fit params for {len(missing_rois)} ROIs: {missing_rois[:5]}. Cannot compute Tonic DF.")
+             
+         # Tonic ROI Loop
+         for r_idx, roi in enumerate(chunk.channel_names):
+             params = self.stats.tonic_fit_params.get(roi)
+             if params:
+                  # Apply Global Fit
+                  iso_fit = apply_global_fit(chunk.uv_raw[:, r_idx], params['slope'], params['intercept'])
+                  chunk.uv_fit[:, r_idx] = iso_fit
+                  
+                  # Compute Tonic DF (Additive)
+                  res = compute_session_tonic_df_from_global(chunk.sig_raw[:, r_idx], chunk.uv_raw[:, r_idx], iso_fit)
+                  if not res.get('success', False):
+                      reason = res.get('reason', 'Unknown failure in compute_session_tonic_df_from_global')
+                      raise RuntimeError(f"Chunk {i}, ROI {roi}: Tonic DF compute failed. Reason: {reason}")
+                  
+                  chunk.delta_f[:, r_idx] = res['df']
+         
+         # Invariant Post-Check: Ensure no NaNs in explicitly computed ROIs
+         for r_idx, roi in enumerate(chunk.channel_names):
+             if np.any(np.isnan(chunk.delta_f[:, r_idx])):
+                 raise RuntimeError(f"Chunk {i}, ROI {roi}: Tonic delta_f contains NaNs after computation. Strict invariant violated.")
+
+         # Compute dFF (using normalization.compute_dff which uses chunk.delta_f / F0)
+         chunk.dff = normalization.compute_dff(chunk, self.stats, self.config)
 
     def run_pass_2(self, output_dir: str, force_format: str = 'auto'):
         print("Starting Pass 2: Analysis...")
@@ -174,11 +257,16 @@ class Pipeline:
                 chunk.uv_filt = preprocessing.lowpass_filter(chunk.uv_raw, chunk.fs_hz, self.config)
                 chunk.sig_filt = preprocessing.lowpass_filter(chunk.sig_raw, chunk.fs_hz, self.config)
                 
-                uv_fit, delta_f = regression.fit_chunk_dynamic(chunk, self.config)
-                chunk.uv_fit = uv_fit
-                chunk.delta_f = delta_f
+                if self.mode == 'tonic':
+                     self._process_chunk_tonic(chunk, i)
+                     
+                else:
+                     # PHASIC MODE (Dynamic)
+                     uv_fit, delta_f = regression.fit_chunk_dynamic(chunk, self.config, mode=self.mode)
+                     chunk.uv_fit = uv_fit
+                     chunk.delta_f = delta_f
                 
-                chunk.dff = normalization.compute_dff(chunk, self.stats, self.config)
+                     chunk.dff = normalization.compute_dff(chunk, self.stats, self.config)
                 
                 feats_df = feature_extraction.extract_features(chunk, self.config)
                 all_features.append(feats_df)
@@ -257,7 +345,9 @@ class Pipeline:
             'f0_is_from_uv_fit': False,        # Constraint: explicit separation
             'regression_window_sec': self.config.window_sec,
             'regression_step_sec': self.config.step_sec,
-            'regression_mode': 'dynamic',
+            'regression_window_sec': self.config.window_sec,
+            'regression_step_sec': self.config.step_sec,
+            'regression_mode': self.mode,
             # D1: Write invalid baseline ROIs
             'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', [])
         }

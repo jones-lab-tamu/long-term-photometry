@@ -398,7 +398,7 @@ def plot_residuals(ax, t_sec, s, u, window_sec=60.0, label_prefix="", return_ser
             config.min_samples_per_window = 0
             
             # Execution
-            uv_fit_res, delta_f_res = fit_chunk_dynamic(chunk, config)
+            uv_fit_res, delta_f_res = fit_chunk_dynamic(chunk, config, mode='phasic')
             
             # Post-check validation
             if uv_fit_res is None or delta_f_res is None:

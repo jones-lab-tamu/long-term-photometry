@@ -26,13 +26,14 @@ def _get_window_indices(center: int, window_samples: int, n_samples: int) -> Opt
 #    start, end = indices
 
 
-def fit_chunk_dynamic(chunk: Chunk, config: Config) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Performs dynamic windowed regression with NaN robustness.
     Returns: (uv_fit, delta_f)
     """
-    if chunk.uv_filt is None or chunk.sig_filt is None:
-        raise ValueError("Dynamic regression requires filtered arrays")
+    if mode == 'tonic':
+        raise RuntimeError("Invariant violated: tonic mode must not run dynamic isosbestic fitting.")
+
         
     n_samples = len(chunk.time_sec)
     n_rois = chunk.uv_filt.shape[1]

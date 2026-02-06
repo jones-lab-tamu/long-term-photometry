@@ -15,6 +15,7 @@ def main():
     parser.add_argument('--file-glob', dest='file_glob', default="*.csv", help="Glob pattern for CSV files (alias: --glob)")
     parser.add_argument('--glob', dest='file_glob', help="Alias for --file-glob")
     parser.add_argument('--overwrite', action='store_true', help="Overwrite output directory")
+    parser.add_argument('--mode', choices=['phasic', 'tonic'], default='phasic', help="Analysis mode: 'phasic' (dynamic fit) or 'tonic' (global fit).")
     
     args = parser.parse_args()
     
@@ -33,7 +34,7 @@ def main():
         config = Config.from_yaml(args.config)
         
         # Init Pipeline
-        pipeline = Pipeline(config)
+        pipeline = Pipeline(config, mode=args.mode)
         
         # Run
         pipeline.run(args.input, args.out, args.format, args.recursive, args.file_glob)
