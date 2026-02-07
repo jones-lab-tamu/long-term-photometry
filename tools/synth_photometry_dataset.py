@@ -21,6 +21,7 @@ def parse_args():
     parser.add_argument('--out', required=True, help="Output root directory")
     parser.add_argument('--format', required=True, choices=['rwd', 'npm'], help="Output format")
     parser.add_argument('--config', required=True, help="Path to config YAML")
+    parser.add_argument('--preset', choices=['biological_shared_nuisance'], help="Apply specific parameter preset")
     
     # Scheduling
     parser.add_argument('--total-days', type=float, default=3.0)
@@ -152,6 +153,35 @@ def parse_args():
     parser.add_argument('--phasic-events-per-10min-max', type=int, default=25, help="Max events per chunk")
 
     args = parser.parse_args()
+
+    # Apply Presets
+    if args.preset == 'biological_shared_nuisance':
+        # A) Shared baseline wobble (synchronous)
+        args.shared_wobble_enable = True
+        args.shared_wobble_amp = 2.0
+        args.shared_wobble_tau_sec = 60.0
+        # args.shared_wobble_iso_lag_sec = 0.0 # Default is already 0.0
+        
+        # B) Time-varying coupling (SIGNAL only)
+        # Gain drift
+        args.shared_wobble_gain_enable = True
+        args.shared_wobble_gain_mean = 1.0
+        args.shared_wobble_gain_sd = 0.20
+        args.shared_wobble_gain_tau_sec = 120.0
+        # args.shared_wobble_gain_min is not an arg, hardcoded clmap check in loop?
+        # Check generate_ar1_series usage. It has clamp_min kwarg. 
+        # But we need to make sure the loop uses 0.1 for this preset. 
+        # The loop currently uses clamp_min=0.1 hardcoded. Good.
+        
+        # Offset drift
+        args.shared_wobble_offset_enable = True
+        args.shared_wobble_offset_amp = 1.0
+        args.shared_wobble_offset_tau_sec = 180.0
+        
+        print(f"Applied Preset: {args.preset}")
+        print(f"  Shared Wobble: Amp={args.shared_wobble_amp}, Tau={args.shared_wobble_tau_sec}")
+        print(f"  Gain Drift: Mean={args.shared_wobble_gain_mean}, SD={args.shared_wobble_gain_sd}, Tau={args.shared_wobble_gain_tau_sec}")
+        print(f"  Offset Drift: Amp={args.shared_wobble_offset_amp}, Tau={args.shared_wobble_offset_tau_sec}")
     
     # Validate
     if args.artifact_motion_neg_prob < 0.0 or args.artifact_motion_neg_prob > 1.0:

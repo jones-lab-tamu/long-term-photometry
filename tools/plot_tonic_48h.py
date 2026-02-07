@@ -94,14 +94,20 @@ def main():
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # 2. Tonic dFF
-    if col_dff in full_df.columns:
-        ax2.plot(t, full_df[col_dff], label='Tonic dFF', color='black', lw=0.8)
-        ax2.set_ylabel("dFF %")
-        ax2.set_title("Tonic Output")
+    # 2. Tonic Output (deltaF)
+    col_deltaF = f"{roi}_deltaF"
+    if col_deltaF in full_df.columns:
+        # Plot deltaF
+        ax2.plot(t, full_df[col_deltaF], label='Tonic (deltaF)', color='black', lw=0.8)
+        ax2.set_ylabel("deltaF")
+        ax2.set_title(f"Tonic Output (Preserved Slow Dynamics) - {roi}")
         ax2.grid(True, alpha=0.3)
+        ax2.legend()
     else:
-        ax2.text(0.5, 0.5, "No Tonic dFF data", ha='center')
+        # Fail loudly if deltaF is missing
+        print(f"CRITICAL: Column {col_deltaF} not found in traces.")
+        print("This tool requires Tonic Analysis output (deltaF) to verify preservation of slow dynamics.")
+        sys.exit(1)
         
     ax2.set_xlabel("Time (Hours)")
     

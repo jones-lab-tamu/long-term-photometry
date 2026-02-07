@@ -48,6 +48,7 @@ def parse_args():
     parser.add_argument('--output-dir', default=None, help="Override output directory")
     parser.add_argument('--dpi', type=int, default=150, help="Output DPI")
     parser.add_argument('--sessions-per-hour', type=int, default=None, help="Force grid columns")
+    parser.add_argument('--mode', choices=['dff', 'raw'], default='dff', help="Plot mode: dff (default) or raw (sig+iso)")
     return parser.parse_args()
 
 def load_config(out_dir):
@@ -304,11 +305,9 @@ def main():
         cid = row['chunk_id']
         tpath = row['trace_path']
         
-        # Load Trace
+            # Load Trace
         try:
             tdf = pd.read_csv(tpath)
-            col = determine_signal_column(tpath, plot_roi, args.signal)
-            y = tdf[col].values
             
             # X axis
             if 'time_sec' in tdf.columns:
@@ -316,26 +315,47 @@ def main():
             elif 'Time(s)' in tdf.columns:
                 x = tdf['Time(s)'].values
             else:
-                x = np.arange(len(y)) / fs_val
-                
+                x = np.arange(len(tdf)) / fs_val
             x = x - x[0] # Normalize
             
-            all_traces.append(y)
+            # ACCUMULATE TRACES FOR Y-LIMITS
+            # Note: y is not defined yet! It depends on mode.
+            # We must move this AFTER y is defined.
             
-            # Peak Verify
-            feat_row = feat_map.get((cid, plot_roi))
-            if feat_row is None:
+            if args.mode == 'dff':
+                col = determine_signal_column(tpath, plot_roi, args.signal)
+                y = tdf[col].values
+                uv = None
                 exp_count = np.nan
-            else:
-                exp_count = feat_row['peak_count']
                 
-            # Internal Re-computation
-            ok, recal_count, peak_indices = verify_peak_count(y, fs_val, config, exp_count, plot_roi, cid)
+                # Peak Verify (only for dff)
+                feat_row = feat_map.get((cid, plot_roi))
+                if feat_row is not None:
+                    exp_count = feat_row['peak_count']
+                
+                # Internal Re-computation
+                ok, recal_count, peak_indices = verify_peak_count(y, fs_val, config, exp_count, plot_roi, cid)
+                if not ok:
+                    print("ABORTING due to verification failure.")
+                    sys.exit(1)
+                    
+            elif args.mode == 'raw':
+                col_sig = f"{plot_roi}_sig_raw"
+                col_uv = f"{plot_roi}_uv_raw"
+                
+                if col_sig not in tdf.columns or col_uv not in tdf.columns:
+                    print(f"Skipping {cid}: Raw columns missing")
+                    continue
+                    
+                y = tdf[col_sig].values
+                uv = tdf[col_uv].values
+                peak_indices = [] # No peaks in raw mode
+                exp_count = np.nan
             
-            if not ok:
-                print("ABORTING due to verification failure.")
-                sys.exit(1)
-                
+            all_traces.append(y)
+            if uv is not None:
+                all_traces.append(uv)
+            
             # Store for plotting
             plot_data.append({
                 'day': row['day_idx'],
@@ -343,9 +363,11 @@ def main():
                 'col': row['hour_rank'],
                 'x': x,
                 'y': y,
+                'uv': uv,
                 'peaks_x': x[peak_indices] if len(peak_indices) > 0 else [],
                 'peaks_y': y[peak_indices] if len(peak_indices) > 0 else [],
-                'count': exp_count
+                'count': exp_count,
+                'chunk_id': cid 
             })
             
             if pd.notna(exp_count):
@@ -364,14 +386,14 @@ def main():
         
     flat_y = np.concatenate([t[np.isfinite(t)] for t in all_traces])
     if len(flat_y) == 0:
-        ymin, ymax = -1, 1
+        global_ymin, global_ymax = -1, 1
     else:
-        ymin, ymax = np.percentile(flat_y, [1, 99])
-        yrange = ymax - ymin
-        ymin -= 0.1 * yrange
-        ymax += 0.1 * yrange
+        global_ymin, global_ymax = np.percentile(flat_y, [1, 99])
+        yrange = global_ymax - global_ymin
+        global_ymin -= 0.1 * yrange
+        global_ymax += 0.1 * yrange
         
-    print(f"Y-Limits: [{ymin:.3f}, {ymax:.3f}]")
+    print(f"Global (DFF-based) Y-Limits: [{global_ymin:.3f}, {global_ymax:.3f}]")
 
     # 7. Plotting
     output_dir = args.output_dir or os.path.join(args.analysis_out, 'phasic_qc')
@@ -379,56 +401,149 @@ def main():
     
     unique_days = sorted(df_grid['day_idx'].unique())
     
+    # Unified Layout for BOTH modes
+    cols = sessions_ph
+    rows = 24 # Fixed 24 hours
+    figsize_width = 4*sessions_ph + 2
+    figsize_height = 24
+    sharey_val = True # Global Y-limits for all (but we will apply manually)
+
     for d in unique_days:
-        fig, axes = plt.subplots(nrows=24, ncols=sessions_ph, 
-                                 figsize=(4*sessions_ph + 2, 24),
-                                 sharex=True, sharey=True)
-        
-        if sessions_ph == 1: axes = axes.reshape(-1, 1)
-        
-        fig.suptitle(f"Phasic QC - Day {d} - ROI {plot_roi}", fontsize=16)
-        
+        # Prepare Plot
         day_items = [p for p in plot_data if p['day'] == d]
+        n_plots = len(day_items)
         
-        for p in day_items:
+        if n_plots == 0:
+            print(f"No chunks found to plot for Day {d}.")
+            continue # Skip to next day
+            
+        # Determine Limits for this Day
+        if args.mode == 'dff':
+             day_ymin, day_ymax = global_ymin, global_ymax
+        elif args.mode == 'raw':
+             # Collect all finite values for this day (sig and uv)
+             day_values = []
+             for p in day_items:
+                 if p['y'] is not None:
+                     v = p['y'][np.isfinite(p['y'])]
+                     if len(v) > 0: day_values.append(v)
+                 if p['uv'] is not None:
+                     v = p['uv'][np.isfinite(p['uv'])]
+                     if len(v) > 0: day_values.append(v)
+             
+             if not day_values:
+                 day_ymin, day_ymax = -1, 1
+             else:
+                 all_day_v = np.concatenate(day_values)
+                 if len(all_day_v) == 0:
+                     day_ymin, day_ymax = -1, 1
+                 else:
+                     raw_min = np.min(all_day_v)
+                     raw_max = np.max(all_day_v)
+                     pad = 0.05 * (raw_max - raw_min)
+                     if pad == 0: pad = 1.0
+                     day_ymin = raw_min - pad
+                     day_ymax = raw_max + pad
+             print(f"  Day {d} Raw Limits: [{day_ymin:.3f}, {day_ymax:.3f}]")
+             
+        print(f"DEBUG: Day {d}, Mode {args.mode}, n_plots={n_plots}, rows={rows}, cols={cols}")
+
+        fig, axes = plt.subplots(nrows=rows, ncols=cols, 
+                                 figsize=(figsize_width, figsize_height),
+                                 sharex=True, sharey=False) # We set ylim manually
+
+        # Ensure axes is always a 2D array for consistent indexing
+        if rows == 1 and cols == 1:
+            axes = np.array([[axes]])
+        elif rows == 1 or cols == 1:
+            axes = axes.reshape(rows, cols)
+            
+        fig.suptitle(f"Phasic QC - Day {d} - ROI {plot_roi} - Mode: {args.mode.upper()}", fontsize=16)
+        
+        # Plot Loop
+        print(f"Generating Grid for Day {d} ({n_plots} chunks)... Mode={args.mode}")
+        
+        for i, p in enumerate(day_items):
             h, c = p['hour'], p['col']
-            if c >= sessions_ph: continue # Layout mismatch fallback
             
+            # Subplot indexing (Unified)
+            if c >= cols:
+                print(f"Skipping chunk {p['chunk_id']} (rank {c} >= cols {cols})")
+                continue
             ax = axes[h, c]
-            ax.plot(p['x'], p['y'], 'k', lw=0.8)
             
-            # Overlay Peaks
-            if len(p['peaks_x']) > 0:
-                ax.scatter(p['peaks_x'], p['peaks_y'], s=10, c='red', alpha=0.6, zorder=3)
-            
-            # Annotation
-            val = p['count']
-            if pd.isna(val):
-                txt = "peaks=NaN"
-                clr = "orange"
-            else:
-                txt = f"peaks={int(val)}"
-                clr = "blue"
+            # Plot Trace
+            if args.mode == 'dff':
+                ax.plot(p['x'], p['y'], 'k', lw=0.8)
                 
-            ax.text(0.02, 0.9, txt, transform=ax.transAxes, color=clr, fontsize=9, fontweight='bold')
-            
-            # X limits
-            if p['x'].max() > 550:
-                ax.set_xlim(0, 600)
+                # Overlay Peaks
+                if len(p['peaks_x']) > 0:
+                    ax.scatter(p['peaks_x'], p['peaks_y'], s=10, c='red', alpha=0.6, zorder=3)
                 
+                # Annotation
+                val = p['count']
+                if pd.isna(val):
+                    txt = "peaks=NaN"
+                    color = 'red'
+                else:
+                    txt = f"peaks={int(val)}"
+                    color = 'blue'
+                    
+                ax.text(0.95, 0.9, txt, transform=ax.transAxes, 
+                        ha='right', va='top', fontsize=8, color=color, 
+                        bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+                ax.set_ylabel("dFF")
+
+            elif args.mode == 'raw':
+                # RAW Mode: Sig (Green) and Iso (Purple)
+                ax.plot(p['x'], p['y'], color='green', lw=0.8, label='Sig')
+                if p['uv'] is not None:
+                     ax.plot(p['x'], p['uv'], color='purple', lw=0.8, alpha=0.7, label='Iso')
+                
+                ax.set_ylabel("Raw AU")
+                if i == 0: # Legend only on first plot
+                    ax.legend(fontsize='x-small', loc='upper right')
+            
+            # Common Aesthetics
+            ax.set_title(f"Chunk {p['chunk_id']}", fontsize=9)
+            ax.grid(True, alpha=0.3)
+            # Use Day-Specific Y-Limits (which are global per day for raw, or global overall for dff)
+            ax.set_ylim(day_ymin, day_ymax)
+
         # Formatting
-        for i in range(24):
-            axes[i,0].set_ylabel(f"H{i:02d}", rotation=0, labelpad=20, fontweight='bold')
-            for j in range(sessions_ph):
-                ax = axes[i, j]
-                ax.set_ylim(ymin, ymax)
+        # Turn off unused subplots for raw mode if n_plots < total_subplots
+        # This logic is now handled by the unified layout, where empty cells remain empty.
+        # We just need to ensure labels are set correctly.
+        
+        for i_row in range(rows):
+            axes[i_row,0].set_ylabel(f"H{i_row:02d}", rotation=0, labelpad=20, fontweight='bold')
+            for j_col in range(cols):
+                ax = axes[i_row, j_col]
                 ax.grid(True, alpha=0.3)
                 
-        out_path = os.path.join(output_dir, f"day_{d:03d}.png")
-        plt.tight_layout(rect=[0, 0.03, 1, 0.97])
-        plt.savefig(out_path, dpi=args.dpi)
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        
+        # Save output
+        if args.mode == 'dff':
+            fname = f"day_{d:03d}.png"
+            out_path = os.path.join(output_dir, fname)
+            plt.savefig(out_path, dpi=args.dpi)
+            print(f"Saved {out_path}")
+        else: # raw
+            # Standard raw filename
+            fname = f"day_{d:03d}_raw.png"
+            out_path = os.path.join(output_dir, fname)
+            plt.savefig(out_path, dpi=args.dpi)
+            print(f"Saved {out_path}")
+            
+            # Canonical alias for Day 0
+            if d == 0:
+                canon_path = os.path.join(output_dir, "fig_phasic_raw_qc_grid.png")
+                import shutil
+                shutil.copy(out_path, canon_path)
+                print(f"Saved canonical: {canon_path}")
+
         plt.close(fig)
-        print(f"Saved {out_path}")
 
     # 8. Circadian Sanity Check (Requirement F)
     print("Checking Circadian Modulation...")
