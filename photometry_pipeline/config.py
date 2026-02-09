@@ -51,8 +51,9 @@ class Config:
     peak_threshold_method: str = 'mean_std'
     peak_threshold_k: float = 2.0
     peak_threshold_percentile: float = 95.0
-    peak_min_distance_sec: float = 1.0
+    peak_min_distance_sec: float = 0.5 # Default kept at 0.5 per user request (was 1.0 in previous file but user asked to keep default 0.5)
     
+
     # channel identifiers - MUST be provided in config (no defaults for these essentially)
     rwd_time_col: str = "Time(s)" # Default often seen, but user should override
     uv_suffix: str = "-410"
@@ -94,7 +95,15 @@ class Config:
                 raise ValueError(f"Invalid npm_time_axis: {data['npm_time_axis']}. Allowed: {{'system_timestamp', 'computer_timestamp'}}")
                 
         if 'peak_threshold_method' in data:
-            if data['peak_threshold_method'] not in {'mean_std', 'percentile'}:
-                raise ValueError(f"Invalid peak_threshold_method: {data['peak_threshold_method']}. Allowed: {{'mean_std', 'percentile'}}")
+            if data['peak_threshold_method'] not in {'mean_std', 'percentile', 'median_mad'}:
+                raise ValueError(f"Invalid peak_threshold_method: {data['peak_threshold_method']}. Allowed: {{'mean_std', 'percentile', 'median_mad'}}")
+
+        if 'peak_pre_filter' in data:
+            if data['peak_pre_filter'] not in {'none', 'lowpass'}:
+                raise ValueError(f"Invalid peak_pre_filter: {data['peak_pre_filter']}. Allowed: {{'none', 'lowpass'}}")
+                
+        if 'event_auc_baseline' in data:
+             if data['event_auc_baseline'] not in {'zero', 'median'}:
+                raise ValueError(f"Invalid event_auc_baseline: {data['event_auc_baseline']}. Allowed: {{'zero', 'median'}}")
         
         return cls(**data)

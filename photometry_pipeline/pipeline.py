@@ -407,9 +407,7 @@ class Pipeline:
             'f0_is_from_uv_fit': False,        # Constraint: explicit separation
             'regression_window_sec': self.config.window_sec,
             'regression_step_sec': self.config.step_sec,
-            'regression_window_sec': self.config.window_sec,
-            'regression_step_sec': self.config.step_sec,
-            'regression_mode': self.mode,
+            'regression_mode': 'dynamic' if self.mode == 'phasic' else self.mode,
             # D1: Write invalid baseline ROIs
             'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', [])
         }

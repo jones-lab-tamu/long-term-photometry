@@ -70,7 +70,7 @@ class DeterministicReservoir:
 class GlobalFitAccumulator:
     """
     Accumulates stats for Method B Pass 1a:
-    Σuv, Σsig, Σuv², Σuv·sig, n
+    Sum_uv, Sum_sig, Sum_uv^2, Sum_uv*sig, n
     """
     stats: Dict[str, Dict[str, float]] = field(default_factory=dict) # channel -> stats
     
