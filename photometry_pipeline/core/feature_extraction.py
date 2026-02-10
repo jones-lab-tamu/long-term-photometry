@@ -2,6 +2,45 @@ import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
 
+def compute_auc_above_threshold(dff, thresh, fs_hz=None, time_s=None):
+    """
+    Computes AUC as area above threshold (clamped to 0).
+    Args:
+        dff (np.array): Phasic dFF signal.
+        thresh (float): Threshold value.
+        fs_hz (float): Sampling rate (required if time_s is None).
+        time_s (np.array): Time vector (optional).
+    Returns:
+        float: AUC value (>= 0).
+    """
+    if dff is None or len(dff) < 2:
+        return 0.0
+    
+    if thresh is None or not np.isfinite(thresh):
+        raise ValueError("thresh must be finite")
+        
+    rect = np.clip(dff - thresh, 0.0, None)
+    
+    if time_s is not None:
+        if len(time_s) != len(dff):
+            raise ValueError("time_s length mismatch")
+        # Check strict monotonicity? Or just let trapz handle it?
+        # User req: "strictly increasing (or at least non-decreasing...)"
+        if np.any(np.diff(time_s) < 0):
+            raise ValueError("time_s must be non-decreasing")
+             
+        auc = float(np.trapz(rect, x=time_s))
+    else:
+        if fs_hz is None or fs_hz <= 0:
+            raise ValueError("fs_hz must be > 0 when time_s is None")
+        dt = 1.0 / fs_hz
+        auc = float(np.trapz(rect, dx=dt))
+    
+    # Single safeguard
+    auc = max(auc, 0.0)
+        
+    return auc
+
 def extract_features(chunk, config):
     """
     Extracts phasic features from a Chunk object.
@@ -40,8 +79,7 @@ def extract_features(chunk, config):
         ends = np.where(diff == -1)[0]
         
         total_peaks = 0
-        total_auc = 0.0 # Legacy full AUC (all positive area? or just total integral? Stick to original logic: simple trapz)
-        
+        total_auc = 0.0 
         
         clean_trace = trace[is_valid]
         
@@ -91,10 +129,10 @@ def extract_features(chunk, config):
                                       distance=dist_samples)
                 total_peaks += len(peaks)
                 
-                # Legacy AUC (integral of raw trace)
-                if len(seg_time) > 1:
-                    total_auc += np.trapz(seg_trace, seg_time)
-                
+                # AUC above threshold
+                total_auc += compute_auc_above_threshold(seg_trace, thresh, 
+                                                         fs_hz=chunk.fs_hz, 
+                                                         time_s=seg_time)
             
             row = {
                 'chunk_id': chunk.chunk_id,

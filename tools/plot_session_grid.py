@@ -80,8 +80,7 @@ def main():
                 
             # Duration
             duration = t[-1] - t[0]
-            # 10 min = 600s. Tolerate small padding diffs? 
-            # Request says [590, 610]
+            # 10 min = 600s. Request says [590, 610]
             if not (590 <= duration <= 610):
                 print(f"CRITICAL: Invalid duration {duration:.2f}s in {f}")
                 sys.exit(1)
