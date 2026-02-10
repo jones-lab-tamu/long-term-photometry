@@ -2,6 +2,7 @@
 import argparse
 import os
 import sys
+import glob
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -101,51 +102,42 @@ def main():
         use_datetime = (parse_rate >= 0.90)
         
         # Verify consistency if session_duration_s is provided
-        if args.session_duration_s:
+        if args.session_duration_s is not None:
             # We need to check against actual trace duration if possible.
             # Traces are in <analysis_out>/traces/chunk_*.csv
-            # We can pick the first chunk from features.csv to verify.
-            first_chunk_id = roi_df['chunk_id'].iloc[0]
+            # Strategy: Find ANY valid trace file in the traces directory to verify session duration.
+            # We assume all sessions have consistent duration.
+            traces_dir = os.path.join(args.analysis_out, 'traces')
+            trace_files = sorted(glob.glob(os.path.join(traces_dir, 'chunk_*.csv')))
             
-            # 1. Resolve Trace Path (Robust search)
-            trace_path = None
+            if not trace_files:
+                raise RuntimeError(f"Consistency check failed: No trace files found in {traces_dir} to verify duration.")
+            
+            # Use the first available trace
+            trace_path = trace_files[0]
+            
+            # Read & Verify
             try:
-                cid_val = int(first_chunk_id)
-                candidates = [
-                    os.path.join(args.analysis_out, 'traces', f"chunk_{cid_val:04d}.csv"),
-                    os.path.join(args.analysis_out, 'traces', f"chunk_{cid_val:03d}.csv"),
-                    os.path.join(args.analysis_out, 'traces', f"chunk_{cid_val}.csv")
-                ]
-                for cand in candidates:
-                    if os.path.exists(cand):
-                        trace_path = cand
-                        break
-            except:
-                pass # If chunk_id not interpretable as int
-            
-            # 2. Check Existence
-            if not trace_path:
-                print(f"WARNING: Could not find trace file for chunk {first_chunk_id} to verify duration. Skipping check.")
-            else:
-                # 3. Read & Verify
-                try:
-                    tdf = pd.read_csv(trace_path)
-                    if 'time_sec' not in tdf.columns:
-                         print(f"WARNING: 'time_sec' column missing in {trace_path}. Skipping duration check.")
-                    else:
-                         t = tdf['time_sec'].values
-                         if len(t) < 2:
-                              print(f"WARNING: Insufficient points in {trace_path}. Skipping check.")
-                         else:
-                              trace_dur = t[-1] - t[0]
-                              diff = abs(trace_dur - args.session_duration_s)
-                              if diff > 2.0:
-                                   raise RuntimeError(f"Session Duration Mismatch! Provided: {args.session_duration_s:.2f}s, Trace: {trace_dur:.2f}s (Diff: {diff:.2f}s). Chunk: {first_chunk_id}, File: {trace_path}")
-                except RuntimeError:
-                    raise # Propagate the fatal error
-                except Exception as e:
-                    print(f"WARNING: Failed to read/parse {trace_path}: {e}. Skipping check.")
-        if args.session_duration_s:
+                tdf = pd.read_csv(trace_path)
+                if 'time_sec' not in tdf.columns:
+                     raise RuntimeError(f"Consistency check failed: 'time_sec' column missing in {trace_path}.")
+                
+                t = tdf['time_sec'].values
+                if len(t) < 2:
+                     raise RuntimeError(f"Consistency check failed: Insufficient points in {trace_path}.")
+                
+                trace_dur = t[-1] - t[0]
+                diff = abs(trace_dur - args.session_duration_s)
+                tol = max(2.0, 0.005 * args.session_duration_s)
+                if diff > tol:
+                     raise RuntimeError(f"Session Duration Mismatch! Provided: {args.session_duration_s:.2f}s, Trace: {trace_dur:.2f}s (Diff: {diff:.2f}s, Tol: {tol:.2f}s). File: {trace_path}")
+
+            except RuntimeError:
+                raise # Propagate the fatal error
+            except Exception as e:
+                raise RuntimeError(f"Consistency check failed during read of {trace_path}: {e}")
+
+        if args.session_duration_s is not None:
             session_duration_s = args.session_duration_s
         else:
             # Fallback (Legacy behavior, but now technically incorrect for duty cycle)

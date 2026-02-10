@@ -36,6 +36,7 @@ def parse_args():
     parser.add_argument('--format', required=True, choices=['rwd', 'npm', 'auto'])
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--sessions-per-hour', type=int, help="Force sessions per hour (integer)")
+    parser.add_argument('--session-duration-s', type=float, help="Recording duration in seconds (data length per chunk). If provided, validated against traces.")
     parser.add_argument('--smooth-window-s', type=float, default=1.0)
     return parser.parse_args()
 
@@ -103,11 +104,14 @@ def main():
             
         # Inspect first trace for duration
         df0 = pd.read_csv(trace_files[0])
+        if 'time_sec' not in df0.columns or len(df0) < 2:
+             raise RuntimeError(f"Trace {trace_files[0]} missing time_sec or too short.")
+             
         time_sec = df0['time_sec'].values
-        duration_s = time_sec[-1] - time_sec[0]
+        trace_duration_s = time_sec[-1] - time_sec[0]
         
-        if not np.isfinite(duration_s) or duration_s <= 0:
-            raise RuntimeError(f"Invalid duration_s: {duration_s}")
+        if not np.isfinite(trace_duration_s) or trace_duration_s <= 0:
+            raise RuntimeError(f"Invalid trace_duration_s: {trace_duration_s}")
 
         # Stride Inference
         stride_s = None
@@ -131,16 +135,34 @@ def main():
         if abs(stride_s * computed_sph - 3600.0) > 2.0:
              raise RuntimeError(f"Stride {stride_s:.2f}s not compatible with integer sessions/hr {computed_sph}")
              
-        # Duration sanity check (relaxed)
-        # Expected ~600s usually, but could be anything < stride
-        if duration_s > (stride_s + 1.0):
-             raise RuntimeError(f"Duration {duration_s:.1f}s > Stride {stride_s:.1f}s")
+        # Definition:
+        # session_duration_s := within-session trace length
+        # session_stride_s := time between starts (cadence)
+        
+        if args.session_duration_s is not None:
+             if args.session_duration_s <= 0:
+                  raise RuntimeError(f"Provided session duration must be > 0, got {args.session_duration_s}")
+                  
+             # Validate against trace
+             tol = max(2.0, 0.005 * args.session_duration_s)
+             diff = abs(trace_duration_s - args.session_duration_s)
+             if diff > tol:
+                  raise RuntimeError(f"Session Duration Mismatch! Provided: {args.session_duration_s:.2f}s, Trace: {trace_duration_s:.2f}s (Diff: {diff:.2f}s, Tol: {tol:.2f}s). File: {trace_files[0]}")
+             
+             session_duration_s = args.session_duration_s
+        else:
+             session_duration_s = trace_duration_s
+             
+        # Impossible Schedule Check
+        # Duration cannot exceed Stride
+        if session_duration_s > (stride_s + 1e-6):
+             raise RuntimeError(f"Impossible schedule: Duration {session_duration_s:.2f}s > Stride {stride_s:.2f}s (SPH={sessions_per_hour}).")
              
         sessions_per_hour = computed_sph
         manifest['sessions_per_hour'] = sessions_per_hour
-        manifest['session_duration_s'] = duration_s
+        manifest['session_duration_s'] = session_duration_s
         manifest['session_stride_s'] = stride_s
-        print(f"Deterministic Sessions Per Hour: {sessions_per_hour} (Stride={stride_s:.1f}s, Dur={duration_s:.1f}s)")
+        print(f"Deterministic Sessions Per Hour: {sessions_per_hour} (Stride={stride_s:.1f}s, Dur={session_duration_s:.1f}s)")
 
         # 4. Diagnostics & Per-Region Processing
         feats_csv = os.path.join(phasic_out, 'features', 'features.csv')
@@ -245,7 +267,7 @@ def main():
                       '--analysis-out', phasic_out,
                       '--roi', roi,
                       '--sessions-per-hour', str(sessions_per_hour),
-                      '--session-duration-s', str(duration_s),
+                      '--session-duration-s', str(session_duration_s),
                       '--out-dir', ts_dir,
                       '--export-csv']
             manifest['commands'].append(run_cmd(cmd_ts))
@@ -287,9 +309,10 @@ def main():
             cmd_sess = [sys.executable, 'tools/plot_session_grid.py',
                         '--analysis-out', phasic_out,
                         '--roi', roi,
-                        '--sessions-per-hour', str(sessions_per_hour)]
+                        '--sessions-per-hour', str(sessions_per_hour),
+                        '--session-duration-s', str(session_duration_s)]
             run_cmd(cmd_sess)
-
+            
             # 3. Stacked
             cmd_stack = [sys.executable, 'tools/plot_phasic_stacked_day_smoothed.py',
                          '--analysis-out', phasic_out,

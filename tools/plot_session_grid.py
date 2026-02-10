@@ -33,6 +33,7 @@ def parse_args():
     parser.add_argument('--analysis-out', required=True)
     parser.add_argument('--roi', default=None)
     parser.add_argument('--sessions-per-hour', type=int, default=None)
+    parser.add_argument('--session-duration-s', type=float, default=None, help="Expected session duration in seconds. If provided, used for validation.")
     return parser.parse_args()
 
 def check_monotonicity(time_arr):
@@ -59,8 +60,12 @@ def main():
     valid_files = []
     
     # Auto-detect ROI
-    df0 = pd.read_csv(files[0], nrows=1)
+    df0 = pd.read_csv(files[0], nrows=10)
     sig_cols = [c for c in df0.columns if '_sig_raw' in c]
+    if not sig_cols:
+         print("CRITICAL: No signal columns found in first trace.")
+         sys.exit(1)
+         
     rois = [c.replace('_sig_raw','') for c in sig_cols]
     if args.roi: 
         roi = args.roi
@@ -80,10 +85,20 @@ def main():
                 
             # Duration
             duration = t[-1] - t[0]
-            # 10 min = 600s. Request says [590, 610]
-            if not (590 <= duration <= 610):
-                print(f"CRITICAL: Invalid duration {duration:.2f}s in {f}")
-                sys.exit(1)
+            
+            # Validation Logic
+            if args.session_duration_s is not None:
+                 # Validated against provided duration with tolerance
+                 expected = args.session_duration_s
+                 tol = max(2.0, 0.005 * expected)
+                 if abs(duration - expected) > tol:
+                      print(f"CRITICAL: Duration mismatch in {f}. Expected ~{expected:.2f}s, got {duration:.2f}s (Diff > {tol:.2f}s)")
+                      sys.exit(1)
+            else:
+                 # Standard check (10 min = 600s). Request says [590, 610]
+                 if not (590 <= duration <= 610):
+                     print(f"CRITICAL: Invalid duration {duration:.2f}s in {f} (Expected ~600s)")
+                     sys.exit(1)
                 
             # Continuity
             # Infer dt from median diff
