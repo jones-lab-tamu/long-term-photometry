@@ -25,6 +25,9 @@ debug_output/
 *.parquet
 *.csv
 
+# Contract (internal reference, not distributed)
+DELIVERABLES_CONTRACT.md
+
 # Scripts (Utility/generated)
 create_digest.py
 verify_digest.py

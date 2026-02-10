@@ -38,11 +38,71 @@ def parse_args():
     parser.add_argument('--sessions-per-hour', type=int, help="Force sessions per hour (integer)")
     parser.add_argument('--session-duration-s', type=float, help="Recording duration in seconds (data length per chunk). If provided, validated against traces.")
     parser.add_argument('--smooth-window-s', type=float, default=1.0)
+    parser.add_argument('--validate-only', action='store_true',
+                        help="Validate inputs and print the command that would run, then exit.")
     return parser.parse_args()
+
+def validate_inputs(args):
+    """Cheap preflight checks. Raises RuntimeError on any problem."""
+    # Input path
+    if not os.path.isdir(args.input):
+        raise RuntimeError(f"Input directory does not exist or is not a directory: {args.input}")
+
+    # Config path
+    if not os.path.isfile(args.config):
+        raise RuntimeError(f"Config file does not exist or is not a file: {args.config}")
+
+    # Format (already constrained by argparse choices, but belt-and-suspenders)
+    if args.format not in ('rwd', 'npm', 'auto'):
+        raise RuntimeError(f"Invalid format: {args.format}")
+
+    # sessions_per_hour
+    if args.sessions_per_hour is not None:
+        if args.sessions_per_hour < 1:
+            raise RuntimeError(f"--sessions-per-hour must be >= 1, got {args.sessions_per_hour}")
+
+    # session_duration_s
+    if args.session_duration_s is not None:
+        if args.session_duration_s <= 0:
+            raise RuntimeError(f"--session-duration-s must be > 0, got {args.session_duration_s}")
+
+    # Impossible schedule (only when both are provided)
+    if args.sessions_per_hour is not None and args.session_duration_s is not None:
+        stride_s = 3600.0 / args.sessions_per_hour
+        if args.session_duration_s > stride_s + 1e-6:
+            raise RuntimeError(
+                f"Impossible schedule: Duration {args.session_duration_s:.2f}s > "
+                f"Stride {stride_s:.2f}s (SPH={args.sessions_per_hour}).")
 
 def main():
     args = parse_args()
-    
+
+    # 0. Validate-only preflight
+    if args.validate_only:
+        try:
+            validate_inputs(args)
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+
+        # Build the argv that a real run would use
+        argv = [sys.executable, "tools/run_full_pipeline_deliverables.py",
+                "--input", args.input,
+                "--out", args.out,
+                "--config", args.config,
+                "--format", args.format]
+        if args.overwrite:
+            argv.append("--overwrite")
+        if args.sessions_per_hour is not None:
+            argv.extend(["--sessions-per-hour", str(args.sessions_per_hour)])
+        if args.session_duration_s is not None:
+            argv.extend(["--session-duration-s", str(args.session_duration_s)])
+        argv.extend(["--smooth-window-s", str(args.smooth_window_s)])
+
+        print("VALIDATE-ONLY: OK")
+        print(f"VALIDATE-ONLY: argv={json.dumps(argv)}")
+        sys.exit(0)
+
     # 1. Validation & Setup
     if os.path.exists(args.out):
         if not args.overwrite:
