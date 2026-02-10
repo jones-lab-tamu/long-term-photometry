@@ -1,5 +1,5 @@
 """
-ManifestViewer — MANIFEST.json-driven results browser.
+ManifestViewer, MANIFEST.json-driven results browser.
 
 Loads MANIFEST.json from a pipeline output directory, renders a Summary tab
 and one tab per ROI with PNG thumbnails, day-plot selector, and CSV table viewer.
@@ -347,11 +347,11 @@ class ManifestViewer(QWidget):
         layout = QVBoxLayout(widget)
 
         fields = [
-            ("Tool", manifest.get("tool", "—")),
-            ("Timestamp", manifest.get("timestamp", "—")),
-            ("Sessions/Hour", str(manifest.get("sessions_per_hour", "—"))),
-            ("Session Duration (s)", str(manifest.get("session_duration_s", "—"))),
-            ("Session Stride (s)", str(manifest.get("session_stride_s", "—"))),
+            ("Tool", manifest.get("tool", "--")),
+            ("Timestamp", manifest.get("timestamp", "--")),
+            ("Sessions/Hour", str(manifest.get("sessions_per_hour", "--"))),
+            ("Session Duration (s)", str(manifest.get("session_duration_s", "--"))),
+            ("Session Stride (s)", str(manifest.get("session_stride_s", "--"))),
             ("Regions", ", ".join(manifest.get("regions", []))),
         ]
 

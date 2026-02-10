@@ -1,9 +1,11 @@
 """
-PipelineRunner — QProcess wrapper for tools/run_full_pipeline_deliverables.py
+PipelineRunner, QProcess wrapper for tools/run_full_pipeline_deliverables.py
 
 Streams stdout/stderr line-by-line, supports cancel with process-tree kill on Windows.
+Cancel flag file is the primary cancellation mechanism; QProcess kill is fallback.
 """
 
+import os
 import sys
 import subprocess
 
@@ -24,10 +26,15 @@ class PipelineRunner(QObject):
         self._process = None
         self._stdout_buf = b""
         self._stderr_buf = b""
+        self._run_dir = ""
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def set_run_dir(self, path: str) -> None:
+        """Set the run directory so cancel can write the flag file."""
+        self._run_dir = path
 
     def start(self, argv: list) -> None:
         """Start the pipeline. argv[0] is the program, argv[1:] are arguments."""
@@ -53,9 +60,19 @@ class PipelineRunner(QObject):
         self._process.start(program, args)
 
     def cancel(self) -> None:
-        """Terminate the running process (and its children on Windows)."""
+        """Cancel the running process. Writes cancel flag first, then fallback kill."""
         if not self.is_running():
             return
+
+        # Step 0: write cancel flag (primary cancellation mechanism)
+        if self._run_dir:
+            cancel_flag = os.path.join(self._run_dir, "CANCEL.REQUESTED")
+            try:
+                with open(cancel_flag, "w") as f:
+                    f.write("cancel\n")
+                self.log_line.emit("OUT: Cancel flag written, waiting for engine to stop...")
+            except Exception as e:
+                self.log_line.emit(f"ERR: Could not write cancel flag: {e}")
 
         self.log_line.emit("ERR: Cancel requested, terminating process...")
 

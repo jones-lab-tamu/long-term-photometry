@@ -1,5 +1,5 @@
 """
-Photometry Pipeline Deliverables — GUI Application
+Photometry Pipeline Deliverables, GUI Application
 
 Usage:
     python -m gui.app
@@ -14,6 +14,7 @@ from gui.main_window import MainWindow
 
 def main():
     app = QApplication(sys.argv)
+    app.setOrganizationName("JonesLab")
     app.setApplicationName("Photometry Pipeline Deliverables")
     window = MainWindow()
     window.show()
