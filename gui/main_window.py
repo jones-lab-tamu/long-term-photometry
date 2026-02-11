@@ -5,14 +5,27 @@ Three zones:
   1) Config panel (top) -- run parameters, Validate/Run/Cancel/Open Results buttons
   2) Log panel (middle) -- live stdout/stderr from pipeline
   3) Results panel (bottom) -- ManifestViewer, populated on successful run
+
+State machine:
+  IDLE -> VALIDATING -> (SUCCESS -> IDLE with _validation_passed)
+  IDLE -> RUNNING -> SUCCESS / FAILED / CANCELLED
+  Any DONE state allows re-validate.
+
+Button gating:
+  IDLE: Validate YES, Run YES (only if _validation_passed), Cancel NO, Open Folder NO
+  VALIDATING: Validate NO, Run NO, Cancel NO, Open Folder NO
+  RUNNING: Validate NO, Run NO, Cancel YES, Open Folder NO
+  DONE: Validate YES, Run NO (re-validate required), Cancel NO, Open Folder YES
 """
 
+import json
 import sys
 import os
 import secrets
+import subprocess as _subprocess
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -21,7 +34,8 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QSizePolicy,
 )
 
-from gui.process_runner import PipelineRunner
+from gui.process_runner import PipelineRunner, RunnerState
+from gui.events_follower import EventsFollower
 from gui.manifest_viewer import ManifestViewer
 
 
@@ -35,6 +49,16 @@ def _generate_run_id():
     """Generate a run_id: run_YYYYMMDD_HHMMSS_<8hex>."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"run_{ts}_{secrets.token_hex(4)}"
+
+
+def _open_folder(path: str) -> None:
+    """Cross-platform open a folder in the file manager."""
+    if sys.platform == "win32":
+        os.startfile(path)
+    elif sys.platform == "darwin":
+        _subprocess.run(["open", path], check=False)
+    else:
+        _subprocess.run(["xdg-open", path], check=False)
 
 
 class MainWindow(QMainWindow):
@@ -54,10 +78,26 @@ class MainWindow(QMainWindow):
         self._runner.started.connect(self._on_run_started)
         self._runner.finished.connect(self._on_run_finished)
         self._runner.error.connect(self._on_run_error)
+        self._runner.state_changed.connect(self._on_state_changed)
+
+        # Events follower (created per run)
+        self._events_follower = None
 
         # Current run directory (set before each run)
         self._current_run_dir = ""
         self._is_validate_only = False
+        self._validation_passed = False
+
+        # Accumulated stdout for validate-only result checking
+        self._validate_stdout = []
+
+        # Status label fields (state + last event, shown together)
+        self._state_str = "IDLE"
+        self._ui_state = RunnerState.IDLE
+        self._last_event_stage = "\u2014"
+        self._last_event_type = "\u2014"
+        self._last_event_msg = ""
+        self._saw_cancel_event = False
 
         # Build UI
         central = QWidget()
@@ -70,6 +110,13 @@ class MainWindow(QMainWindow):
         # --- Zone A: Config Panel ---
         config_group = self._build_config_panel()
         splitter.addWidget(config_group)
+
+        # --- Status label ---
+        self._status_label = QLabel("State: IDLE")
+        self._status_label.setStyleSheet(
+            "font-weight: bold; padding: 4px; background: #f0f0f0;"
+        )
+        main_layout.addWidget(self._status_label)
 
         # --- Zone B: Log Panel ---
         log_group = self._build_log_panel()
@@ -105,6 +152,7 @@ class MainWindow(QMainWindow):
 
         # Input directory
         self._input_dir = QLineEdit()
+        self._input_dir.textChanged.connect(self._on_config_changed)
         input_row = QHBoxLayout()
         input_row.addWidget(self._input_dir)
         btn = QPushButton("Browse...")
@@ -114,6 +162,7 @@ class MainWindow(QMainWindow):
 
         # Output directory (used as --out-base in GUI mode)
         self._output_dir = QLineEdit()
+        self._output_dir.textChanged.connect(self._on_config_changed)
         output_row = QHBoxLayout()
         output_row.addWidget(self._output_dir)
         btn2 = QPushButton("Browse...")
@@ -123,6 +172,7 @@ class MainWindow(QMainWindow):
 
         # Config YAML
         self._config_path = QLineEdit()
+        self._config_path.textChanged.connect(self._on_config_changed)
         config_row = QHBoxLayout()
         config_row.addWidget(self._config_path)
         btn3 = QPushButton("Browse...")
@@ -133,12 +183,14 @@ class MainWindow(QMainWindow):
         # Format
         self._format_combo = QComboBox()
         self._format_combo.addItems(["auto", "rwd", "npm"])
+        self._format_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Format:", self._format_combo)
 
         # sessions_per_hour (optional)
         self._sph_edit = QLineEdit()
         self._sph_edit.setPlaceholderText("(optional, integer >= 1)")
         self._sph_edit.setMaximumWidth(200)
+        self._sph_edit.textChanged.connect(self._on_config_changed)
         form.addRow("Sessions/Hour:", self._sph_edit)
 
         # SPH warning
@@ -152,6 +204,7 @@ class MainWindow(QMainWindow):
         self._duration_edit = QLineEdit()
         self._duration_edit.setPlaceholderText("(optional, seconds > 0)")
         self._duration_edit.setMaximumWidth(200)
+        self._duration_edit.textChanged.connect(self._on_config_changed)
         form.addRow("Session Duration (s):", self._duration_edit)
 
         # smooth_window_s
@@ -161,6 +214,7 @@ class MainWindow(QMainWindow):
         self._smooth_spin.setDecimals(2)
         self._smooth_spin.setSingleStep(0.1)
         self._smooth_spin.setMaximumWidth(200)
+        self._smooth_spin.valueChanged.connect(self._on_config_changed)
         form.addRow("Smooth Window (s):", self._smooth_spin)
 
         # Overwrite (legacy CLI only; disabled in GUI which uses --out-base)
@@ -191,6 +245,10 @@ class MainWindow(QMainWindow):
         self._open_results_btn = QPushButton("Open Results...")
         self._open_results_btn.clicked.connect(self._on_open_results)
         btn_row.addWidget(self._open_results_btn)
+
+        self._open_folder_btn = QPushButton("Open Run Folder")
+        self._open_folder_btn.clicked.connect(self._on_open_folder)
+        btn_row.addWidget(self._open_folder_btn)
 
         btn_row.addStretch()
         outer.addLayout(btn_row)
@@ -299,6 +357,15 @@ class MainWindow(QMainWindow):
         return None
 
     # ==================================================================
+    # Config change handler — resets validation
+    # ==================================================================
+
+    def _on_config_changed(self):
+        """Any config widget change invalidates prior validation."""
+        self._validation_passed = False
+        self._update_button_states()
+
+    # ==================================================================
     # Button handlers
     # ==================================================================
 
@@ -313,8 +380,16 @@ class MainWindow(QMainWindow):
         self._append_log("--- Validate Only ---")
         argv = self._build_argv(validate_only=True)
         self._is_validate_only = True
+        self._validation_passed = False
+        self._validate_stdout = []
+        self._reset_event_flags()
+
+        # Pre-create run_dir so events/logs are stable (design rule D)
+        os.makedirs(self._current_run_dir, exist_ok=True)
+
         self._runner.set_run_dir(self._current_run_dir)
-        self._runner.start(argv)
+        self._start_events_follower()
+        self._runner.start(argv, state=RunnerState.VALIDATING)
 
     def _on_run(self):
         err = self._validate_gui_inputs()
@@ -342,13 +417,20 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.Yes:
                 return
 
+        # Pre-create run_dir (design rule D)
+        os.makedirs(run_dir, exist_ok=True)
+
         self._log_view.clear()
         self._manifest_viewer.clear()
         self._append_log("--- Starting Pipeline ---")
         self._append_log(f"Run directory: {run_dir}")
         self._is_validate_only = False
+        self._validation_passed = False
+        self._reset_event_flags()
+
         self._runner.set_run_dir(run_dir)
-        self._runner.start(argv)
+        self._start_events_follower()
+        self._runner.start(argv, state=RunnerState.RUNNING)
 
     def _on_cancel(self):
         self._runner.cancel()
@@ -375,6 +457,93 @@ class MainWindow(QMainWindow):
         # ManifestViewer.load_manifest handles missing/invalid file gracefully
         self._manifest_viewer.load_manifest(selected)
 
+    def _on_open_folder(self):
+        """Open the current run_dir in the system file manager."""
+        run_dir = self._current_run_dir
+        if not run_dir or not os.path.isdir(run_dir):
+            QMessageBox.information(
+                self, "No Run Folder",
+                "No run directory available to open."
+            )
+            return
+
+        # Show MANIFEST summary if available
+        manifest_path = os.path.join(run_dir, "MANIFEST.json")
+        if os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as fh:
+                    m = json.loads(fh.read())
+                status = m.get("status", "unknown")
+                run_id = m.get("run_id", "unknown")
+                n_commands = len(m.get("commands", []))
+                self._append_log(
+                    f"MANIFEST: status={status}, run_id={run_id}, "
+                    f"commands={n_commands}"
+                )
+            except Exception:
+                self._append_log("MANIFEST: could not parse MANIFEST.json")
+        else:
+            self._append_log("MANIFEST not created")
+
+        _open_folder(run_dir)
+
+    # ==================================================================
+    # Events follower integration
+    # ==================================================================
+
+    def _start_events_follower(self):
+        """Create and start an EventsFollower for the current run_dir."""
+        self._stop_events_follower()
+        events_path = os.path.join(self._current_run_dir, "events.ndjson")
+        self._events_follower = EventsFollower(events_path, poll_ms=300, parent=self)
+        self._events_follower.event_received.connect(self._on_event)
+        self._events_follower.parse_error.connect(self._on_event_parse_error)
+        self._events_follower.start()
+
+    def _stop_events_follower(self):
+        """Stop and discard the events follower."""
+        if self._events_follower is not None:
+            self._events_follower.stop()
+            self._events_follower.deleteLater()
+            self._events_follower = None
+
+    def _reset_event_flags(self):
+        """Reset event-derived fields at the start of each validate/run."""
+        self._saw_cancel_event = False
+        self._last_event_stage = "\u2014"
+        self._last_event_type = "\u2014"
+        self._last_event_msg = ""
+        self._render_status_label()
+
+    def _render_status_label(self):
+        """Compose status label from state + last event fields."""
+        parts = [f"State: {self._state_str}"]
+        parts.append(f"Stage: {self._last_event_stage}")
+        parts.append(f"Type: {self._last_event_type}")
+        if self._last_event_msg:
+            parts.append(self._last_event_msg)
+        self._status_label.setText(" | ".join(parts))
+
+    def _on_event(self, evt: dict):
+        """Handle a parsed event from events.ndjson."""
+        self._last_event_stage = evt.get("stage", "?")
+        self._last_event_type = evt.get("type", "?")
+        self._last_event_msg = evt.get("message", "")
+        self._render_status_label()
+
+        # Detect cancellation via events (requirement B)
+        etype_lower = self._last_event_type.lower()
+        estatus_lower = str(evt.get("status", "")).lower()
+        emsg_lower = self._last_event_msg.lower()
+        if etype_lower == "cancelled" or estatus_lower == "cancelled":
+            self._saw_cancel_event = True
+        elif "cancel" in emsg_lower and etype_lower in {"done", "status", "engine"}:
+            self._saw_cancel_event = True
+
+    def _on_event_parse_error(self, msg: str):
+        """Non-fatal warning for malformed event lines."""
+        self._append_log(f"WARN(events): {msg}")
+
     # ==================================================================
     # Runner signal handlers
     # ==================================================================
@@ -382,15 +551,59 @@ class MainWindow(QMainWindow):
     def _on_run_started(self):
         self._update_button_states()
 
+    def _on_state_changed(self, state_str: str):
+        """Update status label on state transitions."""
+        self._state_str = state_str
+        try:
+            self._ui_state = RunnerState(state_str)
+        except ValueError:
+            pass  # leave _ui_state unchanged for unknown strings
+        self._render_status_label()
+
     def _on_run_finished(self, exit_code: int):
+        # Drain events follower before updating UI
+        if self._events_follower is not None:
+            self._events_follower.begin_drain()
+            # Schedule final UI update after a brief drain window
+            QTimer.singleShot(700, lambda: self._finalize_run(exit_code))
+        else:
+            self._finalize_run(exit_code)
+
+    def _finalize_run(self, exit_code: int):
+        """Called after events drain completes.
+
+        Uses event-informed final state classification (requirement B):
+          1) events indicate cancellation -> CANCELLED
+          2) cancel_requested + nonzero exit -> CANCELLED
+          3) exit code 0 -> SUCCESS
+          4) else -> FAILED
+        """
+        self._stop_events_follower()
+
+        # Event-informed final state (overrides runner's exit-code-only guess)
+        if self._saw_cancel_event:
+            final_state = RunnerState.CANCELLED
+        elif self._runner.was_cancel_requested and exit_code != 0:
+            final_state = RunnerState.CANCELLED
+        elif exit_code == 0:
+            final_state = RunnerState.SUCCESS
+        else:
+            final_state = RunnerState.FAILED
+
+        # Update UI-owned state for button gating
+        self._ui_state = final_state
+        self._state_str = final_state.value
+        self._render_status_label()
         self._update_button_states()
 
-        if exit_code == 0:
+        if final_state == RunnerState.SUCCESS:
             self._append_log(f"--- Finished (exit code {exit_code}) ---")
-            if not self._is_validate_only and self._current_run_dir:
+            if self._is_validate_only:
+                self._check_validation_result()
+            elif self._current_run_dir:
                 self._manifest_viewer.load_manifest(self._current_run_dir)
-        elif exit_code == 130:
-            self._append_log("--- Run CANCELLED (exit code 130) ---")
+        elif final_state == RunnerState.CANCELLED:
+            self._append_log("--- Run CANCELLED ---")
             if self._current_run_dir:
                 manifest_path = os.path.join(self._current_run_dir, "MANIFEST.json")
                 if os.path.exists(manifest_path):
@@ -398,14 +611,39 @@ class MainWindow(QMainWindow):
                     self._manifest_viewer.load_manifest(self._current_run_dir)
         else:
             self._append_log(f"--- Run FAILED (exit code {exit_code}) ---")
-            # Try to load partial results if MANIFEST exists
             if self._current_run_dir:
                 manifest_path = os.path.join(self._current_run_dir, "MANIFEST.json")
                 if os.path.exists(manifest_path):
-                    self._append_log("Attempting to load partial results from MANIFEST.json...")
+                    self._append_log("Attempting to load partial results...")
                     self._manifest_viewer.load_manifest(self._current_run_dir)
 
+        # After any full run: require re-validation
+        if not self._is_validate_only:
+            self._validation_passed = False
+            self._update_button_states()
+
+    def _check_validation_result(self):
+        """Check stdout for VALIDATE-ONLY: OK and gate the Run button."""
+        # Read stdout.log from run_dir if available
+        log_path = os.path.join(self._current_run_dir, "stdout.log")
+        stdout_text = ""
+        if os.path.isfile(log_path):
+            try:
+                with open(log_path, "r", encoding="utf-8") as fh:
+                    stdout_text = fh.read()
+            except OSError:
+                pass
+
+        if "VALIDATE-ONLY: OK" in stdout_text:
+            self._validation_passed = True
+            self._append_log("Validation PASSED. Run is now enabled.")
+        else:
+            self._validation_passed = False
+            self._append_log("Validation did not confirm OK. Run remains disabled.")
+        self._update_button_states()
+
     def _on_run_error(self, msg: str):
+        self._stop_events_follower()
         self._update_button_states()
         self._append_log(f"ERR: {msg}")
         QMessageBox.critical(self, "Process Error", msg)
@@ -458,11 +696,31 @@ class MainWindow(QMainWindow):
         self._log_view.appendPlainText(text)
 
     def _update_button_states(self):
+        state = self._ui_state
         running = self._runner.is_running()
-        self._validate_btn.setEnabled(not running)
-        self._run_btn.setEnabled(not running)
-        self._cancel_btn.setEnabled(running)
+
+        is_done = state in (RunnerState.SUCCESS, RunnerState.FAILED,
+                            RunnerState.CANCELLED)
+        is_idle_or_done = state == RunnerState.IDLE or is_done
+
+        # Validate: enabled only when idle or done (not running/validating)
+        self._validate_btn.setEnabled(is_idle_or_done and not running)
+
+        # Run: enabled only when idle/done, not running, AND validated
+        self._run_btn.setEnabled(
+            is_idle_or_done and not running and self._validation_passed
+        )
+
+        # Cancel: enabled only when RUNNING (not VALIDATING per rule A)
+        self._cancel_btn.setEnabled(state == RunnerState.RUNNING and running)
+
+        # Open Results: always enabled when not running
         self._open_results_btn.setEnabled(not running)
+
+        # Open Run Folder: enabled when done and run_dir exists
+        has_run_dir = (self._current_run_dir
+                       and os.path.isdir(self._current_run_dir))
+        self._open_folder_btn.setEnabled(is_done and has_run_dir and not running)
 
     def _browse_dir(self, line_edit: QLineEdit, title: str):
         path = QFileDialog.getExistingDirectory(self, title, line_edit.text())

@@ -137,9 +137,18 @@ def parse_args():
     parser.add_argument('--session-duration-s', type=float, help="Recording duration in seconds (data length per chunk). If provided, validated against traces.")
     parser.add_argument('--smooth-window-s', type=float, default=1.0)
     parser.add_argument('--validate-only', action='store_true',
-                        help="Validate inputs and print the command that would run, then exit.")
+                        help=(
+                            "Validate inputs and exit without analysis. "
+                            "Legacy --out: no run_dir, no directories, no MANIFEST. "
+                            "GUI --out-base: may create run_dir for auto paths."
+                        ))
     parser.add_argument('--events', default='auto',
-                        help="Events NDJSON path, or 'auto' for run_dir/events.ndjson")
+                        help=(
+                            "Events NDJSON path, or 'auto' (run_dir/events.ndjson). "
+                            "In legacy validate-only: 'auto' disables events "
+                            "(run_dir not created); explicit path writes only if "
+                            "parent directory already exists."
+                        ))
     parser.add_argument('--cancel-flag', default='auto',
                         help="Cancel flag path, or 'auto' for run_dir/CANCEL.REQUESTED")
     return parser.parse_args()
