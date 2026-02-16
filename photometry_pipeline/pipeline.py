@@ -13,7 +13,7 @@ from .core.types import Chunk, SessionStats
 from .io.adapters import load_chunk, sniff_format
 from .core import preprocessing, regression, normalization, feature_extraction, baseline
 from .core.reporting import generate_run_report, append_run_report_warnings
-from .viz import plots
+# from .viz import plots # Moved to run() to avoid side effects
 
 # Helper for robust config access (Dict vs Attribute)
 def _get_cfg_value(cfg, key, default):
@@ -112,8 +112,8 @@ class Pipeline:
                         self.roi_map = chunk.metadata['roi_map']
                     
                     # Compute filtered explicitly for fit accumulation
-                    chunk.uv_filt = preprocessing.lowpass_filter(chunk.uv_raw, chunk.fs_hz, self.config)
-                    chunk.sig_filt = preprocessing.lowpass_filter(chunk.sig_raw, chunk.fs_hz, self.config)
+                    chunk.uv_filt, _ = preprocessing.lowpass_filter_with_meta(chunk.uv_raw, chunk.fs_hz, self.config)
+                    chunk.sig_filt, _ = preprocessing.lowpass_filter_with_meta(chunk.sig_raw, chunk.fs_hz, self.config)
                     
                     for ch_idx, ch_name in enumerate(chunk.channel_names):
                         accumulator.add(ch_name, chunk.uv_filt[:, ch_idx], chunk.sig_filt[:, ch_idx])
@@ -261,6 +261,9 @@ class Pipeline:
          chunk.dff = normalization.compute_dff(chunk, self.stats, self.config)
 
     def run_pass_2(self, output_dir: str, force_format: str = 'auto'):
+        # Lazy import for VIZ
+        from .viz import plots
+        
         print("Starting Pass 2: Analysis...")
         
         traces_dir = os.path.join(output_dir, 'traces')
@@ -282,8 +285,18 @@ class Pipeline:
                 if not self.roi_map and chunk.metadata.get("roi_map"):
                     self.roi_map = chunk.metadata["roi_map"]
                 
-                chunk.uv_filt = preprocessing.lowpass_filter(chunk.uv_raw, chunk.fs_hz, self.config)
-                chunk.sig_filt = preprocessing.lowpass_filter(chunk.sig_raw, chunk.fs_hz, self.config)
+                uv_filt, uv_meta = preprocessing.lowpass_filter_with_meta(chunk.uv_raw, chunk.fs_hz, self.config)
+                sig_filt, sig_meta = preprocessing.lowpass_filter_with_meta(chunk.sig_raw, chunk.fs_hz, self.config)
+                
+                chunk.uv_filt = uv_filt
+                chunk.sig_filt = sig_filt
+                
+                # Warning aggregation (NaN Safety Policy 2)
+                for m in [uv_meta, sig_meta]:
+                     if m.get('rois_affected', 0) > 0:
+                         msg = f"Chunk {i} Block-wise filtering active: {m['rois_affected']} ROIs, {m['samples_skipped']} samples skipped."
+                         if 'scan_warnings' not in self.qc_summary: self.qc_summary['scan_warnings'] = []
+                         self.qc_summary['scan_warnings'].append(msg)
                 
                 if self.mode == 'tonic':
                      self._process_chunk_tonic(chunk, i)
@@ -442,6 +455,9 @@ class Pipeline:
                 logging.warning(f"Viz failure for {roi}: {e}")
                 
     def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv"):
+        # Lazy import to avoid GUI side effects at module level
+        from .viz import plots
+        
         self.output_dir = output_dir
         os.makedirs(os.path.join(output_dir, 'qc'), exist_ok=True)
         self.discover_files(input_dir, recursive, glob_pattern, force_format=force_format)

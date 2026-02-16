@@ -4,7 +4,10 @@ import numpy as np
 
 @dataclass
 class SessionStats:
-    """Contains session-level baseline quantities computed in Pass 1."""
+    """
+    Contains session-level baseline quantities computed in Pass 1.
+    Values should be interpreted based on 'method_used'.
+    """
     # Method A: raw percentiles per ROI
     f0_values: Dict[str, float] = field(default_factory=dict)
     
@@ -56,17 +59,35 @@ class Chunk:
     channel_names: List[str] = field(default_factory=list)
     metadata: Dict = field(default_factory=dict)
 
-    def validate(self):
+    def validate(self, tolerance_frac: Optional[float] = None):
         """Strict validation of the chunk contract."""
         T = len(self.time_sec)
         
         # Grid uniformity check
         dt = np.diff(self.time_sec)
         if len(dt) > 0:
-            if not np.allclose(dt, 1.0/self.fs_hz, atol=1e-5):
-                 # This might be too strict for float precision, but let's warn or check CV
-                 # The spec says "Uniform Grid", created by arange, so it SHOULD be perfect.
-                 pass
+            expected_dt = 1.0 / self.fs_hz
+            
+            # Policy: use provided fraction or default strict 1%
+            tol_frac = tolerance_frac if tolerance_frac is not None else 0.01
+            tol_val = expected_dt * tol_frac
+            
+            # Check for grid violations
+            bad_indices = np.where(np.abs(dt - expected_dt) > tol_val)[0]
+            if len(bad_indices) > 0:
+                # Stats for the error message
+                min_dt = np.min(dt)
+                max_dt = np.max(dt)
+                first_bad = bad_indices[0]
+                bad_val = dt[first_bad]
+                fraction_bad = len(bad_indices) / len(dt)
+                
+                raise ValueError(
+                    f"Uniform grid violation: {len(bad_indices)} intervals ({fraction_bad:.2%}) outside tolerance.\n"
+                    f"Expected dt={expected_dt:.5f}s (+/-{tol_val:.5f}s, frac={tol_frac:.2f}).\n"
+                    f"Range: [{min_dt:.5f}, {max_dt:.5f}].\n"
+                    f"First violation at index {first_bad}: dt={bad_val:.5f}s."
+                )
 
         if self.uv_raw.shape[0] != T:
             raise ValueError(f"UV Raw shape mismatch: {self.uv_raw.shape} vs Time {T}")

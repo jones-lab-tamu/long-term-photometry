@@ -101,7 +101,32 @@ def generate_run_report(config: Config, output_dir: str):
         }
     }
     
-    # 4. Output
+    # 4. Baseline Semantics (Dynamic)
+    baseline_semantics = {}
+    
+    if config.baseline_method == 'uv_raw_percentile_session':
+        baseline_semantics = {
+            "method": "uv_raw_percentile_session",
+            "f0_source": "uv_raw",
+            "f0_units": "uv-scale",
+            "dff_formula": "100 * (sig_raw - uv_fit) / F0",
+            "interpretation_note": "F0 is the isosbestic baseline. dFF represents signal change relative to isosbestic baseline scale."
+        }
+    elif config.baseline_method == 'uv_globalfit_percentile_session':
+        baseline_semantics = {
+            "method": "uv_globalfit_percentile_session",
+            "f0_source": "uv_est",
+            "f0_units": "signal-scale",
+            "dff_formula": "100 * (sig_raw - uv_fit) / F0",
+            "interpretation_note": "F0 is the mapped isosbestic baseline (scaled to signal). dFF is relative to signal scale."
+        }
+    else:
+        # Strict contract: unknown method is an error
+        raise ValueError(f"Unknown baseline_method: {config.baseline_method}")
+        
+    contract["baseline_semantics"] = baseline_semantics
+
+    # 5. Output
     report = {
         "configuration": config_snapshot,
         "derived_settings": derived_settings,

@@ -20,6 +20,7 @@ Thumbs.db
 tests/out_*/
 tests/syn_*/
 tests/
+tests/*
 out/
 debug_output/
 *.parquet
@@ -36,3 +37,5 @@ project_digest.txt
 
 # Agentic
 .gemini/
+*.diff
+

@@ -160,7 +160,8 @@ def load_chunk(path: str, format_type: str, config: Config, chunk_id: int) -> Ch
         raise ValueError(f"Unknown format: {format_type}")
     
     _ensure_session_time_metadata(chunk)
-    chunk.validate()
+    # Use config.timestamp_cv_max as tolerance fraction
+    chunk.validate(tolerance_frac=config.timestamp_cv_max)
     return chunk
 
 def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
