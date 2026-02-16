@@ -64,12 +64,21 @@ class EventsFollower(QObject):
     # ------------------------------------------------------------------
 
     def _poll(self) -> None:
-        """Read new bytes from events file, parse complete lines."""
+        """Read new bytes from events file, parse complete lines.
+        
+        Requirements:
+        1. Read starting at self._offset.
+        2. Prepend prior self._remainder.
+        3. Split by newline.
+        4. Parse all but the last segment (newline-terminated).
+        5. Store the last segment (trailing partial) back into self._remainder.
+        """
         if not os.path.isfile(self._events_path):
             # File not yet created; keep polling
             if self._drain_mode:
                 self._idle_polls += 1
                 if self._idle_polls >= 2:
+                    self._flush_remainder()
                     self.stop()
             return
 
