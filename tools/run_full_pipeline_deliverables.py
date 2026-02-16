@@ -27,7 +27,7 @@ import pandas as pd
 import numpy as np
 import time
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ======================================================================
 # Helpers
@@ -371,19 +371,95 @@ def main():
     os.makedirs(run_dir, exist_ok=True)
 
     # -- Open event emitter (write mode: fresh file per run) --
+    # ============================================================
+    # 2. Status & Emitter Setup
+    # ============================================================
+
+    # -- Status tracking (strict contract) --
+    # Phase: "running" (no status field) -> "final" (status="success"|"error")
+    status_data = {
+        "run_id": run_id,
+        "phase": "running", 
+        # "status": "..." # OMITTED per Design 1 while running
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "finished_utc": None,
+        "duration_sec": 0.0,
+        "input_dir": os.path.abspath(args.input),
+        "out_base": os.path.abspath(args.out_base) if args.out_base else os.path.abspath(os.path.dirname(run_dir)),
+        "run_root": run_dir,
+        "output_package": run_dir,
+        "command": " ".join(sys.argv),
+        "config_path": os.path.abspath(args.config),
+        "format": args.format,
+        "sessions_per_hour": args.sessions_per_hour,
+        "events_mode": args.events,
+        "outputs": {
+            "manifest_json": manifest_path,
+            "events_ndjson": events_path,
+            "region_dirs": []
+        },
+        "errors": [],
+        "warnings": []
+    }
+    t0_status = time.time()
+    status_path = os.path.join(run_dir, "status.json")
+
+    def _atomic_write_json(path, data):
+        """Write JSON to a temp file, then rename atomically."""
+        tmp_path = path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except Exception as e:
+            # Fallback if atomic rename fails (e.g. crossing filesystems, though unlikely for .tmp)
+            print(f"WARNING: Atomic write failed for {path}: {e}", file=sys.stderr)
+            try:
+                if os.path.exists(tmp_path):
+                    shutil.move(tmp_path, path)
+            except Exception as e2:
+                 print(f"CRITICAL: Fallback write failed for {path}: {e2}", file=sys.stderr)
+
+    def _finalize_status(state="success", error_msg=None):
+        """Update and write status.json atomically with final state."""
+        status_data["phase"] = "final"
+        status_data["status"] = state # "success", "error", "cancelled"
+        status_data["finished_utc"] = datetime.now(timezone.utc).isoformat()
+        status_data["duration_sec"] = time.time() - t0_status
+        
+        if error_msg:
+            status_data["errors"].append(str(error_msg))
+            
+        # Discover region dirs if possible/safe
+        if os.path.isdir(run_dir):
+            try:
+                subs = [os.path.join(run_dir, d) for d in os.listdir(run_dir) 
+                        if os.path.isdir(os.path.join(run_dir, d)) and d.startswith("Region")]
+                status_data["outputs"]["region_dirs"] = sorted(subs)
+            except OSError:
+                pass
+
+        _atomic_write_json(status_path, status_data)
+
+    # Initial write (phase="running")
+    _atomic_write_json(status_path, status_data)
+
+    # -- Open event emitter --
     emitter = EventEmitter(events_path, run_id, run_dir, file_mode="w")
     emitter.emit("engine", "start", "Engine starting")
 
-    # -- Check cancel immediately --
-    check_cancel(cancel_flag_path, emitter, "engine_start", manifest_path, manifest)
-
-    analysis_dir = os.path.join(run_dir, '_analysis')
-    tonic_out = os.path.join(analysis_dir, 'tonic_out')
-    phasic_out = os.path.join(analysis_dir, 'phasic_out')
-
     try:
+        # -- Check cancel immediately --
+        check_cancel(cancel_flag_path, emitter, "engine_start", manifest_path, manifest)
+    
+        analysis_dir = os.path.join(run_dir, '_analysis')
+        tonic_out = os.path.join(analysis_dir, 'tonic_out')
+        phasic_out = os.path.join(analysis_dir, 'phasic_out')
+
         # ============================================================
-        # 2. Validate
+        # 3. Validate
         # ============================================================
         emitter.emit("validate", "start", "Validating inputs")
         validate_inputs(args)
@@ -392,10 +468,16 @@ def main():
         check_cancel(cancel_flag_path, emitter, "validate", manifest_path, manifest)
 
         # ============================================================
-        # 3. Tonic Analysis
+        # 4. Tonic Analysis
         # ============================================================
+        # Locate analyze_photometry.py relative to this script
+        # This script is in tools/, analyze_photometry.py is in root/
+        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = os.path.dirname(tools_dir)
+        analyze_script = os.path.join(root_dir, 'analyze_photometry.py')
+        
         emitter.emit("tonic", "start", "Running tonic analysis")
-        cmd_tonic = [sys.executable, 'analyze_photometry.py',
+        cmd_tonic = [sys.executable, analyze_script,
                      '--input', args.input,
                      '--out', tonic_out,
                      '--config', args.config,
@@ -408,10 +490,10 @@ def main():
         check_cancel(cancel_flag_path, emitter, "tonic", manifest_path, manifest)
 
         # ============================================================
-        # 4. Phasic Analysis
+        # 5. Phasic Analysis
         # ============================================================
         emitter.emit("phasic", "start", "Running phasic analysis")
-        cmd_phasic = [sys.executable, 'analyze_photometry.py',
+        cmd_phasic = [sys.executable, analyze_script,
                       '--input', args.input,
                       '--out', phasic_out,
                       '--config', args.config,
@@ -424,7 +506,7 @@ def main():
         check_cancel(cancel_flag_path, emitter, "phasic", manifest_path, manifest)
 
         # ============================================================
-        # 5. Session / Stride Computation
+        # 6. Session / Stride Computation
         # ============================================================
         trace_files = sorted(glob.glob(os.path.join(phasic_out, 'traces', 'chunk_*.csv')))
         if not trace_files:
@@ -485,7 +567,7 @@ def main():
         check_cancel(cancel_flag_path, emitter, "session_compute", manifest_path, manifest)
 
         # ============================================================
-        # 6. Per-Region Processing (Plots & Packaging)
+        # 7. Per-Region Processing (Plots & Packaging)
         # ============================================================
         emitter.emit("plots", "start", "Generating per-ROI deliverables")
 
@@ -684,7 +766,7 @@ def main():
         check_cancel(cancel_flag_path, emitter, "package", manifest_path, manifest)
 
         # ============================================================
-        # 7. Write Manifest (LAST, atomic)
+        # 8. Write Manifest (LAST, atomic)
         # ============================================================
         emitter.emit("package", "start", "Writing final manifest")
         manifest['status'] = 'success'
@@ -694,9 +776,13 @@ def main():
         emitter.emit("engine", "done", "Deliverables package complete")
         emitter.close()
         print("Deliverables Package Complete.")
+        
+        # --- Finalize Status: Success ---
+        _finalize_status("success")
 
     except SystemExit:
         # Re-raise sys.exit calls (from check_cancel) without catching them
+        _finalize_status("cancelled", error_msg="CANCELLED")
         raise
     except Exception as e:
         print(f"CRITICAL FAILURE: {e}")
@@ -713,6 +799,9 @@ def main():
 
         emitter.emit("engine", "error", str(e), error_code="EXCEPTION")
         emitter.close()
+        
+        # --- Finalize Status: Error ---
+        _finalize_status("error", error_msg=str(e))
         sys.exit(1)
 
 if __name__ == '__main__':

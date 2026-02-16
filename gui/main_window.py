@@ -612,6 +612,24 @@ class MainWindow(QMainWindow):
         else:
             self._append_log(f"--- Run FAILED (exit code {exit_code}) ---")
             if self._current_run_dir:
+                status_path = os.path.join(self._current_run_dir, "status.json")
+                if os.path.isfile(status_path):
+                    try:
+                        with open(status_path, "r", encoding="utf-8") as fh:
+                            s = json.load(fh)
+                        
+                        phase = s.get("phase")
+                        status = s.get("status")
+
+                        if phase == "final" and status in ("error", "cancelled"):
+                            errors = s.get("errors", [])
+                            if errors:
+                                self._append_log("ERRORS from status.json:")
+                                for e in errors:
+                                    self._append_log(f"  - {e}")
+                    except Exception:
+                        self._append_log("Could not parse status.json for errors.")
+
                 manifest_path = os.path.join(self._current_run_dir, "MANIFEST.json")
                 if os.path.exists(manifest_path):
                     self._append_log("Attempting to load partial results...")

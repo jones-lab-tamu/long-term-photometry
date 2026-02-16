@@ -11,6 +11,7 @@ import enum
 import os
 import sys
 import subprocess
+import json
 
 from PySide6.QtCore import QObject, QProcess, Signal
 
@@ -245,39 +246,99 @@ class PipelineRunner(QObject):
         self._stdout_buf = b""
         self._stderr_buf = b""
 
-    def _determine_final_state(self, exit_code: int) -> RunnerState:
-        """Determine final state using evidence order per design spec C.
-
-        Evidence order:
-        1) cancel_requested flag + nonzero exit -> CANCELLED
-        2) exit code 0 -> SUCCESS
-        3) else -> FAILED
-        Note: events-based cancellation detection is handled at the GUI layer.
-        """
-        if self._cancel_requested and exit_code != 0:
-            return RunnerState.CANCELLED
-        if exit_code == 0:
-            return RunnerState.SUCCESS
-        return RunnerState.FAILED
-
     def _on_started(self):
         self.started.emit()
 
-    def _on_finished(self, exit_code, _exit_status):
+    def _on_error(self, error: QProcess.ProcessError):
+        """Handle launch errors (e.g. executable not found)."""
+        if self._state != RunnerState.FAILED:
+            self._set_state(RunnerState.FAILED)
+            self.error.emit(f"Launch error: {error}")
+
+    def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus):
+        self.log_line.emit(f"OUT: Process finished with exit code {exit_code}")
         self._flush_remaining()
         self._close_log_files()
-        final = self._determine_final_state(exit_code)
-        self._set_state(final)
+
+        final_state = self._compute_final_state(exit_code)
+        self._set_state(final_state)
         self.finished.emit(exit_code)
 
-    def _on_error(self, proc_error):
-        error_map = {
-            QProcess.FailedToStart: "Process failed to start",
-            QProcess.Crashed: "Process crashed",
-            QProcess.Timedout: "Process timed out",
-            QProcess.WriteError: "Write error",
-            QProcess.ReadError: "Read error",
-            QProcess.UnknownError: "Unknown error",
-        }
-        msg = error_map.get(proc_error, f"QProcess error code {proc_error}")
-        self.error.emit(msg)
+    def _compute_final_state(self, exit_code: int) -> RunnerState:
+        """Determines final state based on status.json, cancellation, and exit code.
+        
+        Logic (Design 1):
+        1. Explicit cancellation (requested + nonzero exit) -> CANCELLED.
+        2. status.json authoritative check:
+           - success -> SUCCESS
+           - cancelled -> CANCELLED
+           - error/other -> FAILED
+        3. Fallback (missing status.json):
+           - exit 0 -> SUCCESS
+           - else -> FAILED
+        """
+        # 1. Check explicit cancellation request
+        if self._cancel_requested and exit_code != 0:
+            return RunnerState.CANCELLED
+
+        # 2. Check status.json if run_dir is set
+        if self._run_dir:
+            status_path = os.path.join(self._run_dir, "status.json")
+            st, _ = _read_final_status(status_path)
+
+            if st is not None:
+                if st == "success":
+                    return RunnerState.SUCCESS
+                elif st == "cancelled":
+                    return RunnerState.CANCELLED
+                else:
+                    # "error", "__MALFORMED__", "__not_final__", etc.
+                    # Any presence of status.json that isn't success/cancelled is FAILED
+                    return RunnerState.FAILED
+
+        # 3. Fallback
+        if exit_code == 0:
+            return RunnerState.SUCCESS
+        else:
+            return RunnerState.FAILED
+
+
+def _read_final_status(status_path: str) -> tuple[str | None, list[str]]:
+    """
+    Reads status.json and determines the final status.
+    Returns (status_or_code, errors_list).
+    
+    Codes:
+      None: File missing
+      "__MALFORMED__": JSON parse failed
+      "__NOT_FINAL__": phase != "final"
+      "__MISSING_STATUS__": phase="final" but status missing
+      "__BAD_STATUS__": status present but not in {success, error, cancelled}
+      "success"|"error"|"cancelled": Valid final status
+    """
+    if not os.path.isfile(status_path):
+        return None, []
+    
+    try:
+        with open(status_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return "__MALFORMED__", []
+
+    phase = data.get("phase")
+    if phase != "final":
+        return "__NOT_FINAL__", []
+    
+    status = data.get("status")
+    if status is None:
+        return "__MISSING_STATUS__", []
+    
+    if status not in ("success", "error", "cancelled"):
+        return "__BAD_STATUS__", []
+        
+    # Valid final status
+    errors = data.get("errors", [])
+    if not isinstance(errors, list):
+        errors = []
+        
+    return status, errors

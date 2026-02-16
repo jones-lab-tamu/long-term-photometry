@@ -204,11 +204,16 @@ def main():
         # 9. Plot 2: AUC
         y_auc = roi_df['auc'].astype(float)
         
-        if y_auc.isna().all():
-            raise RuntimeError("All AUC values are NaN.")
-
         fig2, ax2 = plt.subplots(figsize=(10, 6), dpi=args.dpi)
-        ax2.plot(x, y_auc, marker='o', linestyle='-', label=f'AUC (ROI: {selected_roi})')
+        
+        if y_auc.isna().all():
+             sys.stderr.write("WARNING: All AUC values are NaN, writing placeholder plot.\n")
+             ax2.text(0.5, 0.5, "AUC unavailable (all values NaN)", 
+                      horizontalalignment='center', verticalalignment='center',
+                      transform=ax2.transAxes)
+        else:
+             ax2.plot(x, y_auc, marker='o', linestyle='-', label=f'AUC (ROI: {selected_roi})')
+
         ax2.set_xlabel("Elapsed time (hours)")
         ax2.set_ylabel("AUC above threshold (dFF·s)")
         ax2.set_title(f"Phasic AUC over time (ROI {selected_roi})")
