@@ -289,7 +289,8 @@ class PipelineRunner(QObject):
                     return RunnerState.SUCCESS
                 if st == "cancelled":
                     return RunnerState.CANCELLED
-                # Any sentinel code ("__MALFORMED__", "__NOT_FINAL__", etc.)
+                # Any sentinel code ("__MALFORMED__", "__NOT_FINAL__", 
+                # "__MISSING_SCHEMA__", "__BAD_SCHEMA__", etc.)
                 # or "error" status -> FAILED (Fail-Closed)
                 return RunnerState.FAILED
 
@@ -311,6 +312,8 @@ def _read_final_status(status_path: str) -> tuple[str | None, list[str]]:
       None: File missing
       "__MALFORMED__": JSON parse failed
       "__NOT_FINAL__": phase != "final"
+      "__MISSING_SCHEMA__": schema_version field missing
+      "__BAD_SCHEMA__": schema_version not integer or not 1
       "__MISSING_STATUS__": phase="final" but status missing
       "__BAD_STATUS__": status present but not in {success, error, cancelled}
       "success"|"error"|"cancelled": Valid final status
@@ -327,6 +330,13 @@ def _read_final_status(status_path: str) -> tuple[str | None, list[str]]:
     phase = data.get("phase")
     if phase != "final":
         return "__NOT_FINAL__", []
+    
+    # Enforce schema versioning (Requirement 1)
+    sv = data.get("schema_version")
+    if sv is None:
+        return "__MISSING_SCHEMA__", []
+    if not isinstance(sv, int) or sv != 1:
+        return "__BAD_SCHEMA__", []
     
     status = data.get("status")
     if status is None:

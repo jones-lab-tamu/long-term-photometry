@@ -378,6 +378,7 @@ def main():
     # -- Status tracking (strict contract) --
     # Phase: "running" (no status field) -> "final" (status="success"|"error")
     status_data = {
+        "schema_version": 1,
         "run_id": run_id,
         "phase": "running", 
         # "status": "..." # OMITTED per Design 1 while running

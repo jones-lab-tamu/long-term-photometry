@@ -1,5 +1,5 @@
 """
-EventsFollower — QTimer-based NDJSON tailer for events.ndjson.
+EventsFollower - QTimer-based NDJSON tailer for events.ndjson.
 
 Polls the events file at a configurable interval, parses new complete lines,
 and emits signals for each event.  Handles:
@@ -21,6 +21,7 @@ class EventsFollower(QObject):
     # Signals
     event_received = Signal(dict)   # Each fully parsed JSON event
     parse_error = Signal(str)       # Non-fatal: bad JSON line description
+    warning = Signal(str)           # Advisory: schema or type mismatch
 
     def __init__(self, events_path: str, poll_ms: int = 300, parent=None):
         super().__init__(parent)
@@ -33,6 +34,7 @@ class EventsFollower(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(poll_ms)
         self._timer.timeout.connect(self._poll)
+        self._warned_bad_event_schema = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -44,6 +46,7 @@ class EventsFollower(QObject):
         self._remainder = b""
         self._idle_polls = 0
         self._drain_mode = False
+        self._warned_bad_event_schema = False
         self._timer.start()
 
     def stop(self) -> None:
@@ -134,9 +137,34 @@ class EventsFollower(QObject):
                 return
             try:
                 obj = json.loads(text)
-                self.event_received.emit(obj)
+                if self._is_supported_event_schema(obj):
+                    self.event_received.emit(obj)
             except json.JSONDecodeError:
                 pass  # silently drop partial fragment during drain
+
+    def _is_supported_event_schema(self, obj: object) -> bool:
+        """Determines if a decoded JSON value is a supported event dict.
+
+        Enforces schema_version=1 for dict events (Step 1 Complete).
+        Returns False for non-dict JSON or mismatched schema versions.
+        """
+        # 1. Type check: must be a dict
+        if not isinstance(obj, dict):
+            if not self._warned_bad_event_schema:
+                tname = type(obj).__name__
+                self.warning.emit(f"WARN: Ignoring non-object JSON event (type={tname})")
+                self._warned_bad_event_schema = True
+            return False
+
+        # 2. Schema check: schema_version must be 1 (int)
+        sv = obj.get("schema_version")
+        if isinstance(sv, int) and sv == 1:
+            return True
+        
+        if not self._warned_bad_event_schema:
+            self.warning.emit(f"WARN: Ignoring event with unsupported schema_version={sv}")
+            self._warned_bad_event_schema = True
+        return False
 
     def _parse_line(self, raw: bytes) -> None:
         """Decode and parse a single NDJSON line."""
@@ -148,6 +176,7 @@ class EventsFollower(QObject):
             return
         try:
             obj = json.loads(text)
-            self.event_received.emit(obj)
+            if self._is_supported_event_schema(obj):
+                self.event_received.emit(obj)
         except json.JSONDecodeError as exc:
             self.parse_error.emit(f"Bad JSON: {text[:120]}... ({exc})")
