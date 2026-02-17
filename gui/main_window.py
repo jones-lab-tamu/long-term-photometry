@@ -88,16 +88,12 @@ class MainWindow(QMainWindow):
         self._is_validate_only = False
         self._validation_passed = False
 
-        # Accumulated stdout for validate-only result checking
-        self._validate_stdout = []
-
         # Status label fields (state + last event, shown together)
         self._state_str = "IDLE"
         self._ui_state = RunnerState.IDLE
         self._last_event_stage = "\u2014"
         self._last_event_type = "\u2014"
         self._last_event_msg = ""
-        self._saw_cancel_event = False
 
         # Build UI
         central = QWidget()
@@ -381,7 +377,6 @@ class MainWindow(QMainWindow):
         argv = self._build_argv(validate_only=True)
         self._is_validate_only = True
         self._validation_passed = False
-        self._validate_stdout = []
         self._reset_event_flags()
 
         # Pre-create run_dir so events/logs are stable (design rule D)
@@ -509,7 +504,6 @@ class MainWindow(QMainWindow):
 
     def _reset_event_flags(self):
         """Reset event-derived fields at the start of each validate/run."""
-        self._saw_cancel_event = False
         self._last_event_stage = "\u2014"
         self._last_event_type = "\u2014"
         self._last_event_msg = ""
@@ -530,15 +524,6 @@ class MainWindow(QMainWindow):
         self._last_event_type = evt.get("type", "?")
         self._last_event_msg = evt.get("message", "")
         self._render_status_label()
-
-        # Detect cancellation via events (requirement B)
-        etype_lower = self._last_event_type.lower()
-        estatus_lower = str(evt.get("status", "")).lower()
-        emsg_lower = self._last_event_msg.lower()
-        if etype_lower == "cancelled" or estatus_lower == "cancelled":
-            self._saw_cancel_event = True
-        elif "cancel" in emsg_lower and etype_lower in {"done", "status", "engine"}:
-            self._saw_cancel_event = True
 
     def _on_event_parse_error(self, msg: str):
         """Non-fatal warning for malformed event lines."""
@@ -572,23 +557,13 @@ class MainWindow(QMainWindow):
     def _finalize_run(self, exit_code: int):
         """Called after events drain completes.
 
-        Uses event-informed final state classification (requirement B):
-          1) events indicate cancellation -> CANCELLED
-          2) cancel_requested + nonzero exit -> CANCELLED
-          3) exit code 0 -> SUCCESS
-          4) else -> FAILED
+        Final state is taken from PipelineRunner.state (hardened precedence);
+        events are only for progress display.
         """
         self._stop_events_follower()
 
-        # Event-informed final state (overrides runner's exit-code-only guess)
-        if self._saw_cancel_event:
-            final_state = RunnerState.CANCELLED
-        elif self._runner.was_cancel_requested and exit_code != 0:
-            final_state = RunnerState.CANCELLED
-        elif exit_code == 0:
-            final_state = RunnerState.SUCCESS
-        else:
-            final_state = RunnerState.FAILED
+        final_state = self._runner.state
+        # redundant logic removed
 
         # Update UI-owned state for button gating
         self._ui_state = final_state
@@ -641,23 +616,13 @@ class MainWindow(QMainWindow):
             self._update_button_states()
 
     def _check_validation_result(self):
-        """Check stdout for VALIDATE-ONLY: OK and gate the Run button."""
-        # Read stdout.log from run_dir if available
-        log_path = os.path.join(self._current_run_dir, "stdout.log")
-        stdout_text = ""
-        if os.path.isfile(log_path):
-            try:
-                with open(log_path, "r", encoding="utf-8") as fh:
-                    stdout_text = fh.read()
-            except OSError:
-                pass
-
-        if "VALIDATE-ONLY: OK" in stdout_text:
+        """Check status.json for validation success, avoiding log parsing (Requirement 2)."""
+        if self._runner.state == RunnerState.SUCCESS:
             self._validation_passed = True
-            self._append_log("Validation PASSED. Run is now enabled.")
+            self._append_log("Validation PASSED (per status.json). Run is now enabled.")
         else:
             self._validation_passed = False
-            self._append_log("Validation did not confirm OK. Run remains disabled.")
+            self._append_log("Validation FAILED (per status.json). Run remains disabled.")
         self._update_button_states()
 
     def _on_run_error(self, msg: str):

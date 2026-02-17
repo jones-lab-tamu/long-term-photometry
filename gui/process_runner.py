@@ -265,23 +265,21 @@ class PipelineRunner(QObject):
         self.finished.emit(exit_code)
 
     def _compute_final_state(self, exit_code: int) -> RunnerState:
-        """Determines final state based on status.json, cancellation, and exit code.
-        
-        Logic (Design 1):
-        1. Explicit cancellation (requested + nonzero exit) -> CANCELLED.
-        2. status.json authoritative check:
-           - success -> SUCCESS
-           - cancelled -> CANCELLED
-           - error/other -> FAILED
-        3. Fallback (missing status.json):
-           - exit 0 -> SUCCESS
+        """Determines final state from status.json (authoritative) or process fallback.
+
+        FAIL-CLOSED POLICY:
+        1. If status.json exists and is valid/final:
+           - "success" -> SUCCESS
+           - "cancelled" -> CANCELLED
+           - "error" -> FAILED
+        2. If status.json exists but is malformed, non-final, or missing required fields:
+           - return FAILED (Fail-Closed)
+        3. Only if status.json is missing entirely:
+           - cancel_requested + exit_code != 0 -> CANCELLED
+           - exit_code == 0 -> SUCCESS
            - else -> FAILED
         """
-        # 1. Check explicit cancellation request
-        if self._cancel_requested and exit_code != 0:
-            return RunnerState.CANCELLED
-
-        # 2. Check status.json if run_dir is set
+        # 1. Authoritative check: status.json
         if self._run_dir:
             status_path = os.path.join(self._run_dir, "status.json")
             st, _ = _read_final_status(status_path)
@@ -289,18 +287,19 @@ class PipelineRunner(QObject):
             if st is not None:
                 if st == "success":
                     return RunnerState.SUCCESS
-                elif st == "cancelled":
+                if st == "cancelled":
                     return RunnerState.CANCELLED
-                else:
-                    # "error", "__MALFORMED__", "__not_final__", etc.
-                    # Any presence of status.json that isn't success/cancelled is FAILED
-                    return RunnerState.FAILED
+                # Any sentinel code ("__MALFORMED__", "__NOT_FINAL__", etc.)
+                # or "error" status -> FAILED (Fail-Closed)
+                return RunnerState.FAILED
 
-        # 3. Fallback
+        # 2. Fallback (only if status.json missing)
+        if self._cancel_requested and exit_code != 0:
+            return RunnerState.CANCELLED
+
         if exit_code == 0:
             return RunnerState.SUCCESS
-        else:
-            return RunnerState.FAILED
+        return RunnerState.FAILED
 
 
 def _read_final_status(status_path: str) -> tuple[str | None, list[str]]:
