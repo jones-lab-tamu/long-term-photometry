@@ -75,6 +75,7 @@ class EventsFollower(QObject):
         3. Split by newline.
         4. Parse all but the last segment (newline-terminated).
         5. Store the last segment (trailing partial) back into self._remainder.
+        6. NO early returns from the segment loop (must process all lines in one tick).
         """
         if not os.path.isfile(self._events_path):
             # File not yet created; keep polling
@@ -114,7 +115,22 @@ class EventsFollower(QObject):
         # All segments except the last are complete lines.
         # The last segment is a remainder (could be empty if data ended with \n).
         for segment in segments[:-1]:
-            self._parse_line(segment)
+            # --- Inlined parsing logic to avoid early return starvation ---
+            try:
+                text = segment.decode("utf-8", errors="replace").strip()
+            except Exception:
+                continue # Skip malformed binary segments
+
+            if not text:
+                continue
+
+            try:
+                obj = json.loads(text)
+                if self._is_supported_event_schema(obj):
+                    self.event_received.emit(obj)
+            except json.JSONDecodeError as exc:
+                self.parse_error.emit(f"WARN: Bad JSON: {text[:120]}... ({exc})")
+                continue
 
         # Store trailing partial (may be empty bytes)
         self._remainder = segments[-1]
@@ -152,7 +168,7 @@ class EventsFollower(QObject):
         if not isinstance(obj, dict):
             if not self._warned_bad_event_schema:
                 tname = type(obj).__name__
-                self.warning.emit(f"WARN: Ignoring non-object JSON event (type={tname})")
+                self.warning.emit(f"WARN: Ignoring non-object event (type={tname})")
                 self._warned_bad_event_schema = True
             return False
 
@@ -165,18 +181,3 @@ class EventsFollower(QObject):
             self.warning.emit(f"WARN: Ignoring event with unsupported schema_version={sv}")
             self._warned_bad_event_schema = True
         return False
-
-    def _parse_line(self, raw: bytes) -> None:
-        """Decode and parse a single NDJSON line."""
-        try:
-            text = raw.decode("utf-8", errors="replace").strip()
-        except Exception:
-            return
-        if not text:
-            return
-        try:
-            obj = json.loads(text)
-            if self._is_supported_event_schema(obj):
-                self.event_received.emit(obj)
-        except json.JSONDecodeError as exc:
-            self.parse_error.emit(f"Bad JSON: {text[:120]}... ({exc})")

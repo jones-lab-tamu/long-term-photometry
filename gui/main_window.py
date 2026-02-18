@@ -493,6 +493,7 @@ class MainWindow(QMainWindow):
         self._events_follower = EventsFollower(events_path, poll_ms=300, parent=self)
         self._events_follower.event_received.connect(self._on_event)
         self._events_follower.parse_error.connect(self._on_event_parse_error)
+        self._events_follower.warning.connect(self._on_event_warning)
         self._events_follower.start()
 
     def _stop_events_follower(self):
@@ -527,7 +528,11 @@ class MainWindow(QMainWindow):
 
     def _on_event_parse_error(self, msg: str):
         """Non-fatal warning for malformed event lines."""
-        self._append_log(f"WARN(events): {msg}")
+        self._append_log(msg)
+
+    def _on_event_warning(self, msg: str):
+        """Advisory warning for schema/type mismatches (non-fatal)."""
+        self._append_log(msg)
 
     # ==================================================================
     # Runner signal handlers

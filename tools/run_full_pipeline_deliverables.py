@@ -52,6 +52,12 @@ def _atomic_write_json(path, obj):
         json.dump(obj, f, indent=2)
     os.replace(tmp, path)
 
+def _normalize_event_dict(event: dict) -> dict:
+    """Ensure event dict has schema_version: 1 (int), overriding any existing key."""
+    obj = event.copy()
+    obj["schema_version"] = 1
+    return obj
+
 # ======================================================================
 # NDJSON Event Emitter
 # ======================================================================
@@ -76,19 +82,23 @@ class EventEmitter:
                 # else: stay disabled (self._fh remains None)
 
     def emit(self, stage, event_type, message, **kwargs):
-        """Emit one NDJSON event line."""
-        obj = {
-            "schema_version": 1,
+        """Emit one NDJSON event line. schema_version: 1 is forced."""
+        raw_obj = {
             "time_iso": datetime.now().isoformat(),
             "run_id": self._run_id,
             "run_dir": self._run_dir,
             "stage": stage,
             "type": event_type,
             "message": message,
+            **kwargs,
         }
-        obj.update(kwargs)
+        
+        # Producer-side discipline: force schema_version: 1 (int)
+        obj = _normalize_event_dict(raw_obj)
+        
         if self._fh:
-            self._fh.write(json.dumps(obj) + "\n")
+            # separators=(",", ":") for compact NDJSON (standard compliant)
+            self._fh.write(json.dumps(obj, separators=(",", ":")) + "\n")
             self._fh.flush()
 
     def close(self):
@@ -404,24 +414,6 @@ def main():
     }
     t0_status = time.time()
     status_path = os.path.join(run_dir, "status.json")
-
-    def _atomic_write_json(path, data):
-        """Write JSON to a temp file, then rename atomically."""
-        tmp_path = path + ".tmp"
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, path)
-        except Exception as e:
-            # Fallback if atomic rename fails (e.g. crossing filesystems, though unlikely for .tmp)
-            print(f"WARNING: Atomic write failed for {path}: {e}", file=sys.stderr)
-            try:
-                if os.path.exists(tmp_path):
-                    shutil.move(tmp_path, path)
-            except Exception as e2:
-                 print(f"CRITICAL: Fallback write failed for {path}: {e2}", file=sys.stderr)
 
     def _finalize_status(state="success", error_msg=None):
         """Update and write status.json atomically with final state."""
