@@ -76,9 +76,9 @@ class MainWindow(QMainWindow):
         self._runner = PipelineRunner(self)
         self._runner.log_line.connect(self._append_log)
         self._runner.started.connect(self._on_run_started)
-        self._runner.finished.connect(self._on_run_finished)
         self._runner.error.connect(self._on_run_error)
         self._runner.state_changed.connect(self._on_state_changed)
+        self._runner.finished.connect(self._on_run_finished_failsafe)
 
         # Events follower (created per run)
         self._events_follower = None
@@ -87,6 +87,10 @@ class MainWindow(QMainWindow):
         self._current_run_dir = ""
         self._is_validate_only = False
         self._validation_passed = False
+        self._did_finalize_run_ui = False
+
+        # Accumulated stdout for validate-only result checking
+        self._validate_stdout = []
 
         # Status label fields (state + last event, shown together)
         self._state_str = "IDLE"
@@ -94,6 +98,7 @@ class MainWindow(QMainWindow):
         self._last_event_stage = "\u2014"
         self._last_event_type = "\u2014"
         self._last_event_msg = ""
+        self._saw_cancel_event = False
 
         # Build UI
         central = QWidget()
@@ -377,6 +382,7 @@ class MainWindow(QMainWindow):
         argv = self._build_argv(validate_only=True)
         self._is_validate_only = True
         self._validation_passed = False
+        self._validate_stdout = []
         self._reset_event_flags()
 
         # Pre-create run_dir so events/logs are stable (design rule D)
@@ -493,7 +499,6 @@ class MainWindow(QMainWindow):
         self._events_follower = EventsFollower(events_path, poll_ms=300, parent=self)
         self._events_follower.event_received.connect(self._on_event)
         self._events_follower.parse_error.connect(self._on_event_parse_error)
-        self._events_follower.warning.connect(self._on_event_warning)
         self._events_follower.start()
 
     def _stop_events_follower(self):
@@ -505,6 +510,7 @@ class MainWindow(QMainWindow):
 
     def _reset_event_flags(self):
         """Reset event-derived fields at the start of each validate/run."""
+        self._saw_cancel_event = False
         self._last_event_stage = "\u2014"
         self._last_event_type = "\u2014"
         self._last_event_msg = ""
@@ -521,113 +527,112 @@ class MainWindow(QMainWindow):
 
     def _on_event(self, evt: dict):
         """Handle a parsed event from events.ndjson."""
-        self._last_event_stage = evt.get("stage", "?")
-        self._last_event_type = evt.get("type", "?")
+        stage = evt.get("stage")
+        etype = evt.get("type")
+        
+        self._last_event_stage = stage or "?"
+        self._last_event_type = etype or "?"
         self._last_event_msg = evt.get("message", "")
         self._render_status_label()
 
+        # Detect cancellation via events (requirement B)
+        etype_lower = self._last_event_type.lower()
+        estatus_lower = str(evt.get("status", "")).lower()
+        emsg_lower = self._last_event_msg.lower()
+        if etype_lower == "cancelled" or estatus_lower == "cancelled":
+            self._saw_cancel_event = True
+        elif "cancel" in emsg_lower and etype_lower in {"done", "status", "engine"}:
+            self._saw_cancel_event = True
+
     def _on_event_parse_error(self, msg: str):
         """Non-fatal warning for malformed event lines."""
-        self._append_log(msg)
-
-    def _on_event_warning(self, msg: str):
-        """Advisory warning for schema/type mismatches (non-fatal)."""
-        self._append_log(msg)
+        self._append_log(f"WARN(events): {msg}")
 
     # ==================================================================
     # Runner signal handlers
     # ==================================================================
 
     def _on_run_started(self):
+        self._did_finalize_run_ui = False
         self._update_button_states()
 
     def _on_state_changed(self, state_str: str):
-        """Update status label on state transitions."""
+        """Update status label and button states on state transitions."""
         self._state_str = state_str
         try:
             self._ui_state = RunnerState(state_str)
+            
+            # Terminal state transition
+            terminal_states = (
+                RunnerState.SUCCESS, RunnerState.FAILED, 
+                RunnerState.CANCELLED, RunnerState.FAIL_CLOSED
+            )
+            if self._ui_state in terminal_states:
+                self._stop_events_follower()
+                self._finalize_run_ui()
+                
         except ValueError:
-            pass  # leave _ui_state unchanged for unknown strings
-        self._render_status_label()
-
-    def _on_run_finished(self, exit_code: int):
-        # Drain events follower before updating UI
-        if self._events_follower is not None:
-            self._events_follower.begin_drain()
-            # Schedule final UI update after a brief drain window
-            QTimer.singleShot(700, lambda: self._finalize_run(exit_code))
-        else:
-            self._finalize_run(exit_code)
-
-    def _finalize_run(self, exit_code: int):
-        """Called after events drain completes.
-
-        Final state is taken from PipelineRunner.state (hardened precedence);
-        events are only for progress display.
-        """
-        self._stop_events_follower()
-
-        final_state = self._runner.state
-        # redundant logic removed
-
-        # Update UI-owned state for button gating
-        self._ui_state = final_state
-        self._state_str = final_state.value
+            pass
         self._render_status_label()
         self._update_button_states()
 
-        if final_state == RunnerState.SUCCESS:
-            self._append_log(f"--- Finished (exit code {exit_code}) ---")
+    def _on_run_finished_failsafe(self, exit_code: int):
+        """Backup handler to ensure finalization if state_changed was missed."""
+        # Ensure finalization exactly once
+        self._stop_events_follower()
+        self._finalize_run_ui()
+
+    def _stop_events_follower(self):
+        """Cleanly stop and disconnect the follower."""
+        if self._events_follower is not None:
+            self._events_follower.stop()
+            try:
+                self._events_follower.event_received.disconnect(self._on_event)
+            except (RuntimeError, TypeError):
+                pass
+            self._events_follower = None
+
+    def _finalize_run_ui(self):
+        """Update UI based on final runner state (authoritative)."""
+        if self._did_finalize_run_ui:
+            return
+        self._did_finalize_run_ui = True
+        
+        # Determine final outcome from runner state (authoritative source)
+        state = self._runner.state
+        code = self._runner.final_status_code
+        
+        if state == RunnerState.SUCCESS:
+            self._append_log(f"--- Finished (status: {code}) ---")
             if self._is_validate_only:
-                self._check_validation_result()
-            elif self._current_run_dir:
-                self._manifest_viewer.load_manifest(self._current_run_dir)
-        elif final_state == RunnerState.CANCELLED:
+                self._validation_passed = True
+                self._append_log("Validation PASSED (per status.json). Run is now enabled.")
+            else:
+                # Guard manifest loading (Requirement A)
+                if self._current_run_dir and os.path.isdir(self._current_run_dir):
+                    self._manifest_viewer.load_manifest(self._current_run_dir)
+                else:
+                    self._append_log("No run_dir available, cannot load manifest.")
+
+        elif state == RunnerState.FAIL_CLOSED:
+            class_id = self._runner.fail_closed_code or "FAIL_CLOSED"
+            self._append_log(f"Run failed (FAIL_CLOSED): {class_id}")
+
+        elif state == RunnerState.FAILED:
+            self._append_log(f"--- Run FAILED (status: {code}) ---")
+            if self._runner.final_errors:
+                self._append_log("ERRORS from status.json:")
+                for e in self._runner.final_errors:
+                    self._append_log(f"  \u2022 {e}")
+
+        elif state == RunnerState.CANCELLED:
             self._append_log("--- Run CANCELLED ---")
-            if self._current_run_dir:
-                manifest_path = os.path.join(self._current_run_dir, "MANIFEST.json")
-                if os.path.exists(manifest_path):
-                    self._append_log("Loading cancelled run manifest...")
-                    self._manifest_viewer.load_manifest(self._current_run_dir)
-        else:
-            self._append_log(f"--- Run FAILED (exit code {exit_code}) ---")
-            if self._current_run_dir:
-                status_path = os.path.join(self._current_run_dir, "status.json")
-                if os.path.isfile(status_path):
-                    try:
-                        with open(status_path, "r", encoding="utf-8") as fh:
-                            s = json.load(fh)
-                        
-                        phase = s.get("phase")
-                        status = s.get("status")
-
-                        if phase == "final" and status in ("error", "cancelled"):
-                            errors = s.get("errors", [])
-                            if errors:
-                                self._append_log("ERRORS from status.json:")
-                                for e in errors:
-                                    self._append_log(f"  - {e}")
-                    except Exception:
-                        self._append_log("Could not parse status.json for errors.")
-
-                manifest_path = os.path.join(self._current_run_dir, "MANIFEST.json")
-                if os.path.exists(manifest_path):
-                    self._append_log("Attempting to load partial results...")
-                    self._manifest_viewer.load_manifest(self._current_run_dir)
 
         # After any full run: require re-validation
         if not self._is_validate_only:
             self._validation_passed = False
-            self._update_button_states()
-
-    def _check_validation_result(self):
-        """Check status.json for validation success, avoiding log parsing (Requirement 2)."""
-        if self._runner.state == RunnerState.SUCCESS:
-            self._validation_passed = True
-            self._append_log("Validation PASSED (per status.json). Run is now enabled.")
-        else:
-            self._validation_passed = False
-            self._append_log("Validation FAILED (per status.json). Run remains disabled.")
+        
+        self._update_button_states()
         self._update_button_states()
 
     def _on_run_error(self, msg: str):
@@ -688,7 +693,7 @@ class MainWindow(QMainWindow):
         running = self._runner.is_running()
 
         is_done = state in (RunnerState.SUCCESS, RunnerState.FAILED,
-                            RunnerState.CANCELLED)
+                            RunnerState.CANCELLED, RunnerState.FAIL_CLOSED)
         is_idle_or_done = state == RunnerState.IDLE or is_done
 
         # Validate: enabled only when idle or done (not running/validating)
@@ -696,19 +701,20 @@ class MainWindow(QMainWindow):
 
         # Run: enabled only when idle/done, not running, AND validated
         self._run_btn.setEnabled(
-            is_idle_or_done and not running and self._validation_passed
+            bool(is_idle_or_done and not running and self._validation_passed)
         )
 
         # Cancel: enabled only when RUNNING (not VALIDATING per rule A)
         self._cancel_btn.setEnabled(state == RunnerState.RUNNING and running)
 
-        # Open Results: always enabled when not running
-        self._open_results_btn.setEnabled(not running)
+        # Open Results: enabled only when SUCCESS and status code is "success" (Requirement 5.2)
+        is_success = bool(state == RunnerState.SUCCESS)
+        has_success_code = bool(self._runner.final_status_code == "success")
+        self._open_results_btn.setEnabled(bool(is_success and has_success_code))
 
         # Open Run Folder: enabled when done and run_dir exists
-        has_run_dir = (self._current_run_dir
-                       and os.path.isdir(self._current_run_dir))
-        self._open_folder_btn.setEnabled(is_done and has_run_dir and not running)
+        has_run_dir = bool(self._current_run_dir and os.path.isdir(self._current_run_dir))
+        self._open_folder_btn.setEnabled(bool(is_done and has_run_dir and not running))
 
     def _browse_dir(self, line_edit: QLineEdit, title: str):
         path = QFileDialog.getExistingDirectory(self, title, line_edit.text())

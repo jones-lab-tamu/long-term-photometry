@@ -22,6 +22,7 @@ class RunnerState(enum.Enum):
     RUNNING = "RUNNING"
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
+    FAIL_CLOSED = "FAIL_CLOSED"
     CANCELLED = "CANCELLED"
 
 
@@ -46,6 +47,13 @@ class PipelineRunner(QObject):
         # Log file handles
         self._stdout_log = None
         self._stderr_log = None
+        # Fail-closed feedback
+        self.final_status_code = None
+        self.final_errors = []
+        self.fail_closed_code = None
+        self.fail_closed_detail = None
+        self.fail_closed_remediation = None
+        self.validation_summary = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -58,6 +66,10 @@ class PipelineRunner(QObject):
     @property
     def was_cancel_requested(self) -> bool:
         return self._cancel_requested
+
+    def set_run_dir(self, run_dir: str):
+        """Set run directory (used by tests and GUI)."""
+        self._run_dir = run_dir
 
     def _set_state(self, new_state: RunnerState) -> None:
         self._state = new_state
@@ -246,108 +258,125 @@ class PipelineRunner(QObject):
         self._stdout_buf = b""
         self._stderr_buf = b""
 
-    def _on_started(self):
-        self.started.emit()
+    def _determine_final_state(self, exit_code: int) -> RunnerState:
+        """Determine final state using evidence order per design spec C.
 
-    def _on_error(self, error: QProcess.ProcessError):
-        """Handle launch errors (e.g. executable not found)."""
-        if self._state != RunnerState.FAILED:
-            self._set_state(RunnerState.FAILED)
-            self.error.emit(f"Launch error: {error}")
-
-    def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus):
-        self.log_line.emit(f"OUT: Process finished with exit code {exit_code}")
-        self._flush_remaining()
-        self._close_log_files()
-
-        final_state = self._compute_final_state(exit_code)
-        self._set_state(final_state)
-        self.finished.emit(exit_code)
-
-    def _compute_final_state(self, exit_code: int) -> RunnerState:
-        """Determines final state from status.json (authoritative) or process fallback.
-
-        FAIL-CLOSED POLICY:
-        1. If status.json exists and is valid/final:
-           - "success" -> SUCCESS
-           - "cancelled" -> CANCELLED
-           - "error" -> FAILED
-        2. If status.json exists but is malformed, non-final, or missing required fields:
-           - return FAILED (Fail-Closed)
-        3. Only if status.json is missing entirely:
-           - cancel_requested + exit_code != 0 -> CANCELLED
-           - exit_code == 0 -> SUCCESS
-           - else -> FAILED
+        Evidence order:
+        1) cancel_requested flag + nonzero exit -> CANCELLED
+        2) exit code 0 -> SUCCESS
+        3) else -> FAILED
+        Note: events-based cancellation detection is handled at the GUI layer.
         """
-        # 1. Authoritative check: status.json
-        if self._run_dir:
-            status_path = os.path.join(self._run_dir, "status.json")
-            st, _ = _read_final_status(status_path)
-
-            if st is not None:
-                if st == "success":
-                    return RunnerState.SUCCESS
-                if st == "cancelled":
-                    return RunnerState.CANCELLED
-                # Any sentinel code ("__MALFORMED__", "__NOT_FINAL__", 
-                # "__MISSING_SCHEMA__", "__BAD_SCHEMA__", etc.)
-                # or "error" status -> FAILED (Fail-Closed)
-                return RunnerState.FAILED
-
-        # 2. Fallback (only if status.json missing)
         if self._cancel_requested and exit_code != 0:
             return RunnerState.CANCELLED
-
         if exit_code == 0:
             return RunnerState.SUCCESS
         return RunnerState.FAILED
 
+    def _resolve_final_state(self, code: str | None, exit_code: int) -> RunnerState:
+        """Determines final state from status code and populates fail-closed details."""
+        self.fail_closed_code = None
+        self.fail_closed_detail = None
+        self.fail_closed_remediation = None
+
+        # 1. Authoritative status check
+        if code in ("success", "error", "cancelled"):
+            if code == "success":
+                return RunnerState.SUCCESS
+            if code == "cancelled":
+                return RunnerState.CANCELLED
+            return RunnerState.FAILED
+
+        # 2. Sentinels -> FAIL_CLOSED
+        if code in ("MISSING_FILE", "MALFORMED_STATUS", "SCHEMA_MISMATCH",
+                    "NOT_FINAL", "NONFINAL_WITH_EXIT", "MISSING_STATUS", "BAD_STATUS"):
+            self.fail_closed_code = code
+            mapping = {
+                "MISSING_FILE": ("status.json was never created or is unreadable.", "Verify run directory is writeable and disk is not full."),
+                "MALFORMED_STATUS": ("status.json is malformed or invalid JSON.", "Inspect status.json for corruption or partial writes."),
+                "SCHEMA_MISMATCH": ("status.json schema_version is missing or incorrect.", "Check tool version or clear output directory."),
+                "NOT_FINAL": ("status.json exists but phase is not 'final'.", "Wait for the process to fully complete or check for hangs."),
+                "NONFINAL_WITH_EXIT": ("Process exited but status never reached 'final' phase.", "Check stderr.log for crashes or early exits."),
+                "MISSING_STATUS": ("status.json is missing required 'status' field.", "Review run script logic or inspect status.json."),
+                "BAD_STATUS": ("status.json 'status' field has unrecognized value.", "Verify contract adherence in run script.")
+            }
+            msg, rem = mapping.get(code, ("Incomplete or invalid status contract.", "Check logs."))
+            self.fail_closed_detail = msg
+            self.fail_closed_remediation = rem
+            return RunnerState.FAIL_CLOSED
+
+        # 3. Fallback for cancellation
+        if self._cancel_requested and exit_code != 0:
+            return RunnerState.CANCELLED
+
+        # 4. Strictly fail-closed fallback
+        self.fail_closed_code = code or "UNKNOWN_ERROR"
+        self.fail_closed_detail = "Strict contract check failed; status.json is missing or invalid."
+        self.fail_closed_remediation = "Consult logs to determine why the status contract was not satisfied."
+        return RunnerState.FAIL_CLOSED
+
+    def _on_started(self):
+        self.started.emit()
+
+    def _on_finished(self, exit_code, _exit_status):
+        self._flush_remaining()
+        self._close_log_files()
+        final = self._determine_final_state(exit_code)
+        self._set_state(final)
+        self.finished.emit(exit_code)
+
+    def _on_error(self, proc_error):
+        error_map = {
+            QProcess.FailedToStart: "Process failed to start",
+            QProcess.Crashed: "Process crashed",
+            QProcess.Timedout: "Process timed out",
+            QProcess.WriteError: "Write error",
+            QProcess.ReadError: "Read error",
+            QProcess.UnknownError: "Unknown error",
+        }
+        msg = error_map.get(proc_error, f"QProcess error code {proc_error}")
+        self.error.emit(msg)
+
 
 def _read_final_status(status_path: str) -> tuple[str | None, list[str]]:
-    """
-    Reads status.json and determines the final status.
+    """Read and validate status.json, returning (status_or_code, errors_list).
+
     Returns (status_or_code, errors_list).
-    
+
     Codes:
-      None: File missing
-      "__MALFORMED__": JSON parse failed
-      "__NOT_FINAL__": phase != "final"
-      "__MISSING_SCHEMA__": schema_version field missing
-      "__BAD_SCHEMA__": schema_version not integer or not 1
-      "__MISSING_STATUS__": phase="final" but status missing
-      "__BAD_STATUS__": status present but not in {success, error, cancelled}
+      "MISSING_FILE": File does not exist
+      "MALFORMED_STATUS": JSON parse failed
+      "NOT_FINAL": phase != "final"
+      "SCHEMA_MISMATCH": schema_version missing OR != 1 OR not int
+      "MISSING_STATUS": phase="final" but status key missing
+      "BAD_STATUS": status present but not in {success, error, cancelled}
       "success"|"error"|"cancelled": Valid final status
     """
     if not os.path.isfile(status_path):
-        return None, []
-    
+        return "MISSING_FILE", []
+
     try:
         with open(status_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
-        return "__MALFORMED__", []
+        return "MALFORMED_STATUS", []
 
     phase = data.get("phase")
     if phase != "final":
-        return "__NOT_FINAL__", []
-    
-    # Enforce schema versioning (Requirement 1)
+        return "NOT_FINAL", []
+
+    # Enforce schema versioning
     sv = data.get("schema_version")
-    if sv is None:
-        return "__MISSING_SCHEMA__", []
-    if not isinstance(sv, int) or sv != 1:
-        return "__BAD_SCHEMA__", []
-    
+    if sv is None or not isinstance(sv, int) or sv != 1:
+        return "SCHEMA_MISMATCH", []
+
     status = data.get("status")
     if status is None:
-        return "__MISSING_STATUS__", []
-    
+        return "MISSING_STATUS", []
+
     if status not in ("success", "error", "cancelled"):
-        return "__BAD_STATUS__", []
-        
+        return "BAD_STATUS", []
+
     # Valid final status
     errors = data.get("errors", [])
-    if not isinstance(errors, list):
-        errors = []
-        
-    return status, errors
+    return status, errors if isinstance(errors, list) else []

@@ -29,6 +29,7 @@ import time
 import secrets
 from datetime import datetime, timezone
 
+
 # ======================================================================
 # Helpers
 # ======================================================================
@@ -57,6 +58,9 @@ def _normalize_event_dict(event: dict) -> dict:
     obj = event.copy()
     obj["schema_version"] = 1
     return obj
+
+
+
 
 # ======================================================================
 # NDJSON Event Emitter
@@ -121,8 +125,8 @@ def check_cancel(cancel_flag_path, emitter, stage, manifest_path, manifest):
         return
     emitter.emit(stage, "cancelled", f"Cancel flag detected at stage: {stage}",
                  error_code="CANCELLED")
-    manifest["status"] = "cancelled"
-    _atomic_write_json(manifest_path, manifest)
+    manifest_data = manifest.copy()
+    _atomic_write_json(manifest_path, manifest_data)
     emitter.close()
     sys.exit(130)
 
@@ -266,7 +270,6 @@ def main():
         'timestamp': datetime.now().isoformat(),
         'run_id': run_id,
         'run_dir': run_dir,
-        'status': 'running',
         'events_path': events_path,
         'cancel_flag_path': cancel_flag_path,
         'args': vars(args),
@@ -314,11 +317,58 @@ def main():
         emitter.emit("engine", "start", "Engine starting (validate-only)")
         emitter.emit("validate", "start", "Validating inputs")
 
+        # --- Helpers for GUI validate-only status.json ---
+        vo_t0 = time.time()
+        vo_created_utc = datetime.now(timezone.utc).isoformat()
+        vo_out_base = os.path.abspath(args.out_base) if args.out_base else None
+
+        def _vo_status_template():
+            """Return the base status dict for validate-only mode."""
+            return {
+                "schema_version": 1,
+                "run_id": run_id,
+                "phase": "running",
+                "created_utc": vo_created_utc,
+                "finished_utc": None,
+                "duration_sec": 0.0,
+                "input_dir": os.path.abspath(args.input),
+                "out_base": vo_out_base,
+                "run_root": run_dir,
+                "output_package": run_dir,
+                "command": " ".join(sys.argv),
+                "config_path": os.path.abspath(args.config),
+                "format": args.format,
+                "sessions_per_hour": args.sessions_per_hour,
+                "events_mode": args.events,
+                "outputs": {
+                    "manifest_json": None,
+                    "events_ndjson": vo_events_path,
+                    "region_dirs": []
+                },
+                "errors": [],
+                "warnings": [],
+                "validation": {"result": "validate_only"}
+            }
+
+        def _vo_write_final_status(status, error_msg=None):
+            """Finalize and write status.json for GUI validate-only."""
+            sd = _vo_status_template()
+            sd["phase"] = "final"
+            sd["status"] = status
+            sd["finished_utc"] = datetime.now(timezone.utc).isoformat()
+            sd["duration_sec"] = time.time() - vo_t0
+            if error_msg:
+                sd["errors"].append(str(error_msg))
+            vo_status_path = os.path.join(run_dir, "status.json")
+            _atomic_write_json(vo_status_path, sd)
+
         try:
             validate_inputs(args)
         except RuntimeError as e:
             emitter.emit("validate", "error", str(e), error_code="VALIDATION_FAILED")
             emitter.close()
+            if is_gui_mode:
+                _vo_write_final_status("error", error_msg=str(e))
             print(str(e), file=sys.stderr)
             sys.exit(1)
 
@@ -350,6 +400,8 @@ def main():
 
         emitter.emit("engine", "done", "Validate-only complete")
         emitter.close()
+        if is_gui_mode:
+            _vo_write_final_status("success")
         sys.exit(0)
 
     # ============================================================
@@ -410,7 +462,8 @@ def main():
             "region_dirs": []
         },
         "errors": [],
-        "warnings": []
+        "warnings": [],
+        "validation": None
     }
     t0_status = time.time()
     status_path = os.path.join(run_dir, "status.json")
@@ -418,22 +471,25 @@ def main():
     def _finalize_status(state="success", error_msg=None):
         """Update and write status.json atomically with final state."""
         status_data["phase"] = "final"
-        status_data["status"] = state # "success", "error", "cancelled"
         status_data["finished_utc"] = datetime.now(timezone.utc).isoformat()
         status_data["duration_sec"] = time.time() - t0_status
         
         if error_msg:
             status_data["errors"].append(str(error_msg))
             
-        # Discover region dirs if possible/safe
+        # Discover region dirs (any child dir except _analysis and hidden)
         if os.path.isdir(run_dir):
             try:
-                subs = [os.path.join(run_dir, d) for d in os.listdir(run_dir) 
-                        if os.path.isdir(os.path.join(run_dir, d)) and d.startswith("Region")]
+                subs = []
+                for d in os.listdir(run_dir):
+                    p = os.path.join(run_dir, d)
+                    if os.path.isdir(p) and d not in ("_analysis",) and not d.startswith("."):
+                        subs.append(p)
                 status_data["outputs"]["region_dirs"] = sorted(subs)
             except OSError:
                 pass
 
+        status_data["status"] = state
         _atomic_write_json(status_path, status_data)
 
     # Initial write (phase="running")
@@ -762,7 +818,6 @@ def main():
         # 8. Write Manifest (LAST, atomic)
         # ============================================================
         emitter.emit("package", "start", "Writing final manifest")
-        manifest['status'] = 'success'
         _atomic_write_json(manifest_path, manifest)
         emitter.emit("package", "done", "Manifest written")
 
@@ -783,8 +838,6 @@ def main():
         traceback.print_exc()
 
         # Write failed manifest
-        manifest['status'] = 'failed'
-        manifest['error'] = str(e)
         try:
             _atomic_write_json(manifest_path, manifest)
         except Exception:
