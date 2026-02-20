@@ -216,9 +216,12 @@ def plot_stacked_session(traces_dir: str, roi: str, output_dir: str, file_list: 
             
     if subsamples:
         all_vals = np.concatenate(subsamples)
-        p99 = np.nanpercentile(all_vals, 99)
-        p1 = np.nanpercentile(all_vals, 1)
-        yrange = p99 - p1
+        if not np.any(np.isfinite(all_vals)):
+            yrange = 0
+        else:
+            p99 = np.nanpercentile(all_vals, 99)
+            p1 = np.nanpercentile(all_vals, 1)
+            yrange = p99 - p1
     else:
         yrange = 0
         

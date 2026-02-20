@@ -55,14 +55,18 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
             u_w = u_f[m]
             s_w = s_f[m]
             
-            if len(u_w) < 2:
+            if len(u_w) < 2 or len(s_w) < 2:
+                if not hasattr(chunk, 'metadata') or chunk.metadata is None: chunk.metadata = {}
+                chunk.metadata.setdefault('qc_warnings', []).append(f"DEGENERATE[DD1] <2 samples in ROI {i} win fallback (var_u=NaN)")
                 continue
                 
             cov = np.cov(u_w, s_w, bias=True)
             var_u = cov[0, 0]
             cov_us = cov[0, 1]
             
-            if var_u <= 1e-12:
+            if not np.isfinite(var_u) or var_u <= 1e-12:
+                if not hasattr(chunk, 'metadata') or chunk.metadata is None: chunk.metadata = {}
+                chunk.metadata.setdefault('qc_warnings', []).append(f"DEGENERATE[DD2] var_u non-finite or too small in ROI {i} win fallback (var_u={var_u})")
                 continue
                 
             slope = cov_us / var_u
@@ -96,9 +100,9 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
         stats = [] # (t, a_gated, u_mean, s_mean)
         
         # Calculate var_floor safely
+        u_f_finite = u_f[np.isfinite(u_f)]
         try:
-            med_val = np.nanmedian(u_f)
-            if np.isnan(med_val): med_val = 0.0
+            med_val = np.median(u_f_finite) if len(u_f_finite) > 0 else 0.0
             var_floor = 1e-6 * (med_val**2)
             if var_floor < 1e-9: var_floor = 1e-9
         except Exception:
@@ -123,7 +127,13 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
             s_w = s_win[m]
             
             # Check Variance
+            if len(u_w) < 2 or len(s_w) < 2:
+                if not hasattr(chunk, 'metadata') or chunk.metadata is None: chunk.metadata = {}
+                chunk.metadata.setdefault('qc_warnings', []).append(f"DEGENERATE[DD1] <2 samples in ROI {r_idx} win {c}")
+                continue
             if np.var(u_w) < var_floor:
+                if not hasattr(chunk, 'metadata') or chunk.metadata is None: chunk.metadata = {}
+                chunk.metadata.setdefault('qc_warnings', []).append(f"DEGENERATE[DD2] var_u below floor in ROI {r_idx} win {c}")
                 continue
                 
             # OLS
@@ -131,7 +141,10 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
             var_u = cov[0,0]
             cov_us = cov[0,1]
             
-            if var_u <= 1e-12: continue
+            if var_u <= 1e-12 or not np.isfinite(var_u): 
+                if not hasattr(chunk, 'metadata') or chunk.metadata is None: chunk.metadata = {}
+                chunk.metadata.setdefault('qc_warnings', []).append(f"DEGENERATE[DD2] var_u non-finite or too small in ROI {r_idx} win {c} (var_u={var_u})")
+                continue
             
             slope = cov_us / var_u
             

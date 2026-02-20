@@ -91,29 +91,37 @@ def extract_features(chunk, config):
             
         is_valid_use = np.isfinite(trace_use)
         clean_trace_use = trace_use[is_valid_use]
+        clean_finite = clean_trace_use[np.isfinite(clean_trace_use)]
         
-        if len(clean_trace_use) == 0:
+        if len(clean_finite) < 2:
+             if not hasattr(chunk, 'metadata') or chunk.metadata is None: chunk.metadata = {}
+             chunk.metadata.setdefault('qc_warnings', []).append(f"DEGENERATE[DD3] < 2 finite samples in ROI '{roi}'")
+             
              row = {
                 'chunk_id': chunk.chunk_id, 'source_file': chunk.source_file, 'roi': roi,
                 'mean': np.nan, 'median': np.nan, 'std': np.nan, 'mad': np.nan,
                 'peak_count': 0, 'auc': np.nan,
             }
+             rows.append(row)
+             continue
         else:
-            mu = np.mean(clean_trace_use)
-            med = np.median(clean_trace_use)
-            sigma = np.std(clean_trace_use)
-            mad = np.median(np.abs(clean_trace_use - med))
+            mu = np.mean(clean_finite)
+            med = np.median(clean_finite)
+            sigma = np.std(clean_finite)
+            mad = np.median(np.abs(clean_finite - med))
             sigma_robust = 1.4826 * mad
             
             # Determine Threshold
             if config.peak_threshold_method == 'mean_std':
                 thresh = mu + config.peak_threshold_k * sigma
             elif config.peak_threshold_method == 'percentile':
-                thresh = np.nanpercentile(clean_trace_use, config.peak_threshold_percentile)
+                thresh = np.nanpercentile(clean_finite, config.peak_threshold_percentile)
                 if np.isnan(thresh):
                     raise ValueError(f"Feature Extraction Error: Percentile threshold is NaN for ROI '{roi}' (Chunk {chunk.chunk_id}).")
             elif config.peak_threshold_method == 'median_mad':
                 if sigma_robust == 0:
+                     if not hasattr(chunk, 'metadata') or chunk.metadata is None: chunk.metadata = {}
+                     chunk.metadata.setdefault('qc_warnings', []).append(f"DEGENERATE[DD4] Zero robust variance in ROI '{roi}'")
                      # If MAD is 0 (e.g. quantization or flat signal), threshold is effectively infinite unless k=0
                      if config.peak_threshold_k == 0:
                          thresh = med
@@ -158,6 +166,11 @@ def extract_features(chunk, config):
                      seg_trace_clean = seg_trace_use[seg_valid]
                 else:
                      seg_trace_clean = seg_trace_use
+                     
+                if len(seg_trace_clean) < 2:
+                    if not hasattr(chunk, 'metadata') or chunk.metadata is None: chunk.metadata = {}
+                    chunk.metadata.setdefault('qc_warnings', []).append(f"DEGENERATE[DD5] Empty or single-element segment after NaN masking in ROI {roi}")
+                    continue
                 
                 # Find Peaks
                 peaks, _ = find_peaks(seg_trace_clean, 
