@@ -31,10 +31,12 @@ class EventsFollower(QObject):
         self._remainder = b""      # trailing partial line from last poll
         self._idle_polls = 0       # consecutive polls with no new data
         self._drain_mode = False   # set after process finishes
+        self._dropped_lines_count = 0
         self._timer = QTimer(self)
         self._timer.setInterval(poll_ms)
         self._timer.timeout.connect(self._poll)
         self._warned_bad_event_schema = False
+        self._drop_summary_emitted = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -46,12 +48,16 @@ class EventsFollower(QObject):
         self._remainder = b""
         self._idle_polls = 0
         self._drain_mode = False
+        self._dropped_lines_count = 0
         self._warned_bad_event_schema = False
+        self._drop_summary_emitted = False
         self._timer.start()
 
     def stop(self) -> None:
         """Stop polling immediately."""
         self._timer.stop()
+        self._flush_remainder()
+        self._emit_drop_summary()
 
     def begin_drain(self) -> None:
         """Enter drain mode: keep polling until no new data for 2 polls."""
@@ -83,6 +89,7 @@ class EventsFollower(QObject):
                 self._idle_polls += 1
                 if self._idle_polls >= 2:
                     self._flush_remainder()
+                    self._emit_drop_summary()
                     self.stop()
             return
 
@@ -99,6 +106,7 @@ class EventsFollower(QObject):
             if self._drain_mode and self._idle_polls >= 2:
                 # Drain complete: flush remainder if any, then stop
                 self._flush_remainder()
+                self._emit_drop_summary()
                 self.stop()
             return
 
@@ -129,7 +137,7 @@ class EventsFollower(QObject):
                 if self._is_supported_event_schema(obj):
                     self.event_received.emit(obj)
             except json.JSONDecodeError as exc:
-                self.parse_error.emit(f"WARN: Bad JSON: {text[:120]}... ({exc})")
+                self._dropped_lines_count += 1
                 continue
 
         # Store trailing partial (may be empty bytes)
@@ -156,7 +164,23 @@ class EventsFollower(QObject):
                 if self._is_supported_event_schema(obj):
                     self.event_received.emit(obj)
             except json.JSONDecodeError:
+                self._dropped_lines_count += 1
                 pass  # silently drop partial fragment during drain
+
+    def _emit_drop_summary(self) -> None:
+        if self._dropped_lines_count > 0 and not self._drop_summary_emitted:
+            msg = f"Event follower dropped {self._dropped_lines_count} unparseable JSON lines."
+            import logging
+            logging.warning(msg)
+            self.event_received.emit({
+                "schema_version": 1,
+                "stage": "events_follower",
+                "type": "stream_warning",
+                "message": msg,
+                "dropped_lines_count": self._dropped_lines_count
+            })
+            self._dropped_lines_count = 0
+            self._drop_summary_emitted = True
 
     def _is_supported_event_schema(self, obj: object) -> bool:
         """Determines if a decoded JSON value is a supported event dict.
@@ -175,6 +199,10 @@ class EventsFollower(QObject):
         # 2. Schema check: schema_version must be 1 (int)
         sv = obj.get("schema_version")
         if isinstance(sv, int) and sv == 1:
+            return True
+        
+        # 3. Allow internal stream_warning even if type string diverges from typical
+        if obj.get("type") == "stream_warning" and obj.get("schema_version") == 1:
             return True
         
         if not self._warned_bad_event_schema:

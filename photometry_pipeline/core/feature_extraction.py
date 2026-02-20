@@ -1,13 +1,14 @@
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
+from .preprocessing import lowpass_filter
 
-def compute_auc_above_threshold(dff, thresh, fs_hz=None, time_s=None):
+def compute_auc_above_threshold(dff, baseline_value, fs_hz=None, time_s=None):
     """
     Computes AUC as area above threshold (clamped to 0).
     Args:
         dff (np.array): Phasic dFF signal.
-        thresh (float): Threshold value.
+        baseline_value (float): Threshold/Baseline value for AUC integration.
         fs_hz (float): Sampling rate (required if time_s is None).
         time_s (np.array): Time vector (optional).
     Returns:
@@ -16,10 +17,10 @@ def compute_auc_above_threshold(dff, thresh, fs_hz=None, time_s=None):
     if dff is None or len(dff) < 2:
         return 0.0
     
-    if thresh is None or not np.isfinite(thresh):
-        raise ValueError("thresh must be finite")
+    if baseline_value is None or not np.isfinite(baseline_value):
+        raise ValueError("baseline_value must be finite")
         
-    rect = np.clip(dff - thresh, 0.0, None)
+    rect = np.clip(dff - baseline_value, 0.0, None)
     
     if time_s is not None:
         if len(time_s) != len(dff):
@@ -81,26 +82,34 @@ def extract_features(chunk, config):
         total_peaks = 0
         total_auc = 0.0 
         
-        clean_trace = trace[is_valid]
+        # Determine signal to use based on pre-filter setting
+        use_filter = getattr(config, 'peak_pre_filter', 'none') == 'lowpass'
+        if use_filter:
+            trace_use = lowpass_filter(trace, chunk.fs_hz, config)
+        else:
+            trace_use = trace
+            
+        is_valid_use = np.isfinite(trace_use)
+        clean_trace_use = trace_use[is_valid_use]
         
-        if len(clean_trace) == 0:
+        if len(clean_trace_use) == 0:
              row = {
                 'chunk_id': chunk.chunk_id, 'source_file': chunk.source_file, 'roi': roi,
                 'mean': np.nan, 'median': np.nan, 'std': np.nan, 'mad': np.nan,
                 'peak_count': 0, 'auc': np.nan,
             }
         else:
-            mu = np.mean(clean_trace)
-            med = np.median(clean_trace)
-            sigma = np.std(clean_trace)
-            mad = np.median(np.abs(clean_trace - med))
+            mu = np.mean(clean_trace_use)
+            med = np.median(clean_trace_use)
+            sigma = np.std(clean_trace_use)
+            mad = np.median(np.abs(clean_trace_use - med))
             sigma_robust = 1.4826 * mad
             
             # Determine Threshold
             if config.peak_threshold_method == 'mean_std':
                 thresh = mu + config.peak_threshold_k * sigma
             elif config.peak_threshold_method == 'percentile':
-                thresh = np.nanpercentile(clean_trace, config.peak_threshold_percentile)
+                thresh = np.nanpercentile(clean_trace_use, config.peak_threshold_percentile)
                 if np.isnan(thresh):
                     raise ValueError(f"Feature Extraction Error: Percentile threshold is NaN for ROI '{roi}' (Chunk {chunk.chunk_id}).")
             elif config.peak_threshold_method == 'median_mad':
@@ -115,24 +124,51 @@ def extract_features(chunk, config):
             else:
                 raise ValueError(f"Unknown peak_threshold_method: {config.peak_threshold_method}. Supported: ['mean_std', 'percentile', 'median_mad']")
                 
+            # AUC Baseline
+            auc_baseline_method = getattr(config, 'event_auc_baseline', 'zero')
+            if auc_baseline_method == 'median':
+                auc_baseline = med
+            else:
+                auc_baseline = 0.0
+                
             # Constraints
             dist_samples = max(1, int(config.peak_min_distance_sec * chunk.fs_hz))
 
             # Segment iteration
             for s, e in zip(starts, ends):
-                seg_trace = trace[s:e]
+                seg_trace_use = trace_use[s:e]
+                
+                # Apply local valid mask to segment if needed for peak finding/AUC (though AUC handles NaNs or assumes finite depending on implementation). 
+                # Our implementation relies on `find_peaks` which dislikes NaNs.
+                seg_valid = is_valid_use[s:e]
+                
+                # If segment is entirely invalid, skip
+                if not np.any(seg_valid):
+                    continue
+                    
+                # Otherwise, interpolate or extract clean seg
+                # Actually, find_peaks expects continuous array. Missing data in segments is an edge case.
+                # If there are NaNs inside the segment, find_peaks might fail.
+                # Since requirement is D1/D2, we need clean_trace_use for stats and baseline.
                 seg_time = time[s:e]
                 
+                # For peaks, finding peaks on NaNs raises an error, so we remove NaNs or just skip 
+                if not np.all(seg_valid):
+                     # Skip segment if it contains any NaNs to be perfectly safe, or drop them
+                     seg_trace_clean = seg_trace_use[seg_valid]
+                else:
+                     seg_trace_clean = seg_trace_use
+                
                 # Find Peaks
-                peaks, _ = find_peaks(seg_trace, 
+                peaks, _ = find_peaks(seg_trace_clean, 
                                       height=thresh, 
                                       distance=dist_samples)
                 total_peaks += len(peaks)
                 
                 # AUC above threshold
-                total_auc += compute_auc_above_threshold(seg_trace, thresh, 
+                total_auc += compute_auc_above_threshold(seg_trace_clean, auc_baseline, 
                                                          fs_hz=chunk.fs_hz, 
-                                                         time_s=seg_time)
+                                                         time_s=seg_time[seg_valid] if not np.all(seg_valid) else seg_time)
             
             row = {
                 'chunk_id': chunk.chunk_id,

@@ -12,6 +12,7 @@ from .config import Config
 from .core.types import Chunk, SessionStats
 from .io.adapters import load_chunk, sniff_format
 from .core import preprocessing, regression, normalization, feature_extraction, baseline
+from .core.utils import natural_sort_key
 from .core.reporting import generate_run_report, append_run_report_warnings
 # from .viz import plots # Moved to run() to avoid side effects
 
@@ -22,6 +23,16 @@ def _get_cfg_value(cfg, key, default):
     if isinstance(cfg, dict):
         return cfg.get(key, default)
     return default
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
 
 class Pipeline:
     def __init__(self, config: Config, mode: str = 'phasic'):
@@ -36,6 +47,7 @@ class Pipeline:
             'roi_failures': {}
         }
         self.roi_map = {}
+        self._pass1_manifest = []
 
     def discover_files(self, input_path: str, recursive: bool = False, file_glob: str = "*.csv", force_format: str = 'auto'):
         if force_format == 'rwd':
@@ -52,7 +64,7 @@ class Pipeline:
                 search_pattern = os.path.join(input_path, file_glob)
                 self.file_list = glob.glob(search_pattern)
         
-        self.file_list.sort()
+        self.file_list.sort(key=natural_sort_key)
         if not self.file_list:
             raise ValueError(f"No files found in {input_path}")
             
@@ -90,8 +102,13 @@ class Pipeline:
                         uv_data = chunk.uv_raw[:, ch_idx]
                         reservoir.add(ch_name, uv_data)
                         
+                    if fpath not in self._pass1_manifest:
+                        self._pass1_manifest.append(fpath)
+                        
                 except Exception as e:
                     logging.warning(f"Pass 1: Skipping {fpath} due to error: {e}")
+                    if not any(x['file'] == fpath for x in self.qc_summary['failed_chunks']):
+                        self.qc_summary['failed_chunks'].append({'file': fpath, 'error': str(e)})
                     continue
             
             self.stats.method_used = method
@@ -120,6 +137,8 @@ class Pipeline:
                         
                 except Exception as e:
                     logging.warning(f"Pass 1a: Skipping {fpath}: {e}")
+                    if not any(x['file'] == fpath for x in self.qc_summary['failed_chunks']):
+                        self.qc_summary['failed_chunks'].append({'file': fpath, 'error': str(e)})
                     continue
             
             self.stats.global_fit_params = accumulator.solve()
@@ -136,6 +155,9 @@ class Pipeline:
                             uv_val = chunk.uv_raw[:, ch_idx]
                             uv_est = params['a'] * uv_val + params['b']
                             reservoir.add(ch_name, uv_est)
+                            
+                    if fpath not in self._pass1_manifest:
+                        self._pass1_manifest.append(fpath)
                             
                 except Exception as e:
                     continue
@@ -169,7 +191,7 @@ class Pipeline:
             acc_sig = {}
             
             for i, fpath in enumerate(self.file_list):
-                 try:
+                try:
                     fmt = self._get_format(fpath, force_format)
                     chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
                     for ch_idx, ch_name in enumerate(chunk.channel_names):
@@ -178,8 +200,11 @@ class Pipeline:
                             acc_sig[ch_name] = []
                         acc_uv[ch_name].append(chunk.uv_raw[:, ch_idx])
                         acc_sig[ch_name].append(chunk.sig_raw[:, ch_idx])
-                 except Exception:
-                     continue
+                        
+                    if fpath not in self._pass1_manifest:
+                        self._pass1_manifest.append(fpath)
+                except Exception:
+                    continue
             
             # Solve
             for ch in acc_uv.keys():
@@ -275,8 +300,21 @@ class Pipeline:
         failed_count = 0
         first_success_chunk = None
         
+        # Freeze manifest to ensure it cannot be mutated after Pass 1
+        frozen_manifest = tuple(self._pass1_manifest)
+        
+        # Check for new files not in pass 1 manifest
+        new_files = [f for f in self.file_list if f not in frozen_manifest]
+        for f in new_files:
+            if not any(x['file'] == f for x in self.qc_summary['failed_chunks']):
+                self.qc_summary['failed_chunks'].append({'file': f, 'error': 'Ignored (Not in Pass 1 manifest)'})
+                
+        if new_files:
+             logging.warning(f"Pass 2: Found {len(new_files)} new or skipped files not in Pass 1 manifest. First few: {new_files[:3]}. They will be ignored.")
+        
         print("Pass 2 (Analysis)...")
-        for i, fpath in enumerate(self.file_list):
+        # Ensure we only iterate over files successfully processed in Pass 1
+        for i, fpath in enumerate(frozen_manifest):
             try:
                 fmt = self._get_format(fpath, force_format)
                 chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
@@ -360,7 +398,7 @@ class Pipeline:
                         }
                         json_path = os.path.join(inter_dir, f"chunk_{i:04d}_{roi}_meta.json")
                         with open(json_path, 'w') as f:
-                            json.dump(meta, f, indent=2)
+                            json.dump(meta, f, indent=2, cls=NumpyEncoder)
 
                 # VIZ: Plot Set A & D (First SUCCESSFUL Chunk Only)
                 if first_success_chunk is None:
@@ -378,9 +416,8 @@ class Pipeline:
                             logging.warning(f"Viz failure (chunk {i}) {roi}: {e}")
                 
             except Exception as e:
-                logging.error(f"Failed chunk {i} ({fpath}): {e}")
-                self.qc_summary['failed_chunks'].append({'file': fpath, 'error': str(e)})
-                failed_count += 1
+                # Requirement B4: Fail fast if a file in the manifest cannot be loaded in Pass 2
+                raise RuntimeError(f"Pass 2: Cannot reliably read manifest file {fpath} successfully processed in Pass 1. Error: {e}")
                 
         if all_features:
             full_feats = pd.concat(all_features, ignore_index=True)
@@ -404,7 +441,7 @@ class Pipeline:
                 logging.warning(f"Baseline invalid for {len(bad_rois)} ROIs across {total_chunks} chunks ({total_affected} pairs).")
             
         with open(os.path.join(output_dir, 'qc', 'qc_summary.json'), 'w') as f:
-            json.dump(self.qc_summary, f, indent=2)
+            json.dump(self.qc_summary, f, indent=2, cls=NumpyEncoder)
             
         run_meta = {
             'target_fs_hz': self.config.target_fs_hz,
@@ -425,7 +462,7 @@ class Pipeline:
             'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', [])
         }
         with open(os.path.join(output_dir, 'run_metadata.json'), 'w') as f:
-            json.dump(run_meta, f, indent=2)
+            json.dump(run_meta, f, indent=2, cls=NumpyEncoder)
             
         if self.qc_summary['chunk_fail_fraction'] > self.config.qc_max_chunk_fail_fraction:
             logging.error(f"High failure rate: {self.qc_summary['chunk_fail_fraction']:.2%}")

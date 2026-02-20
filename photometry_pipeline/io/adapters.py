@@ -8,6 +8,25 @@ from ..config import Config
 from ..core.types import Chunk, SessionTimeMetadata
 from dataclasses import asdict
 import pathlib
+import logging
+
+def _interp_with_nan_policy(time_sec, xp, fp, config, roi_idx, channel_name):
+    mask = np.isfinite(xp) & np.isfinite(fp)
+    n_nans = len(fp) - np.sum(mask)
+    
+    if n_nans > 0:
+        if getattr(config, 'adapter_value_nan_policy', 'strict') == 'strict':
+            raise ValueError(f"NPM strict: NaN values found in {channel_name} for ROI {roi_idx}")
+        else:
+            xp_use = xp[mask]
+            fp_use = fp[mask]
+            if len(xp_use) < 2:
+                logging.warning(f"NPM mask: Too few points remain for {channel_name} ROI {roi_idx} after NaN masking ({n_nans} NaNs)")
+                return np.full_like(time_sec, np.nan), n_nans
+            else:
+                return np.interp(time_sec, xp_use, fp_use, left=np.nan, right=np.nan), n_nans
+    else:
+        return np.interp(time_sec, xp, fp, left=np.nan, right=np.nan), 0
 
 
 def discover_rwd_chunks(root_path: str) -> List[str]:
@@ -251,6 +270,8 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
     uv_vals = df.loc[mask_uv, roi_cols].values
     sig_vals = df.loc[mask_sig, roi_cols].values
     
+    n_value_nans_uv = 0
+    n_value_nans_sig = 0
     
     if not config.allow_partial_final_chunk:
         # Strict Mode Logic
@@ -301,8 +322,13 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
         sig_out = np.zeros((n_target, n_rois))
         
         for i in range(n_rois):
-            uv_out[:, i] = np.interp(time_sec, t_uv_use, uv_use[:, i])
-            sig_out[:, i] = np.interp(time_sec, t_sig_use, sig_use[:, i])
+            uv_val, nans_uv = _interp_with_nan_policy(time_sec, t_uv_use, uv_use[:, i], config, i, "UV")
+            uv_out[:, i] = uv_val
+            n_value_nans_uv += nans_uv
+            
+            sig_val, nans_sig = _interp_with_nan_policy(time_sec, t_sig_use, sig_use[:, i], config, i, "SIG")
+            sig_out[:, i] = sig_val
+            n_value_nans_sig += nans_sig
             
     else:
         # Permissive Mode (Original/Fallback)
@@ -351,12 +377,14 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
         
         for i in range(n_rois):
             # UV
-            val_uv = np.interp(time_sec, t_uv_rel, uv_vals_f[:, i], left=np.nan, right=np.nan)
-            uv_out[:, i] = val_uv
+            uv_val, nans_uv = _interp_with_nan_policy(time_sec, t_uv_rel, uv_vals_f[:, i], config, i, "UV")
+            uv_out[:, i] = uv_val
+            n_value_nans_uv += nans_uv
             
             # SIG
-            val_sig = np.interp(time_sec, t_sig_rel, sig_vals_f[:, i], left=np.nan, right=np.nan)
-            sig_out[:, i] = val_sig
+            sig_val, nans_sig = _interp_with_nan_policy(time_sec, t_sig_rel, sig_vals_f[:, i], config, i, "SIG")
+            sig_out[:, i] = sig_val
+            n_value_nans_sig += nans_sig
         
     chunk = Chunk(
         chunk_id=chunk_id,
@@ -367,7 +395,12 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
         sig_raw=sig_out,
         fs_hz=config.target_fs_hz,
         channel_names=names,
-        metadata={"roi_map": roi_map}
+        metadata={
+            "roi_map": roi_map,
+            "n_value_nans_uv": int(n_value_nans_uv),
+            "n_value_nans_sig": int(n_value_nans_sig),
+            "adapter_value_nan_policy": getattr(config, 'adapter_value_nan_policy', 'strict')
+        }
     )
     # chunk.validate() moved to load_chunk
     return chunk

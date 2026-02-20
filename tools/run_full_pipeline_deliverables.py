@@ -29,6 +29,15 @@ import time
 import secrets
 from datetime import datetime, timezone
 
+# Assume script is run with repository root in PYTHONPATH or via `python -m tools.run_full_pipeline_deliverables`
+try:
+    from photometry_pipeline.core.utils import natural_sort_key
+except ImportError:
+    # Use raise SystemExit(1) to avoid NameError if sys is unavailable in some edge cases
+    # although sys is imported above, this pattern is preferred by contract.
+    print("ERROR: Must run this script with repo root in PYTHONPATH, e.g. `python -m tools.run_full_pipeline_deliverables`")
+    raise SystemExit(1)
+
 
 # ======================================================================
 # Helpers
@@ -128,7 +137,7 @@ def check_cancel(cancel_flag_path, emitter, stage, manifest_path, manifest):
     manifest_data = manifest.copy()
     _atomic_write_json(manifest_path, manifest_data)
     emitter.close()
-    sys.exit(130)
+    raise SystemExit(130)
 
 # ======================================================================
 # Arg Parsing
@@ -211,13 +220,13 @@ def resolve_run_dir(args):
     """Resolve run_dir and run_id from args. Returns (run_dir, run_id, is_gui_mode)."""
     if args.out and args.out_base:
         print("Error: --out and --out-base are mutually exclusive.", file=sys.stderr)
-        sys.exit(2)
+        raise SystemExit(2)
     if not args.out and not args.out_base:
         print("Error: one of --out or --out-base is required.", file=sys.stderr)
-        sys.exit(2)
+        raise SystemExit(2)
     if args.run_id and not args.out_base:
         print("Error: --run-id requires --out-base.", file=sys.stderr)
-        sys.exit(2)
+        raise SystemExit(2)
 
     if args.out_base:
         # GUI mode
@@ -226,7 +235,7 @@ def resolve_run_dir(args):
         if os.sep in run_id or (os.altsep and os.altsep in run_id):
             print(f"Error: --run-id must not contain path separators, got: {run_id}",
                   file=sys.stderr)
-            sys.exit(2)
+            raise SystemExit(2)
         run_dir = os.path.abspath(os.path.join(args.out_base, run_id))
         return run_dir, run_id, True
     else:
@@ -328,6 +337,7 @@ def main():
                 "schema_version": 1,
                 "run_id": run_id,
                 "phase": "running",
+                "status": "running",
                 "created_utc": vo_created_utc,
                 "finished_utc": None,
                 "duration_sec": 0.0,
@@ -370,7 +380,7 @@ def main():
             if is_gui_mode:
                 _vo_write_final_status("error", error_msg=str(e))
             print(str(e), file=sys.stderr)
-            sys.exit(1)
+            raise SystemExit(1)
 
         emitter.emit("validate", "done", "Validation passed")
 
@@ -402,7 +412,7 @@ def main():
         emitter.close()
         if is_gui_mode:
             _vo_write_final_status("success")
-        sys.exit(0)
+        raise SystemExit(0)
 
     # ============================================================
     # 1. Setup run directory
@@ -416,7 +426,7 @@ def main():
         if os.path.exists(run_dir):
             if not args.overwrite:
                 print(f"Error: Output directory {run_dir} exists. Use --overwrite.")
-                sys.exit(1)
+                raise SystemExit(1)
 
             # Robust rmtree
             max_retries = 5
@@ -427,7 +437,7 @@ def main():
                 except OSError as e:
                     if i == max_retries - 1:
                         print(f"Error: Failed to delete {run_dir} after retries: {e}")
-                        sys.exit(1)
+                        raise SystemExit(1)
                     time.sleep(0.5 * (i + 1))
 
     os.makedirs(run_dir, exist_ok=True)
@@ -443,7 +453,7 @@ def main():
         "schema_version": 1,
         "run_id": run_id,
         "phase": "running", 
-        # "status": "..." # OMITTED per Design 1 while running
+        "status": "running",
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "finished_utc": None,
         "duration_sec": 0.0,
@@ -557,7 +567,7 @@ def main():
         # ============================================================
         # 6. Session / Stride Computation
         # ============================================================
-        trace_files = sorted(glob.glob(os.path.join(phasic_out, 'traces', 'chunk_*.csv')))
+        trace_files = sorted(glob.glob(os.path.join(phasic_out, 'traces', 'chunk_*.csv')), key=natural_sort_key)
         if not trace_files:
             raise RuntimeError("No phases traces found.")
 
@@ -683,7 +693,7 @@ def main():
                 files_written.append("tonic_overview.png")
 
             # Tonic CSV
-            tonic_files = sorted(glob.glob(os.path.join(tonic_out, 'traces', 'chunk_*.csv')))
+            tonic_files = sorted(glob.glob(os.path.join(tonic_out, 'traces', 'chunk_*.csv')), key=natural_sort_key)
             t_rows = []
             fs_tonic = 20.0
 
@@ -848,7 +858,7 @@ def main():
         
         # --- Finalize Status: Error ---
         _finalize_status("error", error_msg=str(e))
-        sys.exit(1)
+        raise SystemExit(1)
 
 if __name__ == '__main__':
     main()

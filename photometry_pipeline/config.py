@@ -52,7 +52,11 @@ class Config:
     peak_threshold_k: float = 2.0
     peak_threshold_percentile: float = 95.0
     peak_min_distance_sec: float = 0.5 # Default kept at 0.5 per user request (was 1.0 in previous file but user asked to keep default 0.5)
+    peak_pre_filter: str = 'none'
+    event_auc_baseline: str = 'zero'
     
+    # adapters
+    adapter_value_nan_policy: str = 'strict'
 
     # channel identifiers - MUST be provided in config (no defaults for these essentially)
     rwd_time_col: str = "Time(s)" # Default often seen, but user should override
@@ -105,5 +109,9 @@ class Config:
         if 'event_auc_baseline' in data:
              if data['event_auc_baseline'] not in {'zero', 'median'}:
                 raise ValueError(f"Invalid event_auc_baseline: {data['event_auc_baseline']}. Allowed: {{'zero', 'median'}}")
+                
+        if 'adapter_value_nan_policy' in data:
+             if data['adapter_value_nan_policy'] not in {'strict', 'mask'}:
+                raise ValueError(f"Invalid adapter_value_nan_policy: {data['adapter_value_nan_policy']}. Allowed: {{'strict', 'mask'}}")
         
         return cls(**data)

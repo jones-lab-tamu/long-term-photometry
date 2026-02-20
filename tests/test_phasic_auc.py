@@ -66,15 +66,15 @@ class TestPhasicAUC(unittest.TestCase):
         
         # Invalid fs_hz when time_s is None
         with self.assertRaisesRegex(ValueError, "fs_hz must be > 0"):
-            compute_auc_above_threshold(dff, thresh=0.0, fs_hz=0)
+            compute_auc_above_threshold(dff, baseline_value=0.0, fs_hz=0)
             
-        # Invalid thresh
-        with self.assertRaisesRegex(ValueError, "thresh must be finite"):
-            compute_auc_above_threshold(dff, thresh=np.nan, fs_hz=1.0)
+        # Invalid baseline_value
+        with self.assertRaisesRegex(ValueError, "baseline_value must be finite"):
+            compute_auc_above_threshold(dff, baseline_value=np.nan, fs_hz=1.0)
             
         # Time mismatch
         with self.assertRaisesRegex(ValueError, "length mismatch"):
-            compute_auc_above_threshold(dff, thresh=0.0, time_s=np.array([0, 1]))
+            compute_auc_above_threshold(dff, baseline_value=0.0, time_s=np.array([0, 1]))
 
 if __name__ == '__main__':
     unittest.main()

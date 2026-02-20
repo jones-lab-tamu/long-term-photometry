@@ -247,7 +247,8 @@ def verify_peak_count_strict(trace_arr, time_arr, fs, config, expected_count, ro
         print(f"CRITICAL: Verification Failed for Chunk {cid}, ROI {roi}")
         print(f"  Expected (CSV): {expected_count}")
         print(f"  Computed (Pipeline): {pipeline_count}")
-        print(f"  Config: method={config.peak_threshold_method}, k={config.peak_threshold_k}, filter={config.peak_pre_filter}")
+        safe_filter = getattr(config, 'peak_pre_filter', 'none')
+        print(f"  Config: method={config.peak_threshold_method}, k={config.peak_threshold_k}, filter={safe_filter}")
         sys.exit(1)
 
     # 2. Local Plotting Indices Verification

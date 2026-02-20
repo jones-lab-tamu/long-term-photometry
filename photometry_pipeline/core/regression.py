@@ -45,8 +45,36 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
     window_samples = int(config.window_sec * fs)
     step_samples = int(config.step_sec * fs)
     
-    if window_samples > n_samples:
-        return uv_fit_all, delta_f_all 
+    if window_samples >= n_samples:
+        # Fallback: perform exactly one regression on the entire chunk
+        for i in range(n_rois):
+            u_f = chunk.uv_filt[:, i]
+            s_f = chunk.sig_filt[:, i]
+            
+            m = np.isfinite(u_f) & np.isfinite(s_f)
+            u_w = u_f[m]
+            s_w = s_f[m]
+            
+            if len(u_w) < 2:
+                continue
+                
+            cov = np.cov(u_w, s_w, bias=True)
+            var_u = cov[0, 0]
+            cov_us = cov[0, 1]
+            
+            if var_u <= 1e-12:
+                continue
+                
+            slope = cov_us / var_u
+            intercept = np.mean(s_w) - slope * np.mean(u_w)
+            
+            uv_fit_all[:, i] = intercept + slope * chunk.uv_filt[:, i]
+            delta_f_all[:, i] = chunk.sig_filt[:, i] - uv_fit_all[:, i]
+            
+        if not hasattr(chunk, 'metadata') or chunk.metadata is None:
+            chunk.metadata = {}
+        chunk.metadata['window_fallback_global'] = True
+        return uv_fit_all, delta_f_all
     
     # Safety Check for step
     if step_samples <= 0:
