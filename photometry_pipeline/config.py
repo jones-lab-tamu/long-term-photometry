@@ -57,6 +57,7 @@ class Config:
     
     # adapters
     adapter_value_nan_policy: str = 'strict'
+    tonic_allowed_nan_frac: float = 0.0
 
     # channel identifiers - MUST be provided in config (no defaults for these essentially)
     rwd_time_col: str = "Time(s)" # Default often seen, but user should override

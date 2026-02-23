@@ -6,11 +6,11 @@ import numpy as np
 import pandas as pd
 import datetime
 
-# Ensure we can import config
-sys.path.append(os.getcwd())
-p = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if p not in sys.path:
-    sys.path.append(p)
+# Self-contained repo root bootstrap
+from pathlib import Path
+_repo_root = str(Path(__file__).resolve().parents[1])
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 from photometry_pipeline.config import Config
 

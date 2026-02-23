@@ -16,23 +16,25 @@ from .core.utils import natural_sort_key
 from .core.reporting import generate_run_report, append_run_report_warnings
 # from .viz import plots # Moved to run() to avoid side effects
 
-# Helper for robust config access (Dict vs Attribute)
-def _get_cfg_value(cfg, key, default):
-    if hasattr(cfg, key):
-        return getattr(cfg, key)
-    if isinstance(cfg, dict):
-        return cfg.get(key, default)
-    return default
 
-class NumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return super(NumpyEncoder, self).default(obj)
+
+def _sanitize_metadata(obj):
+    """
+    Recursively convert metadata to JSON-safe primitives.
+    Handles numpy types explicitly so they become Python scalars/lists.
+    Unknown types are converted to repr(obj).
+    """
+    if isinstance(obj, dict):
+        return {str(k): _sanitize_metadata(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_metadata(x) for x in obj]
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return repr(obj)
 
 class Pipeline:
     def __init__(self, config: Config, mode: str = 'phasic'):
@@ -158,7 +160,6 @@ class Pipeline:
                             
                     if fpath not in self._pass1_manifest:
                         self._pass1_manifest.append(fpath)
-                            
                 except Exception as e:
                     continue
             
@@ -264,7 +265,7 @@ class Pipeline:
                   n_valid = int(np.sum(valid_mask))
                   frac_invalid = 1.0 - (n_valid / float(n_total)) if n_total > 0 else 1.0
                        
-                  allowed_raw = _get_cfg_value(self.config, 'tonic_allowed_nan_frac', 0.0)
+                  allowed_raw = getattr(self.config, 'tonic_allowed_nan_frac', 0.0)
                   try:
                       allowed = float(allowed_raw)
                   except (ValueError, TypeError):
@@ -297,7 +298,6 @@ class Pipeline:
         os.makedirs(traces_dir, exist_ok=True)
         
         all_features = []
-        failed_count = 0
         first_success_chunk = None
         
         # Freeze manifest to ensure it cannot be mutated after Pass 1
@@ -368,7 +368,8 @@ class Pipeline:
                 
                 if self.mode == 'phasic':
                     # Strict Verification Artifacts (Step 2 of Protocol)
-                    inter_dir = os.path.join(self.output_dir, 'phasic_intermediates')
+                    mode_out_dir = output_dir
+                    inter_dir = os.path.join(mode_out_dir, 'phasic_intermediates')
                     os.makedirs(inter_dir, exist_ok=True)
                     
                     for r_idx, roi in enumerate(chunk.channel_names):
@@ -381,10 +382,6 @@ class Pipeline:
                             'residual': chunk.delta_f[:, r_idx] if chunk.delta_f is not None else np.nan,
                             'dff': chunk.dff[:, r_idx] if chunk.dff is not None else np.nan
                         })
-                        # Filename: chunk_XXX_{roi}.csv to handle multi-roi
-                        # User requested chunk_XXX.csv but implied per-ROI columns or structure. 
-                        # To be safe for multi-ROI, we must distinguish.
-                        # We will use chunk_0000_Region0.csv pattern.
                         csv_path = os.path.join(inter_dir, f"chunk_{i:04d}_{roi}.csv")
                         meta_df.to_csv(csv_path, index=False)
                         
@@ -396,9 +393,26 @@ class Pipeline:
                             'peak_method': self.config.peak_threshold_method,
                             'peak_k': self.config.peak_threshold_k
                         }
+                        if hasattr(chunk, 'metadata') and chunk.metadata:
+                            meta['chunk_metadata'] = _sanitize_metadata(chunk.metadata)
+                        
                         json_path = os.path.join(inter_dir, f"chunk_{i:04d}_{roi}_meta.json")
                         with open(json_path, 'w') as f:
-                            json.dump(meta, f, indent=2, cls=NumpyEncoder)
+                            json.dump(_sanitize_metadata(meta), f, indent=2)
+                            
+                        if not hasattr(self, '_chunk_meta_outputs'):
+                            self._chunk_meta_outputs = []
+                        rel_path = os.path.relpath(json_path, mode_out_dir).replace('\\', '/')
+                        if rel_path not in self._chunk_meta_outputs:
+                            self._chunk_meta_outputs.append(rel_path)
+
+                # Requirement B4 (Policy refinement): count chunk as failed if it has any DEGENERATE warnings
+                # Integrate into canonical failed_chunks list to avoid double counting.
+                if hasattr(chunk, 'metadata') and chunk.metadata:
+                    qc_warnings = chunk.metadata.get('qc_warnings', [])
+                    if any("DEGENERATE" in w for w in qc_warnings):
+                        if not any(x['file'] == fpath for x in self.qc_summary['failed_chunks']):
+                            self.qc_summary['failed_chunks'].append({'file': fpath, 'error': 'QC: Degenerate data detected'})
 
                 # VIZ: Plot Set A & D (First SUCCESSFUL Chunk Only)
                 if first_success_chunk is None:
@@ -428,7 +442,7 @@ class Pipeline:
 
         total_chunks = len(self.file_list)
         if total_chunks > 0:
-            self.qc_summary['chunk_fail_fraction'] = failed_count / total_chunks
+            self.qc_summary['chunk_fail_fraction'] = len(self.qc_summary.get('failed_chunks', [])) / total_chunks
             
         # Robustness: Add baseline invalid counts if tracked
         if 'invalid_baseline_rois' in self.qc_summary:
@@ -441,7 +455,7 @@ class Pipeline:
                 logging.warning(f"Baseline invalid for {len(bad_rois)} ROIs across {total_chunks} chunks ({total_affected} pairs).")
             
         with open(os.path.join(output_dir, 'qc', 'qc_summary.json'), 'w') as f:
-            json.dump(self.qc_summary, f, indent=2, cls=NumpyEncoder)
+            json.dump(_sanitize_metadata(self.qc_summary), f, indent=2)
             
         run_meta = {
             'target_fs_hz': self.config.target_fs_hz,
@@ -459,10 +473,14 @@ class Pipeline:
             'regression_step_sec': self.config.step_sec,
             'regression_mode': 'dynamic' if self.mode == 'phasic' else self.mode,
             # D1: Write invalid baseline ROIs
-            'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', [])
+            'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', []),
+            'chunk_metadata_outputs': sorted(
+                getattr(self, '_chunk_meta_outputs', []),
+                key=natural_sort_key
+            )
         }
         with open(os.path.join(output_dir, 'run_metadata.json'), 'w') as f:
-            json.dump(run_meta, f, indent=2, cls=NumpyEncoder)
+            json.dump(_sanitize_metadata(run_meta), f, indent=2)
             
         if self.qc_summary['chunk_fail_fraction'] > self.config.qc_max_chunk_fail_fraction:
             logging.error(f"High failure rate: {self.qc_summary['chunk_fail_fraction']:.2%}")

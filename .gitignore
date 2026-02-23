@@ -19,8 +19,6 @@ Thumbs.db
 # Project Outputs & Temporary Data
 tests/out_*/
 tests/syn_*/
-tests/
-tests/*
 out/
 debug_output/
 *.parquet
@@ -39,3 +37,19 @@ project_digest.txt
 .gemini/
 *.diff
 
+# Artifacts & Scratch Data
+
+# Task B scratch artifacts (auto-added)
+temp_integ_out/
+test_out/
+*_diff*.txt
+*_result*.txt
+*_suite*.txt
+*_tracebacks*.txt
+temp_pytest_out.txt
+test_debug_*.py
+test_debug_*.json
+test_dump_*.py
+diagnostics.txt
+err*.txt
+RUNTHROUGH_REPORT.md

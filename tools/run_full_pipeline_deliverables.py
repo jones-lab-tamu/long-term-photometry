@@ -29,13 +29,16 @@ import time
 import secrets
 from datetime import datetime, timezone
 
-# Assume script is run with repository root in PYTHONPATH or via `python -m tools.run_full_pipeline_deliverables`
+# Self-contained repo root bootstrap
+from pathlib import Path
+_repo_root = str(Path(__file__).resolve().parents[1])
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
 try:
     from photometry_pipeline.core.utils import natural_sort_key
 except ImportError:
-    # Use raise SystemExit(1) to avoid NameError if sys is unavailable in some edge cases
-    # although sys is imported above, this pattern is preferred by contract.
-    print("ERROR: Must run this script with repo root in PYTHONPATH, e.g. `python -m tools.run_full_pipeline_deliverables`")
+    print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.")
     raise SystemExit(1)
 
 

@@ -26,6 +26,8 @@ class DeterministicReservoir:
             self.buffer[channel] = np.zeros(self.capacity, dtype=np.float32)
             self.count[channel] = 0
             
+        data = np.asarray(data)
+        data = data[np.isfinite(data)]
         n = len(data)
         if n == 0: return
         
