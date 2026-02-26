@@ -37,9 +37,13 @@ project_digest.txt
 .gemini/
 *.diff
 
-# Artifacts & Scratch Data
+# Task C artifacts
+smoke_run_log*.txt
 
-# Task B scratch artifacts (auto-added)
+# Scratch
+scratch/
+
+# Scratch artifacts
 temp_integ_out/
 test_out/
 *_diff*.txt
@@ -53,3 +57,8 @@ test_dump_*.py
 diagnostics.txt
 err*.txt
 RUNTHROUGH_REPORT.md
+recovered_tests_backup/
+tests/out*/
+tests/smoke_dataset_temp/
+tests/out_task_c_smoke/
+/tests/*
