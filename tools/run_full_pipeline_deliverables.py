@@ -338,6 +338,7 @@ def main():
             """Return the base status dict for validate-only mode."""
             return {
                 "schema_version": 1,
+                "run_type": "validate_only",
                 "run_id": run_id,
                 "phase": "running",
                 "status": "running",
@@ -454,6 +455,7 @@ def main():
     # Phase: "running" (no status field) -> "final" (status="success"|"error")
     status_data = {
         "schema_version": 1,
+        "run_type": "full",
         "run_id": run_id,
         "phase": "running", 
         "status": "running",
@@ -511,6 +513,7 @@ def main():
     # -- Open event emitter --
     emitter = EventEmitter(events_path, run_id, run_dir, file_mode="w")
     emitter.emit("engine", "start", "Engine starting")
+    emitter.emit("engine", "context", "Run context initialized", payload={"run_type": "full", "features_extracted": None, "preview": None})
 
     try:
         # -- Check cancel immediately --

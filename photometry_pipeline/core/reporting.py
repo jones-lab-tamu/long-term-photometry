@@ -128,6 +128,11 @@ def generate_run_report(config: Config, output_dir: str):
 
     # 5. Output
     report = {
+        "run_context": {
+            "run_type": "full",
+            "features_extracted": None,
+            "preview": None
+        },
         "configuration": config_snapshot,
         "derived_settings": derived_settings,
         "analytical_contract": contract
