@@ -67,9 +67,17 @@ class PipelineRunner(QObject):
     def was_cancel_requested(self) -> bool:
         return self._cancel_requested
 
-    def set_run_dir(self, run_dir: str):
-        """Set run directory (used by tests and GUI)."""
+    def set_run_dir(self, run_dir: str) -> None:
+        """Set the run directory and reset all per-run parsing state."""
         self._run_dir = run_dir
+        self._stdout_buf = b""
+        self._stderr_buf = b""
+        self.final_status_code = None
+        self.final_errors = []
+        self.fail_closed_code = None
+        self.fail_closed_detail = None
+        self.fail_closed_remediation = None
+        self.validation_summary = None
 
     def _set_state(self, new_state: RunnerState) -> None:
         self._state = new_state
@@ -78,10 +86,6 @@ class PipelineRunner(QObject):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
-    def set_run_dir(self, path: str) -> None:
-        """Set the run directory so cancel can write the flag file."""
-        self._run_dir = path
 
     def start(self, argv: list, state: RunnerState = RunnerState.RUNNING) -> None:
         """Start the pipeline. argv[0] is the program, argv[1:] are arguments."""
@@ -199,40 +203,54 @@ class PipelineRunner(QObject):
         self._stderr_log = None
 
     # ------------------------------------------------------------------
-    # Private slots
+    # Private slots and test hooks
     # ------------------------------------------------------------------
 
+    def _handle_stdout_line(self, line: str) -> None:
+        """Hook for stdout line processing. Emits signal and writes to log file."""
+        self.log_line.emit("OUT: " + line)
+        if self._stdout_log:
+            try:
+                self._stdout_log.write(line + "\n")
+                self._stdout_log.flush()
+            except OSError:
+                pass
+
+    def _handle_stderr_line(self, line: str) -> None:
+        """Hook for stderr line processing. Emits signal and writes to log file."""
+        self.log_line.emit("ERR: " + line)
+        if self._stderr_log:
+            try:
+                self._stderr_log.write(line + "\n")
+                self._stderr_log.flush()
+            except OSError:
+                pass
+
     def _on_stdout(self):
-        data = self._process.readAllStandardOutput().data()
-        self._stdout_buf += data
-        self._flush_buffer("stdout")
+        if self._process:
+            data = self._process.readAllStandardOutput().data()
+            self._stdout_buf += data
+            self._flush_buffer("stdout")
 
     def _on_stderr(self):
-        data = self._process.readAllStandardError().data()
-        self._stderr_buf += data
-        self._flush_buffer("stderr")
+        if self._process:
+            data = self._process.readAllStandardError().data()
+            self._stderr_buf += data
+            self._flush_buffer("stderr")
 
     def _flush_buffer(self, channel: str):
         """Split buffer on newlines, emit complete lines, keep partial tail."""
         if channel == "stdout":
             buf = self._stdout_buf
-            prefix = "OUT: "
-            log_fh = self._stdout_log
+            handler = self._handle_stdout_line
         else:
             buf = self._stderr_buf
-            prefix = "ERR: "
-            log_fh = self._stderr_log
+            handler = self._handle_stderr_line
 
         while b"\n" in buf:
             line_bytes, buf = buf.split(b"\n", 1)
             line = line_bytes.decode("utf-8", errors="replace").rstrip("\r")
-            self.log_line.emit(prefix + line)
-            if log_fh:
-                try:
-                    log_fh.write(line + "\n")
-                    log_fh.flush()
-                except OSError:
-                    pass
+            handler(line)
 
         if channel == "stdout":
             self._stdout_buf = buf
@@ -241,22 +259,17 @@ class PipelineRunner(QObject):
 
     def _flush_remaining(self):
         """Emit any trailing partial lines on process exit."""
-        for channel, buf, prefix, log_fh in [
-            ("stdout", self._stdout_buf, "OUT: ", self._stdout_log),
-            ("stderr", self._stderr_buf, "ERR: ", self._stderr_log),
-        ]:
-            if buf:
-                line = buf.decode("utf-8", errors="replace").rstrip("\r")
-                if line:
-                    self.log_line.emit(prefix + line)
-                    if log_fh:
-                        try:
-                            log_fh.write(line + "\n")
-                            log_fh.flush()
-                        except OSError:
-                            pass
-        self._stdout_buf = b""
-        self._stderr_buf = b""
+        if self._stdout_buf:
+            line = self._stdout_buf.decode("utf-8", errors="replace").rstrip("\r")
+            if line:
+                self._handle_stdout_line(line)
+            self._stdout_buf = b""
+
+        if self._stderr_buf:
+            line = self._stderr_buf.decode("utf-8", errors="replace").rstrip("\r")
+            if line:
+                self._handle_stderr_line(line)
+            self._stderr_buf = b""
 
     def _determine_final_state(self, exit_code: int) -> RunnerState:
         """Determine final state using evidence order per design spec C.
@@ -319,10 +332,32 @@ class PipelineRunner(QObject):
         self.started.emit()
 
     def _on_finished(self, exit_code, _exit_status):
+        # FINAL DRAIN: Ensure we capture any bytes remaining in QProcess buffers.
+        if self._process:
+            self._stdout_buf += self._process.readAllStandardOutput().data()
+            self._flush_buffer("stdout")
+            
+            self._stderr_buf += self._process.readAllStandardError().data()
+            self._flush_buffer("stderr")
+
         self._flush_remaining()
-        self._close_log_files()
-        final = self._determine_final_state(exit_code)
+        
+        # Resolve final state using status contract if available
+        code = None
+        errors = []
+        if self._run_dir:
+            status_path = os.path.join(self._run_dir, "status.json")
+            code, errors = _read_final_status(status_path, is_finished=True)
+            self.final_status_code = code
+            self.final_errors = errors
+        
+        if self._run_dir and code is not None:
+            final = self._resolve_final_state(code, exit_code)
+        else:
+            final = self._determine_final_state(exit_code)
+            
         self._set_state(final)
+        self._close_log_files()
         self.finished.emit(exit_code)
 
     def _on_error(self, proc_error):
@@ -338,7 +373,7 @@ class PipelineRunner(QObject):
         self.error.emit(msg)
 
 
-def _read_final_status(status_path: str) -> tuple[str | None, list[str]]:
+def _read_final_status(status_path: str, is_finished: bool = False) -> tuple[str | None, list[str]]:
     """Read and validate status.json, returning (status_or_code, errors_list).
 
     Returns (status_or_code, errors_list).
@@ -346,7 +381,8 @@ def _read_final_status(status_path: str) -> tuple[str | None, list[str]]:
     Codes:
       "MISSING_FILE": File does not exist
       "MALFORMED_STATUS": JSON parse failed
-      "NOT_FINAL": phase != "final"
+      "NOT_FINAL": phase != "final" (process still running)
+      "NONFINAL_WITH_EXIT": phase != "final" but process has exited
       "SCHEMA_MISMATCH": schema_version missing OR != 1 OR not int
       "MISSING_STATUS": phase="final" but status key missing
       "BAD_STATUS": status present but not in {success, error, cancelled}
@@ -363,6 +399,8 @@ def _read_final_status(status_path: str) -> tuple[str | None, list[str]]:
 
     phase = data.get("phase")
     if phase != "final":
+        if is_finished:
+            return "NONFINAL_WITH_EXIT", []
         return "NOT_FINAL", []
 
     # Enforce schema versioning

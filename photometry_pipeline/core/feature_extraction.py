@@ -142,46 +142,65 @@ def extract_features(chunk, config):
             # Constraints
             dist_samples = max(1, int(config.peak_min_distance_sec * chunk.fs_hz))
 
+            total_peaks = 0
+            total_auc = 0.0
+
             # Segment iteration
             for s, e in zip(starts, ends):
-                seg_trace_use = trace_use[s:e]
+                seg_y = trace_use[s:e]
+                seg_t = time[s:e]
+                seg_valid = np.isfinite(seg_y)
                 
-                # Apply local valid mask to segment if needed for peak finding/AUC (though AUC handles NaNs or assumes finite depending on implementation). 
-                # Our implementation relies on `find_peaks` which dislikes NaNs.
-                seg_valid = is_valid_use[s:e]
-                
-                # If segment is entirely invalid, skip
                 if not np.any(seg_valid):
                     continue
-                    
-                # Otherwise, interpolate or extract clean seg
-                # Actually, find_peaks expects continuous array. Missing data in segments is an edge case.
-                # If there are NaNs inside the segment, find_peaks might fail.
-                # Since requirement is D1/D2, we need clean_trace_use for stats and baseline.
-                seg_time = time[s:e]
                 
-                # For peaks, finding peaks on NaNs raises an error, so we remove NaNs or just skip 
+                # Ensure qc_counts exists
+                if not hasattr(chunk, 'metadata') or chunk.metadata is None: chunk.metadata = {}
+                qc_counts = chunk.metadata.setdefault('qc_counts', {})
+                
+                # Check for NaNs within THIS segment window
                 if not np.all(seg_valid):
-                     # Skip segment if it contains any NaNs to be perfectly safe, or drop them
-                     seg_trace_clean = seg_trace_use[seg_valid]
-                else:
-                     seg_trace_clean = seg_trace_use
-                     
-                if len(seg_trace_clean) < 2:
-                    if not hasattr(chunk, 'metadata') or chunk.metadata is None: chunk.metadata = {}
-                    chunk.metadata.setdefault('qc_warnings', []).append(f"DEGENERATE[DD5] Empty or single-element segment after NaN masking in ROI {roi}")
-                    continue
+                    qc_counts['DD6'] = qc_counts.get('DD6', 0) + 1
+                    warning = f"DEGENERATE[DD6] Analysis signal has NaNs inside raw-finite segment {s}:{e} in ROI '{roi}', splitting into finite runs (nan_gap_split)."
+                    if warning not in chunk.metadata.get('qc_warnings', []):
+                         chunk.metadata.setdefault('qc_warnings', []).append(warning)
+                    
+                    # Filter-artifact distinction
+                    if use_filter:
+                        seg_valid_raw = np.isfinite(trace[s:e])
+                        # If raw was all finite but filtered is not, it's a filter artifact
+                        if np.all(seg_valid_raw):
+                            qc_counts['FILTER_NAN'] = qc_counts.get('FILTER_NAN', 0) + 1
+                            f_warning = f"DEGENERATE[FILTER_NAN] lowpass_filter introduced NaNs inside segment {s}:{e} in ROI '{roi}'."
+                            if f_warning not in chunk.metadata.get('qc_warnings', []):
+                                chunk.metadata.setdefault('qc_warnings', []).append(f_warning)
                 
-                # Find Peaks
-                peaks, _ = find_peaks(seg_trace_clean, 
-                                      height=thresh, 
-                                      distance=dist_samples)
-                total_peaks += len(peaks)
+                # Split into contiguous finite runs WITHIN the segment window
+                padded_run = np.concatenate(([False], seg_valid, [False]))
+                diff_run = np.diff(padded_run.astype(int))
+                run_starts = np.where(diff_run == 1)[0]
+                run_ends = np.where(diff_run == -1)[0]
                 
-                # AUC above threshold
-                total_auc += compute_auc_above_threshold(seg_trace_clean, auc_baseline, 
-                                                         fs_hz=chunk.fs_hz, 
-                                                         time_s=seg_time[seg_valid] if not np.all(seg_valid) else seg_time)
+                for rs, re in zip(run_starts, run_ends):
+                    run_y = seg_y[rs:re]
+                    run_t = seg_t[rs:re]
+                    
+                    if len(run_y) < 2:
+                        # Emit DD5 for EACH run shorter than 2 samples with absolute indices
+                        chunk.metadata.setdefault('qc_warnings', []).append(
+                            f"DEGENERATE[DD5] Finite run {s+rs}:{s+re} in ROI '{roi}' length < 2"
+                        )
+                        qc_counts['DD5'] = qc_counts.get('DD5', 0) + 1
+                        continue
+                
+                    # Compute peaks and AUC for this run
+                    peaks, _ = find_peaks(run_y, height=thresh, distance=dist_samples)
+                    total_peaks += len(peaks)
+                    total_auc += compute_auc_above_threshold(
+                        run_y, auc_baseline, 
+                        fs_hz=chunk.fs_hz, 
+                        time_s=run_t
+                    )
             
             row = {
                 'chunk_id': chunk.chunk_id,
@@ -194,7 +213,6 @@ def extract_features(chunk, config):
                 'peak_count': total_peaks,
                 'auc': total_auc,
             }
-            
-        rows.append(row)
+            rows.append(row)
         
     return pd.DataFrame(rows)
