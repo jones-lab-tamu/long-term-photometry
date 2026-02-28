@@ -16,6 +16,9 @@ def main():
     parser.add_argument('--glob', dest='file_glob', help="Alias for --file-glob")
     parser.add_argument('--overwrite', action='store_true', help="Overwrite output directory")
     parser.add_argument('--mode', choices=['phasic', 'tonic'], default='phasic', help="Analysis mode: 'phasic' (dynamic fit) or 'tonic' (global fit).")
+    parser.add_argument('--include-rois', type=str, default=None, help="Comma-separated list of ROIs to process exclusively")
+    parser.add_argument('--exclude-rois', type=str, default=None, help="Comma-separated list of ROIs to ignore")
+    parser.add_argument('--events-path', type=str, default=None, help="Absolute path to parent events.ndjson to append ROI selection event to")
     
     args = parser.parse_args()
     
@@ -36,8 +39,25 @@ def main():
         # Init Pipeline
         pipeline = Pipeline(config, mode=args.mode)
         
-        # Run
-        pipeline.run(args.input, args.out, args.format, args.recursive, args.file_glob)
+        inc_rois = [r.strip() for r in args.include_rois.split(',') if r.strip()] if args.include_rois else None
+        exc_rois = [r.strip() for r in args.exclude_rois.split(',') if r.strip()] if args.exclude_rois else None
+        
+        # Run pipeline (ROI selection resolved inside pipeline.run)
+        pipeline.run(
+            args.input, args.out, args.format, args.recursive, args.file_glob,
+            include_rois=inc_rois, exclude_rois=exc_rois
+        )
+        
+        # Emit inputs:roi_selection event via EventEmitter if events_path provided
+        if args.events_path and pipeline.roi_selection is not None:
+            from photometry_pipeline.core.events import EventEmitter
+            
+            run_id = os.path.basename(args.out)
+            emitter = EventEmitter(args.events_path, run_id, args.out, file_mode="a",
+                                   allow_makedirs=False)
+            emitter.emit("inputs", "roi_selection", "ROI selection resolved",
+                         payload=pipeline.roi_selection)
+            emitter.close()
         
     except Exception as e:
         print(f"CRITICAL FAILURE: {e}")

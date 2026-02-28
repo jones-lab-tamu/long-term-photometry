@@ -37,6 +37,7 @@ if _repo_root not in sys.path:
 
 try:
     from photometry_pipeline.core.utils import natural_sort_key
+    from photometry_pipeline.core.events import EventEmitter
 except ImportError:
     print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.")
     raise SystemExit(1)
@@ -72,55 +73,7 @@ def _normalize_event_dict(event: dict) -> dict:
     return obj
 
 
-
-
-# ======================================================================
-# NDJSON Event Emitter
-# ======================================================================
-
-class EventEmitter:
-    """Writes NDJSON events to events_path, one JSON object per line."""
-
-    def __init__(self, events_path, run_id, run_dir, file_mode="a",
-                 allow_makedirs=True):
-        self._run_id = run_id
-        self._run_dir = run_dir
-        self._fh = None
-        if events_path:
-            parent = os.path.dirname(events_path) or "."
-            if allow_makedirs:
-                os.makedirs(parent, exist_ok=True)
-                self._fh = open(events_path, file_mode, encoding="utf-8")
-            else:
-                # Side-effect free: only open if parent already exists
-                if os.path.isdir(parent):
-                    self._fh = open(events_path, file_mode, encoding="utf-8")
-                # else: stay disabled (self._fh remains None)
-
-    def emit(self, stage, event_type, message, **kwargs):
-        """Emit one NDJSON event line. schema_version: 1 is forced."""
-        raw_obj = {
-            "time_iso": datetime.now().isoformat(),
-            "run_id": self._run_id,
-            "run_dir": self._run_dir,
-            "stage": stage,
-            "type": event_type,
-            "message": message,
-            **kwargs,
-        }
-        
-        # Producer-side discipline: force schema_version: 1 (int)
-        obj = _normalize_event_dict(raw_obj)
-        
-        if self._fh:
-            # separators=(",", ":") for compact NDJSON (standard compliant)
-            self._fh.write(json.dumps(obj, separators=(",", ":")) + "\n")
-            self._fh.flush()
-
-    def close(self):
-        if self._fh:
-            self._fh.close()
-            self._fh = None
+# EventEmitter is now imported from photometry_pipeline.core.events
 
 # ======================================================================
 # Cancel Flag
@@ -159,6 +112,8 @@ def parse_args():
     parser.add_argument('--config', required=True)
     parser.add_argument('--format', required=True, choices=['rwd', 'npm', 'auto'])
     parser.add_argument('--overwrite', action='store_true')
+    parser.add_argument('--include-rois', type=str, default=None, help="Comma-separated list of ROIs to process exclusively")
+    parser.add_argument('--exclude-rois', type=str, default=None, help="Comma-separated list of ROIs to ignore")
     parser.add_argument('--sessions-per-hour', type=int, help="Force sessions per hour (integer)")
     parser.add_argument('--session-duration-s', type=float, help="Recording duration in seconds (data length per chunk). If provided, validated against traces.")
     parser.add_argument('--smooth-window-s', type=float, default=1.0)
@@ -400,6 +355,10 @@ def main():
             if args.run_id:
                 argv.extend(["--run-id", args.run_id])
         argv.extend(["--config", args.config, "--format", args.format])
+        if args.include_rois:
+            argv.extend(["--include-rois", args.include_rois])
+        if args.exclude_rois:
+            argv.extend(["--exclude-rois", args.exclude_rois])
         if args.sessions_per_hour is not None:
             argv.extend(["--sessions-per-hour", str(args.sessions_per_hour)])
         if args.session_duration_s is not None:
@@ -542,6 +501,7 @@ def main():
         analyze_script = os.path.join(root_dir, 'analyze_photometry.py')
         
         emitter.emit("tonic", "start", "Running tonic analysis")
+        emitter.close()  # Release file lock so subprocess can append events
         cmd_tonic = [sys.executable, analyze_script,
                      '--input', args.input,
                      '--out', tonic_out,
@@ -549,7 +509,13 @@ def main():
                      '--mode', 'tonic',
                      '--format', args.format,
                      '--recursive', '--overwrite']
-        manifest['commands'].append(run_cmd(cmd_tonic))
+        if args.include_rois: cmd_tonic.extend(['--include-rois', args.include_rois])
+        if args.exclude_rois: cmd_tonic.extend(['--exclude-rois', args.exclude_rois])
+        if events_path: cmd_tonic.extend(['--events-path', events_path])
+        try:
+            manifest['commands'].append(run_cmd(cmd_tonic))
+        finally:
+            emitter = EventEmitter(events_path, run_id, run_dir, file_mode="a")
         emitter.emit("tonic", "done", "Tonic analysis complete")
 
         check_cancel(cancel_flag_path, emitter, "tonic", manifest_path, manifest)
@@ -558,6 +524,7 @@ def main():
         # 5. Phasic Analysis
         # ============================================================
         emitter.emit("phasic", "start", "Running phasic analysis")
+        emitter.close()  # Release file lock so subprocess can append events
         cmd_phasic = [sys.executable, analyze_script,
                       '--input', args.input,
                       '--out', phasic_out,
@@ -565,7 +532,13 @@ def main():
                       '--mode', 'phasic',
                       '--format', args.format,
                       '--recursive', '--overwrite']
-        manifest['commands'].append(run_cmd(cmd_phasic))
+        if args.include_rois: cmd_phasic.extend(['--include-rois', args.include_rois])
+        if args.exclude_rois: cmd_phasic.extend(['--exclude-rois', args.exclude_rois])
+        if events_path: cmd_phasic.extend(['--events-path', events_path])
+        try:
+            manifest['commands'].append(run_cmd(cmd_phasic))
+        finally:
+            emitter = EventEmitter(events_path, run_id, run_dir, file_mode="a")
         emitter.emit("phasic", "done", "Phasic analysis complete")
 
         check_cancel(cancel_flag_path, emitter, "phasic", manifest_path, manifest)

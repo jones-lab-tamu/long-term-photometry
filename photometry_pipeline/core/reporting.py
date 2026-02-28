@@ -34,7 +34,7 @@ def make_json_safe(obj: Any) -> Any:
     # Fallback
     return str(obj)
 
-def generate_run_report(config: Config, output_dir: str):
+def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = None):
     """
     Generates the mandatory run-report artifact.
     Freezes analytical assumptions and flags tonic-attenuation risk.
@@ -137,6 +137,9 @@ def generate_run_report(config: Config, output_dir: str):
         "derived_settings": derived_settings,
         "analytical_contract": contract
     }
+    
+    if roi_selection is not None:
+        report["roi_selection"] = make_json_safe(roi_selection)
     
     with open(os.path.join(output_dir, "run_report.json"), "w") as f:
         json.dump(report, f, indent=2)

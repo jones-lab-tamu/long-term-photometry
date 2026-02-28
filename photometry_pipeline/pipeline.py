@@ -50,6 +50,8 @@ class Pipeline:
         }
         self.roi_map = {}
         self._pass1_manifest = []
+        self._selected_rois = None
+        self.roi_selection = None
 
     def discover_files(self, input_path: str, recursive: bool = False, file_glob: str = "*.csv", force_format: str = 'auto'):
         if force_format == 'rwd':
@@ -96,6 +98,7 @@ class Pipeline:
                 try:
                     fmt = self._get_format(fpath, force_format)
                     chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                    if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
                     
                     if not self.roi_map and chunk.metadata.get('roi_map'):
                         self.roi_map = chunk.metadata['roi_map']
@@ -126,6 +129,7 @@ class Pipeline:
                 try:
                     fmt = self._get_format(fpath, force_format)
                     chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                    if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
                     
                     if not self.roi_map and chunk.metadata.get('roi_map'):
                         self.roi_map = chunk.metadata['roi_map']
@@ -150,6 +154,7 @@ class Pipeline:
                 try:
                     fmt = self._get_format(fpath, force_format)
                     chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                    if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
                     
                     for ch_idx, ch_name in enumerate(chunk.channel_names):
                         params = self.stats.global_fit_params.get(ch_name)
@@ -195,6 +200,7 @@ class Pipeline:
                 try:
                     fmt = self._get_format(fpath, force_format)
                     chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                    if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
                     for ch_idx, ch_name in enumerate(chunk.channel_names):
                         if ch_name not in acc_uv:
                             acc_uv[ch_name] = []
@@ -318,6 +324,7 @@ class Pipeline:
             try:
                 fmt = self._get_format(fpath, force_format)
                 chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
                 
                 # Capture ROI map if missing (e.g. if Pass 1 failed or skipped)
                 if not self.roi_map and chunk.metadata.get("roi_map"):
@@ -509,7 +516,18 @@ class Pipeline:
             except Exception as e:
                 logging.warning(f"Viz failure for {roi}: {e}")
                 
-    def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv"):
+    def _apply_roi_filter(self, chunk):
+        """Filter chunk data to only include channels in self._selected_rois."""
+        selected = set(self._selected_rois)
+        keep_idx = [i for i, name in enumerate(chunk.channel_names) if name in selected]
+        chunk.channel_names = [chunk.channel_names[i] for i in keep_idx]
+        chunk.uv_raw = chunk.uv_raw[:, keep_idx]
+        chunk.sig_raw = chunk.sig_raw[:, keep_idx]
+        if chunk.metadata and "roi_map" in chunk.metadata:
+            chunk.metadata["roi_map"] = {k: v for k, v in chunk.metadata["roi_map"].items() if k in selected}
+        return chunk
+
+    def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv", include_rois: List[str] = None, exclude_rois: List[str] = None):
         # Lazy import to avoid GUI side effects at module level
         from .viz import plots
         
@@ -517,8 +535,49 @@ class Pipeline:
         os.makedirs(os.path.join(output_dir, 'qc'), exist_ok=True)
         self.discover_files(input_dir, recursive, glob_pattern, force_format=force_format)
         
+        # --- ROI Discovery & Resolution ---
+        channels_seen = []
+        for i, fpath in enumerate(self.file_list):
+            try:
+                fmt = self._get_format(fpath, force_format)
+                chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                channels_seen.append(chunk.channel_names)
+            except Exception as e:
+                logging.warning(f"ROI Discovery: Failed to read {fpath}: {e}")
+        
+        if not channels_seen:
+            raise RuntimeError("No valid data files found for ROI discovery.")
+            
+        # Intersection over all valid chunks, preserving discovered order from first chunk
+        channel_sets = [set(cx) for cx in channels_seen]
+        discovered_rois = [r for r in channels_seen[0] if all(r in cs for cs in channel_sets)]
+                
+        selected_rois = list(discovered_rois)
+        
+        if include_rois is not None:
+             missing = [r for r in include_rois if r not in discovered_rois]
+             if missing:
+                 raise ValueError(f"Validation Error: Included ROIs not found in discovered ROIs: {missing}")
+             # Preserve discovered order, filter by include_rois
+             selected_rois = [r for r in discovered_rois if r in include_rois]
+             
+        if exclude_rois is not None:
+             missing = [r for r in exclude_rois if r not in discovered_rois]
+             if missing:
+                 logging.warning(f"Excluded ROIs not found in discovered ROIs (ignoring): {missing}")
+             selected_rois = [r for r in selected_rois if r not in exclude_rois]
+             
+        self.roi_selection = {
+            "discovered_rois": discovered_rois,
+            "include_rois": include_rois,
+            "exclude_rois": exclude_rois,
+            "selected_rois": selected_rois
+        }
+        
+        self._selected_rois = selected_rois
+
         # 1. Run Report (Pre-Analysis)
-        generate_run_report(self.config, output_dir)
+        generate_run_report(self.config, output_dir, roi_selection=self.roi_selection)
         
         self.run_pass_1(force_format)
         
