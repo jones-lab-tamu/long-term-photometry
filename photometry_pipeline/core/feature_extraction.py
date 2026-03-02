@@ -42,6 +42,19 @@ def compute_auc_above_threshold(dff, baseline_value, fs_hz=None, time_s=None):
         
     return auc
 
+def get_event_signal_array(chunk, config):
+    signal_type = getattr(config, 'event_signal', 'dff')
+    if signal_type == 'dff':
+        if getattr(chunk, 'dff', None) is None:
+            raise ValueError("chunk.dff was not computed but config.event_signal='dff'")
+        return chunk.dff
+    elif signal_type == 'delta_f':
+        if getattr(chunk, 'delta_f', None) is None:
+            raise ValueError("chunk.delta_f was not computed but config.event_signal='delta_f'")
+        return chunk.delta_f
+    else:
+        raise ValueError(f"Unknown event_signal: {signal_type}")
+
 def extract_features(chunk, config):
     """
     Extracts phasic features from a Chunk object.
@@ -58,15 +71,14 @@ def extract_features(chunk, config):
         pd.DataFrame: One row per ROI containing the extracted features.
         Columns: chunk_id, source_file, roi, mean, median, std, mad, peak_count, auc.
     """
-    if chunk.dff is None:
-        return pd.DataFrame()
+    signal_array = get_event_signal_array(chunk, config)
         
     rows = []
-    n_rois = chunk.dff.shape[1]
+    n_rois = signal_array.shape[1]
     
     for i in range(n_rois):
         roi = chunk.channel_names[i]
-        trace = chunk.dff[:, i]
+        trace = signal_array[:, i]
         time = chunk.time_sec
         
         # Valid segments
@@ -112,7 +124,9 @@ def extract_features(chunk, config):
             sigma_robust = 1.4826 * mad
             
             # Determine Threshold
-            if config.peak_threshold_method == 'mean_std':
+            if config.peak_threshold_method == 'absolute':
+                thresh = getattr(config, 'peak_threshold_abs', 0.0)
+            elif config.peak_threshold_method == 'mean_std':
                 thresh = mu + config.peak_threshold_k * sigma
             elif config.peak_threshold_method == 'percentile':
                 thresh = np.nanpercentile(clean_finite, config.peak_threshold_percentile)
@@ -130,7 +144,7 @@ def extract_features(chunk, config):
                 else:
                     thresh = med + config.peak_threshold_k * sigma_robust
             else:
-                raise ValueError(f"Unknown peak_threshold_method: {config.peak_threshold_method}. Supported: ['mean_std', 'percentile', 'median_mad']")
+                raise ValueError(f"Unknown peak_threshold_method: {config.peak_threshold_method}. Supported: ['mean_std', 'percentile', 'median_mad', 'absolute']")
                 
             # AUC Baseline
             auc_baseline_method = getattr(config, 'event_auc_baseline', 'zero')

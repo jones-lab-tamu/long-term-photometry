@@ -36,6 +36,7 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 try:
+    from photometry_pipeline.config import Config
     from photometry_pipeline.core.utils import natural_sort_key
     from photometry_pipeline.core.events import EventEmitter
 except ImportError:
@@ -118,6 +119,7 @@ def parse_args():
     parser.add_argument('--sessions-per-hour', type=int, help="Force sessions per hour (integer)")
     parser.add_argument('--session-duration-s', type=float, help="Recording duration in seconds (data length per chunk). If provided, validated against traces.")
     parser.add_argument('--smooth-window-s', type=float, default=1.0)
+    parser.add_argument('--event-signal', type=str, choices=['dff', 'delta_f'], help="Signal to use for peak/event detection")
     parser.add_argument('--validate-only', action='store_true',
                         help=(
                             "Validate inputs and exit without analysis. "
@@ -472,10 +474,28 @@ def main():
     # Initial write (phase="running")
     _atomic_write_json(status_path, status_data)
 
+    # Determine effective event signal for stamping
+    effective_event_signal = "dff"
+    if args.event_signal is not None:
+        effective_event_signal = args.event_signal
+    else:
+        try:
+            cfg = Config.from_yaml(args.config)
+            effective_event_signal = getattr(cfg, "event_signal", "dff")
+        except Exception as e:
+            print(f"WARNING: Failed to parse config for runner stamping: {e}")
+            effective_event_signal = "dff" # Expliclit default fallback
+
     # -- Open event emitter --
     emitter = EventEmitter(events_path, run_id, run_dir, file_mode="w")
     emitter.emit("engine", "start", "Engine starting")
-    emitter.emit("engine", "context", "Run context initialized", payload={"run_type": "full", "features_extracted": False if args.traces_only else None, "preview": None, "traces_only": args.traces_only})
+    emitter.emit("engine", "context", "Run context initialized", payload={
+        "run_type": "full", 
+        "features_extracted": False if args.traces_only else None, 
+        "preview": None, 
+        "traces_only": args.traces_only, 
+        "event_signal": effective_event_signal
+    })
 
     try:
         # -- Check cancel immediately --
@@ -515,6 +535,7 @@ def main():
         if args.include_rois: cmd_tonic.extend(['--include-rois', args.include_rois])
         if args.exclude_rois: cmd_tonic.extend(['--exclude-rois', args.exclude_rois])
         if args.traces_only: cmd_tonic.append('--traces-only')
+        if args.event_signal: cmd_tonic.extend(['--event-signal', args.event_signal])
         if events_path: cmd_tonic.extend(['--events-path', events_path])
         try:
             manifest['commands'].append(run_cmd(cmd_tonic))
@@ -539,6 +560,7 @@ def main():
         if args.include_rois: cmd_phasic.extend(['--include-rois', args.include_rois])
         if args.exclude_rois: cmd_phasic.extend(['--exclude-rois', args.exclude_rois])
         if args.traces_only: cmd_phasic.append('--traces-only')
+        if args.event_signal: cmd_phasic.extend(['--event-signal', args.event_signal])
         if events_path: cmd_phasic.extend(['--events-path', events_path])
         try:
             manifest['commands'].append(run_cmd(cmd_phasic))

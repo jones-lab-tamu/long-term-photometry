@@ -51,9 +51,11 @@ class Config:
     peak_threshold_method: str = 'mean_std'
     peak_threshold_k: float = 2.0
     peak_threshold_percentile: float = 95.0
+    peak_threshold_abs: float = 0.0 # Used only when method is 'absolute'
     peak_min_distance_sec: float = 0.5 # Default kept at 0.5 per user request (was 1.0 in previous file but user asked to keep default 0.5)
     peak_pre_filter: str = 'none'
     event_auc_baseline: str = 'zero'
+    event_signal: Literal['dff', 'delta_f'] = 'dff'
     
     # adapters
     adapter_value_nan_policy: str = 'strict'
@@ -100,8 +102,8 @@ class Config:
                 raise ValueError(f"Invalid npm_time_axis: {data['npm_time_axis']}. Allowed: {{'system_timestamp', 'computer_timestamp'}}")
                 
         if 'peak_threshold_method' in data:
-            if data['peak_threshold_method'] not in {'mean_std', 'percentile', 'median_mad'}:
-                raise ValueError(f"Invalid peak_threshold_method: {data['peak_threshold_method']}. Allowed: {{'mean_std', 'percentile', 'median_mad'}}")
+            if data['peak_threshold_method'] not in {'mean_std', 'percentile', 'median_mad', 'absolute'}:
+                raise ValueError(f"Invalid peak_threshold_method: {data['peak_threshold_method']}. Allowed: {{'mean_std', 'percentile', 'median_mad', 'absolute'}}")
 
         if 'peak_pre_filter' in data:
             if data['peak_pre_filter'] not in {'none', 'lowpass'}:
@@ -111,8 +113,18 @@ class Config:
              if data['event_auc_baseline'] not in {'zero', 'median'}:
                 raise ValueError(f"Invalid event_auc_baseline: {data['event_auc_baseline']}. Allowed: {{'zero', 'median'}}")
                 
+        if 'event_signal' in data:
+             if data['event_signal'] not in {'dff', 'delta_f'}:
+                raise ValueError(f"Invalid event_signal: {data['event_signal']}. Allowed: {{'dff', 'delta_f'}}")
+                
         if 'adapter_value_nan_policy' in data:
              if data['adapter_value_nan_policy'] not in {'strict', 'mask'}:
                 raise ValueError(f"Invalid adapter_value_nan_policy: {data['adapter_value_nan_policy']}. Allowed: {{'strict', 'mask'}}")
         
-        return cls(**data)
+        obj = cls(**data)
+        
+        if obj.peak_threshold_method == 'absolute':
+            if obj.peak_threshold_abs <= 0.0:
+                raise ValueError("peak_threshold_abs must be > 0 when peak_threshold_method='absolute'")
+                
+        return obj

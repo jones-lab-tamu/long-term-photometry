@@ -155,7 +155,9 @@ def get_local_peak_indices(trace_arr, fs, config):
     thresh = np.inf
     
     # Calculate stats on global clean trace
-    if method == 'mean_std':
+    if method == 'absolute':
+        thresh = getattr(config, 'peak_threshold_abs', 0.0)
+    elif method == 'mean_std':
         mu = np.mean(clean_trace)
         sigma = np.std(clean_trace)
         thresh = mu + config.peak_threshold_k * sigma

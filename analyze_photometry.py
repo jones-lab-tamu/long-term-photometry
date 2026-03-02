@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--exclude-rois', type=str, default=None, help="Comma-separated list of ROIs to ignore")
     parser.add_argument('--events-path', type=str, default=None, help="Absolute path to parent events.ndjson to append ROI selection event to")
     parser.add_argument('--traces-only', action='store_true', help="Run traces and QC, skip feature extraction (features.csv) and feature-dependent summaries. This pipeline has no separate signal event-detection stage.")
+    parser.add_argument('--event-signal', type=str, choices=['dff', 'delta_f'], help="Signal to use for peak detection features (default from config: dff)")
     
     args = parser.parse_args()
     
@@ -36,6 +37,10 @@ def main():
     try:
         # Load Config
         config = Config.from_yaml(args.config)
+        
+        # Apply CLI override for event_signal
+        if args.event_signal is not None:
+            config.event_signal = args.event_signal
         
         # Init Pipeline
         pipeline = Pipeline(config, mode=args.mode)

@@ -132,7 +132,8 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
             "run_type": "full",
             "features_extracted": False if traces_only else None,
             "preview": None,
-            "traces_only": traces_only
+            "traces_only": traces_only,
+            "event_signal": getattr(config, 'event_signal', 'dff')
         },
         "configuration": config_snapshot,
         "derived_settings": derived_settings,
