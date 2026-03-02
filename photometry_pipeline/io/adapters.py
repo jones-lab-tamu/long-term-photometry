@@ -215,7 +215,10 @@ def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
     channel_data.sort(key=lambda x: x[0])
     
     n_rois = len(channel_data)
-    names = _create_canonical_names(n_rois)
+    # POLICY: We preserve ROI base names derived directly from column headers (e.g., Region_0).
+    # This ensures user labels (including underscores) are not lost but rather round-trip 
+    # successfully into roi_selection and downstream packaging.
+    names = [x[0] for x in channel_data]
     roi_map = {names[i]: {"raw_uv": x[1], "raw_sig": x[2]} for i, x in enumerate(channel_data)}
     
     uv_raw = df[[x[1] for x in channel_data]].values

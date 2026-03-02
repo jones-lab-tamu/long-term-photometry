@@ -52,6 +52,7 @@ class Pipeline:
         self._pass1_manifest = []
         self._selected_rois = None
         self.roi_selection = None
+        self.traces_only = False
 
     def discover_files(self, input_path: str, recursive: bool = False, file_glob: str = "*.csv", force_format: str = 'auto'):
         if force_format == 'rwd':
@@ -354,8 +355,15 @@ class Pipeline:
                 
                      chunk.dff = normalization.compute_dff(chunk, self.stats, self.config)
                 
-                feats_df = feature_extraction.extract_features(chunk, self.config)
-                all_features.append(feats_df)
+                # traces-only: skip feature extraction and all feature-derived outputs.
+                # NOTE: This pipeline does NOT perform event detection as a separate stage.
+                # "events" in this codebase refers to NDJSON lifecycle logging (engine:start,
+                # engine:context, etc.), not signal event detection.  The only analysis step
+                # gated here is feature_extraction.extract_features(), which computes
+                # per-chunk statistics (peak count, AUC, mean, etc.).
+                if not self.traces_only:
+                    feats_df = feature_extraction.extract_features(chunk, self.config)
+                    all_features.append(feats_df)
                 
                 trace_data = {'time_sec': chunk.time_sec}
                 for r_idx, roi in enumerate(chunk.channel_names):
@@ -527,7 +535,7 @@ class Pipeline:
             chunk.metadata["roi_map"] = {k: v for k, v in chunk.metadata["roi_map"].items() if k in selected}
         return chunk
 
-    def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv", include_rois: List[str] = None, exclude_rois: List[str] = None):
+    def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv", include_rois: List[str] = None, exclude_rois: List[str] = None, traces_only: bool = False):
         # Lazy import to avoid GUI side effects at module level
         from .viz import plots
         
@@ -575,9 +583,10 @@ class Pipeline:
         }
         
         self._selected_rois = selected_rois
+        self.traces_only = traces_only
 
         # 1. Run Report (Pre-Analysis)
-        generate_run_report(self.config, output_dir, roi_selection=self.roi_selection)
+        generate_run_report(self.config, output_dir, roi_selection=self.roi_selection, traces_only=traces_only)
         
         self.run_pass_1(force_format)
         

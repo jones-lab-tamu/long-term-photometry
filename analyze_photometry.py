@@ -19,6 +19,7 @@ def main():
     parser.add_argument('--include-rois', type=str, default=None, help="Comma-separated list of ROIs to process exclusively")
     parser.add_argument('--exclude-rois', type=str, default=None, help="Comma-separated list of ROIs to ignore")
     parser.add_argument('--events-path', type=str, default=None, help="Absolute path to parent events.ndjson to append ROI selection event to")
+    parser.add_argument('--traces-only', action='store_true', help="Run traces and QC, skip feature extraction (features.csv) and feature-dependent summaries. This pipeline has no separate signal event-detection stage.")
     
     args = parser.parse_args()
     
@@ -45,7 +46,8 @@ def main():
         # Run pipeline (ROI selection resolved inside pipeline.run)
         pipeline.run(
             args.input, args.out, args.format, args.recursive, args.file_glob,
-            include_rois=inc_rois, exclude_rois=exc_rois
+            include_rois=inc_rois, exclude_rois=exc_rois,
+            traces_only=args.traces_only
         )
         
         # Emit inputs:roi_selection event via EventEmitter if events_path provided

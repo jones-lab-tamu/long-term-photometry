@@ -1,0 +1,16 @@
+seed: 42
+experiment_name: "Phasic_QC_Test"
+subject: "M1"
+fs_hz: 50.0
+# Only valid Config keys here!
+channels:
+  Action:
+    wavelength: 470
+    photobleach_tau: 1e6
+    noise_sigma: 0.1
+    motion_artifact_amp: 0.5
+  Reference:
+    wavelength: 415
+    photobleach_tau: 1e6
+    noise_sigma: 0.05
+    motion_artifact_amp: 0.5

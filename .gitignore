@@ -17,12 +17,9 @@ env/
 Thumbs.db
 
 # Project Outputs & Temporary Data
-tests/out_*/
-tests/syn_*/
 out/
 debug_output/
 *.parquet
-*.csv
 
 # Contract (internal reference, not distributed)
 DELIVERABLES_CONTRACT.md
@@ -58,7 +55,23 @@ diagnostics.txt
 err*.txt
 RUNTHROUGH_REPORT.md
 recovered_tests_backup/
+
+# ---- tests: track code, ignore generated artifacts ----
+tests/out_*/
 tests/out*/
-tests/smoke_dataset_temp/
 tests/out_task_c_smoke/
-/tests/*
+tests/syn_*/
+tests/smoke_dataset_temp/
+tests/.pytest_cache/
+tests/**/.pytest_cache/
+tests/**/__pycache__/
+
+# Common pipeline run artifacts that may appear under tests/ or out dirs
+**/_analysis/
+**/events.ndjson
+**/status.json
+**/MANIFEST.json
+
+# Generated plots under test output dirs
+tests/**/*.png
+tests/**/*.pdf

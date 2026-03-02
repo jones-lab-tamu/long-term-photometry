@@ -34,7 +34,7 @@ def make_json_safe(obj: Any) -> Any:
     # Fallback
     return str(obj)
 
-def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = None):
+def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = None, traces_only: bool = False):
     """
     Generates the mandatory run-report artifact.
     Freezes analytical assumptions and flags tonic-attenuation risk.
@@ -130,8 +130,9 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
     report = {
         "run_context": {
             "run_type": "full",
-            "features_extracted": None,
-            "preview": None
+            "features_extracted": False if traces_only else None,
+            "preview": None,
+            "traces_only": traces_only
         },
         "configuration": config_snapshot,
         "derived_settings": derived_settings,

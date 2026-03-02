@@ -114,6 +114,7 @@ def parse_args():
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--include-rois', type=str, default=None, help="Comma-separated list of ROIs to process exclusively")
     parser.add_argument('--exclude-rois', type=str, default=None, help="Comma-separated list of ROIs to ignore")
+    parser.add_argument('--traces-only', action='store_true', help="Run traces and QC, skip feature extraction (features.csv) and feature-dependent summaries.")
     parser.add_argument('--sessions-per-hour', type=int, help="Force sessions per hour (integer)")
     parser.add_argument('--session-duration-s', type=float, help="Recording duration in seconds (data length per chunk). If provided, validated against traces.")
     parser.add_argument('--smooth-window-s', type=float, default=1.0)
@@ -437,7 +438,9 @@ def main():
         },
         "errors": [],
         "warnings": [],
-        "validation": None
+        "validation": None,
+        "features_extracted": False if args.traces_only else None,
+        "traces_only": args.traces_only
     }
     t0_status = time.time()
     status_path = os.path.join(run_dir, "status.json")
@@ -472,7 +475,7 @@ def main():
     # -- Open event emitter --
     emitter = EventEmitter(events_path, run_id, run_dir, file_mode="w")
     emitter.emit("engine", "start", "Engine starting")
-    emitter.emit("engine", "context", "Run context initialized", payload={"run_type": "full", "features_extracted": None, "preview": None})
+    emitter.emit("engine", "context", "Run context initialized", payload={"run_type": "full", "features_extracted": False if args.traces_only else None, "preview": None, "traces_only": args.traces_only})
 
     try:
         # -- Check cancel immediately --
@@ -511,6 +514,7 @@ def main():
                      '--recursive', '--overwrite']
         if args.include_rois: cmd_tonic.extend(['--include-rois', args.include_rois])
         if args.exclude_rois: cmd_tonic.extend(['--exclude-rois', args.exclude_rois])
+        if args.traces_only: cmd_tonic.append('--traces-only')
         if events_path: cmd_tonic.extend(['--events-path', events_path])
         try:
             manifest['commands'].append(run_cmd(cmd_tonic))
@@ -534,6 +538,7 @@ def main():
                       '--recursive', '--overwrite']
         if args.include_rois: cmd_phasic.extend(['--include-rois', args.include_rois])
         if args.exclude_rois: cmd_phasic.extend(['--exclude-rois', args.exclude_rois])
+        if args.traces_only: cmd_phasic.append('--traces-only')
         if events_path: cmd_phasic.extend(['--events-path', events_path])
         try:
             manifest['commands'].append(run_cmd(cmd_phasic))
@@ -610,8 +615,42 @@ def main():
         emitter.emit("plots", "start", "Generating per-ROI deliverables")
 
         feats_csv = os.path.join(phasic_out, 'features', 'features.csv')
-        df_feat = pd.read_csv(feats_csv)
-        regions = sorted(df_feat['roi'].unique())
+        has_features = os.path.exists(feats_csv)
+
+        if has_features:
+            df_feat = pd.read_csv(feats_csv)
+            regions = sorted(df_feat['roi'].unique())
+        else:
+            # traces-only: derive ROIs from canonical roi_selection in run_report.json
+            regions = None
+            report_path = os.path.join(phasic_out, 'run_report.json')
+            if os.path.exists(report_path):
+                try:
+                    rr = json.load(open(report_path, 'r'))
+                    roi_sel = rr.get('roi_selection', {})
+                    if roi_sel.get('selected_rois'):
+                        regions = list(roi_sel['selected_rois'])
+                    elif roi_sel.get('discovered_rois'):
+                        regions = list(roi_sel['discovered_rois'])
+                except Exception as e:
+                    print(f"WARNING: Failed to read roi_selection from run_report.json: {e}")
+            if regions is None:
+                print("WARNING: roi_selection not found in run_report.json; falling back to tonic_out")
+                report_path_t = os.path.join(tonic_out, 'run_report.json')
+                if os.path.exists(report_path_t):
+                    try:
+                        rr = json.load(open(report_path_t, 'r'))
+                        roi_sel = rr.get('roi_selection', {})
+                        if roi_sel.get('selected_rois'):
+                            regions = list(roi_sel['selected_rois'])
+                        elif roi_sel.get('discovered_rois'):
+                            regions = list(roi_sel['discovered_rois'])
+                    except Exception:
+                        pass
+            if regions is None:
+                regions = []
+                print("WARNING: Could not determine ROIs for traces-only packaging")
+            df_feat = None
         manifest['regions'] = regions
 
         for roi in regions:
@@ -623,43 +662,46 @@ def main():
             os.makedirs(reg_dir, exist_ok=True)
             files_written = []
 
-            roi_feat = df_feat[df_feat['roi'] == roi].copy()
-            roi_feat = roi_feat.sort_values('chunk_id')
+            if has_features:
+                roi_feat = df_feat[df_feat['roi'] == roi].copy()
+                roi_feat = roi_feat.sort_values('chunk_id')
 
-            # Diagnostic Selection (Day 0, H 12, S 0)
-            diag_idx = 12 * sessions_per_hour
-            candidates = roi_feat['chunk_id'].values
+                # Diagnostic Selection (Day 0, H 12, S 0)
+                diag_idx = 12 * sessions_per_hour
+                candidates = roi_feat['chunk_id'].values
 
-            if len(candidates) > diag_idx:
-                cid_diag = candidates[diag_idx]
+                if len(candidates) > diag_idx:
+                    cid_diag = candidates[diag_idx]
+                else:
+                    cid_diag = candidates[0]
+
+                manifest['deliverables'][roi] = {'diagnostic_chunk_id': int(cid_diag)}
+
+                # A. Phasic Correction Impact (3-Panel)
+                cmd_impact = [sys.executable, 'tools/plot_phasic_correction_impact.py',
+                              '--analysis-out', phasic_out,
+                              '--roi', roi,
+                              '--chunk-id', str(cid_diag),
+                              '--out', os.path.join(reg_dir, "phasic_correction_impact.png")]
+                manifest['commands'].append(run_cmd(cmd_impact))
+                files_written.append("phasic_correction_impact.png")
+
+                # Correction Data CSV
+                c_csv = os.path.join(phasic_out, 'phasic_intermediates', f"chunk_{cid_diag:04d}_{roi}.csv")
+                if not os.path.exists(c_csv):
+                     c_csv = os.path.join(phasic_out, 'phasic_intermediates', f"chunk_{cid_diag}_{roi}.csv")
+
+                if os.path.exists(c_csv):
+                    df_c = pd.read_csv(c_csv)
+                    rename_map = {'time_sec': 't_s', 'fit_ref': 'iso_fit_dynamic', 'dff': 'dff_dynamic'}
+                    df_c = df_c.rename(columns=rename_map)
+                    keep = ['t_s', 'sig_raw', 'iso_raw', 'iso_fit_dynamic', 'dff_dynamic', 'region', 'chunk_id']
+                    df_c['region'] = roi
+                    df_c['chunk_id'] = cid_diag
+                    df_c[keep].to_csv(os.path.join(reg_dir, "phasic_correction_impact_session.csv"), index=False)
+                    files_written.append("phasic_correction_impact_session.csv")
             else:
-                cid_diag = candidates[0]
-
-            manifest['deliverables'][roi] = {'diagnostic_chunk_id': int(cid_diag)}
-
-            # A. Phasic Correction Impact (3-Panel)
-            cmd_impact = [sys.executable, 'tools/plot_phasic_correction_impact.py',
-                          '--analysis-out', phasic_out,
-                          '--roi', roi,
-                          '--chunk-id', str(cid_diag),
-                          '--out', os.path.join(reg_dir, "phasic_correction_impact.png")]
-            manifest['commands'].append(run_cmd(cmd_impact))
-            files_written.append("phasic_correction_impact.png")
-
-            # Correction Data CSV
-            c_csv = os.path.join(phasic_out, 'phasic_intermediates', f"chunk_{cid_diag:04d}_{roi}.csv")
-            if not os.path.exists(c_csv):
-                 c_csv = os.path.join(phasic_out, 'phasic_intermediates', f"chunk_{cid_diag}_{roi}.csv")
-
-            if os.path.exists(c_csv):
-                df_c = pd.read_csv(c_csv)
-                rename_map = {'time_sec': 't_s', 'fit_ref': 'iso_fit_dynamic', 'dff': 'dff_dynamic'}
-                df_c = df_c.rename(columns=rename_map)
-                keep = ['t_s', 'sig_raw', 'iso_raw', 'iso_fit_dynamic', 'dff_dynamic', 'region', 'chunk_id']
-                df_c['region'] = roi
-                df_c['chunk_id'] = cid_diag
-                df_c[keep].to_csv(os.path.join(reg_dir, "phasic_correction_impact_session.csv"), index=False)
-                files_written.append("phasic_correction_impact_session.csv")
+                manifest['deliverables'][roi] = {}
 
             # B. Tonic Overview
             cmd_tonic_roi = [sys.executable, 'tools/plot_tonic_48h.py',
@@ -693,43 +735,45 @@ def main():
                 full_tonic.to_csv(os.path.join(reg_dir, "tonic_df_timeseries.csv"), index=False)
                 files_written.append("tonic_df_timeseries.csv")
 
-            # C. Phasic Time Series (Plots & CSV)
-            ts_dir = os.path.join(phasic_out, f'viz_{roi}')
-            cmd_ts = [sys.executable, 'tools/plot_phasic_time_series_summary.py',
-                      '--analysis-out', phasic_out,
-                      '--roi', roi,
-                      '--sessions-per-hour', str(sessions_per_hour),
-                      '--session-duration-s', str(session_duration_s),
-                      '--out-dir', ts_dir,
-                      '--export-csv']
-            manifest['commands'].append(run_cmd(cmd_ts))
+            if has_features:
+                # C. Phasic Time Series (Plots & CSV) — requires features
+                ts_dir = os.path.join(phasic_out, f'viz_{roi}')
+                cmd_ts = [sys.executable, 'tools/plot_phasic_time_series_summary.py',
+                          '--analysis-out', phasic_out,
+                          '--roi', roi,
+                          '--sessions-per-hour', str(sessions_per_hour),
+                          '--session-duration-s', str(session_duration_s),
+                          '--out-dir', ts_dir,
+                          '--export-csv']
+                manifest['commands'].append(run_cmd(cmd_ts))
 
-            # Copy Results
-            pairs = [
-                ("fig_phasic_peak_rate_timeseries.png", "phasic_peak_rate_timeseries.png"),
-                ("fig_phasic_auc_timeseries.png", "phasic_auc_timeseries.png"),
-                ("phasic_peak_rate_timeseries.csv", "phasic_peak_rate_timeseries.csv"),
-                ("phasic_auc_timeseries.csv", "phasic_auc_timeseries.csv")
-            ]
-            for src_name, dst_name in pairs:
-                s = os.path.join(ts_dir, src_name)
-                if os.path.exists(s):
-                    shutil.copy2(s, os.path.join(reg_dir, dst_name))
-                    files_written.append(dst_name)
+                # Copy Results
+                pairs = [
+                    ("fig_phasic_peak_rate_timeseries.png", "phasic_peak_rate_timeseries.png"),
+                    ("fig_phasic_auc_timeseries.png", "phasic_auc_timeseries.png"),
+                    ("phasic_peak_rate_timeseries.csv", "phasic_peak_rate_timeseries.csv"),
+                    ("phasic_auc_timeseries.csv", "phasic_auc_timeseries.csv")
+                ]
+                for src_name, dst_name in pairs:
+                    s = os.path.join(ts_dir, src_name)
+                    if os.path.exists(s):
+                        shutil.copy2(s, os.path.join(reg_dir, dst_name))
+                        files_written.append(dst_name)
 
             check_cancel(cancel_flag_path, emitter, "plots", manifest_path, manifest)
 
             # D. Per-Day Plots (Sig/Iso, dFF, Stacked)
 
-            # 1. dFF Grid
-            qc_dir = os.path.join(phasic_out, f'qc_dff_{roi}')
-            cmd_qc = [sys.executable, 'tools/plot_phasic_qc_grid.py',
-                      '--analysis-out', phasic_out,
-                      '--roi', roi,
-                      '--mode', 'dff',
-                      '--sessions-per-hour', str(sessions_per_hour),
-                      '--output-dir', qc_dir]
-            run_cmd(cmd_qc)
+            # 1. dFF Grid (requires features.csv)
+            if has_features:
+                qc_dir = os.path.join(phasic_out, f'qc_dff_{roi}')
+                cmd_qc = [sys.executable, 'tools/plot_phasic_qc_grid.py',
+                          '--analysis-out', phasic_out,
+                          '--roi', roi,
+                          '--mode', 'dff',
+                          '--sessions-per-hour', str(sessions_per_hour),
+                          '--output-dir', qc_dir]
+                run_cmd(cmd_qc)
 
             # 2. Sig/Iso Grid
             sess_dir = os.path.join(phasic_out, f'session_qc_{roi}')
@@ -740,30 +784,32 @@ def main():
                         '--session-duration-s', str(session_duration_s)]
             run_cmd(cmd_sess)
 
-            # 3. Stacked
-            cmd_stack = [sys.executable, 'tools/plot_phasic_stacked_day_smoothed.py',
-                         '--analysis-out', phasic_out,
-                         '--roi', roi,
-                         '--out-dir', reg_dir,
-                         '--sessions-per-hour', str(sessions_per_hour),
-                         '--smooth-window-s', str(args.smooth_window_s)]
-            manifest['commands'].append(run_cmd(cmd_stack))
+            # 3. Stacked (requires features.csv)
+            if has_features:
+                cmd_stack = [sys.executable, 'tools/plot_phasic_stacked_day_smoothed.py',
+                             '--analysis-out', phasic_out,
+                             '--roi', roi,
+                             '--out-dir', reg_dir,
+                             '--sessions-per-hour', str(sessions_per_hour),
+                             '--smooth-window-s', str(args.smooth_window_s)]
+                manifest['commands'].append(run_cmd(cmd_stack))
 
             # Collect Per-Day Files
             days_generated = set()
             days_dff = set()
             days_sig_iso = set()
 
-            # Copy dFF
-            qc_dir_roi = os.path.join(phasic_out, f'qc_dff_{roi}')
-            for f in glob.glob(os.path.join(qc_dir_roi, "day_*.png")):
-                m = re.match(r'day_(\d+)\.png', os.path.basename(f))
-                if m:
-                    day_idx = m.group(1)
-                    dst = f"phasic_dFF_day_{day_idx}.png"
-                    shutil.copy2(f, os.path.join(reg_dir, dst))
-                    files_written.append(dst)
-                    days_dff.add(day_idx)
+            # Copy dFF (only produced when has_features)
+            if has_features:
+                qc_dir_roi = os.path.join(phasic_out, f'qc_dff_{roi}')
+                for f in glob.glob(os.path.join(qc_dir_roi, "day_*.png")):
+                    m = re.match(r'day_(\d+)\.png', os.path.basename(f))
+                    if m:
+                        day_idx = m.group(1)
+                        dst = f"phasic_dFF_day_{day_idx}.png"
+                        shutil.copy2(f, os.path.join(reg_dir, dst))
+                        files_written.append(dst)
+                        days_dff.add(day_idx)
 
             # Copy Sig/Iso
             sess_out_base = os.path.join(phasic_out, 'session_qc')
@@ -793,11 +839,12 @@ def main():
             manifest['deliverables'][roi]['days_sig_iso'] = s_sig
             manifest['deliverables'][roi]['days_stacked'] = s_stk
 
-            if not (s_dff == s_sig == s_stk):
+            # Consistency check: only enforce when all day-plot sets are produced
+            if has_features and not (s_dff == s_sig == s_stk):
                  raise RuntimeError(f"Inconsistent day sets for ROI {roi}: DFF={s_dff}, SigIso={s_sig}, Stacked={s_stk}")
 
             manifest['deliverables'][roi]['files'] = sorted(list(set(files_written)))
-            manifest['deliverables'][roi]['days_generated'] = s_dff
+            manifest['deliverables'][roi]['days_generated'] = s_dff if has_features else s_stk
 
         emitter.emit("plots", "done", "All ROI deliverables complete")
 
