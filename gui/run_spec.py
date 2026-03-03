@@ -84,11 +84,16 @@ class RunSpec:
         """
         Generate config_effective.yaml in run_dir.
 
-        Loads base YAML from config_source_path, applies config_overrides,
-        writes with stable key ordering for deterministic output.
+        Loads base YAML from config_source_path, applies config_overrides
+        (after validating them against the knob registry), and writes
+        with stable key ordering for deterministic output.
+
+        Raises ValueError if config_overrides contain unknown or blocked keys.
 
         Returns the absolute path to the generated file.
         """
+        from gui.knobs_registry import filter_config_overrides
+
         base = {}
         if self.config_source_path and os.path.isfile(self.config_source_path):
             with open(self.config_source_path, "r") as f:
@@ -96,8 +101,13 @@ class RunSpec:
             if isinstance(loaded, dict):
                 base = loaded
 
-        for key, value in self.config_overrides.items():
-            base[key] = value
+        # Validate GUI-originated overrides against the knob registry.
+        # Base YAML keys bypass this filter (they come from the user's
+        # existing config file, not from GUI controls).
+        if self.config_overrides:
+            filtered = filter_config_overrides(self.config_overrides)
+            for key, value in filtered.items():
+                base[key] = value
 
         os.makedirs(run_dir, exist_ok=True)
         config_path = os.path.join(run_dir, "config_effective.yaml")
@@ -161,9 +171,11 @@ class RunSpec:
     def get_derived_config_preview(self) -> str:
         """
         Return the derived config YAML as a string (for UI preview),
-        without writing to disk. Uses the same merge logic as
-        generate_derived_config.
+        without writing to disk. Uses the same merge + filter logic
+        as generate_derived_config.
         """
+        from gui.knobs_registry import filter_config_overrides
+
         base = {}
         if self.config_source_path and os.path.isfile(self.config_source_path):
             with open(self.config_source_path, "r") as f:
@@ -171,8 +183,10 @@ class RunSpec:
             if isinstance(loaded, dict):
                 base = loaded
 
-        for key, value in self.config_overrides.items():
-            base[key] = value
+        if self.config_overrides:
+            filtered = filter_config_overrides(self.config_overrides)
+            for key, value in filtered.items():
+                base[key] = value
 
         return _stable_yaml_dump(base)
 

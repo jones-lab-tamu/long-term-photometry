@@ -1,0 +1,229 @@
+"""
+GUI knob registry: allowlists, metadata, and filtering.
+
+Defines which Config keys are exposed in the GUI (categorized into
+NORMAL, ADVANCED, and DEVELOPER tiers), provides human-readable metadata
+for each, and ensures GUI can never write unknown config keys.
+
+No PySide6 dependency.
+"""
+
+from typing import Dict, Set
+
+from gui.knobs_schema import get_config_field_specs, is_config_key
+
+
+# ======================================================================
+# Allowlists — every name MUST be a real Config field.
+# ======================================================================
+
+GUI_KNOBS_NORMAL: Set[str] = {
+    "event_signal",
+}
+
+GUI_KNOBS_ADVANCED: Set[str] = {
+    # Dynammic Correction
+    "window_sec",
+    "step_sec",
+    "min_valid_windows",
+    # Peak/Event
+    "peak_threshold_method",
+    "peak_threshold_k",
+    "peak_threshold_percentile",
+    "peak_threshold_abs",
+    "peak_min_distance_sec",
+    "peak_pre_filter",
+    "event_auc_baseline",
+}
+
+GUI_KNOBS_DEVELOPER: Set[str] = {
+    "allow_partial_final_chunk",
+    "timestamp_cv_max",
+    "duration_tolerance_frac",
+    "qc_max_chunk_fail_fraction",
+    "adapter_value_nan_policy",
+    "tonic_allowed_nan_frac",
+}
+
+
+# ======================================================================
+# Metadata — every allowlisted key must have at least label + help.
+# ======================================================================
+
+KNOB_META: Dict[str, dict] = {
+    # --- NORMAL ---
+    "event_signal": {
+        "label": "Event Signal",
+        "help": "Signal type for event detection: 'dff' or 'delta_f'.",
+    },
+    # --- ADVANCED ---
+    "peak_threshold_method": {
+        "label": "Peak Threshold Method",
+        "help": "Algorithm for computing the peak detection threshold.",
+    },
+    "peak_threshold_k": {
+        "label": "Peak Threshold K",
+        "help": "Number of standard deviations for mean_std method.",
+        "range": {"min": 0.0, "max": 10.0},
+    },
+    "peak_threshold_percentile": {
+        "label": "Peak Threshold Percentile",
+        "help": "Percentile for percentile-based threshold method.",
+        "range": {"min": 0.0, "max": 100.0},
+    },
+    "peak_threshold_abs": {
+        "label": "Peak Threshold Absolute",
+        "help": "Absolute threshold value (used when method is 'absolute').",
+        "visible_when": [{"key": "peak_threshold_method", "equals": "absolute"}],
+    },
+    "peak_min_distance_sec": {
+        "label": "Peak Min Distance (sec)",
+        "help": "Minimum time between detected peaks.",
+        "range": {"min": 0.0, "max": 60.0},
+    },
+    "peak_pre_filter": {
+        "label": "Peak Pre-Filter",
+        "help": "Optional lowpass filter before peak detection.",
+    },
+    "event_auc_baseline": {
+        "label": "Event AUC Baseline",
+        "help": "Baseline method for AUC calculation: 'zero' or 'median'.",
+    },
+    "window_sec": {
+        "label": "Regression Window (sec)",
+        "help": "Sliding window size for regression analysis.",
+    },
+    "step_sec": {
+        "label": "Regression Step (sec)",
+        "help": "Step size for sliding regression window.",
+    },
+    "min_valid_windows": {
+        "label": "Min Valid Windows",
+        "help": "Minimum number of valid regression windows required.",
+    },
+    # --- DEVELOPER ---
+    "allow_partial_final_chunk": {
+        "label": "Allow Partial Final Chunk",
+        "help": "If True, the last chunk may be shorter than chunk_duration_sec.",
+    },
+    "timestamp_cv_max": {
+        "label": "Timestamp CV Max",
+        "help": "Maximum allowed coefficient of variation for timestamp intervals.",
+    },
+    "duration_tolerance_frac": {
+        "label": "Duration Tolerance Fraction",
+        "help": "Fractional tolerance for session duration validation.",
+    },
+    "qc_max_chunk_fail_fraction": {
+        "label": "QC Max Chunk Fail Fraction",
+        "help": "Maximum fraction of chunks allowed to fail QC.",
+        "range": {"min": 0.0, "max": 1.0},
+    },
+    "adapter_value_nan_policy": {
+        "label": "Adapter NaN Policy",
+        "help": "How adapters handle NaN values: 'strict' or 'mask'.",
+    },
+    "tonic_allowed_nan_frac": {
+        "label": "Tonic Allowed NaN Fraction",
+        "help": "Maximum fraction of NaN values allowed in tonic computation.",
+        "range": {"min": 0.0, "max": 1.0},
+    },
+}
+
+
+# ======================================================================
+# Validation
+# ======================================================================
+
+def validate_registry_against_schema() -> None:
+    """Assert registry is consistent with Config schema.
+
+    Checks:
+    - Every allowlisted key exists in Config
+    - No overlap between NORMAL / ADVANCED / DEVELOPER
+    - Every allowlisted key has label + help in KNOB_META
+    """
+    schema = get_config_field_specs()
+    all_knobs = GUI_KNOBS_NORMAL | GUI_KNOBS_ADVANCED | GUI_KNOBS_DEVELOPER
+
+    # Every key must be a real Config field
+    unknown = all_knobs - set(schema.keys())
+    assert not unknown, f"Registry contains non-Config keys: {unknown}"
+
+    # No overlap
+    na = GUI_KNOBS_NORMAL & GUI_KNOBS_ADVANCED
+    nd = GUI_KNOBS_NORMAL & GUI_KNOBS_DEVELOPER
+    ad = GUI_KNOBS_ADVANCED & GUI_KNOBS_DEVELOPER
+    assert not na, f"NORMAL/ADVANCED overlap: {na}"
+    assert not nd, f"NORMAL/DEVELOPER overlap: {nd}"
+    assert not ad, f"ADVANCED/DEVELOPER overlap: {ad}"
+
+    # Every key has metadata
+    for key in all_knobs:
+        assert key in KNOB_META, f"Missing KNOB_META for: {key}"
+        meta = KNOB_META[key]
+        assert "label" in meta, f"Missing 'label' in KNOB_META[{key!r}]"
+        assert "help" in meta, f"Missing 'help' in KNOB_META[{key!r}]"
+
+
+# ======================================================================
+# Filtering
+# ======================================================================
+
+def filter_config_overrides(
+    overrides: dict,
+    allow_developer: bool = False,
+) -> dict:
+    """Filter config overrides to only allowlisted + valid Config keys.
+
+    Args:
+        overrides: Dict of config key -> value from GUI.
+        allow_developer: If True, DEVELOPER keys are allowed.
+
+    Returns:
+        Shallow copy containing only permitted keys.
+
+    Raises:
+        ValueError: If overrides contain unknown Config keys or
+            developer-only keys when allow_developer is False.
+    """
+    # Determine which keys are allowed
+    allowed = GUI_KNOBS_NORMAL | GUI_KNOBS_ADVANCED
+    if allow_developer:
+        allowed = allowed | GUI_KNOBS_DEVELOPER
+
+    # Check for keys not in Config at all
+    unknown = set()
+    for key in overrides:
+        if not is_config_key(key):
+            unknown.add(key)
+    if unknown:
+        raise ValueError(
+            f"Unknown config keys (not in Config schema): {sorted(unknown)}"
+        )
+
+    # Check for developer keys when not allowed
+    if not allow_developer:
+        dev_blocked = set(overrides.keys()) & GUI_KNOBS_DEVELOPER
+        if dev_blocked:
+            raise ValueError(
+                f"Developer-only config keys not allowed: {sorted(dev_blocked)}"
+            )
+
+    # Check for keys that are valid Config but not in any allowlist
+    all_knobs = GUI_KNOBS_NORMAL | GUI_KNOBS_ADVANCED | GUI_KNOBS_DEVELOPER
+    unregistered = set(overrides.keys()) - all_knobs
+    # Allow unregistered valid Config keys to pass through (they are valid
+    # per schema, just not in the GUI registry yet). This is intentional:
+    # the base YAML may contain keys the GUI doesn't manage.
+    # Actually, for config_overrides (GUI-originated), we should be strict:
+    valid_config_but_not_allowed = set()
+    for key in overrides:
+        if key not in unknown and key not in allowed:
+            valid_config_but_not_allowed.add(key)
+    if valid_config_but_not_allowed:
+        raise ValueError(
+            f"Config keys not in GUI allowlist: {sorted(valid_config_but_not_allowed)}"
+        )
+
+    return dict(overrides)

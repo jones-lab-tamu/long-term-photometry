@@ -53,7 +53,7 @@ class TestRunSpec(unittest.TestCase):
     # ----------------------------------------------------------------
     def test_yaml_determinism_safe_dump(self):
         """Same base + overrides yields byte-identical config_effective.yaml."""
-        overrides = {"lowpass_hz": 5.0, "target_fs_hz": 100.0}
+        overrides = {"event_signal": "delta_f", "peak_threshold_k": 3.0}
 
         run_dir_1 = os.path.join(self.tmp_dir, "run_1")
         run_dir_2 = os.path.join(self.tmp_dir, "run_2")
@@ -79,8 +79,8 @@ class TestRunSpec(unittest.TestCase):
                          "Derived config is not byte-identical across runs")
 
         loaded = yaml.safe_load(content1)
-        self.assertEqual(loaded["lowpass_hz"], 5.0)
-        self.assertEqual(loaded["target_fs_hz"], 100.0)
+        self.assertEqual(loaded["event_signal"], "delta_f")
+        self.assertEqual(loaded["peak_threshold_k"], 3.0)
         self.assertEqual(loaded["rwd_time_col"], "Time(s)")
 
     # ----------------------------------------------------------------
@@ -144,14 +144,13 @@ class TestRunSpec(unittest.TestCase):
         """get_derived_config_preview includes config_overrides."""
         spec = RunSpec(
             config_source_path=self.config_path,
-            config_overrides={"target_fs_hz": 123.0},
+            config_overrides={"event_signal": "delta_f"},
         )
         preview = spec.get_derived_config_preview()
         loaded = yaml.safe_load(preview)
 
-        self.assertEqual(loaded["target_fs_hz"], 123.0)
+        self.assertEqual(loaded["event_signal"], "delta_f")
         self.assertEqual(loaded["rwd_time_col"], "Time(s)")
-        self.assertEqual(loaded["lowpass_hz"], 1.0)
 
     # ----------------------------------------------------------------
     # B: GUI does not write or emit events (strict substring bans)
@@ -325,12 +324,18 @@ class TestRunSpec(unittest.TestCase):
         RunSpec.validate_effective_config(config_path)
 
     def test_validate_effective_config_invalid(self):
-        """Invalid derived config (preview_first_n=0) raises ValueError."""
+        """Invalid derived config raises ValueError via Config.from_yaml."""
         run_dir = os.path.join(self.tmp_dir, "run_invalid")
-        spec = RunSpec(
-            config_source_path=self.config_path,
-            config_overrides={"preview_first_n": 0},
-        )
+        # Write a base config with preview_first_n=0 (invalid per Config
+        # validation: must be > 0 or None). This goes in the base YAML,
+        # not via config_overrides (which would be rejected by the registry).
+        bad_config = self.base_config.copy()
+        bad_config["preview_first_n"] = 0
+        bad_config_path = os.path.join(self.tmp_dir, "bad_config.yaml")
+        with open(bad_config_path, "w") as f:
+            yaml.safe_dump(bad_config, f, sort_keys=True)
+
+        spec = RunSpec(config_source_path=bad_config_path)
         config_path = spec.generate_derived_config(run_dir)
         with self.assertRaises(ValueError) as cm:
             RunSpec.validate_effective_config(config_path)
