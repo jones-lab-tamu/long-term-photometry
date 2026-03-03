@@ -57,6 +57,7 @@ class Config:
     event_auc_baseline: str = 'zero'
     event_signal: Literal['dff', 'delta_f'] = 'dff'
     representative_session_index: Optional[int] = None
+    preview_first_n: Optional[int] = None
     
     # adapters
     adapter_value_nan_policy: str = 'strict'
@@ -127,5 +128,9 @@ class Config:
         if obj.peak_threshold_method == 'absolute':
             if obj.peak_threshold_abs <= 0.0:
                 raise ValueError("peak_threshold_abs must be > 0 when peak_threshold_method='absolute'")
+
+        if obj.preview_first_n is not None:
+            if not isinstance(obj.preview_first_n, int) or obj.preview_first_n <= 0:
+                raise ValueError("preview_first_n must be an int > 0")
                 
         return obj

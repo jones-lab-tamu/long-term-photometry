@@ -22,6 +22,7 @@ def main():
     parser.add_argument('--traces-only', action='store_true', help="Run traces and QC, skip feature extraction (features.csv) and feature-dependent summaries. This pipeline has no separate signal event-detection stage.")
     parser.add_argument('--event-signal', type=str, choices=['dff', 'delta_f'], help="Signal to use for peak detection features (default from config: dff)")
     parser.add_argument('--representative-session-index', type=int, default=None, help="Force a specific session index for representative artifacts (0-based)")
+    parser.add_argument('--preview-first-n', type=int, default=None, help="Preview mode: process only the first N discovered sessions (after discovery/sort).")
     
     args = parser.parse_args()
     
@@ -44,6 +45,8 @@ def main():
             config.event_signal = args.event_signal
         if args.representative_session_index is not None:
             config.representative_session_index = args.representative_session_index
+        if args.preview_first_n is not None:
+            config.preview_first_n = args.preview_first_n
         
         # Init Pipeline
         pipeline = Pipeline(config, mode=args.mode)
@@ -57,6 +60,14 @@ def main():
             from photometry_pipeline.core.events import EventEmitter
             run_id = os.path.basename(args.out)
             emitter = EventEmitter(args.events_path, run_id, args.out, file_mode="a", allow_makedirs=False)
+            # Emit engine:context BEFORE pipeline.run (preview counts not yet known)
+            emitter.emit("engine", "context", "Run context initialized", payload={
+                "run_type": "preview" if config.preview_first_n is not None else "full",
+                "preview": {"selector": "first_n", "first_n": config.preview_first_n} if config.preview_first_n is not None else None,
+                "traces_only": args.traces_only,
+                "event_signal": config.event_signal,
+                "representative_session_index": config.representative_session_index
+            })
 
         # Run pipeline (ROI selection and representative session resolved inside pipeline.run)
         pipeline.run(
@@ -66,7 +77,7 @@ def main():
             emitter=emitter
         )
         
-        # Emit inputs:roi_selection event via EventEmitter if emitter exists
+        # Emit post-run audit events
         if emitter:
             if pipeline.roi_selection is not None:
                 emitter.emit("inputs", "roi_selection", "ROI selection resolved",

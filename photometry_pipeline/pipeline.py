@@ -638,6 +638,29 @@ class Pipeline:
         os.makedirs(os.path.join(output_dir, 'qc'), exist_ok=True)
         self.discover_files(input_dir, recursive, glob_pattern, force_format=force_format)
         
+        # --- Preview Mode: limit to first N sessions ---
+        n_total_discovered = len(self.file_list)
+        preview_first_n = self.config.preview_first_n
+        if preview_first_n is not None:
+            limit_n = min(preview_first_n, n_total_discovered)
+            self.file_list = self.file_list[:limit_n]
+            self.run_type = "preview"
+            self.preview_info = {
+                "selector": "first_n",
+                "first_n": preview_first_n,
+                "n_total_discovered": n_total_discovered,
+                "n_sessions_resolved": len(self.file_list)
+            }
+            logging.info(f"Preview mode: processing {len(self.file_list)} of {n_total_discovered} discovered sessions (first_n={preview_first_n}).")
+        else:
+            self.run_type = "full"
+            self.preview_info = None
+        
+        # Emit inputs:preview audit event if emitter provided
+        if emitter and self.preview_info is not None:
+            emitter.emit("inputs", "preview", "Preview selection resolved",
+                         payload=self.preview_info)
+        
         # --- ROI Discovery & Resolution ---
         channels_seen = []
         for i, fpath in enumerate(self.file_list):
@@ -689,7 +712,8 @@ class Pipeline:
             self.config, output_dir, 
             roi_selection=self.roi_selection, 
             traces_only=traces_only,
-            representative_info=self.representative_session_info
+            representative_info=self.representative_session_info,
+            preview_info=self.preview_info
         )
         
         self.run_pass_1(force_format)

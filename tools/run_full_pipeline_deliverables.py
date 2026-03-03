@@ -121,6 +121,7 @@ def parse_args():
     parser.add_argument('--smooth-window-s', type=float, default=1.0)
     parser.add_argument('--event-signal', type=str, choices=['dff', 'delta_f'], help="Signal to use for peak/event detection")
     parser.add_argument('--representative-session-index', type=int, default=None, help="Force a specific session index for representative artifacts (0-based)")
+    parser.add_argument('--preview-first-n', type=int, default=None, help="Preview mode: process only the first N discovered sessions (after discovery/sort).")
     parser.add_argument('--validate-only', action='store_true',
                         help=(
                             "Validate inputs and exit without analysis. "
@@ -472,33 +473,42 @@ def main():
         status_data["status"] = state
         _atomic_write_json(status_path, status_data)
 
-    # Initial write (phase="running")
-    _atomic_write_json(status_path, status_data)
 
-    # Determine effective event signal and representative index for stamping
+
+    # Determine effective event signal, representative index, and preview for stamping
     effective_event_signal = args.event_signal
     effective_representative_index = args.representative_session_index
+    effective_preview_first_n = args.preview_first_n
     
-    if effective_event_signal is None or effective_representative_index is None:
+    if effective_event_signal is None or effective_representative_index is None or effective_preview_first_n is None:
         try:
             cfg = Config.from_yaml(args.config)
             if effective_event_signal is None:
                 effective_event_signal = getattr(cfg, "event_signal", "dff")
             if effective_representative_index is None:
                 effective_representative_index = getattr(cfg, "representative_session_index", None)
+            if effective_preview_first_n is None:
+                effective_preview_first_n = getattr(cfg, "preview_first_n", None)
         except Exception as e:
             print(f"WARNING: Failed to parse config for runner stamping: {e}")
             if effective_event_signal is None: 
                 effective_event_signal = "dff"
-            # effective_representative_index remains as requested (None if not provided)
+            # effective_representative_index and effective_preview_first_n remain as given
+
+    # Update status_data with resolved preview info before initial write
+    status_data["run_type"] = "preview" if effective_preview_first_n is not None else "full"
+    status_data["preview"] = {"selector": "first_n", "first_n": effective_preview_first_n} if effective_preview_first_n is not None else None
+
+    # Initial write (phase="running")
+    _atomic_write_json(status_path, status_data)
 
     # -- Open event emitter --
     emitter = EventEmitter(events_path, run_id, run_dir, file_mode="w")
     emitter.emit("engine", "start", "Engine starting")
     emitter.emit("engine", "context", "Run context initialized", payload={
-        "run_type": "full", 
+        "run_type": "preview" if effective_preview_first_n is not None else "full", 
         "features_extracted": False if args.traces_only else None, 
-        "preview": None, 
+        "preview": {"selector": "first_n", "first_n": effective_preview_first_n} if effective_preview_first_n is not None else None, 
         "traces_only": args.traces_only, 
         "event_signal": effective_event_signal,
         "representative_session_index": effective_representative_index
@@ -544,6 +554,7 @@ def main():
         if args.traces_only: cmd_tonic.append('--traces-only')
         if args.event_signal: cmd_tonic.extend(['--event-signal', args.event_signal])
         if args.representative_session_index is not None: cmd_tonic.extend(['--representative-session-index', str(args.representative_session_index)])
+        if args.preview_first_n is not None: cmd_tonic.extend(['--preview-first-n', str(args.preview_first_n)])
         if events_path: cmd_tonic.extend(['--events-path', events_path])
         try:
             manifest['commands'].append(run_cmd(cmd_tonic))
@@ -570,6 +581,7 @@ def main():
         if args.traces_only: cmd_phasic.append('--traces-only')
         if args.event_signal: cmd_phasic.extend(['--event-signal', args.event_signal])
         if args.representative_session_index is not None: cmd_phasic.extend(['--representative-session-index', str(args.representative_session_index)])
+        if args.preview_first_n is not None: cmd_phasic.extend(['--preview-first-n', str(args.preview_first_n)])
         if events_path: cmd_phasic.extend(['--events-path', events_path])
         try:
             manifest['commands'].append(run_cmd(cmd_phasic))
