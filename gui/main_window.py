@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 from gui.process_runner import PipelineRunner, RunnerState
 from gui.events_follower import EventsFollower
 from gui.manifest_viewer import ManifestViewer
+from gui.run_spec import RunSpec
 
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -243,6 +244,10 @@ class MainWindow(QMainWindow):
         self._cancel_btn.clicked.connect(self._on_cancel)
         btn_row.addWidget(self._cancel_btn)
 
+        self._preview_config_btn = QPushButton("Preview Config")
+        self._preview_config_btn.clicked.connect(self._on_preview_config)
+        btn_row.addWidget(self._preview_config_btn)
+
         self._open_results_btn = QPushButton("Open Results...")
         self._open_results_btn.clicked.connect(self._on_open_results)
         btn_row.addWidget(self._open_results_btn)
@@ -273,45 +278,107 @@ class MainWindow(QMainWindow):
         return group
 
     # ==================================================================
-    # Argv construction (GUI mode: --out-base + --run-id)
+    # RunSpec construction + argv (GUI mode: --out <explicit_run_dir>)
     # ==================================================================
 
-    def _build_argv(self, validate_only: bool = False) -> list:
-        """Construct the argv list for the pipeline runner.
+    @staticmethod
+    def _track_if_nonempty(field_name: str, text: str, out: list) -> None:
+        """Append field_name to out if text is non-empty."""
+        if text:
+            out.append(field_name)
 
-        Uses --out-base mode: Output Directory field is the base directory,
-        a unique run_id is generated per invocation.
+    @staticmethod
+    def _track_if_changed(field_name: str, value, default, out: list) -> None:
+        """Append field_name to out if value != default."""
+        if value != default:
+            out.append(field_name)
+
+    def _build_run_spec(self, validate_only: bool = False,
+                        run_dir_override: str = "") -> RunSpec:
+        """Create a RunSpec from current widget values.
+
+        Args:
+            validate_only: If True, sets validate_only on the RunSpec.
+            run_dir_override: If non-empty, use as RunSpec.run_dir WITHOUT
+                mutating self._current_run_dir. Used by preview mode.
+                If empty, computes run_dir from out_base + run_id and
+                sets self._current_run_dir.
+
+        Runner uses --out as explicit run_dir (see resolve_output_mode
+        in tools/run_full_pipeline_deliverables.py).
+
+        Tracks which fields the user explicitly set (non-default/non-empty)
+        for every user-editable GUI control.
         """
-        out_base = self._output_dir.text().strip()
-        run_id = _generate_run_id()
-        self._current_run_dir = os.path.join(out_base, run_id)
+        if run_dir_override:
+            run_dir = run_dir_override
+        else:
+            out_base = self._output_dir.text().strip()
+            run_id = _generate_run_id()
+            run_dir = os.path.join(out_base, run_id)
+            self._current_run_dir = run_dir
 
-        argv = [
-            sys.executable,
-            PIPELINE_SCRIPT,
-            "--input", self._input_dir.text().strip(),
-            "--out-base", out_base,
-            "--run-id", run_id,
-            "--config", self._config_path.text().strip(),
-            "--format", self._format_combo.currentText(),
-            "--events", "auto",
-            "--cancel-flag", "auto",
-        ]
+        user_set = []
 
-        # GUI always uses --out-base; --overwrite is not passed.
+        # Parse optional numeric fields
+        sph_text = self._sph_edit.text().strip()
+        sph_val = int(sph_text) if sph_text else None
+        self._track_if_nonempty("sessions_per_hour", sph_text, user_set)
 
-        sph = self._sph_edit.text().strip()
-        if sph:
-            argv.extend(["--sessions-per-hour", sph])
+        dur_text = self._duration_edit.text().strip()
+        dur_val = float(dur_text) if dur_text else None
+        self._track_if_nonempty("session_duration_s", dur_text, user_set)
 
-        dur = self._duration_edit.text().strip()
-        if dur:
-            argv.extend(["--session-duration-s", dur])
+        smooth = self._smooth_spin.value()
+        self._track_if_changed("smooth_window_s", smooth, 1.0, user_set)
 
-        argv.extend(["--smooth-window-s", str(self._smooth_spin.value())])
+        fmt = self._format_combo.currentText()
+        self._track_if_changed("format", fmt, "auto", user_set)
 
         if validate_only:
-            argv.append("--validate-only")
+            user_set.append("validate_only")
+
+        spec = RunSpec(
+            input_dir=self._input_dir.text().strip(),
+            run_dir=run_dir,
+            format=fmt,
+            validate_only=validate_only,
+            sessions_per_hour=sph_val,
+            session_duration_s=dur_val,
+            smooth_window_s=smooth,
+            config_source_path=self._config_path.text().strip(),
+            config_overrides={},
+            gui_version="1.0.0",
+            timestamp_local=datetime.now().isoformat(),
+            user_set_fields=user_set,
+        )
+        return spec
+
+    def _build_argv(self, validate_only: bool = False) -> list:
+        """Construct argv via RunSpec.
+
+        Writes into run_dir:
+          1. config_effective.yaml (derived config)
+          2. gui_run_spec.json (intent record)
+          3. command_invoked.txt (exact argv)
+
+        Validates derived config before returning.
+        Uses --out <run_dir> mode.
+        """
+        spec = self._build_run_spec(validate_only=validate_only)
+        run_dir = self._current_run_dir
+        os.makedirs(run_dir, exist_ok=True)
+
+        # Write derived config and validate it
+        config_path = spec.generate_derived_config(run_dir)
+        RunSpec.validate_effective_config(config_path)
+
+        # Build argv
+        argv = spec.build_runner_argv()
+
+        # Write intent record and command log
+        spec.write_gui_run_spec(run_dir)
+        spec.write_command_invoked(run_dir, argv)
 
         return argv
 
@@ -370,6 +437,31 @@ class MainWindow(QMainWindow):
     # Button handlers
     # ==================================================================
 
+    def _on_preview_config(self):
+        """Show a read-only dialog with the derived config YAML preview.
+
+        Builds the same RunSpec that _build_run_spec produces (reading
+        ALL current widget values) so the preview is exact.
+        """
+        config_path = self._config_path.text().strip()
+        if not config_path or not os.path.isfile(config_path):
+            QMessageBox.warning(self, "No Config", "Select a valid Config YAML first.")
+            return
+
+        # Build full RunSpec from current widget state. run_dir_override
+        # is a sentinel since we are only previewing (no files written,
+        # _current_run_dir is not mutated).
+        spec = self._build_run_spec(validate_only=False,
+                                    run_dir_override="<preview>")
+        preview_text = spec.get_derived_config_preview()
+
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Derived Config Preview")
+        dlg.setText("This is the exact config YAML that will be passed to the runner:")
+        dlg.setDetailedText(preview_text)
+        dlg.setStandardButtons(QMessageBox.Ok)
+        dlg.exec()
+
     def _on_validate(self):
         err = self._validate_gui_inputs()
         if err:
@@ -385,8 +477,7 @@ class MainWindow(QMainWindow):
         self._validate_stdout = []
         self._reset_event_flags()
 
-        # Pre-create run_dir so events/logs are stable (design rule D)
-        os.makedirs(self._current_run_dir, exist_ok=True)
+        # run_dir already created by _build_argv -> _build_run_spec
 
         self._runner.set_run_dir(self._current_run_dir)
         self._start_events_follower()
@@ -400,31 +491,15 @@ class MainWindow(QMainWindow):
 
         self._save_widgets_to_settings()
 
-        # Build argv first so _current_run_dir is computed
+        # Build argv (also generates derived config + gui_run_spec.json)
         argv = self._build_argv(validate_only=False)
         run_dir = self._current_run_dir
-
-        # Warn if the computed run_dir already exists and is non-empty
-        if os.path.isdir(run_dir) and os.listdir(run_dir):
-            reply = QMessageBox.warning(
-                self,
-                "Run Directory Exists",
-                f"Run directory already exists and is non-empty:\n{run_dir}\n\n"
-                "Each GUI run normally gets a unique directory.\n"
-                "Proceed anyway?",
-                QMessageBox.Cancel | QMessageBox.Yes,
-                QMessageBox.Cancel,
-            )
-            if reply != QMessageBox.Yes:
-                return
-
-        # Pre-create run_dir (design rule D)
-        os.makedirs(run_dir, exist_ok=True)
 
         self._log_view.clear()
         self._manifest_viewer.clear()
         self._append_log("--- Starting Pipeline ---")
         self._append_log(f"Run directory: {run_dir}")
+        self._append_log(f"Config: {os.path.join(run_dir, 'config_effective.yaml')}")
         self._is_validate_only = False
         self._validation_passed = False
         self._reset_event_flags()
