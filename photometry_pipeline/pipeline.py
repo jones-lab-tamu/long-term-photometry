@@ -4,6 +4,7 @@ import glob
 import json
 import yaml
 import logging
+import pathlib
 import pandas as pd
 import numpy as np
 from typing import List, Optional
@@ -227,8 +228,84 @@ class Pipeline:
             
         # End Pass 1
 
+    def _apply_standard_analysis(self, chunk, chunk_id):
+        """
+        Shared source of truth for standard analysis steps (preprocessing -> regression -> normalization).
+        Returns the processed chunk.
+        """
+        uv_filt, uv_meta = preprocessing.lowpass_filter_with_meta(chunk.uv_raw, chunk.fs_hz, self.config)
+        sig_filt, sig_meta = preprocessing.lowpass_filter_with_meta(chunk.sig_raw, chunk.fs_hz, self.config)
+        
+        chunk.uv_filt = uv_filt
+        chunk.sig_filt = sig_filt
+        
+        # Warning aggregation (NaN Safety Policy 2)
+        for m in [uv_meta, sig_meta]:
+             if m.get('rois_affected', 0) > 0:
+                 msg = f"Chunk {chunk_id} Block-wise filtering active: {m['rois_affected']} ROIs, {m['samples_skipped']} samples skipped."
+                 if 'scan_warnings' not in self.qc_summary: self.qc_summary['scan_warnings'] = []
+                 self.qc_summary['scan_warnings'].append(msg)
+        
+        if self.mode == 'tonic':
+             self._process_chunk_tonic(chunk, chunk_id)
+        else:
+             # PHASIC MODE (Dynamic)
+             uv_fit, delta_f = regression.fit_chunk_dynamic(chunk, self.config, mode=self.mode)
+             chunk.uv_fit = uv_fit
+             chunk.delta_f = delta_f
+             chunk.dff = normalization.compute_dff(chunk, self.stats, self.config)
+        
+        return chunk
+
+    def _resolve_representative_session(self, force_format: str, emitter=None):
+        """
+        Resolves the representative session only after file_list is finalized.
+        Implements legacy fallback and emits audit event.
+        """
+        n_sessions_resolved = len(self.file_list)
+        user_idx = self.config.representative_session_index
+        rep_idx_effective = None
+        rep_session_id = None
+        user_provided = (user_idx is not None)
+
+        if user_provided:
+            if not isinstance(user_idx, int) or not (0 <= user_idx < n_sessions_resolved):
+                raise ValueError(f"representative_session_index out of range: idx={user_idx}, n_sessions={n_sessions_resolved}")
+            rep_idx_effective = user_idx
+            rep_session_id = self._session_entry_to_id(self.file_list[user_idx])
+        else:
+            # Legacy Default: find first loadable
+            for i, fpath in enumerate(self.file_list):
+                try:
+                    fmt = self._get_format(fpath, force_format)
+                    load_chunk(fpath, fmt, self.config, chunk_id=i) # Validation load
+                    rep_idx_effective = i
+                    rep_session_id = self._session_entry_to_id(fpath)
+                    break
+                except Exception as e:
+                    logging.warning(f"Resolution: Skipping session {fpath} for representative selection: {e}")
+        
+        self.representative_session_index = rep_idx_effective
+        self.representative_session_id = rep_session_id
+        self.n_sessions_resolved = n_sessions_resolved
+        self.representative_user_provided = user_provided
+
+        self.representative_session_info = {
+            "representative_session_index": self.representative_session_index,
+            "representative_session_id": self.representative_session_id,
+            "n_sessions_resolved": self.n_sessions_resolved,
+            "resolved_session_ids_preview": [self._session_entry_to_id(f) for f in self.file_list[:5]],
+            "user_provided": self.representative_user_provided
+        }
+
+        if emitter:
+            emitter.emit("inputs", "representative_session", "Representative session resolved",
+                         payload=self.representative_session_info)
+
+
     # Helper for Unit Testing / Invariant Enforcement
     def _process_chunk_tonic(self, chunk: Chunk, i: int):
+
          # Explicit Global Fit Application
          from .core.tonic_dff import apply_global_fit, compute_session_tonic_df_from_global
          
@@ -305,7 +382,8 @@ class Pipeline:
         os.makedirs(traces_dir, exist_ok=True)
         
         all_features = []
-        first_success_chunk = None
+        rep_chunk_for_plotting = None
+        rep_idx = self.representative_session_index  # set by _resolve_representative_session
         
         # Freeze manifest to ensure it cannot be mutated after Pass 1
         frozen_manifest = tuple(self._pass1_manifest)
@@ -330,30 +408,15 @@ class Pipeline:
                 # Capture ROI map if missing (e.g. if Pass 1 failed or skipped)
                 if not self.roi_map and chunk.metadata.get("roi_map"):
                     self.roi_map = chunk.metadata["roi_map"]
+
                 
-                uv_filt, uv_meta = preprocessing.lowpass_filter_with_meta(chunk.uv_raw, chunk.fs_hz, self.config)
-                sig_filt, sig_meta = preprocessing.lowpass_filter_with_meta(chunk.sig_raw, chunk.fs_hz, self.config)
+                # SHARED PROCESSING (single source of truth for filtering, regression, dff)
+                chunk = self._apply_standard_analysis(chunk, i)
                 
-                chunk.uv_filt = uv_filt
-                chunk.sig_filt = sig_filt
-                
-                # Warning aggregation (NaN Safety Policy 2)
-                for m in [uv_meta, sig_meta]:
-                     if m.get('rois_affected', 0) > 0:
-                         msg = f"Chunk {i} Block-wise filtering active: {m['rois_affected']} ROIs, {m['samples_skipped']} samples skipped."
-                         if 'scan_warnings' not in self.qc_summary: self.qc_summary['scan_warnings'] = []
-                         self.qc_summary['scan_warnings'].append(msg)
-                
-                if self.mode == 'tonic':
-                     self._process_chunk_tonic(chunk, i)
-                     
-                else:
-                     # PHASIC MODE (Dynamic)
-                     uv_fit, delta_f = regression.fit_chunk_dynamic(chunk, self.config, mode=self.mode)
-                     chunk.uv_fit = uv_fit
-                     chunk.delta_f = delta_f
-                
-                     chunk.dff = normalization.compute_dff(chunk, self.stats, self.config)
+                # Retain for representative plotting
+                if rep_idx is not None and i == rep_idx:
+                    rep_chunk_for_plotting = chunk
+
                 
                 # traces-only: skip feature extraction and all feature-derived outputs.
                 # NOTE: This pipeline does NOT perform event detection as a separate stage.
@@ -421,28 +484,14 @@ class Pipeline:
                         if rel_path not in self._chunk_meta_outputs:
                             self._chunk_meta_outputs.append(rel_path)
 
-                # Requirement B4 (Policy refinement): count chunk as failed if it has any DEGENERATE warnings
-                # Integrate into canonical failed_chunks list to avoid double counting.
                 if hasattr(chunk, 'metadata') and chunk.metadata:
                     qc_warnings = chunk.metadata.get('qc_warnings', [])
                     if any("DEGENERATE" in w for w in qc_warnings):
                         if not any(x['file'] == fpath for x in self.qc_summary['failed_chunks']):
                             self.qc_summary['failed_chunks'].append({'file': fpath, 'error': 'QC: Degenerate data detected'})
 
-                # VIZ: Plot Set A & D (First SUCCESSFUL Chunk Only)
-                if first_success_chunk is None:
-                    first_success_chunk = chunk
-                    viz_dir = os.path.join(output_dir, 'viz')
-                    os.makedirs(viz_dir, exist_ok=True)
-                    plots.set_style()
-                    for roi in chunk.channel_names:
-                        try:
-                            # A: Single Session Raw
-                            plots.plot_single_session_raw(chunk, roi, viz_dir)
-                            # D: Correction Impact (Use full chunk as interval)
-                            plots.plot_correction_impact(chunk, roi, slice(None), viz_dir)
-                        except Exception as e:
-                            logging.warning(f"Viz failure (chunk {i}) {roi}: {e}")
+
+                # Legacy VIZ was here, now moved out of loop for strict resolution/loading
                 
             except Exception as e:
                 # Requirement B4: Fail fast if a file in the manifest cannot be loaded in Pass 2
@@ -501,7 +550,46 @@ class Pipeline:
             logging.error(f"High failure rate: {self.qc_summary['chunk_fail_fraction']:.2%}")
 
         # -----------------------------
-        # VIZ: Canonical Visualization
+        # VIZ: Representative Session Plots
+        # -----------------------------
+        viz_dir = os.path.join(output_dir, 'viz')
+        rep_fpath = self.file_list[rep_idx] if (rep_idx is not None and 0 <= rep_idx < len(self.file_list)) else None
+        
+        if rep_chunk_for_plotting is not None:
+            try:
+                os.makedirs(viz_dir, exist_ok=True)
+                plots.set_style()
+                
+                # A & D Plots (per-ROI raw + correction impact)
+                for roi in rep_chunk_for_plotting.channel_names:
+                    try:
+                        plots.plot_single_session_raw(rep_chunk_for_plotting, roi, viz_dir)
+                        plots.plot_correction_impact(rep_chunk_for_plotting, roi, slice(None), viz_dir)
+                    except Exception as e:
+                        logging.warning(f"Representative Plot failure (A/D) for {roi}: {e}")
+                    
+            except Exception as e:
+                # Fail-closed logic: if user explicitly requested this index, raise.
+                if self.representative_user_provided:
+                    raise RuntimeError(
+                        f"FAILED to plot requested representative session "
+                        f"(index={rep_idx}, file={rep_fpath}, stage=analysis/pass-2): {e}"
+                    )
+                else:
+                    logging.warning(f"Skipping representative plots: default session failed to plot: {e}")
+        else:
+            if self.representative_user_provided:
+                raise RuntimeError(
+                    f"FAILED to process requested representative session "
+                    f"(index={rep_idx}, file={rep_fpath}, stage=analysis/pass-2). "
+                    f"Session was not successfully processed during Pass 2."
+                )
+            logging.info("Representative session plots skipped (no valid session resolved).")
+
+
+
+        # -----------------------------
+        # VIZ: Aggregate Canonical Visualization
         # -----------------------------
         print("Generating visualizations...")
         plots.set_style()
@@ -535,7 +623,14 @@ class Pipeline:
             chunk.metadata["roi_map"] = {k: v for k, v in chunk.metadata["roi_map"].items() if k in selected}
         return chunk
 
-    def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv", include_rois: List[str] = None, exclude_rois: List[str] = None, traces_only: bool = False):
+    def _session_entry_to_id(self, entry: str) -> str:
+        """Returns a stable session ID for a file path or RWD folder."""
+        p = pathlib.Path(entry)
+        if p.name == "fluorescence.csv":
+            return p.parent.name
+        return p.stem
+
+    def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv", include_rois: List[str] = None, exclude_rois: List[str] = None, traces_only: bool = False, emitter=None):
         # Lazy import to avoid GUI side effects at module level
         from .viz import plots
         
@@ -585,8 +680,17 @@ class Pipeline:
         self._selected_rois = selected_rois
         self.traces_only = traces_only
 
+        # --- Representative Session Resolution ---
+        self._resolve_representative_session(force_format, emitter=emitter)
+
         # 1. Run Report (Pre-Analysis)
-        generate_run_report(self.config, output_dir, roi_selection=self.roi_selection, traces_only=traces_only)
+
+        generate_run_report(
+            self.config, output_dir, 
+            roi_selection=self.roi_selection, 
+            traces_only=traces_only,
+            representative_info=self.representative_session_info
+        )
         
         self.run_pass_1(force_format)
         

@@ -43,7 +43,7 @@ class TestRobustnessPatch(unittest.TestCase):
         self.config.peak_threshold_method = 'mean_plus_k_std'
         with self.assertRaises(ValueError) as cm:
             extract_features(chunk, self.config)
-        self.assertIn("Supported: ['mean_std', 'percentile', 'median_mad']", str(cm.exception))
+        self.assertIn("Supported: ['mean_std', 'percentile', 'median_mad', 'absolute']", str(cm.exception))
 
     def test_regression_window_boundaries(self):
         """Test 2: Regression window helper exactness."""

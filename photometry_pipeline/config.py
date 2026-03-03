@@ -56,6 +56,7 @@ class Config:
     peak_pre_filter: str = 'none'
     event_auc_baseline: str = 'zero'
     event_signal: Literal['dff', 'delta_f'] = 'dff'
+    representative_session_index: Optional[int] = None
     
     # adapters
     adapter_value_nan_policy: str = 'strict'

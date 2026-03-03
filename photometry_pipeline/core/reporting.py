@@ -34,7 +34,7 @@ def make_json_safe(obj: Any) -> Any:
     # Fallback
     return str(obj)
 
-def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = None, traces_only: bool = False):
+def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = None, traces_only: bool = False, representative_info: Dict = None):
     """
     Generates the mandatory run-report artifact.
     Freezes analytical assumptions and flags tonic-attenuation risk.
@@ -133,12 +133,17 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
             "features_extracted": False if traces_only else None,
             "preview": None,
             "traces_only": traces_only,
-            "event_signal": getattr(config, 'event_signal', 'dff')
+            "event_signal": getattr(config, 'event_signal', 'dff'),
+            "representative_session_index": representative_info.get("representative_session_index") if representative_info else None,
+            "representative_session_id": representative_info.get("representative_session_id") if representative_info else None,
+            "n_sessions_resolved": representative_info.get("n_sessions_resolved", 0) if representative_info else 0,
+            "user_provided_representative_session_index": representative_info.get("user_provided", False) if representative_info else False
         },
         "configuration": config_snapshot,
         "derived_settings": derived_settings,
         "analytical_contract": contract
     }
+
     
     if roi_selection is not None:
         report["roi_selection"] = make_json_safe(roi_selection)

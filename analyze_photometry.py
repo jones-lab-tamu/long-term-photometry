@@ -21,6 +21,7 @@ def main():
     parser.add_argument('--events-path', type=str, default=None, help="Absolute path to parent events.ndjson to append ROI selection event to")
     parser.add_argument('--traces-only', action='store_true', help="Run traces and QC, skip feature extraction (features.csv) and feature-dependent summaries. This pipeline has no separate signal event-detection stage.")
     parser.add_argument('--event-signal', type=str, choices=['dff', 'delta_f'], help="Signal to use for peak detection features (default from config: dff)")
+    parser.add_argument('--representative-session-index', type=int, default=None, help="Force a specific session index for representative artifacts (0-based)")
     
     args = parser.parse_args()
     
@@ -41,6 +42,8 @@ def main():
         # Apply CLI override for event_signal
         if args.event_signal is not None:
             config.event_signal = args.event_signal
+        if args.representative_session_index is not None:
+            config.representative_session_index = args.representative_session_index
         
         # Init Pipeline
         pipeline = Pipeline(config, mode=args.mode)
@@ -48,22 +51,27 @@ def main():
         inc_rois = [r.strip() for r in args.include_rois.split(',') if r.strip()] if args.include_rois else None
         exc_rois = [r.strip() for r in args.exclude_rois.split(',') if r.strip()] if args.exclude_rois else None
         
-        # Run pipeline (ROI selection resolved inside pipeline.run)
+        # Prepare emitter if requested
+        emitter = None
+        if args.events_path:
+            from photometry_pipeline.core.events import EventEmitter
+            run_id = os.path.basename(args.out)
+            emitter = EventEmitter(args.events_path, run_id, args.out, file_mode="a", allow_makedirs=False)
+
+        # Run pipeline (ROI selection and representative session resolved inside pipeline.run)
         pipeline.run(
             args.input, args.out, args.format, args.recursive, args.file_glob,
             include_rois=inc_rois, exclude_rois=exc_rois,
-            traces_only=args.traces_only
+            traces_only=args.traces_only,
+            emitter=emitter
         )
         
-        # Emit inputs:roi_selection event via EventEmitter if events_path provided
-        if args.events_path and pipeline.roi_selection is not None:
-            from photometry_pipeline.core.events import EventEmitter
+        # Emit inputs:roi_selection event via EventEmitter if emitter exists
+        if emitter:
+            if pipeline.roi_selection is not None:
+                emitter.emit("inputs", "roi_selection", "ROI selection resolved",
+                             payload=pipeline.roi_selection)
             
-            run_id = os.path.basename(args.out)
-            emitter = EventEmitter(args.events_path, run_id, args.out, file_mode="a",
-                                   allow_makedirs=False)
-            emitter.emit("inputs", "roi_selection", "ROI selection resolved",
-                         payload=pipeline.roi_selection)
             emitter.close()
         
     except Exception as e:

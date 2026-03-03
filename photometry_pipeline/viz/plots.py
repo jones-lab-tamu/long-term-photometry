@@ -241,3 +241,4 @@ def plot_stacked_session(traces_dir: str, roi: str, output_dir: str, file_list: 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"plot_C_stacked_{roi}.png"))
     plt.close(fig)
+
