@@ -289,9 +289,14 @@ class TestRunSpec(unittest.TestCase):
         self.assertIn("format", data["user_set_fields"])
 
         # Must NOT contain runner/pipeline-resolved fields
-        for forbidden in ("n_total_discovered", "n_sessions_resolved",
-                          "representative_session_id"):
+        for forbidden in ("n_total_discovered", "n_sessions_resolved"):
             self.assertNotIn(forbidden, data)
+
+        # Intent fields ARE allowed (Step 4) — default None serialized
+        self.assertIn("representative_session_id", data)
+        self.assertIsNone(data["representative_session_id"])
+        self.assertIn("include_roi_ids", data)
+        self.assertIsNone(data["include_roi_ids"])
 
     # ----------------------------------------------------------------
     # User set fields tracking
@@ -477,6 +482,186 @@ class TestRunSpec(unittest.TestCase):
         self.assertNotIn("--validate-only", argv)
         # smooth-window-s is always included (has a default value)
         self.assertIn("--smooth-window-s", argv)
+        # format=auto must OMIT --format entirely (Step 4 rule)
+        self.assertNotIn("--format", argv)
+
+    # ----------------------------------------------------------------
+    # Step 4: intent fields round-trip through gui_run_spec.json
+    # ----------------------------------------------------------------
+    def test_gui_run_spec_includes_intent_fields_in_json(self):
+        """Intent fields (representative_session_id, include_roi_ids)
+        are serialized into gui_run_spec.json."""
+        run_dir = os.path.join(self.tmp_dir, "run_intent")
+
+        spec = RunSpec(
+            input_dir="/data/in",
+            run_dir=run_dir,
+            config_source_path=self.config_path,
+            representative_session_id="session_2",
+            include_roi_ids=["Region0", "Region1"],
+        )
+
+        spec_path = spec.write_gui_run_spec(run_dir)
+        with open(spec_path, "r") as f:
+            d = json.load(f)
+
+        self.assertEqual(d["representative_session_id"], "session_2")
+        self.assertEqual(d["include_roi_ids"], ["Region0", "Region1"])
+
+    # ----------------------------------------------------------------
+    # Step 4: intent fields do NOT leak into config_effective.yaml
+    # ----------------------------------------------------------------
+    def test_generate_derived_config_does_not_write_intent_into_config(self):
+        """config_effective.yaml must NOT contain intent-only fields."""
+        run_dir = os.path.join(self.tmp_dir, "run_no_intent_leak")
+
+        spec = RunSpec(
+            input_dir="/data/in",
+            run_dir=run_dir,
+            config_source_path=self.config_path,
+            config_overrides={},
+            representative_session_id="session_5",
+            include_roi_ids=["RegionA"],
+        )
+
+        config_path = spec.generate_derived_config(run_dir)
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f)
+
+        # Intent fields must be absent from config YAML
+        if cfg is not None:
+            self.assertNotIn("representative_session_id", cfg)
+            self.assertNotIn("include_roi_ids", cfg)
+
+    # ----------------------------------------------------------------
+    # Step 4: intent fields do NOT appear in runner argv
+    # ----------------------------------------------------------------
+    def test_argv_does_not_contain_intent_flags(self):
+        """build_runner_argv must NOT include intent-only fields as flags."""
+        run_dir = os.path.join(self.tmp_dir, "run_no_intent_argv")
+
+        spec = RunSpec(
+            input_dir="/data/in",
+            run_dir=run_dir,
+            config_source_path=self.config_path,
+            representative_session_id="session_3",
+            include_roi_ids=["Region0"],
+        )
+
+        spec.generate_derived_config(run_dir)
+        argv = spec.build_runner_argv()
+        argv_str = " ".join(argv)
+
+        self.assertNotIn("--representative-session-id", argv_str)
+        self.assertNotIn("--include-roi-ids", argv_str)
+        self.assertNotIn("session_3", argv_str)
+        self.assertNotIn("Region0", argv_str)
+
+    # ----------------------------------------------------------------
+    # Step 4: run_discovery works with run_dir="" (no side-effects)
+    # ----------------------------------------------------------------
+    def test_run_discovery_does_not_require_run_dir(self):
+        """RunSpec.run_discovery() works with run_dir='' and does not write files."""
+        spec = RunSpec(
+            input_dir="/nonexistent/path",
+            run_dir="",
+            format="auto",
+            config_source_path=self.config_path,
+        )
+
+        # run_discovery should not crash due to empty run_dir;
+        # it will fail because /nonexistent/path doesn't exist,
+        # but the error should be about the input, not run_dir.
+        with self.assertRaises(RuntimeError) as ctx:
+            spec.run_discovery()
+        error_msg = str(ctx.exception)
+        # Error should be about discovery failing, not about run_dir
+        self.assertNotIn("run_dir", error_msg.lower())
+
+    # ----------------------------------------------------------------
+    # Step 4: format=auto omits --format, format=rwd includes it
+    # ----------------------------------------------------------------
+    def test_argv_format_conditional(self):
+        """--format is omitted for auto, included for explicit formats."""
+        run_dir_auto = os.path.join(self.tmp_dir, "run_fmt_auto")
+        spec_auto = RunSpec(
+            input_dir="/data/in",
+            run_dir=run_dir_auto,
+            format="auto",
+            config_source_path=self.config_path,
+        )
+        spec_auto.generate_derived_config(run_dir_auto)
+        argv_auto = spec_auto.build_runner_argv()
+        self.assertNotIn("--format", argv_auto)
+
+        run_dir_rwd = os.path.join(self.tmp_dir, "run_fmt_rwd")
+        spec_rwd = RunSpec(
+            input_dir="/data/in",
+            run_dir=run_dir_rwd,
+            format="rwd",
+            config_source_path=self.config_path,
+        )
+        spec_rwd.generate_derived_config(run_dir_rwd)
+        argv_rwd = spec_rwd.build_runner_argv()
+        self.assertIn("--format", argv_rwd)
+        self.assertEqual(argv_rwd[argv_rwd.index("--format") + 1], "rwd")
+
+    # ----------------------------------------------------------------
+    # Step 4 invariant: main_window.py has no legacy argv literals
+    # ----------------------------------------------------------------
+    def test_main_window_no_legacy_argv_literals(self):
+        """main_window.py must not contain legacy argv patterns."""
+        import gui.main_window as mw_mod
+        mw_path = os.path.abspath(mw_mod.__file__)
+        with open(mw_path, "r", encoding="utf-8") as f:
+            src = f.read()
+
+        for banned in ("--out-base", "--run-id", "PIPELINE_SCRIPT"):
+            self.assertNotIn(banned, src,
+                             f"main_window.py still contains legacy literal: {banned}")
+
+    # ----------------------------------------------------------------
+    # Step 4: discovery argv respects format=auto omission rule
+    # ----------------------------------------------------------------
+    def test_discovery_argv_format_conditional(self):
+        """run_discovery omits --format for auto, includes it for rwd."""
+        from unittest.mock import patch, MagicMock
+
+        # Case 1: format=auto => argv must NOT contain --format
+        spec_auto = RunSpec(
+            input_dir="/data/in",
+            run_dir="",
+            format="auto",
+            config_source_path=self.config_path,
+        )
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "{}"
+        mock_result.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            spec_auto.run_discovery()
+            called_argv = mock_run.call_args[0][0]
+            self.assertNotIn("--format", called_argv,
+                             "discovery argv must omit --format when auto")
+            self.assertIn("--discover", called_argv)
+
+        # Case 2: format=rwd => argv must contain --format rwd
+        spec_rwd = RunSpec(
+            input_dir="/data/in",
+            run_dir="",
+            format="rwd",
+            config_source_path=self.config_path,
+        )
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            spec_rwd.run_discovery()
+            called_argv = mock_run.call_args[0][0]
+            self.assertIn("--format", called_argv,
+                          "discovery argv must include --format for rwd")
+            fmt_idx = called_argv.index("--format")
+            self.assertEqual(called_argv[fmt_idx + 1], "rwd")
 
 
 if __name__ == "__main__":

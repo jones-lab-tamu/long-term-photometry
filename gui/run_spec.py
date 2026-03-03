@@ -71,6 +71,12 @@ class RunSpec:
     timestamp_local: str = ""
     user_note: Optional[str] = None
 
+    # --- (D) Intent fields (UI only, NOT config knobs) ---
+    # Written into gui_run_spec.json for downstream consumption.
+    # MUST NOT appear in config_effective.yaml or build_runner_argv().
+    representative_session_id: Optional[str] = None
+    include_roi_ids: Optional[List[str]] = None
+
     # --- Explicitness tracking ---
     # Records which RunSpec fields were explicitly set by the user
     # (vs defaulted by GUI). Built by MainWindow._build_run_spec.
@@ -213,10 +219,13 @@ class RunSpec:
             "--input", self.input_dir,
             "--out", self.run_dir,
             "--config", config_path,
-            "--format", self.format,
             "--events", "auto",
             "--cancel-flag", "auto",
         ]
+
+        # Omit --format when auto — let the runner auto-detect
+        if self.format != "auto":
+            argv.extend(["--format", self.format])
 
         if self.sessions_per_hour is not None:
             argv.extend(["--sessions-per-hour", str(self.sessions_per_hour)])
