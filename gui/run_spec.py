@@ -230,3 +230,59 @@ class RunSpec:
             argv.append("--validate-only")
 
         return argv
+
+    def run_discovery(self) -> dict:
+        """
+        Invoke the runner in --discover mode and return the parsed JSON.
+
+        This uses the actual runner backend to discover sessions and ROIs
+        without creating any run directories or events.ndjson files.
+        """
+        import subprocess
+
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        runner_script = os.path.join(
+            repo_root, "tools", "run_full_pipeline_deliverables.py"
+        )
+
+        # We must provide a valid config file for discover to load.
+        # If the user has a source config, use it. Otherwise, we creates a temp one
+        # or just rely on the runner to parse what we give it (it needs a real file).
+        # We'll use get_derived_config_preview to create a temporary one for discovery.
+        import tempfile
+        
+        preview_yaml = self.get_derived_config_preview()
+        
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".yaml") as tmp:
+            tmp.write(preview_yaml)
+            tmp_config_path = tmp.name
+
+        try:
+            argv = [
+                sys.executable,
+                runner_script,
+                "--discover",
+                "--input", self.input_dir,
+                "--config", tmp_config_path,
+                "--format", self.format,
+                # Runner requires --out or --out-base, provide a dummy one
+                # even though discovery mode ignores it.
+                "--out-base", os.path.join(tempfile.gettempdir(), "_dummy_discover_out")
+            ]
+
+            result = subprocess.run(
+                argv, 
+                capture_output=True, 
+                text=True, 
+                check=True
+            )
+            
+            return json.loads(result.stdout)
+            
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Discovery failed: {e.stderr}") from e
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Failed to parse discovery output: {e}") from e
+        finally:
+            if os.path.exists(tmp_config_path):
+                os.remove(tmp_config_path)

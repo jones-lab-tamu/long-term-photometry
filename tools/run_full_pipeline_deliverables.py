@@ -135,6 +135,11 @@ def parse_args():
                             "(run_dir not created); explicit path writes only if "
                             "parent directory already exists."
                         ))
+    parser.add_argument('--discover', action='store_true',
+                        help=(
+                            "Discovery mode: emit JSON with discovered sessions and ROIs. "
+                            "Exits 0 without creating files or running analysis."
+                        ))
     parser.add_argument('--cancel-flag', default='auto',
                         help="Cancel flag path, or 'auto' for run_dir/CANCEL.REQUESTED")
     return parser.parse_args()
@@ -228,6 +233,32 @@ def resolve_paths(args, run_dir):
 
 def main():
     args = parse_args()
+
+    # ============================================================
+    # Discovery Preflight
+    # ============================================================
+    if args.discover:
+        # We perform discovery and print JSON to stdout, then exit 0.
+        # No run_dir is created, no events emitted.
+        from photometry_pipeline.discovery import discover_inputs
+        try:
+            cfg = Config.from_yaml(args.config)
+            # Apply any CLI overrides that discovery might care about
+            if args.preview_first_n is not None:
+                cfg.preview_first_n = args.preview_first_n
+                
+            res = discover_inputs(
+                input_dir=args.input,
+                config=cfg,
+                force_format=args.format,
+                preview_first_n=cfg.preview_first_n
+            )
+            print(json.dumps(res, indent=2))
+            raise SystemExit(0)
+        except Exception as e:
+            # Output error strictly to stderr so stdout JSON remains clean if expected
+            print(f"Error during discovery: {e}", file=sys.stderr)
+            raise SystemExit(1)
 
     # -- Resolve run directory --
     run_dir, run_id, is_gui_mode = resolve_run_dir(args)
