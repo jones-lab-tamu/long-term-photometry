@@ -219,6 +219,45 @@ class MainWindow(QMainWindow):
         self._smooth_spin.valueChanged.connect(self._on_config_changed)
         form.addRow("Smooth Window (s):", self._smooth_spin)
 
+        # Mode
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItems(["both", "phasic", "tonic"])
+        self._mode_combo.setToolTip("Select which analysis modes to run. Default is both.")
+        form.addRow("Mode:", self._mode_combo)
+        self._mode_combo.currentIndexChanged.connect(self._on_config_changed)
+
+        # Traces-only (--traces-only CLI flag)
+        self._traces_only_cb = QCheckBox("Skip feature extraction (traces and QC only)")
+        self._traces_only_cb.stateChanged.connect(self._on_config_changed)
+        form.addRow("Traces-only:", self._traces_only_cb)
+
+        # Preview first N (--preview-first-n CLI flag)
+        self._preview_enabled_cb = QCheckBox("Limit sessions")
+        self._preview_enabled_cb.stateChanged.connect(self._on_config_changed)
+        self._preview_n_spin = QSpinBox()
+        self._preview_n_spin.setRange(1, 100000)
+        self._preview_n_spin.setValue(5)
+        self._preview_n_spin.setMaximumWidth(120)
+        self._preview_n_spin.setEnabled(False)
+        self._preview_enabled_cb.toggled.connect(self._preview_n_spin.setEnabled)
+        preview_row = QHBoxLayout()
+        preview_row.addWidget(self._preview_enabled_cb)
+        preview_row.addWidget(self._preview_n_spin)
+        preview_row.addStretch()
+        form.addRow("Preview first N:", preview_row)
+
+        # Recursive (always enabled by runner; informational only)
+        self._recursive_cb = QCheckBox("Always enabled by runner")
+        self._recursive_cb.setChecked(True)
+        self._recursive_cb.setEnabled(False)
+        self._recursive_cb.setToolTip(
+            "Always enabled by the runner currently "
+            "(it always passes --recursive)."
+        )
+        form.addRow("Recursive:", self._recursive_cb)
+
+
+
         # Overwrite (legacy CLI only; disabled in GUI mode)
         self._overwrite_cb = QCheckBox("Overwrite existing output (legacy CLI only)")
         self._overwrite_cb.setEnabled(False)
@@ -255,12 +294,32 @@ class MainWindow(QMainWindow):
         sess_col.addWidget(self._sessions_list)
         disc_lists.addLayout(sess_col)
 
+        # ROI filter mode (Include vs Exclude)
+        roi_filter_row = QHBoxLayout()
+        roi_filter_row.addWidget(QLabel("ROI Filter Mode:"))
+        self._roi_filter_combo = QComboBox()
+        self._roi_filter_combo.addItems(["Include selected", "Exclude selected"])
+        self._roi_filter_combo.setMaximumWidth(200)
+        self._roi_filter_combo.currentIndexChanged.connect(self._on_config_changed)
+        roi_filter_row.addWidget(self._roi_filter_combo)
+        roi_filter_row.addStretch()
+        disc_layout.addLayout(roi_filter_row)
+
         # ROIs checklist (checkable, exact discovery order)
         roi_col = QVBoxLayout()
-        roi_col.addWidget(QLabel("ROIs (check to include):"))
+        roi_col.addWidget(QLabel("ROIs (check to include/exclude):"))
         self._roi_list = QListWidget()
         self._roi_list.setMaximumHeight(120)
         roi_col.addWidget(self._roi_list)
+        roi_btn_row = QHBoxLayout()
+        self._roi_select_all_btn = QPushButton("Select all")
+        self._roi_select_all_btn.clicked.connect(self._on_roi_select_all)
+        roi_btn_row.addWidget(self._roi_select_all_btn)
+        self._roi_select_none_btn = QPushButton("Select none")
+        self._roi_select_none_btn.clicked.connect(self._on_roi_select_none)
+        roi_btn_row.addWidget(self._roi_select_none_btn)
+        roi_btn_row.addStretch()
+        roi_col.addLayout(roi_btn_row)
         disc_lists.addLayout(roi_col)
 
         disc_layout.addLayout(disc_lists)
@@ -375,25 +434,64 @@ class MainWindow(QMainWindow):
         if validate_only:
             user_set.append("validate_only")
 
-        # --- Intent fields from discovery UI ---
-        rep_session_id = None
-        if self._rep_session_combo.currentIndex() > 0:
-            rep_session_id = self._rep_session_combo.currentText()
-            user_set.append("representative_session_id")
+        # --- Mode ---
+        mode_text = self._mode_combo.currentText()
+        if mode_text == "both":
+            mode_val = None
+        else:
+            mode_val = mode_text
+            user_set.append("mode")
 
+        # --- Traces-only (--traces-only CLI flag) ---
+        traces_only = self._traces_only_cb.isChecked()
+        if traces_only:
+            user_set.append("traces_only")
+
+        # --- Preview first N (--preview-first-n CLI flag) ---
+        preview_first_n = None
+        if self._preview_enabled_cb.isChecked():
+            preview_first_n = self._preview_n_spin.value()
+            user_set.append("preview_first_n")
+
+
+        # --- Representative session index (0-based, from discovery) ---
+        rep_session_idx = None
+        if self._rep_session_combo.currentIndex() > 0:
+            # Index 0 is "(auto)"; session indices start at 1 in combo
+            rep_session_idx = self._rep_session_combo.currentIndex() - 1
+            user_set.append("representative_session_index")
+
+        # --- ROI selection (include vs exclude) ---
         include_roi_ids = None
+        exclude_roi_ids = None
+        is_exclude_mode = (self._roi_filter_combo.currentIndex() == 1)
         if self._discovery_cache is not None:
-            # Collect only checked ROI ids
+            all_rois = [r["roi_id"] for r in self._discovery_cache.get("rois", [])]
             checked = []
             for i in range(self._roi_list.count()):
                 item = self._roi_list.item(i)
                 if item.checkState() == Qt.Checked:
                     checked.append(item.text())
-            # Only set if user actually unchecked something
-            all_rois = [r["roi_id"] for r in self._discovery_cache.get("rois", [])]
-            if set(checked) != set(all_rois):
-                include_roi_ids = checked
-                user_set.append("include_roi_ids")
+            if is_exclude_mode:
+                # Exclude mode: checked = excluded ROIs
+                if len(checked) == 0:
+                    exclude_roi_ids = None  # exclude nothing
+                elif len(checked) == len(all_rois):
+                    exclude_roi_ids = []  # all excluded (blocked by GUI)
+                    user_set.append("exclude_roi_ids")
+                else:
+                    exclude_roi_ids = checked
+                    user_set.append("exclude_roi_ids")
+            else:
+                # Include mode: checked = included ROIs
+                if len(checked) == len(all_rois):
+                    include_roi_ids = None  # all included (default)
+                elif len(checked) == 0:
+                    include_roi_ids = []  # none included (blocked by GUI)
+                    user_set.append("include_roi_ids")
+                else:
+                    include_roi_ids = checked
+                    user_set.append("include_roi_ids")
 
         spec = RunSpec(
             input_dir=self._input_dir.text().strip(),
@@ -403,12 +501,16 @@ class MainWindow(QMainWindow):
             sessions_per_hour=sph_val,
             session_duration_s=dur_val,
             smooth_window_s=smooth,
+            traces_only=traces_only,
+            preview_first_n=preview_first_n,
+            representative_session_index=rep_session_idx,
+            include_roi_ids=include_roi_ids,
+            exclude_roi_ids=exclude_roi_ids,
             config_source_path=self._config_path.text().strip(),
             config_overrides={},
             gui_version="1.0.0",
             timestamp_local=datetime.now().isoformat(),
-            representative_session_id=rep_session_id,
-            include_roi_ids=include_roi_ids,
+            mode=mode_val,
             user_set_fields=user_set,
         )
         return spec
@@ -480,6 +582,21 @@ class MainWindow(QMainWindow):
                     return "Session Duration must be > 0."
             except ValueError:
                 return f"Session Duration must be a number, got: '{dur}'"
+
+        # ROI selection: block "process nothing" states
+        if self._discovery_cache is not None:
+            total_rois = self._roi_list.count()
+            checked_count = sum(
+                1 for i in range(total_rois)
+                if self._roi_list.item(i).checkState() == Qt.Checked
+            )
+            is_exclude_mode = (self._roi_filter_combo.currentIndex() == 1)
+            if not is_exclude_mode and checked_count == 0:
+                return ("No ROIs selected. Select at least one ROI "
+                        "or click Select all.")
+            if is_exclude_mode and checked_count == total_rois:
+                return ("All ROIs excluded. Uncheck at least one ROI "
+                        "or click Select none.")
 
         return None
 
@@ -598,6 +715,16 @@ class MainWindow(QMainWindow):
         self._rep_session_combo.addItem("(auto)")
         for sess in sessions:
             self._rep_session_combo.addItem(sess.get("session_id", "?"))
+
+    def _on_roi_select_all(self):
+        """Check all ROI items in the checklist."""
+        for i in range(self._roi_list.count()):
+            self._roi_list.item(i).setCheckState(Qt.Checked)
+
+    def _on_roi_select_none(self):
+        """Uncheck all ROI items in the checklist."""
+        for i in range(self._roi_list.count()):
+            self._roi_list.item(i).setCheckState(Qt.Unchecked)
 
     def _on_validate(self):
         err = self._validate_gui_inputs()
