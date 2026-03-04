@@ -59,6 +59,97 @@ def _open_folder(path: str) -> None:
         _subprocess.run(["xdg-open", path], check=False)
 
 
+def parse_and_validate_isosbestic_knobs(
+    window_sec_str: str,
+    step_sec_str: str,
+    min_valid_windows_val: int,
+    r_low_str: str,
+    r_high_str: str,
+    g_min_str: str,
+    min_samples_val: int,
+    defaults: dict,
+) -> tuple[dict | None, str | None]:
+    """
+    Parses and validates the isosbestic advanced knobs.
+    Returns (dict_of_overrides, None) if valid.
+    Returns (None, error_message) if invalid.
+    """
+    ws_text = window_sec_str.strip()
+    try:
+        ws = float(ws_text if ws_text else defaults["window_sec"])
+        if ws <= 0:
+            return None, "Regression Window must be > 0."
+    except ValueError:
+        return None, "Regression Window must be a number."
+
+    ss_text = step_sec_str.strip()
+    try:
+        ss = float(ss_text if ss_text else defaults["step_sec"])
+        if ss <= 0:
+            return None, "Regression Step must be > 0."
+    except ValueError:
+        return None, "Regression Step must be a number."
+
+    if ss > ws:
+        return None, "Regression Step cannot be greater than Regression Window."
+
+    try:
+        r_low_val = r_low_str.strip()
+        r_high_val = r_high_str.strip()
+        r_low = float(r_low_val if r_low_val else defaults["r_low"])
+        r_high = float(r_high_val if r_high_val else defaults["r_high"])
+        if not (0 <= r_low <= r_high <= 1):
+            return None, "R-Low and R-High must be between 0 and 1, and R-Low <= R-High."
+    except ValueError:
+        return None, "R-Low and R-High must be numbers."
+
+    try:
+        g_min_val = g_min_str.strip()
+        g_min = float(g_min_val if g_min_val else defaults["g_min"])
+        if g_min < 0:
+            return None, "G-Min must be >= 0."
+    except ValueError:
+        return None, "G-Min must be a number."
+
+    if min_valid_windows_val < 1:
+        return None, "Min Valid Windows must be >= 1."
+    if min_samples_val < 1:
+        return None, "Min Samples per Window must be >= 1."
+
+    overrides = {
+        "window_sec": ws,
+        "step_sec": ss,
+        "min_valid_windows": min_valid_windows_val,
+        "r_low": r_low,
+        "r_high": r_high,
+        "g_min": g_min,
+        "min_samples_per_window": min_samples_val,
+    }
+    return overrides, None
+
+
+def is_isosbestic_active(mode_text: str) -> bool:
+    """Return True if the mode implies phasic analysis will run."""
+    return mode_text in ("both", "phasic")
+
+
+def get_isosbestic_overrides_if_active(mode_text: str, parsed_overrides: dict) -> dict:
+    """Return the overrides only if the mode implies phasic analysis will run."""
+    if is_isosbestic_active(mode_text):
+        return parsed_overrides
+    return {}
+
+
+def compute_isosbestic_overrides_user_changed(parsed: dict, defaults: dict) -> dict:
+    """
+    Returns only the key/value pairs in parsed that differ from the defaults.
+    """
+    changed = {}
+    for k, v in parsed.items():
+        if k in defaults and v != defaults[k]:
+            changed[k] = v
+    return changed
+
 class MainWindow(QMainWindow):
     """Photometry Pipeline Deliverables GUI."""
 
@@ -69,6 +160,9 @@ class MainWindow(QMainWindow):
 
         # Settings (injectable for testing)
         self._settings = settings if settings is not None else QSettings()
+
+        from photometry_pipeline.config import Config
+        self._default_cfg = Config()
 
         # Pipeline runner
         self._runner = PipelineRunner(self)
@@ -268,6 +362,51 @@ class MainWindow(QMainWindow):
 
         outer.addLayout(form)
 
+        # --- Advanced: Isosbestic Correction ---
+        adv_group = QGroupBox("Advanced: Isosbestic Correction")
+        adv_layout = QFormLayout(adv_group)
+        adv_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
+        self._window_sec_edit = QLineEdit(str(self._default_cfg.window_sec))
+        adv_layout.addRow("Regression Window (sec):", self._window_sec_edit)
+
+        self._step_sec_edit = QLineEdit(str(self._default_cfg.step_sec))
+        adv_layout.addRow("Regression Step (sec):", self._step_sec_edit)
+
+        self._min_valid_windows_spin = QSpinBox()
+        self._min_valid_windows_spin.setRange(1, 1000)
+        self._min_valid_windows_spin.setValue(self._default_cfg.min_valid_windows)
+        adv_layout.addRow("Min Valid Windows:", self._min_valid_windows_spin)
+
+        self._r_low_edit = QLineEdit(str(self._default_cfg.r_low))
+        adv_layout.addRow("R-Low Threshold:", self._r_low_edit)
+
+        self._r_high_edit = QLineEdit(str(self._default_cfg.r_high))
+        adv_layout.addRow("R-High Threshold:", self._r_high_edit)
+
+        self._g_min_edit = QLineEdit(str(self._default_cfg.g_min))
+        adv_layout.addRow("G-Min Threshold:", self._g_min_edit)
+
+        self._min_samples_per_window_spin = QSpinBox()
+        self._min_samples_per_window_spin.setRange(1, 100000)
+        
+        # In our schema, min_samples_per_window defaults to 0 (dynamic).
+        # But the strict GUI spec for Step 5 says to enforce >= 1.
+        default_min_samples = self._default_cfg.min_samples_per_window
+        if default_min_samples < 1:
+            default_min_samples = 1
+        
+        self._min_samples_per_window_spin.setValue(default_min_samples)
+        self._min_samples_per_window_spin.setToolTip("Minimum valid samples per window.")
+        adv_layout.addRow("Min Samples per Window:", self._min_samples_per_window_spin)
+
+        self._adv_group = adv_group
+        outer.addWidget(adv_group)
+
+        # Wire visibility based on mode
+        self._mode_combo.currentIndexChanged.connect(self._update_adv_group_visibility)
+        self._update_adv_group_visibility()
+
         # --- Discovery Section ---
         disc_group = QGroupBox("Session / ROI Discovery")
         disc_layout = QVBoxLayout(disc_group)
@@ -384,6 +523,15 @@ class MainWindow(QMainWindow):
 
         return group
 
+    def _update_adv_group_visibility(self):
+        # In our GUI contract, "both" maps to mode_val=None (which implies phasic runs)
+        # Show if (mode == "both" or mode == "phasic")
+        mode_text = self._mode_combo.currentText()
+        if is_isosbestic_active(mode_text):
+            self._adv_group.show()
+        else:
+            self._adv_group.hide()
+
     # ==================================================================
     # RunSpec construction + argv (GUI mode: --out <explicit_run_dir>)
     # ==================================================================
@@ -493,6 +641,33 @@ class MainWindow(QMainWindow):
                     include_roi_ids = checked
                     user_set.append("include_roi_ids")
 
+        # --- Config Overrides ---
+        config_overrides = {}
+        if is_isosbestic_active(mode_text):
+            default_dict = {
+                "window_sec": self._default_cfg.window_sec,
+                "step_sec": self._default_cfg.step_sec,
+                "min_valid_windows": self._default_cfg.min_valid_windows,
+                "r_low": self._default_cfg.r_low,
+                "r_high": self._default_cfg.r_high,
+                "g_min": self._default_cfg.g_min,
+                # Enforce dynamic minimum mapping matching GUI constraint default
+                "min_samples_per_window": max(1, self._default_cfg.min_samples_per_window),
+            }
+            overrides, _ = parse_and_validate_isosbestic_knobs(
+                self._window_sec_edit.text(),
+                self._step_sec_edit.text(),
+                self._min_valid_windows_spin.value(),
+                self._r_low_edit.text(),
+                self._r_high_edit.text(),
+                self._g_min_edit.text(),
+                self._min_samples_per_window_spin.value(),
+                defaults=default_dict,
+            )
+            if overrides is not None:
+                changed_overrides = compute_isosbestic_overrides_user_changed(overrides, default_dict)
+                config_overrides.update(changed_overrides)
+
         spec = RunSpec(
             input_dir=self._input_dir.text().strip(),
             run_dir=run_dir,
@@ -507,7 +682,7 @@ class MainWindow(QMainWindow):
             include_roi_ids=include_roi_ids,
             exclude_roi_ids=exclude_roi_ids,
             config_source_path=self._config_path.text().strip(),
-            config_overrides={},
+            config_overrides=config_overrides,
             gui_version="1.0.0",
             timestamp_local=datetime.now().isoformat(),
             mode=mode_val,
@@ -597,6 +772,30 @@ class MainWindow(QMainWindow):
             if is_exclude_mode and checked_count == total_rois:
                 return ("All ROIs excluded. Uncheck at least one ROI "
                         "or click Select none.")
+
+        if is_isosbestic_active(self._mode_combo.currentText()):
+            default_dict = {
+                "window_sec": self._default_cfg.window_sec,
+                "step_sec": self._default_cfg.step_sec,
+                "min_valid_windows": self._default_cfg.min_valid_windows,
+                "r_low": self._default_cfg.r_low,
+                "r_high": self._default_cfg.r_high,
+                "g_min": self._default_cfg.g_min,
+                # Enforce dynamic minimum mapping matching GUI constraint default
+                "min_samples_per_window": max(1, self._default_cfg.min_samples_per_window),
+            }
+            _, err = parse_and_validate_isosbestic_knobs(
+                self._window_sec_edit.text(),
+                self._step_sec_edit.text(),
+                self._min_valid_windows_spin.value(),
+                self._r_low_edit.text(),
+                self._r_high_edit.text(),
+                self._g_min_edit.text(),
+                self._min_samples_per_window_spin.value(),
+                defaults=default_dict,
+            )
+            if err:
+                return err
 
         return None
 

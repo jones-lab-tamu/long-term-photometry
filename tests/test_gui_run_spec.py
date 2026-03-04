@@ -1019,5 +1019,192 @@ class TestRunSpec(unittest.TestCase):
                              f"Runner has unexpected flag: {flag}")
 
 
+class TestIsosbesticKnobs(unittest.TestCase):
+    """Test the pure validation function for isosbestic advanced knobs."""
+
+    def test_valid_isosbestic_knobs(self):
+        from gui.main_window import parse_and_validate_isosbestic_knobs
+        defaults = {
+            "window_sec": 60.0, "step_sec": 10.0,
+            "min_valid_windows": 5, "r_low": 0.2, "r_high": 0.8,
+            "g_min": 0.2, "min_samples_per_window": 1
+        }
+        # Update valid arguments: 1 instead of 0
+        overrides, err = parse_and_validate_isosbestic_knobs(
+            "60.0", "10.0", 5, "0.2", "0.8", "0.2", 1, defaults=defaults
+        )
+        self.assertIsNone(err)
+        self.assertEqual(overrides["window_sec"], 60.0)
+        self.assertEqual(overrides["step_sec"], 10.0)
+        self.assertEqual(overrides["min_valid_windows"], 5)
+        self.assertEqual(overrides["r_low"], 0.2)
+        self.assertEqual(overrides["r_high"], 0.8)
+        self.assertEqual(overrides["g_min"], 0.2)
+        self.assertEqual(overrides["min_samples_per_window"], 1)
+
+    def test_validation_rules(self):
+        from gui.main_window import parse_and_validate_isosbestic_knobs
+        defaults = {
+            "window_sec": 60.0, "step_sec": 10.0,
+            "min_valid_windows": 5, "r_low": 0.2, "r_high": 0.8,
+            "g_min": 0.2, "min_samples_per_window": 1
+        }
+
+        # window_sec <= 0
+        _, err = parse_and_validate_isosbestic_knobs("0", "10.0", 5, "0.2", "0.8", "0.2", 1, defaults=defaults)
+        self.assertIn("Regression Window must be > 0", err)
+        
+        # step_sec <= 0
+        _, err = parse_and_validate_isosbestic_knobs("60.0", "0", 5, "0.2", "0.8", "0.2", 1, defaults=defaults)
+        self.assertIn("Regression Step must be > 0", err)
+
+        # step > window
+        _, err = parse_and_validate_isosbestic_knobs("10.0", "20.0", 5, "0.2", "0.8", "0.2", 1, defaults=defaults)
+        self.assertIn("cannot be greater than Regression Window", err)
+
+        # r_low > r_high
+        _, err = parse_and_validate_isosbestic_knobs("60.0", "10.0", 5, "0.8", "0.2", "0.2", 1, defaults=defaults)
+        self.assertIn("R-Low <= R-High", err)
+
+        # r_low outside [0,1]
+        _, err = parse_and_validate_isosbestic_knobs("60.0", "10.0", 5, "-0.1", "0.8", "0.2", 1, defaults=defaults)
+        self.assertIn("between 0 and 1", err)
+
+        # g_min < 0
+        _, err = parse_and_validate_isosbestic_knobs("60.0", "10.0", 5, "0.2", "0.8", "-0.1", 1, defaults=defaults)
+        self.assertIn("G-Min must be >= 0", err)
+
+        # min_valid_windows < 1
+        _, err = parse_and_validate_isosbestic_knobs("60.0", "10.0", 0, "0.2", "0.8", "0.2", 1, defaults=defaults)
+        self.assertIn("Min Valid Windows must be >= 1", err)
+
+        # min_samples < 1
+        _, err = parse_and_validate_isosbestic_knobs("60.0", "10.0", 5, "0.2", "0.8", "0.2", 0, defaults=defaults)
+        self.assertIn("Min Samples per Window must be >= 1", err)
+
+    def test_isosbestic_gating_by_mode(self):
+        from gui.main_window import is_isosbestic_active
+        
+        # When mode is both or phasic, is active
+        self.assertTrue(is_isosbestic_active("both"))
+        self.assertTrue(is_isosbestic_active("phasic"))
+        
+        # When mode is tonic-only, is inactive
+        self.assertFalse(is_isosbestic_active("tonic"))
+
+    def test_isosbestic_keys_not_in_config_when_tonic(self):
+        """T1: When mode is tonic, isosbestic overrides must NOT appear in config_effective.yaml."""
+        from gui.run_spec import RunSpec
+        import tempfile
+        import os
+        import shutil
+        import yaml
+        
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            # We must use RunSpec to prove config generation works as expected
+            run_dir = os.path.join(tmp_dir, "run_tonic")
+            
+            # Create a mock base config (no isosbestic keys)
+            base_config = {"some_other_key": True}
+            base_config_path = os.path.join(tmp_dir, "base_config.yaml")
+            with open(base_config_path, "w") as f:
+                yaml.safe_dump(base_config, f)
+            
+            # Gating occurs in MainWindow, we emulate that flow
+            from gui.main_window import is_isosbestic_active
+            overrides = {
+                "window_sec": 120.0, "step_sec": 5.0, "min_valid_windows": 10,
+                "min_samples_per_window": 5, "r_low": 0.5, "r_high": 0.9, "g_min": 0.1
+            } # Attempted user overrides
+            
+            active_overrides = overrides if is_isosbestic_active("tonic") else {}
+            # Assert contract: gating yields config_overrides == {}
+            self.assertEqual(active_overrides, {})
+            
+            spec = RunSpec(
+                run_dir=run_dir,
+                config_source_path=base_config_path,
+                config_overrides=active_overrides
+            )
+            config_path = spec.generate_derived_config(run_dir)
+            
+            with open(config_path, "r") as f:
+                loaded = yaml.safe_load(f)
+                
+            # The overrides were dropped by gating. None of these keys should exist.
+            keys_to_check = [
+                "window_sec", "step_sec", "min_valid_windows",
+                "min_samples_per_window", "r_low", "r_high", "g_min"
+            ]
+            for key in keys_to_check:
+                self.assertNotIn(key, loaded)
+            
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_isosbestic_keys_present_when_phasic_and_user_changed(self):
+        """T2: Under mode='phasic'/'both' with changed values, keys must be emitted."""
+        from gui.run_spec import RunSpec
+        import tempfile
+        import os
+        import shutil
+        import yaml
+        
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            run_dir = os.path.join(tmp_dir, "run_phasic")
+            
+            base_config = {"window_sec": 60.0, "step_sec": 10.0}
+            base_config_path = os.path.join(tmp_dir, "base_config.yaml")
+            with open(base_config_path, "w") as f:
+                yaml.safe_dump(base_config, f)
+            
+            from gui.main_window import is_isosbestic_active, compute_isosbestic_overrides_user_changed, parse_and_validate_isosbestic_knobs
+            
+            defaults = {"window_sec": 60.0, "step_sec": 10.0, "min_valid_windows": 5, "r_low": 0.2, "r_high": 0.8, "g_min": 0.2, "min_samples_per_window": 1}
+            # Simulate parsing from GUI where window_sec is changed
+            parsed_overrides, err = parse_and_validate_isosbestic_knobs("150.0", "10.0", 5, "0.2", "0.8", "0.2", 1, defaults=defaults)
+            
+            # T2: Gating through "phasic" retains the override
+            active_overrides = parsed_overrides if is_isosbestic_active("phasic") else {}
+            # T2: Changed from default retains the override
+            changed_overrides = compute_isosbestic_overrides_user_changed(
+                active_overrides, 
+                defaults
+            )
+            
+            spec = RunSpec(
+                run_dir=run_dir,
+                config_source_path=base_config_path,
+                config_overrides=changed_overrides
+            )
+            config_path = spec.generate_derived_config(run_dir)
+            
+            with open(config_path, "r") as f:
+                loaded = yaml.safe_load(f)
+                
+            self.assertEqual(loaded["window_sec"], 150.0)
+            self.assertEqual(loaded["step_sec"], 10.0) # Stays base config since step_sec wasn't overridden
+            
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_isosbestic_defaults_not_written_when_unchanged(self):
+        """T3: Under phasic/both, if parsed values == defaults, overrides are dropped."""
+        from gui.main_window import is_isosbestic_active, compute_isosbestic_overrides_user_changed, parse_and_validate_isosbestic_knobs
+        
+        defaults = {"window_sec": 60.0, "step_sec": 10.0, "r_low": 0.2, "min_valid_windows": 5, "r_high": 0.8, "g_min": 0.2, "min_samples_per_window": 1}
+        # Emulate GUI blank inputs taking defaults
+        parsed_overrides, err = parse_and_validate_isosbestic_knobs("", "", 5, "", "", "", 1, defaults=defaults)
+        
+        # Passes gating
+        active_overrides = parsed_overrides if is_isosbestic_active("both") else {}
+        
+        # Dropped because they match defaults
+        changed_overrides = compute_isosbestic_overrides_user_changed(active_overrides, defaults)
+        
+        self.assertEqual(changed_overrides, {})
+
 if __name__ == "__main__":
     unittest.main()

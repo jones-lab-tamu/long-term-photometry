@@ -26,6 +26,10 @@ GUI_KNOBS_ADVANCED: Set[str] = {
     "window_sec",
     "step_sec",
     "min_valid_windows",
+    "r_low",
+    "r_high",
+    "g_min",
+    "min_samples_per_window",
     # Peak/Event
     "peak_threshold_method",
     "peak_threshold_k",
@@ -100,6 +104,25 @@ KNOB_META: Dict[str, dict] = {
     "min_valid_windows": {
         "label": "Min Valid Windows",
         "help": "Minimum number of valid regression windows required.",
+    },
+    "r_low": {
+        "label": "R-Low Threshold",
+        "help": "Lower Pearson correlation threshold for dynamic correction.",
+        "range": {"min": 0.0, "max": 1.0},
+    },
+    "r_high": {
+        "label": "R-High Threshold",
+        "help": "Upper Pearson correlation threshold for dynamic correction.",
+        "range": {"min": 0.0, "max": 1.0},
+    },
+    "g_min": {
+        "label": "G-Min Threshold",
+        "help": "Minimum Green channel variance threshold.",
+        "range": {"min": 0.0},
+    },
+    "min_samples_per_window": {
+        "label": "Min Samples per Window",
+        "help": "Minimum valid samples per window.",
     },
     # --- DEVELOPER ---
     "allow_partial_final_chunk": {
