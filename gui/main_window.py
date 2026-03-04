@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QCheckBox, QSpinBox,
     QDoubleSpinBox, QPushButton, QPlainTextEdit, QSplitter,
-    QFileDialog, QMessageBox, QSizePolicy,
+    QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem,
 )
 
 from gui.process_runner import PipelineRunner, RunnerState
@@ -39,9 +39,6 @@ from gui.events_follower import EventsFollower
 from gui.manifest_viewer import ManifestViewer
 from gui.run_spec import RunSpec
 
-
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-PIPELINE_SCRIPT = os.path.join(_REPO_ROOT, "tools", "run_full_pipeline_deliverables.py")
 
 _SETTINGS_GROUP = "run_config"
 
@@ -92,6 +89,9 @@ class MainWindow(QMainWindow):
 
         # Accumulated stdout for validate-only result checking
         self._validate_stdout = []
+
+        # Discovery cache (result of RunSpec.run_discovery)
+        self._discovery_cache = None
 
         # Status label fields (state + last event, shown together)
         self._state_str = "IDLE"
@@ -162,7 +162,7 @@ class MainWindow(QMainWindow):
         input_row.addWidget(btn)
         form.addRow("Input Directory:", input_row)
 
-        # Output directory (used as --out-base in GUI mode)
+        # Output base directory (run_dir = out_base / run_id)
         self._output_dir = QLineEdit()
         self._output_dir.textChanged.connect(self._on_config_changed)
         output_row = QHBoxLayout()
@@ -219,7 +219,46 @@ class MainWindow(QMainWindow):
         self._smooth_spin.valueChanged.connect(self._on_config_changed)
         form.addRow("Smooth Window (s):", self._smooth_spin)
 
-        # Overwrite (legacy CLI only; disabled in GUI which uses --out-base)
+        # Mode
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItems(["both", "phasic", "tonic"])
+        self._mode_combo.setToolTip("Select which analysis modes to run. Default is both.")
+        form.addRow("Mode:", self._mode_combo)
+        self._mode_combo.currentIndexChanged.connect(self._on_config_changed)
+
+        # Traces-only (--traces-only CLI flag)
+        self._traces_only_cb = QCheckBox("Skip feature extraction (traces and QC only)")
+        self._traces_only_cb.stateChanged.connect(self._on_config_changed)
+        form.addRow("Traces-only:", self._traces_only_cb)
+
+        # Preview first N (--preview-first-n CLI flag)
+        self._preview_enabled_cb = QCheckBox("Limit sessions")
+        self._preview_enabled_cb.stateChanged.connect(self._on_config_changed)
+        self._preview_n_spin = QSpinBox()
+        self._preview_n_spin.setRange(1, 100000)
+        self._preview_n_spin.setValue(5)
+        self._preview_n_spin.setMaximumWidth(120)
+        self._preview_n_spin.setEnabled(False)
+        self._preview_enabled_cb.toggled.connect(self._preview_n_spin.setEnabled)
+        preview_row = QHBoxLayout()
+        preview_row.addWidget(self._preview_enabled_cb)
+        preview_row.addWidget(self._preview_n_spin)
+        preview_row.addStretch()
+        form.addRow("Preview first N:", preview_row)
+
+        # Recursive (always enabled by runner; informational only)
+        self._recursive_cb = QCheckBox("Always enabled by runner")
+        self._recursive_cb.setChecked(True)
+        self._recursive_cb.setEnabled(False)
+        self._recursive_cb.setToolTip(
+            "Always enabled by the runner currently "
+            "(it always passes --recursive)."
+        )
+        form.addRow("Recursive:", self._recursive_cb)
+
+
+
+        # Overwrite (legacy CLI only; disabled in GUI mode)
         self._overwrite_cb = QCheckBox("Overwrite existing output (legacy CLI only)")
         self._overwrite_cb.setEnabled(False)
         self._overwrite_cb.setToolTip(
@@ -228,6 +267,74 @@ class MainWindow(QMainWindow):
         form.addRow("", self._overwrite_cb)
 
         outer.addLayout(form)
+
+        # --- Discovery Section ---
+        disc_group = QGroupBox("Session / ROI Discovery")
+        disc_layout = QVBoxLayout(disc_group)
+
+        disc_btn_row = QHBoxLayout()
+        self._discover_btn = QPushButton("Discover Sessions / ROIs")
+        self._discover_btn.clicked.connect(self._on_discover)
+        disc_btn_row.addWidget(self._discover_btn)
+        disc_btn_row.addStretch()
+        disc_layout.addLayout(disc_btn_row)
+
+        self._discovery_summary = QLabel("No discovery run yet.")
+        self._discovery_summary.setStyleSheet("color: #666; font-size: 11px;")
+        disc_layout.addWidget(self._discovery_summary)
+
+        # Sessions list (read-only, exact discovery order)
+        disc_lists = QHBoxLayout()
+
+        sess_col = QVBoxLayout()
+        sess_col.addWidget(QLabel("Sessions (discovery order):"))
+        self._sessions_list = QListWidget()
+        self._sessions_list.setMaximumHeight(120)
+        self._sessions_list.setSelectionMode(QListWidget.NoSelection)
+        sess_col.addWidget(self._sessions_list)
+        disc_lists.addLayout(sess_col)
+
+        # ROI filter mode (Include vs Exclude)
+        roi_filter_row = QHBoxLayout()
+        roi_filter_row.addWidget(QLabel("ROI Filter Mode:"))
+        self._roi_filter_combo = QComboBox()
+        self._roi_filter_combo.addItems(["Include selected", "Exclude selected"])
+        self._roi_filter_combo.setMaximumWidth(200)
+        self._roi_filter_combo.currentIndexChanged.connect(self._on_config_changed)
+        roi_filter_row.addWidget(self._roi_filter_combo)
+        roi_filter_row.addStretch()
+        disc_layout.addLayout(roi_filter_row)
+
+        # ROIs checklist (checkable, exact discovery order)
+        roi_col = QVBoxLayout()
+        roi_col.addWidget(QLabel("ROIs (check to include/exclude):"))
+        self._roi_list = QListWidget()
+        self._roi_list.setMaximumHeight(120)
+        roi_col.addWidget(self._roi_list)
+        roi_btn_row = QHBoxLayout()
+        self._roi_select_all_btn = QPushButton("Select all")
+        self._roi_select_all_btn.clicked.connect(self._on_roi_select_all)
+        roi_btn_row.addWidget(self._roi_select_all_btn)
+        self._roi_select_none_btn = QPushButton("Select none")
+        self._roi_select_none_btn.clicked.connect(self._on_roi_select_none)
+        roi_btn_row.addWidget(self._roi_select_none_btn)
+        roi_btn_row.addStretch()
+        roi_col.addLayout(roi_btn_row)
+        disc_lists.addLayout(roi_col)
+
+        disc_layout.addLayout(disc_lists)
+
+        # Representative session dropdown
+        rep_row = QHBoxLayout()
+        rep_row.addWidget(QLabel("Representative Session:"))
+        self._rep_session_combo = QComboBox()
+        self._rep_session_combo.addItem("(auto)")
+        self._rep_session_combo.setMinimumWidth(200)
+        rep_row.addWidget(self._rep_session_combo)
+        rep_row.addStretch()
+        disc_layout.addLayout(rep_row)
+
+        outer.addWidget(disc_group)
 
         # Buttons row
         btn_row = QHBoxLayout()
@@ -293,30 +400,19 @@ class MainWindow(QMainWindow):
         if value != default:
             out.append(field_name)
 
-    def _build_run_spec(self, validate_only: bool = False,
-                        run_dir_override: str = "") -> RunSpec:
-        """Create a RunSpec from current widget values.
+    def _build_run_spec(self, validate_only: bool = False) -> RunSpec:
+        """Create a RunSpec from current widget values for a real run.
 
-        Args:
-            validate_only: If True, sets validate_only on the RunSpec.
-            run_dir_override: If non-empty, use as RunSpec.run_dir WITHOUT
-                mutating self._current_run_dir. Used by preview mode.
-                If empty, computes run_dir from out_base + run_id and
-                sets self._current_run_dir.
+        Computes run_dir from out_base + run_id and sets
+        self._current_run_dir.  Used exclusively by _build_argv()
+        for validate and run operations.
 
-        Runner uses --out as explicit run_dir (see resolve_output_mode
-        in tools/run_full_pipeline_deliverables.py).
-
-        Tracks which fields the user explicitly set (non-default/non-empty)
-        for every user-editable GUI control.
+        Discovery and preview use _build_discovery_spec() instead.
         """
-        if run_dir_override:
-            run_dir = run_dir_override
-        else:
-            out_base = self._output_dir.text().strip()
-            run_id = _generate_run_id()
-            run_dir = os.path.join(out_base, run_id)
-            self._current_run_dir = run_dir
+        out_base = self._output_dir.text().strip()
+        run_id = _generate_run_id()
+        run_dir = os.path.join(out_base, run_id)
+        self._current_run_dir = run_dir
 
         user_set = []
 
@@ -338,6 +434,65 @@ class MainWindow(QMainWindow):
         if validate_only:
             user_set.append("validate_only")
 
+        # --- Mode ---
+        mode_text = self._mode_combo.currentText()
+        if mode_text == "both":
+            mode_val = None
+        else:
+            mode_val = mode_text
+            user_set.append("mode")
+
+        # --- Traces-only (--traces-only CLI flag) ---
+        traces_only = self._traces_only_cb.isChecked()
+        if traces_only:
+            user_set.append("traces_only")
+
+        # --- Preview first N (--preview-first-n CLI flag) ---
+        preview_first_n = None
+        if self._preview_enabled_cb.isChecked():
+            preview_first_n = self._preview_n_spin.value()
+            user_set.append("preview_first_n")
+
+
+        # --- Representative session index (0-based, from discovery) ---
+        rep_session_idx = None
+        if self._rep_session_combo.currentIndex() > 0:
+            # Index 0 is "(auto)"; session indices start at 1 in combo
+            rep_session_idx = self._rep_session_combo.currentIndex() - 1
+            user_set.append("representative_session_index")
+
+        # --- ROI selection (include vs exclude) ---
+        include_roi_ids = None
+        exclude_roi_ids = None
+        is_exclude_mode = (self._roi_filter_combo.currentIndex() == 1)
+        if self._discovery_cache is not None:
+            all_rois = [r["roi_id"] for r in self._discovery_cache.get("rois", [])]
+            checked = []
+            for i in range(self._roi_list.count()):
+                item = self._roi_list.item(i)
+                if item.checkState() == Qt.Checked:
+                    checked.append(item.text())
+            if is_exclude_mode:
+                # Exclude mode: checked = excluded ROIs
+                if len(checked) == 0:
+                    exclude_roi_ids = None  # exclude nothing
+                elif len(checked) == len(all_rois):
+                    exclude_roi_ids = []  # all excluded (blocked by GUI)
+                    user_set.append("exclude_roi_ids")
+                else:
+                    exclude_roi_ids = checked
+                    user_set.append("exclude_roi_ids")
+            else:
+                # Include mode: checked = included ROIs
+                if len(checked) == len(all_rois):
+                    include_roi_ids = None  # all included (default)
+                elif len(checked) == 0:
+                    include_roi_ids = []  # none included (blocked by GUI)
+                    user_set.append("include_roi_ids")
+                else:
+                    include_roi_ids = checked
+                    user_set.append("include_roi_ids")
+
         spec = RunSpec(
             input_dir=self._input_dir.text().strip(),
             run_dir=run_dir,
@@ -346,10 +501,16 @@ class MainWindow(QMainWindow):
             sessions_per_hour=sph_val,
             session_duration_s=dur_val,
             smooth_window_s=smooth,
+            traces_only=traces_only,
+            preview_first_n=preview_first_n,
+            representative_session_index=rep_session_idx,
+            include_roi_ids=include_roi_ids,
+            exclude_roi_ids=exclude_roi_ids,
             config_source_path=self._config_path.text().strip(),
             config_overrides={},
             gui_version="1.0.0",
             timestamp_local=datetime.now().isoformat(),
+            mode=mode_val,
             user_set_fields=user_set,
         )
         return spec
@@ -422,6 +583,21 @@ class MainWindow(QMainWindow):
             except ValueError:
                 return f"Session Duration must be a number, got: '{dur}'"
 
+        # ROI selection: block "process nothing" states
+        if self._discovery_cache is not None:
+            total_rois = self._roi_list.count()
+            checked_count = sum(
+                1 for i in range(total_rois)
+                if self._roi_list.item(i).checkState() == Qt.Checked
+            )
+            is_exclude_mode = (self._roi_filter_combo.currentIndex() == 1)
+            if not is_exclude_mode and checked_count == 0:
+                return ("No ROIs selected. Select at least one ROI "
+                        "or click Select all.")
+            if is_exclude_mode and checked_count == total_rois:
+                return ("All ROIs excluded. Uncheck at least one ROI "
+                        "or click Select none.")
+
         return None
 
     # ==================================================================
@@ -437,22 +613,30 @@ class MainWindow(QMainWindow):
     # Button handlers
     # ==================================================================
 
-    def _on_preview_config(self):
-        """Show a read-only dialog with the derived config YAML preview.
+    def _build_discovery_spec(self) -> RunSpec:
+        """Build a lightweight RunSpec for discovery/preview only.
 
-        Builds the same RunSpec that _build_run_spec produces (reading
-        ALL current widget values) so the preview is exact.
+        Does NOT compute a run_id, does NOT touch _current_run_dir,
+        and does NOT depend on the output directory widget.
+        run_dir is left empty since discovery never writes to it.
         """
+        fmt = self._format_combo.currentText()
+        return RunSpec(
+            input_dir=self._input_dir.text().strip(),
+            run_dir="",
+            format=fmt,
+            config_source_path=self._config_path.text().strip(),
+            config_overrides={},
+        )
+
+    def _on_preview_config(self):
+        """Show a read-only dialog with the derived config YAML preview."""
         config_path = self._config_path.text().strip()
         if not config_path or not os.path.isfile(config_path):
             QMessageBox.warning(self, "No Config", "Select a valid Config YAML first.")
             return
 
-        # Build full RunSpec from current widget state. run_dir_override
-        # is a sentinel since we are only previewing (no files written,
-        # _current_run_dir is not mutated).
-        spec = self._build_run_spec(validate_only=False,
-                                    run_dir_override="<preview>")
+        spec = self._build_discovery_spec()
         preview_text = spec.get_derived_config_preview()
 
         dlg = QMessageBox(self)
@@ -461,6 +645,86 @@ class MainWindow(QMainWindow):
         dlg.setDetailedText(preview_text)
         dlg.setStandardButtons(QMessageBox.Ok)
         dlg.exec()
+
+    def _on_discover(self):
+        """Run discovery via the runner backend and populate the UI."""
+        input_dir = self._input_dir.text().strip()
+        config_path = self._config_path.text().strip()
+
+        if not input_dir or not os.path.isdir(input_dir):
+            QMessageBox.warning(self, "Discovery Error",
+                                "Select a valid input directory first.")
+            return
+        if not config_path or not os.path.isfile(config_path):
+            QMessageBox.warning(self, "Discovery Error",
+                                "Select a valid config YAML first.")
+            return
+
+        spec = self._build_discovery_spec()
+        try:
+            result = spec.run_discovery()
+        except Exception as e:
+            self._discovery_cache = None
+            self._discovery_summary.setText("Discovery failed.")
+            self._sessions_list.clear()
+            self._roi_list.clear()
+            self._rep_session_combo.clear()
+            self._rep_session_combo.addItem("(auto)")
+            self._append_log(f"Discovery error: {e}")
+            QMessageBox.critical(self, "Discovery Failed", str(e))
+            return
+
+        self._discovery_cache = result
+        self._populate_discovery_ui(result)
+        self._append_log(
+            f"Discovery complete: {result.get('n_total_discovered', 0)} sessions, "
+            f"{len(result.get('rois', []))} ROIs, format={result.get('resolved_format', '?')}"
+        )
+
+    def _populate_discovery_ui(self, disco: dict):
+        """Fill sessions list, ROI checklist, and rep session combo from discovery JSON."""
+        # Summary
+        n_total = disco.get("n_total_discovered", 0)
+        n_preview = disco.get("n_preview", 0)
+        fmt = disco.get("resolved_format", "?")
+        self._discovery_summary.setText(
+            f"Format: {fmt}  |  Sessions: {n_total}  |  Preview: {n_preview}"
+        )
+
+        # Sessions list (read-only, exact order from discovery)
+        self._sessions_list.clear()
+        sessions = disco.get("sessions", [])
+        for sess in sessions:
+            sid = sess.get("session_id", "?")
+            preview_flag = sess.get("included_in_preview", False)
+            label = f"{sid}  {'[preview]' if preview_flag else ''}"
+            self._sessions_list.addItem(label)
+
+        # ROIs checklist (all checked by default, exact order)
+        self._roi_list.clear()
+        rois = disco.get("rois", [])
+        for roi in rois:
+            roi_id = roi.get("roi_id", "?")
+            item = QListWidgetItem(roi_id)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self._roi_list.addItem(item)
+
+        # Representative session dropdown
+        self._rep_session_combo.clear()
+        self._rep_session_combo.addItem("(auto)")
+        for sess in sessions:
+            self._rep_session_combo.addItem(sess.get("session_id", "?"))
+
+    def _on_roi_select_all(self):
+        """Check all ROI items in the checklist."""
+        for i in range(self._roi_list.count()):
+            self._roi_list.item(i).setCheckState(Qt.Checked)
+
+    def _on_roi_select_none(self):
+        """Uncheck all ROI items in the checklist."""
+        for i in range(self._roi_list.count()):
+            self._roi_list.item(i).setCheckState(Qt.Unchecked)
 
     def _on_validate(self):
         err = self._validate_gui_inputs()

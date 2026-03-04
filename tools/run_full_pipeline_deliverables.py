@@ -112,6 +112,7 @@ def parse_args():
                         help="Optional run ID for --out-base mode (no path separators)")
     parser.add_argument('--config', required=True)
     parser.add_argument('--format', required=True, choices=['rwd', 'npm', 'auto'])
+    parser.add_argument('--mode', choices=['both', 'tonic', 'phasic'], default='both', help="Analysis mode (both, tonic, or phasic)")
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--include-rois', type=str, default=None, help="Comma-separated list of ROIs to process exclusively")
     parser.add_argument('--exclude-rois', type=str, default=None, help="Comma-separated list of ROIs to ignore")
@@ -134,6 +135,11 @@ def parse_args():
                             "In legacy validate-only: 'auto' disables events "
                             "(run_dir not created); explicit path writes only if "
                             "parent directory already exists."
+                        ))
+    parser.add_argument('--discover', action='store_true',
+                        help=(
+                            "Discovery mode: emit JSON with discovered sessions and ROIs. "
+                            "Exits 0 without creating files or running analysis."
                         ))
     parser.add_argument('--cancel-flag', default='auto',
                         help="Cancel flag path, or 'auto' for run_dir/CANCEL.REQUESTED")
@@ -228,6 +234,32 @@ def resolve_paths(args, run_dir):
 
 def main():
     args = parse_args()
+
+    # ============================================================
+    # Discovery Preflight
+    # ============================================================
+    if args.discover:
+        # We perform discovery and print JSON to stdout, then exit 0.
+        # No run_dir is created, no events emitted.
+        from photometry_pipeline.discovery import discover_inputs
+        try:
+            cfg = Config.from_yaml(args.config)
+            # Apply any CLI overrides that discovery might care about
+            if args.preview_first_n is not None:
+                cfg.preview_first_n = args.preview_first_n
+                
+            res = discover_inputs(
+                input_dir=args.input,
+                config=cfg,
+                force_format=args.format,
+                preview_first_n=cfg.preview_first_n
+            )
+            print(json.dumps(res, indent=2))
+            raise SystemExit(0)
+        except Exception as e:
+            # Output error strictly to stderr so stdout JSON remains clean if expected
+            print(f"Error during discovery: {e}", file=sys.stderr)
+            raise SystemExit(1)
 
     # -- Resolve run directory --
     run_dir, run_id, is_gui_mode = resolve_run_dir(args)
@@ -540,63 +572,66 @@ def main():
         root_dir = os.path.dirname(tools_dir)
         analyze_script = os.path.join(root_dir, 'analyze_photometry.py')
         
-        emitter.emit("tonic", "start", "Running tonic analysis")
-        emitter.close()  # Release file lock so subprocess can append events
-        cmd_tonic = [sys.executable, analyze_script,
-                     '--input', args.input,
-                     '--out', tonic_out,
-                     '--config', args.config,
-                     '--mode', 'tonic',
-                     '--format', args.format,
-                     '--recursive', '--overwrite']
-        if args.include_rois: cmd_tonic.extend(['--include-rois', args.include_rois])
-        if args.exclude_rois: cmd_tonic.extend(['--exclude-rois', args.exclude_rois])
-        if args.traces_only: cmd_tonic.append('--traces-only')
-        if args.event_signal: cmd_tonic.extend(['--event-signal', args.event_signal])
-        if args.representative_session_index is not None: cmd_tonic.extend(['--representative-session-index', str(args.representative_session_index)])
-        if args.preview_first_n is not None: cmd_tonic.extend(['--preview-first-n', str(args.preview_first_n)])
-        if events_path: cmd_tonic.extend(['--events-path', events_path])
-        try:
-            manifest['commands'].append(run_cmd(cmd_tonic))
-        finally:
-            emitter = EventEmitter(events_path, run_id, run_dir, file_mode="a")
-        emitter.emit("tonic", "done", "Tonic analysis complete")
+        if args.mode in ('both', 'tonic'):
+            emitter.emit("tonic", "start", "Running tonic analysis")
+            emitter.close()  # Release file lock so subprocess can append events
+            cmd_tonic = [sys.executable, analyze_script,
+                         '--input', args.input,
+                         '--out', tonic_out,
+                         '--config', args.config,
+                         '--mode', 'tonic',
+                         '--format', args.format,
+                         '--recursive', '--overwrite']
+            if args.include_rois: cmd_tonic.extend(['--include-rois', args.include_rois])
+            if args.exclude_rois: cmd_tonic.extend(['--exclude-rois', args.exclude_rois])
+            if args.traces_only: cmd_tonic.append('--traces-only')
+            if args.event_signal: cmd_tonic.extend(['--event-signal', args.event_signal])
+            if args.representative_session_index is not None: cmd_tonic.extend(['--representative-session-index', str(args.representative_session_index)])
+            if args.preview_first_n is not None: cmd_tonic.extend(['--preview-first-n', str(args.preview_first_n)])
+            if events_path: cmd_tonic.extend(['--events-path', events_path])
+            try:
+                manifest['commands'].append(run_cmd(cmd_tonic))
+            finally:
+                emitter = EventEmitter(events_path, run_id, run_dir, file_mode="a")
+            emitter.emit("tonic", "done", "Tonic analysis complete")
 
-        check_cancel(cancel_flag_path, emitter, "tonic", manifest_path, manifest)
+            check_cancel(cancel_flag_path, emitter, "tonic", manifest_path, manifest)
 
         # ============================================================
         # 5. Phasic Analysis
         # ============================================================
-        emitter.emit("phasic", "start", "Running phasic analysis")
-        emitter.close()  # Release file lock so subprocess can append events
-        cmd_phasic = [sys.executable, analyze_script,
-                      '--input', args.input,
-                      '--out', phasic_out,
-                      '--config', args.config,
-                      '--mode', 'phasic',
-                      '--format', args.format,
-                      '--recursive', '--overwrite']
-        if args.include_rois: cmd_phasic.extend(['--include-rois', args.include_rois])
-        if args.exclude_rois: cmd_phasic.extend(['--exclude-rois', args.exclude_rois])
-        if args.traces_only: cmd_phasic.append('--traces-only')
-        if args.event_signal: cmd_phasic.extend(['--event-signal', args.event_signal])
-        if args.representative_session_index is not None: cmd_phasic.extend(['--representative-session-index', str(args.representative_session_index)])
-        if args.preview_first_n is not None: cmd_phasic.extend(['--preview-first-n', str(args.preview_first_n)])
-        if events_path: cmd_phasic.extend(['--events-path', events_path])
-        try:
-            manifest['commands'].append(run_cmd(cmd_phasic))
-        finally:
-            emitter = EventEmitter(events_path, run_id, run_dir, file_mode="a")
-        emitter.emit("phasic", "done", "Phasic analysis complete")
+        if args.mode in ('both', 'phasic'):
+            emitter.emit("phasic", "start", "Running phasic analysis")
+            emitter.close()  # Release file lock so subprocess can append events
+            cmd_phasic = [sys.executable, analyze_script,
+                          '--input', args.input,
+                          '--out', phasic_out,
+                          '--config', args.config,
+                          '--mode', 'phasic',
+                          '--format', args.format,
+                          '--recursive', '--overwrite']
+            if args.include_rois: cmd_phasic.extend(['--include-rois', args.include_rois])
+            if args.exclude_rois: cmd_phasic.extend(['--exclude-rois', args.exclude_rois])
+            if args.traces_only: cmd_phasic.append('--traces-only')
+            if args.event_signal: cmd_phasic.extend(['--event-signal', args.event_signal])
+            if args.representative_session_index is not None: cmd_phasic.extend(['--representative-session-index', str(args.representative_session_index)])
+            if args.preview_first_n is not None: cmd_phasic.extend(['--preview-first-n', str(args.preview_first_n)])
+            if events_path: cmd_phasic.extend(['--events-path', events_path])
+            try:
+                manifest['commands'].append(run_cmd(cmd_phasic))
+            finally:
+                emitter = EventEmitter(events_path, run_id, run_dir, file_mode="a")
+            emitter.emit("phasic", "done", "Phasic analysis complete")
 
-        check_cancel(cancel_flag_path, emitter, "phasic", manifest_path, manifest)
+            check_cancel(cancel_flag_path, emitter, "phasic", manifest_path, manifest)
 
         # ============================================================
         # 6. Session / Stride Computation
         # ============================================================
-        trace_files = sorted(glob.glob(os.path.join(phasic_out, 'traces', 'chunk_*.csv')), key=natural_sort_key)
+        tr_out = tonic_out if args.mode == 'tonic' else phasic_out
+        trace_files = sorted(glob.glob(os.path.join(tr_out, 'traces', 'chunk_*.csv')), key=natural_sort_key)
         if not trace_files:
-            raise RuntimeError("No phases traces found.")
+            raise RuntimeError(f"No traces found in {tr_out}/traces.")
 
         # Inspect first trace for duration
         df0 = pd.read_csv(trace_files[0])

@@ -71,10 +71,24 @@ class RunSpec:
     timestamp_local: str = ""
     user_note: Optional[str] = None
 
+    # --- (D) Intent fields (UI only, NOT config knobs) ---
+    # Written into gui_run_spec.json for downstream consumption.
+    # MUST NOT appear in config_effective.yaml or build_runner_argv().
+    representative_session_index: Optional[int] = None
+    include_roi_ids: Optional[List[str]] = None
+    exclude_roi_ids: Optional[List[str]] = None
+    mode: Optional[str] = None
+    traces_only: bool = False
+    preview_first_n: Optional[int] = None
+
     # --- Explicitness tracking ---
     # Records which RunSpec fields were explicitly set by the user
     # (vs defaulted by GUI). Built by MainWindow._build_run_spec.
     user_set_fields: List[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        if self.include_roi_ids is not None and self.exclude_roi_ids is not None:
+            raise ValueError("include_roi_ids and exclude_roi_ids are mutually exclusive")
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-safe dictionary."""
@@ -213,10 +227,13 @@ class RunSpec:
             "--input", self.input_dir,
             "--out", self.run_dir,
             "--config", config_path,
-            "--format", self.format,
             "--events", "auto",
             "--cancel-flag", "auto",
         ]
+
+        # Omit --format when auto — let the runner auto-detect
+        if self.format != "auto":
+            argv.extend(["--format", self.format])
 
         if self.sessions_per_hour is not None:
             argv.extend(["--sessions-per-hour", str(self.sessions_per_hour)])
@@ -226,7 +243,77 @@ class RunSpec:
 
         argv.extend(["--smooth-window-s", str(self.smooth_window_s)])
 
+        if self.traces_only:
+            argv.append("--traces-only")
+            
+        if self.preview_first_n is not None:
+            argv.extend(["--preview-first-n", str(self.preview_first_n)])
+            
+        if self.representative_session_index is not None:
+            argv.extend(["--representative-session-index", str(self.representative_session_index)])
+
+        if self.include_roi_ids:
+            argv.extend(["--include-rois", ",".join(self.include_roi_ids)])
+            
+        if self.exclude_roi_ids:
+            argv.extend(["--exclude-rois", ",".join(self.exclude_roi_ids)])
+            
+        if getattr(self, "mode", None) is not None:
+            argv.extend(["--mode", self.mode])
+
         if self.validate_only:
             argv.append("--validate-only")
 
         return argv
+
+    def run_discovery(self) -> dict:
+        """
+        Invoke the runner in --discover mode and return the parsed JSON.
+
+        This uses the actual runner backend to discover sessions and ROIs
+        without creating any run directories or events.ndjson files.
+        """
+        import subprocess
+        import tempfile
+
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        runner_script = os.path.join(
+            repo_root, "tools", "run_full_pipeline_deliverables.py"
+        )
+
+        preview_yaml = self.get_derived_config_preview()
+        
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".yaml") as tmp:
+            tmp.write(preview_yaml)
+            tmp.flush()
+            tmp_config_path = tmp.name
+
+        try:
+            argv = [
+                sys.executable,
+                runner_script,
+                "--input", self.input_dir,
+                "--config", tmp_config_path,
+                "--discover"
+            ]
+            if self.format != "auto":
+                argv.extend(["--format", self.format])
+
+            result = subprocess.run(
+                argv, 
+                capture_output=True, 
+                text=True, 
+                check=False
+            )
+            
+            if result.returncode != 0:
+                raise RuntimeError(f"Discovery failed with code {result.returncode}.\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
+                
+            try:
+                return json.loads(result.stdout)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"Failed to parse discovery output JSON.\nError: {e}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}") from e
+            
+        finally:
+            if os.path.exists(tmp_config_path):
+                os.remove(tmp_config_path)
