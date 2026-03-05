@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.process_runner import PipelineRunner, RunnerState
-from gui.run_spec import RunSpec
+from gui.run_spec import RunSpec, FORMAT_CHOICES
 from gui.status_follower import StatusFollower
 from gui.run_report_viewer import RunReportViewer
 from photometry_pipeline.config import Config
@@ -593,7 +593,7 @@ class MainWindow(QMainWindow):
 
         # Format
         self._format_combo = QComboBox()
-        self._format_combo.addItems(["auto", "rwd", "npm"])
+        self._format_combo.addItems(list(FORMAT_CHOICES))
         self._format_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Format:", self._format_combo)
 
@@ -1253,6 +1253,10 @@ class MainWindow(QMainWindow):
             if is_exclude_mode and checked_count == total_rois:
                 return ("All ROIs excluded. Uncheck at least one ROI "
                         "or click Select none.")
+
+        fmt = self._format_combo.currentText()
+        if not fmt or fmt not in FORMAT_CHOICES:
+            return f"Invalid Format: '{fmt}'. Must be one of {FORMAT_CHOICES}."
 
         if is_isosbestic_active(self._mode_combo.currentText()):
             default_dict = {

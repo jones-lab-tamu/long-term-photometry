@@ -14,7 +14,7 @@ import yaml
 
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from gui.run_spec import RunSpec
+from gui.run_spec import RunSpec, FORMAT_CHOICES
 
 
 class TestRunSpec(unittest.TestCase):
@@ -488,8 +488,9 @@ class TestRunSpec(unittest.TestCase):
         self.assertNotIn("--validate-only", argv)
         # smooth-window-s is always included (has a default value)
         self.assertIn("--smooth-window-s", argv)
-        # format=auto must OMIT --format entirely (Step 4 rule)
-        self.assertNotIn("--format", argv)
+        # format=auto: included (always required by runner CLI)
+        self.assertIn("--format", argv)
+        self.assertEqual(argv[argv.index("--format") + 1], "auto")
 
     # ----------------------------------------------------------------
     # Step 4: runner-wired fields in gui_run_spec.json
@@ -741,8 +742,8 @@ class TestRunSpec(unittest.TestCase):
         self.assertIn("--events", argv)
         self.assertIn("--cancel-flag", argv)
         self.assertIn("--smooth-window-s", argv)
-        # format=auto: omitted
-        self.assertNotIn("--format", argv)
+        self.assertIn("--format", argv)
+        self.assertEqual(argv[argv.index("--format") + 1], "auto")
         # Optional flags absent by default
         self.assertNotIn("--traces-only", argv)
         self.assertNotIn("--preview-first-n", argv)
@@ -782,11 +783,8 @@ class TestRunSpec(unittest.TestCase):
         error_msg = str(ctx.exception)
         self.assertNotIn("run_dir", error_msg.lower())
 
-    # ----------------------------------------------------------------
-    # Step 4: format=auto omits --format, format=rwd includes it
-    # ----------------------------------------------------------------
     def test_argv_format_conditional(self):
-        """--format is omitted for auto, included for explicit formats."""
+        """--format is always included for auto, rwd, and npm."""
         run_dir_auto = os.path.join(self.tmp_dir, "run_fmt_auto")
         spec_auto = RunSpec(
             input_dir="/data/in",
@@ -795,7 +793,9 @@ class TestRunSpec(unittest.TestCase):
             config_source_path=self.config_path,
         )
         spec_auto.generate_derived_config(run_dir_auto)
-        self.assertNotIn("--format", spec_auto.build_runner_argv())
+        argv_auto = spec_auto.build_runner_argv()
+        self.assertIn("--format", argv_auto)
+        self.assertEqual(argv_auto[argv_auto.index("--format") + 1], "auto")
 
         run_dir_rwd = os.path.join(self.tmp_dir, "run_fmt_rwd")
         spec_rwd = RunSpec(
@@ -808,6 +808,16 @@ class TestRunSpec(unittest.TestCase):
         argv_rwd = spec_rwd.build_runner_argv()
         self.assertIn("--format", argv_rwd)
         self.assertEqual(argv_rwd[argv_rwd.index("--format") + 1], "rwd")
+
+    def test_run_spec_default_format(self):
+        """RunSpec defaults to 'auto' and generates --format auto."""
+        spec = RunSpec(input_dir="/data/in", run_dir="/data/out")
+        self.assertEqual(spec.format, "auto")
+        self.assertIn("auto", FORMAT_CHOICES)
+        
+        argv = spec.build_runner_argv()
+        self.assertIn("--format", argv)
+        self.assertEqual(argv[argv.index("--format") + 1], "auto")
 
     # ----------------------------------------------------------------
     # Step 4 invariant: main_window.py has no legacy argv literals
@@ -843,7 +853,8 @@ class TestRunSpec(unittest.TestCase):
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             spec_auto.run_discovery()
             called_argv = mock_run.call_args[0][0]
-            self.assertNotIn("--format", called_argv)
+            self.assertIn("--format", called_argv)
+            self.assertEqual(called_argv[called_argv.index("--format") + 1], "auto")
             self.assertIn("--discover", called_argv)
 
         spec_rwd = RunSpec(

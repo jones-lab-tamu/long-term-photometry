@@ -28,6 +28,8 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+FORMAT_CHOICES = ("auto", "rwd", "npm")
+
 
 def _stable_yaml_dump(data: dict) -> str:
     """Serialize dict to YAML with deterministic key ordering.
@@ -231,9 +233,7 @@ class RunSpec:
             "--cancel-flag", "auto",
         ]
 
-        # Omit --format when auto — let the runner auto-detect
-        if self.format != "auto":
-            argv.extend(["--format", self.format])
+        argv.extend(["--format", self.format])
 
         if self.sessions_per_hour is not None:
             argv.extend(["--sessions-per-hour", str(self.sessions_per_hour)])
@@ -296,8 +296,7 @@ class RunSpec:
                 "--config", tmp_config_path,
                 "--discover"
             ]
-            if self.format != "auto":
-                argv.extend(["--format", self.format])
+            argv.extend(["--format", self.format])
 
             result = subprocess.run(
                 argv, 
