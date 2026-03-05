@@ -1206,5 +1206,408 @@ class TestIsosbesticKnobs(unittest.TestCase):
         
         self.assertEqual(changed_overrides, {})
 
+class TestPreprocBaselineKnobs(unittest.TestCase):
+    """Tests for Step 6 Preprocessing + Baseline advanced GUI knobs."""
+
+    def test_t1_defaults_not_written_when_unchanged(self):
+        """T1: Ensure Step 6 keys are omitted when overrides are empty."""
+        from gui.run_spec import RunSpec
+        import tempfile
+        import os
+        import shutil
+        import yaml
+        
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            run_dir = os.path.join(tmp_dir, "run_test_t1")
+            
+            # Base config lacks the Step 6 keys
+            base_config = {"some_other_key": True}
+            base_config_path = os.path.join(tmp_dir, "base_config.yaml")
+            with open(base_config_path, "w") as f:
+                yaml.safe_dump(base_config, f)
+            
+            # Simulate untouched config overrides for Step 6
+            spec = RunSpec(
+                run_dir=run_dir,
+                config_source_path=base_config_path,
+                config_overrides={}
+            )
+            config_path = spec.generate_derived_config(run_dir)
+            
+            with open(config_path, "r") as f:
+                loaded = yaml.safe_load(f)
+                
+            keys_to_check = [
+                "lowpass_hz", "baseline_method", "baseline_percentile", "f0_min_value"
+            ]
+            for key in keys_to_check:
+                self.assertNotIn(key, loaded)
+            
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_t2_lowpass_hz_and_f0_min_value_written_when_changed(self):
+        """T2: Prove lowpass_hz and f0_min_value get emitted if user changed them."""
+        from gui.main_window import parse_and_validate_preproc_baseline_knobs, compute_overrides_user_changed
+        from photometry_pipeline.config import Config
+        from gui.run_spec import RunSpec
+        import tempfile, os, shutil, yaml
+        
+        cfg0 = Config()
+        defaults = {
+            "lowpass_hz": cfg0.lowpass_hz, 
+            "baseline_method": cfg0.baseline_method, 
+            "baseline_percentile": cfg0.baseline_percentile, 
+            "f0_min_value": cfg0.f0_min_value
+        }
+        
+        # Change lowpass and f0 to different values
+        lowpass_override = defaults["lowpass_hz"] * 2.0 if defaults["lowpass_hz"] > 0 else 1.0
+        f0_override = defaults["f0_min_value"] + 0.05 if defaults["f0_min_value"] >= 0 else 0.05
+        
+        parsed_overrides, err = parse_and_validate_preproc_baseline_knobs(
+            str(lowpass_override), defaults["baseline_method"], str(defaults["baseline_percentile"]), str(f0_override), defaults=defaults
+        )
+        self.assertIsNone(err)
+        
+        changed = compute_overrides_user_changed(parsed_overrides, defaults)
+        self.assertIn("lowpass_hz", changed)
+        self.assertIn("f0_min_value", changed)
+        self.assertNotIn("baseline_method", changed)  # unchanged
+        self.assertNotIn("baseline_percentile", changed)  # unchanged
+        
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            run_dir = os.path.join(tmp_dir, "run_test_t2")
+            base_config_path = os.path.join(tmp_dir, "base_config.yaml")
+            with open(base_config_path, "w") as f:
+                yaml.safe_dump({"some_other_key": True}, f)
+            
+            spec = RunSpec(
+                run_dir=run_dir,
+                config_source_path=base_config_path,
+                config_overrides=changed
+            )
+            config_path = spec.generate_derived_config(run_dir)
+            with open(config_path, "r") as f:
+                loaded = yaml.safe_load(f)
+                
+            self.assertEqual(loaded["lowpass_hz"], lowpass_override)
+            self.assertEqual(loaded["f0_min_value"], f0_override)
+            self.assertNotIn("baseline_method", loaded)
+            
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_t3_baseline_method_change_emits_method_and_may_require_percentile(self):
+        """T3: Verify baseline_method_change emits method and absent percentile if unchanged."""
+        from gui.main_window import parse_and_validate_preproc_baseline_knobs, compute_overrides_user_changed, get_allowed_baseline_methods_from_config
+        from photometry_pipeline.config import Config
+        from gui.run_spec import RunSpec
+        import tempfile, os, shutil, yaml
+        
+        cfg0 = Config()
+        defaults = {
+            "lowpass_hz": cfg0.lowpass_hz, 
+            "baseline_method": cfg0.baseline_method, 
+            "baseline_percentile": cfg0.baseline_percentile, 
+            "f0_min_value": cfg0.f0_min_value
+        }
+        
+        allowed_methods = get_allowed_baseline_methods_from_config()
+        self.assertIn(cfg0.baseline_method, allowed_methods)
+        
+        if len(allowed_methods) <= 1:
+            self.skipTest("No alternative baseline method available to change to.")
+        
+        method = next(m for m in allowed_methods if m != defaults["baseline_method"])
+        
+        parsed_overrides, err = parse_and_validate_preproc_baseline_knobs(
+            str(defaults["lowpass_hz"]), method, str(defaults["baseline_percentile"]), str(defaults["f0_min_value"]), defaults=defaults
+        )
+        self.assertIsNone(err)
+        
+        changed = compute_overrides_user_changed(parsed_overrides, defaults)
+        self.assertIn("baseline_method", changed)
+        self.assertEqual(changed["baseline_method"], method)
+        # Percentile is unchanged, so shouldn't emit
+        self.assertNotIn("baseline_percentile", changed)
+        
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            run_dir = os.path.join(tmp_dir, "run_test_t3")
+            base_config_path = os.path.join(tmp_dir, "base_config.yaml")
+            with open(base_config_path, "w") as f:
+                yaml.safe_dump({"some_other_key": True}, f)
+                
+            spec = RunSpec(
+                run_dir=run_dir,
+                config_source_path=base_config_path,
+                config_overrides=changed
+            )
+            config_path = spec.generate_derived_config(run_dir)
+            with open(config_path, "r") as f:
+                loaded = yaml.safe_load(f)
+                
+            self.assertIn("baseline_method", loaded)
+            self.assertEqual(loaded["baseline_method"], method)
+            self.assertNotIn("baseline_percentile", loaded)
+            
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_t4_baseline_percentile_emitted_when_applicable_and_changed(self):
+        """T4: baseline_percentile emitted when method DOES use percentile and user changed it."""
+        from gui.main_window import parse_and_validate_preproc_baseline_knobs, compute_overrides_user_changed, get_allowed_baseline_methods_from_config, baseline_method_requires_percentile
+        from photometry_pipeline.config import Config
+        
+        cfg0 = Config()
+        defaults = {
+            "lowpass_hz": cfg0.lowpass_hz, 
+            "baseline_method": cfg0.baseline_method, 
+            "baseline_percentile": cfg0.baseline_percentile, 
+            "f0_min_value": cfg0.f0_min_value
+        }
+        
+        allowed_methods = get_allowed_baseline_methods_from_config()
+        self.assertIn(cfg0.baseline_method, allowed_methods)
+        
+        pct_methods = [m for m in allowed_methods if baseline_method_requires_percentile(m)]
+        if not pct_methods:
+            self.skipTest("No baseline methods use percentile in schema.")
+            
+        method = pct_methods[0]
+        
+        pct_override = 50.0
+        if pct_override == defaults["baseline_percentile"]:
+            pct_override = 51.0
+            
+        parsed_overrides, err = parse_and_validate_preproc_baseline_knobs(
+            str(defaults["lowpass_hz"]), method, str(pct_override), str(defaults["f0_min_value"]), defaults=defaults
+        )
+        self.assertIsNone(err)
+        
+        changed = compute_overrides_user_changed(parsed_overrides, defaults)
+        self.assertIn("baseline_percentile", changed)
+        self.assertEqual(changed["baseline_percentile"], pct_override)
+
+    def test_t5_validation_failures(self):
+        from gui.main_window import parse_and_validate_preproc_baseline_knobs
+        from gui.main_window import baseline_method_requires_percentile
+        from photometry_pipeline.config import Config
+        
+        cfg0 = Config()
+        defaults = {
+            "lowpass_hz": cfg0.lowpass_hz, 
+            "baseline_method": cfg0.baseline_method, 
+            "baseline_percentile": cfg0.baseline_percentile, 
+            "f0_min_value": cfg0.f0_min_value
+        }
+        
+        # lowpass_hz <= 0
+        _, err = parse_and_validate_preproc_baseline_knobs("0.0", defaults["baseline_method"], str(defaults["baseline_percentile"]), str(defaults["f0_min_value"]), defaults)
+        self.assertIn("Lowpass Filter (Hz) must be > 0", err)
+        
+        # f0_min_value < 0
+        _, err = parse_and_validate_preproc_baseline_knobs(str(defaults["lowpass_hz"]), defaults["baseline_method"], str(defaults["baseline_percentile"]), "-1.0", defaults)
+        self.assertIn("F0 Min Value must be >= 0", err)
+        
+        # invalid baseline method
+        _, err = parse_and_validate_preproc_baseline_knobs(str(defaults["lowpass_hz"]), "definitely_not_a_real_baseline_method", str(defaults["baseline_percentile"]), str(defaults["f0_min_value"]), defaults)
+        self.assertIn("Invalid Baseline Method.", err)
+        
+        # percentile out of bounds (ONLY when the active baseline method actually requires percentile)
+        if baseline_method_requires_percentile(defaults["baseline_method"]):
+            _, err = parse_and_validate_preproc_baseline_knobs(
+                str(defaults["lowpass_hz"]),
+                defaults["baseline_method"],
+                "150.0",
+                str(defaults["f0_min_value"]),
+                defaults,
+            )
+            self.assertIsNotNone(err)
+            self.assertIn("Baseline Percentile must be between 0 and 100", err)
+        else:
+            _, err = parse_and_validate_preproc_baseline_knobs(
+                str(defaults["lowpass_hz"]),
+                defaults["baseline_method"],
+                "150.0",
+                str(defaults["f0_min_value"]),
+                defaults,
+            )
+            self.assertIsNone(err)
+        
+    def test_t6_run_report_reflects_step_6_knobs(self):
+        """T6: Hard validation gate proving Step 6 config reaches run_report.json."""
+        from gui.main_window import parse_and_validate_preproc_baseline_knobs, compute_overrides_user_changed, get_allowed_baseline_methods_from_config, baseline_method_requires_percentile
+        from gui.run_spec import RunSpec
+        from photometry_pipeline.config import Config
+        from photometry_pipeline.core.reporting import generate_run_report
+        import tempfile, os, shutil, yaml, json
+        
+        cfg0 = Config()
+        defaults = {
+            "lowpass_hz": cfg0.lowpass_hz, 
+            "baseline_method": cfg0.baseline_method, 
+            "baseline_percentile": cfg0.baseline_percentile, 
+            "f0_min_value": cfg0.f0_min_value
+        }
+        
+        allowed_methods = get_allowed_baseline_methods_from_config()
+        self.assertIn(cfg0.baseline_method, allowed_methods)
+        
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            # Report A (Defaults)
+            run_dir_a = os.path.join(tmp_dir, "run_a")
+            base_config_path_a = os.path.join(tmp_dir, "base_config_a.yaml")
+            with open(base_config_path_a, "w") as f:
+                yaml.safe_dump({}, f)
+                
+            spec_a = RunSpec(run_dir=run_dir_a, config_source_path=base_config_path_a, config_overrides={})
+            conf_path_a = spec_a.generate_derived_config(run_dir_a)
+            
+            with open(conf_path_a, "r") as f:
+                cfg_a = Config(**yaml.safe_load(f))
+            generate_run_report(cfg_a, run_dir_a)
+            
+            with open(os.path.join(run_dir_a, "run_report.json"), "r") as f:
+                report_a = json.load(f)
+                
+            # Report A contains default values
+            cfg_dict_a = report_a["configuration"]
+            self.assertEqual(cfg_dict_a["baseline_method"], defaults["baseline_method"])
+            self.assertEqual(cfg_dict_a["baseline_percentile"], defaults["baseline_percentile"])
+            self.assertEqual(cfg_dict_a["lowpass_hz"], defaults["lowpass_hz"])
+            self.assertEqual(cfg_dict_a["f0_min_value"], defaults["f0_min_value"])
+            
+            # Report B (Overrides)
+            run_dir_b = os.path.join(tmp_dir, "run_b")
+            base_config_path_b = os.path.join(tmp_dir, "base_config_b.yaml")
+            with open(base_config_path_b, "w") as f:
+                yaml.safe_dump({}, f)
+                
+            lowpass_override = defaults["lowpass_hz"] * 2.0 if defaults["lowpass_hz"] > 0 else 1.0
+            f0_min_override = defaults["f0_min_value"] + 0.05 if defaults["f0_min_value"] >= 0 else 0.05
+            
+            # Select different method if possible
+            if len(allowed_methods) > 1:
+                baseline_method_override = next(m for m in allowed_methods if m != defaults["baseline_method"])
+            else:
+                baseline_method_override = defaults["baseline_method"]
+                
+            baseline_percentile_override = str(defaults["baseline_percentile"])
+            if baseline_method_requires_percentile(baseline_method_override):
+                pct = 50.0
+                if pct == defaults["baseline_percentile"]:
+                    pct = 51.0
+                baseline_percentile_override = str(pct)
+            
+            # Simulate GUI changing knobs
+            parsed_overrides, err = parse_and_validate_preproc_baseline_knobs(
+                str(lowpass_override), baseline_method_override, baseline_percentile_override, str(f0_min_override), defaults=defaults
+            )
+            self.assertIsNone(err)
+            changed = compute_overrides_user_changed(parsed_overrides, defaults)
+            
+            spec_b = RunSpec(run_dir=run_dir_b, config_source_path=base_config_path_b, config_overrides=changed)
+            conf_path_b = spec_b.generate_derived_config(run_dir_b)
+            
+            with open(conf_path_b, "r") as f:
+                cfg_b = Config(**yaml.safe_load(f))
+            generate_run_report(cfg_b, run_dir_b)
+            
+            with open(os.path.join(run_dir_b, "run_report.json"), "r") as f:
+                report_b = json.load(f)
+                
+            cfg_dict_b = report_b["configuration"]
+            self.assertEqual(cfg_dict_b["baseline_method"], baseline_method_override)
+            self.assertEqual(cfg_dict_b["lowpass_hz"], lowpass_override)
+            self.assertEqual(cfg_dict_b["f0_min_value"], f0_min_override)
+            
+            if baseline_method_requires_percentile(baseline_method_override):
+                self.assertEqual(cfg_dict_b["baseline_percentile"], float(baseline_percentile_override))
+                self.assertIn("baseline_percentile", changed)
+            else:
+                self.assertNotIn("baseline_percentile", changed)
+            
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_t7_percentile_gating_schema_locked(self):
+        """T7: Assert percentile requirement strictly follows effective Config schema rules, no heuristics."""
+        from gui.main_window import baseline_method_requires_percentile, get_allowed_baseline_methods_from_config
+        from photometry_pipeline.config import Config
+        
+        allowed_methods = get_allowed_baseline_methods_from_config()
+        self.assertTrue(len(allowed_methods) > 0, "No baseline methods returned by config schema.")
+        
+        for method in allowed_methods:
+            cfg1 = Config(baseline_method=method, baseline_percentile=10.0)
+            cfg2 = Config(baseline_method=method, baseline_percentile=50.0)
+            expected = (cfg1.baseline_percentile != cfg2.baseline_percentile)
+            observed = baseline_method_requires_percentile(method)
+            self.assertEqual(expected, observed, f"Method {method} requirement mismatch: expected={expected}, observed={observed}")
+
+    def test_t8_percentile_not_parsed_when_gating_false(self):
+        """T8: Prove baseline_percentile is neither parsed nor included when gating function returns False."""
+        from gui.main_window import parse_and_validate_preproc_baseline_knobs, get_allowed_baseline_methods_from_config
+        from photometry_pipeline.config import Config
+        import unittest.mock
+        
+        allowed_methods = get_allowed_baseline_methods_from_config()
+        self.assertTrue(len(allowed_methods) > 0, "No baseline methods returned by config schema.")
+            
+        method = allowed_methods[0]
+        cfg0 = Config()
+        defaults = {
+            "lowpass_hz": cfg0.lowpass_hz, 
+            "baseline_method": cfg0.baseline_method, 
+            "baseline_percentile": cfg0.baseline_percentile, 
+            "f0_min_value": cfg0.f0_min_value
+        }
+        
+        # Monkeypatch the gating function to definitively return False
+        with unittest.mock.patch("gui.main_window.baseline_method_requires_percentile", return_value=False):
+            # Pass a clearly invalid percentile string
+            overrides, err = parse_and_validate_preproc_baseline_knobs(
+                str(defaults["lowpass_hz"]), method, "150.0", str(defaults["f0_min_value"]), defaults
+            )
+            
+        # It must not raise an error, because it should not have parsed it
+        self.assertIsNone(err, f"Should not have validated percentile for method {method} when gating is False")
+        self.assertIsNotNone(overrides)
+        self.assertNotIn("baseline_percentile", overrides)
+
+    def test_t9_percentile_validated_when_required(self):
+        """T9: Prove baseline_percentile is validated when required by the method."""
+        from gui.main_window import parse_and_validate_preproc_baseline_knobs, baseline_method_requires_percentile, get_allowed_baseline_methods_from_config
+        from photometry_pipeline.config import Config
+        
+        allowed_methods = get_allowed_baseline_methods_from_config()
+        pct_methods = [m for m in allowed_methods if baseline_method_requires_percentile(m)]
+        
+        if not pct_methods:
+            self.skipTest("No percentile methods exist in current schema.")
+            
+        method = pct_methods[0]
+        cfg0 = Config()
+        defaults = {
+            "lowpass_hz": cfg0.lowpass_hz, 
+            "baseline_method": cfg0.baseline_method, 
+            "baseline_percentile": cfg0.baseline_percentile, 
+            "f0_min_value": cfg0.f0_min_value
+        }
+        
+        # Pass a clearly invalid percentile string
+        _, err = parse_and_validate_preproc_baseline_knobs(
+            str(defaults["lowpass_hz"]), method, "150.0", str(defaults["f0_min_value"]), defaults
+        )
+        
+        # It MUST raise an error
+        self.assertIsNotNone(err)
+        self.assertIn("Baseline Percentile must be between 0 and 100", err)
+
 if __name__ == "__main__":
     unittest.main()

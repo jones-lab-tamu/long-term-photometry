@@ -38,6 +38,9 @@ from gui.process_runner import PipelineRunner, RunnerState
 from gui.events_follower import EventsFollower
 from gui.manifest_viewer import ManifestViewer
 from gui.run_spec import RunSpec
+from photometry_pipeline.config import Config
+import dataclasses
+from typing import get_args
 
 
 _SETTINGS_GROUP = "run_config"
@@ -143,6 +146,136 @@ def get_isosbestic_overrides_if_active(mode_text: str, parsed_overrides: dict) -
 def compute_isosbestic_overrides_user_changed(parsed: dict, defaults: dict) -> dict:
     """
     Returns only the key/value pairs in parsed that differ from the defaults.
+    """
+    changed = {}
+    for k, v in parsed.items():
+        if k in defaults and v != defaults[k]:
+            changed[k] = v
+    return changed
+
+_cached_baseline_methods = None
+
+def get_allowed_baseline_methods_from_config() -> list[str]:
+    """
+    Derives allowed baseline methods from the Config schema dynamically.
+    Falls back to a single default list if introspection fails.
+    """
+    global _cached_baseline_methods
+    if _cached_baseline_methods is not None:
+        return _cached_baseline_methods
+
+    try:
+        cfg_fields = {f.name: f for f in dataclasses.fields(Config)}
+        baseline_method_type = cfg_fields["baseline_method"].type
+        
+        # Literal extraction
+        args = get_args(baseline_method_type)
+        if args:
+            methods = [a for a in args if isinstance(a, str)]
+            if methods:
+                _cached_baseline_methods = sorted(set(methods))
+                return _cached_baseline_methods
+
+        # Enum extraction
+        import enum
+        if isinstance(baseline_method_type, type) and issubclass(baseline_method_type, enum.Enum):
+            methods = [e.value for e in baseline_method_type if isinstance(e.value, str)]
+            if methods:
+                _cached_baseline_methods = sorted(set(methods))
+                return _cached_baseline_methods
+            
+    except Exception:
+        pass
+        
+    _cached_baseline_methods = [str(Config().baseline_method)]
+    return _cached_baseline_methods
+
+_cached_percentile_reqs = {}
+
+def baseline_method_requires_percentile(method_str: str) -> bool:
+    """
+    Returns True if the given baseline method requires a percentile parameter.
+    Determined deterministically from the Config schema behavior, without heuristics.
+    """
+    global _cached_percentile_reqs
+    if method_str in _cached_percentile_reqs:
+        return _cached_percentile_reqs[method_str]
+
+    allowed = get_allowed_baseline_methods_from_config()
+    if method_str not in allowed:
+        _cached_percentile_reqs[method_str] = False
+        return False
+
+    try:
+        # Construct two configs differing only in baseline_percentile
+        cfg1 = Config(baseline_method=method_str, baseline_percentile=10.0)
+        cfg2 = Config(baseline_method=method_str, baseline_percentile=50.0)
+        
+        # If changing the input percentile changes the effective percentile, it is required.
+        req = (cfg1.baseline_percentile != cfg2.baseline_percentile)
+        _cached_percentile_reqs[method_str] = req
+        return req
+    except Exception:
+        # Fallback if instantiation fails for some reason
+        _cached_percentile_reqs[method_str] = False
+        return False
+
+def parse_and_validate_preproc_baseline_knobs(
+    lowpass_hz_str: str,
+    baseline_method_text: str,
+    baseline_percentile_str: str,
+    f0_min_value_str: str,
+    defaults: dict,
+) -> tuple[dict | None, str | None]:
+    """
+    Parses and validates the preprocessing and baseline advanced knobs.
+    Returns (dict_of_overrides, None) if valid.
+    Returns (None, error_message) if invalid.
+    """
+    try:
+        lp_val = lowpass_hz_str.strip()
+        lowpass_hz = float(lp_val if lp_val else defaults["lowpass_hz"])
+        if lowpass_hz <= 0:
+            return None, "Lowpass Filter (Hz) must be > 0."
+    except ValueError:
+        return None, "Lowpass Filter (Hz) must be a number."
+
+    method = baseline_method_text.strip()
+    allowed_methods = get_allowed_baseline_methods_from_config()
+    if method not in allowed_methods:
+        return None, "Invalid Baseline Method."
+
+    try:
+        f0_val = f0_min_value_str.strip()
+        f0_min = float(f0_val if f0_val else defaults["f0_min_value"])
+        if f0_min < 0:
+            return None, "F0 Min Value must be >= 0."
+    except ValueError:
+        return None, "F0 Min Value must be a number."
+
+    overrides = {
+        "lowpass_hz": lowpass_hz,
+        "baseline_method": method,
+        "f0_min_value": f0_min,
+    }
+
+    if baseline_method_requires_percentile(method):
+        try:
+            pct_val = baseline_percentile_str.strip()
+            # Careful not to accidentally validate if we shouldn't have been parsing
+            pct = float(pct_val if pct_val else defaults["baseline_percentile"])
+            if not (0 <= pct <= 100):
+                return None, "Baseline Percentile must be between 0 and 100."
+            overrides["baseline_percentile"] = pct
+        except ValueError:
+            return None, "Baseline Percentile must be a number."
+
+    return overrides, None
+
+
+def compute_overrides_user_changed(parsed: dict, defaults: dict) -> dict:
+    """
+    Generic helper: returns only key/value pairs in parsed that differ from defaults.
     """
     changed = {}
     for k, v in parsed.items():
@@ -403,6 +536,43 @@ class MainWindow(QMainWindow):
         self._adv_group = adv_group
         outer.addWidget(adv_group)
 
+        # Step 6 baseline and preprocessing knobs apply to all modes, only percentile is method-dependent.
+        # --- Advanced: Preprocessing + Baseline ---
+        adv_prep_group = QGroupBox("Advanced: Preprocessing + Baseline")
+        adv_prep_layout = QFormLayout(adv_prep_group)
+        adv_prep_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
+        self._lowpass_hz_edit = QLineEdit(str(self._default_cfg.lowpass_hz))
+        adv_prep_layout.addRow("Lowpass Filter (Hz):", self._lowpass_hz_edit)
+
+        self._baseline_method_combo = QComboBox()
+        allowed_methods = get_allowed_baseline_methods_from_config()
+        if self._default_cfg.baseline_method not in allowed_methods:
+            allowed_methods.append(self._default_cfg.baseline_method)
+            
+        self._baseline_method_combo.addItems(sorted(allowed_methods))
+        
+        # Set combo box to the default value
+        idx = self._baseline_method_combo.findText(self._default_cfg.baseline_method)
+        if idx >= 0:
+            self._baseline_method_combo.setCurrentIndex(idx)
+            
+        adv_prep_layout.addRow("Baseline Method:", self._baseline_method_combo)
+
+        self._baseline_percentile_edit = QLineEdit(str(self._default_cfg.baseline_percentile))
+        self._baseline_percentile_label = QLabel("Baseline Percentile:")
+        adv_prep_layout.addRow(self._baseline_percentile_label, self._baseline_percentile_edit)
+
+        self._f0_min_value_edit = QLineEdit(str(self._default_cfg.f0_min_value))
+        adv_prep_layout.addRow("F0 Min Value:", self._f0_min_value_edit)
+
+        self._adv_prep_group = adv_prep_group
+        outer.addWidget(adv_prep_group)
+
+        # Wire visibility based on baseline method
+        self._baseline_method_combo.currentIndexChanged.connect(self._update_adv_prep_visibility)
+        self._update_adv_prep_visibility()
+
         # Wire visibility based on mode
         self._mode_combo.currentIndexChanged.connect(self._update_adv_group_visibility)
         self._update_adv_group_visibility()
@@ -531,6 +701,15 @@ class MainWindow(QMainWindow):
             self._adv_group.show()
         else:
             self._adv_group.hide()
+
+    def _update_adv_prep_visibility(self):
+        method_text = self._baseline_method_combo.currentText()
+        if baseline_method_requires_percentile(method_text):
+            self._baseline_percentile_edit.show()
+            self._baseline_percentile_label.show()
+        else:
+            self._baseline_percentile_edit.hide()
+            self._baseline_percentile_label.hide()
 
     # ==================================================================
     # RunSpec construction + argv (GUI mode: --out <explicit_run_dir>)
@@ -668,6 +847,24 @@ class MainWindow(QMainWindow):
                 changed_overrides = compute_isosbestic_overrides_user_changed(overrides, default_dict)
                 config_overrides.update(changed_overrides)
 
+        # Preprocessing + Baseline overrides
+        default_prep_dict = {
+            "lowpass_hz": self._default_cfg.lowpass_hz,
+            "baseline_method": self._default_cfg.baseline_method,
+            "baseline_percentile": self._default_cfg.baseline_percentile,
+            "f0_min_value": self._default_cfg.f0_min_value,
+        }
+        prep_overrides, _ = parse_and_validate_preproc_baseline_knobs(
+            self._lowpass_hz_edit.text(),
+            self._baseline_method_combo.currentText(),
+            self._baseline_percentile_edit.text(),
+            self._f0_min_value_edit.text(),
+            defaults=default_prep_dict,
+        )
+        if prep_overrides is not None:
+            changed_prep_overrides = compute_overrides_user_changed(prep_overrides, default_prep_dict)
+            config_overrides.update(changed_prep_overrides)
+
         spec = RunSpec(
             input_dir=self._input_dir.text().strip(),
             run_dir=run_dir,
@@ -796,6 +993,23 @@ class MainWindow(QMainWindow):
             )
             if err:
                 return err
+
+        # Preprocessing + Baseline validation
+        default_prep_dict = {
+            "lowpass_hz": self._default_cfg.lowpass_hz,
+            "baseline_method": self._default_cfg.baseline_method,
+            "baseline_percentile": self._default_cfg.baseline_percentile,
+            "f0_min_value": self._default_cfg.f0_min_value,
+        }
+        _, err = parse_and_validate_preproc_baseline_knobs(
+            self._lowpass_hz_edit.text(),
+            self._baseline_method_combo.currentText(),
+            self._baseline_percentile_edit.text(),
+            self._f0_min_value_edit.text(),
+            defaults=default_prep_dict,
+        )
+        if err:
+            return err
 
         return None
 

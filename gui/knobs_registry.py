@@ -22,6 +22,11 @@ GUI_KNOBS_NORMAL: Set[str] = {
 }
 
 GUI_KNOBS_ADVANCED: Set[str] = {
+    # Preprocessing + Baseline
+    "lowpass_hz",
+    "baseline_method",
+    "baseline_percentile",
+    "f0_min_value",
     # Dynammic Correction
     "window_sec",
     "step_sec",
@@ -61,6 +66,25 @@ KNOB_META: Dict[str, dict] = {
         "help": "Signal type for event detection: 'dff' or 'delta_f'.",
     },
     # --- ADVANCED ---
+    "lowpass_hz": {
+        "label": "Lowpass Filter (Hz)",
+        "help": "Cutoff frequency for lowpass filtering.",
+        "range": {"min": 1e-9},
+    },
+    "baseline_method": {
+        "label": "Baseline Method",
+        "help": "Method used to compute the baseline.",
+    },
+    "baseline_percentile": {
+        "label": "Baseline Percentile",
+        "help": "Percentile threshold, used when the baseline method uses a percentile.",
+        "range": {"min": 0.0, "max": 100.0},
+    },
+    "f0_min_value": {
+        "label": "F0 Min Value",
+        "help": "Minimum allowed value for the baseline F0.",
+        "range": {"min": 0.0},
+    },
     "peak_threshold_method": {
         "label": "Peak Threshold Method",
         "help": "Algorithm for computing the peak detection threshold.",
@@ -250,3 +274,20 @@ def filter_config_overrides(
         )
 
     return dict(overrides)
+
+
+# ======================================================================
+# Meta-Validation Hook (Import-Time)
+# ======================================================================
+try:
+    from photometry_pipeline.config import Config
+    import dataclasses
+    required = ["lowpass_hz", "baseline_method", "baseline_percentile", "f0_min_value"]
+    cfg_fields = {f.name for f in dataclasses.fields(Config)}
+    missing = [k for k in required if k not in cfg_fields]
+    if missing:
+        raise RuntimeError(f"Config missing expected Step 6 key: {missing[0]}")
+except RuntimeError:
+    raise
+except Exception as e:
+    raise RuntimeError(f"Step 6 schema validation failure: {type(e).__name__}: {e}") from e
