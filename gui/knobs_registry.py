@@ -14,12 +14,10 @@ from gui.knobs_schema import get_config_field_specs, is_config_key
 
 
 # ======================================================================
-# Allowlists — every name MUST be a real Config field.
+# Allowlists - every name MUST be a real Config field.
 # ======================================================================
 
-GUI_KNOBS_NORMAL: Set[str] = {
-    "event_signal",
-}
+GUI_KNOBS_NORMAL: Set[str] = set()
 
 GUI_KNOBS_ADVANCED: Set[str] = {
     # Preprocessing + Baseline
@@ -36,6 +34,7 @@ GUI_KNOBS_ADVANCED: Set[str] = {
     "g_min",
     "min_samples_per_window",
     # Peak/Event
+    "event_signal",
     "peak_threshold_method",
     "peak_threshold_k",
     "peak_threshold_percentile",
@@ -61,11 +60,11 @@ GUI_KNOBS_DEVELOPER: Set[str] = {
 
 KNOB_META: Dict[str, dict] = {
     # --- NORMAL ---
+    # --- ADVANCED ---
     "event_signal": {
         "label": "Event Signal",
         "help": "Signal type for event detection: 'dff' or 'delta_f'.",
     },
-    # --- ADVANCED ---
     "lowpass_hz": {
         "label": "Lowpass Filter (Hz)",
         "help": "Cutoff frequency for lowpass filtering.",
@@ -282,12 +281,22 @@ def filter_config_overrides(
 try:
     from photometry_pipeline.config import Config
     import dataclasses
-    required = ["lowpass_hz", "baseline_method", "baseline_percentile", "f0_min_value"]
+    required_step6 = ["lowpass_hz", "baseline_method", "baseline_percentile", "f0_min_value"]
+    required_step7 = [
+        "event_signal", "peak_threshold_method", "peak_threshold_k",
+        "peak_threshold_percentile", "peak_threshold_abs",
+        "peak_min_distance_sec", "event_auc_baseline"
+    ]
     cfg_fields = {f.name for f in dataclasses.fields(Config)}
-    missing = [k for k in required if k not in cfg_fields]
-    if missing:
-        raise RuntimeError(f"Config missing expected Step 6 key: {missing[0]}")
+    
+    missing_step6 = [k for k in required_step6 if k not in cfg_fields]
+    if missing_step6:
+        raise RuntimeError(f"Config missing expected Step 6 key: {missing_step6[0]}")
+        
+    missing_step7 = [k for k in required_step7 if k not in cfg_fields]
+    if missing_step7:
+        raise RuntimeError(f"Config missing expected Step 7 key: {missing_step7[0]}")
 except RuntimeError:
     raise
 except Exception as e:
-    raise RuntimeError(f"Step 6 schema validation failure: {type(e).__name__}: {e}") from e
+    raise RuntimeError(f"Step 6/7 schema validation failure: {type(e).__name__}: {e}") from e

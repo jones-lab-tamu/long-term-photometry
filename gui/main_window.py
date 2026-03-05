@@ -153,42 +153,55 @@ def compute_isosbestic_overrides_user_changed(parsed: dict, defaults: dict) -> d
             changed[k] = v
     return changed
 
-_cached_baseline_methods = None
+_cached_allowed_fields = {}
 
-def get_allowed_baseline_methods_from_config() -> list[str]:
+def _get_allowed_from_config_field(field_name: str) -> list[str]:
     """
-    Derives allowed baseline methods from the Config schema dynamically.
+    Derives allowed strings from the Config schema dynamically for a given field.
     Falls back to a single default list if introspection fails.
     """
-    global _cached_baseline_methods
-    if _cached_baseline_methods is not None:
-        return _cached_baseline_methods
+    global _cached_allowed_fields
+    if field_name in _cached_allowed_fields:
+        return _cached_allowed_fields[field_name]
 
     try:
         cfg_fields = {f.name: f for f in dataclasses.fields(Config)}
-        baseline_method_type = cfg_fields["baseline_method"].type
+        field_type = cfg_fields[field_name].type
         
         # Literal extraction
-        args = get_args(baseline_method_type)
+        args = get_args(field_type)
         if args:
             methods = [a for a in args if isinstance(a, str)]
             if methods:
-                _cached_baseline_methods = sorted(set(methods))
-                return _cached_baseline_methods
+                _cached_allowed_fields[field_name] = sorted(set(methods))
+                return _cached_allowed_fields[field_name]
 
         # Enum extraction
         import enum
-        if isinstance(baseline_method_type, type) and issubclass(baseline_method_type, enum.Enum):
-            methods = [e.value for e in baseline_method_type if isinstance(e.value, str)]
+        if isinstance(field_type, type) and issubclass(field_type, enum.Enum):
+            methods = [e.value for e in field_type if isinstance(e.value, str)]
             if methods:
-                _cached_baseline_methods = sorted(set(methods))
-                return _cached_baseline_methods
+                _cached_allowed_fields[field_name] = sorted(set(methods))
+                return _cached_allowed_fields[field_name]
             
     except Exception:
         pass
         
-    _cached_baseline_methods = [str(Config().baseline_method)]
-    return _cached_baseline_methods
+    default_val = getattr(Config(), field_name)
+    _cached_allowed_fields[field_name] = [str(default_val)]
+    return _cached_allowed_fields[field_name]
+
+def get_allowed_baseline_methods_from_config() -> list[str]:
+    return _get_allowed_from_config_field("baseline_method")
+
+def get_allowed_event_signals_from_config() -> list[str]:
+    return _get_allowed_from_config_field("event_signal")
+
+def get_allowed_peak_threshold_methods_from_config() -> list[str]:
+    return _get_allowed_from_config_field("peak_threshold_method")
+
+def get_allowed_event_auc_baselines_from_config() -> list[str]:
+    return _get_allowed_from_config_field("event_auc_baseline")
 
 _cached_percentile_reqs = {}
 
@@ -271,6 +284,150 @@ def parse_and_validate_preproc_baseline_knobs(
             return None, "Baseline Percentile must be a number."
 
     return overrides, None
+
+_cached_peak_reqs = {}  # type: dict[tuple[str, str], bool]
+
+def _peak_threshold_method_requires_param(method_str: str, param_name: str, val1: float, val2: float) -> bool:
+    global _cached_peak_reqs
+    cache_key = (method_str, param_name)
+    if cache_key in _cached_peak_reqs:
+        return _cached_peak_reqs[cache_key]
+
+    try:
+        from photometry_pipeline.config import Config
+    except Exception:
+        # If import fails entirely, we cannot determine requirement. Fail-closed: assume required.
+        _cached_peak_reqs[cache_key] = True
+        return True
+
+    try:
+        allowed = get_allowed_peak_threshold_methods_from_config()
+        if method_str not in allowed:
+            _cached_peak_reqs[cache_key] = False
+            return False
+
+        kwargs1 = {"peak_threshold_method": method_str, param_name: val1}
+        kwargs2 = {"peak_threshold_method": method_str, param_name: val2}
+        cfg1 = Config(**kwargs1)
+        cfg2 = Config(**kwargs2)
+        req = (getattr(cfg1, param_name) != getattr(cfg2, param_name))
+        _cached_peak_reqs[cache_key] = req
+        return req
+    except Exception:
+        # Fallback approach if construction fails without validation
+        try:
+            Config(peak_threshold_method=method_str)
+            base_succeeds = True
+        except Exception:
+            base_succeeds = False
+            
+        if not base_succeeds:
+            # Cannot determine. Fail-closed: assume required.
+            _cached_peak_reqs[cache_key] = True
+            return True
+            
+        # Base succeeds. Does adding the param fail?
+        try:
+            Config(peak_threshold_method=method_str, **{param_name: val1})
+            param_succeeds = True
+        except Exception:
+            param_succeeds = False
+            
+        if param_succeeds:
+            # Both succeed. Cannot determine. Fail-closed: assume required. (Conservative)
+            _cached_peak_reqs[cache_key] = True
+            return True
+        else:
+            # Base succeeds but adding param explicitly rejected -> deterministic False
+            _cached_peak_reqs[cache_key] = False
+            return False
+
+def peak_threshold_method_requires_k(method_str: str) -> bool:
+    return _peak_threshold_method_requires_param(method_str, "peak_threshold_k", 1.0, 2.0)
+
+def peak_threshold_method_requires_percentile(method_str: str) -> bool:
+    return _peak_threshold_method_requires_param(method_str, "peak_threshold_percentile", 10.0, 50.0)
+
+def peak_threshold_method_requires_abs(method_str: str) -> bool:
+    return _peak_threshold_method_requires_param(method_str, "peak_threshold_abs", 0.5, 1.0)
+
+def parse_and_validate_event_feature_knobs(
+    event_signal_text: str,
+    peak_method_text: str,
+    peak_k_str: str,
+    peak_pct_str: str,
+    peak_abs_str: str,
+    peak_dist_str: str,
+    event_auc_text: str,
+    defaults: dict,
+) -> tuple[dict | None, str | None]:
+    """
+    Parses and validates the event + feature advanced knobs.
+    Returns (dict_of_overrides, None) if valid.
+    Returns (None, error_message) if invalid.
+    """
+    event_sig_method = event_signal_text.strip()
+    allowed_event_signals = get_allowed_event_signals_from_config()
+    if event_sig_method not in allowed_event_signals:
+        return None, "Invalid Event Signal."
+
+    peak_method = peak_method_text.strip()
+    allowed_peak_methods = get_allowed_peak_threshold_methods_from_config()
+    if peak_method not in allowed_peak_methods:
+        return None, "Invalid Peak Threshold Method."
+        
+    auc_baseline = event_auc_text.strip()
+    allowed_auc_baselines = get_allowed_event_auc_baselines_from_config()
+    if auc_baseline not in allowed_auc_baselines:
+        return None, "Invalid Event AUC Baseline."
+
+    try:
+        dist_val = peak_dist_str.strip()
+        peak_dist = float(dist_val if dist_val else defaults["peak_min_distance_sec"])
+        if peak_dist < 0:
+            return None, "Peak Min Distance (sec) must be >= 0."
+    except ValueError:
+        return None, "Peak Min Distance (sec) must be a number."
+
+    overrides = {
+        "event_signal": event_sig_method,
+        "peak_threshold_method": peak_method,
+        "peak_min_distance_sec": peak_dist,
+        "event_auc_baseline": auc_baseline,
+    }
+
+    if peak_threshold_method_requires_k(peak_method):
+        try:
+            k_val = peak_k_str.strip()
+            k = float(k_val if k_val else defaults["peak_threshold_k"])
+            if k <= 0:
+                return None, "Peak Threshold K must be > 0."
+            overrides["peak_threshold_k"] = k
+        except ValueError:
+            return None, "Peak Threshold K must be a number."
+            
+    if peak_threshold_method_requires_percentile(peak_method):
+        try:
+            pct_val = peak_pct_str.strip()
+            pct = float(pct_val if pct_val else defaults["peak_threshold_percentile"])
+            if not (0 <= pct <= 100):
+                return None, "Peak Threshold Percentile must be between 0 and 100."
+            overrides["peak_threshold_percentile"] = pct
+        except ValueError:
+            return None, "Peak Threshold Percentile must be a number."
+            
+    if peak_threshold_method_requires_abs(peak_method):
+        try:
+            abs_val = peak_abs_str.strip()
+            abs_v = float(abs_val if abs_val else defaults["peak_threshold_abs"])
+            if abs_v <= 0:
+                return None, "Peak Threshold Absolute must be > 0."
+            overrides["peak_threshold_abs"] = abs_v
+        except ValueError:
+            return None, "Peak Threshold Absolute must be a number."
+
+    return overrides, None
+
 
 
 def compute_overrides_user_changed(parsed: dict, defaults: dict) -> dict:
@@ -569,9 +726,63 @@ class MainWindow(QMainWindow):
         self._adv_prep_group = adv_prep_group
         outer.addWidget(adv_prep_group)
 
+        # --- Advanced: Events + Features ---
+        adv_ev_group = QGroupBox("Advanced: Events + Features")
+        adv_ev_layout = QFormLayout(adv_ev_group)
+        adv_ev_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
+        self._event_signal_combo = QComboBox()
+        allowed_sigs = get_allowed_event_signals_from_config()
+        if self._default_cfg.event_signal not in allowed_sigs:
+            allowed_sigs.append(self._default_cfg.event_signal)
+        self._event_signal_combo.addItems(sorted(allowed_sigs))
+        idx = self._event_signal_combo.findText(self._default_cfg.event_signal)
+        if idx >= 0: self._event_signal_combo.setCurrentIndex(idx)
+        adv_ev_layout.addRow("Event Signal:", self._event_signal_combo)
+
+        self._peak_method_combo = QComboBox()
+        allowed_peak_methods = get_allowed_peak_threshold_methods_from_config()
+        if self._default_cfg.peak_threshold_method not in allowed_peak_methods:
+            allowed_peak_methods.append(self._default_cfg.peak_threshold_method)
+        self._peak_method_combo.addItems(sorted(allowed_peak_methods))
+        idx = self._peak_method_combo.findText(self._default_cfg.peak_threshold_method)
+        if idx >= 0: self._peak_method_combo.setCurrentIndex(idx)
+        adv_ev_layout.addRow("Peak Threshold Method:", self._peak_method_combo)
+
+        self._peak_k_edit = QLineEdit(str(self._default_cfg.peak_threshold_k))
+        self._peak_k_label = QLabel("Peak Threshold K:")
+        adv_ev_layout.addRow(self._peak_k_label, self._peak_k_edit)
+
+        self._peak_pct_edit = QLineEdit(str(self._default_cfg.peak_threshold_percentile))
+        self._peak_pct_label = QLabel("Peak Threshold Percentile:")
+        adv_ev_layout.addRow(self._peak_pct_label, self._peak_pct_edit)
+
+        self._peak_abs_edit = QLineEdit(str(self._default_cfg.peak_threshold_abs))
+        self._peak_abs_label = QLabel("Peak Threshold Absolute:")
+        adv_ev_layout.addRow(self._peak_abs_label, self._peak_abs_edit)
+
+        self._peak_dist_edit = QLineEdit(str(self._default_cfg.peak_min_distance_sec))
+        adv_ev_layout.addRow("Peak Min Distance (sec):", self._peak_dist_edit)
+
+        self._event_auc_combo = QComboBox()
+        allowed_auc = get_allowed_event_auc_baselines_from_config()
+        if self._default_cfg.event_auc_baseline not in allowed_auc:
+            allowed_auc.append(self._default_cfg.event_auc_baseline)
+        self._event_auc_combo.addItems(sorted(allowed_auc))
+        idx = self._event_auc_combo.findText(self._default_cfg.event_auc_baseline)
+        if idx >= 0: self._event_auc_combo.setCurrentIndex(idx)
+        adv_ev_layout.addRow("Event AUC Baseline:", self._event_auc_combo)
+
+        self._adv_ev_group = adv_ev_group
+        outer.addWidget(adv_ev_group)
+
         # Wire visibility based on baseline method
         self._baseline_method_combo.currentIndexChanged.connect(self._update_adv_prep_visibility)
         self._update_adv_prep_visibility()
+
+        # Wire visibility based on peak threshold method
+        self._peak_method_combo.currentIndexChanged.connect(self._update_adv_ev_visibility)
+        self._update_adv_ev_visibility()
 
         # Wire visibility based on mode
         self._mode_combo.currentIndexChanged.connect(self._update_adv_group_visibility)
@@ -710,6 +921,30 @@ class MainWindow(QMainWindow):
         else:
             self._baseline_percentile_edit.hide()
             self._baseline_percentile_label.hide()
+
+    def _update_adv_ev_visibility(self):
+        method_text = self._peak_method_combo.currentText()
+        
+        if peak_threshold_method_requires_k(method_text):
+            self._peak_k_edit.show()
+            self._peak_k_label.show()
+        else:
+            self._peak_k_edit.hide()
+            self._peak_k_label.hide()
+            
+        if peak_threshold_method_requires_percentile(method_text):
+            self._peak_pct_edit.show()
+            self._peak_pct_label.show()
+        else:
+            self._peak_pct_edit.hide()
+            self._peak_pct_label.hide()
+            
+        if peak_threshold_method_requires_abs(method_text):
+            self._peak_abs_edit.show()
+            self._peak_abs_label.show()
+        else:
+            self._peak_abs_edit.hide()
+            self._peak_abs_label.hide()
 
     # ==================================================================
     # RunSpec construction + argv (GUI mode: --out <explicit_run_dir>)
@@ -865,6 +1100,30 @@ class MainWindow(QMainWindow):
             changed_prep_overrides = compute_overrides_user_changed(prep_overrides, default_prep_dict)
             config_overrides.update(changed_prep_overrides)
 
+        # Event + Feature overrides
+        default_ev_dict = {
+            "event_signal": self._default_cfg.event_signal,
+            "peak_threshold_method": self._default_cfg.peak_threshold_method,
+            "peak_threshold_k": self._default_cfg.peak_threshold_k,
+            "peak_threshold_percentile": self._default_cfg.peak_threshold_percentile,
+            "peak_threshold_abs": self._default_cfg.peak_threshold_abs,
+            "peak_min_distance_sec": self._default_cfg.peak_min_distance_sec,
+            "event_auc_baseline": self._default_cfg.event_auc_baseline,
+        }
+        ev_overrides, _ = parse_and_validate_event_feature_knobs(
+            self._event_signal_combo.currentText(),
+            self._peak_method_combo.currentText(),
+            self._peak_k_edit.text(),
+            self._peak_pct_edit.text(),
+            self._peak_abs_edit.text(),
+            self._peak_dist_edit.text(),
+            self._event_auc_combo.currentText(),
+            defaults=default_ev_dict,
+        )
+        if ev_overrides is not None:
+            changed_ev_overrides = compute_overrides_user_changed(ev_overrides, default_ev_dict)
+            config_overrides.update(changed_ev_overrides)
+
         spec = RunSpec(
             input_dir=self._input_dir.text().strip(),
             run_dir=run_dir,
@@ -1011,8 +1270,30 @@ class MainWindow(QMainWindow):
         if err:
             return err
 
-        return None
+        # Event + Feature validation
+        default_ev_dict = {
+            "event_signal": self._default_cfg.event_signal,
+            "peak_threshold_method": self._default_cfg.peak_threshold_method,
+            "peak_threshold_k": self._default_cfg.peak_threshold_k,
+            "peak_threshold_percentile": self._default_cfg.peak_threshold_percentile,
+            "peak_threshold_abs": self._default_cfg.peak_threshold_abs,
+            "peak_min_distance_sec": self._default_cfg.peak_min_distance_sec,
+            "event_auc_baseline": self._default_cfg.event_auc_baseline,
+        }
+        _, err = parse_and_validate_event_feature_knobs(
+            self._event_signal_combo.currentText(),
+            self._peak_method_combo.currentText(),
+            self._peak_k_edit.text(),
+            self._peak_pct_edit.text(),
+            self._peak_abs_edit.text(),
+            self._peak_dist_edit.text(),
+            self._event_auc_combo.currentText(),
+            defaults=default_ev_dict,
+        )
+        if err:
+            return err
 
+        return None
     # ==================================================================
     # Config change handler — resets validation
     # ==================================================================

@@ -1609,5 +1609,430 @@ class TestPreprocBaselineKnobs(unittest.TestCase):
         self.assertIsNotNone(err)
         self.assertIn("Baseline Percentile must be between 0 and 100", err)
 
+class TestEventFeatureKnobs(unittest.TestCase):
+    """Tests for Step 7 Event + Feature advanced GUI knobs."""
+
+    def test_t1_defaults_not_written_when_unchanged(self):
+        """T1: Ensure Step 7 keys are omitted when overrides are empty."""
+        from gui.run_spec import RunSpec
+        import tempfile, os, shutil, yaml
+        
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            run_dir = os.path.join(tmp_dir, "run_test_t1")
+            base_config = {"some_other_key": True}
+            base_config_path = os.path.join(tmp_dir, "base_config.yaml")
+            with open(base_config_path, "w") as f:
+                yaml.safe_dump(base_config, f)
+            
+            spec = RunSpec(
+                run_dir=run_dir,
+                config_source_path=base_config_path,
+                config_overrides={}
+            )
+            config_path = spec.generate_derived_config(run_dir)
+            
+            with open(config_path, "r") as f:
+                loaded = yaml.safe_load(f)
+                
+            keys_to_check = [
+                "event_signal", "peak_threshold_method", "peak_threshold_k",
+                "peak_threshold_percentile", "peak_threshold_abs",
+                "peak_min_distance_sec", "event_auc_baseline"
+            ]
+            for key in keys_to_check:
+                self.assertNotIn(key, loaded)
+                
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_t2_event_signal_and_distance_written_when_changed(self):
+        """T2: Prove unconditionally-used fields like event_signal, dist, auc emit if user changed them."""
+        from gui.main_window import parse_and_validate_event_feature_knobs, compute_overrides_user_changed
+        from gui.main_window import get_allowed_event_signals_from_config, get_allowed_event_auc_baselines_from_config
+        from photometry_pipeline.config import Config
+        from gui.run_spec import RunSpec
+        import tempfile, os, shutil, yaml
+        
+        cfg0 = Config()
+        defaults = {
+            "event_signal": cfg0.event_signal,
+            "peak_threshold_method": cfg0.peak_threshold_method,
+            "peak_threshold_k": cfg0.peak_threshold_k,
+            "peak_threshold_percentile": cfg0.peak_threshold_percentile,
+            "peak_threshold_abs": cfg0.peak_threshold_abs,
+            "peak_min_distance_sec": cfg0.peak_min_distance_sec,
+            "event_auc_baseline": cfg0.event_auc_baseline,
+        }
+        
+        allowed_sigs = get_allowed_event_signals_from_config()
+        if len(allowed_sigs) > 1:
+            sig_override = next(s for s in allowed_sigs if s != defaults["event_signal"])
+        else:
+            sig_override = defaults["event_signal"]
+            
+        allowed_aucs = get_allowed_event_auc_baselines_from_config()
+        if len(allowed_aucs) > 1:
+            auc_override = next(a for a in allowed_aucs if a != defaults["event_auc_baseline"])
+        else:
+            auc_override = defaults["event_auc_baseline"]
+            
+        dist_override = defaults["peak_min_distance_sec"] + 1.0
+        
+        # For local testing where gating might be overly permissive, supply valid numeric inputs 
+        # that satisfy the GUI constraints (abs > 0, k > 0, percentile in [0, 100])
+        valid_k = "1.0" if defaults["peak_threshold_k"] <= 0 else str(defaults["peak_threshold_k"])
+        valid_pct = "50.0" if not (0 <= defaults["peak_threshold_percentile"] <= 100) else str(defaults["peak_threshold_percentile"])
+        valid_abs = "1.0" if defaults["peak_threshold_abs"] <= 0 else str(defaults["peak_threshold_abs"])
+        
+        parsed_overrides, err = parse_and_validate_event_feature_knobs(
+            sig_override,
+            defaults["peak_threshold_method"],
+            valid_k,
+            valid_pct,
+            valid_abs,
+            str(dist_override),
+            auc_override,
+            defaults=defaults
+        )
+        self.assertIsNone(err)
+        
+        changed = compute_overrides_user_changed(parsed_overrides, defaults)
+        self.assertIn("peak_min_distance_sec", changed)
+        if len(allowed_sigs) > 1:
+            self.assertIn("event_signal", changed)
+        if len(allowed_aucs) > 1:
+            self.assertIn("event_auc_baseline", changed)
+            
+        self.assertNotIn("peak_threshold_method", changed)
+        
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            run_dir = os.path.join(tmp_dir, "run_test_t2")
+            base_config_path = os.path.join(tmp_dir, "base_config.yaml")
+            with open(base_config_path, "w") as f:
+                yaml.safe_dump({"some_other_key": True}, f)
+            
+            spec = RunSpec(
+                run_dir=run_dir,
+                config_source_path=base_config_path,
+                config_overrides=changed
+            )
+            config_path = spec.generate_derived_config(run_dir)
+            with open(config_path, "r") as f:
+                loaded = yaml.safe_load(f)
+                
+            self.assertEqual(loaded["peak_min_distance_sec"], dist_override)
+            if len(allowed_sigs) > 1:
+                self.assertEqual(loaded["event_signal"], sig_override)
+            self.assertNotIn("peak_threshold_method", loaded)
+            
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_t3_conditional_parameter_emission(self):
+        """T3: Verify only the method-relevant parameter key is emitted when changed."""
+        from gui.main_window import parse_and_validate_event_feature_knobs, compute_overrides_user_changed
+        from gui.main_window import get_allowed_peak_threshold_methods_from_config
+        from gui.main_window import peak_threshold_method_requires_k, peak_threshold_method_requires_percentile, peak_threshold_method_requires_abs
+        from photometry_pipeline.config import Config
+        
+        cfg0 = Config()
+        defaults = {
+            "event_signal": cfg0.event_signal,
+            "peak_threshold_method": cfg0.peak_threshold_method,
+            "peak_threshold_k": cfg0.peak_threshold_k,
+            "peak_threshold_percentile": cfg0.peak_threshold_percentile,
+            "peak_threshold_abs": cfg0.peak_threshold_abs,
+            "peak_min_distance_sec": cfg0.peak_min_distance_sec,
+            "event_auc_baseline": cfg0.event_auc_baseline,
+        }
+        
+        allowed_methods = get_allowed_peak_threshold_methods_from_config()
+        self.assertTrue(len(allowed_methods) > 0)
+        
+        for method in allowed_methods:
+            uses_k = peak_threshold_method_requires_k(method)
+            uses_pct = peak_threshold_method_requires_percentile(method)
+            uses_abs = peak_threshold_method_requires_abs(method)
+            
+            new_k = defaults["peak_threshold_k"] + 1.0
+            new_pct = defaults["peak_threshold_percentile"] / 2.0
+            new_abs = defaults["peak_threshold_abs"] + 10.0
+            
+            parsed, err = parse_and_validate_event_feature_knobs(
+                defaults["event_signal"], method, str(new_k), str(new_pct), str(new_abs),
+                str(defaults["peak_min_distance_sec"]), defaults["event_auc_baseline"], defaults
+            )
+            self.assertIsNone(err)
+            
+            changed = compute_overrides_user_changed(parsed, defaults)
+            if method != defaults["peak_threshold_method"]:
+                self.assertIn("peak_threshold_method", changed)
+                
+            if uses_k:
+                self.assertIn("peak_threshold_k", changed)
+            else:
+                self.assertNotIn("peak_threshold_k", changed)
+                
+            if uses_pct:
+                self.assertIn("peak_threshold_percentile", changed)
+            else:
+                self.assertNotIn("peak_threshold_percentile", changed)
+                
+            if uses_abs:
+                self.assertIn("peak_threshold_abs", changed)
+            else:
+                self.assertNotIn("peak_threshold_abs", changed)
+
+    def test_t4_validation_failures(self):
+        """T4: Validation failures for numeric constraints conditional on method."""
+        from gui.main_window import parse_and_validate_event_feature_knobs
+        from gui.main_window import peak_threshold_method_requires_k, peak_threshold_method_requires_percentile, peak_threshold_method_requires_abs
+        from photometry_pipeline.config import Config
+        
+        cfg0 = Config()
+        defaults = {
+            "event_signal": cfg0.event_signal,
+            "peak_threshold_method": cfg0.peak_threshold_method,
+            "peak_threshold_k": cfg0.peak_threshold_k,
+            "peak_threshold_percentile": cfg0.peak_threshold_percentile,
+            "peak_threshold_abs": cfg0.peak_threshold_abs,
+            "peak_min_distance_sec": cfg0.peak_min_distance_sec,
+            "event_auc_baseline": cfg0.event_auc_baseline,
+        }
+        
+        method = defaults["peak_threshold_method"]
+        
+        # dist < 0
+        _, err = parse_and_validate_event_feature_knobs(
+            defaults["event_signal"], method, str(defaults["peak_threshold_k"]),
+            str(defaults["peak_threshold_percentile"]), str(defaults["peak_threshold_abs"]),
+            "-1.0", defaults["event_auc_baseline"], defaults
+        )
+        self.assertIn("Peak Min Distance (sec) must be >= 0", err)
+        
+        # k <= 0
+        if peak_threshold_method_requires_k(method):
+            _, err = parse_and_validate_event_feature_knobs(
+                defaults["event_signal"], method, "0.0",
+                str(defaults["peak_threshold_percentile"]), str(defaults["peak_threshold_abs"]),
+                str(defaults["peak_min_distance_sec"]), defaults["event_auc_baseline"], defaults
+            )
+            self.assertIn("Peak Threshold K must be > 0", err)
+        else:
+            _, err = parse_and_validate_event_feature_knobs(
+                defaults["event_signal"], method, "0.0",
+                str(defaults["peak_threshold_percentile"]), str(defaults["peak_threshold_abs"]),
+                str(defaults["peak_min_distance_sec"]), defaults["event_auc_baseline"], defaults
+            )
+            self.assertIsNone(err)
+            
+        # pct out of bounds
+        if peak_threshold_method_requires_percentile(method):
+            _, err = parse_and_validate_event_feature_knobs(
+                defaults["event_signal"], method, str(defaults["peak_threshold_k"]),
+                "150.0", str(defaults["peak_threshold_abs"]),
+                str(defaults["peak_min_distance_sec"]), defaults["event_auc_baseline"], defaults
+            )
+            self.assertIn("Peak Threshold Percentile must be between 0 and 100", err)
+            
+        # abs <= 0
+        if peak_threshold_method_requires_abs(method):
+            _, err = parse_and_validate_event_feature_knobs(
+                defaults["event_signal"], method, str(defaults["peak_threshold_k"]),
+                str(defaults["peak_threshold_percentile"]), "-1.0",
+                str(defaults["peak_min_distance_sec"]), defaults["event_auc_baseline"], defaults
+            )
+            self.assertIn("Peak Threshold Absolute must be > 0", err)
+            
+    def test_t5_run_report_reflects_step_7_knobs(self):
+        """T5: Hard validation gate proving Step 7 config reaches run_report.json."""
+        from gui.main_window import parse_and_validate_event_feature_knobs, compute_overrides_user_changed
+        from gui.main_window import get_allowed_peak_threshold_methods_from_config
+        from gui.main_window import peak_threshold_method_requires_k, peak_threshold_method_requires_abs, peak_threshold_method_requires_percentile
+        from gui.run_spec import RunSpec
+        from photometry_pipeline.config import Config
+        from photometry_pipeline.core.reporting import generate_run_report
+        import tempfile, os, shutil, yaml, json
+        
+        cfg0 = Config()
+        defaults = {
+            "event_signal": cfg0.event_signal,
+            "peak_threshold_method": cfg0.peak_threshold_method,
+            "peak_threshold_k": cfg0.peak_threshold_k,
+            "peak_threshold_percentile": cfg0.peak_threshold_percentile,
+            "peak_threshold_abs": cfg0.peak_threshold_abs,
+            "peak_min_distance_sec": cfg0.peak_min_distance_sec,
+            "event_auc_baseline": cfg0.event_auc_baseline,
+        }
+        
+        allowed_methods = get_allowed_peak_threshold_methods_from_config()
+        self.assertIn(cfg0.peak_threshold_method, allowed_methods)
+        
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            run_dir_b = os.path.join(tmp_dir, "run_b")
+            base_config_path_b = os.path.join(tmp_dir, "base_config_b.yaml")
+            with open(base_config_path_b, "w") as f:
+                yaml.safe_dump({}, f)
+                
+            dist_override = defaults["peak_min_distance_sec"] + 1.0
+            
+            if len(allowed_methods) > 1:
+                method_override = next(m for m in allowed_methods if m != defaults["peak_threshold_method"])
+            else:
+                method_override = defaults["peak_threshold_method"]
+                
+            k_ov = "3.14" if peak_threshold_method_requires_k(method_override) else str(defaults["peak_threshold_k"])
+            pct_ov = "42.0" if peak_threshold_method_requires_percentile(method_override) else str(defaults["peak_threshold_percentile"])
+            abs_ov = "9.99" if peak_threshold_method_requires_abs(method_override) else str(defaults["peak_threshold_abs"])
+            
+            parsed_overrides, err = parse_and_validate_event_feature_knobs(
+                defaults["event_signal"], method_override, k_ov, pct_ov, abs_ov, str(dist_override), defaults["event_auc_baseline"], defaults
+            )
+            self.assertIsNone(err)
+            changed = compute_overrides_user_changed(parsed_overrides, defaults)
+            
+            spec_b = RunSpec(run_dir=run_dir_b, config_source_path=base_config_path_b, config_overrides=changed)
+            conf_path_b = spec_b.generate_derived_config(run_dir_b)
+            
+            with open(conf_path_b, "r") as f:
+                cfg_b = Config(**yaml.safe_load(f))
+            generate_run_report(cfg_b, run_dir_b)
+            
+            with open(os.path.join(run_dir_b, "run_report.json"), "r") as f:
+                report_b = json.load(f)
+                
+            cfg_dict_b = report_b["configuration"]
+            self.assertEqual(cfg_dict_b["peak_threshold_method"], method_override)
+            self.assertEqual(cfg_dict_b["peak_min_distance_sec"], dist_override)
+            
+            if peak_threshold_method_requires_k(method_override):
+                self.assertEqual(cfg_dict_b["peak_threshold_k"], float(k_ov))
+            if peak_threshold_method_requires_percentile(method_override):
+                self.assertEqual(cfg_dict_b["peak_threshold_percentile"], float(pct_ov))
+            if peak_threshold_method_requires_abs(method_override):
+                self.assertEqual(cfg_dict_b["peak_threshold_abs"], float(abs_ov))
+            
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_t6_peak_threshold_gating_schema_locked(self):
+        """T6: Assert peak threshold parameters are evaluated by schema constraint probing, not heuristics."""
+        from gui.main_window import (
+            peak_threshold_method_requires_k,
+            peak_threshold_method_requires_percentile,
+            peak_threshold_method_requires_abs,
+            get_allowed_peak_threshold_methods_from_config
+        )
+        from photometry_pipeline.config import Config
+        
+        allowed_methods = get_allowed_peak_threshold_methods_from_config()
+        self.assertTrue(len(allowed_methods) > 0, "No peak threshold methods returned.")
+        
+        for method in allowed_methods:
+            # check k
+            try:
+                c1 = Config(peak_threshold_method=method, peak_threshold_k=1.0)
+                c2 = Config(peak_threshold_method=method, peak_threshold_k=2.0)
+                expected_k = (c1.peak_threshold_k != c2.peak_threshold_k)
+            except Exception:
+                try:
+                    Config(peak_threshold_method=method)
+                    b_k = True
+                except Exception:
+                    b_k = False
+                
+                if not b_k:
+                    expected_k = True
+                else:
+                    try:
+                        Config(peak_threshold_method=method, peak_threshold_k=1.0)
+                        p_k = True
+                    except Exception:
+                        p_k = False
+                    expected_k = True if p_k else False
+            self.assertEqual(expected_k, peak_threshold_method_requires_k(method), f"Method {method} expected K:{expected_k}")
+            
+            # check percentile
+            try:
+                c1 = Config(peak_threshold_method=method, peak_threshold_percentile=10.0)
+                c2 = Config(peak_threshold_method=method, peak_threshold_percentile=50.0)
+                expected_pct = (c1.peak_threshold_percentile != c2.peak_threshold_percentile)
+            except Exception:
+                try:
+                    Config(peak_threshold_method=method)
+                    b_pct = True
+                except Exception:
+                    b_pct = False
+                if not b_pct:
+                    expected_pct = True
+                else:
+                    try:
+                        Config(peak_threshold_method=method, peak_threshold_percentile=10.0)
+                        p_pct = True
+                    except Exception:
+                        p_pct = False
+                    expected_pct = True if p_pct else False
+            self.assertEqual(expected_pct, peak_threshold_method_requires_percentile(method), f"Method {method} expected PCT:{expected_pct}")
+            
+            # check abs
+            try:
+                c1 = Config(peak_threshold_method=method, peak_threshold_abs=0.5)
+                c2 = Config(peak_threshold_method=method, peak_threshold_abs=1.0)
+                expected_abs = (c1.peak_threshold_abs != c2.peak_threshold_abs)
+            except Exception:
+                try:
+                    Config(peak_threshold_method=method)
+                    b_abs = True
+                except Exception:
+                    b_abs = False
+                if not b_abs:
+                    expected_abs = True
+                else:
+                    try:
+                        Config(peak_threshold_method=method, peak_threshold_abs=0.5)
+                        p_abs = True
+                    except Exception:
+                        p_abs = False
+                    expected_abs = True if p_abs else False
+            self.assertEqual(expected_abs, peak_threshold_method_requires_abs(method), f"Method {method} expected ABS:{expected_abs}")
+
+    def test_t7_peak_threshold_not_parsed_when_gating_false(self):
+        """T7: Prove parameters are not validated or sent to the config dictionary if their gating is False."""
+        from gui.main_window import parse_and_validate_event_feature_knobs, get_allowed_peak_threshold_methods_from_config
+        from photometry_pipeline.config import Config
+        import unittest.mock
+        
+        allowed_methods = get_allowed_peak_threshold_methods_from_config()
+        self.assertTrue(len(allowed_methods) > 0)
+        method = allowed_methods[0]
+        
+        cfg0 = Config()
+        defaults = {
+            "event_signal": cfg0.event_signal,
+            "peak_threshold_method": cfg0.peak_threshold_method,
+            "peak_threshold_k": cfg0.peak_threshold_k,
+            "peak_threshold_percentile": cfg0.peak_threshold_percentile,
+            "peak_threshold_abs": cfg0.peak_threshold_abs,
+            "peak_min_distance_sec": cfg0.peak_min_distance_sec,
+            "event_auc_baseline": cfg0.event_auc_baseline,
+        }
+        
+        # We'll test percentile and abs simultaneously
+        with unittest.mock.patch("gui.main_window.peak_threshold_method_requires_percentile", return_value=False), \
+             unittest.mock.patch("gui.main_window.peak_threshold_method_requires_abs", return_value=False):
+            # Pass highly invalid values for everything since they shouldn't trigger verification
+            overrides, err = parse_and_validate_event_feature_knobs(
+                defaults["event_signal"], method, str(defaults["peak_threshold_k"]),
+                "999.0", "-50.0", str(defaults["peak_min_distance_sec"]), defaults["event_auc_baseline"], defaults
+            )
+            
+        self.assertIsNone(err, "Should not hit validation for param gated off.")
+        self.assertIsNotNone(overrides)
+        self.assertNotIn("peak_threshold_percentile", overrides)
+        self.assertNotIn("peak_threshold_abs", overrides)
+
 if __name__ == "__main__":
     unittest.main()
