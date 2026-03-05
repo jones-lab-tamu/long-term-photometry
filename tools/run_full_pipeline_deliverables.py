@@ -333,19 +333,17 @@ def main():
         #     --events is "auto" (would require creating run_dir).
         vo_events_path = events_path
         vo_allow_makedirs = True
-        if is_gui_mode:
-            os.makedirs(run_dir, exist_ok=True)
-        else:
-            # Legacy mode: side-effect free policy.
-            # a) --events auto: disable events entirely.
-            # b) --events <explicit>: only write if parent dir already exists;
-            #    never create directories.
+        
+        # Enforce Step 8 contract: validate-only MUST create run_dir to house status.json
+        os.makedirs(run_dir, exist_ok=True)
+
+        if not is_gui_mode:
+            # Legacy mode: specifically silence 'auto' events to prevent clutter
+            # if the user wasn't expecting directory side effects beyond status.json.
             if args.events == "auto":
                 vo_events_path = None
                 print("VALIDATE-ONLY: events disabled (legacy --out mode, "
-                      "--events auto); to enable, pass --events <PATH> to "
-                      "an existing parent directory "
-                      "(no directories will be created)")
+                      "--events auto); to enable, pass --events <PATH>")
             else:
                 # Explicit path: check parent directory
                 parent = os.path.dirname(events_path) or "."
@@ -414,8 +412,8 @@ def main():
         except RuntimeError as e:
             emitter.emit("validate", "error", str(e), error_code="VALIDATION_FAILED")
             emitter.close()
-            if is_gui_mode:
-                _vo_write_final_status("error", error_msg=str(e))
+            # Always emit status.json even in legacy mode for GUI/automated observers
+            _vo_write_final_status("error", error_msg=str(e))
             print(str(e), file=sys.stderr)
             raise SystemExit(1)
 
@@ -451,8 +449,8 @@ def main():
 
         emitter.emit("engine", "done", "Validate-only complete")
         emitter.close()
-        if is_gui_mode:
-            _vo_write_final_status("success")
+        # Always emit status.json even in legacy mode for GUI/automated observers
+        _vo_write_final_status("success")
         raise SystemExit(0)
 
     # ============================================================

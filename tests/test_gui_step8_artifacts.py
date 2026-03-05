@@ -10,6 +10,8 @@ import json
 import tempfile
 import pytest
 
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from gui.process_runner import PipelineRunner, RunnerState
 from gui.status_follower import StatusFollower
 from gui.run_report_parser import (
