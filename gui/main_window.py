@@ -30,7 +30,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QCheckBox, QSpinBox,
-    QDoubleSpinBox, QPushButton, QPlainTextEdit, QSplitter,
+    QDoubleSpinBox, QPushButton, QPlainTextEdit, QSplitter, QScrollArea,
     QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem,
 )
 
@@ -490,11 +490,20 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(8, 8, 8, 8)
 
-        splitter = QSplitter(Qt.Vertical)
+        main_splitter = QSplitter(Qt.Horizontal)
 
-        # --- Zone A: Config Panel ---
+        # --- Zone A: Config Panel (Scrollable Sidebar) ---
         config_group = self._build_config_panel()
-        splitter.addWidget(config_group)
+        config_scroll = QScrollArea()
+        config_scroll.setWidgetResizable(True)
+        config_scroll.setWidget(config_group)
+        config_scroll.setFrameShape(QScrollArea.NoFrame)
+        config_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        main_splitter.addWidget(config_scroll)
+
+        # Right side: Content (Log + Results)
+        content_splitter = QSplitter(Qt.Vertical)
+        main_splitter.addWidget(content_splitter)
 
         # --- Status label & Preview Badge ---
         status_row = QHBoxLayout()
@@ -516,20 +525,25 @@ class MainWindow(QMainWindow):
 
         # --- Zone B: Log Panel ---
         log_group = self._build_log_panel()
-        splitter.addWidget(log_group)
+        content_splitter.addWidget(log_group)
 
         # --- Zone C: Results Panel ---
         results_group = QGroupBox("Results")
         results_lay = QVBoxLayout(results_group)
         self._report_viewer = RunReportViewer()
         results_lay.addWidget(self._report_viewer)
-        splitter.addWidget(results_group)
+        content_splitter.addWidget(results_group)
 
-        splitter.setStretchFactor(0, 0)  # config: natural size
-        splitter.setStretchFactor(1, 1)  # log: grows
-        splitter.setStretchFactor(2, 2)  # results: grows more
+        # Sidebar vs Content stretch
+        main_splitter.setStretchFactor(0, 0)
+        main_splitter.setStretchFactor(1, 1)
 
-        main_layout.addWidget(splitter)
+        # Inner Content stretch (Log vs Results)
+        content_splitter.setStretchFactor(0, 1)
+        content_splitter.setStretchFactor(1, 2)
+
+        main_splitter.setSizes([420, 1000])
+        main_layout.addWidget(main_splitter)
         self._update_button_states()
 
         # Restore persisted settings
@@ -541,6 +555,7 @@ class MainWindow(QMainWindow):
 
     def _build_config_panel(self) -> QGroupBox:
         group = QGroupBox("Run Configuration")
+        # Relaxed size policy returned to Preferred to allow scroll area to function correctly
         outer = QVBoxLayout(group)
 
         form = QFormLayout()
