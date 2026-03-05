@@ -169,7 +169,7 @@ class PipelineRunner(QObject):
     # ------------------------------------------------------------------
 
     def _open_log_files(self) -> None:
-        """Open stdout.log and stderr.log in run_dir if it exists.
+        """Open stdout.txt and stderr.txt in run_dir if it exists.
 
         Uses write mode ("w") so each process start truncates old content,
         preventing false validation gating from stale log data.
@@ -178,14 +178,14 @@ class PipelineRunner(QObject):
         if self._run_dir and os.path.isdir(self._run_dir):
             try:
                 self._stdout_log = open(
-                    os.path.join(self._run_dir, "stdout.log"),
+                    os.path.join(self._run_dir, "stdout.txt"),
                     "w", encoding="utf-8"
                 )
             except OSError:
                 self._stdout_log = None
             try:
                 self._stderr_log = open(
-                    os.path.join(self._run_dir, "stderr.log"),
+                    os.path.join(self._run_dir, "stderr.txt"),
                     "w", encoding="utf-8"
                 )
             except OSError:
@@ -309,7 +309,7 @@ class PipelineRunner(QObject):
                 "MALFORMED_STATUS": ("status.json is malformed or invalid JSON.", "Inspect status.json for corruption or partial writes."),
                 "SCHEMA_MISMATCH": ("status.json schema_version is missing or incorrect.", "Check tool version or clear output directory."),
                 "NOT_FINAL": ("status.json exists but phase is not 'final'.", "Wait for the process to fully complete or check for hangs."),
-                "NONFINAL_WITH_EXIT": ("Process exited but status never reached 'final' phase.", "Check stderr.log for crashes or early exits."),
+                "NONFINAL_WITH_EXIT": ("Process exited but status never reached 'final' phase.", "Check stderr.txt for crashes or early exits."),
                 "MISSING_STATUS": ("status.json is missing required 'status' field.", "Review run script logic or inspect status.json."),
                 "BAD_STATUS": ("status.json 'status' field has unrecognized value.", "Verify contract adherence in run script.")
             }
@@ -356,6 +356,12 @@ class PipelineRunner(QObject):
         else:
             final = self._determine_final_state(exit_code)
             
+        # Hardening (Step 8): Detect artifact presence but do NOT lie about state.
+        if self._run_dir:
+            report_path = os.path.join(self._run_dir, "run_report.json")
+            if os.path.exists(report_path):
+                 self.has_run_report = True
+
         self._set_state(final)
         self._close_log_files()
         self.finished.emit(exit_code)

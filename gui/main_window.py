@@ -35,9 +35,9 @@ from PySide6.QtWidgets import (
 )
 
 from gui.process_runner import PipelineRunner, RunnerState
-from gui.events_follower import EventsFollower
-from gui.manifest_viewer import ManifestViewer
 from gui.run_spec import RunSpec
+from gui.status_follower import StatusFollower
+from gui.run_report_viewer import RunReportViewer
 from photometry_pipeline.config import Config
 import dataclasses
 from typing import get_args
@@ -454,16 +454,13 @@ class MainWindow(QMainWindow):
         from photometry_pipeline.config import Config
         self._default_cfg = Config()
 
-        # Pipeline runner
-        self._runner = PipelineRunner(self)
+        self._status_follower = None
+        self._runner = PipelineRunner()
         self._runner.log_line.connect(self._append_log)
         self._runner.started.connect(self._on_run_started)
         self._runner.error.connect(self._on_run_error)
         self._runner.state_changed.connect(self._on_state_changed)
         self._runner.finished.connect(self._on_run_finished_failsafe)
-
-        # Events follower (created per run)
-        self._events_follower = None
 
         # Current run directory (set before each run)
         self._current_run_dir = ""
@@ -477,13 +474,15 @@ class MainWindow(QMainWindow):
         # Discovery cache (result of RunSpec.run_discovery)
         self._discovery_cache = None
 
-        # Status label fields (state + last event, shown together)
+        # Status label fields
         self._state_str = "IDLE"
         self._ui_state = RunnerState.IDLE
-        self._last_event_stage = "\u2014"
-        self._last_event_type = "\u2014"
-        self._last_event_msg = ""
-        self._saw_cancel_event = False
+        self._last_status_phase = "\u2014"
+        self._last_status_state = "\u2014"
+        self._last_status_duration = ""
+        self._last_status_errors = []
+        self._last_status_msg = ""
+        self._saw_cancel_status = False
 
         # Build UI
         central = QWidget()
@@ -497,12 +496,23 @@ class MainWindow(QMainWindow):
         config_group = self._build_config_panel()
         splitter.addWidget(config_group)
 
-        # --- Status label ---
-        self._status_label = QLabel("State: IDLE")
+        # --- Status label & Preview Badge ---
+        status_row = QHBoxLayout()
+        self._status_label = QLabel("Runner State: IDLE")
         self._status_label.setStyleSheet(
             "font-weight: bold; padding: 4px; background: #f0f0f0;"
         )
-        main_layout.addWidget(self._status_label)
+        status_row.addWidget(self._status_label, 1)
+
+        self._preview_badge = QLabel("PREVIEW")
+        self._preview_badge.setStyleSheet(
+            "font-weight: bold; color: white; background: #d9534f; "
+            "padding: 2px 8px; border-radius: 4px;"
+        )
+        self._preview_badge.hide()
+        status_row.addWidget(self._preview_badge)
+
+        main_layout.addLayout(status_row)
 
         # --- Zone B: Log Panel ---
         log_group = self._build_log_panel()
@@ -511,8 +521,8 @@ class MainWindow(QMainWindow):
         # --- Zone C: Results Panel ---
         results_group = QGroupBox("Results")
         results_lay = QVBoxLayout(results_group)
-        self._manifest_viewer = ManifestViewer()
-        results_lay.addWidget(self._manifest_viewer)
+        self._report_viewer = RunReportViewer()
+        results_lay.addWidget(self._report_viewer)
         splitter.addWidget(results_group)
 
         splitter.setStretchFactor(0, 0)  # config: natural size
@@ -1427,18 +1437,19 @@ class MainWindow(QMainWindow):
             return
 
         self._save_widgets_to_settings()
+        self._report_viewer.clear()
         self._log_view.clear()
         self._append_log("--- Validate Only ---")
         argv = self._build_argv(validate_only=True)
         self._is_validate_only = True
         self._validation_passed = False
         self._validate_stdout = []
-        self._reset_event_flags()
+        self._reset_status_flags()
 
         # run_dir already created by _build_argv -> _build_run_spec
 
         self._runner.set_run_dir(self._current_run_dir)
-        self._start_events_follower()
+        self._start_status_follower()
         self._runner.start(argv, state=RunnerState.VALIDATING)
 
     def _on_run(self):
@@ -1453,17 +1464,18 @@ class MainWindow(QMainWindow):
         argv = self._build_argv(validate_only=False)
         run_dir = self._current_run_dir
 
+        # Clear past results
+        self._report_viewer.clear()
         self._log_view.clear()
-        self._manifest_viewer.clear()
         self._append_log("--- Starting Pipeline ---")
         self._append_log(f"Run directory: {run_dir}")
         self._append_log(f"Config: {os.path.join(run_dir, 'config_effective.yaml')}")
         self._is_validate_only = False
         self._validation_passed = False
-        self._reset_event_flags()
+        self._reset_status_flags()
 
         self._runner.set_run_dir(run_dir)
-        self._start_events_follower()
+        self._start_status_follower()
         self._runner.start(argv, state=RunnerState.RUNNING)
 
     def _on_cancel(self):
@@ -1489,7 +1501,7 @@ class MainWindow(QMainWindow):
             self._append_log(f"--- Opening results from {selected} ---")
 
         # ManifestViewer.load_manifest handles missing/invalid file gracefully
-        self._manifest_viewer.load_manifest(selected)
+        self._report_viewer.load_report(selected)
 
     def _on_open_folder(self):
         """Open the current run_dir in the system file manager."""
@@ -1522,64 +1534,92 @@ class MainWindow(QMainWindow):
         _open_folder(run_dir)
 
     # ==================================================================
-    # Events follower integration
+    # Status follower integration
     # ==================================================================
 
-    def _start_events_follower(self):
-        """Create and start an EventsFollower for the current run_dir."""
-        self._stop_events_follower()
-        events_path = os.path.join(self._current_run_dir, "events.ndjson")
-        self._events_follower = EventsFollower(events_path, poll_ms=300, parent=self)
-        self._events_follower.event_received.connect(self._on_event)
-        self._events_follower.parse_error.connect(self._on_event_parse_error)
-        self._events_follower.start()
+    def _start_status_follower(self):
+        """Create and start a StatusFollower for the current run_dir."""
+        self._stop_status_follower()
+        status_path = os.path.join(self._current_run_dir, "status.json")
+        from gui.status_follower import StatusFollower
+        self._status_follower = StatusFollower(status_path, poll_ms=500, parent=self)
+        self._status_follower.status_received.connect(self._on_status)
+        self._status_follower.parse_error.connect(self._on_status_parse_error)
+        self._status_follower.status_warning.connect(self._on_status_warning)
+        self._status_follower.start()
 
-    def _stop_events_follower(self):
-        """Stop and discard the events follower."""
-        if self._events_follower is not None:
-            self._events_follower.stop()
-            self._events_follower.deleteLater()
-            self._events_follower = None
+    def _stop_status_follower(self):
+        """Stop and discard the status follower."""
+        if hasattr(self, '_status_follower') and self._status_follower is not None:
+            self._status_follower.stop()
+            try:
+                self._status_follower.status_received.disconnect(self._on_status)
+                self._status_follower.status_warning.disconnect(self._on_status_warning)
+            except (RuntimeError, TypeError):
+                pass
+            self._status_follower.deleteLater()
+            self._status_follower = None
 
-    def _reset_event_flags(self):
-        """Reset event-derived fields at the start of each validate/run."""
-        self._saw_cancel_event = False
-        self._last_event_stage = "\u2014"
-        self._last_event_type = "\u2014"
-        self._last_event_msg = ""
+    def _reset_status_flags(self):
+        """Reset status-derived fields at the start of each validate/run."""
+        self._saw_cancel_status = False
+        self._last_status_phase = "\u2014"
+        self._last_status_state = "\u2014"
+        self._last_status_duration = ""
+        self._last_status_errors = []
+        self._last_status_msg = ""
         self._render_status_label()
 
-    def _render_status_label(self):
-        """Compose status label from state + last event fields."""
-        parts = [f"State: {self._state_str}"]
-        parts.append(f"Stage: {self._last_event_stage}")
-        parts.append(f"Type: {self._last_event_type}")
-        if self._last_event_msg:
-            parts.append(self._last_event_msg)
+    def _render_status_label(self, is_updating: bool = False):
+        """Compose status label from Runner state + status.json fields."""
+        parts = [f"Runner State: {self._state_str}"]
+        parts.append(f"Phase: {self._last_status_phase}")
+        parts.append(f"Status: {self._last_status_state}")
+        
+        if self._last_status_duration:
+            parts.append(f"Duration: {self._last_status_duration}")
+            
+        if self._last_status_errors:
+            parts.append(f"({len(self._last_status_errors)} Error(s))")
+
+        if self._last_status_msg:
+            parts.append(f"[{self._last_status_msg}]")
+
+        if is_updating and not self._last_status_msg:
+            parts.append("[updating...]")
+
         self._status_label.setText(" | ".join(parts))
 
-    def _on_event(self, evt: dict):
-        """Handle a parsed event from events.ndjson."""
-        stage = evt.get("stage")
-        etype = evt.get("type")
+    def _on_status(self, data: dict):
+        """Handle a successfully parsed status.json dictionary."""
+        self._last_status_phase = str(data.get("phase", "?"))
+        self._last_status_state = str(data.get("status", "?"))
         
-        self._last_event_stage = stage or "?"
-        self._last_event_type = etype or "?"
-        self._last_event_msg = evt.get("message", "")
-        self._render_status_label()
+        # Format duration to 1 decimal place if available
+        dur = data.get("duration_sec")
+        if isinstance(dur, (int, float)):
+            self._last_status_duration = f"{dur:.1f}s"
+        else:
+            self._last_status_duration = ""
+            
+        self._last_status_errors = data.get("errors", [])
+        self._last_status_msg = "" # Clear warnings on valid parse
+        
+        self._render_status_label(is_updating=False)
 
-        # Detect cancellation via events (requirement B)
-        etype_lower = self._last_event_type.lower()
-        estatus_lower = str(evt.get("status", "")).lower()
-        emsg_lower = self._last_event_msg.lower()
-        if etype_lower == "cancelled" or estatus_lower == "cancelled":
-            self._saw_cancel_event = True
-        elif "cancel" in emsg_lower and etype_lower in {"done", "status", "engine"}:
-            self._saw_cancel_event = True
+        # Detect cancellation via status.json
+        if self._last_status_state.lower() == "cancelled":
+            self._saw_cancel_status = True
 
-    def _on_event_parse_error(self, msg: str):
-        """Non-fatal warning for malformed event lines."""
-        self._append_log(f"WARN(events): {msg}")
+    def _on_status_parse_error(self, msg: str):
+        """Update UI to show partial write / reading state (non-critical)."""
+        self._last_status_msg = msg
+        self._render_status_label(is_updating=True)
+
+    def _on_status_warning(self, msg: str):
+        """Update UI to show unknown status warning from follower."""
+        self._last_status_msg = msg
+        self._render_status_label(is_updating=False)
 
     # ==================================================================
     # Runner signal handlers
@@ -1601,7 +1641,7 @@ class MainWindow(QMainWindow):
                 RunnerState.CANCELLED, RunnerState.FAIL_CLOSED
             )
             if self._ui_state in terminal_states:
-                self._stop_events_follower()
+                self._stop_status_follower()
                 self._finalize_run_ui()
                 
         except ValueError:
@@ -1612,18 +1652,8 @@ class MainWindow(QMainWindow):
     def _on_run_finished_failsafe(self, exit_code: int):
         """Backup handler to ensure finalization if state_changed was missed."""
         # Ensure finalization exactly once
-        self._stop_events_follower()
+        self._stop_status_follower()
         self._finalize_run_ui()
-
-    def _stop_events_follower(self):
-        """Cleanly stop and disconnect the follower."""
-        if self._events_follower is not None:
-            self._events_follower.stop()
-            try:
-                self._events_follower.event_received.disconnect(self._on_event)
-            except (RuntimeError, TypeError):
-                pass
-            self._events_follower = None
 
     def _finalize_run_ui(self):
         """Update UI based on final runner state (authoritative)."""
@@ -1640,26 +1670,32 @@ class MainWindow(QMainWindow):
             if self._is_validate_only:
                 self._validation_passed = True
                 self._append_log("Validation PASSED (per status.json). Run is now enabled.")
-            else:
-                # Guard manifest loading (Requirement A)
-                if self._current_run_dir and os.path.isdir(self._current_run_dir):
-                    self._manifest_viewer.load_manifest(self._current_run_dir)
-                else:
-                    self._append_log("No run_dir available, cannot load manifest.")
-
-        elif state == RunnerState.FAIL_CLOSED:
-            class_id = self._runner.fail_closed_code or "FAIL_CLOSED"
-            self._append_log(f"Run failed (FAIL_CLOSED): {class_id}")
-
         elif state == RunnerState.FAILED:
             self._append_log(f"--- Run FAILED (status: {code}) ---")
             if self._runner.final_errors:
                 self._append_log("ERRORS from status.json:")
                 for e in self._runner.final_errors:
                     self._append_log(f"  \u2022 {e}")
-
+        elif state == RunnerState.FAIL_CLOSED:
+            class_id = self._runner.fail_closed_code or "FAIL_CLOSED"
+            self._append_log(f"Run failed (FAIL_CLOSED): {class_id}")
         elif state == RunnerState.CANCELLED:
             self._append_log("--- Run CANCELLED ---")
+
+        # Step 8 Rendering Hardening:
+        # Load report if it exists on disk, regardless of runner state or flag.
+        report_on_disk = os.path.join(self._current_run_dir, "run_report.json")
+        if os.path.exists(report_on_disk):
+            if state != RunnerState.SUCCESS:
+                 self._append_log(f"NOTE: Report present, runner state = {state.name}")
+            
+            if not self._is_validate_only:
+                 self._report_viewer.load_report(self._current_run_dir)
+                 if state == RunnerState.SUCCESS:
+                      self._append_log(f"INFO: Analysis completed successfully in {self._current_run_dir}")
+
+        # Step 8 Preview Mode labeling (Requirement)
+        self._apply_preview_labeling()
 
         # After any full run: require re-validation
         if not self._is_validate_only:
@@ -1668,8 +1704,31 @@ class MainWindow(QMainWindow):
         self._update_button_states()
         self._update_button_states()
 
+    def _apply_preview_labeling(self):
+        """Source preview state from run_report.json and update window/badge."""
+        self.setWindowTitle("Photometry Pipeline Deliverables")
+        self._preview_badge.hide()
+        
+        if not self._current_run_dir:
+            return
+            
+        report_path = os.path.join(self._current_run_dir, "run_report.json")
+        if not os.path.exists(report_path):
+            return
+            
+        try:
+            with open(report_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            from gui.run_report_parser import get_preview_mode
+            if get_preview_mode(data):
+                self.setWindowTitle("Photometry Pipeline Deliverables [PREVIEW]")
+                self._preview_badge.show()
+        except Exception:
+            pass
+
     def _on_run_error(self, msg: str):
-        self._stop_events_follower()
+        self._stop_status_follower()
         self._update_button_states()
         self._append_log(f"ERR: {msg}")
         QMessageBox.critical(self, "Process Error", msg)

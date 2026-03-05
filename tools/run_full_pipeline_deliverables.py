@@ -96,6 +96,42 @@ def check_cancel(cancel_flag_path, emitter, stage, manifest_path, manifest):
     emitter.close()
     raise SystemExit(130)
 
+def _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter):
+    """
+    Ensure <run_dir>/run_report.json exists at root before terminal status.
+    Ordered requirement for Step 8: Strict Ordering Gate.
+    Returns: bool (True if root run_report.json exists after check/copy).
+    """
+    if not run_dir or not os.path.isdir(run_dir):
+        return False
+        
+    report_path = os.path.join(run_dir, "run_report.json")
+    if os.path.exists(report_path):
+        return True
+
+    # Search in subdirectories
+    search_paths = []
+    if phasic_out:
+        search_paths.append(os.path.join(phasic_out, "run_report.json"))
+    if tonic_out:
+        search_paths.append(os.path.join(tonic_out, "run_report.json"))
+    
+    for src in search_paths:
+        if os.path.exists(src):
+            try:
+                shutil.copy2(src, report_path)
+                if emitter:
+                    emitter.emit("package", "done", f"Hardened copy: {os.path.basename(src)} -> root")
+                return True
+            except Exception as e:
+                if emitter:
+                    emitter.emit("package", "error", f"Failed to copy report to root: {e}")
+                
+    if emitter:
+        emitter.emit("package", "notice", "run_report.json sourcing skipped (missing artifacts)")
+    
+    return os.path.exists(report_path)
+
 # ======================================================================
 # Arg Parsing
 # ======================================================================
@@ -234,6 +270,11 @@ def resolve_paths(args, run_dir):
 
 def main():
     args = parse_args()
+    
+    # Initialize variables for safe use in except blocks (Strict Ordering Gate)
+    phasic_out = None
+    tonic_out = None
+    emitter = None
 
     # ============================================================
     # Discovery Preflight
@@ -927,7 +968,7 @@ def main():
         emitter.emit("plots", "done", "All ROI deliverables complete")
 
         check_cancel(cancel_flag_path, emitter, "package", manifest_path, manifest)
-
+        
         # ============================================================
         # 8. Write Manifest (LAST, atomic)
         # ============================================================
@@ -935,33 +976,67 @@ def main():
         _atomic_write_json(manifest_path, manifest)
         emitter.emit("package", "done", "Manifest written")
 
-        emitter.emit("engine", "done", "Deliverables package complete")
-        emitter.close()
-        print("Deliverables Package Complete.")
-        
-        # --- Finalize Status: Success ---
-        _finalize_status("success")
+        # ============================================================
+        # 9. Finalize Artifacts (Strict Ordering Gate)
+        # ============================================================
+        # ============================================================
+        # Finalize Status (Success)
+        # ============================================================
+        ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter)
+        err_payload = None
+        if not ok:
+            msg = "STRICT ORDERING VIOLATION: root run_report.json missing at terminal finalize"
+            emitter.emit("package", "error", msg)
+            err_payload = msg
 
-    except SystemExit:
-        # Re-raise sys.exit calls (from check_cancel) without catching them
-        _finalize_status("cancelled", error_msg="CANCELLED")
-        raise
+        _finalize_status("success", error_msg=err_payload)
+        emitter.emit("engine", "done", "Execution complete")
+        emitter.close()
+    
+    except SystemExit as se:
+        # Re-raise sys.exit calls (from check_cancel) WITHOUT catching them
+        # BUT ensure the ordering gate holds for cancellation too.
+        ok = False
+        try:
+             # Pass explicit variables as requested (not locals())
+             ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter)
+        except Exception:
+             pass
+             
+        err_payload = "CANCELLED"
+        if not ok:
+            msg = "STRICT ORDERING VIOLATION: root run_report.json missing at terminal finalize"
+            if emitter:
+                emitter.emit("package", "error", msg)
+            err_payload = f"CANCELLED | {msg}"
+
+        _finalize_status("cancelled", error_msg=err_payload)
+        if emitter:
+            emitter.close()
+        raise se
     except Exception as e:
-        print(f"CRITICAL FAILURE: {e}")
+        # --- Catch-all Error Handling ---
         import traceback
         traceback.print_exc()
-
-        # Write failed manifest
-        try:
-            _atomic_write_json(manifest_path, manifest)
-        except Exception:
-            pass  # best effort
-
-        emitter.emit("engine", "error", str(e), error_code="EXCEPTION")
-        emitter.close()
         
+        # ============================================================
+        # Finalize Artifacts (Strict Ordering Gate) - Error path
+        # ============================================================
+        ok = False
+        try:
+             ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter)
+        except Exception:
+             pass
+
+        msg_body = str(e)
+        if not ok:
+            viol_msg = "STRICT ORDERING VIOLATION: root run_report.json missing at terminal finalize"
+            if emitter:
+                emitter.emit("package", "error", viol_msg)
+            msg_body = f"{msg_body} | {viol_msg}"
+
         # --- Finalize Status: Error ---
-        _finalize_status("error", error_msg=str(e))
+        _finalize_status("error", error_msg=msg_body)
         raise SystemExit(1)
 
 if __name__ == '__main__':
