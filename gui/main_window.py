@@ -1471,8 +1471,13 @@ class MainWindow(QMainWindow):
         self._save_widgets_to_settings()
         self._report_viewer.clear()
         self._log_view.clear()
-        self._append_log("--- Validate Only ---")
+        
+        # Narrative start (Fix Readability 2: Append BEFORE starting followers/runner)
+        self._append_run_log("--- Validate Only ---")
         argv = self._build_argv(validate_only=True)
+        self._append_run_log(f"Run directory: {self._current_run_dir}")
+        self._append_run_log(f"Config (temp): {os.path.join(self._current_run_dir, 'config_effective.yaml')}")
+
         self._validation_passed = False
         self._is_validate_only = True
         self._validate_stdout = []
@@ -1521,9 +1526,12 @@ class MainWindow(QMainWindow):
         # Clear past results
         self._report_viewer.clear()
         self._log_view.clear()
-        self._append_log("--- Starting Pipeline ---")
-        self._append_log(f"Run directory: {run_dir}")
-        self._append_log(f"Config: {os.path.join(run_dir, 'config_effective.yaml')}")
+        
+        # Narrative start (Fix Readability 2: Append BEFORE starting followers/runner)
+        self._append_run_log("--- Starting Pipeline ---")
+        self._append_run_log(f"Run directory: {run_dir}")
+        self._append_run_log(f"Config: {os.path.join(run_dir, 'config_effective.yaml')}")
+
         self._is_validate_only = False
         self._validation_passed = False
         self._reset_status_flags()
@@ -1551,9 +1559,9 @@ class MainWindow(QMainWindow):
 
         manifest_path = os.path.join(selected, "MANIFEST.json")
         if not os.path.isfile(manifest_path):
-            self._append_log(f"ERR: No MANIFEST.json found in {selected}")
+            self._append_run_log(f"No MANIFEST.json found in {selected}")
         else:
-            self._append_log(f"--- Opening results from {selected} ---")
+            self._append_run_log(f"--- Opening results from {selected} ---")
 
         # ManifestViewer.load_manifest handles missing/invalid file gracefully
         self._report_viewer.load_report(selected)
@@ -1577,14 +1585,14 @@ class MainWindow(QMainWindow):
                 status = m.get("status", "unknown")
                 run_id = m.get("run_id", "unknown")
                 n_commands = len(m.get("commands", []))
-                self._append_log(
-                    f"MANIFEST: status={status}, run_id={run_id}, "
+                self._append_run_log(
+                    f"Manifest status={status}, run_id={run_id}, "
                     f"commands={n_commands}"
                 )
             except Exception:
-                self._append_log("MANIFEST: could not parse MANIFEST.json")
+                self._append_run_log("Could not parse MANIFEST.json")
         else:
-            self._append_log("MANIFEST not created")
+            self._append_run_log("Manifest not created")
 
         _open_folder(run_dir)
 
@@ -1772,33 +1780,33 @@ class MainWindow(QMainWindow):
         code = self._runner.final_status_code
         
         if state == RunnerState.SUCCESS:
-            self._append_log(f"--- Finished (status: {code}) ---")
+            self._append_run_log(f"--- Finished (status: {code}) ---")
             if self._is_validate_only:
                 self._validation_passed = True
-                self._append_log("Validation PASSED (per status.json). Run is now enabled.")
+                self._append_run_log("Validation PASSED (per status.json). Run is now enabled.")
         elif state == RunnerState.FAILED:
-            self._append_log(f"--- Run FAILED (status: {code}) ---")
+            self._append_run_log(f"--- Run FAILED (status: {code}) ---")
             if self._runner.final_errors:
-                self._append_log("ERRORS from status.json:")
+                self._append_run_log("ERRORS from status.json:")
                 for e in self._runner.final_errors:
-                    self._append_log(f"  \u2022 {e}")
+                    self._append_run_log(f"  \u2022 {e}")
         elif state == RunnerState.FAIL_CLOSED:
             class_id = self._runner.fail_closed_code or "FAIL_CLOSED"
-            self._append_log(f"Run failed (FAIL_CLOSED): {class_id}")
+            self._append_run_log(f"Run failed (FAIL_CLOSED): {class_id}")
         elif state == RunnerState.CANCELLED:
-            self._append_log("--- Run CANCELLED ---")
+            self._append_run_log("--- Run CANCELLED ---")
 
         # Step 8 Rendering Hardening:
         # Load report if it exists on disk, regardless of runner state or flag.
         report_on_disk = os.path.join(self._current_run_dir, "run_report.json")
         if os.path.exists(report_on_disk):
             if state != RunnerState.SUCCESS:
-                 self._append_log(f"NOTE: Report present, runner state = {state.name}")
+                 self._append_run_log(f"Report present, runner state = {state.name}")
             
             if not self._is_validate_only:
                  self._report_viewer.load_report(self._current_run_dir)
                  if state == RunnerState.SUCCESS:
-                      self._append_log(f"INFO: Analysis completed successfully in {self._current_run_dir}")
+                      self._append_run_log(f"Analysis completed successfully in {self._current_run_dir}")
 
         # Step 8 Preview Mode labeling (Requirement)
         self._apply_preview_labeling()
@@ -1900,6 +1908,10 @@ class MainWindow(QMainWindow):
 
     def _append_log(self, text: str):
         self._log_view.appendPlainText(text)
+
+    def _append_run_log(self, text: str):
+        """Append a message from the wrapper/GUI with a 'RUN: ' prefix."""
+        self._append_log(f"RUN: {text}")
 
     def _update_button_states(self):
         state = self._ui_state

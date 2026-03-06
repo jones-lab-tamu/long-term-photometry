@@ -28,6 +28,8 @@ class LogFollower(QObject):
         self._stdout_carry = ""
         self._stderr_carry = ""
         
+        self._last_line = None  # Consecutive duplicate suppression
+
         self._timer = QTimer(self)
         self._timer.setInterval(poll_ms)
         self._timer.timeout.connect(self._poll)
@@ -38,6 +40,7 @@ class LogFollower(QObject):
         self._stderr_offset = 0
         self._stdout_carry = ""
         self._stderr_carry = ""
+        self._last_line = None
         self._timer.start()
 
     def stop(self) -> None:
@@ -47,16 +50,23 @@ class LogFollower(QObject):
         self._poll()
         # Flush any remaining carry
         if self._stdout_carry:
-            self.line_received.emit(f"OUT: {self._stdout_carry}")
+            self._emit_line(f"OUT: {self._stdout_carry}")
             self._stdout_carry = ""
         if self._stderr_carry:
-            self.line_received.emit(f"ERR: {self._stderr_carry}")
+            self._emit_line(f"ERR: {self._stderr_carry}")
             self._stderr_carry = ""
 
     def _poll(self) -> None:
         """Check both files for new bytes."""
         self._tail_file(self._stdout_path, "OUT")
         self._tail_file(self._stderr_path, "ERR")
+
+    def _emit_line(self, full_line: str) -> None:
+        """Emit line with consecutive duplicate suppression."""
+        if full_line == self._last_line:
+            return
+        self.line_received.emit(full_line)
+        self._last_line = full_line
 
     def _tail_file(self, path: str, prefix: str) -> None:
         """Read any new bytes from path and emit complete lines."""
@@ -110,7 +120,7 @@ class LogFollower(QObject):
                 setattr(self, carry_attr, lines[-1])
 
             for line in emit_lines:
-                self.line_received.emit(f"{prefix}: {line}")
+                self._emit_line(f"{prefix}: {line}")
                 
         except Exception:
             pass

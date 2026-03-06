@@ -166,3 +166,38 @@ def test_log_follower_stop_flushes_carry():
         follower.stop()
         assert len(received) == 1
         assert received[0] == "OUT: FINAL"
+
+def test_log_follower_consecutive_duplicate_suppression():
+    """Verify that exact consecutive duplicates are suppressed."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stdout_path = os.path.join(tmpdir, "stdout.txt")
+        follower = LogFollower(run_dir=tmpdir)
+        
+        received = []
+        follower.line_received.connect(received.append)
+        
+        with open(stdout_path, "w", encoding="utf-8") as f:
+            f.write("DUPE\nDUPE\nUNIQUE\n")
+        
+        follower._poll()
+        assert len(received) == 2
+        assert received[0] == "OUT: DUPE"
+        assert received[1] == "OUT: UNIQUE"
+
+def test_log_follower_non_consecutive_duplicates_preserved():
+    """Verify that non-consecutive duplicates are NOT suppressed."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stdout_path = os.path.join(tmpdir, "stdout.txt")
+        follower = LogFollower(run_dir=tmpdir)
+        
+        received = []
+        follower.line_received.connect(received.append)
+        
+        with open(stdout_path, "w", encoding="utf-8") as f:
+            f.write("A\nB\nA\n")
+        
+        follower._poll()
+        assert len(received) == 3
+        assert received[0] == "OUT: A"
+        assert received[1] == "OUT: B"
+        assert received[2] == "OUT: A"
