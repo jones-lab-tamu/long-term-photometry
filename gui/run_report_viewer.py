@@ -15,7 +15,7 @@ from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QGroupBox, QScrollArea, QFrame, QPushButton, QSizePolicy,
-    QTextEdit
+    QTextEdit, QPlainTextEdit
 )
 
 from gui.run_report_parser import parse_run_report, get_summary_fields, resolve_quick_links
@@ -26,24 +26,22 @@ class CollapsibleRawViewer(QWidget):
     def __init__(self, title: str, json_data: dict, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 2, 0, 2)
         
-        # Toggle button
-        self._toggle_btn = QPushButton(f"▶ Viewer: Raw {title}")
-        self._toggle_btn.setStyleSheet("text-align: left; padding: 4px;")
+        # Toggle button - clearer labeling
+        self._toggle_btn = QPushButton(f"▶ Advanced: raw {title}")
+        self._toggle_btn.setStyleSheet("text-align: left; padding: 4px; font-weight: normal;")
+        self._toggle_btn.setCursor(Qt.PointingHandCursor)
         self._toggle_btn.clicked.connect(self._toggle)
         layout.addWidget(self._toggle_btn)
         
-        # Text area
-        self._text_edit = QTextEdit()
+        # Plain text area for better readability of raw JSON
+        self._text_edit = QPlainTextEdit()
         self._text_edit.setReadOnly(True)
         self._text_edit.setFont(QFont("Consolas", 9))
         self._text_edit.setPlainText(json.dumps(json_data, indent=2))
         self._text_edit.hide() # Hidden by default
-        
-        # Determine fixed height based on content size, cap at 200px
-        doc_height = int(self._text_edit.document().size().height()) + 10
-        self._text_edit.setFixedHeight(min(doc_height, 200))
+        self._text_edit.setMinimumHeight(150) # Sensible expanded height
         
         layout.addWidget(self._text_edit)
         
@@ -83,14 +81,23 @@ class RunReportViewer(QWidget):
         self._title_label.setStyleSheet("color: gray; font-size: 14px;")
         self._container_layout.addWidget(self._title_label)
         
-        # Summary Box
+        # Summary Box - explicitly compact and left-aligned
         self._summary_box = QGroupBox("Run Summary")
-        self._summary_layout = QGridLayout(self._summary_box)
+        self._summary_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self._summary_container = QWidget()
+        self._summary_outer_layout = QHBoxLayout(self._summary_box)
+        self._summary_outer_layout.setContentsMargins(5, 5, 5, 5)
+        
+        self._summary_layout = QGridLayout()
+        self._summary_layout.setSpacing(10)
+        self._summary_outer_layout.addLayout(self._summary_layout)
+        self._summary_outer_layout.addStretch() # Push content to the left
+        
         self._container_layout.addWidget(self._summary_box)
         self._summary_box.hide()
         
-        # Quick Links Box
-        self._links_box = QGroupBox("Quick Links")
+        # Region Deliverables Box
+        self._links_box = QGroupBox("Region Deliverables")
         self._links_layout = QVBoxLayout(self._links_box)
         self._container_layout.addWidget(self._links_box)
         self._links_box.hide()
@@ -144,9 +151,10 @@ class RunReportViewer(QWidget):
             for row, (k, v) in enumerate(fields):
                 lbl_k = QLabel(f"<b>{k}:</b>")
                 lbl_v = QLabel(v)
+                lbl_v.setWordWrap(True) # Prevent clipping of long values
                 lbl_v.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                self._summary_layout.addWidget(lbl_k, row, 0, Qt.AlignRight)
-                self._summary_layout.addWidget(lbl_v, row, 1, Qt.AlignLeft)
+                self._summary_layout.addWidget(lbl_k, row, 0, Qt.AlignRight | Qt.AlignTop)
+                self._summary_layout.addWidget(lbl_v, row, 1, Qt.AlignLeft | Qt.AlignTop)
         
         # 2. Region Deliverables
         from gui.run_report_parser import resolve_region_deliverables
@@ -204,7 +212,7 @@ class RunReportViewer(QWidget):
         self._links_layout.addWidget(reg_frame)
 
     def _render_link_row(self, layout: QVBoxLayout, label: str, full_path: str, status: str):
-        """Helper to render a single link row."""
+        """Helper to render a single link row with absolute path hidden in tooltip."""
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 2, 0, 2)
@@ -216,15 +224,13 @@ class RunReportViewer(QWidget):
             btn = QPushButton("Open")
             btn.setCursor(Qt.PointingHandCursor)
             btn.setFixedWidth(60)
+            btn.setToolTip(full_path) # Show absolute path on hover only
             btn.clicked.connect(lambda checked=False, p=full_path: self._open_path(p))
             row_layout.addWidget(btn)
-            
-            path_lbl = QLabel(os.path.basename(full_path) if os.path.isfile(full_path) else full_path)
-            path_lbl.setStyleSheet("color: gray; font-size: 11px;")
-            row_layout.addWidget(path_lbl)
         else:
             err_lbl = QLabel(f"[{status}]")
             err_lbl.setStyleSheet("color: red;")
+            err_lbl.setToolTip(full_path)
             row_layout.addWidget(err_lbl)
             
         row_layout.addStretch()
