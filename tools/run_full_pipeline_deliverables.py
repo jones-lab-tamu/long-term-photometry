@@ -821,7 +821,12 @@ def main():
             print(f"Processing ROI: {roi}")
             emitter.emit("plots", "progress", f"Processing ROI: {roi}", roi=roi)
             reg_dir = os.path.join(run_dir, roi)
-            os.makedirs(reg_dir, exist_ok=True)
+            s_dir = os.path.join(reg_dir, "summary")
+            d_dir = os.path.join(reg_dir, "day_plots")
+            t_dir = os.path.join(reg_dir, "tables")
+            
+            for d in [reg_dir, s_dir, d_dir, t_dir]:
+                os.makedirs(d, exist_ok=True)
             files_written = []
 
             if has_features:
@@ -844,9 +849,9 @@ def main():
                               '--analysis-out', phasic_out,
                               '--roi', roi,
                               '--chunk-id', str(cid_diag),
-                              '--out', os.path.join(reg_dir, "phasic_correction_impact.png")]
+                              '--out', os.path.join(s_dir, "phasic_correction_impact.png")]
                 manifest['commands'].append(run_cmd(cmd_impact))
-                files_written.append("phasic_correction_impact.png")
+                files_written.append("summary/phasic_correction_impact.png")
 
                 # Correction Data CSV
                 c_csv = os.path.join(phasic_out, 'phasic_intermediates', f"chunk_{cid_diag:04d}_{roi}.csv")
@@ -860,8 +865,8 @@ def main():
                     keep = ['t_s', 'sig_raw', 'iso_raw', 'iso_fit_dynamic', 'dff_dynamic', 'region', 'chunk_id']
                     df_c['region'] = roi
                     df_c['chunk_id'] = cid_diag
-                    df_c[keep].to_csv(os.path.join(reg_dir, "phasic_correction_impact_session.csv"), index=False)
-                    files_written.append("phasic_correction_impact_session.csv")
+                    df_c[keep].to_csv(os.path.join(t_dir, "phasic_correction_impact_session.csv"), index=False)
+                    files_written.append("tables/phasic_correction_impact_session.csv")
             else:
                 manifest['deliverables'][roi] = {}
 
@@ -872,8 +877,8 @@ def main():
 
             src_tonic = os.path.join(tonic_out, 'tonic_qc', f"tonic_48h_overview_{roi}.png")
             if os.path.exists(src_tonic):
-                shutil.copy2(src_tonic, os.path.join(reg_dir, "tonic_overview.png"))
-                files_written.append("tonic_overview.png")
+                shutil.copy2(src_tonic, os.path.join(s_dir, "tonic_overview.png"))
+                files_written.append("summary/tonic_overview.png")
 
             # Tonic CSV
             tonic_files = sorted(glob.glob(os.path.join(tonic_out, 'traces', 'chunk_*.csv')), key=natural_sort_key)
@@ -894,8 +899,8 @@ def main():
 
             if t_rows:
                 full_tonic = pd.concat(t_rows, ignore_index=True)
-                full_tonic.to_csv(os.path.join(reg_dir, "tonic_df_timeseries.csv"), index=False)
-                files_written.append("tonic_df_timeseries.csv")
+                full_tonic.to_csv(os.path.join(t_dir, "tonic_df_timeseries.csv"), index=False)
+                files_written.append("tables/tonic_df_timeseries.csv")
 
             if has_features:
                 # C. Phasic Time Series (Plots & CSV) — requires features
@@ -911,16 +916,18 @@ def main():
 
                 # Copy Results
                 pairs = [
-                    ("fig_phasic_peak_rate_timeseries.png", "phasic_peak_rate_timeseries.png"),
-                    ("fig_phasic_auc_timeseries.png", "phasic_auc_timeseries.png"),
-                    ("phasic_peak_rate_timeseries.csv", "phasic_peak_rate_timeseries.csv"),
-                    ("phasic_auc_timeseries.csv", "phasic_auc_timeseries.csv")
+                    ("fig_phasic_peak_rate_timeseries.png", s_dir, "phasic_peak_rate_timeseries.png"),
+                    ("fig_phasic_auc_timeseries.png", s_dir, "phasic_auc_timeseries.png"),
+                    ("phasic_peak_rate_timeseries.csv", t_dir, "phasic_peak_rate_timeseries.csv"),
+                    ("phasic_auc_timeseries.csv", t_dir, "phasic_auc_timeseries.csv")
                 ]
-                for src_name, dst_name in pairs:
+                for src_name, dst_dir, dst_name in pairs:
                     s = os.path.join(ts_dir, src_name)
                     if os.path.exists(s):
-                        shutil.copy2(s, os.path.join(reg_dir, dst_name))
-                        files_written.append(dst_name)
+                        shutil.copy2(s, os.path.join(dst_dir, dst_name))
+                        # Record relative to ROI root for manifest compat
+                        rel_path = os.path.relpath(os.path.join(dst_dir, dst_name), reg_dir).replace('\\', '/')
+                        files_written.append(rel_path)
 
             check_cancel(cancel_flag_path, emitter, "plots", manifest_path, manifest)
 
@@ -943,7 +950,8 @@ def main():
                         '--analysis-out', phasic_out,
                         '--roi', roi,
                         '--sessions-per-hour', str(sessions_per_hour),
-                        '--session-duration-s', str(session_duration_s)]
+                        '--session-duration-s', str(session_duration_s),
+                        '--output-dir', sess_dir]
             run_cmd(cmd_sess)
 
             # 3. Stacked (requires features.csv)
@@ -951,7 +959,7 @@ def main():
                 cmd_stack = [sys.executable, 'tools/plot_phasic_stacked_day_smoothed.py',
                              '--analysis-out', phasic_out,
                              '--roi', roi,
-                             '--out-dir', reg_dir,
+                             '--out-dir', d_dir,
                              '--sessions-per-hour', str(sessions_per_hour),
                              '--smooth-window-s', str(args.smooth_window_s)]
                 manifest['commands'].append(run_cmd(cmd_stack))
@@ -962,6 +970,7 @@ def main():
             days_sig_iso = set()
 
             # Copy dFF (only produced when has_features)
+            # restored to RegionX/day_plots/ per correction
             if has_features:
                 qc_dir_roi = os.path.join(phasic_out, f'qc_dff_{roi}')
                 for f in glob.glob(os.path.join(qc_dir_roi, "day_*.png")):
@@ -969,39 +978,39 @@ def main():
                     if m:
                         day_idx = m.group(1)
                         dst = f"phasic_dFF_day_{day_idx}.png"
-                        shutil.copy2(f, os.path.join(reg_dir, dst))
-                        files_written.append(dst)
+                        shutil.copy2(f, os.path.join(d_dir, dst))
+                        files_written.append(f"day_plots/{dst}")
                         days_dff.add(day_idx)
 
             # Copy Sig/Iso
-            sess_out_base = os.path.join(phasic_out, 'session_qc')
-            for f in glob.glob(os.path.join(sess_out_base, f"day_*_raw_iso_{roi}.png")):
+            # restored to RegionX/day_plots/ per correction
+            sess_out_roi = os.path.join(phasic_out, f'session_qc_{roi}')
+            for f in glob.glob(os.path.join(sess_out_roi, f"day_*_raw_iso_{roi}.png")):
                  m = re.match(r'day_(\d+)_raw_iso_', os.path.basename(f))
                  if m:
                      day_idx = m.group(1)
                      dst = f"phasic_sig_iso_day_{day_idx}.png"
-                     shutil.copy2(f, os.path.join(reg_dir, dst))
-                     files_written.append(dst)
+                     shutil.copy2(f, os.path.join(d_dir, dst))
+                     files_written.append(f"day_plots/{dst}")
                      days_sig_iso.add(day_idx)
 
-            # Stacked are already in reg_dir, just verify
+            # Stacked are already in d_dir, just verify
             days_stacked = set()
-            for f in glob.glob(os.path.join(reg_dir, "phasic_stacked_day_*.png")):
-                files_written.append(os.path.basename(f))
+            for f in glob.glob(os.path.join(d_dir, "phasic_stacked_day_*.png")):
+                files_written.append(f"day_plots/{os.path.basename(f)}")
                 m = re.match(r'phasic_stacked_day_(\d+)\.png', os.path.basename(f))
                 if m:
                     days_stacked.add(m.group(1))
 
-            # Sort sets for consistency check
             s_dff = sorted(list(days_dff))
             s_sig = sorted(list(days_sig_iso))
             s_stk = sorted(list(days_stacked))
-
+            
             manifest['deliverables'][roi]['days_dff'] = s_dff
             manifest['deliverables'][roi]['days_sig_iso'] = s_sig
             manifest['deliverables'][roi]['days_stacked'] = s_stk
 
-            # Consistency check: only enforce when all day-plot sets are produced
+            # Consistency check (restored)
             if has_features and not (s_dff == s_sig == s_stk):
                  raise RuntimeError(f"Inconsistent day sets for ROI {roi}: DFF={s_dff}, SigIso={s_sig}, Stacked={s_stk}")
 

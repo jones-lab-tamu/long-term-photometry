@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument('--roi', default=None)
     parser.add_argument('--sessions-per-hour', type=int, default=None)
     parser.add_argument('--session-duration-s', type=float, default=None, help="Expected session duration in seconds. If provided, used for validation.")
+    parser.add_argument('--output-dir', default=None, help="Override output directory")
     return parser.parse_args()
 
 def check_monotonicity(time_arr):
@@ -127,7 +128,10 @@ def main():
         sph = max(1, round(n_chunks / 48.0))
         print(f"Inferred {sph} sessions/hour")
         
-    out_dir = os.path.join(args.analysis_out, 'session_qc')
+    if args.output_dir:
+        out_dir = args.output_dir
+    else:
+        out_dir = os.path.join(args.analysis_out, 'session_qc')
     os.makedirs(out_dir, exist_ok=True)
     
     # Group by day
