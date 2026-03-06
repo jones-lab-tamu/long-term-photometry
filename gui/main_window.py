@@ -1730,11 +1730,42 @@ class MainWindow(QMainWindow):
         self._stop_log_follower()
         self._finalize_run_ui()
 
+    def _refresh_status_from_disk_final(self):
+        """Authoritative read of status.json at run completion."""
+        if not self._current_run_dir:
+            return
+            
+        status_path = os.path.join(self._current_run_dir, "status.json")
+        if not os.path.exists(status_path):
+            return
+            
+        try:
+            with open(status_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            # Map fields (mirrors _on_status)
+            self._last_status_phase = str(data.get("phase", self._last_status_phase))
+            self._last_status_state = str(data.get("status", self._last_status_state))
+            
+            dur = data.get("duration_sec")
+            if isinstance(dur, (int, float)):
+                self._last_status_duration = f"{dur:.1f}s"
+            
+            self._last_status_errors = data.get("errors", self._last_status_errors)
+            self._last_status_msg = "" # Clear warnings on final valid read
+            
+        except Exception as e:
+            # Safely ignore read errors during finalization to avoid crashing
+            self._append_log(f"DEBUG: Final status sync skipped: {e}")
+
     def _finalize_run_ui(self):
         """Update UI based on final runner state (authoritative)."""
         if self._did_finalize_run_ui:
             return
         self._did_finalize_run_ui = True
+        
+        # Sync terminal values from disk before rendering (Fix stale top-status)
+        self._refresh_status_from_disk_final()
         
         # Determine final outcome from runner state (authoritative)
         state = self._runner.state
