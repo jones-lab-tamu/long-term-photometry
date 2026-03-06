@@ -577,6 +577,13 @@ def main():
         status_data["status"] = state
         _atomic_write_json(status_path, status_data)
 
+    def _write_status_update(phase):
+        """Perform a non-terminal status update with current duration."""
+        status_data["phase"] = phase
+        status_data["status"] = "running"
+        status_data["duration_sec"] = time.time() - t0_status
+        _atomic_write_json(status_path, status_data)
+
 
 
     # Determine effective event signal, representative index, and preview for stamping
@@ -605,6 +612,7 @@ def main():
 
     # Initial write (phase="running")
     _atomic_write_json(status_path, status_data)
+    _write_status_update("initializing")
 
     # -- Open event emitter --
     emitter = EventEmitter(events_path, run_id, run_dir, file_mode="w")
@@ -629,6 +637,7 @@ def main():
         # ============================================================
         # 3. Validate
         # ============================================================
+        _write_status_update("validating")
         emitter.emit("validate", "start", "Validating inputs")
         validate_inputs(args)
         emitter.emit("validate", "done", "Validation passed")
@@ -645,6 +654,7 @@ def main():
         analyze_script = os.path.join(root_dir, 'analyze_photometry.py')
         
         if args.mode in ('both', 'tonic'):
+            _write_status_update("tonic_analysis")
             emitter.emit("tonic", "start", "Running tonic analysis")
             emitter.close()  # Release file lock so subprocess can append events
             cmd_tonic = [sys.executable, analyze_script,
@@ -673,6 +683,7 @@ def main():
         # 5. Phasic Analysis
         # ============================================================
         if args.mode in ('both', 'phasic'):
+            _write_status_update("phasic_analysis")
             emitter.emit("phasic", "start", "Running phasic analysis")
             emitter.close()  # Release file lock so subprocess can append events
             cmd_phasic = [sys.executable, analyze_script,
@@ -759,9 +770,9 @@ def main():
 
         check_cancel(cancel_flag_path, emitter, "session_compute", manifest_path, manifest)
 
-        # ============================================================
         # 7. Per-Region Processing (Plots & Packaging)
         # ============================================================
+        _write_status_update("plots")
         emitter.emit("plots", "start", "Generating per-ROI deliverables")
 
         feats_csv = os.path.join(phasic_out, 'features', 'features.csv')
@@ -805,6 +816,7 @@ def main():
 
         for roi in regions:
             check_cancel(cancel_flag_path, emitter, "plots", manifest_path, manifest)
+            _write_status_update(f"plot_{roi}")
 
             print(f"Processing ROI: {roi}")
             emitter.emit("plots", "progress", f"Processing ROI: {roi}", roi=roi)
