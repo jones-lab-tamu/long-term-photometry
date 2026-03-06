@@ -7,6 +7,7 @@ Replaces ManifestViewer to conform to artifact-first rendering requirements.
 
 import os
 import json
+from typing import Dict, Any, List, Tuple
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QDesktopServices
@@ -127,10 +128,8 @@ class RunReportViewer(QWidget):
         if parse_err:
             self._title_label.setText(f"⚠ Missing or invalid run_report.json.\nReason: {parse_err}")
             self._title_label.setStyleSheet("color: red; font-weight: bold; font-size: 12px;")
-            # Everything else remains hidden
             return
             
-        # Determine Title / Preview Labeling
         is_preview = data.get("run_context", {}).get("run_type") == "preview"
         title_text = "Run Report"
         if is_preview:
@@ -138,7 +137,7 @@ class RunReportViewer(QWidget):
         self._title_label.setText(title_text)
         self._title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         
-        # Populate allowlisted Summary fields
+        # 1. Run Summary
         fields = get_summary_fields(data)
         if fields:
             self._summary_box.show()
@@ -149,48 +148,87 @@ class RunReportViewer(QWidget):
                 self._summary_layout.addWidget(lbl_k, row, 0, Qt.AlignRight)
                 self._summary_layout.addWidget(lbl_v, row, 1, Qt.AlignLeft)
         
-        # Populate Quick Links
-        links = resolve_quick_links(out_dir, data)
-        if links:
+        # 2. Region Deliverables
+        from gui.run_report_parser import resolve_region_deliverables
+        regions = resolve_region_deliverables(out_dir)
+        
+        if regions:
+            self._links_box.setTitle("Region Deliverables")
             self._links_box.show()
-            for label, full_path, status in links:
-                row_widget = QWidget()
-                row_layout = QHBoxLayout(row_widget)
-                row_layout.setContentsMargins(0, 2, 0, 2)
+            for reg in regions:
+                self._render_region(reg)
+        else:
+            # Show a placeholder if no regions found but run succeeded
+            self._links_box.setTitle("Deliverables")
+            self._links_box.show()
+            lbl = QLabel("No region deliverables discovered.")
+            lbl.setStyleSheet("color: gray; font-style: italic;")
+            self._links_layout.addWidget(lbl)
                 
-                name_lbl = QLabel(f"<b>{label}:</b>")
-                row_layout.addWidget(name_lbl)
-                
-                if status == "ok":
-                    btn = QPushButton("Open")
-                    btn.setCursor(Qt.PointingHandCursor)
-                    # Use default parameter binding for lambda closure
-                    btn.clicked.connect(lambda checked=False, p=full_path: self._open_path(p))
-                    row_layout.addWidget(btn)
-                    
-                    path_lbl = QLabel(full_path)
-                    path_lbl.setStyleSheet("color: gray; font-size: 11px;")
-                    row_layout.addWidget(path_lbl)
-                else:
-                    err_lbl = QLabel(f"[{status}]")
-                    err_lbl.setStyleSheet("color: red;")
-                    row_layout.addWidget(err_lbl)
-                    
-                    path_lbl = QLabel(full_path)
-                    path_lbl.setStyleSheet("color: gray; font-size: 11px; text-decoration: line-through;")
-                    row_layout.addWidget(path_lbl)
-                    
-                row_layout.addStretch()
-                self._links_layout.addWidget(row_widget)
-                
-        # Populate Raw Viewers
+        # 3. Advanced / Internal Artifacts
+        from gui.run_report_parser import resolve_internal_artifacts, resolve_primary_artifacts
+        internal = resolve_internal_artifacts(out_dir)
+        primary = resolve_primary_artifacts(out_dir, data)
+        advanced_links = primary + internal
+        
+        if advanced_links:
+            adv_group = QGroupBox("Advanced / Internal Artifacts")
+            adv_layout = QVBoxLayout(adv_group)
+            for label, path, status in advanced_links:
+                self._render_link_row(adv_layout, label, path, status)
+            self._raw_viewers_layout.insertWidget(0, adv_group)
+
+        # 4. Raw Viewers
         run_ctx = data.get("run_context", {})
         config_obj = data.get("configuration", {})
-        
         if run_ctx:
             self._raw_viewers_layout.addWidget(CollapsibleRawViewer("run_context", run_ctx))
         if config_obj:
             self._raw_viewers_layout.addWidget(CollapsibleRawViewer("configuration", config_obj))
+
+    def _render_region(self, reg: Dict[str, Any]):
+        """Render a compact block for a single region."""
+        reg_frame = QFrame()
+        reg_frame.setFrameShape(QFrame.StyledPanel)
+        reg_frame.setStyleSheet("QFrame { background-color: #fcfcfc; border: 1px solid #eee; border-radius: 4px; }")
+        reg_layout = QVBoxLayout(reg_frame)
+        reg_layout.setContentsMargins(6, 6, 6, 6)
+        reg_layout.setSpacing(2)
+        
+        name_lbl = QLabel(f"<b>Region: {reg['name']}</b>")
+        reg_layout.addWidget(name_lbl)
+        
+        for label, path, status in reg['subfolders']:
+            self._render_link_row(reg_layout, label, path, status)
+            
+        self._links_layout.addWidget(reg_frame)
+
+    def _render_link_row(self, layout: QVBoxLayout, label: str, full_path: str, status: str):
+        """Helper to render a single link row."""
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 2, 0, 2)
+        
+        name_lbl = QLabel(f"<b>{label}:</b>")
+        row_layout.addWidget(name_lbl)
+        
+        if status == "ok":
+            btn = QPushButton("Open")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedWidth(60)
+            btn.clicked.connect(lambda checked=False, p=full_path: self._open_path(p))
+            row_layout.addWidget(btn)
+            
+            path_lbl = QLabel(os.path.basename(full_path) if os.path.isfile(full_path) else full_path)
+            path_lbl.setStyleSheet("color: gray; font-size: 11px;")
+            row_layout.addWidget(path_lbl)
+        else:
+            err_lbl = QLabel(f"[{status}]")
+            err_lbl.setStyleSheet("color: red;")
+            row_layout.addWidget(err_lbl)
+            
+        row_layout.addStretch()
+        layout.addWidget(row_widget)
             
     def _open_path(self, path: str):
         """Use default OS handler to open files or folders."""

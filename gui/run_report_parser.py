@@ -63,67 +63,131 @@ def get_summary_fields(report_data: Dict[str, Any]) -> List[Tuple[str, str]]:
     return fields
 
 
-def resolve_quick_links(run_dir: str, report_data: Dict[str, Any]) -> List[Tuple[str, str, str]]:
+def resolve_region_deliverables(run_dir: str) -> List[Dict[str, Any]]:
     """
-    Resolve quick links to specific subdirectories/files in the run_dir.
-    Returns a list of tuples: (Label, Path, Status)
-    Status is either "ok" or "missing/invalid (outside run_dir)".
+    Dynamically discover region folders in the run_root.
+    A folder is a region if it contains 'summary', 'day_plots', or 'tables'.
+    Returns a list of dicts: {'name': str, 'path': str, 'subfolders': List[Tuple[str, str, str]]}
+    """
+    run_dir = os.path.realpath(run_dir)
+    regions = []
     
-    Priority 1: Explicit paths in report_data (e.g., config_effective.yaml)
-    Priority 2: Fallback subdirectories.
+    if not os.path.isdir(run_dir):
+        return []
+
+    # Potential region candidates are subdirectories of the run root
+    try:
+        candidates = [d for d in os.listdir(run_dir) if os.path.isdir(os.path.join(run_dir, d))]
+    except OSError:
+        return []
+
+    for d in sorted(candidates):
+        if d.startswith(".") or d.startswith("_"):
+            continue # Skip internal/hidden
+            
+        reg_path = os.path.join(run_dir, d)
+        
+        # Check for semantic subfolders
+        subfolders = []
+        for sub in ["summary", "day_plots", "tables"]:
+            sub_path = os.path.join(reg_path, sub)
+            if os.path.isdir(sub_path):
+                label = sub.replace("_", " ").title()
+                subfolders.append((label, sub_path, "ok"))
+        
+        if subfolders:
+            regions.append({
+                "name": d,
+                "path": reg_path,
+                "subfolders": subfolders
+            })
+            
+    return regions
+
+
+def resolve_internal_artifacts(run_dir: str) -> List[Tuple[str, str, str]]:
+    """
+    Find internal/advanced artifacts under _analysis/.
+    """
+    run_dir = os.path.realpath(run_dir)
+    analysis_dir = os.path.join(run_dir, "_analysis")
+    links = []
+    
+    if not os.path.isdir(analysis_dir):
+        return []
+        
+    targets = [
+        ("phasic_out", "Phasic Analysis (Internal)"),
+        ("tonic_out", "Tonic Analysis (Internal)")
+    ]
+    
+    for rel, label in targets:
+        p = os.path.join(analysis_dir, rel)
+        if os.path.isdir(p):
+            links.append((label, p, "ok"))
+            
+    return links
+
+
+def _add_link(run_dir: str, links: List[Tuple[str, str, str]], label: str, rel_path: str):
+    """Internal helper to safely resolve a link within run_dir."""
+    # Defense-in-depth: Reject explicit traversal segments
+    normalized_rel = rel_path.replace("\\", "/")
+    if ".." in normalized_rel.split("/"):
+         links.append((label, rel_path, "missing/invalid (directory traversal rejected)"))
+         return
+
+    # Join and normalize
+    target_path = os.path.realpath(os.path.join(run_dir, rel_path))
+    
+    # Enforce run_dir enclosure
+    try:
+        is_inside = os.path.commonpath([run_dir, target_path]) == run_dir
+    except (ValueError, OSError):
+        is_inside = False
+        
+    if not is_inside:
+        links.append((label, target_path, f"missing/invalid (outside run_dir: {target_path})"))
+        return
+        
+    if os.path.exists(target_path):
+        links.append((label, target_path, "ok"))
+    else:
+        links.append((label, target_path, "missing (does not exist)"))
+
+
+def resolve_primary_artifacts(run_dir: str, report_data: Dict[str, Any]) -> List[Tuple[str, str, str]]:
+    """
+    Resolve high-level root-level artifacts (config, status, etc).
+    Also processes explicit 'artifacts' map from report_data for backward compatibility.
     """
     run_dir = os.path.realpath(run_dir)
     links = []
     
-    def add_link(label: str, rel_path: str):
-        # Defense-in-depth: Reject explicit traversal segments in the input string
-        # before any normalization occurs.
-        normalized_rel = rel_path.replace("\\", "/")
-        if ".." in normalized_rel.split("/"):
-             links.append((label, rel_path, "missing/invalid (directory traversal rejected)"))
-             return
-
-        # Join and normalize to resolve absolute paths or harmless internal dots
-        # Use realpath on candidate as well to resolve symlinks
-        target_path = os.path.realpath(os.path.join(run_dir, rel_path))
-        
-        # Enforce run_dir enclosure
-        try:
-            is_inside = os.path.commonpath([run_dir, target_path]) == run_dir
-        except (ValueError, OSError):
-            # Different drives or invalid paths
-            is_inside = False
-            
-        if not is_inside:
-            links.append((label, target_path, f"missing/invalid (outside run_dir: {target_path})"))
-            return
-            
-        if os.path.exists(target_path):
-            links.append((label, target_path, "ok"))
-        else:
-            links.append((label, target_path, "missing (does not exist)"))
-            
-    # Priority 1: explicitly enumerated output paths in report_data
-    # Determine what explicit keys might exist. Actually the spec says:
-    # "Use explicit artifact paths enumerated inside run_report.json if provided."
-    # Let's assume common paths like "config_effective.yaml", "gui_run_spec.json", "status.json"
-    # Actually, the report might enumeration things under a "deliverables" or "artifacts" key.
-    # For now, let's look for known top-level outputs listed in the report.
+    # Explicitly enumerated artifacts in report
     artifacts = report_data.get("artifacts", {})
     if isinstance(artifacts, dict):
         for name, rel_path in artifacts.items():
             if isinstance(rel_path, str):
-                add_link(f"Artifact: {name}", rel_path)
+                _add_link(run_dir, links, f"Artifact: {name}", rel_path)
 
-    # Priority 2: Fallback directories
-    fallbacks = [
-        ("traces/", "Traces Folder"),
-        ("features/", "Features Folder"),
-        ("qc_summary/", "QC Summary Folder"),
-        ("viz/", "Visualizations Folder")
+    # Standard root-level files
+    targets = [
+        ("config_effective.yaml", "Effective Config"),
+        ("status.json", "Run Status"),
+        ("MANIFEST.json", "Output Manifest")
     ]
     
-    for rel_path, label in fallbacks:
-        add_link(label, rel_path)
-        
+    for rel, label in targets:
+        # We only add if it exists or if we want to show it as missing
+        # For primary artifacts, we only show if exists or explicitly listed
+        p = os.path.join(run_dir, rel)
+        if os.path.exists(p):
+            _add_link(run_dir, links, label, rel)
+            
     return links
+
+
+def resolve_quick_links(run_dir: str, report_data: Dict[str, Any]) -> List[Tuple[str, str, str]]:
+    """Backward compatibility wrapper for root-level artifact resolution."""
+    return resolve_primary_artifacts(run_dir, report_data)
