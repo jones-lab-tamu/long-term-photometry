@@ -96,6 +96,46 @@ def check_cancel(cancel_flag_path, emitter, stage, manifest_path, manifest):
     emitter.close()
     raise SystemExit(130)
 
+def _cleanup_run_outputs_in_place(run_dir, emitter=None):
+    """
+    Perform in-place cleanup of tool-generated outputs while preserving
+    GUI-owned files and the root run directory.
+    """
+    msg = "overwrite: in-place cleanup of generated outputs"
+    if emitter:
+        emitter.emit("engine", "info", msg)
+    else:
+        print(msg)
+
+    # Tool-generated artifacts to remove if they exist.
+    to_remove = [
+        "status.json",
+        "run_metadata.json",
+        "run_report.json",
+        "MANIFEST.json",
+        "events.ndjson",
+        "features.csv",
+        "summary.csv",
+        "discovery.json",
+        "_analysis",
+        "phasic_output",
+        "tonic_output"
+    ]
+
+    for item in to_remove:
+        path = os.path.join(run_dir, item)
+        if os.path.isdir(path):
+            try:
+                shutil.rmtree(path)
+            except OSError as e:
+                print(f"WARNING: Could not remove directory {path}: {e}")
+        elif os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError as e:
+                print(f"WARNING: Could not remove file {path}: {e}")
+
+
 def _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter):
     """
     Ensure <run_dir>/run_report.json exists at root before terminal status.
@@ -467,17 +507,10 @@ def main():
                 print(f"Error: Output directory {run_dir} exists. Use --overwrite.")
                 raise SystemExit(1)
 
-            # Robust rmtree
-            max_retries = 5
-            for i in range(max_retries):
-                try:
-                    shutil.rmtree(run_dir)
-                    break
-                except OSError as e:
-                    if i == max_retries - 1:
-                        print(f"Error: Failed to delete {run_dir} after retries: {e}")
-                        raise SystemExit(1)
-                    time.sleep(0.5 * (i + 1))
+            # In-Place Overwrite (Fix B1v5)
+            # We do NOT delete the root run_dir because it contains GUI-owned files
+            # and open log handles.
+            _cleanup_run_outputs_in_place(run_dir, emitter=None)
 
     os.makedirs(run_dir, exist_ok=True)
 

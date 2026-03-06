@@ -37,7 +37,12 @@ from PySide6.QtWidgets import (
 from gui.process_runner import PipelineRunner, RunnerState
 from gui.run_spec import RunSpec, FORMAT_CHOICES
 from gui.status_follower import StatusFollower
+from gui.log_follower import LogFollower
 from gui.run_report_viewer import RunReportViewer
+from gui.validate_run_policy import (
+    compute_run_signature,
+    is_validation_current
+)
 from photometry_pipeline.config import Config
 import dataclasses
 from typing import get_args
@@ -454,9 +459,14 @@ class MainWindow(QMainWindow):
         from photometry_pipeline.config import Config
         self._default_cfg = Config()
 
+        # Validate->Run reuse tracking (Fix B1)
+        self._validated_run_dir = None
+        self._validated_gui_run_spec_json_path = None
+        self._validated_config_effective_yaml_path = None
+        self._validated_run_signature = None
         self._status_follower = None
+        self._log_follower = None
         self._runner = PipelineRunner()
-        self._runner.log_line.connect(self._append_log)
         self._runner.started.connect(self._on_run_started)
         self._runner.error.connect(self._on_run_error)
         self._runner.state_changed.connect(self._on_state_changed)
@@ -1171,7 +1181,7 @@ class MainWindow(QMainWindow):
         )
         return spec
 
-    def _build_argv(self, validate_only: bool = False) -> list:
+    def _build_argv(self, validate_only: bool = False, overwrite: bool = False) -> list:
         """Construct argv via RunSpec.
 
         Writes into run_dir:
@@ -1183,6 +1193,7 @@ class MainWindow(QMainWindow):
         Uses --out <run_dir> mode.
         """
         spec = self._build_run_spec(validate_only=validate_only)
+        spec.overwrite = overwrite
         run_dir = self._current_run_dir
         os.makedirs(run_dir, exist_ok=True)
 
@@ -1330,6 +1341,7 @@ class MainWindow(QMainWindow):
     def _on_config_changed(self):
         """Any config widget change invalidates prior validation."""
         self._validation_passed = False
+        self._validated_run_signature = None
         self._update_button_states()
 
     # ==================================================================
@@ -1460,15 +1472,21 @@ class MainWindow(QMainWindow):
         self._log_view.clear()
         self._append_log("--- Validate Only ---")
         argv = self._build_argv(validate_only=True)
-        self._is_validate_only = True
         self._validation_passed = False
+        self._is_validate_only = True
         self._validate_stdout = []
-        self._reset_status_flags()
+
+        # Validate->Run reuse tracking (Fix B1)
+        self._validated_run_dir = None
+        self._validated_gui_run_spec_json_path = None
+        self._validated_config_effective_yaml_path = None
+        self._validated_run_signature = None
 
         # run_dir already created by _build_argv -> _build_run_spec
 
         self._runner.set_run_dir(self._current_run_dir)
         self._start_status_follower()
+        self._start_log_follower(self._current_run_dir)
         self._runner.start(argv, state=RunnerState.VALIDATING)
 
     def _on_run(self):
@@ -1480,8 +1498,24 @@ class MainWindow(QMainWindow):
         self._save_widgets_to_settings()
 
         # Build argv (also generates derived config + gui_run_spec.json)
-        argv = self._build_argv(validate_only=False)
+        argv = self._build_argv(validate_only=False, overwrite=True)
         run_dir = self._current_run_dir
+        
+        # --- Fix B1v4: Validate->Run Consistency Policy ---
+        # Same-directory reuse is abandoned due to handle conflicts on Windows and
+        # destructive runner semantics. Instead, we use distinct directories but 
+        # ensure the user intent is still validly validated.
+        try:
+            current_sig = compute_run_signature(run_dir)
+            if not is_validation_current(self._validated_run_signature, current_sig):
+                QMessageBox.warning(self, "Re-validation Required", 
+                                    "The current settings differ from the last successful validation. "
+                                    "Please run 'Validate Only' again before proceeding.")
+                return
+        except Exception as e:
+            QMessageBox.warning(self, "Validation State Error", 
+                                f"Could not verify consistency with prior validation: {e}")
+            return
 
         # Clear past results
         self._report_viewer.clear()
@@ -1495,6 +1529,7 @@ class MainWindow(QMainWindow):
 
         self._runner.set_run_dir(run_dir)
         self._start_status_follower()
+        self._start_log_follower(run_dir)
         self._runner.start(argv, state=RunnerState.RUNNING)
 
     def _on_cancel(self):
@@ -1579,6 +1614,24 @@ class MainWindow(QMainWindow):
             self._status_follower.deleteLater()
             self._status_follower = None
 
+    def _start_log_follower(self, run_dir: str):
+        """Create and start a LogFollower for the current run_dir."""
+        self._stop_log_follower()
+        self._log_follower = LogFollower(run_dir, poll_ms=500, parent=self)
+        self._log_follower.line_received.connect(self._append_log)
+        self._log_follower.start()
+
+    def _stop_log_follower(self):
+        """Stop and discard the log follower."""
+        if hasattr(self, '_log_follower') and self._log_follower is not None:
+            self._log_follower.stop()
+            try:
+                self._log_follower.line_received.disconnect(self._append_log)
+            except (RuntimeError, TypeError):
+                pass
+            self._log_follower.deleteLater()
+            self._log_follower = None
+
     def _reset_status_flags(self):
         """Reset status-derived fields at the start of each validate/run."""
         self._saw_cancel_status = False
@@ -1661,6 +1714,7 @@ class MainWindow(QMainWindow):
             )
             if self._ui_state in terminal_states:
                 self._stop_status_follower()
+                self._stop_log_follower()
                 self._finalize_run_ui()
                 
         except ValueError:
@@ -1672,6 +1726,7 @@ class MainWindow(QMainWindow):
         """Backup handler to ensure finalization if state_changed was missed."""
         # Ensure finalization exactly once
         self._stop_status_follower()
+        self._stop_log_follower()
         self._finalize_run_ui()
 
     def _finalize_run_ui(self):
@@ -1680,7 +1735,7 @@ class MainWindow(QMainWindow):
             return
         self._did_finalize_run_ui = True
         
-        # Determine final outcome from runner state (authoritative source)
+        # Determine final outcome from runner state (authoritative)
         state = self._runner.state
         code = self._runner.final_status_code
         
@@ -1717,10 +1772,24 @@ class MainWindow(QMainWindow):
         self._apply_preview_labeling()
 
         # After any full run: require re-validation
-        if not self._is_validate_only:
-            self._validation_passed = False
-        
-        self._update_button_states()
+        if self._is_validate_only and self._runner.state == RunnerState.SUCCESS:
+            self._validation_passed = True
+            # Store validated state for future reuse (Fix B1)
+            try:
+                self._validated_run_dir = self._current_run_dir
+                self._validated_gui_run_spec_json_path = os.path.join(self._validated_run_dir, "gui_run_spec.json")
+                self._validated_config_effective_yaml_path = os.path.join(self._validated_run_dir, "config_effective.yaml")
+                self._validated_run_signature = compute_run_signature(self._validated_run_dir)
+            except Exception as e:
+                self._append_log(f"DEBUG: Failed to record validation signature: {e}")
+                self._validated_run_dir = None
+                self._validated_gui_run_spec_json_path = None
+                self._validated_config_effective_yaml_path = None
+                self._validated_run_signature = None
+
+        self._render_status_label()
+        # Ensure _is_validate_only is False before updating buttons so we are no longer "validating"
+        self._is_validate_only = False
         self._update_button_states()
 
     def _apply_preview_labeling(self):
@@ -1748,6 +1817,7 @@ class MainWindow(QMainWindow):
 
     def _on_run_error(self, msg: str):
         self._stop_status_follower()
+        self._stop_log_follower()
         self._update_button_states()
         self._append_log(f"ERR: {msg}")
         QMessageBox.critical(self, "Process Error", msg)
@@ -1802,7 +1872,7 @@ class MainWindow(QMainWindow):
     def _update_button_states(self):
         state = self._ui_state
         running = self._runner.is_running()
-
+        
         is_done = state in (RunnerState.SUCCESS, RunnerState.FAILED,
                             RunnerState.CANCELLED, RunnerState.FAIL_CLOSED)
         is_idle_or_done = state == RunnerState.IDLE or is_done

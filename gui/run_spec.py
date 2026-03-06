@@ -82,6 +82,9 @@ class RunSpec:
     mode: Optional[str] = None
     traces_only: bool = False
     preview_first_n: Optional[int] = None
+    
+    # --- (E) Run execution control ---
+    overwrite: bool = False
 
     # --- Explicitness tracking ---
     # Records which RunSpec fields were explicitly set by the user
@@ -263,6 +266,9 @@ class RunSpec:
 
         if self.validate_only:
             argv.append("--validate-only")
+
+        if self.overwrite:
+            argv.append("--overwrite")
 
         return argv
 
