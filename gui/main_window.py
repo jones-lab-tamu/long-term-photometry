@@ -509,6 +509,7 @@ class MainWindow(QMainWindow):
         config_scroll.setWidget(config_group)
         config_scroll.setFrameShape(QScrollArea.NoFrame)
         config_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        config_scroll.setMinimumWidth(480)
         main_splitter.addWidget(config_scroll)
 
         # Right side: Content (Log + Results)
@@ -531,7 +532,7 @@ class MainWindow(QMainWindow):
         self._preview_badge.hide()
         status_row.addWidget(self._preview_badge)
 
-        main_layout.addLayout(status_row)
+        main_layout.addLayout(status_row, 0)
 
         # --- Zone B: Log Panel ---
         log_group = self._build_log_panel()
@@ -552,8 +553,8 @@ class MainWindow(QMainWindow):
         content_splitter.setStretchFactor(0, 1)
         content_splitter.setStretchFactor(1, 2)
 
-        main_splitter.setSizes([420, 1000])
-        main_layout.addWidget(main_splitter)
+        main_splitter.setSizes([500, 1000])
+        main_layout.addWidget(main_splitter, 1)
         self._update_button_states()
 
         # Restore persisted settings
