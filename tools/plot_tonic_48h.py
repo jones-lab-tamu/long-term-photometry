@@ -21,6 +21,7 @@ import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import time
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -29,6 +30,8 @@ def parse_args():
     return parser.parse_args()
 
 def main():
+    t_start = time.perf_counter()
+    print("PLOT_TIMING START script=plot_tonic_48h.py", flush=True)
     args = parse_args()
     
     traces_dir = os.path.join(args.analysis_out, 'traces')
@@ -49,9 +52,12 @@ def main():
         roi = available_rois[0]
         print(f"Auto-selected ROI: {roi}")
 
+    print(f"PLOT_TIMING STEP script=plot_tonic_48h.py step=discovery elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+
     # Columns
     col_sig = f"{roi}_sig_raw"
     col_uv = f"{roi}_uv_raw"
+    col_deltaF = f"{roi}_deltaF"
     col_dff = f"{roi}_dff" # Tonic dFF
     
     # Load and Stitch
@@ -79,6 +85,25 @@ def main():
     dt = full_df['time_sec'].iloc[1] - full_df['time_sec'].iloc[0]
     full_df['continuous_time'] = np.arange(len(full_df)) * dt
     
+    print(f"PLOT_TIMING STEP script=plot_tonic_48h.py step=data_loading elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+    
+    # Decimate for plotting if dataset is huge (preserves exported numeric files because this script only plots)
+    t_h = full_df['continuous_time'].values / 3600.0
+    sig_raw = full_df[col_sig].values
+    uv_raw = full_df[col_uv].values
+    deltaf_val = full_df[col_deltaF].values if col_deltaF in full_df.columns else None
+
+    n_pts = len(t_h)
+    decimate = max(1, n_pts // 100000)
+    
+    t_plot = t_h[::decimate]
+    sig_plot = sig_raw[::decimate]
+    uv_plot = uv_raw[::decimate]
+    if deltaf_val is not None:
+        deltaf_plot = deltaf_val[::decimate]
+    
+    print(f"PLOT_TIMING STEP script=plot_tonic_48h.py step=data_preparation elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+    
     # Plot
     out_dir = os.path.join(args.analysis_out, 'tonic_qc')
     os.makedirs(out_dir, exist_ok=True)
@@ -86,23 +111,21 @@ def main():
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
     
     # 1. Raw
-    t = full_df['continuous_time'] / 3600.0 # Hours
-    ax1.plot(t, full_df[col_sig], label='Sig', color='green', lw=0.5)
-    ax1.plot(t, full_df[col_uv], label='Iso', color='purple', lw=0.5, alpha=0.8)
+    ax1.plot(t_plot, sig_plot, label='Sig', color='green', lw=0.5)
+    ax1.plot(t_plot, uv_plot, label='Iso', color='purple', lw=0.5, alpha=0.8)
     ax1.set_ylabel("Raw Signal")
     ax1.set_title(f"48h Overview - {roi} - Raw Inputs")
-    ax1.legend()
+    ax1.legend(loc='upper right')
     ax1.grid(True, alpha=0.3)
     
     # 2. Tonic Output (deltaF)
-    col_deltaF = f"{roi}_deltaF"
-    if col_deltaF in full_df.columns:
+    if deltaf_val is not None:
         # Plot deltaF
-        ax2.plot(t, full_df[col_deltaF], label='Tonic (deltaF)', color='black', lw=0.8)
+        ax2.plot(t_plot, deltaf_plot, label='Tonic (deltaF)', color='black', lw=0.8)
         ax2.set_ylabel("deltaF")
         ax2.set_title(f"Tonic Output (Preserved Slow Dynamics) - {roi}")
         ax2.grid(True, alpha=0.3)
-        ax2.legend()
+        ax2.legend(loc='upper right')
     else:
         # Fail loudly if deltaF is missing
         print(f"CRITICAL: Column {col_deltaF} not found in traces.")
@@ -111,10 +134,15 @@ def main():
         
     ax2.set_xlabel("Time (Hours)")
     
+    print(f"PLOT_TIMING STEP script=plot_tonic_48h.py step=plotting elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+    
     out_path = os.path.join(out_dir, f"tonic_48h_overview_{roi}.png")
     plt.tight_layout()
     plt.savefig(out_path)
+    print(f"PLOT_TIMING STEP script=plot_tonic_48h.py step=figure_save elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
     print(f"Saved {out_path}")
     
+    print(f"PLOT_TIMING DONE script=plot_tonic_48h.py total_sec={time.perf_counter() - t_start:.3f}", flush=True)
+
 if __name__ == '__main__':
     main()

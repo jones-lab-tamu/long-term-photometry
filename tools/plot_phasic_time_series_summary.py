@@ -89,10 +89,12 @@ def main():
         # 1. Try strict format on basename (fast, matches pipeline output)
         dt_series_1 = roi_df['source_file'].apply(parse_dt_str)
         
-        # 2. Convert to pandas Timestamp directly (handles other formats)
-        dt_series_1 = pd.to_datetime(dt_series_1, errors='coerce')
-        dt_series_2 = pd.to_datetime(roi_df['source_file'], errors='coerce')
-        dt_final = dt_series_1.fillna(dt_series_2)
+        # Make the fallback explicit without emitting the generic inference warning.
+        if dt_series_1.isna().all():
+            dt_final = pd.Series(pd.NaT, index=roi_df.index)
+        else:
+            dt_final = pd.to_datetime(dt_series_1, errors='coerce')
+            
         roi_df['dt'] = dt_final
         
         valid_count = roi_df['dt'].notna().sum()

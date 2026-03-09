@@ -20,6 +20,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import uniform_filter1d
 from datetime import datetime
+import time
 
 def infer_datetime_from_string(s):
     if not isinstance(s, str): return None
@@ -49,6 +50,9 @@ def parse_args():
     return parser.parse_args()
 
 def main():
+    t_start = time.perf_counter()
+    print("PLOT_TIMING START script=plot_phasic_stacked_day_smoothed.py", flush=True)
+    
     args = parse_args()
     
     # 1. Load Features
@@ -136,48 +140,55 @@ def main():
              print(f"CRITICAL: DFF column for ROI {args.roi} not found.")
              sys.exit(1)
 
+    print(f"PLOT_TIMING STEP script=plot_phasic_stacked_day_smoothed.py step=discovery elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+
+    # Pre-process traces
+    prepared_traces = {}
+    for _, row in df_grid.iterrows():
+        try:
+            df = pd.read_csv(row['trace_path'])
+            y = df[col_dff].values.astype(float)
+            t = df['time_sec'].values.astype(float)
+            
+            # Check for NaNs
+            mask = np.isfinite(y)
+            y = y[mask]
+            t = t[mask]
+            
+            if len(y) < 2: continue
+            
+            t = t - t[0]
+            
+            # Infer fs
+            dt = np.median(np.diff(t))
+            fs = 1.0 / dt if dt > 0 else 1.0
+            
+            # Smooth
+            w_s = args.smooth_window_s
+            w_samples = int(round(fs * w_s))
+            if w_samples < 1: w_samples = 1
+            
+            # Use standard uniform filter
+            y_smooth = uniform_filter1d(y, size=w_samples)
+            
+            prepared_traces[row['chunk_id']] = (t, y_smooth)
+            
+        except Exception as e:
+            print(f"Warning: Failed to load chunk {row['chunk_id']}: {e}")
+            continue
+
+    print(f"PLOT_TIMING STEP script=plot_phasic_stacked_day_smoothed.py step=data_loading elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+    print(f"PLOT_TIMING STEP script=plot_phasic_stacked_day_smoothed.py step=data_preparation elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+
     for d in unique_days:
         day_chunks = df_grid[df_grid['day_idx'] == d].sort_values('chunk_id')
         if day_chunks.empty: continue
         
         traces = []
-        
         for _, row in day_chunks.iterrows():
-            try:
-                df = pd.read_csv(row['trace_path'])
-                y = df[col_dff].values.astype(float)
-                t = df['time_sec'].values.astype(float)
-                
-                # Check for NaNs
-                mask = np.isfinite(y)
-                y = y[mask]
-                t = t[mask]
-                
-                if len(y) < 2: continue
-                
-                t = t - t[0]
-                
-                # Infer fs
-                dt = np.median(np.diff(t))
-                fs = 1.0 / dt if dt > 0 else 1.0
-                
-                # Smooth
-                w_s = args.smooth_window_s
-                w_samples = int(round(fs * w_s))
-                if w_samples < 1: w_samples = 1
-                
-                # Use standard uniform filter
-                y_smooth = uniform_filter1d(y, size=w_samples)
-                
-                # No re-centering unless requested (user said "Do NOT re-center ... Prefer no centering")
-                # But stacked plots need offset. 
-                # We will just offset by index.
-                
-                traces.append((t, y_smooth))
-                
-            except Exception as e:
-                print(f"Warning: Failed to load chunk {row['chunk_id']}: {e}")
-                continue
+            cid = row['chunk_id']
+            if cid in prepared_traces:
+                traces.append(prepared_traces[cid])
                 
         if not traces:
             continue
@@ -202,9 +213,13 @@ def main():
         out_name = f"phasic_stacked_day_{d:03d}.png"
         out_path = os.path.join(args.out_dir, out_name)
         plt.tight_layout()
+        print(f"PLOT_TIMING STEP script=plot_phasic_stacked_day_smoothed.py step=plotting day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
         plt.savefig(out_path, dpi=args.dpi)
+        print(f"PLOT_TIMING STEP script=plot_phasic_stacked_day_smoothed.py step=figure_save day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
         plt.close(fig)
         print(f"Saved {out_path}")
+
+    print(f"PLOT_TIMING DONE script=plot_phasic_stacked_day_smoothed.py total_sec={time.perf_counter() - t_start:.3f}", flush=True)
 
 if __name__ == '__main__':
     main()

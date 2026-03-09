@@ -23,6 +23,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
+import time
 
 # Import layout logic from plot_phasic_qc_grid? 
 # Better to duplicate minimal logic to stay self-contained or import if allowed.
@@ -48,6 +49,9 @@ def check_continuity(time_arr, expected_dt):
     return np.all(diffs < (2.0 * expected_dt))
 
 def main():
+    t_start = time.perf_counter()
+    print("PLOT_TIMING START script=plot_session_grid.py", flush=True)
+    
     args = parse_args()
     traces_dir = os.path.join(args.analysis_out, 'traces')
     files = sorted(glob.glob(os.path.join(traces_dir, 'chunk_*.csv')))
@@ -57,6 +61,7 @@ def main():
         sys.exit(1)
 
     # 1. Audit
+    print(f"PLOT_TIMING STEP script=plot_session_grid.py step=discovery elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
     print("Auditing session boundaries...")
     valid_files = []
     
@@ -115,6 +120,7 @@ def main():
             sys.exit(1)
             
     print(f"Audit PASS: {len(valid_files)} chunks verified.")
+    print(f"PLOT_TIMING STEP script=plot_session_grid.py step=data_loading elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
     
     # 2. Grid Plot
     # Simplest layout: sequential unless datetimes present in text
@@ -155,6 +161,7 @@ def main():
         })
         
     unique_days = sorted(list(set(p['day'] for p in plot_items)))
+    print(f"PLOT_TIMING STEP script=plot_session_grid.py step=data_preparation elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
     
     for d in unique_days:
         fig, axes = plt.subplots(nrows=24, ncols=sph, 
@@ -180,9 +187,13 @@ def main():
             
         out_path = os.path.join(out_dir, f"day_{d:03d}_raw_iso_{roi}.png")
         plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+        print(f"PLOT_TIMING STEP script=plot_session_grid.py step=plotting day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
         plt.savefig(out_path)
+        print(f"PLOT_TIMING STEP script=plot_session_grid.py step=figure_save day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
         print(f"Saved {out_path}")
         plt.close(fig)
+
+    print(f"PLOT_TIMING DONE script=plot_session_grid.py total_sec={time.perf_counter() - t_start:.3f}", flush=True)
 
 if __name__ == '__main__':
     main()

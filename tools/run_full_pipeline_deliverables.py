@@ -40,7 +40,7 @@ try:
     from photometry_pipeline.core.utils import natural_sort_key
     from photometry_pipeline.core.events import EventEmitter
 except ImportError:
-    print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.")
+    print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.", flush=True)
     raise SystemExit(1)
 
 
@@ -68,8 +68,8 @@ def run_cmd(cmd, roi_label=None):
     started_utc = _utc_now_iso()
     t0 = time.perf_counter()
     
-    print(f"TIMING START cmd={label}{roi_info} at {started_utc}")
-    print(f"Running: {' '.join(cmd)}")
+    print(f"TIMING START cmd={label}{roi_info} at {started_utc}", flush=True)
+    print(f"Running: {' '.join(cmd)}", flush=True)
     
     try:
         subprocess.check_call(cmd)
@@ -80,7 +80,7 @@ def run_cmd(cmd, roi_label=None):
 
     elapsed = time.perf_counter() - t0
     finished_utc = _utc_now_iso()
-    print(f"TIMING DONE cmd={label}{roi_info} elapsed_sec={elapsed:.3f}")
+    print(f"TIMING DONE cmd={label}{roi_info} elapsed_sec={elapsed:.3f}", flush=True)
     
     return {
         "cmd": cmd,
@@ -96,7 +96,7 @@ def _phase_start(status_data, phase_name):
     now_utc = _utc_now_iso()
     status_data["timing"]["current_phase"] = phase_name
     status_data["timing"]["phase_started_utc"] = now_utc
-    print(f"TIMING START phase={phase_name} at {now_utc}")
+    print(f"TIMING START phase={phase_name} at {now_utc}", flush=True)
     return time.perf_counter(), now_utc
 
 
@@ -123,7 +123,7 @@ def _phase_done(status_data, manifest, phase_name, t0, started_utc, status_path=
     if status_path:
         _atomic_write_json(status_path, status_data)
     
-    print(f"TIMING DONE phase={phase_name} elapsed_sec={elapsed:.3f}")
+    print(f"TIMING DONE phase={phase_name} elapsed_sec={elapsed:.3f}", flush=True)
 
 
 def _generate_run_id():
@@ -177,7 +177,7 @@ def _cleanup_run_outputs_in_place(run_dir, emitter=None):
     if emitter:
         emitter.emit("engine", "info", msg)
     else:
-        print(msg)
+        print(msg, flush=True)
 
     # Tool-generated artifacts to remove if they exist.
     to_remove = [
@@ -200,12 +200,12 @@ def _cleanup_run_outputs_in_place(run_dir, emitter=None):
             try:
                 shutil.rmtree(path)
             except OSError as e:
-                print(f"WARNING: Could not remove directory {path}: {e}")
+                print(f"WARNING: Could not remove directory {path}: {e}", flush=True)
         elif os.path.exists(path):
             try:
                 os.remove(path)
             except OSError as e:
-                print(f"WARNING: Could not remove file {path}: {e}")
+                print(f"WARNING: Could not remove file {path}: {e}", flush=True)
 
 
 def _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter, sessions_per_hour=None, sessions_per_hour_source=None):
@@ -470,9 +470,9 @@ def main():
 
     # Log the source clearly to stdout (auditable line)
     if resolved_sessions_per_hour is not None:
-        print(f"Using sessions_per_hour={resolved_sessions_per_hour} ({sessions_per_hour_source})")
+        print(f"Using sessions_per_hour={resolved_sessions_per_hour} ({sessions_per_hour_source})", flush=True)
     else:
-        print("Using sessions_per_hour=None (no source found)")
+        print("Using sessions_per_hour=None (no source found)", flush=True)
 
     # Determine effective event signal, representative index, and preview for stamping
     effective_event_signal = args.event_signal
@@ -489,12 +489,12 @@ def main():
             if effective_preview_first_n is None:
                 effective_preview_first_n = getattr(cfg, "preview_first_n", None)
         except Exception as e:
-            print(f"WARNING: Failed to parse config for runner stamping: {e}")
+            print(f"WARNING: Failed to parse config for runner stamping: {e}", flush=True)
             if effective_event_signal is None: 
                 effective_event_signal = "dff"
             # others remain as given or None
 
-    print(f"RUN_DIR: {run_dir}")
+    print(f"RUN_DIR: {run_dir}", flush=True)
 
     # -- Build base manifest dict --
     manifest = {
@@ -530,7 +530,7 @@ def main():
             if args.events == "auto":
                 vo_events_path = None
                 print("VALIDATE-ONLY: events disabled (legacy --out mode, "
-                      "--events auto); to enable, pass --events <PATH>")
+                      "--events auto); to enable, pass --events <PATH>", flush=True)
             else:
                 # Explicit path: check parent directory
                 parent = os.path.dirname(events_path) or "."
@@ -539,7 +539,7 @@ def main():
                     print("VALIDATE-ONLY: events disabled (legacy --out mode); "
                           "parent directory does not exist and will not be "
                           "created because legacy validate-only creates "
-                          "no directories")
+                          "no directories", flush=True)
             vo_allow_makedirs = False
 
         emitter = EventEmitter(vo_events_path, run_id, run_dir,
@@ -629,11 +629,11 @@ def main():
             argv.extend(["--session-duration-s", str(args.session_duration_s)])
         argv.extend(["--smooth-window-s", str(args.smooth_window_s)])
 
-        print("VALIDATE-ONLY: OK")
-        print(f"VALIDATE-ONLY: run_dir={run_dir}")
-        print(f"VALIDATE-ONLY: events_path={vo_events_path}")
-        print(f"VALIDATE-ONLY: cancel_flag_path={cancel_flag_path}")
-        print(f"VALIDATE-ONLY: argv={json.dumps(argv)}")
+        print("VALIDATE-ONLY: OK", flush=True)
+        print(f"VALIDATE-ONLY: run_dir={run_dir}", flush=True)
+        print(f"VALIDATE-ONLY: events_path={vo_events_path}", flush=True)
+        print(f"VALIDATE-ONLY: cancel_flag_path={cancel_flag_path}", flush=True)
+        print(f"VALIDATE-ONLY: argv={json.dumps(argv)}", flush=True)
 
         emitter.emit("engine", "done", "Validate-only complete")
         emitter.close()
@@ -917,7 +917,7 @@ def main():
         manifest['sessions_per_hour_source'] = sessions_per_hour_source
         manifest['session_duration_s'] = session_duration_s
         manifest['session_stride_s'] = stride_s
-        print(f"Deterministic Sessions Per Hour: {sessions_per_hour} (Stride={stride_s:.1f}s, Dur={session_duration_s:.1f}s)")
+        print(f"Deterministic Sessions Per Hour: {sessions_per_hour} (Stride={stride_s:.1f}s, Dur={session_duration_s:.1f}s)", flush=True)
         _phase_done(status_data, manifest, "session_compute", t_phase, started_utc_phase, status_path=status_path)
 
         check_cancel(cancel_flag_path, emitter, "session_compute", manifest_path, manifest)
@@ -947,9 +947,9 @@ def main():
                     elif roi_sel.get('discovered_rois'):
                         regions = list(roi_sel['discovered_rois'])
                 except Exception as e:
-                    print(f"WARNING: Failed to read roi_selection from run_report.json: {e}")
+                    print(f"WARNING: Failed to read roi_selection from run_report.json: {e}", flush=True)
             if regions is None:
-                print("WARNING: roi_selection not found in run_report.json; falling back to tonic_out")
+                print("WARNING: roi_selection not found in run_report.json; falling back to tonic_out", flush=True)
                 report_path_t = os.path.join(tonic_out, 'run_report.json')
                 if os.path.exists(report_path_t):
                     try:
@@ -963,19 +963,19 @@ def main():
                         pass
             if regions is None:
                 regions = []
-                print("WARNING: Could not determine ROIs for traces-only packaging")
+                print("WARNING: Could not determine ROIs for traces-only packaging", flush=True)
             df_feat = None
         manifest['regions'] = regions
 
         for roi in regions:
             t_roi = time.perf_counter()
             started_utc_roi = _utc_now_iso()
-            print(f"TIMING START roi={roi} at {started_utc_roi}")
+            print(f"TIMING START roi={roi} at {started_utc_roi}", flush=True)
             
             check_cancel(cancel_flag_path, emitter, "plots", manifest_path, manifest)
             _write_status_update(f"plot_{roi}")
 
-            print(f"Processing ROI: {roi}")
+            print(f"Processing ROI: {roi}", flush=True)
             emitter.emit("plots", "progress", f"Processing ROI: {roi}", roi=roi)
             reg_dir = os.path.join(run_dir, roi)
             s_dir = os.path.join(reg_dir, "summary")
@@ -1182,7 +1182,7 @@ def main():
                 "finished_utc": finished_utc_roi,
                 "elapsed_sec": elapsed_roi
             }
-            print(f"TIMING DONE roi={roi} elapsed_sec={elapsed_roi:.3f}")
+            print(f"TIMING DONE roi={roi} elapsed_sec={elapsed_roi:.3f}", flush=True)
 
         emitter.emit("plots", "done", "All ROI deliverables complete")
         _phase_done(status_data, manifest, "plots_total", t_phase, started_utc_phase, status_path=status_path)

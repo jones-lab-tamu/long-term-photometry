@@ -32,6 +32,7 @@ import yaml
 import json
 import shutil
 from datetime import datetime, timedelta
+import time
 
 import numpy as np
 import pandas as pd
@@ -268,6 +269,8 @@ def verify_peak_count_strict(trace_arr, time_arr, fs, config, expected_count, ro
     return local_peaks
 
 def main():
+    t_start = time.perf_counter()
+    print("PLOT_TIMING START script=plot_phasic_qc_grid.py", flush=True)
     print("Running tools/plot_phasic_qc_grid.py (FIXED)")
     args = parse_args()
     
@@ -363,6 +366,8 @@ def main():
     sessions_ph = int(max(1, sessions_ph))
     print(f"Layout: {sessions_ph} columns.")
 
+    print(f"PLOT_TIMING STEP script=plot_phasic_qc_grid.py step=discovery elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+
     # 5. Iteration & Signal Loading & Verification
     all_traces = []
     
@@ -445,6 +450,8 @@ def main():
             traceback.print_exc()
             sys.exit(1)
 
+    print(f"PLOT_TIMING STEP script=plot_phasic_qc_grid.py step=data_loading elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+
     # 6. Global Y Limits (Percentile-based)
     if not all_traces:
         print("No trace data loaded.")
@@ -465,6 +472,8 @@ def main():
         global_ymax += pad
         
     print(f"Global (DFF-based) Y-Limits: [{global_ymin:.3f}, {global_ymax:.3f}]")
+
+    print(f"PLOT_TIMING STEP script=plot_phasic_qc_grid.py step=data_preparation elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
 
     # 7. Plotting
     output_dir = args.output_dir or os.path.join(args.analysis_out, 'phasic_qc')
@@ -604,7 +613,9 @@ def main():
             out_name = f"day_{d:03d}_raw.png"
             
         out_path = os.path.join(output_dir, out_name)
+        print(f"PLOT_TIMING STEP script=plot_phasic_qc_grid.py step=plotting day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
         plt.savefig(out_path, dpi=args.dpi)
+        print(f"PLOT_TIMING STEP script=plot_phasic_qc_grid.py step=figure_save day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
         plt.close(fig)
         print(f"Saved {out_path}")
         
@@ -616,6 +627,8 @@ def main():
                 print(f"Copied to {copy_path}")
             else:
                 raise RuntimeError(f"Cannot copy Day 0 plot: {out_path} not generated")
+
+    print(f"PLOT_TIMING DONE script=plot_phasic_qc_grid.py total_sec={time.perf_counter() - t_start:.3f}", flush=True)
 
 if __name__ == "__main__":
     main()
