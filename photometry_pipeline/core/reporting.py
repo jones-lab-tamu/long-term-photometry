@@ -34,7 +34,7 @@ def make_json_safe(obj: Any) -> Any:
     # Fallback
     return str(obj)
 
-def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = None, traces_only: bool = False, representative_info: Dict = None, preview_info: Dict = None):
+def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = None, traces_only: bool = False, representative_info: Dict = None, preview_info: Dict = None, sessions_per_hour: int = None, sessions_per_hour_source: str = None):
     """
     Generates the mandatory run-report artifact.
     Freezes analytical assumptions and flags tonic-attenuation risk.
@@ -53,6 +53,11 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
     strict_enabled = not config.allow_partial_final_chunk
     tonic_attenuation_warning = (config.window_sec < (tonic_warning_ratio * tonic_period_interest))
     
+    # Preserve resolved sessions_per_hour (source of truth from runner/GUI)
+    # If not provided, it remains NULL in derived_settings
+    resolved_sph = sessions_per_hour
+    resolved_sph_source = sessions_per_hour_source
+    
     warnings_list = []
     
     # Nyquist Check
@@ -70,6 +75,8 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
         "regression_step_sec": config.step_sec,
         "target_fs_hz": config.target_fs_hz,
         "chunk_duration_sec": config.chunk_duration_sec,
+        "sessions_per_hour": resolved_sph,
+        "sessions_per_hour_source": resolved_sph_source,
         "strict_mode_enabled": strict_enabled,
         "tonic_period_of_interest_sec": tonic_period_interest,
         "tonic_warning_ratio_threshold": tonic_warning_ratio,
@@ -125,7 +132,7 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
         raise ValueError(f"Unknown baseline_method: {config.baseline_method}")
         
     contract["baseline_semantics"] = baseline_semantics
-
+ 
     # 5. Output
     report = {
         "run_context": {
@@ -134,6 +141,8 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
             "preview": preview_info,
             "traces_only": traces_only,
             "event_signal": getattr(config, 'event_signal', 'dff'),
+            "sessions_per_hour": resolved_sph,
+            "sessions_per_hour_source": resolved_sph_source,
             "representative_session_index": representative_info.get("representative_session_index") if representative_info else None,
             "representative_session_id": representative_info.get("representative_session_id") if representative_info else None,
             "n_sessions_resolved": representative_info.get("n_sessions_resolved", 0) if representative_info else 0,

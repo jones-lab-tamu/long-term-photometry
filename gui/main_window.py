@@ -574,30 +574,36 @@ class MainWindow(QMainWindow):
 
         # Input directory
         self._input_dir = QLineEdit()
+        self._input_dir.setToolTip("The source recording/session folder to analyze.")
         self._input_dir.textChanged.connect(self._on_config_changed)
         input_row = QHBoxLayout()
         input_row.addWidget(self._input_dir)
         btn = QPushButton("Browse...")
+        btn.setToolTip("Browse for the input directory.")
         btn.clicked.connect(lambda: self._browse_dir(self._input_dir, "Select Input Directory"))
         input_row.addWidget(btn)
         form.addRow("Input Directory:", input_row)
 
         # Output base directory (run_dir = out_base / run_id)
         self._output_dir = QLineEdit()
+        self._output_dir.setToolTip("Where the run folder and deliverables will be created. Each run generates a unique timestamped subfolder.")
         self._output_dir.textChanged.connect(self._on_config_changed)
         output_row = QHBoxLayout()
         output_row.addWidget(self._output_dir)
         btn2 = QPushButton("Browse...")
+        btn2.setToolTip("Browse for the output base directory.")
         btn2.clicked.connect(lambda: self._browse_dir(self._output_dir, "Select Output Base Directory"))
         output_row.addWidget(btn2)
         form.addRow("Output Directory:", output_row)
 
         # Config YAML
         self._config_path = QLineEdit()
+        self._config_path.setToolTip("The analysis settings used to build the effective run configuration.")
         self._config_path.textChanged.connect(self._on_config_changed)
         config_row = QHBoxLayout()
         config_row.addWidget(self._config_path)
         btn3 = QPushButton("Browse...")
+        btn3.setToolTip("Browse for a configuration YAML file.")
         btn3.clicked.connect(self._browse_config)
         config_row.addWidget(btn3)
         form.addRow("Config YAML:", config_row)
@@ -605,6 +611,7 @@ class MainWindow(QMainWindow):
         # Format
         self._format_combo = QComboBox()
         self._format_combo.addItems(list(FORMAT_CHOICES))
+        self._format_combo.setToolTip("Tells the pipeline how to interpret the input data layout.")
         self._format_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Format:", self._format_combo)
 
@@ -612,6 +619,7 @@ class MainWindow(QMainWindow):
         self._sph_edit = QLineEdit()
         self._sph_edit.setPlaceholderText("(optional, integer >= 1)")
         self._sph_edit.setMaximumWidth(200)
+        self._sph_edit.setToolTip("Required for duty-cycled recordings when session spacing cannot be inferred from timestamps. Leave blank only if the pipeline can determine the spacing on its own.")
         self._sph_edit.textChanged.connect(self._on_config_changed)
         form.addRow("Sessions/Hour:", self._sph_edit)
 
@@ -626,6 +634,7 @@ class MainWindow(QMainWindow):
         self._duration_edit = QLineEdit()
         self._duration_edit.setPlaceholderText("(optional, seconds > 0)")
         self._duration_edit.setMaximumWidth(200)
+        self._duration_edit.setToolTip("The expected duration of each session. Mainly matters when timing cannot be inferred reliably from the data.")
         self._duration_edit.textChanged.connect(self._on_config_changed)
         form.addRow("Session Duration (s):", self._duration_edit)
 
@@ -636,23 +645,26 @@ class MainWindow(QMainWindow):
         self._smooth_spin.setDecimals(2)
         self._smooth_spin.setSingleStep(0.1)
         self._smooth_spin.setMaximumWidth(200)
+        self._smooth_spin.setToolTip("Affects smoothing of plotted and output time-series. Higher values result in smoother traces but may mask fast transients.")
         self._smooth_spin.valueChanged.connect(self._on_config_changed)
         form.addRow("Smooth Window (s):", self._smooth_spin)
 
         # Mode
         self._mode_combo = QComboBox()
         self._mode_combo.addItems(["both", "phasic", "tonic"])
-        self._mode_combo.setToolTip("Select which analysis modes to run. Default is both.")
+        self._mode_combo.setToolTip("Select whether to run tonic analysis, phasic analysis, or both.")
         form.addRow("Mode:", self._mode_combo)
         self._mode_combo.currentIndexChanged.connect(self._on_config_changed)
 
         # Traces-only (--traces-only CLI flag)
         self._traces_only_cb = QCheckBox("Skip feature extraction (traces and QC only)")
+        self._traces_only_cb.setToolTip("Run preprocessing and QC only. Skip feature extraction and downstream deliverable generation.")
         self._traces_only_cb.stateChanged.connect(self._on_config_changed)
         form.addRow("Traces-only:", self._traces_only_cb)
 
         # Preview first N (--preview-first-n CLI flag)
         self._preview_enabled_cb = QCheckBox("Limit sessions")
+        self._preview_enabled_cb.setToolTip("Limit processing to the first N sessions for a quick test run. Useful for checking settings before a full run.")
         self._preview_enabled_cb.stateChanged.connect(self._on_config_changed)
         self._preview_n_spin = QSpinBox()
         self._preview_n_spin.setRange(1, 100000)
@@ -694,23 +706,29 @@ class MainWindow(QMainWindow):
         adv_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
 
         self._window_sec_edit = QLineEdit(str(self._default_cfg.window_sec))
+        self._window_sec_edit.setToolTip("The duration of the sliding window used for isosbestic regression fitting.")
         adv_layout.addRow("Regression Window (sec):", self._window_sec_edit)
 
         self._step_sec_edit = QLineEdit(str(self._default_cfg.step_sec))
+        self._step_sec_edit.setToolTip("How far the sliding window moves between regression fits.")
         adv_layout.addRow("Regression Step (sec):", self._step_sec_edit)
 
         self._min_valid_windows_spin = QSpinBox()
         self._min_valid_windows_spin.setRange(1, 1000)
         self._min_valid_windows_spin.setValue(self._default_cfg.min_valid_windows)
+        self._min_valid_windows_spin.setToolTip("Minimum number of valid regression windows required to compute a stable fit.")
         adv_layout.addRow("Min Valid Windows:", self._min_valid_windows_spin)
 
         self._r_low_edit = QLineEdit(str(self._default_cfg.r_low))
+        self._r_low_edit.setToolTip("Lower threshold for the correlation coefficient (R) to consider a regression window valid.")
         adv_layout.addRow("R-Low Threshold:", self._r_low_edit)
 
         self._r_high_edit = QLineEdit(str(self._default_cfg.r_high))
+        self._r_high_edit.setToolTip("Upper threshold for the correlation coefficient (R) to consider a regression window valid.")
         adv_layout.addRow("R-High Threshold:", self._r_high_edit)
 
         self._g_min_edit = QLineEdit(str(self._default_cfg.g_min))
+        self._g_min_edit.setToolTip("Minimum green channel intensity required for a window to be included in the regression.")
         adv_layout.addRow("G-Min Threshold:", self._g_min_edit)
 
         self._min_samples_per_window_spin = QSpinBox()
@@ -736,6 +754,7 @@ class MainWindow(QMainWindow):
         adv_prep_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
 
         self._lowpass_hz_edit = QLineEdit(str(self._default_cfg.lowpass_hz))
+        self._lowpass_hz_edit.setToolTip("Frequency cutoff for the low-pass filter applied to raw traces to remove high-frequency noise.")
         adv_prep_layout.addRow("Lowpass Filter (Hz):", self._lowpass_hz_edit)
 
         self._baseline_method_combo = QComboBox()
@@ -750,13 +769,16 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self._baseline_method_combo.setCurrentIndex(idx)
             
+        self._baseline_method_combo.setToolTip("Controls how the baseline reference is computed before dFF/event calculations. Leave at the default unless you have a specific analysis reason to change it.")
         adv_prep_layout.addRow("Baseline Method:", self._baseline_method_combo)
 
         self._baseline_percentile_edit = QLineEdit(str(self._default_cfg.baseline_percentile))
+        self._baseline_percentile_edit.setToolTip("The percentile used for baseline estimation. Only applies to percentile-based methods.")
         self._baseline_percentile_label = QLabel("Baseline Percentile:")
         adv_prep_layout.addRow(self._baseline_percentile_label, self._baseline_percentile_edit)
 
         self._f0_min_value_edit = QLineEdit(str(self._default_cfg.f0_min_value))
+        self._f0_min_value_edit.setToolTip("Minimum allowed value for the calculated baseline (F0) to prevent division by zero or extremely low values.")
         adv_prep_layout.addRow("F0 Min Value:", self._f0_min_value_edit)
 
         self._adv_prep_group = adv_prep_group
@@ -774,6 +796,7 @@ class MainWindow(QMainWindow):
         self._event_signal_combo.addItems(sorted(allowed_sigs))
         idx = self._event_signal_combo.findText(self._default_cfg.event_signal)
         if idx >= 0: self._event_signal_combo.setCurrentIndex(idx)
+        self._event_signal_combo.setToolTip("The signal type used for event detection (e.g., dFF or detrended delta_f).")
         adv_ev_layout.addRow("Event Signal:", self._event_signal_combo)
 
         self._peak_method_combo = QComboBox()
@@ -783,21 +806,26 @@ class MainWindow(QMainWindow):
         self._peak_method_combo.addItems(sorted(allowed_peak_methods))
         idx = self._peak_method_combo.findText(self._default_cfg.peak_threshold_method)
         if idx >= 0: self._peak_method_combo.setCurrentIndex(idx)
+        self._peak_method_combo.setToolTip("Algorithm used to determine the threshold for identifying significant peaks/events.")
         adv_ev_layout.addRow("Peak Threshold Method:", self._peak_method_combo)
 
         self._peak_k_edit = QLineEdit(str(self._default_cfg.peak_threshold_k))
+        self._peak_k_edit.setToolTip("Multiplier for Standard Deviation or MAD based thresholding methods.")
         self._peak_k_label = QLabel("Peak Threshold K:")
         adv_ev_layout.addRow(self._peak_k_label, self._peak_k_edit)
 
         self._peak_pct_edit = QLineEdit(str(self._default_cfg.peak_threshold_percentile))
+        self._peak_pct_edit.setToolTip("Percentile used for identifying peaks if using a percentile-based threshold method.")
         self._peak_pct_label = QLabel("Peak Threshold Percentile:")
         adv_ev_layout.addRow(self._peak_pct_label, self._peak_pct_edit)
 
         self._peak_abs_edit = QLineEdit(str(self._default_cfg.peak_threshold_abs))
+        self._peak_abs_edit.setToolTip("Fixed absolute value threshold for identifying peaks.")
         self._peak_abs_label = QLabel("Peak Threshold Absolute:")
         adv_ev_layout.addRow(self._peak_abs_label, self._peak_abs_edit)
 
         self._peak_dist_edit = QLineEdit(str(self._default_cfg.peak_min_distance_sec))
+        self._peak_dist_edit.setToolTip("Minimum time separation required between adjacent peaks to be counted as distinct events.")
         adv_ev_layout.addRow("Peak Min Distance (sec):", self._peak_dist_edit)
 
         self._event_auc_combo = QComboBox()
@@ -807,6 +835,7 @@ class MainWindow(QMainWindow):
         self._event_auc_combo.addItems(sorted(allowed_auc))
         idx = self._event_auc_combo.findText(self._default_cfg.event_auc_baseline)
         if idx >= 0: self._event_auc_combo.setCurrentIndex(idx)
+        self._event_auc_combo.setToolTip("Determines the baseline reference used for calculating the Area Under the Curve (AUC) for detected events.")
         adv_ev_layout.addRow("Event AUC Baseline:", self._event_auc_combo)
 
         self._adv_ev_group = adv_ev_group
@@ -830,6 +859,7 @@ class MainWindow(QMainWindow):
 
         disc_btn_row = QHBoxLayout()
         self._discover_btn = QPushButton("Discover Sessions / ROIs")
+        self._discover_btn.setToolTip("Search the input directory for sessions and ROIs based on the selected format.")
         self._discover_btn.clicked.connect(self._on_discover)
         disc_btn_row.addWidget(self._discover_btn)
         disc_btn_row.addStretch()
@@ -886,6 +916,7 @@ class MainWindow(QMainWindow):
         self._rep_session_combo = QComboBox()
         self._rep_session_combo.addItem("(auto)")
         self._rep_session_combo.setMinimumWidth(200)
+        self._rep_session_combo.setToolTip("Select a specific session to use for representative summary plots. Leave at (auto) for default selection.")
         rep_row.addWidget(self._rep_session_combo)
         rep_row.addStretch()
         disc_layout.addLayout(rep_row)
@@ -895,19 +926,23 @@ class MainWindow(QMainWindow):
         # Buttons row
         btn_row = QHBoxLayout()
         self._validate_btn = QPushButton("Validate Only")
+        self._validate_btn.setToolTip("Check settings and directory structure without running the full analysis.")
         self._validate_btn.clicked.connect(self._on_validate)
         btn_row.addWidget(self._validate_btn)
 
         self._run_btn = QPushButton("Run Pipeline")
         self._run_btn.setStyleSheet("font-weight: bold;")
+        self._run_btn.setToolTip("Start the full analysis pipeline using the current settings.")
         self._run_btn.clicked.connect(self._on_run)
         btn_row.addWidget(self._run_btn)
 
         self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setToolTip("Stop the currently running pipeline.")
         self._cancel_btn.clicked.connect(self._on_cancel)
         btn_row.addWidget(self._cancel_btn)
 
         self._preview_config_btn = QPushButton("Preview Config")
+        self._preview_config_btn.setToolTip("Show the exact configuration that will be used for the run, combining the YAML file and GUI overrides.")
         self._preview_config_btn.clicked.connect(self._on_preview_config)
         btn_row.addWidget(self._preview_config_btn)
 

@@ -136,7 +136,7 @@ def _cleanup_run_outputs_in_place(run_dir, emitter=None):
                 print(f"WARNING: Could not remove file {path}: {e}")
 
 
-def _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter):
+def _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter, sessions_per_hour=None, sessions_per_hour_source=None):
     """
     Ensure <run_dir>/run_report.json exists at root before terminal status.
     Ordered requirement for Step 8: Strict Ordering Gate.
@@ -146,28 +146,51 @@ def _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter):
         return False
         
     report_path = os.path.join(run_dir, "run_report.json")
-    if os.path.exists(report_path):
-        return True
-
-    # Search in subdirectories
-    search_paths = []
-    if phasic_out:
-        search_paths.append(os.path.join(phasic_out, "run_report.json"))
-    if tonic_out:
-        search_paths.append(os.path.join(tonic_out, "run_report.json"))
     
-    for src in search_paths:
-        if os.path.exists(src):
-            try:
-                shutil.copy2(src, report_path)
-                if emitter:
-                    emitter.emit("package", "done", f"Hardened copy: {os.path.basename(src)} -> root")
-                return True
-            except Exception as e:
-                if emitter:
-                    emitter.emit("package", "error", f"Failed to copy report to root: {e}")
-                
-    if emitter:
+    # Try to find a source if not at root
+    if not os.path.exists(report_path):
+        search_paths = []
+        if phasic_out:
+            search_paths.append(os.path.join(phasic_out, "run_report.json"))
+        if tonic_out:
+            search_paths.append(os.path.join(tonic_out, "run_report.json"))
+        
+        for src in search_paths:
+            if os.path.exists(src):
+                try:
+                    shutil.copy2(src, report_path)
+                    if emitter:
+                        emitter.emit("package", "done", f"Hardened copy: {os.path.basename(src)} -> root")
+                    break
+                except Exception as e:
+                    if emitter:
+                        emitter.emit("package", "error", f"Failed to copy report to root: {e}")
+
+    # STAMPING: Authoritative Audit Stamp
+    if os.path.exists(report_path):
+        try:
+             with open(report_path, 'r') as f:
+                 repo = json.load(f)
+             
+             # Inject authoritative metadata into run_context and derived_settings
+             if 'run_context' in repo:
+                 repo['run_context']['sessions_per_hour'] = sessions_per_hour
+                 repo['run_context']['sessions_per_hour_source'] = sessions_per_hour_source
+             
+             if 'derived_settings' in repo:
+                 repo['derived_settings']['sessions_per_hour'] = sessions_per_hour
+                 repo['derived_settings']['sessions_per_hour_source'] = sessions_per_hour_source
+                 
+             with open(report_path, 'w') as f:
+                 json.dump(repo, f, indent=2)
+             
+             if emitter and sessions_per_hour_source:
+                 emitter.emit("package", "audit", f"Stamped report with sessions_per_hour_source={sessions_per_hour_source}")
+        except Exception as e:
+             if emitter:
+                 emitter.emit("package", "error", f"Failed to stamp report: {e}")
+                 
+    if not os.path.exists(report_path) and emitter:
         emitter.emit("package", "notice", "run_report.json sourcing skipped (missing artifacts)")
     
     return os.path.exists(report_path)
@@ -347,6 +370,54 @@ def main():
     events_path, cancel_flag_path = resolve_paths(args, run_dir)
     manifest_path = os.path.join(run_dir, "MANIFEST.json")
 
+    # ============================================================
+    # 2. Resolve Effective Params (sessions_per_hour, event_signal, etc.)
+    # ============================================================
+    # Resolve early so it is available for status.json in both validate-only and full run.
+
+    # sessions_per_hour resolution (source-auditable)
+    resolved_sessions_per_hour = None
+    sessions_per_hour_source = None
+
+    if args.sessions_per_hour is not None:
+        resolved_sessions_per_hour = args.sessions_per_hour
+        sessions_per_hour_source = "user-provided"
+    else:
+        try:
+            cfg = Config.from_yaml(args.config)
+            config_sph = getattr(cfg, "sessions_per_hour", None)
+            if config_sph is not None:
+                resolved_sessions_per_hour = config_sph
+                sessions_per_hour_source = "config"
+        except Exception:
+            pass
+
+    # Log the source clearly to stdout (auditable line)
+    if resolved_sessions_per_hour is not None:
+        print(f"Using sessions_per_hour={resolved_sessions_per_hour} ({sessions_per_hour_source})")
+    else:
+        print("Using sessions_per_hour=None (no source found)")
+
+    # Determine effective event signal, representative index, and preview for stamping
+    effective_event_signal = args.event_signal
+    effective_representative_index = args.representative_session_index
+    effective_preview_first_n = args.preview_first_n
+    
+    if effective_event_signal is None or effective_representative_index is None or effective_preview_first_n is None:
+        try:
+            cfg = Config.from_yaml(args.config)
+            if effective_event_signal is None:
+                effective_event_signal = getattr(cfg, "event_signal", "dff")
+            if effective_representative_index is None:
+                effective_representative_index = getattr(cfg, "representative_session_index", None)
+            if effective_preview_first_n is None:
+                effective_preview_first_n = getattr(cfg, "preview_first_n", None)
+        except Exception as e:
+            print(f"WARNING: Failed to parse config for runner stamping: {e}")
+            if effective_event_signal is None: 
+                effective_event_signal = "dff"
+            # others remain as given or None
+
     print(f"RUN_DIR: {run_dir}")
 
     # -- Build base manifest dict --
@@ -423,7 +494,8 @@ def main():
                 "command": " ".join(sys.argv),
                 "config_path": os.path.abspath(args.config),
                 "format": args.format,
-                "sessions_per_hour": args.sessions_per_hour,
+                "sessions_per_hour": resolved_sessions_per_hour,
+                "sessions_per_hour_source": sessions_per_hour_source,
                 "events_mode": args.events,
                 "outputs": {
                     "manifest_json": None,
@@ -475,8 +547,8 @@ def main():
             argv.extend(["--include-rois", args.include_rois])
         if args.exclude_rois:
             argv.extend(["--exclude-rois", args.exclude_rois])
-        if args.sessions_per_hour is not None:
-            argv.extend(["--sessions-per-hour", str(args.sessions_per_hour)])
+        if resolved_sessions_per_hour is not None:
+            argv.extend(["--sessions-per-hour", str(resolved_sessions_per_hour)])
         if args.session_duration_s is not None:
             argv.extend(["--session-duration-s", str(args.session_duration_s)])
         argv.extend(["--smooth-window-s", str(args.smooth_window_s)])
@@ -514,7 +586,6 @@ def main():
 
     os.makedirs(run_dir, exist_ok=True)
 
-    # -- Open event emitter (write mode: fresh file per run) --
     # ============================================================
     # 2. Status & Emitter Setup
     # ============================================================
@@ -537,7 +608,8 @@ def main():
         "command": " ".join(sys.argv),
         "config_path": os.path.abspath(args.config),
         "format": args.format,
-        "sessions_per_hour": args.sessions_per_hour,
+        "sessions_per_hour": resolved_sessions_per_hour,
+        "sessions_per_hour_source": sessions_per_hour_source,
         "events_mode": args.events,
         "outputs": {
             "manifest_json": manifest_path,
@@ -584,28 +656,6 @@ def main():
         status_data["duration_sec"] = time.time() - t0_status
         _atomic_write_json(status_path, status_data)
 
-
-
-    # Determine effective event signal, representative index, and preview for stamping
-    effective_event_signal = args.event_signal
-    effective_representative_index = args.representative_session_index
-    effective_preview_first_n = args.preview_first_n
-    
-    if effective_event_signal is None or effective_representative_index is None or effective_preview_first_n is None:
-        try:
-            cfg = Config.from_yaml(args.config)
-            if effective_event_signal is None:
-                effective_event_signal = getattr(cfg, "event_signal", "dff")
-            if effective_representative_index is None:
-                effective_representative_index = getattr(cfg, "representative_session_index", None)
-            if effective_preview_first_n is None:
-                effective_preview_first_n = getattr(cfg, "preview_first_n", None)
-        except Exception as e:
-            print(f"WARNING: Failed to parse config for runner stamping: {e}")
-            if effective_event_signal is None: 
-                effective_event_signal = "dff"
-            # effective_representative_index and effective_preview_first_n remain as given
-
     # Update status_data with resolved preview info before initial write
     status_data["run_type"] = "preview" if effective_preview_first_n is not None else "full"
     status_data["preview"] = {"selector": "first_n", "first_n": effective_preview_first_n} if effective_preview_first_n is not None else None
@@ -623,7 +673,9 @@ def main():
         "preview": {"selector": "first_n", "first_n": effective_preview_first_n} if effective_preview_first_n is not None else None, 
         "traces_only": args.traces_only, 
         "event_signal": effective_event_signal,
-        "representative_session_index": effective_representative_index
+        "representative_session_index": effective_representative_index,
+        "sessions_per_hour": resolved_sessions_per_hour,
+        "sessions_per_hour_source": sessions_per_hour_source
     })
 
     try:
@@ -669,7 +721,10 @@ def main():
             if args.traces_only: cmd_tonic.append('--traces-only')
             if args.event_signal: cmd_tonic.extend(['--event-signal', args.event_signal])
             if args.representative_session_index is not None: cmd_tonic.extend(['--representative-session-index', str(args.representative_session_index)])
-            if args.preview_first_n is not None: cmd_tonic.extend(['--preview-first-n', str(args.preview_first_n)])
+            if args.preview_first_n is not None:
+                cmd_tonic.extend(['--preview-first-n', str(args.preview_first_n)])
+            if resolved_sessions_per_hour is not None: 
+                cmd_tonic.extend(['--sessions-per-hour', str(resolved_sessions_per_hour)])
             if events_path: cmd_tonic.extend(['--events-path', events_path])
             try:
                 manifest['commands'].append(run_cmd(cmd_tonic))
@@ -699,6 +754,8 @@ def main():
             if args.event_signal: cmd_phasic.extend(['--event-signal', args.event_signal])
             if args.representative_session_index is not None: cmd_phasic.extend(['--representative-session-index', str(args.representative_session_index)])
             if args.preview_first_n is not None: cmd_phasic.extend(['--preview-first-n', str(args.preview_first_n)])
+            if resolved_sessions_per_hour is not None: 
+                cmd_phasic.extend(['--sessions-per-hour', str(resolved_sessions_per_hour)])
             if events_path: cmd_phasic.extend(['--events-path', events_path])
             try:
                 manifest['commands'].append(run_cmd(cmd_phasic))
@@ -730,11 +787,15 @@ def main():
         # Stride Inference
         stride_s = None
 
-        if args.sessions_per_hour:
-             sessions_per_hour = args.sessions_per_hour
+        if resolved_sessions_per_hour is not None:
+             sessions_per_hour = resolved_sessions_per_hour
              stride_s = 3600.0 / sessions_per_hour
+             # Already logged at top of main
         else:
-             raise RuntimeError("Cannot infer session stride (duty-cycled acquisition) without --sessions-per-hour. Please provide it explicitly.")
+             # This script currently requires sessions_per_hour for delivery packaging
+             # if it wasn't provided, we could try to infer it from timestamps if they are stable, 
+             # but the requirement is to use the single resolved source of truth.
+             raise RuntimeError("Cannot infer session stride (duty-cycled acquisition) without sessions_per_hour. Please provide it explicitly via GUI/CLI.")
 
         # Validation
         computed_sph = int(round(3600.0 / stride_s))
@@ -764,6 +825,7 @@ def main():
 
         sessions_per_hour = computed_sph
         manifest['sessions_per_hour'] = sessions_per_hour
+        manifest['sessions_per_hour_source'] = sessions_per_hour_source
         manifest['session_duration_s'] = session_duration_s
         manifest['session_stride_s'] = stride_s
         print(f"Deterministic Sessions Per Hour: {sessions_per_hour} (Stride={stride_s:.1f}s, Dur={session_duration_s:.1f}s)")
@@ -1034,7 +1096,9 @@ def main():
         # ============================================================
         # Finalize Status (Success)
         # ============================================================
-        ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter)
+        ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter,
+                                     sessions_per_hour=resolved_sessions_per_hour,
+                                     sessions_per_hour_source=sessions_per_hour_source)
         err_payload = None
         if not ok:
             msg = "STRICT ORDERING VIOLATION: root run_report.json missing at terminal finalize"
@@ -1051,7 +1115,9 @@ def main():
         ok = False
         try:
              # Pass explicit variables as requested (not locals())
-             ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter)
+             ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter,
+                                          sessions_per_hour=resolved_sessions_per_hour,
+                                          sessions_per_hour_source=sessions_per_hour_source)
         except Exception:
              pass
              
@@ -1076,7 +1142,9 @@ def main():
         # ============================================================
         ok = False
         try:
-             ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter)
+             ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter,
+                                          sessions_per_hour=resolved_sessions_per_hour,
+                                          sessions_per_hour_source=sessions_per_hour_source)
         except Exception:
              pass
 

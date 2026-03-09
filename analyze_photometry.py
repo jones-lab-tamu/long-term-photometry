@@ -23,6 +23,7 @@ def main():
     parser.add_argument('--event-signal', type=str, choices=['dff', 'delta_f'], help="Signal to use for peak detection features (default from config: dff)")
     parser.add_argument('--representative-session-index', type=int, default=None, help="Force a specific session index for representative artifacts (0-based)")
     parser.add_argument('--preview-first-n', type=int, default=None, help="Preview mode: process only the first N discovered sessions (after discovery/sort).")
+    parser.add_argument('--sessions-per-hour', type=int, default=None, help="Force sessions per hour for timing inference (overrides inference/defaults)")
     
     args = parser.parse_args()
     
@@ -74,7 +75,8 @@ def main():
             args.input, args.out, args.format, args.recursive, args.file_glob,
             include_rois=inc_rois, exclude_rois=exc_rois,
             traces_only=args.traces_only,
-            emitter=emitter
+            emitter=emitter,
+            sessions_per_hour=args.sessions_per_hour
         )
         
         # Emit post-run audit events

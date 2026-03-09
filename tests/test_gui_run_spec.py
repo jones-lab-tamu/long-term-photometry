@@ -797,6 +797,21 @@ class TestRunSpec(unittest.TestCase):
         self.assertIn("--format", argv_auto)
         self.assertEqual(argv_auto[argv_auto.index("--format") + 1], "auto")
 
+    def test_gui_run_spec_includes_sessions_per_hour_when_user_sets_it(self):
+        """Verifies that Sessions/Hour = 2 in RunSpec results in --sessions-per-hour 2 in argv."""
+        run_dir = os.path.join(self.tmp_dir, "run_sph_2")
+        spec = RunSpec(
+            input_dir="/data/in",
+            run_dir=run_dir,
+            sessions_per_hour=2,
+            config_source_path=self.config_path,
+        )
+        spec.generate_derived_config(run_dir)
+        argv = spec.build_runner_argv()
+        self.assertIn("--sessions-per-hour", argv)
+        idx = argv.index("--sessions-per-hour")
+        self.assertEqual(argv[idx + 1], "2")
+
         run_dir_rwd = os.path.join(self.tmp_dir, "run_fmt_rwd")
         spec_rwd = RunSpec(
             input_dir="/data/in",

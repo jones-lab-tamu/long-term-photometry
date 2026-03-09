@@ -630,7 +630,7 @@ class Pipeline:
             return p.parent.name
         return p.stem
 
-    def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv", include_rois: List[str] = None, exclude_rois: List[str] = None, traces_only: bool = False, emitter=None):
+    def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv", include_rois: List[str] = None, exclude_rois: List[str] = None, traces_only: bool = False, emitter=None, sessions_per_hour: int = None):
         # Lazy import to avoid GUI side effects at module level
         from .viz import plots
         
@@ -713,7 +713,9 @@ class Pipeline:
             roi_selection=self.roi_selection, 
             traces_only=traces_only,
             representative_info=self.representative_session_info,
-            preview_info=self.preview_info
+            preview_info=self.preview_info,
+            sessions_per_hour=sessions_per_hour,
+            sessions_per_hour_source=None
         )
         
         self.run_pass_1(force_format)

@@ -32,6 +32,7 @@ class CollapsibleRawViewer(QWidget):
         self._toggle_btn = QPushButton(f"▶ Advanced: raw {title}")
         self._toggle_btn.setStyleSheet("text-align: left; padding: 4px; font-weight: normal;")
         self._toggle_btn.setCursor(Qt.PointingHandCursor)
+        self._toggle_btn.setToolTip("Show or hide the raw metadata object as recorded in the run report.")
         self._toggle_btn.clicked.connect(self._toggle)
         layout.addWidget(self._toggle_btn)
         
@@ -183,7 +184,8 @@ class RunReportViewer(QWidget):
             adv_group = QGroupBox("Advanced / Internal Artifacts")
             adv_layout = QVBoxLayout(adv_group)
             for label, path, status in advanced_links:
-                self._render_link_row(adv_layout, label, path, status)
+                tooltip = "Open internal analysis artifacts or metadata files for advanced debugging."
+                self._render_link_row(adv_layout, label, path, status, tooltip=tooltip)
             self._raw_viewers_layout.insertWidget(0, adv_group)
 
         # 4. Raw Viewers
@@ -207,11 +209,12 @@ class RunReportViewer(QWidget):
         reg_layout.addWidget(name_lbl)
         
         for label, path, status in reg['subfolders']:
-            self._render_link_row(reg_layout, label, path, status)
+            tooltip = f"Open the {label.lower()} deliverables for this region."
+            self._render_link_row(reg_layout, label, path, status, tooltip=tooltip)
             
         self._links_layout.addWidget(reg_frame)
 
-    def _render_link_row(self, layout: QVBoxLayout, label: str, full_path: str, status: str):
+    def _render_link_row(self, layout: QVBoxLayout, label: str, full_path: str, status: str, tooltip: str = ""):
         """Helper to render a single link row with absolute path hidden in tooltip."""
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
@@ -224,13 +227,13 @@ class RunReportViewer(QWidget):
             btn = QPushButton("Open")
             btn.setCursor(Qt.PointingHandCursor)
             btn.setFixedWidth(60)
-            btn.setToolTip(full_path) # Show absolute path on hover only
+            btn.setToolTip(tooltip) # Descriptive tooltip only
             btn.clicked.connect(lambda checked=False, p=full_path: self._open_path(p))
             row_layout.addWidget(btn)
         else:
             err_lbl = QLabel(f"[{status}]")
             err_lbl.setStyleSheet("color: red;")
-            err_lbl.setToolTip(full_path)
+            err_lbl.setToolTip("This folder or artifact is missing or invalid.")
             row_layout.addWidget(err_lbl)
             
         row_layout.addStretch()
