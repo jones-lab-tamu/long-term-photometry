@@ -48,10 +48,82 @@ except ImportError:
 # Helpers
 # ======================================================================
 
-def run_cmd(cmd):
+def _utc_now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _extract_cmd_label(cmd):
+    """Extract a human-readable label from command list."""
+    if not cmd:
+        return "unknown"
+    # Try to get the script name if it's a python call
+    if len(cmd) > 1 and ("python" in cmd[0].lower() or cmd[0].endswith("python.exe")):
+        return os.path.basename(cmd[1])
+    return os.path.basename(cmd[0])
+
+
+def run_cmd(cmd, roi_label=None):
+    label = _extract_cmd_label(cmd)
+    roi_info = f" roi={roi_label}" if roi_label else ""
+    started_utc = _utc_now_iso()
+    t0 = time.perf_counter()
+    
+    print(f"TIMING START cmd={label}{roi_info} at {started_utc}")
     print(f"Running: {' '.join(cmd)}")
-    subprocess.check_call(cmd)
-    return cmd
+    
+    try:
+        subprocess.check_call(cmd)
+        returncode = 0
+    except subprocess.CalledProcessError:
+        # check_call raises on non-zero, but we want to be explicit if we were using run
+        raise
+
+    elapsed = time.perf_counter() - t0
+    finished_utc = _utc_now_iso()
+    print(f"TIMING DONE cmd={label}{roi_info} elapsed_sec={elapsed:.3f}")
+    
+    return {
+        "cmd": cmd,
+        "started_utc": started_utc,
+        "finished_utc": finished_utc,
+        "elapsed_sec": elapsed,
+        "returncode": returncode
+    }
+
+
+def _phase_start(status_data, phase_name):
+    """Record phase start in status and print log."""
+    now_utc = _utc_now_iso()
+    status_data["timing"]["current_phase"] = phase_name
+    status_data["timing"]["phase_started_utc"] = now_utc
+    print(f"TIMING START phase={phase_name} at {now_utc}")
+    return time.perf_counter(), now_utc
+
+
+def _phase_done(status_data, manifest, phase_name, t0, started_utc, status_path=None):
+    """Record phase completion in status and manifest, and print log."""
+    elapsed = time.perf_counter() - t0
+    finished_utc = _utc_now_iso()
+    
+    # Update status
+    status_data["timing"]["last_completed_phase"] = phase_name
+    status_data["timing"]["last_phase_elapsed_sec"] = elapsed
+    status_data["timing"]["current_phase"] = None
+    status_data["timing"]["phase_started_utc"] = None
+    
+    # Update manifest
+    if "timing" not in manifest:
+        manifest["timing"] = {"phases": {}}
+    manifest["timing"]["phases"][phase_name] = {
+        "started_utc": started_utc,
+        "finished_utc": finished_utc,
+        "elapsed_sec": elapsed
+    }
+    
+    if status_path:
+        _atomic_write_json(status_path, status_data)
+    
+    print(f"TIMING DONE phase={phase_name} elapsed_sec={elapsed:.3f}")
 
 
 def _generate_run_id():
@@ -334,6 +406,10 @@ def resolve_paths(args, run_dir):
 def main():
     args = parse_args()
     
+    # Timing: Authoritative Total Runtime
+    t0_total = time.perf_counter()
+    started_utc_total = _utc_now_iso()
+
     # Initialize variables for safe use in except blocks (Strict Ordering Gate)
     phasic_out = None
     tonic_out = None
@@ -620,7 +696,13 @@ def main():
         "warnings": [],
         "validation": None,
         "features_extracted": False if args.traces_only else None,
-        "traces_only": args.traces_only
+        "traces_only": args.traces_only,
+        "timing": {
+            "current_phase": None,
+            "phase_started_utc": None,
+            "last_completed_phase": None,
+            "last_phase_elapsed_sec": None
+        }
     }
     t0_status = time.time()
     status_path = os.path.join(run_dir, "status.json")
@@ -689,10 +771,12 @@ def main():
         # ============================================================
         # 3. Validate
         # ============================================================
+        t_phase, started_utc_phase = _phase_start(status_data, "validate")
         _write_status_update("validating")
         emitter.emit("validate", "start", "Validating inputs")
         validate_inputs(args)
         emitter.emit("validate", "done", "Validation passed")
+        _phase_done(status_data, manifest, "validate", t_phase, started_utc_phase, status_path=status_path)
 
         check_cancel(cancel_flag_path, emitter, "validate", manifest_path, manifest)
 
@@ -706,6 +790,7 @@ def main():
         analyze_script = os.path.join(root_dir, 'analyze_photometry.py')
         
         if args.mode in ('both', 'tonic'):
+            t_phase, started_utc_phase = _phase_start(status_data, "tonic_analysis")
             _write_status_update("tonic_analysis")
             emitter.emit("tonic", "start", "Running tonic analysis")
             emitter.close()  # Release file lock so subprocess can append events
@@ -731,6 +816,7 @@ def main():
             finally:
                 emitter = EventEmitter(events_path, run_id, run_dir, file_mode="a")
             emitter.emit("tonic", "done", "Tonic analysis complete")
+            _phase_done(status_data, manifest, "tonic_analysis", t_phase, started_utc_phase, status_path=status_path)
 
             check_cancel(cancel_flag_path, emitter, "tonic", manifest_path, manifest)
 
@@ -738,6 +824,7 @@ def main():
         # 5. Phasic Analysis
         # ============================================================
         if args.mode in ('both', 'phasic'):
+            t_phase, started_utc_phase = _phase_start(status_data, "phasic_analysis")
             _write_status_update("phasic_analysis")
             emitter.emit("phasic", "start", "Running phasic analysis")
             emitter.close()  # Release file lock so subprocess can append events
@@ -762,12 +849,14 @@ def main():
             finally:
                 emitter = EventEmitter(events_path, run_id, run_dir, file_mode="a")
             emitter.emit("phasic", "done", "Phasic analysis complete")
+            _phase_done(status_data, manifest, "phasic_analysis", t_phase, started_utc_phase, status_path=status_path)
 
             check_cancel(cancel_flag_path, emitter, "phasic", manifest_path, manifest)
 
         # ============================================================
         # 6. Session / Stride Computation
         # ============================================================
+        t_phase, started_utc_phase = _phase_start(status_data, "session_compute")
         tr_out = tonic_out if args.mode == 'tonic' else phasic_out
         trace_files = sorted(glob.glob(os.path.join(tr_out, 'traces', 'chunk_*.csv')), key=natural_sort_key)
         if not trace_files:
@@ -829,11 +918,13 @@ def main():
         manifest['session_duration_s'] = session_duration_s
         manifest['session_stride_s'] = stride_s
         print(f"Deterministic Sessions Per Hour: {sessions_per_hour} (Stride={stride_s:.1f}s, Dur={session_duration_s:.1f}s)")
+        _phase_done(status_data, manifest, "session_compute", t_phase, started_utc_phase, status_path=status_path)
 
         check_cancel(cancel_flag_path, emitter, "session_compute", manifest_path, manifest)
 
         # 7. Per-Region Processing (Plots & Packaging)
         # ============================================================
+        t_phase, started_utc_phase = _phase_start(status_data, "plots_total")
         _write_status_update("plots")
         emitter.emit("plots", "start", "Generating per-ROI deliverables")
 
@@ -877,6 +968,10 @@ def main():
         manifest['regions'] = regions
 
         for roi in regions:
+            t_roi = time.perf_counter()
+            started_utc_roi = _utc_now_iso()
+            print(f"TIMING START roi={roi} at {started_utc_roi}")
+            
             check_cancel(cancel_flag_path, emitter, "plots", manifest_path, manifest)
             _write_status_update(f"plot_{roi}")
 
@@ -912,7 +1007,7 @@ def main():
                               '--roi', roi,
                               '--chunk-id', str(cid_diag),
                               '--out', os.path.join(s_dir, "phasic_correction_impact.png")]
-                manifest['commands'].append(run_cmd(cmd_impact))
+                manifest['commands'].append(run_cmd(cmd_impact, roi_label=roi))
                 files_written.append("summary/phasic_correction_impact.png")
 
                 # Correction Data CSV
@@ -935,7 +1030,7 @@ def main():
             # B. Tonic Overview
             cmd_tonic_roi = [sys.executable, 'tools/plot_tonic_48h.py',
                              '--analysis-out', tonic_out, '--roi', roi]
-            run_cmd(cmd_tonic_roi)
+            run_cmd(cmd_tonic_roi, roi_label=roi)
 
             src_tonic = os.path.join(tonic_out, 'tonic_qc', f"tonic_48h_overview_{roi}.png")
             if os.path.exists(src_tonic):
@@ -974,7 +1069,7 @@ def main():
                           '--session-duration-s', str(session_duration_s),
                           '--out-dir', ts_dir,
                           '--export-csv']
-                manifest['commands'].append(run_cmd(cmd_ts))
+                manifest['commands'].append(run_cmd(cmd_ts, roi_label=roi))
 
                 # Copy Results
                 pairs = [
@@ -1004,7 +1099,7 @@ def main():
                           '--mode', 'dff',
                           '--sessions-per-hour', str(sessions_per_hour),
                           '--output-dir', qc_dir]
-                run_cmd(cmd_qc)
+                run_cmd(cmd_qc, roi_label=roi)
 
             # 2. Sig/Iso Grid
             sess_dir = os.path.join(phasic_out, f'session_qc_{roi}')
@@ -1014,7 +1109,7 @@ def main():
                         '--sessions-per-hour', str(sessions_per_hour),
                         '--session-duration-s', str(session_duration_s),
                         '--output-dir', sess_dir]
-            run_cmd(cmd_sess)
+            run_cmd(cmd_sess, roi_label=roi)
 
             # 3. Stacked (requires features.csv)
             if has_features:
@@ -1024,7 +1119,7 @@ def main():
                              '--out-dir', d_dir,
                              '--sessions-per-hour', str(sessions_per_hour),
                              '--smooth-window-s', str(args.smooth_window_s)]
-                manifest['commands'].append(run_cmd(cmd_stack))
+                manifest['commands'].append(run_cmd(cmd_stack, roi_label=roi))
 
             # Collect Per-Day Files
             days_generated = set()
@@ -1079,20 +1174,38 @@ def main():
             manifest['deliverables'][roi]['files'] = sorted(list(set(files_written)))
             manifest['deliverables'][roi]['days_generated'] = s_dff if has_features else s_stk
 
+            # ROI timing finalize
+            elapsed_roi = time.perf_counter() - t_roi
+            finished_utc_roi = _utc_now_iso()
+            manifest['deliverables'][roi]['timing'] = {
+                "started_utc": started_utc_roi,
+                "finished_utc": finished_utc_roi,
+                "elapsed_sec": elapsed_roi
+            }
+            print(f"TIMING DONE roi={roi} elapsed_sec={elapsed_roi:.3f}")
+
         emitter.emit("plots", "done", "All ROI deliverables complete")
+        _phase_done(status_data, manifest, "plots_total", t_phase, started_utc_phase, status_path=status_path)
 
         check_cancel(cancel_flag_path, emitter, "package", manifest_path, manifest)
         
         # ============================================================
         # 8. Write Manifest (LAST, atomic)
         # ============================================================
+        t_phase, started_utc_phase = _phase_start(status_data, "manifest_write")
         emitter.emit("package", "start", "Writing final manifest")
+        
+        # Add authoritative total runtime to manifest timing
+        manifest["timing"]["total_runtime_sec"] = time.perf_counter() - t0_total
+        
         _atomic_write_json(manifest_path, manifest)
         emitter.emit("package", "done", "Manifest written")
+        _phase_done(status_data, manifest, "manifest_write", t_phase, started_utc_phase, status_path=status_path)
 
         # ============================================================
         # 9. Finalize Artifacts (Strict Ordering Gate)
         # ============================================================
+        t_phase, started_utc_phase = _phase_start(status_data, "finalize_artifacts")
         # ============================================================
         # Finalize Status (Success)
         # ============================================================
@@ -1104,6 +1217,12 @@ def main():
             msg = "STRICT ORDERING VIOLATION: root run_report.json missing at terminal finalize"
             emitter.emit("package", "error", msg)
             err_payload = msg
+            
+        _phase_done(status_data, manifest, "finalize_artifacts", t_phase, started_utc_phase, status_path=status_path)
+
+        # Final manifest update for end-to-end timing
+        manifest["timing"]["total_runtime_sec"] = time.perf_counter() - t0_total
+        _atomic_write_json(manifest_path, manifest)
 
         _finalize_status("success", error_msg=err_payload)
         emitter.emit("engine", "done", "Execution complete")
