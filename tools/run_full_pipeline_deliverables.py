@@ -1028,13 +1028,13 @@ def main():
                 manifest['deliverables'][roi] = {}
 
             # B. Tonic Overview
+            out_tonic = os.path.join(s_dir, "tonic_overview.png")
             cmd_tonic_roi = [sys.executable, 'tools/plot_tonic_48h.py',
-                             '--analysis-out', tonic_out, '--roi', roi]
+                             '--analysis-out', tonic_out, '--roi', roi,
+                             '--out', out_tonic]
             run_cmd(cmd_tonic_roi, roi_label=roi)
 
-            src_tonic = os.path.join(tonic_out, 'tonic_qc', f"tonic_48h_overview_{roi}.png")
-            if os.path.exists(src_tonic):
-                shutil.copy2(src_tonic, os.path.join(s_dir, "tonic_overview.png"))
+            if os.path.exists(out_tonic):
                 files_written.append("summary/tonic_overview.png")
 
             # Tonic CSV
@@ -1061,29 +1061,26 @@ def main():
 
             if has_features:
                 # C. Phasic Time Series (Plots & CSV) — requires features
-                ts_dir = os.path.join(phasic_out, f'viz_{roi}')
+                out_rate_png = os.path.join(s_dir, "phasic_peak_rate_timeseries.png")
+                out_auc_png = os.path.join(s_dir, "phasic_auc_timeseries.png")
+                out_rate_csv = os.path.join(t_dir, "phasic_peak_rate_timeseries.csv")
+                out_auc_csv = os.path.join(t_dir, "phasic_auc_timeseries.csv")
+                
                 cmd_ts = [sys.executable, 'tools/plot_phasic_time_series_summary.py',
                           '--analysis-out', phasic_out,
                           '--roi', roi,
                           '--sessions-per-hour', str(sessions_per_hour),
                           '--session-duration-s', str(session_duration_s),
-                          '--out-dir', ts_dir,
-                          '--export-csv']
+                          '--out-rate-png', out_rate_png,
+                          '--out-auc-png', out_auc_png,
+                          '--out-rate-csv', out_rate_csv,
+                          '--out-auc-csv', out_auc_csv]
                 manifest['commands'].append(run_cmd(cmd_ts, roi_label=roi))
 
-                # Copy Results
-                pairs = [
-                    ("fig_phasic_peak_rate_timeseries.png", s_dir, "phasic_peak_rate_timeseries.png"),
-                    ("fig_phasic_auc_timeseries.png", s_dir, "phasic_auc_timeseries.png"),
-                    ("phasic_peak_rate_timeseries.csv", t_dir, "phasic_peak_rate_timeseries.csv"),
-                    ("phasic_auc_timeseries.csv", t_dir, "phasic_auc_timeseries.csv")
-                ]
-                for src_name, dst_dir, dst_name in pairs:
-                    s = os.path.join(ts_dir, src_name)
-                    if os.path.exists(s):
-                        shutil.copy2(s, os.path.join(dst_dir, dst_name))
-                        # Record relative to ROI root for manifest compat
-                        rel_path = os.path.relpath(os.path.join(dst_dir, dst_name), reg_dir).replace('\\', '/')
+                # Record Results
+                for dst in [out_rate_png, out_auc_png, out_rate_csv, out_auc_csv]:
+                    if os.path.exists(dst):
+                        rel_path = os.path.relpath(dst, reg_dir).replace('\\', '/')
                         files_written.append(rel_path)
 
             check_cancel(cancel_flag_path, emitter, "plots", manifest_path, manifest)
@@ -1092,23 +1089,23 @@ def main():
 
             # 1. dFF Grid (requires features.csv)
             if has_features:
-                qc_dir = os.path.join(phasic_out, f'qc_dff_{roi}')
                 cmd_qc = [sys.executable, 'tools/plot_phasic_qc_grid.py',
                           '--analysis-out', phasic_out,
                           '--roi', roi,
                           '--mode', 'dff',
                           '--sessions-per-hour', str(sessions_per_hour),
-                          '--output-dir', qc_dir]
+                          '--output-dir', d_dir,
+                          '--output-pattern', 'phasic_dFF_day_{d:03d}.png']
                 run_cmd(cmd_qc, roi_label=roi)
 
             # 2. Sig/Iso Grid
-            sess_dir = os.path.join(phasic_out, f'session_qc_{roi}')
             cmd_sess = [sys.executable, 'tools/plot_session_grid.py',
                         '--analysis-out', phasic_out,
                         '--roi', roi,
                         '--sessions-per-hour', str(sessions_per_hour),
                         '--session-duration-s', str(session_duration_s),
-                        '--output-dir', sess_dir]
+                        '--output-dir', d_dir,
+                        '--output-pattern', 'phasic_sig_iso_day_{d:03d}.png']
             run_cmd(cmd_sess, roi_label=roi)
 
             # 3. Stacked (requires features.csv)
@@ -1126,30 +1123,20 @@ def main():
             days_dff = set()
             days_sig_iso = set()
 
-            # Copy dFF (only produced when has_features)
-            # restored to RegionX/day_plots/ per correction
+            # Verify dFF
             if has_features:
-                qc_dir_roi = os.path.join(phasic_out, f'qc_dff_{roi}')
-                for f in glob.glob(os.path.join(qc_dir_roi, "day_*.png")):
-                    m = re.match(r'day_(\d+)\.png', os.path.basename(f))
+                for f in glob.glob(os.path.join(d_dir, "phasic_dFF_day_*.png")):
+                    files_written.append(f"day_plots/{os.path.basename(f)}")
+                    m = re.match(r'phasic_dFF_day_(\d+)\.png', os.path.basename(f))
                     if m:
-                        day_idx = m.group(1)
-                        dst = f"phasic_dFF_day_{day_idx}.png"
-                        shutil.copy2(f, os.path.join(d_dir, dst))
-                        files_written.append(f"day_plots/{dst}")
-                        days_dff.add(day_idx)
+                        days_dff.add(m.group(1))
 
-            # Copy Sig/Iso
-            # restored to RegionX/day_plots/ per correction
-            sess_out_roi = os.path.join(phasic_out, f'session_qc_{roi}')
-            for f in glob.glob(os.path.join(sess_out_roi, f"day_*_raw_iso_{roi}.png")):
-                 m = re.match(r'day_(\d+)_raw_iso_', os.path.basename(f))
+            # Verify Sig/Iso
+            for f in glob.glob(os.path.join(d_dir, "phasic_sig_iso_day_*.png")):
+                 files_written.append(f"day_plots/{os.path.basename(f)}")
+                 m = re.match(r'phasic_sig_iso_day_(\d+)\.png', os.path.basename(f))
                  if m:
-                     day_idx = m.group(1)
-                     dst = f"phasic_sig_iso_day_{day_idx}.png"
-                     shutil.copy2(f, os.path.join(d_dir, dst))
-                     files_written.append(f"day_plots/{dst}")
-                     days_sig_iso.add(day_idx)
+                     days_sig_iso.add(m.group(1))
 
             # Stacked are already in d_dir, just verify
             days_stacked = set()

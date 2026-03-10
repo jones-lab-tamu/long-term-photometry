@@ -550,67 +550,17 @@ class Pipeline:
             logging.error(f"High failure rate: {self.qc_summary['chunk_fail_fraction']:.2%}")
 
         # -----------------------------
-        # VIZ: Representative Session Plots
+        # Representative Session Validation
         # -----------------------------
-        viz_dir = os.path.join(output_dir, 'viz')
         rep_fpath = self.file_list[rep_idx] if (rep_idx is not None and 0 <= rep_idx < len(self.file_list)) else None
         
-        if rep_chunk_for_plotting is not None:
-            try:
-                os.makedirs(viz_dir, exist_ok=True)
-                plots.set_style()
-                
-                # A & D Plots (per-ROI raw + correction impact)
-                for roi in rep_chunk_for_plotting.channel_names:
-                    try:
-                        plots.plot_single_session_raw(rep_chunk_for_plotting, roi, viz_dir)
-                        plots.plot_correction_impact(rep_chunk_for_plotting, roi, slice(None), viz_dir)
-                    except Exception as e:
-                        logging.warning(f"Representative Plot failure (A/D) for {roi}: {e}")
-                    
-            except Exception as e:
-                # Fail-closed logic: if user explicitly requested this index, raise.
-                if self.representative_user_provided:
-                    raise RuntimeError(
-                        f"FAILED to plot requested representative session "
-                        f"(index={rep_idx}, file={rep_fpath}, stage=analysis/pass-2): {e}"
-                    )
-                else:
-                    logging.warning(f"Skipping representative plots: default session failed to plot: {e}")
-        else:
+        if rep_chunk_for_plotting is None:
             if self.representative_user_provided:
                 raise RuntimeError(
                     f"FAILED to process requested representative session "
                     f"(index={rep_idx}, file={rep_fpath}, stage=analysis/pass-2). "
                     f"Session was not successfully processed during Pass 2."
                 )
-            logging.info("Representative session plots skipped (no valid session resolved).")
-
-
-
-        # -----------------------------
-        # VIZ: Aggregate Canonical Visualization
-        # -----------------------------
-        print("Generating visualizations...")
-        plots.set_style()
-        viz_dir = os.path.join(output_dir, 'viz')
-        os.makedirs(viz_dir, exist_ok=True)
-        
-        # Get ROIs from stats or first chunk
-        rois = list(self.stats.f0_values.keys()) if self.stats.f0_values else []
-        if not rois and self.roi_map: rois = list(self.roi_map.keys())
-
-        # Trace files list
-        trace_files = sorted([f for f in os.listdir(traces_dir) if f.endswith('.csv')])
-        
-        for roi in rois:
-            try:
-                # Plot B: Continuous
-                plots.plot_continuous_multiday(traces_dir, roi, viz_dir, trace_files)
-                # Plot C: Stacked
-                plots.plot_stacked_session(traces_dir, roi, viz_dir, trace_files)
-            except Exception as e:
-                logging.warning(f"Viz failure for {roi}: {e}")
                 
     def _apply_roi_filter(self, chunk):
         """Filter chunk data to only include channels in self._selected_rois."""

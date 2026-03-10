@@ -86,15 +86,16 @@ def test_region_day_plots_contains_all_user_facing_day_plots():
         content = f.read()
     
     # 1. Stacked
-    assert 'phasic_stacked_day_*.png' in content or 'phasic_stacked_day_' in content
+    assert 'phasic_stacked_day_' in content
     
-    # 2. dFF (Restored)
-    assert 'phasic_dFF_day_' in content
-    assert 'shutil.copy2' in content and 'd_dir' in content
+    # 2. dFF 
+    assert "'--output-pattern', 'phasic_dFF_day_{d:03d}.png'" in content
     
-    # 3. Sig/Iso (Restored)
-    assert 'phasic_sig_iso_day_' in content
-    assert 'shutil.copy2' in content and 'd_dir' in content
+    # 3. Sig/Iso 
+    assert "'--output-pattern', 'phasic_sig_iso_day_{d:03d}.png'" in content
+    
+    # 4. Verify no remaining copy operations for legacy artifacts
+    assert "shutil.copy2(f, os.path.join(d_dir, dst))" not in content
 
 def test_region_manifest_is_truthful_with_all_day_plots():
     """

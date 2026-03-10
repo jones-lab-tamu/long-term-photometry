@@ -58,6 +58,7 @@ def parse_args():
     parser.add_argument('--roi', default=None, help="Specific ROI to plot (default: first found)")
     parser.add_argument('--signal', default='auto', help="Trace column to plot/verify (default: auto detects *_dff)")
     parser.add_argument('--output-dir', default=None, help="Override output directory")
+    parser.add_argument('--output-pattern', default=None, help="E.g. phasic_dFF_day_{d:03d}.png")
     parser.add_argument('--dpi', type=int, default=150, help="Output DPI")
     parser.add_argument('--sessions-per-hour', type=int, default=None, help="Force grid columns")
     parser.add_argument('--mode', choices=['dff', 'raw'], default='dff', help="Plot mode: dff (default) or raw (sig+iso)")
@@ -607,10 +608,13 @@ def main():
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         
         # Output Naming Handling
-        if args.mode == 'dff':
-            out_name = f"day_{d:03d}.png"
-        else: # raw
-            out_name = f"day_{d:03d}_raw.png"
+        if args.output_pattern:
+            out_name = args.output_pattern.format(d=d)
+        else:
+            if args.mode == 'dff':
+                out_name = f"day_{d:03d}.png"
+            else: # raw
+                out_name = f"day_{d:03d}_raw.png"
             
         out_path = os.path.join(output_dir, out_name)
         print(f"PLOT_TIMING STEP script=plot_phasic_qc_grid.py step=plotting day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)

@@ -14,9 +14,13 @@ def parse_args():
     parser.add_argument('--roi', help="ROI to plot. Defaults to first ROI alphabetically.")
     parser.add_argument('--sessions-per-hour', type=int, default=2, help="Expected sessions per hour for fallback timing.")
     parser.add_argument('--session-duration-s', type=float, default=None, help="Explicit session duration (window seconds).")
-    parser.add_argument('--out-dir', help="Output directory. Defaults to <analysis-out>/viz")
+    parser.add_argument('--out-rate-png', help="Output path for peak rate timeseries PNG")
+    parser.add_argument('--out-auc-png', help="Output path for AUC timeseries PNG")
+    parser.add_argument('--out-rate-csv', help="Output path for peak rate timeseries CSV")
+    parser.add_argument('--out-auc-csv', help="Output path for AUC timeseries CSV")
+    parser.add_argument('--out-dir', help="Fallback output directory based on previous design.")
     parser.add_argument('--dpi', type=int, default=150, help="DPI for output figures")
-    parser.add_argument('--export-csv', action='store_true', help="Export CSVs of plotting data")
+    parser.add_argument('--export-csv', action='store_true', help="Export CSVs of plotting data (if --out-*-csv not provided)")
     return parser.parse_args()
 
 def main():
@@ -33,7 +37,9 @@ def main():
             raise RuntimeError(f"features.csv not found at {features_path}")
             
         out_dir = args.out_dir if args.out_dir else os.path.join(args.analysis_out, 'viz')
-        os.makedirs(out_dir, exist_ok=True)
+        if not all([args.out_rate_png, args.out_auc_png, args.out_rate_csv, args.out_auc_csv]):
+            os.makedirs(out_dir, exist_ok=True)
+
         
         # 2. Load Data
         try:
@@ -197,7 +203,8 @@ def main():
         ax1.set_title(f"Phasic event frequency over time (ROI {selected_roi})")
         ax1.grid(True, alpha=0.3)
         
-        out_path1 = os.path.join(out_dir, "fig_phasic_peak_rate_timeseries.png")
+        out_path1 = args.out_rate_png if args.out_rate_png else os.path.join(out_dir, "fig_phasic_peak_rate_timeseries.png")
+        if os.path.dirname(out_path1): os.makedirs(os.path.dirname(out_path1), exist_ok=True)
         fig1.tight_layout()
         fig1.savefig(out_path1)
         plt.close(fig1) 
@@ -221,14 +228,15 @@ def main():
         ax2.set_title(f"Phasic AUC over time (ROI {selected_roi})")
         ax2.grid(True, alpha=0.3)
         
-        out_path2 = os.path.join(out_dir, "fig_phasic_auc_timeseries.png")
+        out_path2 = args.out_auc_png if args.out_auc_png else os.path.join(out_dir, "fig_phasic_auc_timeseries.png")
+        if os.path.dirname(out_path2): os.makedirs(os.path.dirname(out_path2), exist_ok=True)
         fig2.tight_layout()
         fig2.savefig(out_path2)
         plt.close(fig2)
         print(f"Saved: {out_path2}")
         
         # 10. Export CSVs
-        if args.export_csv:
+        if args.export_csv or args.out_rate_csv or args.out_auc_csv:
             # Prepare DataFrame
             # Schema: time_hours, day, hour, session_in_hour, peak_rate_per_min, n_peaks, window_seconds, auc_above_threshold_dff_s, threshold_used
             
@@ -246,7 +254,8 @@ def main():
             # Enforce integer type for peak_count
             df_peak['peak_count'] = roi_df['peak_count'].fillna(0).astype(int)
             
-            p_path = os.path.join(out_dir, "phasic_peak_rate_timeseries.csv")
+            p_path = args.out_rate_csv if args.out_rate_csv else os.path.join(out_dir, "phasic_peak_rate_timeseries.csv")
+            if os.path.dirname(p_path): os.makedirs(os.path.dirname(p_path), exist_ok=True)
             df_peak.to_csv(p_path, index=False)
             print(f"Saved: {p_path}")
             
@@ -259,7 +268,8 @@ def main():
             elif 'threshold_used' in roi_df.columns:
                 df_auc['threshold_used'] = roi_df['threshold_used']
             
-            a_path = os.path.join(out_dir, "phasic_auc_timeseries.csv")
+            a_path = args.out_auc_csv if args.out_auc_csv else os.path.join(out_dir, "phasic_auc_timeseries.csv")
+            if os.path.dirname(a_path): os.makedirs(os.path.dirname(a_path), exist_ok=True)
             df_auc.to_csv(a_path, index=False)
             print(f"Saved: {a_path}")
         

@@ -36,6 +36,7 @@ def parse_args():
     parser.add_argument('--sessions-per-hour', type=int, default=None)
     parser.add_argument('--session-duration-s', type=float, default=None, help="Expected session duration in seconds. If provided, used for validation.")
     parser.add_argument('--output-dir', default=None, help="Override output directory")
+    parser.add_argument('--output-pattern', default=None, help="E.g. phasic_sig_iso_day_{d:03d}.png")
     return parser.parse_args()
 
 def check_monotonicity(time_arr):
@@ -185,7 +186,12 @@ def main():
         for i in range(24):
             axes[i,0].set_ylabel(f"H{i:02d}", rotation=0, labelpad=20)
             
-        out_path = os.path.join(out_dir, f"day_{d:03d}_raw_iso_{roi}.png")
+        if args.output_pattern:
+            out_name = args.output_pattern.format(d=d, roi=roi)
+        else:
+            out_name = f"day_{d:03d}_raw_iso_{roi}.png"
+            
+        out_path = os.path.join(out_dir, out_name)
         plt.tight_layout(rect=[0, 0.03, 1, 0.97])
         print(f"PLOT_TIMING STEP script=plot_session_grid.py step=plotting day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
         plt.savefig(out_path)

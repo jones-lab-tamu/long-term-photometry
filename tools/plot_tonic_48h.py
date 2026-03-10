@@ -27,6 +27,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--analysis-out', required=True)
     parser.add_argument('--roi', default=None)
+    parser.add_argument('--out', default=None, help="Explicit output path for the PNG")
     return parser.parse_args()
 
 def main():
@@ -105,8 +106,15 @@ def main():
     print(f"PLOT_TIMING STEP script=plot_tonic_48h.py step=data_preparation elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
     
     # Plot
-    out_dir = os.path.join(args.analysis_out, 'tonic_qc')
-    os.makedirs(out_dir, exist_ok=True)
+    if args.out:
+        out_path = args.out
+        out_dir = os.path.dirname(out_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+    else:
+        out_dir = os.path.join(args.analysis_out, 'tonic_qc')
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"tonic_48h_overview_{roi}.png")
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
     
@@ -136,7 +144,6 @@ def main():
     
     print(f"PLOT_TIMING STEP script=plot_tonic_48h.py step=plotting elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
     
-    out_path = os.path.join(out_dir, f"tonic_48h_overview_{roi}.png")
     plt.tight_layout()
     plt.savefig(out_path)
     print(f"PLOT_TIMING STEP script=plot_tonic_48h.py step=figure_save elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)

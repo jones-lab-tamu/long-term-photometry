@@ -90,16 +90,16 @@ class TestFullPipelineDeliverables(unittest.TestCase):
         
         # Multi-day plots
         for day in ["000", "001"]:
-            self.assertTrue(os.path.exists(os.path.join(reg0, f"phasic_sig_iso_day_{day}.png")))
-            self.assertTrue(os.path.exists(os.path.join(reg0, f"phasic_dFF_day_{day}.png")))
-            self.assertTrue(os.path.exists(os.path.join(reg0, f"phasic_stacked_day_{day}.png")))
+            self.assertTrue(os.path.exists(os.path.join(reg0, "day_plots", f"phasic_sig_iso_day_{day}.png")))
+            self.assertTrue(os.path.exists(os.path.join(reg0, "day_plots", f"phasic_dFF_day_{day}.png")))
+            self.assertTrue(os.path.exists(os.path.join(reg0, "day_plots", f"phasic_stacked_day_{day}.png")))
             
         # 3-Panel Correction Impact
-        self.assertTrue(os.path.exists(os.path.join(reg0, "phasic_correction_impact.png")))
-        self.assertTrue(os.path.exists(os.path.join(reg0, "phasic_correction_impact_session.csv")))
+        self.assertTrue(os.path.exists(os.path.join(reg0, "summary", "phasic_correction_impact.png")))
+        self.assertTrue(os.path.exists(os.path.join(reg0, "tables", "phasic_correction_impact_session.csv")))
         
         # Time Series CSV Row Counts
-        ts_csv = os.path.join(reg0, "phasic_peak_rate_timeseries.csv")
+        ts_csv = os.path.join(reg0, "tables", "phasic_peak_rate_timeseries.csv")
         self.assertTrue(os.path.exists(ts_csv))
         df_ts = pd.read_csv(ts_csv)
         # Expected: 96 rows 
@@ -121,7 +121,7 @@ class TestFullPipelineDeliverables(unittest.TestCase):
         self.assertNotIn('n_peaks', df_ts.columns)
         
         # Check AUC CSV
-        auc_csv = os.path.join(reg0, "phasic_auc_timeseries.csv")
+        auc_csv = os.path.join(reg0, "tables", "phasic_auc_timeseries.csv")
         self.assertTrue(os.path.exists(auc_csv))
         df_auc = pd.read_csv(auc_csv)
         self.assertIn('auc_above_threshold_dff_s', df_auc.columns)
@@ -137,6 +137,23 @@ class TestFullPipelineDeliverables(unittest.TestCase):
         self.assertEqual(deliv['days_dff'], deliv['days_generated'])
         self.assertEqual(deliv['days_sig_iso'], deliv['days_generated'])
         self.assertEqual(deliv['days_stacked'], deliv['days_generated'])
+        
+        # ---------------------------------------------------------------------
+        # Issue 2: explicitly verify absence of redundant `_analysis` plot outputs
+        # ---------------------------------------------------------------------
+        analysis_dir = os.path.join(self.output_package, "_analysis")
+        phasic_out = os.path.join(analysis_dir, "phasic_out")
+        tonic_out = os.path.join(analysis_dir, "tonic_out")
+        
+        # Native analysis-stage plot dirs:
+        self.assertFalse(os.path.exists(os.path.join(phasic_out, "viz")), "Redundant _analysis/phasic_out/viz was produced")
+        self.assertFalse(os.path.exists(os.path.join(tonic_out, "viz")), "Redundant _analysis/tonic_out/viz was produced")
+        
+        # Wrapper-stage redundant plot dirs:
+        self.assertFalse(os.path.exists(os.path.join(phasic_out, "viz_Region0")), "Redundant viz_Region0 was produced")
+        self.assertFalse(os.path.exists(os.path.join(phasic_out, "qc_dff_Region0")), "Redundant qc_dff_Region0 was produced")
+        self.assertFalse(os.path.exists(os.path.join(phasic_out, "session_qc_Region0")), "Redundant session_qc_Region0 was produced")
+        self.assertFalse(os.path.exists(os.path.join(tonic_out, "tonic_qc")), "Redundant tonic_qc was produced")
 
     def test_impossible_schedule(self):
         """Ensure failure when session_duration_s > stride_s."""

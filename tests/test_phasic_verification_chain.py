@@ -120,12 +120,13 @@ class TestPhasicVerificationChain(unittest.TestCase):
         
         plot_tonic_cmd = [
             sys.executable, "tools/plot_tonic_48h.py",
-            "--analysis-out", tonic_out
+            "--analysis-out", tonic_out,
+            "--out", os.path.join(self.out_dir, "Region0", "summary", "tonic_overview.png")
         ]
         self.run_cmd(plot_tonic_cmd)
         
         # Verify Output
-        self.assertTrue(os.path.exists(os.path.join(tonic_out, "tonic_qc", "tonic_48h_overview_Region0.png")))
+        self.assertTrue(os.path.exists(os.path.join(self.out_dir, "Region0", "summary", "tonic_overview.png")))
 
         # Step 3: Phasic Pipeline & Session Grid
         phasic_out = os.path.join(self.out_dir, "phasic_out")
@@ -140,14 +141,17 @@ class TestPhasicVerificationChain(unittest.TestCase):
         self.run_cmd(analyze_phasic_cmd)
         report_lines.append(f"3. **Phasic Analysis**\n   ```powershell\n   {' '.join(analyze_phasic_cmd)}\n   ```\n")
         
+        os.makedirs(os.path.join(self.out_dir, "Region0", "day_plots"), exist_ok=True)
         item_grid_cmd = [
             sys.executable, "tools/plot_session_grid.py",
-            "--analysis-out", phasic_out
+            "--analysis-out", phasic_out,
+            "--output-dir", os.path.join(self.out_dir, "Region0", "day_plots"),
+            "--output-pattern", "phasic_sig_iso_day_{d:03d}.png"
         ]
         self.run_cmd(item_grid_cmd)
         
         # Verify Session QC Output
-        self.assertTrue(os.path.exists(os.path.join(phasic_out, "session_qc", "day_000_raw_iso_Region0.png")))
+        self.assertTrue(os.path.exists(os.path.join(self.out_dir, "Region0", "day_plots", "phasic_sig_iso_day_000.png")))
         
         print("Step 4a: Strict Chain Audit (Tier 1 - Default)...")
         chain_cmd_default = [
@@ -170,13 +174,14 @@ class TestPhasicVerificationChain(unittest.TestCase):
         pngs = glob.glob(os.path.join(chain_dir, "*.png"))
         self.assertTrue(len(pngs) > 10, "Should generate chain plots for passed chunks")
         
-        # Step 5: Visualization Grid
         viz_cmd = [
             sys.executable, "tools/plot_phasic_qc_grid.py",
-            "--analysis-out", phasic_out
+            "--analysis-out", phasic_out,
+            "--output-dir", os.path.join(self.out_dir, "Region0", "day_plots"),
+            "--output-pattern", "phasic_dFF_day_{d:03d}.png"
         ]
         self.run_cmd(viz_cmd)
-        self.assertTrue(os.path.exists(os.path.join(phasic_out, "phasic_qc", "day_000.png")))
+        self.assertTrue(os.path.exists(os.path.join(self.out_dir, "Region0", "day_plots", "phasic_dFF_day_000.png")))
         
         # Write Report
         report_path = os.path.join(PROJECT_ROOT, "RUNTHROUGH_REPORT.md")

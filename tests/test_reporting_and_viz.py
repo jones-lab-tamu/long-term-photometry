@@ -148,13 +148,6 @@ class TestReportingAndViz(unittest.TestCase):
         
         pipeline.run(iso_dir, self.out_dir, force_format='rwd', recursive=False)
         
-        # 4. Assertions
-        viz_dir = os.path.join(self.out_dir, "viz")
-        
-        # Check plots A/D exist (from chunk 1)
-        self.assertTrue(os.path.exists(os.path.join(viz_dir, "plot_A_raw_traces_Region0.png")))
-        self.assertTrue(os.path.exists(os.path.join(viz_dir, "plot_D_correction_impact_Region0.png")))
-        
         # Check QC Summary says chunk 0 failed
         qc_path = os.path.join(self.out_dir, "qc", "qc_summary.json")
         with open(qc_path, 'r') as f:
