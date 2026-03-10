@@ -85,8 +85,8 @@ def test_plot_tonic_48h_timing_output(tmp_path):
     # Check for required timing checkpoints
     assert "PLOT_TIMING START script=plot_tonic_48h.py" in out
     assert "step=discovery" in out
-    assert "step=data_loading" in out
-    assert "step=data_preparation" in out
+    assert "step=csv_read" in out
+    assert "step=assembly" in out
     assert "step=plotting" in out
     assert "step=figure_save" in out
     assert "PLOT_TIMING DONE script=plot_tonic_48h.py total_sec=" in out
