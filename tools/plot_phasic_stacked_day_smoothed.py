@@ -22,22 +22,17 @@ from scipy.ndimage import uniform_filter1d
 from datetime import datetime
 import time
 
-def infer_datetime_from_string(s):
-    if not isinstance(s, str): return None
-    patterns = [
-        r'(\d{4})[-_](\d{2})[-_](\d{2})[-_](\d{2})[_:](\d{2})[_:](\d{2})',
-        r'(\d{4})(\d{2})(\d{2})[-_](\d{2})(\d{2})(\d{2})',
-        r'(\d{4})[-_](\d{2})[-_](\d{2})\s+(\d{2})[:](\d{2})[:](\d{2})'
-    ]
-    for pat in patterns:
-        m = re.search(pat, s)
-        if m:
-            try:
-                parts = list(map(int, m.groups()))
-                return datetime(*parts)
-            except ValueError:
-                continue
-    return None
+# Ensure repo root is in path
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from photometry_pipeline.viz.phasic_data_prep import (
+    discover_chunks, build_feature_map, compute_day_layout,
+    infer_datetime_from_string,
+)
+
+# infer_datetime_from_string is now imported from photometry_pipeline.viz.phasic_data_prep
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -55,80 +50,27 @@ def main():
     
     args = parse_args()
     
-    # 1. Load Features
-    feats_path = os.path.join(args.analysis_out, 'features', 'features.csv')
-    if not os.path.exists(feats_path):
-        print("CRITICAL: features.csv missing.")
-        sys.exit(1)
-    df_feat = pd.read_csv(feats_path)
-    
+    # 1. Shared data preparation (chunk discovery, feature map, layout)
     traces_dir = os.path.join(args.analysis_out, 'traces')
-    trace_files = sorted(glob.glob(os.path.join(traces_dir, 'chunk_*.csv')))
+    feats_path = os.path.join(args.analysis_out, 'features', 'features.csv')
     
-    if not trace_files:
-        print("CRITICAL: No trace files found.")
+    try:
+        chunk_entries = discover_chunks(traces_dir)
+    except RuntimeError as e:
+        print(f"CRITICAL: {e}")
         sys.exit(1)
-
-    # 2. Build Grid/Group Mapping
-    feat_map = {}
-    for _, row in df_feat.iterrows():
-        feat_map[(row['chunk_id'], row['roi'])] = row
-        
-    grid_rows = []
-    for tpath in trace_files:
-        fname = os.path.basename(tpath)
-        m = re.search(r'chunk_(\d+)\.csv', fname)
-        if not m: continue
-        cid = int(m.group(1))
-        
-        # Determine Source/Time
-        source = tpath
-        dt = None
-        if (cid, args.roi) in feat_map:
-            source = feat_map[(cid, args.roi)].get('source_file', tpath)
-            dt = infer_datetime_from_string(source)
-            
-        grid_rows.append({
-            'chunk_id': cid,
-            'trace_path': tpath,
-            'datetime': dt,
-            'source': source
-        })
-
-    df_grid = pd.DataFrame(grid_rows)
     
-    # Inferred Grouping Logic
-    mapped = df_grid['datetime'].notnull()
-    pct_mapped = mapped.mean() * 100
-    sessions_ph = args.sessions_per_hour
+    feat_map = build_feature_map(feats_path, roi=args.roi)
+    pds = compute_day_layout(chunk_entries, feat_map, args.roi, args.sessions_per_hour)
     
-    # Logic to match other tools perfectly
-    if pct_mapped > 90 and sessions_ph is None:
-        # Datetime mode
-        t0 = df_grid['datetime'].min()
-        day_start = t0.replace(hour=0, minute=0, second=0, microsecond=0)
-        df_grid['elapsed'] = (df_grid['datetime'] - day_start).dt.total_seconds()
-        df_grid['day_idx'] = (df_grid['elapsed'] // 86400).astype(int)
-    else:
-        # Fallback loop
-        if sessions_ph is None:
-             # Basic default inference if not provided
-             n_chunks = len(df_grid)
-             n_days_est = max(1, math.ceil(n_chunks / 48)) 
-             sph_est = max(1, round(n_chunks / (24 * n_days_est)))
-             sessions_ph = sph_est
-        
-        df_grid = df_grid.sort_values('chunk_id')
-        df_grid['day_idx'] = df_grid.index // (24 * (sessions_ph or 1))
-
-    # 3. Process Each Day
+    # 2. Process Each Day
     os.makedirs(args.out_dir, exist_ok=True)
-    unique_days = sorted(df_grid['day_idx'].unique())
+    unique_days = sorted(pds.chunks_by_day.keys())
 
     print(f"Processing {len(unique_days)} days for ROI {args.roi}...")
     
     # Detect dFF Column
-    df0 = pd.read_csv(trace_files[0], nrows=1)
+    df0 = pd.read_csv(chunk_entries[0][1], nrows=1)
     col_dff = f"{args.roi}_dff"
     
     # If not found, look for alternates
@@ -144,9 +86,9 @@ def main():
 
     # Pre-process traces
     prepared_traces = {}
-    for _, row in df_grid.iterrows():
+    for cr in pds.chunks:
         try:
-            df = pd.read_csv(row['trace_path'])
+            df = pd.read_csv(cr.trace_path)
             y = df[col_dff].values.astype(float)
             t = df['time_sec'].values.astype(float)
             
@@ -171,22 +113,22 @@ def main():
             # Use standard uniform filter
             y_smooth = uniform_filter1d(y, size=w_samples)
             
-            prepared_traces[row['chunk_id']] = (t, y_smooth)
+            prepared_traces[cr.chunk_id] = (t, y_smooth)
             
         except Exception as e:
-            print(f"Warning: Failed to load chunk {row['chunk_id']}: {e}")
+            print(f"Warning: Failed to load chunk {cr.chunk_id}: {e}")
             continue
 
     print(f"PLOT_TIMING STEP script=plot_phasic_stacked_day_smoothed.py step=data_loading elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
     print(f"PLOT_TIMING STEP script=plot_phasic_stacked_day_smoothed.py step=data_preparation elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
 
     for d in unique_days:
-        day_chunks = df_grid[df_grid['day_idx'] == d].sort_values('chunk_id')
-        if day_chunks.empty: continue
+        day_chunks = sorted(pds.chunks_by_day.get(d, []), key=lambda c: c.chunk_id)
+        if not day_chunks: continue
         
         traces = []
-        for _, row in day_chunks.iterrows():
-            cid = row['chunk_id']
+        for cr in day_chunks:
+            cid = cr.chunk_id
             if cid in prepared_traces:
                 traces.append(prepared_traces[cid])
                 

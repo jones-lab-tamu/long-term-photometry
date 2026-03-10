@@ -48,6 +48,10 @@ if repo_root not in sys.path:
 from photometry_pipeline.config import Config
 from photometry_pipeline.core.feature_extraction import extract_features
 from photometry_pipeline.core.types import Chunk
+from photometry_pipeline.viz.phasic_data_prep import (
+    discover_chunks, build_feature_map, resolve_roi,
+    compute_day_layout, infer_datetime_from_string,
+)
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -81,22 +85,7 @@ def load_config_obj(out_dir):
         print(f"CRITICAL: Failed to load config from {path}: {e}")
         sys.exit(1)
 
-def infer_datetime_from_string(s):
-    if not isinstance(s, str): return None
-    patterns = [
-        r'(\d{4})[-_](\d{2})[-_](\d{2})[-_](\d{2})[_:](\d{2})[_:](\d{2})',
-        r'(\d{4})(\d{2})(\d{2})[-_](\d{2})(\d{2})(\d{2})',
-        r'(\d{4})[-_](\d{2})[-_](\d{2})\s+(\d{2})[:](\d{2})[:](\d{2})'
-    ]
-    for pat in patterns:
-        m = re.search(pat, s)
-        if m:
-            try:
-                parts = list(map(int, m.groups()))
-                return datetime(*parts)
-            except ValueError:
-                continue
-    return None
+# infer_datetime_from_string is now imported from photometry_pipeline.viz.phasic_data_prep
 
 def determine_signal_column(trace_path, roi, requested='auto'):
     """
@@ -282,89 +271,28 @@ def main():
     if not os.path.exists(feats_path):
         print("CRITICAL: features.csv missing.")
         sys.exit(1)
-    df_feat = pd.read_csv(feats_path)
     
     traces_dir = os.path.join(args.analysis_out, 'traces')
-    trace_files = sorted(glob.glob(os.path.join(traces_dir, 'chunk_*.csv')))
-    if not trace_files:
-        print("CRITICAL: No trace files found.")
+    
+    # 2. Shared data preparation (chunk discovery, ROI, layout)
+    try:
+        chunk_entries = discover_chunks(traces_dir)
+    except RuntimeError as e:
+        print(f"CRITICAL: {e}")
         sys.exit(1)
-        
-    # 2. Select ROI
-    first_trace = pd.read_csv(trace_files[0], nrows=1)
-    dff_cols = [c for c in first_trace.columns if '_dff' in c]
-    available_rois = [c.replace('_dff', '') for c in dff_cols]
     
-    if args.roi:
-        if args.roi not in available_rois:
-            if args.roi not in df_feat['roi'].unique():
-                print(f"CRITICAL: ROI '{args.roi}' not found.")
-                sys.exit(1)
-        plot_roi = args.roi
-    else:
-        if not available_rois:
-            print("CRITICAL: No _dff columns found. Cannot auto-select ROI.")
-            sys.exit(1)
-        plot_roi = sorted(available_rois)[0]
+    feat_map = build_feature_map(feats_path, roi=None)
+    
+    try:
+        plot_roi = resolve_roi(chunk_entries[0][1], args.roi, column_suffix='_dff')
+    except RuntimeError as e:
+        print(f"CRITICAL: {e}")
+        sys.exit(1)
+    if not args.roi:
         print(f"Auto-selected ROI: {plot_roi}")
-
-    # 3. Build Grid Mapping
-    grid_rows = []
-    feat_map = {}
-    for _, row in df_feat.iterrows():
-        feat_map[(row['chunk_id'], row['roi'])] = row
-        
-    for tpath in trace_files:
-        fname = os.path.basename(tpath)
-        m = re.search(r'chunk_(\d+)\.csv', fname)
-        if not m: continue
-        cid = int(m.group(1))
-        
-        dt = None
-        if (cid, plot_roi) in feat_map:
-            src = feat_map[(cid, plot_roi)].get('source_file', '')
-            dt = infer_datetime_from_string(src)
-        else:
-            src = tpath # Fallback
-
-        grid_rows.append({
-            'chunk_id': cid,
-            'trace_path': tpath,
-            'datetime': dt,
-            'source_file': src
-        })
-        
-    df_grid = pd.DataFrame(grid_rows)
     
-    # 4. Infer Layout
-    mapped = df_grid['datetime'].notnull()
-    pct_mapped = mapped.mean() * 100
-    sessions_ph = args.sessions_per_hour
-    
-    if pct_mapped > 90 and sessions_ph is None:
-        t0 = df_grid['datetime'].min()
-        day_start = t0.replace(hour=0, minute=0, second=0, microsecond=0)
-        df_grid['elapsed'] = (df_grid['datetime'] - day_start).dt.total_seconds()
-        df_grid['day_idx'] = (df_grid['elapsed'] // 86400).astype(int)
-        df_grid['hour_idx'] = ((df_grid['elapsed'] % 86400) // 3600).astype(int)
-        df_grid = df_grid.sort_values(['day_idx', 'hour_idx', 'datetime'])
-        df_grid['hour_rank'] = df_grid.groupby(['day_idx', 'hour_idx']).cumcount()
-        modes = df_grid.groupby(['day_idx', 'hour_idx']).size()
-        sessions_ph = int(modes.mode()[0]) if not modes.empty else 1
-    else:
-        if sessions_ph is None:
-            n_chunks = len(df_grid)
-            n_days_est = max(1, math.ceil(n_chunks / 48)) 
-            sph_est = max(1, round(n_chunks / (24 * n_days_est)))
-            sessions_ph = sph_est
-            print(f"Fallback: Inferred {sessions_ph} sessions/hour from count.")
-            
-        df_grid = df_grid.sort_values('chunk_id')
-        df_grid['day_idx'] = df_grid.index // (24 * (sessions_ph or 1))
-        df_grid['hour_idx'] = (df_grid.index // (sessions_ph or 1)) % 24
-        df_grid['hour_rank'] = df_grid.index % (sessions_ph or 1)
-        
-    sessions_ph = int(max(1, sessions_ph))
+    pds = compute_day_layout(chunk_entries, feat_map, plot_roi, args.sessions_per_hour)
+    sessions_ph = pds.sessions_per_hour
     print(f"Layout: {sessions_ph} columns.")
 
     print(f"PLOT_TIMING STEP script=plot_phasic_qc_grid.py step=discovery elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
@@ -376,9 +304,9 @@ def main():
     
     plot_data = [] 
     
-    for _, row in df_grid.iterrows():
-        cid = row['chunk_id']
-        tpath = row['trace_path']
+    for cr in pds.chunks:
+        cid = cr.chunk_id
+        tpath = cr.trace_path
         
         try:
             tdf = pd.read_csv(tpath)
@@ -415,7 +343,7 @@ def main():
                 # Strict Verification using Pipeline
                 indices = verify_peak_count_strict(
                     y, x, fs, config, 
-                    exp_count, plot_roi, cid, row.get('source_file', tpath)
+                    exp_count, plot_roi, cid, cr.source_file
                 )
                 
             elif args.mode == 'raw':
@@ -434,9 +362,9 @@ def main():
                 all_traces.append(uv)
             
             plot_data.append({
-                'day': row['day_idx'],
-                'hour': row['hour_idx'],
-                'col': row['hour_rank'],
+                'day': cr.day_idx,
+                'hour': cr.hour_idx,
+                'col': cr.hour_rank,
                 'x': x,
                 'y': y,
                 'uv': uv,
@@ -480,7 +408,7 @@ def main():
     output_dir = args.output_dir or os.path.join(args.analysis_out, 'phasic_qc')
     os.makedirs(output_dir, exist_ok=True)
     
-    unique_days = sorted(df_grid['day_idx'].unique())
+    unique_days = sorted(pds.chunks_by_day.keys())
     cols = sessions_ph
     rows = 24 
     figsize_width = 4*sessions_ph + 2

@@ -25,9 +25,14 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import time
 
-# Import layout logic from plot_phasic_qc_grid? 
-# Better to duplicate minimal logic to stay self-contained or import if allowed.
-# I'll implement self-contained simple mapping to ensure independence.
+# Ensure repo root is in path
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from photometry_pipeline.viz.phasic_data_prep import (
+    discover_chunks, resolve_roi, compute_day_layout,
+)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -55,32 +60,32 @@ def main():
     
     args = parse_args()
     traces_dir = os.path.join(args.analysis_out, 'traces')
-    files = sorted(glob.glob(os.path.join(traces_dir, 'chunk_*.csv')))
     
-    if not files:
-        print("CRITICAL: No traces found.")
+    # Shared data preparation (chunk discovery, ROI, layout)
+    try:
+        chunk_entries = discover_chunks(traces_dir)
+    except RuntimeError as e:
+        print(f"CRITICAL: {e}")
         sys.exit(1)
+
+    try:
+        roi = resolve_roi(chunk_entries[0][1], args.roi, column_suffix='_sig_raw')
+    except RuntimeError as e:
+        print(f"CRITICAL: {e}")
+        sys.exit(1)
+    if not args.roi:
+        print(f"Auto-selected ROI: {roi}")
+
+    pds = compute_day_layout(chunk_entries, None, roi, args.sessions_per_hour)
+    sph = pds.sessions_per_hour
 
     # 1. Audit
     print(f"PLOT_TIMING STEP script=plot_session_grid.py step=discovery elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
     print("Auditing session boundaries...")
     valid_files = []
     
-    # Auto-detect ROI
-    df0 = pd.read_csv(files[0], nrows=10)
-    sig_cols = [c for c in df0.columns if '_sig_raw' in c]
-    if not sig_cols:
-         print("CRITICAL: No signal columns found in first trace.")
-         sys.exit(1)
-         
-    rois = [c.replace('_sig_raw','') for c in sig_cols]
-    if args.roi: 
-        roi = args.roi
-    else:
-        roi = rois[0]
-        print(f"Auto-selected ROI: {roi}")
-        
-    for f in files:
+    for cr in pds.chunks:
+        f = cr.trace_path
         try:
             df = pd.read_csv(f)
             t = df['time_sec'].values
@@ -128,40 +133,33 @@ def main():
     # Step 3 requirement: "builds the day/hour/session grid"
     # We will iterate and fill.
     
-    sph = args.sessions_per_hour
-    if sph is None:
-        # Heuristic: 2 days, 96 chunks -> 2/hr
-        n_chunks = len(valid_files)
-        sph = max(1, round(n_chunks / 48.0))
-        print(f"Inferred {sph} sessions/hour")
-        
     if args.output_dir:
         out_dir = args.output_dir
     else:
         out_dir = os.path.join(args.analysis_out, 'session_qc')
     os.makedirs(out_dir, exist_ok=True)
     
-    # Group by day
-    chunks_per_day = 24 * sph
-    
+    # Use prepared layout from shared helper
     # Process all chunks, store plot data
     plot_items = []
     
-    for idx, (fpath, df) in enumerate(valid_files):
-        day = idx // chunks_per_day
-        hour = (idx // sph) % 24
-        col = idx % sph
+    for cr in pds.chunks:
+        # Find the matching validated df
+        match = [df for (fp, df) in valid_files if fp == cr.trace_path]
+        if not match:
+            continue
+        df = match[0]
         
         plot_items.append({
-            'day': day, 
-            'hour': hour, 
-            'col': col,
+            'day': cr.day_idx, 
+            'hour': cr.hour_idx, 
+            'col': cr.hour_rank,
             't': df['time_sec'].values - df['time_sec'].values[0],
             'sig': df[f"{roi}_sig_raw"].values,
             'uv': df[f"{roi}_uv_raw"].values
         })
         
-    unique_days = sorted(list(set(p['day'] for p in plot_items)))
+    unique_days = sorted(pds.chunks_by_day.keys())
     print(f"PLOT_TIMING STEP script=plot_session_grid.py step=data_preparation elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
     
     for d in unique_days:

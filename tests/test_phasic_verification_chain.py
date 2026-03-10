@@ -143,10 +143,13 @@ class TestPhasicVerificationChain(unittest.TestCase):
         
         os.makedirs(os.path.join(self.out_dir, "Region0", "day_plots"), exist_ok=True)
         item_grid_cmd = [
-            sys.executable, "tools/plot_session_grid.py",
+            sys.executable, "tools/plot_phasic_dayplot_bundle.py",
             "--analysis-out", phasic_out,
+            "--roi", "Region0",
             "--output-dir", os.path.join(self.out_dir, "Region0", "day_plots"),
-            "--output-pattern", "phasic_sig_iso_day_{d:03d}.png"
+            "--sessions-per-hour", "2",
+            "--no-write-dff-grid",
+            "--no-write-stacked"
         ]
         self.run_cmd(item_grid_cmd)
         
@@ -175,10 +178,13 @@ class TestPhasicVerificationChain(unittest.TestCase):
         self.assertTrue(len(pngs) > 10, "Should generate chain plots for passed chunks")
         
         viz_cmd = [
-            sys.executable, "tools/plot_phasic_qc_grid.py",
+            sys.executable, "tools/plot_phasic_dayplot_bundle.py",
             "--analysis-out", phasic_out,
+            "--roi", "Region0",
             "--output-dir", os.path.join(self.out_dir, "Region0", "day_plots"),
-            "--output-pattern", "phasic_dFF_day_{d:03d}.png"
+            "--sessions-per-hour", "2",
+            "--no-write-sig-iso-grid",
+            "--no-write-stacked"
         ]
         self.run_cmd(viz_cmd)
         self.assertTrue(os.path.exists(os.path.join(self.out_dir, "Region0", "day_plots", "phasic_dFF_day_000.png")))

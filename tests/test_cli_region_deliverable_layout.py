@@ -85,16 +85,18 @@ def test_region_day_plots_contains_all_user_facing_day_plots():
     with open('tools/run_full_pipeline_deliverables.py', 'r', encoding='utf-8') as f:
         content = f.read()
     
-    # 1. Stacked
+    # 1. Verify the bundle driver replaces the specific legacy calls
+    assert "'tools/plot_phasic_dayplot_bundle.py'" in content
+    assert "'tools/plot_session_grid.py'" not in content
+    assert "'tools/plot_phasic_qc_grid.py'" not in content
+    assert "'tools/plot_phasic_stacked_day_smoothed.py'" not in content
+    
+    # 2. Expected output patterns are still represented for manifest verification
     assert 'phasic_stacked_day_' in content
+    assert "phasic_dFF_day_" in content
+    assert "phasic_sig_iso_day_" in content
     
-    # 2. dFF 
-    assert "'--output-pattern', 'phasic_dFF_day_{d:03d}.png'" in content
-    
-    # 3. Sig/Iso 
-    assert "'--output-pattern', 'phasic_sig_iso_day_{d:03d}.png'" in content
-    
-    # 4. Verify no remaining copy operations for legacy artifacts
+    # 3. Verify no remaining copy operations for legacy artifacts
     assert "shutil.copy2(f, os.path.join(d_dir, dst))" not in content
 
 def test_region_manifest_is_truthful_with_all_day_plots():

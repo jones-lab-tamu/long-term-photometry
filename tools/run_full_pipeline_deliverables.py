@@ -1085,38 +1085,19 @@ def main():
 
             check_cancel(cancel_flag_path, emitter, "plots", manifest_path, manifest)
 
-            # D. Per-Day Plots (Sig/Iso, dFF, Stacked)
-
-            # 1. dFF Grid (requires features.csv)
-            if has_features:
-                cmd_qc = [sys.executable, 'tools/plot_phasic_qc_grid.py',
+            # D. Per-Day Plots (Sig/Iso, dFF, Stacked) via Unified Bundle Driver
+            cmd_bundle = [sys.executable, 'tools/plot_phasic_dayplot_bundle.py',
                           '--analysis-out', phasic_out,
                           '--roi', roi,
-                          '--mode', 'dff',
-                          '--sessions-per-hour', str(sessions_per_hour),
                           '--output-dir', d_dir,
-                          '--output-pattern', 'phasic_dFF_day_{d:03d}.png']
-                run_cmd(cmd_qc, roi_label=roi)
-
-            # 2. Sig/Iso Grid
-            cmd_sess = [sys.executable, 'tools/plot_session_grid.py',
-                        '--analysis-out', phasic_out,
-                        '--roi', roi,
-                        '--sessions-per-hour', str(sessions_per_hour),
-                        '--session-duration-s', str(session_duration_s),
-                        '--output-dir', d_dir,
-                        '--output-pattern', 'phasic_sig_iso_day_{d:03d}.png']
-            run_cmd(cmd_sess, roi_label=roi)
-
-            # 3. Stacked (requires features.csv)
-            if has_features:
-                cmd_stack = [sys.executable, 'tools/plot_phasic_stacked_day_smoothed.py',
-                             '--analysis-out', phasic_out,
-                             '--roi', roi,
-                             '--out-dir', d_dir,
-                             '--sessions-per-hour', str(sessions_per_hour),
-                             '--smooth-window-s', str(args.smooth_window_s)]
-                manifest['commands'].append(run_cmd(cmd_stack, roi_label=roi))
+                          '--sessions-per-hour', str(sessions_per_hour),
+                          '--session-duration-s', str(session_duration_s),
+                          '--smooth-window-s', str(args.smooth_window_s)]
+                          
+            if not has_features:
+                cmd_bundle.extend(['--no-write-dff-grid', '--no-write-stacked'])
+                
+            manifest['commands'].append(run_cmd(cmd_bundle, roi_label=roi))
 
             # Collect Per-Day Files
             days_generated = set()
