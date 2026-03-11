@@ -31,6 +31,7 @@ def _create_synthetic_tonic_cache(tonic_out_dir, n_chunks=4, n_pts=200, rois=['R
     with h5py.File(cache_path, 'w') as f:
         meta = f.create_group('meta')
         meta.attrs['mode'] = 'tonic'
+        meta.attrs['schema_version'] = '1.0'
         
         dt_str = h5py.string_dtype(encoding='utf-8')
         meta.create_dataset('rois', data=np.array(rois, dtype=object), dtype=dt_str)
@@ -136,7 +137,7 @@ class TestPlotTonic48h(unittest.TestCase):
         the final assembled time vector is continuous and properly synthesized.
         """
         from tools.plot_tonic_48h import assemble_arrays
-        from photometry_pipeline.io.tonic_hdf5_reader import open_tonic_cache
+        from photometry_pipeline.io.hdf5_cache_reader import open_tonic_cache
         
         cache = open_tonic_cache(self.cache_path)
         continuous_time, sig_raw, uv_raw, deltaf_val = assemble_arrays(cache, 'Region0')

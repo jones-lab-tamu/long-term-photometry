@@ -65,6 +65,7 @@ def test_plot_tonic_48h_timing_output(tmp_path):
     with h5py.File(cache_path, 'w') as f:
         meta = f.create_group('meta')
         meta.attrs['mode'] = 'tonic'
+        meta.attrs['schema_version'] = '1.0'
         dt_str = h5py.string_dtype(encoding='utf-8')
         meta.create_dataset('rois', data=np.array(['ROI1'], dtype=object), dtype=dt_str)
         meta.create_dataset('chunk_ids', data=np.array([0], dtype=int))

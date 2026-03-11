@@ -24,14 +24,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 import time
 
-from photometry_pipeline.io.tonic_hdf5_reader import open_tonic_cache, resolve_tonic_roi, iter_tonic_chunks_for_roi
+from photometry_pipeline.io.hdf5_cache_reader import (
+    open_tonic_cache,
+    resolve_cache_roi,
+    iter_cache_chunks_for_roi
+)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--analysis-out', required=True)
-    parser.add_argument('--roi', default=None)
-    parser.add_argument('--out', default=None, help="Explicit output path for the PNG")
+    parser = argparse.ArgumentParser(description="Plot tonic 48h overview from HDF5 cache chunks.")
+    parser.add_argument('--analysis-out', required=True, help="Path to _analysis directory")
+    parser.add_argument('--roi', help="Specific ROI to plot (e.g., Region0). Auto-selected if omitted.")
+    parser.add_argument('--out', help="Explicit output file path. Overrides default.")
     return parser.parse_args()
 
 
@@ -46,8 +50,10 @@ def assemble_arrays(cache, roi):
     list_deltaF = []
     
     dt = None
+    
+    required_fields = ['time_sec', 'sig_raw', 'uv_raw', 'deltaF']
 
-    for t, s, u, d in iter_tonic_chunks_for_roi(cache, roi):
+    for t, s, u, d in iter_cache_chunks_for_roi(cache, roi, required_fields):
         if dt is None:
             if len(t) < 2:
                 print("CRITICAL: First chunk has fewer than 2 samples, cannot infer dt.")
@@ -122,7 +128,7 @@ def main():
 
     # --- Stage 1: Discovery ---
     cache = open_tonic_cache(cache_path)
-    roi = resolve_tonic_roi(cache, args.roi)
+    roi = resolve_cache_roi(cache, args.roi)
     
     print(f"PLOT_TIMING STEP script=plot_tonic_48h.py step=discovery elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
 
