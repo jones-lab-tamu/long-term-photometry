@@ -444,6 +444,9 @@ class Pipeline:
                 trace_path = os.path.join(traces_dir, f"chunk_{i:04d}.csv")
                 trace_df.to_csv(trace_path, index=False)
                 
+                if hasattr(self, '_cache_writer'):
+                    self._cache_writer.add_chunk(chunk, i, fpath)
+                
                 if self.mode == 'phasic':
                     # Strict Verification Artifacts (Step 2 of Protocol)
                     mode_out_dir = output_dir
@@ -693,6 +696,15 @@ class Pipeline:
              self.qc_summary['invalid_baseline_rois'] = invalid_rois
              self.qc_summary['baseline_invalid_roi_count'] = len(invalid_rois)
 
-        self.run_pass_2(output_dir, force_format)
+        from .io.hdf5_cache import Hdf5TraceCacheWriter
+        cache_path = os.path.join(output_dir, f"{self.mode}_trace_cache.h5")
+        self._cache_writer = Hdf5TraceCacheWriter(cache_path, self.mode, self.config)
+        
+        try:
+            self.run_pass_2(output_dir, force_format)
+            self._cache_writer.finalize()
+        except Exception:
+            self._cache_writer.abort()
+            raise
         
         print("Pipeline Done.")

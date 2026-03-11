@@ -202,8 +202,6 @@ def main():
     needs_dff_trace = args.write_dff_grid or args.write_stacked
     needs_peak_verification = args.write_dff_grid
     
-    print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=discovery elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
-    
     try:
         chunk_entries = discover_chunks(traces_dir)
     except RuntimeError as e:
@@ -250,106 +248,136 @@ def main():
     col_sig = f"{plot_roi}_sig_raw"
     col_uv = f"{plot_roi}_uv_raw"
 
-    print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=data_loading elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+    # 5. Extract target usecols once
+    time_cands = ['time_sec', getattr(config, 'rwd_time_col', ''), 'Time(s)']
+    col_time = next((c for c in time_cands if c in chunk0_cols), None)
+
+    usecols = []
+    if col_time: usecols.append(col_time)
+    
+    if args.write_sig_iso_grid:
+        usecols.append(col_sig)
+        usecols.append(col_uv)
+        
+    if needs_dff_trace and col_dff:
+        usecols.append(col_dff)
+        
+    usecols = list(dict.fromkeys(usecols))
+
+    print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=discovery elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
 
     # ------------------------------------------------------------------
-    # 1. Single-Pass Data Loading & Audit
+    # 1. Single-Pass CSV Reading
     # ------------------------------------------------------------------
-    cached_data = []
-    global_dff_values = []
+    raw_chunks = []
     
     for cr in pds.chunks:
         try:
-            tdf = pd.read_csv(cr.trace_path)
-            
-            # X axis
-            x = None
-            if 'time_sec' in tdf.columns:
-                x = tdf['time_sec'].values
-            elif getattr(config, 'rwd_time_col', '') in tdf.columns:
-                x = tdf[config.rwd_time_col].values
-            elif 'Time(s)' in tdf.columns:
-                x = tdf['Time(s)'].values
-            
-            fs = infer_fs(x, config, context=f"Chunk {cr.chunk_id}") if x is not None else config.target_fs_hz
-            if x is None: x = np.arange(len(tdf)) / fs
-                
-            # Monotonicity & Continuity & Duration Audits (from session grid)
-            if not check_monotonicity(x):
-                print(f"CRITICAL: Non-monotonic time in {cr.trace_path}")
-                sys.exit(1)
-            
-            duration = x[-1] - x[0]
-            if args.session_duration_s is not None:
-                expected = args.session_duration_s
-                tol = max(2.0, 0.005 * expected)
-                if abs(duration - expected) > tol:
-                    print(f"CRITICAL: Duration mismatch. Expected ~{expected:.2f}s, got {duration:.2f}s")
-                    sys.exit(1)
-            else:
-                if not (590 <= duration <= 610): # Strict fallback
-                    print(f"CRITICAL: Invalid duration {duration:.2f}s (Expected ~600s)")
-                    sys.exit(1)
-
-            dt_median = np.median(np.diff(x))
-            if not check_continuity(x, dt_median):
-                print(f"CRITICAL: Discontinuity detected in {cr.trace_path}")
-                sys.exit(1)
-                
-            # Normalize Time
-            t_norm = x - x[0]
-            
-            # Load Signals Conditionally
-            y_sig = y_uv = None
-            if args.write_sig_iso_grid:
-                y_sig = tdf[col_sig].values
-                y_uv  = tdf[col_uv].values
-            
-            y_dff = None
-            peak_indices = np.array([], dtype=int)
-            exp_count = np.nan
-            
-            if needs_dff_trace:
-                y_dff = tdf[col_dff].values
-                
-            if needs_peak_verification:
-                feat_row = feat_map.get((cr.chunk_id, plot_roi))
-                if feat_row is not None:
-                    exp_count = feat_row['peak_count']
-                    
-                peak_indices = verify_peak_count_strict(
-                    y_dff, x, fs, config, exp_count, plot_roi, cr.chunk_id, cr.source_file
-                )
-            
-            # Store cleanly
+            tdf = pd.read_csv(cr.trace_path, usecols=usecols)
             rec = {
-                'day': cr.day_idx,
-                'hour': cr.hour_idx,
-                'col': cr.hour_rank,
-                'chunk_id': cr.chunk_id,
-                't': t_norm
+                'cr': cr,
+                'x': tdf[col_time].values if col_time and col_time in tdf.columns else None,
+                'y_sig': tdf[col_sig].values if col_sig and col_sig in tdf.columns else None,
+                'y_uv': tdf[col_uv].values if col_uv and col_uv in tdf.columns else None,
+                'y_dff': tdf[col_dff].values if col_dff and col_dff in tdf.columns else None,
+                'N': len(tdf)
             }
-            if args.write_sig_iso_grid:
-                rec['sig'] = y_sig
-                rec['uv'] = y_uv
-            if needs_dff_trace:
-                rec['dff'] = y_dff
-            if needs_peak_verification:
-                rec['peak_indices'] = peak_indices
-                rec['count'] = exp_count
-                
-            cached_data.append(rec)
-            
-            if needs_peak_verification:
-                global_dff_values.append(y_dff[np.isfinite(y_dff)])
-            
+            raw_chunks.append(rec)
         except Exception as e:
-            print(f"CRITICAL: Error processing chunk {cr.chunk_id}: {e}")
+            print(f"CRITICAL: Error reading chunk {cr.chunk_id}: {e}")
             import traceback
             traceback.print_exc()
             sys.exit(1)
             
-    # Calculate global DFF limits for the dFF Grid
+    print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=csv_read elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+
+    # ------------------------------------------------------------------
+    # 2. Verification
+    # ------------------------------------------------------------------
+    for rec in raw_chunks:
+        cr = rec['cr']
+        x = rec['x']
+        
+        fs = infer_fs(x, config, context=f"Chunk {cr.chunk_id}") if x is not None else config.target_fs_hz
+        if x is None:
+            x = np.arange(rec['N']) / fs
+            rec['x'] = x
+            
+        # Monotonicity & Continuity & Duration Audits (from session grid)
+        if not check_monotonicity(x):
+            print(f"CRITICAL: Non-monotonic time in {cr.trace_path}")
+            sys.exit(1)
+        
+        duration = x[-1] - x[0]
+        if args.session_duration_s is not None:
+            expected = args.session_duration_s
+            tol = max(2.0, 0.005 * expected)
+            if abs(duration - expected) > tol:
+                print(f"CRITICAL: Duration mismatch. Expected ~{expected:.2f}s, got {duration:.2f}s")
+                sys.exit(1)
+        else:
+            if not (590 <= duration <= 610): # Strict fallback
+                print(f"CRITICAL: Invalid duration {duration:.2f}s (Expected ~600s)")
+                sys.exit(1)
+
+        dt_median = np.median(np.diff(x))
+        if not check_continuity(x, dt_median):
+            print(f"CRITICAL: Discontinuity detected in {cr.trace_path}")
+            sys.exit(1)
+            
+        # Verify peaks
+        if needs_peak_verification:
+            feat_row = feat_map.get((cr.chunk_id, plot_roi))
+            exp_count = feat_row['peak_count'] if feat_row is not None else np.nan
+                
+            peak_indices = verify_peak_count_strict(
+                rec['y_dff'], x, fs, config, exp_count, plot_roi, cr.chunk_id, cr.source_file
+            )
+            rec['peak_indices'] = peak_indices
+            rec['exp_count'] = exp_count
+
+    print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=verification elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+
+    # ------------------------------------------------------------------
+    # 3. Cache Build
+    # ------------------------------------------------------------------
+    cached_data = []
+    cached_by_day = {}
+    global_dff_values = []
+    
+    for rec in raw_chunks:
+        cr = rec['cr']
+        x = rec['x']
+        t_norm = x - x[0]
+        
+        c_rec = {
+            'day': cr.day_idx,
+            'hour': cr.hour_idx,
+            'col': cr.hour_rank,
+            'chunk_id': cr.chunk_id,
+            't': t_norm
+        }
+        if args.write_sig_iso_grid:
+            c_rec['sig'] = rec['y_sig']
+            c_rec['uv'] = rec['y_uv']
+        if needs_dff_trace:
+            c_rec['dff'] = rec['y_dff']
+        if needs_peak_verification:
+            c_rec['peak_indices'] = rec.get('peak_indices', np.array([], dtype=int))
+            c_rec['count'] = rec.get('exp_count', np.nan)
+            
+        cached_data.append(c_rec)
+        cached_by_day.setdefault(cr.day_idx, []).append(c_rec)
+        
+        if needs_peak_verification:
+            y_dff = rec['y_dff']
+            global_dff_values.append(y_dff[np.isfinite(y_dff)])
+
+    print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=cache_build elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+
+    # ------------------------------------------------------------------
+    # 4. Global Limits
+    # ------------------------------------------------------------------
     if global_dff_values:
         flat_y = np.concatenate(global_dff_values)
         if len(flat_y) == 0:
@@ -366,7 +394,7 @@ def main():
         global_ymin, global_ymax = -1, 1
 
     unique_days = sorted(pds.chunks_by_day.keys())
-    print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=data_preparation elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+    print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=global_limits elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
     
     
     # ------------------------------------------------------------------
@@ -374,7 +402,7 @@ def main():
     # ------------------------------------------------------------------
     if args.write_dff_grid:
         for d in unique_days:
-            day_items = [c for c in cached_data if c['day'] == d]
+            day_items = cached_by_day.get(d, [])
             if not day_items: continue
                 
             fig, axes = plt.subplots(nrows=24, ncols=sph, figsize=(4*sph + 2, 24), sharex=True)
@@ -437,7 +465,7 @@ def main():
     # ------------------------------------------------------------------
     if args.write_sig_iso_grid:
         for d in unique_days:
-            day_items = [c for c in cached_data if c['day'] == d]
+            day_items = cached_by_day.get(d, [])
             if not day_items: continue
                 
             fig, axes = plt.subplots(nrows=24, ncols=sph, figsize=(4*sph + 2, 24), sharex=True)
@@ -480,7 +508,7 @@ def main():
             
         for d in unique_days:
             # Sort chronologically
-            day_items = sorted([c for c in cached_data if c['day'] == d], key=lambda x: x['chunk_id'])
+            day_items = sorted(cached_by_day.get(d, []), key=lambda x: x['chunk_id'])
             traces = [smoothed_data[c['chunk_id']] for c in day_items if c['chunk_id'] in smoothed_data]
             if not traces: continue
                 

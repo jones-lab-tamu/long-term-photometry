@@ -163,5 +163,61 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_dFF_day_000.png')))
         self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_stacked_day_000.png')))
 
+    @patch('tools.plot_phasic_dayplot_bundle.pd.read_csv')
+    @patch('tools.plot_phasic_dayplot_bundle.plt.savefig')
+    def test_usecols_all_modes(self, mock_savefig, mock_read_csv):
+        df_header = pd.DataFrame(columns=['time_sec', 'Region0_sig_raw', 'Region0_uv_raw', 'Region0_dff', 'ignored_col'])
+        df_data = pd.DataFrame({
+            'time_sec': [0.1, 0.2], 'Region0_sig_raw': [1, 2], 'Region0_uv_raw': [1, 2], 'Region0_dff': [0.5, 0.6]
+        })
+        
+        def side_effect(*args, **kwargs):
+            filepath = str(args[0])
+            if 'features.csv' in filepath:
+                return pd.DataFrame([{'chunk_id': 0, 'roi': 'Region0', 'peak_count': 0, 'auc': 0.0}])
+            if kwargs.get('nrows') == 1: return df_header
+            return df_data
+            
+        self.create_synthetic_chunk(cid=0, include_dff=True)
+        self.create_features_csv(peak_count=0) # Must exist for dFF Grid mode
+        
+        cases = [
+            ("sig_iso_only", ['--write-sig-iso-grid', '--no-write-dff-grid', '--no-write-stacked'], 
+             ['time_sec', 'Region0_sig_raw', 'Region0_uv_raw'], ['Region0_dff', 'ignored_col']),
+             
+            ("stacked_only", ['--no-write-sig-iso-grid', '--no-write-dff-grid', '--write-stacked'], 
+             ['time_sec', 'Region0_dff'], ['Region0_sig_raw', 'Region0_uv_raw', 'ignored_col']),
+             
+            ("dff_grid_only", ['--no-write-sig-iso-grid', '--write-dff-grid', '--no-write-stacked'], 
+             ['time_sec', 'Region0_dff'], ['Region0_sig_raw', 'Region0_uv_raw', 'ignored_col']),
+             
+            ("full_mode", ['--write-sig-iso-grid', '--write-dff-grid', '--write-stacked'], 
+             ['time_sec', 'Region0_sig_raw', 'Region0_uv_raw', 'Region0_dff'], ['ignored_col'])
+        ]
+        
+        for name, flags, expected_in, expected_out in cases:
+            mock_read_csv.reset_mock()
+            mock_read_csv.side_effect = side_effect
+            
+            test_args = [
+                'plot_phasic_dayplot_bundle.py', '--analysis-out', self.analysis_out,
+                '--roi', 'Region0', '--output-dir', self.output_dir, '--sessions-per-hour', '1'
+            ]
+            test_args.extend(flags)
+            test_args.extend(['--session-duration-s', '0.1'])
+            
+            with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
+                bundle.main()
+                
+            chunk_calls = [c for c in mock_read_csv.call_args_list if 'chunk_0.csv' in str(c.args[0]) and c.kwargs.get('nrows') != 1]
+            self.assertGreater(len(chunk_calls), 0, f"{name}: No chunk CSV read calls found")
+            usecols = chunk_calls[0].kwargs.get('usecols')
+            
+            self.assertIsNotNone(usecols, f"{name}: usecols should not be None")
+            for col in expected_in:
+                self.assertIn(col, usecols, f"{name}: missing {col} in usecols")
+            for col in expected_out:
+                self.assertNotIn(col, usecols, f"{name}: {col} should not be in usecols")
+
 if __name__ == '__main__':
     unittest.main()

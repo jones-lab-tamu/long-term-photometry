@@ -1,0 +1,127 @@
+"""
+HDF5 Cache Writer
+=================
+
+Phase 1 helper for producing `.h5` output caches from the analysis pipeline
+without rereading chunks from disk. Writes to a temporary file, then renames
+to the final path upon success. Implements Safe Write Semantics.
+"""
+import os
+import h5py
+import numpy as np
+
+class Hdf5TraceCacheWriter:
+    """
+    Writes trace data iteratively into an HDF5 schema defined by Phase 0 contract.
+    """
+    def __init__(self, output_path: str, mode: str, config):
+        """
+        Args:
+            output_path: Final desired path, e.g., '.../tonic_out/tonic_trace_cache.h5'
+            mode: 'tonic' or 'phasic'
+            config: Pipeline Config object (unused currently but kept for signature parity)
+        """
+        self.output_path = output_path
+        self.tmp_path = output_path + '.tmp'
+        self.mode = mode
+        
+        self.f = h5py.File(self.tmp_path, 'w')
+        
+        # Meta schema setup
+        self.meta = self.f.create_group('meta')
+        self.meta.attrs['mode'] = self.mode
+        
+        # Track for finalization
+        self._rois = set()
+        self._chunk_ids = []
+        self._source_files = []
+        
+        self.roi_group = self.f.create_group('roi')
+        self._is_aborted = False
+
+    def add_chunk(self, chunk, chunk_id: int, source_file: str):
+        """
+        Extract chunk arrays into the HDF5 structure.
+        """
+        if self._is_aborted:
+            return
+            
+        self._chunk_ids.append(chunk_id)
+        self._source_files.append(source_file)
+        
+        chunk_group_name = f"chunk_{chunk_id}"
+        
+        for r_idx, roi in enumerate(chunk.channel_names):
+            self._rois.add(roi)
+            
+            # Ensure ROI group exists
+            if roi not in self.roi_group:
+                self.roi_group.create_group(roi)
+                
+            grp = self.roi_group[roi].create_group(chunk_group_name)
+            
+            # Required Time axis
+            grp.create_dataset('time_sec', data=chunk.time_sec, dtype=np.float64, compression="gzip")
+            
+            # Common core traces
+            grp.create_dataset('sig_raw', data=chunk.sig_raw[:, r_idx], dtype=np.float64, compression="gzip")
+            grp.create_dataset('uv_raw', data=chunk.uv_raw[:, r_idx], dtype=np.float64, compression="gzip")
+            
+            # Modes
+            if self.mode == 'tonic' and chunk.delta_f is not None:
+                grp.create_dataset('deltaF', data=chunk.delta_f[:, r_idx], dtype=np.float64, compression="gzip")
+            elif self.mode == 'phasic' and chunk.dff is not None:
+                grp.create_dataset('dff', data=chunk.dff[:, r_idx], dtype=np.float64, compression="gzip")
+
+    def __enter__(self):
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            self.finalize()
+        else:
+            self.abort()
+
+    def finalize(self):
+        """
+        Finish writing metadata, close the file, and atomic rename.
+        """
+        if self._is_aborted:
+            return
+            
+        try:
+            # Sort ROIs for determinism
+            sorted_rois = sorted(list(self._rois))
+            
+            # Use specific type for variable-length strings
+            dt_str = h5py.string_dtype(encoding='utf-8')
+            
+            
+            self.meta.create_dataset('rois', data=np.array(sorted_rois, dtype=object), dtype=dt_str)
+            self.meta.create_dataset('chunk_ids', data=np.array(self._chunk_ids, dtype=int))
+            self.meta.create_dataset('source_files', data=np.array(self._source_files, dtype=object), dtype=dt_str)
+            self.meta.create_dataset('schema_version', data=np.array([1], dtype=int))
+            self.meta.create_dataset('n_chunks', data=np.array([len(self._chunk_ids)], dtype=int))
+            
+            self.f.close()
+            
+            # Atomic replace
+            os.replace(self.tmp_path, self.output_path)
+            print(f"HDF5 Cache Producer: Saved {self.output_path}")
+        except Exception as e:
+            self.abort() # Close and delete
+            raise RuntimeError(f"Failed to finalize HDF5 cache: {e}") from e
+
+    def abort(self):
+        """
+        Close the file and remove the temporary file.
+        """
+        if self._is_aborted:
+            return
+        self._is_aborted = True
+        try:
+            self.f.close()
+        except Exception:
+            pass
+        if os.path.exists(self.tmp_path):
+            os.remove(self.tmp_path)
