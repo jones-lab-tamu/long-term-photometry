@@ -55,37 +55,46 @@ def test_plot_tonic_48h_timing_output(tmp_path):
     """
     Verifies that the new script-local timing lines are printed securely during typical execution.
     """
+    import h5py
     analysis_out = tmp_path / "analysis_out"
-    traces_dir = analysis_out / "traces"
-    traces_dir.mkdir(parents=True)
+    tonic_out_dir = analysis_out / "tonic_out"
+    tonic_out_dir.mkdir(parents=True)
     
-    # Create a minimal chunk file
-    df = pd.DataFrame({
-        'time_sec': np.linspace(0, 10, 100),
-        'ROI1_sig_raw': np.random.randn(100),
-        'ROI1_uv_raw': np.random.randn(100),
-        'ROI1_deltaF': np.random.randn(100)
-    })
-    df.to_csv(traces_dir / "chunk_0.csv", index=False)
+    # Create a minimal h5 cache
+    cache_path = tonic_out_dir / "tonic_trace_cache.h5"
+    with h5py.File(cache_path, 'w') as f:
+        meta = f.create_group('meta')
+        meta.attrs['mode'] = 'tonic'
+        dt_str = h5py.string_dtype(encoding='utf-8')
+        meta.create_dataset('rois', data=np.array(['ROI1'], dtype=object), dtype=dt_str)
+        meta.create_dataset('chunk_ids', data=np.array([0], dtype=int))
+        meta.create_dataset('source_files', data=np.array(['f0.csv'], dtype=object), dtype=dt_str)
+        
+        grp_c = f.create_group('roi/ROI1/chunk_0')
+        t = np.linspace(0, 10, 100)
+        grp_c.create_dataset('time_sec', data=t)
+        grp_c.create_dataset('sig_raw', data=np.random.randn(100))
+        grp_c.create_dataset('uv_raw', data=np.random.randn(100))
+        grp_c.create_dataset('deltaF', data=np.random.randn(100))
     
     script_path = os.path.join(os.path.dirname(__file__), '..', 'tools', 'plot_tonic_48h.py')
     
     cmd = [
         "python",
         os.path.abspath(script_path),
-        "--analysis-out", str(analysis_out)
+        "--analysis-out", str(tonic_out_dir)
     ]
     
     result = subprocess.run(cmd, capture_output=True, text=True)
     
-    assert result.returncode == 0, f"Script failed: {result.stderr}"
+    assert result.returncode == 0, f"Script failed: {result.stderr}\n\n{result.stdout}"
     
     out = result.stdout
     
     # Check for required timing checkpoints
     assert "PLOT_TIMING START script=plot_tonic_48h.py" in out
     assert "step=discovery" in out
-    assert "step=csv_read" in out
+    assert "step=cache_read" in out
     assert "step=assembly" in out
     assert "step=plotting" in out
     assert "step=figure_save" in out
