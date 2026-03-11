@@ -79,9 +79,52 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         }])
         df.to_csv(os.path.join(self.features_dir, 'features.csv'), index=False)
 
+    def create_synthetic_phasic_cache(self, cid=0, include_dff=False, include_sig=True):
+        import h5py
+        cache_path = os.path.join(self.analysis_out, 'phasic_trace_cache.h5')
+        
+        # Open in append mode so we can add multiple chunks if tests ever needed it
+        with h5py.File(cache_path, 'a') as f:
+            if 'meta' not in f:
+                meta = f.create_group('meta')
+                meta.attrs['mode'] = 'phasic'
+                meta.attrs['schema_version'] = '1.0'
+                dt_str = h5py.string_dtype(encoding='utf-8')
+                meta.create_dataset('rois', data=np.array(['Region0'], dtype=object), dtype=dt_str)
+                meta.create_dataset('chunk_ids', data=np.array([cid], dtype=int), maxshape=(None,))
+            else:
+                meta = f['meta']
+                cids = list(meta['chunk_ids'][()])
+                if cid not in cids:
+                    cids.append(cid)
+                    del meta['chunk_ids']
+                    meta.create_dataset('chunk_ids', data=np.array(cids, dtype=int))
+                
+            if 'roi' not in f:
+                f.create_group('roi')
+            roi_grp = f.require_group('roi/Region0')
+            c_grp = roi_grp.require_group(f'chunk_{cid}')
+            
+            t = np.arange(0, 600, 0.1)
+            
+            if 'time_sec' in c_grp: del c_grp['time_sec']
+            c_grp.create_dataset('time_sec', data=t)
+            
+            if include_sig:
+                if 'sig_raw' in c_grp: del c_grp['sig_raw']
+                if 'uv_raw' in c_grp: del c_grp['uv_raw']
+                c_grp.create_dataset('sig_raw', data=np.sin(t))
+                c_grp.create_dataset('uv_raw', data=np.cos(t))
+                
+            if include_dff:
+                if 'dff' in c_grp: del c_grp['dff']
+                # The prompt tests with some high peaks. Let's make sure test_full_dff_mode can overwrite this.
+                c_grp.create_dataset('dff', data=np.sin(t) - np.cos(t))
+
     def test_sig_iso_only_mode_no_dff(self):
         # A. sig/iso-only mode: no features.csv, no dff column -> success
         self.create_synthetic_chunk(cid=0, include_dff=False)
+        self.create_synthetic_phasic_cache(cid=0, include_dff=False)
         test_args = [
             'plot_phasic_dayplot_bundle.py',
             '--analysis-out', self.analysis_out,
@@ -98,6 +141,7 @@ class TestPhasicDayplotBundle(unittest.TestCase):
     def test_stacked_only_mode_no_features(self):
         # B. stacked-only mode: no features.csv, dff necessary but feature shouldn't be read 
         self.create_synthetic_chunk(cid=0, include_dff=True)
+        self.create_synthetic_phasic_cache(cid=0, include_dff=True)
         test_args = [
             'plot_phasic_dayplot_bundle.py',
             '--analysis-out', self.analysis_out,
@@ -115,6 +159,7 @@ class TestPhasicDayplotBundle(unittest.TestCase):
     def test_dff_grid_mode_requires_features(self):
         # C. dFF-grid mode requires features.csv
         self.create_synthetic_chunk(cid=0, include_dff=True)
+        self.create_synthetic_phasic_cache(cid=0, include_dff=True)
         test_args = [
             'plot_phasic_dayplot_bundle.py',
             '--analysis-out', self.analysis_out,
@@ -143,6 +188,7 @@ class TestPhasicDayplotBundle(unittest.TestCase):
             '--write-stacked'
         ]
         
+        # Minimal trace CSV required for discovery logic
         t = np.arange(0, 600, 0.1)
         df_dff = pd.DataFrame({
             'time_sec': t,
@@ -150,10 +196,18 @@ class TestPhasicDayplotBundle(unittest.TestCase):
             'Region0_uv_raw': np.zeros_like(t),
             'Region0_dff': np.zeros_like(t)
         })
-        # Add 2 peaks
-        df_dff.loc[100, 'Region0_dff'] = 100.0
-        df_dff.loc[200, 'Region0_dff'] = 100.0
         df_dff.to_csv(os.path.join(self.traces_dir, 'chunk_0.csv'), index=False)
+        
+        # Add 2 peaks into the cache instead (but zeros otherwise)
+        self.create_synthetic_phasic_cache(cid=0, include_dff=True)
+        import h5py
+        cache_path = os.path.join(self.analysis_out, 'phasic_trace_cache.h5')
+        with h5py.File(cache_path, 'a') as f:
+            dff_data = np.zeros_like(t)
+            dff_data[100] = 100.0
+            dff_data[200] = 100.0
+            del f['roi/Region0/chunk_0/dff']
+            f['roi/Region0/chunk_0'].create_dataset('dff', data=dff_data)
         
         self.create_features_csv(peak_count=2)
         
@@ -163,61 +217,71 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_dFF_day_000.png')))
         self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_stacked_day_000.png')))
 
-    @patch('tools.plot_phasic_dayplot_bundle.pd.read_csv')
-    @patch('tools.plot_phasic_dayplot_bundle.plt.savefig')
-    def test_usecols_all_modes(self, mock_savefig, mock_read_csv):
-        df_header = pd.DataFrame(columns=['time_sec', 'Region0_sig_raw', 'Region0_uv_raw', 'Region0_dff', 'ignored_col'])
-        df_data = pd.DataFrame({
-            'time_sec': [0.1, 0.2], 'Region0_sig_raw': [1, 2], 'Region0_uv_raw': [1, 2], 'Region0_dff': [0.5, 0.6]
-        })
-        
-        def side_effect(*args, **kwargs):
-            filepath = str(args[0])
-            if 'features.csv' in filepath:
-                return pd.DataFrame([{'chunk_id': 0, 'roi': 'Region0', 'peak_count': 0, 'auc': 0.0}])
-            if kwargs.get('nrows') == 1: return df_header
-            return df_data
-            
+
+    def test_missing_cache_fails_with_csvs_present(self):
+        # Even if chunk_0.csv exists, missing HDF5 cache should hard fail
         self.create_synthetic_chunk(cid=0, include_dff=True)
+        # We explicitly DO NOT create the phasic cache
+        test_args = [
+            'plot_phasic_dayplot_bundle.py',
+            '--analysis-out', self.analysis_out,
+            '--roi', 'Region0',
+            '--output-dir', self.output_dir,
+            '--sessions-per-hour', '1',
+            '--no-write-dff-grid',
+            '--no-write-stacked'
+        ]
+        with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
+            with self.assertRaises(SystemExit) as cm:
+                bundle.main()
+            self.assertEqual(cm.exception.code, 1)
+
+    @patch('tools.plot_phasic_dayplot_bundle.discover_chunks')
+    def test_cache_pull_fields_all_modes(self, mock_discover_chunks):
+        # We replace the old CSV usecols test with one that mocks discovery and ensures the cache reader requests exact fields
+        import numpy as np
+        
+        # We physically create the chunk to avoid mocking read_csv at all
+        self.create_synthetic_chunk(cid=0, include_dff=True)
+        self.create_synthetic_phasic_cache(cid=0, include_dff=True)
         self.create_features_csv(peak_count=0) # Must exist for dFF Grid mode
+        
+        mock_discover_chunks.return_value = [(0, os.path.join(self.traces_dir, 'chunk_0.csv'))]
         
         cases = [
             ("sig_iso_only", ['--write-sig-iso-grid', '--no-write-dff-grid', '--no-write-stacked'], 
-             ['time_sec', 'Region0_sig_raw', 'Region0_uv_raw'], ['Region0_dff', 'ignored_col']),
+             ['time_sec', 'sig_raw', 'uv_raw']),
              
             ("stacked_only", ['--no-write-sig-iso-grid', '--no-write-dff-grid', '--write-stacked'], 
-             ['time_sec', 'Region0_dff'], ['Region0_sig_raw', 'Region0_uv_raw', 'ignored_col']),
+             ['time_sec', 'dff']),
              
             ("dff_grid_only", ['--no-write-sig-iso-grid', '--write-dff-grid', '--no-write-stacked'], 
-             ['time_sec', 'Region0_dff'], ['Region0_sig_raw', 'Region0_uv_raw', 'ignored_col']),
+             ['time_sec', 'dff']),
              
             ("full_mode", ['--write-sig-iso-grid', '--write-dff-grid', '--write-stacked'], 
-             ['time_sec', 'Region0_sig_raw', 'Region0_uv_raw', 'Region0_dff'], ['ignored_col'])
+             ['time_sec', 'sig_raw', 'uv_raw', 'dff'])
         ]
         
-        for name, flags, expected_in, expected_out in cases:
-            mock_read_csv.reset_mock()
-            mock_read_csv.side_effect = side_effect
-            
-            test_args = [
-                'plot_phasic_dayplot_bundle.py', '--analysis-out', self.analysis_out,
-                '--roi', 'Region0', '--output-dir', self.output_dir, '--sessions-per-hour', '1'
-            ]
-            test_args.extend(flags)
-            test_args.extend(['--session-duration-s', '0.1'])
-            
-            with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
-                bundle.main()
-                
-            chunk_calls = [c for c in mock_read_csv.call_args_list if 'chunk_0.csv' in str(c.args[0]) and c.kwargs.get('nrows') != 1]
-            self.assertGreater(len(chunk_calls), 0, f"{name}: No chunk CSV read calls found")
-            usecols = chunk_calls[0].kwargs.get('usecols')
-            
-            self.assertIsNotNone(usecols, f"{name}: usecols should not be None")
-            for col in expected_in:
-                self.assertIn(col, usecols, f"{name}: missing {col} in usecols")
-            for col in expected_out:
-                self.assertNotIn(col, usecols, f"{name}: {col} should not be in usecols")
+        with patch('tools.plot_phasic_dayplot_bundle.resolve_roi', return_value='Region0'):
+            for name, flags, expected_fields in cases:
+                with patch('tools.plot_phasic_dayplot_bundle.load_cache_chunk_fields') as mock_load:
+                    # Provide dummy array tuples back matching requested length
+                    mock_load.return_value = tuple([np.array([1, 2])] * len(expected_fields))
+                    
+                    test_args = [
+                        'plot_phasic_dayplot_bundle.py', '--analysis-out', self.analysis_out,
+                        '--roi', 'Region0', '--output-dir', self.output_dir, '--sessions-per-hour', '1',
+                        '--session-duration-s', '0.1'
+                    ] + flags
+                    
+                    with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
+                        bundle.main()
+                        
+                    self.assertTrue(mock_load.called, f"{name}: load_cache_chunk_fields not called")
+                    
+                    # Check exact fields requested are strictly equal
+                    fields_requested = mock_load.call_args[0][3]
+                    self.assertEqual(fields_requested, expected_fields, f"{name}: requested fields mismatch")
 
 if __name__ == '__main__':
     unittest.main()

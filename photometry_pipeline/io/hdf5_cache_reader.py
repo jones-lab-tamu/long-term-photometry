@@ -82,7 +82,7 @@ def open_phasic_cache(cache_path: str) -> h5py.File:
     return _open_cache(cache_path, 'phasic')
 
 
-def list_cache_rois(cache: h5py.File) -> list:
+def list_cache_rois(cache: h5py.File) -> list[str]:
     """Returns the list of ROIs stored in /meta/rois."""
     try:
         return [roi.decode('utf-8') if isinstance(roi, bytes) else str(roi) for roi in cache['meta']['rois']]
@@ -91,7 +91,7 @@ def list_cache_rois(cache: h5py.File) -> list:
         sys.exit(1)
 
 
-def list_cache_chunk_ids(cache: h5py.File) -> list:
+def list_cache_chunk_ids(cache: h5py.File) -> list[int]:
     """Returns the list of chunk IDs stored in /meta/chunk_ids."""
     try:
         return [int(cid) for cid in cache['meta']['chunk_ids']]
@@ -100,7 +100,7 @@ def list_cache_chunk_ids(cache: h5py.File) -> list:
         sys.exit(1)
 
 
-def resolve_cache_roi(cache: h5py.File, requested_roi: str = None) -> str:
+def resolve_cache_roi(cache: h5py.File, requested_roi: str | None = None) -> str:
     """
     Resolve and validate the ROI using the /meta/rois dataset.
     If requested_roi is None, auto-selects the first available ROI.
@@ -121,7 +121,7 @@ def resolve_cache_roi(cache: h5py.File, requested_roi: str = None) -> str:
     return roi
 
 
-def load_cache_chunk_fields(cache: h5py.File, roi: str, chunk_id: int, fields: list) -> tuple:
+def load_cache_chunk_fields(cache: h5py.File, roi: str, chunk_id: int, fields: list[str]) -> tuple:
     """
     Loads specific fields for a given ROI and chunk_id as plain numpy arrays.
     """
@@ -148,7 +148,7 @@ def load_cache_chunk_fields(cache: h5py.File, roi: str, chunk_id: int, fields: l
     return tuple(out)
 
 
-def iter_cache_chunks_for_roi(cache: h5py.File, roi: str, fields: list):
+def iter_cache_chunks_for_roi(cache: h5py.File, roi: str, fields: list[str]):
     """
     Yields tuple of fields for each valid chunk sequentially based on /meta/chunk_ids order.
     """

@@ -38,6 +38,9 @@ from photometry_pipeline.config import Config
 from photometry_pipeline.viz.phasic_data_prep import (
     discover_chunks, build_feature_map, resolve_roi, compute_day_layout
 )
+from photometry_pipeline.io.hdf5_cache_reader import (
+    open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields
+)
 
 # We need the strict peak verification logic from the qc grid script
 # We can just import it from there to avoid duplication, OR recreate it here if preferred.
@@ -208,27 +211,14 @@ def main():
         print(f"CRITICAL: {e}")
         sys.exit(1)
         
-    # 1. Read first chunk header exactly once
-    first_trace = chunk_entries[0][1]
-    df0 = pd.read_csv(first_trace, nrows=1)
-    chunk0_cols = df0.columns.tolist()
+    # 1. Open the HDF5 Cache early
+    cache_path = os.path.join(args.analysis_out, 'phasic_trace_cache.h5')
 
-    # 2. Resolve ROI
-    plot_roi = args.roi
-    suffix = '_dff' if needs_dff_trace else '_sig_raw'
+        
+    cache = open_phasic_cache(cache_path)
     
-    # If explicit roi is passed, validate it. Otherwise detect.
-    if not plot_roi:
-        cands = [c.replace(suffix, '') for c in chunk0_cols if suffix in c]
-        if not cands:
-             print(f"CRITICAL: Could not auto-detect ROI using suffix {suffix} in {first_trace}")
-             sys.exit(1)
-        plot_roi = sorted(cands)[0]
-    else:
-        if f"{plot_roi}{suffix}" not in chunk0_cols:
-             print(f"CRITICAL: Requested ROI {plot_roi} lacks expected column {plot_roi}{suffix}")
-             sys.exit(1)
-             
+    # 2. Resolve ROI via cache instead of CSV headers
+    plot_roi = resolve_cache_roi(cache, args.roi)
     print(f"Plots using ROI: {plot_roi}")
         
     # 3. Features Map (Conditional)
@@ -243,53 +233,56 @@ def main():
     pds = compute_day_layout(chunk_entries, feat_map, plot_roi, args.sessions_per_hour)
     sph = pds.sessions_per_hour
     
-    # 4. Identify signals
-    col_dff = determine_signal_column(chunk0_cols, plot_roi, args.signal) if needs_dff_trace else None
-    col_sig = f"{plot_roi}_sig_raw"
-    col_uv = f"{plot_roi}_uv_raw"
-
-    # 5. Extract target usecols once
-    time_cands = ['time_sec', getattr(config, 'rwd_time_col', ''), 'Time(s)']
-    col_time = next((c for c in time_cands if c in chunk0_cols), None)
-
-    usecols = []
-    if col_time: usecols.append(col_time)
-    
-    if args.write_sig_iso_grid:
-        usecols.append(col_sig)
-        usecols.append(col_uv)
+    # 4. Identify signals to pull from cache
+    # Explicitly enforce mode-minimal field loading contract
+    if args.write_sig_iso_grid and needs_dff_trace:
+        # Full mode
+        fields_to_load = ['time_sec', 'sig_raw', 'uv_raw', 'dff']
+    elif args.write_sig_iso_grid and not needs_dff_trace:
+        # Sig/iso only mode
+        fields_to_load = ['time_sec', 'sig_raw', 'uv_raw']
+    elif not args.write_sig_iso_grid and needs_dff_trace:
+        # Stacked-only or dFF-grid-only mode
+        fields_to_load = ['time_sec', 'dff']
+    else:
+        # Fallback minimal
+        fields_to_load = ['time_sec']
         
-    if needs_dff_trace and col_dff:
-        usecols.append(col_dff)
-        
-    usecols = list(dict.fromkeys(usecols))
-
     print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=discovery elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
 
     # ------------------------------------------------------------------
-    # 1. Single-Pass CSV Reading
+    # 1. Single-Pass Loading (Now from Cache, no longer CSV)
     # ------------------------------------------------------------------
     raw_chunks = []
     
     for cr in pds.chunks:
         try:
-            tdf = pd.read_csv(cr.trace_path, usecols=usecols)
+            # Shared reader returns tuple matching the order of fields_to_load
+            arrays = load_cache_chunk_fields(cache, plot_roi, cr.chunk_id, fields_to_load)
+            
+            # Map back to exactly what downstream expects
+            arr_map = dict(zip(fields_to_load, arrays))
+            
             rec = {
                 'cr': cr,
-                'x': tdf[col_time].values if col_time and col_time in tdf.columns else None,
-                'y_sig': tdf[col_sig].values if col_sig and col_sig in tdf.columns else None,
-                'y_uv': tdf[col_uv].values if col_uv and col_uv in tdf.columns else None,
-                'y_dff': tdf[col_dff].values if col_dff and col_dff in tdf.columns else None,
-                'N': len(tdf)
+                'x': arr_map.get('time_sec'),
+                'y_sig': arr_map.get('sig_raw'),
+                'y_uv': arr_map.get('uv_raw'),
+                'y_dff': arr_map.get('dff'),
+                # N must be derived from the actual length of an array we got
+                'N': len(arrays[0]) if arrays else 0
             }
             raw_chunks.append(rec)
         except Exception as e:
-            print(f"CRITICAL: Error reading chunk {cr.chunk_id}: {e}")
+            print(f"CRITICAL: Error reading chunk {cr.chunk_id} from cache: {e}")
             import traceback
             traceback.print_exc()
             sys.exit(1)
             
-    print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=csv_read elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+    # Close cache explicitly since we are done loading.
+    cache.close()
+            
+    print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=cache_read elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
 
     # ------------------------------------------------------------------
     # 2. Verification

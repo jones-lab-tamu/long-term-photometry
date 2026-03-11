@@ -130,6 +130,24 @@ def test_plot_phasic_dayplot_bundle_timing_output(tmp_path):
     })
     df.to_csv(traces_dir / "chunk_0.csv", index=False)
     
+    # Phasic trace cache expectations
+    import h5py
+    cache_path = analysis_out / 'phasic_trace_cache.h5'
+    with h5py.File(cache_path, 'w') as f:
+        meta = f.create_group('meta')
+        meta.attrs['mode'] = 'phasic'
+        meta.attrs['schema_version'] = '1.0'
+        
+        dt_str = h5py.string_dtype(encoding='utf-8')
+        meta.create_dataset('rois', data=np.array(['Region1'], dtype=object), dtype=dt_str)
+        meta.create_dataset('chunk_ids', data=np.array([0], dtype=int))
+        
+        c0 = f.create_group('roi/Region1/chunk_0')
+        c0.create_dataset('time_sec', data=np.linspace(0, 10, 100))
+        c0.create_dataset('sig_raw', data=np.random.randn(100))
+        c0.create_dataset('uv_raw', data=np.random.randn(100))
+        c0.create_dataset('dff', data=np.zeros(100))
+    
     # minimal features.csv
     pd.DataFrame([{
         'chunk_id': 0, 'roi': 'Region1', 'peak_count': 0, 'auc': 0.0
@@ -152,7 +170,7 @@ def test_plot_phasic_dayplot_bundle_timing_output(tmp_path):
     out = result.stdout
     assert "PLOT_TIMING START script=plot_phasic_dayplot_bundle.py" in out
     assert "step=discovery" in out
-    assert "step=csv_read" in out
+    assert "step=cache_read" in out
     assert "step=verification" in out
     assert "step=cache_build" in out
     assert "step=global_limits" in out
