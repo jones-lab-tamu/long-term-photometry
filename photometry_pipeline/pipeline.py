@@ -374,12 +374,11 @@ class Pipeline:
         # Lazy import for VIZ
         from .viz import plots
         
-        print("Starting Pass 2: Analysis...")
-        
         traces_dir = os.path.join(output_dir, 'traces')
         # Robustness: strict directory creation
         os.makedirs(os.path.join(output_dir, 'qc'), exist_ok=True)
-        os.makedirs(traces_dir, exist_ok=True)
+        if self.mode != 'tonic':
+            os.makedirs(traces_dir, exist_ok=True)
         
         all_features = []
         rep_chunk_for_plotting = None
@@ -428,21 +427,22 @@ class Pipeline:
                     feats_df = feature_extraction.extract_features(chunk, self.config)
                     all_features.append(feats_df)
                 
-                trace_data = {'time_sec': chunk.time_sec}
-                for r_idx, roi in enumerate(chunk.channel_names):
-                    trace_data[f'{roi}_uv_raw'] = chunk.uv_raw[:, r_idx]
-                    trace_data[f'{roi}_sig_raw'] = chunk.sig_raw[:, r_idx]
-                    
-                    if chunk.uv_fit is not None:
-                        trace_data[f'{roi}_uv_fit'] = chunk.uv_fit[:, r_idx]
-                    if chunk.delta_f is not None:
-                        trace_data[f'{roi}_deltaF'] = chunk.delta_f[:, r_idx]
-                    if chunk.dff is not None:
-                        trace_data[f'{roi}_dff'] = chunk.dff[:, r_idx]
+                if self.mode != 'tonic':
+                    trace_data = {'time_sec': chunk.time_sec}
+                    for r_idx, roi in enumerate(chunk.channel_names):
+                        trace_data[f'{roi}_uv_raw'] = chunk.uv_raw[:, r_idx]
+                        trace_data[f'{roi}_sig_raw'] = chunk.sig_raw[:, r_idx]
                         
-                trace_df = pd.DataFrame(trace_data)
-                trace_path = os.path.join(traces_dir, f"chunk_{i:04d}.csv")
-                trace_df.to_csv(trace_path, index=False)
+                        if chunk.uv_fit is not None:
+                            trace_data[f'{roi}_uv_fit'] = chunk.uv_fit[:, r_idx]
+                        if chunk.delta_f is not None:
+                            trace_data[f'{roi}_deltaF'] = chunk.delta_f[:, r_idx]
+                        if chunk.dff is not None:
+                            trace_data[f'{roi}_dff'] = chunk.dff[:, r_idx]
+                            
+                    trace_df = pd.DataFrame(trace_data)
+                    trace_path = os.path.join(traces_dir, f"chunk_{i:04d}.csv")
+                    trace_df.to_csv(trace_path, index=False)
                 
                 if hasattr(self, '_cache_writer'):
                     self._cache_writer.add_chunk(chunk, i, fpath)
@@ -500,7 +500,7 @@ class Pipeline:
                 # Requirement B4: Fail fast if a file in the manifest cannot be loaded in Pass 2
                 raise RuntimeError(f"Pass 2: Cannot reliably read manifest file {fpath} successfully processed in Pass 1. Error: {e}")
                 
-        if all_features:
+        if all_features and self.mode != 'tonic':
             full_feats = pd.concat(all_features, ignore_index=True)
             feats_dir = os.path.join(output_dir, 'features')
             os.makedirs(feats_dir, exist_ok=True)
@@ -521,8 +521,9 @@ class Pipeline:
             if bad_rois:
                 logging.warning(f"Baseline invalid for {len(bad_rois)} ROIs across {total_chunks} chunks ({total_affected} pairs).")
             
-        with open(os.path.join(output_dir, 'qc', 'qc_summary.json'), 'w') as f:
-            json.dump(_sanitize_metadata(self.qc_summary), f, indent=2)
+        if self.mode != 'tonic':
+            with open(os.path.join(output_dir, 'qc', 'qc_summary.json'), 'w') as f:
+                json.dump(_sanitize_metadata(self.qc_summary), f, indent=2)
             
         run_meta = {
             'target_fs_hz': self.config.target_fs_hz,

@@ -68,19 +68,18 @@ class TestTracesOnly(unittest.TestCase):
         self.assertTrue(os.path.isdir(phasic_out))
         self.assertTrue(os.path.isdir(tonic_out))
 
-        # Traces exist
+        # Traces exist for Phasic, absent for Tonic (New Contract)
         phasic_traces = os.path.join(phasic_out, "traces")
         tonic_traces = os.path.join(tonic_out, "traces")
-        self.assertTrue(os.path.isdir(phasic_traces))
-        self.assertTrue(os.path.isdir(tonic_traces))
-        self.assertTrue(len(os.listdir(phasic_traces)) > 0, "phasic traces should exist")
-        self.assertTrue(len(os.listdir(tonic_traces)) > 0, "tonic traces should exist")
+        self.assertTrue(os.path.isdir(phasic_traces), "phasic traces directory should exist")
+        self.assertFalse(os.path.exists(tonic_traces), "tonic traces directory should NOT exist")
+        self.assertTrue(len(os.listdir(phasic_traces)) > 0, "phasic traces should contain CSVs")
 
-        # QC exists
-        phasic_qc = os.path.join(phasic_out, "qc")
-        tonic_qc = os.path.join(tonic_out, "qc")
-        self.assertTrue(os.path.isdir(phasic_qc))
-        self.assertTrue(os.path.isdir(tonic_qc))
+        # QC exists for phasic
+        phasic_qc = os.path.join(phasic_out, "qc", "qc_summary.json")
+        tonic_qc = os.path.join(tonic_out, "qc", "qc_summary.json")
+        self.assertTrue(os.path.exists(phasic_qc))
+        self.assertFalse(os.path.exists(tonic_qc), "tonic qc_summary.json should not exist under new contract")
 
         # Feature outputs are ABSENT
         phasic_features = os.path.join(phasic_out, "features", "features.csv")

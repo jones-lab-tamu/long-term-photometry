@@ -39,6 +39,9 @@ try:
     from photometry_pipeline.config import Config
     from photometry_pipeline.core.utils import natural_sort_key
     from photometry_pipeline.core.events import EventEmitter
+    from photometry_pipeline.io.hdf5_cache_reader import (
+        open_tonic_cache, resolve_cache_roi, load_cache_chunk_fields, list_cache_chunk_ids
+    )
 except ImportError:
     print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.", flush=True)
     raise SystemExit(1)
@@ -857,18 +860,43 @@ def main():
         # 6. Session / Stride Computation
         # ============================================================
         t_phase, started_utc_phase = _phase_start(status_data, "session_compute")
-        tr_out = tonic_out if args.mode == 'tonic' else phasic_out
-        trace_files = sorted(glob.glob(os.path.join(tr_out, 'traces', 'chunk_*.csv')), key=natural_sort_key)
-        if not trace_files:
-            raise RuntimeError(f"No traces found in {tr_out}/traces.")
+        
+        # Timing Resolution Source Switch
+        if args.mode == 'tonic':
+            # Use HDF5 Cache for Tonic Timing
+            cache_path = os.path.join(tonic_out, 'tonic_trace_cache.h5')
+            cache = open_tonic_cache(cache_path)
+            try:
+                # Use first chunk to derive duration
+                cids = list_cache_chunk_ids(cache)
+                if not cids:
+                    raise RuntimeError(f"No chunks found in tonic cache: {cache_path}")
+                
+                # We need an ROI to load data. The timing is SHARED across ROIs.
+                # Just pick one.
+                roi_to_use = resolve_cache_roi(cache)
+                t_arr = load_cache_chunk_fields(cache, roi_to_use, cids[0], ['time_sec'])[0]
+                
+                if len(t_arr) < 2:
+                    raise RuntimeError(f"First tonic chunk is too short.")
+                
+                trace_duration_s = t_arr[-1] - t_arr[0]
+            finally:
+                cache.close()
+        else:
+            # Fallback for Phasic (Legacy CSV path preserved)
+            tr_out = phasic_out
+            trace_files = sorted(glob.glob(os.path.join(tr_out, 'traces', 'chunk_*.csv')), key=natural_sort_key)
+            if not trace_files:
+                raise RuntimeError(f"No traces found in {tr_out}/traces.")
 
-        # Inspect first trace for duration
-        df0 = pd.read_csv(trace_files[0])
-        if 'time_sec' not in df0.columns or len(df0) < 2:
-             raise RuntimeError(f"Trace {trace_files[0]} missing time_sec or too short.")
+            # Inspect first trace for duration
+            df0 = pd.read_csv(trace_files[0])
+            if 'time_sec' not in df0.columns or len(df0) < 2:
+                 raise RuntimeError(f"Trace {trace_files[0]} missing time_sec or too short.")
 
-        time_sec = df0['time_sec'].values
-        trace_duration_s = time_sec[-1] - time_sec[0]
+            time_sec = df0['time_sec'].values
+            trace_duration_s = time_sec[-1] - time_sec[0]
 
         if not np.isfinite(trace_duration_s) or trace_duration_s <= 0:
             raise RuntimeError(f"Invalid trace_duration_s: {trace_duration_s}")
@@ -1037,22 +1065,23 @@ def main():
             if os.path.exists(out_tonic):
                 files_written.append("summary/tonic_overview.png")
 
-            # Tonic CSV
-            tonic_files = sorted(glob.glob(os.path.join(tonic_out, 'traces', 'chunk_*.csv')), key=natural_sort_key)
+            # Tonic DF Timeseries (Migrated to HDF5 Cache)
             t_rows = []
-            fs_tonic = 20.0
-
-            for i, tf in enumerate(tonic_files):
-                tdf = pd.read_csv(tf)
-                col_d = f"{roi}_deltaF"
-                if col_d in tdf.columns:
-                    n_pts = len(tdf)
-                    t_abs = (i * stride_s) + tdf['time_sec'].values
-                    df_sub = pd.DataFrame({
-                        'time_hours': t_abs / 3600.0,
-                        'tonic_df': tdf[col_d].values
-                    })
-                    t_rows.append(df_sub)
+            cache_path = os.path.join(tonic_out, 'tonic_trace_cache.h5')
+            if os.path.exists(cache_path):
+                cache = open_tonic_cache(cache_path)
+                try:
+                    cids = list_cache_chunk_ids(cache)
+                    for i, cid in enumerate(cids):
+                        t_arr, df_arr = load_cache_chunk_fields(cache, roi, cid, ['time_sec', 'deltaF'])
+                        t_abs = (i * stride_s) + t_arr
+                        df_sub = pd.DataFrame({
+                            'time_hours': t_abs / 3600.0,
+                            'tonic_df': df_arr
+                        })
+                        t_rows.append(df_sub)
+                finally:
+                    cache.close()
 
             if t_rows:
                 full_tonic = pd.concat(t_rows, ignore_index=True)

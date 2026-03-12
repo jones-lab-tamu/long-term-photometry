@@ -242,8 +242,8 @@ def main():
     print("--- Step 3: Consolidating Artifacts ---")
     
     # Artifact 1: Regression Fit
-    reg_glob = os.path.join(phasic_out, 'viz', f'plot_D_correction_impact_{roi_name}*.png')
-    reg_matches = sorted(glob.glob(reg_glob), key=os.path.getmtime, reverse=True)
+    reg_glob = os.path.join(out_dir, roi_name, 'summary', 'phasic_correction_impact.png')
+    reg_matches = glob.glob(reg_glob)
     if not reg_matches:
         raise RuntimeError(f"No regression plot found for {roi_name} at {reg_glob}")
     
@@ -290,8 +290,7 @@ def main():
         (os.path.join(phasic_out, 'qc', 'qc_summary.json'), True, False),
         (os.path.join(phasic_out, 'features', 'features.csv'), False, True),
         (os.path.join(tonic_out, 'run_metadata.json'), True, False),
-        (os.path.join(tonic_out, 'qc', 'qc_summary.json'), True, False),
-        (os.path.join(tonic_out, 'features', 'features.csv'), False, True),
+        (os.path.join(tonic_out, 'tonic_trace_cache.h5'), False, False),
         (reg_target, False, False),
         (grid_target, False, False),
         (stitch_target, False, False)

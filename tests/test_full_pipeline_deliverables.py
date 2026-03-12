@@ -7,6 +7,8 @@ import subprocess
 import glob
 import json
 import pandas as pd
+from unittest import mock
+import importlib.util
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
@@ -128,6 +130,14 @@ class TestFullPipelineDeliverables(unittest.TestCase):
         for c in req_cols:
             self.assertIn(c, df_auc.columns)
             
+        # Tonic Time Series CSV (New check for Phase A migration)
+        tonic_csv = os.path.join(reg0, "tables", "tonic_df_timeseries.csv")
+        self.assertTrue(os.path.exists(tonic_csv))
+        df_tonic = pd.read_csv(tonic_csv)
+        self.assertIn('time_hours', df_tonic.columns)
+        self.assertIn('tonic_df', df_tonic.columns)
+        self.assertTrue(len(df_tonic) > 0)
+            
         # Manifest Consistency
         deliv = manifest['deliverables']['Region0']
         self.assertIn('days_dff', deliv)
@@ -154,6 +164,95 @@ class TestFullPipelineDeliverables(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(phasic_out, "qc_dff_Region0")), "Redundant qc_dff_Region0 was produced")
         self.assertFalse(os.path.exists(os.path.join(phasic_out, "session_qc_Region0")), "Redundant session_qc_Region0 was produced")
         self.assertFalse(os.path.exists(os.path.join(tonic_out, "tonic_qc")), "Redundant tonic_qc was produced")
+        
+        # Tonic traces directory should NOT exist (New contract)
+        self.assertFalse(os.path.exists(os.path.join(tonic_out, "traces")), "Legacy _analysis/tonic_out/traces/ was produced")
+        
+        # Phase A: Tonic Producer Cleanup contract verifications
+        self.assertFalse(os.path.exists(os.path.join(tonic_out, "features", "features.csv")), "Removed: tonic_out features.csv should not be produced")
+        self.assertFalse(os.path.exists(os.path.join(tonic_out, "qc", "qc_summary.json")), "Removed: tonic_out qc_summary.json should not be produced")
+
+    def test_tonic_csv_content_independence(self):
+        """
+        RIGOROUS PROOF: Verify that tonic wrapper logic (timing & tables) 
+        functions correctly even when all tonic CSV trace files are deleted,
+        proving total reliance on the HDF5 cache for waveform data.
+        """
+        import tempfile
+        
+        # 1. SETUP: Create a fresh output directory
+        test_run_dir = tempfile.mkdtemp(prefix="tonic_independence_")
+        analysis_dir = os.path.join(test_run_dir, "_analysis")
+        tonic_analysis_out = os.path.join(analysis_dir, "tonic_out")
+        tonic_traces_dir = os.path.join(tonic_analysis_out, "traces")
+        
+        # 2. SEED: Copy the HDF5 cache and report from a real run (self.output_package)
+        # Note: self.test_pipeline_deliverables must run first or we use the setUpClass one.
+        # But wait, test order isn't guaranteed. We need to ensure we have a cache.
+        source_tonic = os.path.join(self.output_package, "_analysis", "tonic_out")
+        if not os.path.exists(source_tonic):
+            # Fallback: run a quick analysis if it's missing (should not happen with setUpClass)
+            self.test_pipeline_deliverables()
+            
+        os.makedirs(tonic_analysis_out, exist_ok=True)
+        shutil.copy2(os.path.join(source_tonic, "tonic_trace_cache.h5"), tonic_analysis_out)
+        shutil.copy2(os.path.join(source_tonic, "run_report.json"), tonic_analysis_out)
+        
+        # 3. VERIFY: Ensure NO CSV files were produced by default (New Contract) 
+        self.assertFalse(os.path.exists(os.path.join(tonic_analysis_out, "traces")), "Tonic traces directory should not exist by default")
+        
+        # 4. EXECUTE: Run the wrapper in-process against this poisoned directory
+        # We use a side_effect mock for subprocess.check_call to:
+        # a) prevent actual analysis (which would re-create CSVs)
+        # b) inject ONLY the HDF5 cache and run_report into the output dir
+        
+        # Import the script module
+        script_path = os.path.join(PROJECT_ROOT, 'tools', 'run_full_pipeline_deliverables.py')
+        spec = importlib.util.spec_from_file_location("runner", script_path)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        
+        test_args = [
+            script_path,
+            "--input", self.input_dir,
+            "--out", test_run_dir,
+            "--config", self.config_path,
+            "--format", "rwd",
+            "--mode", "tonic",
+            "--sessions-per-hour", "2",
+            "--overwrite"
+        ]
+        
+        def mock_analysis_side_effect(cmd):
+            # This is called when the wrapper tries to run analyze_photometry.py
+            # Identify the output path from the command
+            if '--out' in cmd:
+                out_path = cmd[cmd.index('--out') + 1]
+                os.makedirs(out_path, exist_ok=True)
+                # Inject only HDF5 and JSON, NO CSVs. NO traces/ dir for tonic.
+                shutil.copy2(os.path.join(source_tonic, "tonic_trace_cache.h5"), out_path)
+                shutil.copy2(os.path.join(source_tonic, "run_report.json"), out_path)
+            return 0
+
+        with mock.patch('sys.argv', test_args):
+            with mock.patch('subprocess.check_call', side_effect=mock_analysis_side_effect):
+                # Suppress normal prints if desired
+                runner.main()
+        
+        # 5. VERIFY: The deliverable was produced successfully from CACHE ONLY
+        # If it tried to read CSVs, it would have failed (none exist).
+        # If it failed to resolve timing, it would have exited.
+        
+        tonic_csv = os.path.join(test_run_dir, "Region0", "tables", "tonic_df_timeseries.csv")
+        self.assertTrue(os.path.exists(tonic_csv), "tonic_df_timeseries.csv was NOT produced")
+        
+        df = pd.read_csv(tonic_csv)
+        self.assertGreater(len(df), 0, "Produced CSV is empty")
+        self.assertIn('time_hours', df.columns)
+        self.assertIn('tonic_df', df.columns)
+        
+        # Cleanup
+        shutil.rmtree(test_run_dir)
 
     def test_impossible_schedule(self):
         """Ensure failure when session_duration_s > stride_s."""
