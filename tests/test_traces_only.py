@@ -68,12 +68,11 @@ class TestTracesOnly(unittest.TestCase):
         self.assertTrue(os.path.isdir(phasic_out))
         self.assertTrue(os.path.isdir(tonic_out))
 
-        # Traces exist for Phasic, absent for Tonic (New Contract)
+        # Traces absent for both Phasic and Tonic (New Contract)
         phasic_traces = os.path.join(phasic_out, "traces")
         tonic_traces = os.path.join(tonic_out, "traces")
-        self.assertTrue(os.path.isdir(phasic_traces), "phasic traces directory should exist")
+        self.assertFalse(os.path.exists(phasic_traces), "phasic traces directory should NOT exist")
         self.assertFalse(os.path.exists(tonic_traces), "tonic traces directory should NOT exist")
-        self.assertTrue(len(os.listdir(phasic_traces)) > 0, "phasic traces should contain CSVs")
 
         # QC exists for phasic
         phasic_qc = os.path.join(phasic_out, "qc", "qc_summary.json")

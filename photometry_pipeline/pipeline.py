@@ -374,11 +374,8 @@ class Pipeline:
         # Lazy import for VIZ
         from .viz import plots
         
-        traces_dir = os.path.join(output_dir, 'traces')
         # Robustness: strict directory creation
         os.makedirs(os.path.join(output_dir, 'qc'), exist_ok=True)
-        if self.mode != 'tonic':
-            os.makedirs(traces_dir, exist_ok=True)
         
         all_features = []
         rep_chunk_for_plotting = None
@@ -427,22 +424,6 @@ class Pipeline:
                     feats_df = feature_extraction.extract_features(chunk, self.config)
                     all_features.append(feats_df)
                 
-                if self.mode != 'tonic':
-                    trace_data = {'time_sec': chunk.time_sec}
-                    for r_idx, roi in enumerate(chunk.channel_names):
-                        trace_data[f'{roi}_uv_raw'] = chunk.uv_raw[:, r_idx]
-                        trace_data[f'{roi}_sig_raw'] = chunk.sig_raw[:, r_idx]
-                        
-                        if chunk.uv_fit is not None:
-                            trace_data[f'{roi}_uv_fit'] = chunk.uv_fit[:, r_idx]
-                        if chunk.delta_f is not None:
-                            trace_data[f'{roi}_deltaF'] = chunk.delta_f[:, r_idx]
-                        if chunk.dff is not None:
-                            trace_data[f'{roi}_dff'] = chunk.dff[:, r_idx]
-                            
-                    trace_df = pd.DataFrame(trace_data)
-                    trace_path = os.path.join(traces_dir, f"chunk_{i:04d}.csv")
-                    trace_df.to_csv(trace_path, index=False)
                 
                 if hasattr(self, '_cache_writer'):
                     self._cache_writer.add_chunk(chunk, i, fpath)

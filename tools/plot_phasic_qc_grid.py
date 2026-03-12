@@ -49,8 +49,11 @@ from photometry_pipeline.config import Config
 from photometry_pipeline.core.feature_extraction import extract_features
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.viz.phasic_data_prep import (
-    discover_chunks, build_feature_map, resolve_roi,
+    build_feature_map,
     compute_day_layout, infer_datetime_from_string,
+)
+from photometry_pipeline.io.hdf5_cache_reader import (
+    open_phasic_cache, resolve_cache_roi, list_cache_chunk_ids, list_cache_source_files, load_cache_chunk_fields
 )
 
 # Setup Logging
@@ -87,30 +90,15 @@ def load_config_obj(out_dir):
 
 # infer_datetime_from_string is now imported from photometry_pipeline.viz.phasic_data_prep
 
-def determine_signal_column(trace_path, roi, requested='auto'):
+def determine_signal_column(roi, requested='auto'):
     """
-    Identifies the correct column for PEAK_INPUT_SIGNAL.
+    Identifies the correct dataset for PEAK_INPUT_SIGNAL.
+    Given we use the cache, this is now standardized to 'dff'.
     """
-    df = pd.read_csv(trace_path, nrows=1)
-    cols = df.columns.tolist()
-    
     if requested != 'auto':
-        if requested in cols:
-            return requested
-        else:
-            print(f"CRITICAL: Requested signal '{requested}' not found in {trace_path}")
-            sys.exit(1)
+        return requested
     
-    cand = f"{roi}_dff"
-    if cand in cols:
-        return cand
-    
-    match = [c for c in cols if roi in c and c.endswith('_dff')]
-    if match:
-        return match[0]
-        
-    print(f"CRITICAL: Could not auto-detect signal for ROI {roi} in {trace_path}. Available: {cols}")
-    sys.exit(1)
+    return 'dff'
 
 def infer_fs(time_arr, config, context=""):
     """
@@ -272,19 +260,30 @@ def main():
         print("CRITICAL: features.csv missing.")
         sys.exit(1)
     
-    traces_dir = os.path.join(args.analysis_out, 'traces')
-    
-    # 2. Shared data preparation (chunk discovery, ROI, layout)
-    try:
-        chunk_entries = discover_chunks(traces_dir)
-    except RuntimeError as e:
-        print(f"CRITICAL: {e}")
+    # 2. Locate Cache (Mandatory)
+    cache_path = os.path.join(args.analysis_out, 'phasic_trace_cache.h5')
+    if not os.path.exists(cache_path):
+        print(f"CRITICAL: Phasic cache not found: {cache_path}")
         sys.exit(1)
+        
+    cache = open_phasic_cache(cache_path)
+    
+    # 3. Discover Chunks via Cache Metadata (IDs and original source files for layout inference)
+    cids = list_cache_chunk_ids(cache)
+    sfs = list_cache_source_files(cache)
+    
+    if not cids:
+        print("CRITICAL: No chunks found in cache.")
+        sys.exit(1)
+        
+    # Build entries for layout engine (second element is source_file for datetime inference)
+    chunk_entries = list(zip(cids, sfs))
     
     feat_map = build_feature_map(feats_path, roi=None)
     
+    # 4. Resolve ROI via Cache
     try:
-        plot_roi = resolve_roi(chunk_entries[0][1], args.roi, column_suffix='_dff')
+        plot_roi = resolve_cache_roi(cache, args.roi)
     except RuntimeError as e:
         print(f"CRITICAL: {e}")
         sys.exit(1)
@@ -306,33 +305,19 @@ def main():
     
     for cr in pds.chunks:
         cid = cr.chunk_id
-        tpath = cr.trace_path
         
         try:
-            tdf = pd.read_csv(tpath)
+            # Load required fields from cache
+            fields_to_load = ['time_sec', 'dff', 'sig_raw', 'uv_raw']
+            t_cache, dff_cache, sig_cache, uv_cache = load_cache_chunk_fields(cache, plot_roi, cid, fields_to_load)
             
-            # X axis & FS Inference
-            x = None
-            if 'time_sec' in tdf.columns:
-                x = tdf['time_sec'].values
-            elif getattr(config, 'rwd_time_col', '') in tdf.columns:
-                x = tdf[config.rwd_time_col].values
-            elif 'Time(s)' in tdf.columns:
-                x = tdf['Time(s)'].values
-            
-            # Infer FS
-            if x is not None and len(x) > 1:
-                fs = infer_fs(x, config, context=f"Chunk {cid}")
-            else:
-                fs = config.target_fs_hz
-                if x is None:
-                    x = np.arange(len(tdf)) / fs
-            
+            x = t_cache
+            fs = infer_fs(x, config, context=f"Chunk {cid}")
             x = x - x[0] # Normalize
             
             if args.mode == 'dff':
-                col = determine_signal_column(tpath, plot_roi, args.signal)
-                y = tdf[col].values
+                # Use 'dff' field from cache for verification/plotting
+                y = dff_cache
                 uv = None
                 exp_count = np.nan
                 
@@ -347,13 +332,8 @@ def main():
                 )
                 
             elif args.mode == 'raw':
-                col_sig = f"{plot_roi}_sig_raw"
-                col_uv = f"{plot_roi}_uv_raw"
-                if col_sig not in tdf.columns or col_uv not in tdf.columns:
-                    print(f"Skipping {cid}: Raw columns missing")
-                    continue
-                y = tdf[col_sig].values
-                uv = tdf[col_uv].values
+                y = sig_cache
+                uv = uv_cache
                 indices = []
                 exp_count = np.nan
             
@@ -374,10 +354,13 @@ def main():
             })
             
         except Exception as e:
-            print(f"Error processing chunk {cid}: {e}")
+            print(f"Error processing chunk {cid} from cache: {e}")
             import traceback
             traceback.print_exc()
             sys.exit(1)
+            
+    # Done with cache
+    cache.close()
 
     print(f"PLOT_TIMING STEP script=plot_phasic_qc_grid.py step=data_loading elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
 

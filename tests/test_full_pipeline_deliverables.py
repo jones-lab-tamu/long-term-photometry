@@ -167,6 +167,9 @@ class TestFullPipelineDeliverables(unittest.TestCase):
         
         # Tonic traces directory should NOT exist (New contract)
         self.assertFalse(os.path.exists(os.path.join(tonic_out, "traces")), "Legacy _analysis/tonic_out/traces/ was produced")
+
+        # Phasic traces directory should NOT exist (New contract)
+        self.assertFalse(os.path.exists(os.path.join(phasic_out, "traces")), "Phasic traces directory was produced")
         
         # Phase A: Tonic Producer Cleanup contract verifications
         self.assertFalse(os.path.exists(os.path.join(tonic_out, "features", "features.csv")), "Removed: tonic_out features.csv should not be produced")
