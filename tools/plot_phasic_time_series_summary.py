@@ -8,6 +8,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 from datetime import datetime
 
+# Self-contained repo root bootstrap
+from pathlib import Path
+_repo_root = str(Path(__file__).resolve().parents[1])
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+try:
+    from photometry_pipeline.io.hdf5_cache_reader import (
+        open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields, list_cache_chunk_ids
+    )
+except ImportError:
+    print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.")
+    sys.exit(1)
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Plot phasic event frequency and AUC over time.")
     parser.add_argument('--analysis-out', required=True, help="Path to analysis output directory (containing features/features.csv)")
@@ -111,39 +125,32 @@ def main():
         
         # Verify consistency if session_duration_s is provided
         if args.session_duration_s is not None:
-            # We need to check against actual trace duration if possible.
-            # Traces are in <analysis_out>/traces/chunk_*.csv
-            # Strategy: Find ANY valid trace file in the traces directory to verify session duration.
-            # We assume all sessions have consistent duration.
-            traces_dir = os.path.join(args.analysis_out, 'traces')
-            trace_files = sorted(glob.glob(os.path.join(traces_dir, 'chunk_*.csv')))
+            # Phasic (Migrated to HDF5 Cache)
+            cache_path = os.path.join(args.analysis_out, 'phasic_trace_cache.h5')
+            if not os.path.exists(cache_path):
+                raise RuntimeError(f"Consistency check failed: phasic cache not found at {cache_path}")
             
-            if not trace_files:
-                raise RuntimeError(f"Consistency check failed: No trace files found in {traces_dir} to verify duration.")
-            
-            # Use the first available trace
-            trace_path = trace_files[0]
-            
-            # Read & Verify
+            cache = open_phasic_cache(cache_path)
             try:
-                tdf = pd.read_csv(trace_path)
-                if 'time_sec' not in tdf.columns:
-                     raise RuntimeError(f"Consistency check failed: 'time_sec' column missing in {trace_path}.")
+                roi = resolve_cache_roi(cache, args.roi)
+                cids = list_cache_chunk_ids(cache)
+                if not cids:
+                    raise RuntimeError(f"Consistency check failed: No chunks found in phasic cache at {cache_path}")
                 
-                t = tdf['time_sec'].values
-                if len(t) < 2:
-                     raise RuntimeError(f"Consistency check failed: Insufficient points in {trace_path}.")
+                # Use the first available chunk for duration verification
+                cid0 = cids[0]
+                t_arr, = load_cache_chunk_fields(cache, roi, cid0, ['time_sec'])
                 
-                trace_dur = t[-1] - t[0]
+                if len(t_arr) < 2:
+                     raise RuntimeError(f"Consistency check failed: Insufficient points in cache: {roi}/chunk_{cid0}.")
+                
+                trace_dur = t_arr[-1] - t_arr[0]
                 diff = abs(trace_dur - args.session_duration_s)
                 tol = max(2.0, 0.005 * args.session_duration_s)
                 if diff > tol:
-                     raise RuntimeError(f"Session Duration Mismatch! Provided: {args.session_duration_s:.2f}s, Trace: {trace_dur:.2f}s (Diff: {diff:.2f}s, Tol: {tol:.2f}s). File: {trace_path}")
-
-            except RuntimeError:
-                raise # Propagate the fatal error
-            except Exception as e:
-                raise RuntimeError(f"Consistency check failed during read of {trace_path}: {e}")
+                     raise RuntimeError(f"Session Duration Mismatch! Provided: {args.session_duration_s:.2f}s, Trace (Cache): {trace_dur:.2f}s (Diff: {diff:.2f}s, Tol: {tol:.2f}s). Trace: {roi}/chunk_{cid0}")
+            finally:
+                cache.close()
 
         if args.session_duration_s is not None:
             session_duration_s = args.session_duration_s

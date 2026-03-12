@@ -100,6 +100,15 @@ def list_cache_chunk_ids(cache: h5py.File) -> list[int]:
         sys.exit(1)
 
 
+def list_cache_source_files(cache: h5py.File) -> list[str]:
+    """Returns the list of original source files stored in /meta/source_files."""
+    try:
+        return [sf.decode('utf-8') if isinstance(sf, bytes) else str(sf) for sf in cache['meta']['source_files']]
+    except Exception as e:
+        print(f"CRITICAL: Failed to read source_files from cache: {e}")
+        sys.exit(1)
+
+
 def resolve_cache_roi(cache: h5py.File, requested_roi: str | None = None) -> str:
     """
     Resolve and validate the ROI using the /meta/rois dataset.

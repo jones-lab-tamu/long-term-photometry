@@ -40,7 +40,7 @@ try:
     from photometry_pipeline.core.utils import natural_sort_key
     from photometry_pipeline.core.events import EventEmitter
     from photometry_pipeline.io.hdf5_cache_reader import (
-        open_tonic_cache, resolve_cache_roi, load_cache_chunk_fields, list_cache_chunk_ids
+        open_tonic_cache, open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields, list_cache_chunk_ids
     )
 except ImportError:
     print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.", flush=True)
@@ -861,7 +861,7 @@ def main():
         # ============================================================
         t_phase, started_utc_phase = _phase_start(status_data, "session_compute")
         
-        # Timing Resolution Source Switch
+        # Timing Resolution Cache Measurement (Mandatory)
         if args.mode == 'tonic':
             # Use HDF5 Cache for Tonic Timing
             cache_path = os.path.join(tonic_out, 'tonic_trace_cache.h5')
@@ -873,33 +873,41 @@ def main():
                     raise RuntimeError(f"No chunks found in tonic cache: {cache_path}")
                 
                 # We need an ROI to load data. The timing is SHARED across ROIs.
-                # Just pick one.
                 roi_to_use = resolve_cache_roi(cache)
                 t_arr = load_cache_chunk_fields(cache, roi_to_use, cids[0], ['time_sec'])[0]
                 
                 if len(t_arr) < 2:
                     raise RuntimeError(f"First tonic chunk is too short.")
                 
-                trace_duration_s = t_arr[-1] - t_arr[0]
+                actual_trace_duration_s = t_arr[-1] - t_arr[0]
             finally:
                 cache.close()
         else:
-            # Fallback for Phasic (Legacy CSV path preserved)
-            tr_out = phasic_out
-            trace_files = sorted(glob.glob(os.path.join(tr_out, 'traces', 'chunk_*.csv')), key=natural_sort_key)
-            if not trace_files:
-                raise RuntimeError(f"No traces found in {tr_out}/traces.")
+            # Phasic (Migrated to HDF5 Cache)
+            cache_path = os.path.join(phasic_out, 'phasic_trace_cache.h5')
+            if not os.path.exists(cache_path):
+                raise RuntimeError(f"Phasic cache not found: {cache_path}")
+            
+            cache = open_phasic_cache(cache_path)
+            try:
+                roi = resolve_cache_roi(cache, None)
+                cids = list_cache_chunk_ids(cache)
+                if not cids:
+                    raise RuntimeError(f"No chunks found in phasic cache: {cache_path}")
+                
+                cid0 = cids[0]
+                # We only need time_sec to resolve duration
+                t_arr, = load_cache_chunk_fields(cache, roi, cid0, ['time_sec'])
+                
+                if len(t_arr) < 2:
+                    raise RuntimeError(f"First phasic chunk is too short.")
+                
+                actual_trace_duration_s = t_arr[-1] - t_arr[0]
+            finally:
+                cache.close()
 
-            # Inspect first trace for duration
-            df0 = pd.read_csv(trace_files[0])
-            if 'time_sec' not in df0.columns or len(df0) < 2:
-                 raise RuntimeError(f"Trace {trace_files[0]} missing time_sec or too short.")
-
-            time_sec = df0['time_sec'].values
-            trace_duration_s = time_sec[-1] - time_sec[0]
-
-        if not np.isfinite(trace_duration_s) or trace_duration_s <= 0:
-            raise RuntimeError(f"Invalid trace_duration_s: {trace_duration_s}")
+        if not np.isfinite(actual_trace_duration_s) or actual_trace_duration_s <= 0:
+            raise RuntimeError(f"Invalid actual_trace_duration_s: {actual_trace_duration_s}")
 
         # Stride Inference
         stride_s = None
@@ -910,8 +918,6 @@ def main():
              # Already logged at top of main
         else:
              # This script currently requires sessions_per_hour for delivery packaging
-             # if it wasn't provided, we could try to infer it from timestamps if they are stable, 
-             # but the requirement is to use the single resolved source of truth.
              raise RuntimeError("Cannot infer session stride (duty-cycled acquisition) without sessions_per_hour. Please provide it explicitly via GUI/CLI.")
 
         # Validation
@@ -926,15 +932,15 @@ def main():
              if args.session_duration_s <= 0:
                   raise RuntimeError(f"Provided session duration must be > 0, got {args.session_duration_s}")
 
-             # Validate against trace
+             # Validate actual duration against user input
              tol = max(2.0, 0.005 * args.session_duration_s)
-             diff = abs(trace_duration_s - args.session_duration_s)
+             diff = abs(actual_trace_duration_s - args.session_duration_s)
              if diff > tol:
-                  raise RuntimeError(f"Session Duration Mismatch! Provided: {args.session_duration_s:.2f}s, Trace: {trace_duration_s:.2f}s (Diff: {diff:.2f}s, Tol: {tol:.2f}s). File: {trace_files[0]}")
+                   raise RuntimeError(f"Session Duration Mismatch! Provided: {args.session_duration_s:.2f}s, Trace (Cache): {actual_trace_duration_s:.2f}s (Diff: {diff:.2f}s, Tol: {tol:.2f}s).")
 
              session_duration_s = args.session_duration_s
         else:
-             session_duration_s = trace_duration_s
+             session_duration_s = actual_trace_duration_s
 
         # Impossible Schedule Check
         if session_duration_s > (stride_s + 1e-6):

@@ -31,7 +31,10 @@ if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
 from photometry_pipeline.viz.phasic_data_prep import (
-    discover_chunks, resolve_roi, compute_day_layout,
+    compute_day_layout,
+)
+from photometry_pipeline.io.hdf5_cache_reader import (
+    open_phasic_cache, resolve_cache_roi, list_cache_chunk_ids, list_cache_source_files, load_cache_chunk_fields
 )
 
 def parse_args():
@@ -59,17 +62,29 @@ def main():
     print("PLOT_TIMING START script=plot_session_grid.py", flush=True)
     
     args = parse_args()
-    traces_dir = os.path.join(args.analysis_out, 'traces')
     
-    # Shared data preparation (chunk discovery, ROI, layout)
-    try:
-        chunk_entries = discover_chunks(traces_dir)
-    except RuntimeError as e:
-        print(f"CRITICAL: {e}")
+    # Locate Cache
+    cache_path = os.path.join(args.analysis_out, 'phasic_trace_cache.h5')
+    if not os.path.exists(cache_path):
+        print(f"CRITICAL: Phasic cache not found: {cache_path}")
         sys.exit(1)
+        
+    cache = open_phasic_cache(cache_path)
+    
+    # Discover Chunks via Cache Metadata (IDs and original source files for layout inference)
+    cids = list_cache_chunk_ids(cache)
+    sfs = list_cache_source_files(cache)
+    
+    if not cids:
+        print("CRITICAL: No chunks found in cache.")
+        sys.exit(1)
+        
+    # Build entries for layout engine (second element is source_file for datetime inference)
+    chunk_entries = list(zip(cids, sfs))
 
+    # Resolve ROI via Cache
     try:
-        roi = resolve_roi(chunk_entries[0][1], args.roi, column_suffix='_sig_raw')
+        roi = resolve_cache_roi(cache, args.roi)
     except RuntimeError as e:
         print(f"CRITICAL: {e}")
         sys.exit(1)
@@ -81,18 +96,18 @@ def main():
 
     # 1. Audit
     print(f"PLOT_TIMING STEP script=plot_session_grid.py step=discovery elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
-    print("Auditing session boundaries...")
-    valid_files = []
+    print("Auditing session boundaries via cache...")
+    plot_items = []
     
     for cr in pds.chunks:
-        f = cr.trace_path
+        cid = cr.chunk_id
         try:
-            df = pd.read_csv(f)
-            t = df['time_sec'].values
+            # Load required fields from cache
+            t, sig, uv = load_cache_chunk_fields(cache, roi, cid, ['time_sec', 'sig_raw', 'uv_raw'])
             
             # Monotonicity
             if not check_monotonicity(t):
-                print(f"CRITICAL: Non-monotonic time in {f}")
+                print(f"CRITICAL: Non-monotonic time in cache for chunk {cid}")
                 sys.exit(1)
                 
             # Duration
@@ -104,28 +119,39 @@ def main():
                  expected = args.session_duration_s
                  tol = max(2.0, 0.005 * expected)
                  if abs(duration - expected) > tol:
-                      print(f"CRITICAL: Duration mismatch in {f}. Expected ~{expected:.2f}s, got {duration:.2f}s (Diff > {tol:.2f}s)")
+                      print(f"CRITICAL: Duration mismatch in cache for chunk {cid}. Expected ~{expected:.2f}s, got {duration:.2f}s (Diff > {tol:.2f}s)")
                       sys.exit(1)
             else:
                  # Standard check (10 min = 600s). Request says [590, 610]
                  if not (590 <= duration <= 610):
-                     print(f"CRITICAL: Invalid duration {duration:.2f}s in {f} (Expected ~600s)")
+                     print(f"CRITICAL: Invalid duration {duration:.2f}s in cache for chunk {cid} (Expected ~600s)")
                      sys.exit(1)
                 
             # Continuity
             # Infer dt from median diff
             dt = np.median(np.diff(t))
             if not check_continuity(t, dt):
-                print(f"CRITICAL: Discontinuity detected in {f}")
+                print(f"CRITICAL: Discontinuity detected in cache for chunk {cid}")
                 sys.exit(1)
                 
-            valid_files.append((f, df))
+            # Store plot data
+            plot_items.append({
+                'day': cr.day_idx, 
+                'hour': cr.hour_idx, 
+                'col': cr.hour_rank,
+                't': t - t[0],
+                'sig': sig,
+                'uv': uv
+            })
             
         except Exception as e:
-            print(f"CRITICAL: Read error {f}: {e}")
+            print(f"CRITICAL: Read error from cache for chunk {cid}: {e}")
             sys.exit(1)
             
-    print(f"Audit PASS: {len(valid_files)} chunks verified.")
+    # Done with cache
+    cache.close()
+    
+    print(f"Audit PASS: {len(plot_items)} chunks verified.")
     print(f"PLOT_TIMING STEP script=plot_session_grid.py step=data_loading elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
     
     # 2. Grid Plot
@@ -139,26 +165,6 @@ def main():
         out_dir = os.path.join(args.analysis_out, 'session_qc')
     os.makedirs(out_dir, exist_ok=True)
     
-    # Use prepared layout from shared helper
-    # Process all chunks, store plot data
-    plot_items = []
-    
-    for cr in pds.chunks:
-        # Find the matching validated df
-        match = [df for (fp, df) in valid_files if fp == cr.trace_path]
-        if not match:
-            continue
-        df = match[0]
-        
-        plot_items.append({
-            'day': cr.day_idx, 
-            'hour': cr.hour_idx, 
-            'col': cr.hour_rank,
-            't': df['time_sec'].values - df['time_sec'].values[0],
-            'sig': df[f"{roi}_sig_raw"].values,
-            'uv': df[f"{roi}_uv_raw"].values
-        })
-        
     unique_days = sorted(pds.chunks_by_day.keys())
     print(f"PLOT_TIMING STEP script=plot_session_grid.py step=data_preparation elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
     

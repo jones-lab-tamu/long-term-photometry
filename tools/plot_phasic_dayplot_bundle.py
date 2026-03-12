@@ -39,7 +39,8 @@ from photometry_pipeline.viz.phasic_data_prep import (
     discover_chunks, build_feature_map, resolve_roi, compute_day_layout
 )
 from photometry_pipeline.io.hdf5_cache_reader import (
-    open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields
+    open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields,
+    list_cache_chunk_ids, list_cache_source_files
 )
 
 # We need the strict peak verification logic from the qc grid script
@@ -200,24 +201,35 @@ def main():
     
     config = load_config_obj(args.analysis_out)
     feats_path = os.path.join(args.analysis_out, 'features', 'features.csv')
-    traces_dir = os.path.join(args.analysis_out, 'traces')
     
     needs_dff_trace = args.write_dff_grid or args.write_stacked
     needs_peak_verification = args.write_dff_grid
     
-    try:
-        chunk_entries = discover_chunks(traces_dir)
-    except RuntimeError as e:
-        print(f"CRITICAL: {e}")
-        sys.exit(1)
-        
-    # 1. Open the HDF5 Cache early
+    # 1. Open the HDF5 Cache (Mandatory source for discovery and data)
     cache_path = os.path.join(args.analysis_out, 'phasic_trace_cache.h5')
-
+    if not os.path.exists(cache_path):
+        print(f"CRITICAL: Phasic cache not found: {cache_path}")
+        sys.exit(1)
         
     cache = open_phasic_cache(cache_path)
     
-    # 2. Resolve ROI via cache instead of CSV headers
+    # 2. Discover Chunks via Cache Metadata (No longer dependent on traces/ CSV folder)
+    cids = list_cache_chunk_ids(cache)
+    sfs = list_cache_source_files(cache)
+    
+    if not cids:
+        print("CRITICAL: No chunks found in cache.")
+        sys.exit(1)
+        
+    if len(cids) != len(sfs):
+        print(f"CRITICAL: Cache metadata mismatch: {len(cids)} IDs vs {len(sfs)} source files.")
+        sys.exit(1)
+        
+    # Build discovery entries for layout engine. 
+    # The layout engine uses the 2nd element (source_file) for datetime inference.
+    chunk_entries = list(zip(cids, sfs))
+    
+    # 3. Resolve ROI via cache
     plot_roi = resolve_cache_roi(cache, args.roi)
     print(f"Plots using ROI: {plot_roi}")
         

@@ -186,27 +186,32 @@ class TestFullPipelineDeliverables(unittest.TestCase):
         tonic_analysis_out = os.path.join(analysis_dir, "tonic_out")
         tonic_traces_dir = os.path.join(tonic_analysis_out, "traces")
         
-        # 2. SEED: Copy the HDF5 cache and report from a real run (self.output_package)
-        # Note: self.test_pipeline_deliverables must run first or we use the setUpClass one.
-        # But wait, test order isn't guaranteed. We need to ensure we have a cache.
+        # 2. SEED: Copy the HDF5 cache and report from a real run
         source_tonic = os.path.join(self.output_package, "_analysis", "tonic_out")
+        source_phasic = os.path.join(self.output_package, "_analysis", "phasic_out")
         if not os.path.exists(source_tonic):
-            # Fallback: run a quick analysis if it's missing (should not happen with setUpClass)
             self.test_pipeline_deliverables()
             
         os.makedirs(tonic_analysis_out, exist_ok=True)
         shutil.copy2(os.path.join(source_tonic, "tonic_trace_cache.h5"), tonic_analysis_out)
         shutil.copy2(os.path.join(source_tonic, "run_report.json"), tonic_analysis_out)
+        shutil.copy2(os.path.join(source_tonic, "config_used.yaml"), tonic_analysis_out)
         
-        # 3. VERIFY: Ensure NO CSV files were produced by default (New Contract) 
+        # Wrapper Section 7 unconditionally calls phasic plotters (dayplot bundle),
+        # which still read CSV traces (NOT migrated in B2). Provide phasic artifacts.
+        phasic_analysis_out = os.path.join(analysis_dir, "phasic_out")
+        os.makedirs(phasic_analysis_out, exist_ok=True)
+        shutil.copy2(os.path.join(source_phasic, "phasic_trace_cache.h5"), phasic_analysis_out)
+        shutil.copy2(os.path.join(source_phasic, "run_report.json"), phasic_analysis_out)
+        shutil.copy2(os.path.join(source_phasic, "config_used.yaml"), phasic_analysis_out)
+        traces_src = os.path.join(source_phasic, "traces")
+        if os.path.exists(traces_src):
+            shutil.copytree(traces_src, os.path.join(phasic_analysis_out, "traces"), dirs_exist_ok=True)
+        
+        # 3. VERIFY: Ensure NO tonic CSV files were produced by default (New Contract)
         self.assertFalse(os.path.exists(os.path.join(tonic_analysis_out, "traces")), "Tonic traces directory should not exist by default")
         
-        # 4. EXECUTE: Run the wrapper in-process against this poisoned directory
-        # We use a side_effect mock for subprocess.check_call to:
-        # a) prevent actual analysis (which would re-create CSVs)
-        # b) inject ONLY the HDF5 cache and run_report into the output dir
-        
-        # Import the script module
+        # 4. EXECUTE: Run the wrapper in-process
         script_path = os.path.join(PROJECT_ROOT, 'tools', 'run_full_pipeline_deliverables.py')
         spec = importlib.util.spec_from_file_location("runner", script_path)
         runner = importlib.util.module_from_spec(spec)
@@ -223,16 +228,34 @@ class TestFullPipelineDeliverables(unittest.TestCase):
             "--overwrite"
         ]
         
+        import subprocess as sp
+        real_check_call = sp.check_call
+        
         def mock_analysis_side_effect(cmd):
-            # This is called when the wrapper tries to run analyze_photometry.py
-            # Identify the output path from the command
-            if '--out' in cmd:
-                out_path = cmd[cmd.index('--out') + 1]
-                os.makedirs(out_path, exist_ok=True)
-                # Inject only HDF5 and JSON, NO CSVs. NO traces/ dir for tonic.
-                shutil.copy2(os.path.join(source_tonic, "tonic_trace_cache.h5"), out_path)
-                shutil.copy2(os.path.join(source_tonic, "run_report.json"), out_path)
-            return 0
+            cmd_str = " ".join([str(p).replace(os.sep, '/') for p in cmd])
+            
+            if 'analyze_photometry.py' in cmd_str:
+                if '--out' in cmd:
+                    out_path = cmd[cmd.index('--out') + 1]
+                    os.makedirs(out_path, exist_ok=True)
+                    # Inject tonic artifacts (NO CSVs for tonic)
+                    shutil.copy2(os.path.join(source_tonic, "tonic_trace_cache.h5"), out_path)
+                    shutil.copy2(os.path.join(source_tonic, "run_report.json"), out_path)
+                    shutil.copy2(os.path.join(source_tonic, "config_used.yaml"), out_path)
+                    # --overwrite deletes _analysis/, so re-seed phasic_out here.
+                    # Section 7 plotting unconditionally calls phasic dayplot bundle
+                    # which still reads CSV traces (NOT migrated in B2).
+                    p_out = os.path.join(os.path.dirname(out_path), 'phasic_out')
+                    os.makedirs(p_out, exist_ok=True)
+                    shutil.copy2(os.path.join(source_phasic, "phasic_trace_cache.h5"), p_out)
+                    shutil.copy2(os.path.join(source_phasic, "run_report.json"), p_out)
+                    shutil.copy2(os.path.join(source_phasic, "config_used.yaml"), p_out)
+                    traces_src = os.path.join(source_phasic, "traces")
+                    if os.path.exists(traces_src):
+                        shutil.copytree(traces_src, os.path.join(p_out, "traces"), dirs_exist_ok=True)
+                return 0
+                
+            return real_check_call(cmd)
 
         with mock.patch('sys.argv', test_args):
             with mock.patch('subprocess.check_call', side_effect=mock_analysis_side_effect):
@@ -253,6 +276,131 @@ class TestFullPipelineDeliverables(unittest.TestCase):
         
         # Cleanup
         shutil.rmtree(test_run_dir)
+
+    def test_phasic_csv_content_independence(self):
+        """
+        RIGOROUS PROOF: Verify that phasic wrapper timing/session-duration
+        resolution and plot_phasic_time_series_summary.py duration validation
+        function correctly using phasic_trace_cache.h5.
+
+        Scope: Phase B2 approved migrations only.
+        - Wrapper timing resolution: uses cache, not CSV content.
+        - Summary plotter duration validation: uses cache, not CSV content.
+
+        Note: plot_phasic_dayplot_bundle.py is NOT migrated in B2 and still
+        reads CSV traces, so those are provided to allow the full pipeline
+        to complete.
+        """
+        import tempfile
+        import importlib.util
+        
+        # 1. SETUP: Create a fresh output directory
+        test_run_dir = tempfile.mkdtemp(prefix="phasic_independence_")
+        analysis_dir = os.path.join(test_run_dir, "_analysis")
+        phasic_analysis_out = os.path.join(analysis_dir, "phasic_out")
+        
+        # 2. SEED: Copy necessary artifacts from a real run
+        source_phasic = os.path.join(self.output_package, "_analysis", "phasic_out")
+        if not os.path.exists(source_phasic):
+            self.test_pipeline_deliverables()
+            
+        os.makedirs(phasic_analysis_out, exist_ok=True)
+        shutil.copy2(os.path.join(source_phasic, "phasic_trace_cache.h5"), phasic_analysis_out)
+        shutil.copy2(os.path.join(source_phasic, "run_report.json"), phasic_analysis_out)
+        shutil.copy2(os.path.join(source_phasic, "config_used.yaml"), phasic_analysis_out)
+        # Summary plotter needs features.csv
+        os.makedirs(os.path.join(phasic_analysis_out, "features"), exist_ok=True)
+        shutil.copy2(os.path.join(source_phasic, "features", "features.csv"), os.path.join(phasic_analysis_out, "features"))
+        # Plotters also need intermediates
+        inter_src = os.path.join(source_phasic, "phasic_intermediates")
+        if os.path.exists(inter_src):
+            shutil.copytree(inter_src, os.path.join(phasic_analysis_out, "phasic_intermediates"), dirs_exist_ok=True)
+        # Dayplot bundle (Migrated) NO LONGER needs legacy CSV traces.
+        # We explicitly omit copying 'traces' here to prove cache-only discovery.
+        # Wrapper Section 7 unconditionally calls tonic overview plotter.
+        # Provide tonic artifacts so it can succeed.
+        source_tonic = os.path.join(self.output_package, "_analysis", "tonic_out")
+        tonic_analysis_out = os.path.join(analysis_dir, "tonic_out")
+        os.makedirs(tonic_analysis_out, exist_ok=True)
+        shutil.copy2(os.path.join(source_tonic, "tonic_trace_cache.h5"), tonic_analysis_out)
+        shutil.copy2(os.path.join(source_tonic, "run_report.json"), tonic_analysis_out)
+        
+        # 3. EXECUTE: Run the wrapper in-process
+        script_path = os.path.join(PROJECT_ROOT, 'tools', 'run_full_pipeline_deliverables.py')
+        spec = importlib.util.spec_from_file_location("runner", script_path)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        
+        test_args = [
+            script_path,
+            "--input", self.input_dir,
+            "--out", test_run_dir,
+            "--config", self.config_path,
+            "--format", "rwd",
+            "--mode", "phasic",
+            "--sessions-per-hour", "2",
+            "--session-duration-s", "600",
+            "--overwrite"
+        ]
+        
+        import subprocess as sp
+        real_check_call = sp.check_call
+
+        def mock_analysis_side_effect(cmd):
+            cmd_str = " ".join([str(p).replace(os.sep, '/') for p in cmd])
+            
+            if 'analyze_photometry.py' in cmd_str:
+                if '--out' in cmd:
+                    out_path = cmd[cmd.index('--out') + 1]
+                    os.makedirs(out_path, exist_ok=True)
+                    shutil.copy2(os.path.join(source_phasic, "phasic_trace_cache.h5"), out_path)
+                    shutil.copy2(os.path.join(source_phasic, "run_report.json"), out_path)
+                    shutil.copy2(os.path.join(source_phasic, "config_used.yaml"), out_path)
+                    os.makedirs(os.path.join(out_path, "features"), exist_ok=True)
+                    shutil.copy2(os.path.join(source_phasic, "features", "features.csv"), os.path.join(out_path, "features"))
+                    inter_src = os.path.join(source_phasic, "phasic_intermediates")
+                    if os.path.exists(inter_src):
+                        shutil.copytree(inter_src, os.path.join(out_path, "phasic_intermediates"), dirs_exist_ok=True)
+                    # Dayplot bundle (Migrated) NO LONGER needs legacy CSV traces.
+                    # --overwrite deletes _analysis/, so seed tonic_out here.
+                    # Section 7 plotting unconditionally calls tonic overview plotter.
+                    t_out = os.path.join(os.path.dirname(out_path), 'tonic_out')
+                    os.makedirs(t_out, exist_ok=True)
+                    shutil.copy2(os.path.join(source_tonic, "tonic_trace_cache.h5"), t_out)
+                    shutil.copy2(os.path.join(source_tonic, "run_report.json"), t_out)
+                return 0
+                
+            return real_check_call(cmd)
+
+        with mock.patch('sys.argv', test_args):
+            with mock.patch('subprocess.check_call', side_effect=mock_analysis_side_effect):
+                runner.main()
+        
+        # 4. VERIFY: B2-scoped deliverables were produced
+        # A. Summary plotter outputs (proves cache-backed duration validation worked)
+        reg0_tables = os.path.join(test_run_dir, "Region0", "tables")
+        self.assertTrue(os.path.exists(os.path.join(reg0_tables, "phasic_peak_rate_timeseries.csv")), 
+                        "phasic_peak_rate_timeseries.csv was NOT produced despite cache-backed validation")
+        
+        # C. Dayplot bundle outputs (proves cache-backed DISCOVERY worked)
+        reg0_plots = os.path.join(test_run_dir, "Region0", "day_plots")
+        self.assertTrue(os.path.exists(os.path.join(reg0_plots, "phasic_dFF_day_000.png")),
+                        "phasic_dFF_day_000.png was NOT produced. Cache-backed discovery potentially failed.")
+        self.assertTrue(os.path.exists(os.path.join(reg0_plots, "phasic_sig_iso_day_000.png")),
+                        "phasic_sig_iso_day_000.png was NOT produced.")
+        self.assertTrue(os.path.exists(os.path.join(reg0_plots, "phasic_stacked_day_000.png")),
+                        "phasic_stacked_day_000.png was NOT produced.")
+        
+        # B. Manifest should have resolved duration from cache
+        man_path = os.path.join(test_run_dir, "MANIFEST.json")
+        with open(man_path, 'r') as f:
+            manifest = json.load(f)
+        self.assertTrue(590 < manifest['session_duration_s'] < 610,
+                        f"session_duration_s={manifest['session_duration_s']} not in expected range")
+        
+        # Cleanup
+        shutil.rmtree(test_run_dir)
+
 
     def test_impossible_schedule(self):
         """Ensure failure when session_duration_s > stride_s."""
@@ -284,6 +432,37 @@ class TestFullPipelineDeliverables(unittest.TestCase):
         self.assertIn("Stride", combined)
             
         print("Successfully caught impossible schedule error with correct message.")
+
+    def test_phasic_duration_mismatch_fails(self):
+        """
+        Verify that the wrapper correctly detects and fails when the user
+        provides a session duration that mismatches the actual cache content.
+        """
+        # Phasic cache in self.output_package is ~600s.
+        # Provide 500s -> should fail.
+        cmd = [
+            sys.executable, "tools/run_full_pipeline_deliverables.py",
+            "--input", self.input_dir,
+            "--out", os.path.join(self.out_dir, "test_mismatch"),
+            "--config", self.config_path,
+            "--format", "rwd",
+            "--mode", "phasic",
+            "--overwrite",
+            "--sessions-per-hour", "2",
+            "--session-duration-s", "500" 
+        ]
+        
+        # Expect failure (return code 1 from SystemExit)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0, "Command should have failed due to duration mismatch")
+        
+        combined = (result.stdout or "") + "\n" + (result.stderr or "")
+        print(f"DEBUG: Combined Output:\n{combined}")
+        self.assertIn("Session Duration Mismatch", combined)
+        self.assertIn("Trace (Cache)", combined)
+        # 500 is provided as input, so it should be there as "500.00s"
+        self.assertIn("500", combined) 
+        print("Successfully verified that duration mismatch raises RuntimeError.")
 
     @classmethod
     def tearDownClass(cls):
