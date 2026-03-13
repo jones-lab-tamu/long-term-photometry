@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# VERIFICATION TOOL
+# STATUS: verification-only
+# USED BY GUI DELIVERABLES: no
+# NOTE: This script is not part of the supported GUI-deliverables workflow.
+# NOTE: It is retained for diagnostics, smoke tests, migration checks, or synthetic-data verification.
 """
 Phasic QC Grid Generator (Signal-Locked)
 ========================================

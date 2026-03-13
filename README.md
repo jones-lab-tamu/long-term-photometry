@@ -163,6 +163,20 @@ python tools/run_full_pipeline_deliverables.py \
   --validate-only
 ```
 
+
+
+## Supported vs. Legacy / Verification Tools
+
+The supported workflow for this repository is the GUI-deliverables path centered on:
+- `tools/run_full_pipeline_deliverables.py`
+- `analyze_photometry.py`
+- `photometry_pipeline/pipeline.py`
+- HDF5 cache-backed plotting and deliverables
+
+Some scripts under `tools/` are retained as verification-only utilities or deprecated legacy utilities. These non-GUI scripts are not part of the supported artifact contract and are not maintained as part of the live GUI runtime path.
+
+Legacy scripts may still reference obsolete outputs such as `traces/`, `viz/`, or older standalone workflows. Verification-only scripts may still be useful for diagnostics, smoke tests, and migration validation, but they are not part of the live GUI runtime path.
+
 ## Configuration (`config.yaml`)
 
 All numerical behavior is controlled via configuration. Unknown keys cause a hard error.

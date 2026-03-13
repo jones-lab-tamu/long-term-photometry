@@ -1,3 +1,8 @@
+# VERIFICATION TOOL
+# STATUS: verification-only
+# USED BY GUI DELIVERABLES: no
+# NOTE: This script is not part of the supported GUI-deliverables workflow.
+# NOTE: It is retained for diagnostics, smoke tests, migration checks, or synthetic-data verification.
 
 import argparse
 import os

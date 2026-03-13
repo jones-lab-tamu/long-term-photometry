@@ -1,3 +1,8 @@
+# LEGACY TOOL
+# STATUS: deprecated
+# USED BY GUI DELIVERABLES: no
+# NOTE: This script is not part of the supported GUI-deliverables workflow.
+# NOTE: It is retained only as a legacy utility and may depend on obsolete artifact contracts.
 
 import subprocess
 import os
