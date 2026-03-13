@@ -10,7 +10,7 @@ import numpy as np
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, repo_root)
 
-from tools.plot_phasic_intermediate_chain import evaluate_synth_gating
+from tools.verification.plot_phasic_intermediate_chain import evaluate_synth_gating
 
 class TestSynthGatingCornerCases(unittest.TestCase):
     """

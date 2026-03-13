@@ -254,7 +254,7 @@ def verify_peak_count_strict(trace_arr, time_arr, fs, config, expected_count, ro
 def main():
     t_start = time.perf_counter()
     print("PLOT_TIMING START script=plot_phasic_qc_grid.py", flush=True)
-    print("Running tools/plot_phasic_qc_grid.py (FIXED)")
+    print("Running tools/verification/plot_phasic_qc_grid.py (FIXED)")
     args = parse_args()
     
     # 1. Load Config Object (Strict)

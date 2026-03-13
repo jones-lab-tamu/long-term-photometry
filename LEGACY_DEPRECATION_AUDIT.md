@@ -32,44 +32,44 @@ These are on the live GUI-deliverables execution path:
 
 ## Deprecate Candidates (High Confidence)
 
-These are not in the GUI path and have no meaningful runtime callers in the current deliverables flow.
+These are not in the GUI path and have no meaningful runtime callers in the current deliverables flow. (MOVED TO `tools/legacy/`)
 
-1. `tools/DEPRECATED_run_cli_and_make_tonic_phasic_plots.py`
+1. `tools/legacy/DEPRECATED_run_cli_and_make_tonic_phasic_plots.py`
    - Already explicitly named `DEPRECATED_`.
-2. `tools/plot_multi_roi_tonic_verification.py`
+2. `tools/legacy/plot_multi_roi_tonic_verification.py`
    - No in-repo callers found.
-3. `tools/plot_tonic_verification_panel.py`
+3. `tools/legacy/plot_tonic_verification_panel.py`
    - No in-repo callers found.
-4. `tools/plot_verification_panel.old.py`
+4. `tools/legacy/plot_verification_panel.old.py`
    - Explicit `.old` legacy file.
-5. `tools/run_tonic_dff_demo.py`
+5. `tools/legacy/run_tonic_dff_demo.py`
    - Standalone demo chain; no runtime callers.
-6. `tools/plot_tonic_dff_panel.py`
-   - Only called by `tools/run_tonic_dff_demo.py`.
-7. `tools/plot_verification_panel.py`
+6. `tools/legacy/plot_tonic_dff_panel.py`
+   - Only called by `tools/legacy/run_tonic_dff_demo.py`.
+7. `tools/legacy/plot_verification_panel.py`
    - Standalone panel generator; not called by GUI flow.
-8. `tools/verify_paper_alignment.py`
+8. `tools/legacy/verify_paper_alignment.py`
    - Enforces legacy `traces/` and `viz/` expectations; not GUI-deliverables contract aligned.
 
 ## Verification-Only (Non-GUI Runtime)
 
-These are useful diagnostics, but not part of live GUI deliverables. They should be marked as verification utilities (or moved under `tools/legacy/verification/` if desired).
+These are useful diagnostics, but not part of live GUI deliverables. (MOVED TO `tools/verification/`)
 
-1. `tools/plot_phasic_qc_grid.py`
-   - Called by `tools/run_task_c_smoke.py`, `tools/run_biological_synth_verification.py`, migration tests.
-2. `tools/plot_session_grid.py`
+1. `tools/verification/plot_phasic_qc_grid.py`
+   - Called by `tools/verification/run_task_c_smoke.py`, `tools/verification/run_biological_synth_verification.py`, migration tests.
+2. `tools/verification/plot_session_grid.py`
    - Not called by wrapper; covered by migration tests only.
-3. `tools/plot_phasic_stacked.py`
+3. `tools/verification/plot_phasic_stacked.py`
    - Verification usage + migration test coverage.
-4. `tools/plot_phasic_intermediate_chain.py`
+4. `tools/verification/plot_phasic_intermediate_chain.py`
    - Verification-chain tests only.
-5. `tools/plot_phasic_stacked_day_smoothed.py`
+5. `tools/verification/plot_phasic_stacked_day_smoothed.py`
    - Not used by wrapper; only mentioned in helper docs/tests.
-6. `tools/run_biological_synth_verification.py`
+6. `tools/verification/run_biological_synth_verification.py`
    - Standalone verification orchestration.
-7. `tools/run_task_c_smoke.py`
+7. `tools/verification/run_task_c_smoke.py`
    - Standalone smoke orchestration.
-8. `tools/plot_raw_stitched.py`
+8. `tools/verification/plot_raw_stitched.py`
    - Used by synthetic/verification scripts and tests, not GUI deliverables.
 
 ## Module-Level Legacy Candidate
@@ -89,7 +89,7 @@ These should be relabeled as `legacy` or updated to prevent accidental reactivat
 
 ## Recommended Marking Strategy
 
-Phase 1 (non-breaking, immediate):
+Phase 1 (non-breaking, immediate): COMPLETE
 
 1. Add a standard header tag to candidate scripts:
    - `# LEGACY: Not used by GUI deliverables path`
@@ -98,11 +98,11 @@ Phase 1 (non-breaking, immediate):
 3. Add a short section in `README.md`:
    - "Legacy / Verification Tools (not used by GUI)"
 
-Phase 2 (structural cleanup):
+Phase 2 (structural cleanup): COMPLETE
 
 1. Move deprecated scripts to `tools/legacy/`.
 2. Move verification-only scripts to `tools/verification/`.
-3. Keep compatibility shims (thin wrappers) for one transition cycle if external users may call old paths.
+3. Keep compatibility shims (thin wrappers) for one transition cycle if external users may call old paths. (DECISION: No shims kept per requirements).
 
 ## Suggested Next Cleanup Pass
 

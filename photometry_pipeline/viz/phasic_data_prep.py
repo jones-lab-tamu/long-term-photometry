@@ -6,9 +6,9 @@ Shared data-preparation layer for phasic plotting scripts.
 Centralises chunk discovery, ROI resolution, day/hour grouping,
 and feature-map construction that was previously duplicated across:
 
-  - tools/plot_phasic_qc_grid.py
-  - tools/plot_session_grid.py
-  - tools/plot_phasic_stacked_day_smoothed.py
+  - tools/verification/plot_phasic_qc_grid.py
+  - tools/verification/plot_session_grid.py
+  - tools/verification/plot_phasic_stacked_day_smoothed.py
 
 This module is Part 1 of a two-part plotting optimisation.
 It does NOT eliminate cross-script CSV reloading (each script
