@@ -19,11 +19,12 @@ class Hdf5TraceCacheWriter:
         Args:
             output_path: Final desired path, e.g., '.../tonic_out/tonic_trace_cache.h5'
             mode: 'tonic' or 'phasic'
-            config: Pipeline Config object (unused currently but kept for signature parity)
+            config: Pipeline Config object
         """
         self.output_path = output_path
         self.tmp_path = output_path + '.tmp'
         self.mode = mode
+        self.config = config
         
         self.f = h5py.File(self.tmp_path, 'w')
         
@@ -59,6 +60,12 @@ class Hdf5TraceCacheWriter:
                 self.roi_group.create_group(roi)
                 
             grp = self.roi_group[roi].create_group(chunk_group_name)
+
+            grp.attrs['fs_hz'] = float(chunk.fs_hz)
+
+            if self.mode == 'phasic' and self.config:
+                grp.attrs['peak_threshold_method'] = str(self.config.peak_threshold_method)
+                grp.attrs['peak_threshold_k'] = float(self.config.peak_threshold_k)                      
             
             # Required Time axis
             grp.create_dataset('time_sec', data=chunk.time_sec, dtype=np.float64, compression="gzip")
@@ -70,8 +77,15 @@ class Hdf5TraceCacheWriter:
             # Modes
             if self.mode == 'tonic' and chunk.delta_f is not None:
                 grp.create_dataset('deltaF', data=chunk.delta_f[:, r_idx], dtype=np.float64, compression="gzip")
-            elif self.mode == 'phasic' and chunk.dff is not None:
-                grp.create_dataset('dff', data=chunk.dff[:, r_idx], dtype=np.float64, compression="gzip")
+            elif self.mode == 'phasic':
+                if chunk.dff is not None:
+                    grp.create_dataset('dff', data=chunk.dff[:, r_idx], dtype=np.float64, compression="gzip")
+
+                if chunk.uv_fit is not None:
+                    grp.create_dataset('fit_ref', data=chunk.uv_fit[:, r_idx], dtype=np.float64, compression="gzip")
+
+                if chunk.delta_f is not None:
+                    grp.create_dataset('delta_f', data=chunk.delta_f[:, r_idx], dtype=np.float64, compression="gzip")
 
     def __enter__(self):
         return self

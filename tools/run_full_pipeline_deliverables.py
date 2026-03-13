@@ -1042,22 +1042,34 @@ def main():
                               '--chunk-id', str(cid_diag),
                               '--out', os.path.join(s_dir, "phasic_correction_impact.png")]
                 manifest['commands'].append(run_cmd(cmd_impact, roi_label=roi))
-                files_written.append("summary/phasic_correction_impact.png")
+                files_written.append("summary/phasic_correction_impact.png")                
 
-                # Correction Data CSV
-                c_csv = os.path.join(phasic_out, 'phasic_intermediates', f"chunk_{cid_diag:04d}_{roi}.csv")
-                if not os.path.exists(c_csv):
-                     c_csv = os.path.join(phasic_out, 'phasic_intermediates', f"chunk_{cid_diag}_{roi}.csv")
+                # Correction Data CSV (Migrated to HDF5 Cache)
+                cache_path_p = os.path.join(phasic_out, 'phasic_trace_cache.h5')
+                if not os.path.exists(cache_path_p):
+                    raise RuntimeError(f"CRITICAL: Phasic cache missing for required session CSV: {cache_path_p}")
 
-                if os.path.exists(c_csv):
-                    df_c = pd.read_csv(c_csv)
-                    rename_map = {'time_sec': 't_s', 'fit_ref': 'iso_fit_dynamic', 'dff': 'dff_dynamic'}
-                    df_c = df_c.rename(columns=rename_map)
-                    keep = ['t_s', 'sig_raw', 'iso_raw', 'iso_fit_dynamic', 'dff_dynamic', 'region', 'chunk_id']
-                    df_c['region'] = roi
-                    df_c['chunk_id'] = cid_diag
-                    df_c[keep].to_csv(os.path.join(t_dir, "phasic_correction_impact_session.csv"), index=False)
-                    files_written.append("tables/phasic_correction_impact_session.csv")
+                try:
+                    with open_phasic_cache(cache_path_p) as f_p:
+                        # approved B3 fields: time_sec, sig_raw, uv_raw, fit_ref, dff
+                        fields = ['time_sec', 'sig_raw', 'uv_raw', 'fit_ref', 'dff']
+                        t, sig, uv, fit, dff = load_cache_chunk_fields(f_p, roi, int(cid_diag), fields)
+                        
+                        df_c = pd.DataFrame({
+                            't_s': t,
+                            'sig_raw': sig,
+                            'iso_raw': uv,          # Mapping uv_raw -> iso_raw
+                            'iso_fit_dynamic': fit, # Mapping fit_ref -> iso_fit_dynamic
+                            'dff_dynamic': dff,     # Mapping dff -> dff_dynamic
+                            'region': roi,
+                            'chunk_id': int(cid_diag)
+                        })
+                        
+                        keep = ['t_s', 'sig_raw', 'iso_raw', 'iso_fit_dynamic', 'dff_dynamic', 'region', 'chunk_id']
+                        df_c[keep].to_csv(os.path.join(t_dir, "phasic_correction_impact_session.csv"), index=False)
+                        files_written.append("tables/phasic_correction_impact_session.csv")
+                except Exception as e:
+                    raise RuntimeError(f"CRITICAL: Failed to read phasic cache for session CSV (ROI={roi}, chunk={cid_diag}): {e}")
             else:
                 manifest['deliverables'][roi] = {}
 

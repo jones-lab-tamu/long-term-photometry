@@ -17,8 +17,6 @@ from .core.utils import natural_sort_key
 from .core.reporting import generate_run_report, append_run_report_warnings
 # from .viz import plots # Moved to run() to avoid side effects
 
-
-
 def _sanitize_metadata(obj):
     """
     Recursively convert metadata to JSON-safe primitives.
@@ -428,46 +426,6 @@ class Pipeline:
                 if hasattr(self, '_cache_writer'):
                     self._cache_writer.add_chunk(chunk, i, fpath)
                 
-                if self.mode == 'phasic':
-                    # Strict Verification Artifacts (Step 2 of Protocol)
-                    mode_out_dir = output_dir
-                    inter_dir = os.path.join(mode_out_dir, 'phasic_intermediates')
-                    os.makedirs(inter_dir, exist_ok=True)
-                    
-                    for r_idx, roi in enumerate(chunk.channel_names):
-                        # 1. CSV
-                        meta_df = pd.DataFrame({
-                            'time_sec': chunk.time_sec,
-                            'sig_raw': chunk.sig_raw[:, r_idx],
-                            'iso_raw': chunk.uv_raw[:, r_idx],
-                            'fit_ref': chunk.uv_fit[:, r_idx] if chunk.uv_fit is not None else np.nan,
-                            'residual': chunk.delta_f[:, r_idx] if chunk.delta_f is not None else np.nan,
-                            'dff': chunk.dff[:, r_idx] if chunk.dff is not None else np.nan
-                        })
-                        csv_path = os.path.join(inter_dir, f"chunk_{i:04d}_{roi}.csv")
-                        meta_df.to_csv(csv_path, index=False)
-                        
-                        # 2. Meta JSON
-                        meta = {
-                            'fs_hz': float(chunk.fs_hz),
-                            'fit_method': 'dynamic_windowed' if self.config.window_sec > 0 else 'global', # Simplified
-                            'window_sec': self.config.window_sec,
-                            'peak_method': self.config.peak_threshold_method,
-                            'peak_k': self.config.peak_threshold_k
-                        }
-                        if hasattr(chunk, 'metadata') and chunk.metadata:
-                            meta['chunk_metadata'] = _sanitize_metadata(chunk.metadata)
-                        
-                        json_path = os.path.join(inter_dir, f"chunk_{i:04d}_{roi}_meta.json")
-                        with open(json_path, 'w') as f:
-                            json.dump(_sanitize_metadata(meta), f, indent=2)
-                            
-                        if not hasattr(self, '_chunk_meta_outputs'):
-                            self._chunk_meta_outputs = []
-                        rel_path = os.path.relpath(json_path, mode_out_dir).replace('\\', '/')
-                        if rel_path not in self._chunk_meta_outputs:
-                            self._chunk_meta_outputs.append(rel_path)
-
                 if hasattr(chunk, 'metadata') and chunk.metadata:
                     qc_warnings = chunk.metadata.get('qc_warnings', [])
                     if any("DEGENERATE" in w for w in qc_warnings):
@@ -522,11 +480,7 @@ class Pipeline:
             'regression_step_sec': self.config.step_sec,
             'regression_mode': 'dynamic' if self.mode == 'phasic' else self.mode,
             # D1: Write invalid baseline ROIs
-            'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', []),
-            'chunk_metadata_outputs': sorted(
-                getattr(self, '_chunk_meta_outputs', []),
-                key=natural_sort_key
-            )
+            'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', [])
         }
         with open(os.path.join(output_dir, 'run_metadata.json'), 'w') as f:
             json.dump(_sanitize_metadata(run_meta), f, indent=2)

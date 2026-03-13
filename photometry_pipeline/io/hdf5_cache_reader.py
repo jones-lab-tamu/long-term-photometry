@@ -157,6 +157,32 @@ def load_cache_chunk_fields(cache: h5py.File, roi: str, chunk_id: int, fields: l
     return tuple(out)
 
 
+def load_cache_chunk_metadata(cache: h5py.File, roi: str, chunk_id: int, keys: list[str]) -> dict:
+    """
+    Loads specific metadata attributes for a given ROI and chunk_id.
+    """
+    roi_group = cache.get(f"roi/{roi}")
+    if not roi_group:
+        print(f"CRITICAL: Missing dataset group for ROI {roi}")
+        sys.exit(1)
+        
+    chunk_group_name = f"chunk_{chunk_id}"
+    if chunk_group_name not in roi_group:
+        print(f"CRITICAL: Missing {chunk_group_name} in {roi} group.")
+        sys.exit(1)
+        
+    grp = roi_group[chunk_group_name]
+    
+    out = {}
+    for k in keys:
+        if k not in grp.attrs:
+            print(f"CRITICAL: Missing attribute {k} in {roi}/{chunk_group_name}.")
+            sys.exit(1)
+        out[k] = grp.attrs[k]
+        
+    return out
+
+
 def iter_cache_chunks_for_roi(cache: h5py.File, roi: str, fields: list[str]):
     """
     Yields tuple of fields for each valid chunk sequentially based on /meta/chunk_ids order.

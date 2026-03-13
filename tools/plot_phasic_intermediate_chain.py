@@ -26,6 +26,13 @@ import json
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
+from photometry_pipeline.io.hdf5_cache_reader import (
+    open_phasic_cache,
+    resolve_cache_roi,
+    list_cache_chunk_ids,
+    load_cache_chunk_fields,
+    load_cache_chunk_metadata
+)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -40,19 +47,35 @@ def parse_args():
     parser.add_argument('--gate-ratio', type=float, default=1.25, help='Required Up/Down peak count ratio (default 1.25)')
     return parser.parse_args()
 
-def load_chunk_artifact(out_dir, chunk_id, roi):
-    """Loads CSV and JSON from phasic_intermediates."""
-    inter_dir = os.path.join(out_dir, "phasic_intermediates")
-    csv_path = os.path.join(inter_dir, f"chunk_{chunk_id:04d}_{roi}.csv")
-    json_path = os.path.join(inter_dir, f"chunk_{chunk_id:04d}_{roi}_meta.json")
+def load_chunk_artifact(cache, chunk_id, roi):
+    """Loads required fields and metadata from the HDF5 cache."""
+    # B3 approved fields
+    fields = ['time_sec', 'sig_raw', 'uv_raw', 'fit_ref', 'delta_f', 'dff']
+    values = load_cache_chunk_fields(cache, roi, int(chunk_id), fields)
     
-    if not os.path.exists(csv_path) or not os.path.exists(json_path):
-        return None, None
-        
-    df = pd.read_csv(csv_path)
-    with open(json_path, 'r') as f:
-        meta = json.load(f)
-        
+    # Map to legacy audit concepts explicitly:
+    # uv_raw -> iso_raw
+    # delta_f -> residual
+    df = pd.DataFrame({
+        'time_sec': values[0],
+        'sig_raw': values[1],
+        'iso_raw': values[2],      # cache uv_raw
+        'fit_ref': values[3],
+        'residual': values[4],     # cache delta_f
+        'dff': values[5]
+    })
+    
+    # Load required metadata
+    meta_keys = ['fs_hz', 'peak_threshold_method', 'peak_threshold_k']
+    c_meta = load_cache_chunk_metadata(cache, roi, int(chunk_id), meta_keys)
+    
+    # Map to legacy metadata keys
+    meta = {
+        'fs_hz': c_meta['fs_hz'],
+        'peak_method': c_meta['peak_threshold_method'],
+        'peak_k': c_meta['peak_threshold_k']
+    }
+    
     return df, meta
 
 def audit_chunk(df, meta, chunk_id):
@@ -271,44 +294,22 @@ def main():
     
     args = parse_args()
     
-    # We scan artifacts in phasic_intermediates
-    inter_dir = os.path.join(args.analysis_out, 'phasic_intermediates')
-    if not os.path.exists(inter_dir):
-        print(f"CRITICAL: {inter_dir} does not exist. Run pipeline with artifact saving enabled.")
-        sys.exit(1)
-        
-    files = sorted(glob.glob(os.path.join(inter_dir, 'chunk_*_*.csv')))
-    
-    if not files:
-        print("CRITICAL: No intermediate files found.")
-        sys.exit(1)
-        
-    # Select ROI
-    # Infer ROI from first file or arg
-    # File format: chunk_0000_ROI.csv
-    # We need to filter files by ROI if provided
-    
-    df0 = pd.read_csv(files[0])
-    # ROI is in filename, not column.
-    
-    if args.roi:
-        roi = args.roi
-        files = [f for f in files if f"_{roi}.csv" in f]
-        if not files:
-            print(f"CRITICAL: No files for ROI {roi}")
+    # Open the HDF5 Trace Cache
+    cache_path = os.path.join(args.analysis_out, 'phasic_trace_cache.h5')
+    if not os.path.exists(cache_path):
+         print(f"CRITICAL: Phasic trace cache missing at {cache_path}. Run pipeline first.")
+         sys.exit(1)
+
+    cache = open_phasic_cache(cache_path)
+    roi = resolve_cache_roi(cache, args.roi)
+    chunk_ids = list_cache_chunk_ids(cache)
+
+    if args.chunks:
+        requested = set(args.chunks)
+        chunk_ids = [cid for cid in chunk_ids if cid in requested]
+        if not chunk_ids:
+            print(f"CRITICAL: None of the requested chunks {args.chunks} found in cache.")
             sys.exit(1)
-            
-    else:
-        # Auto-detect ROI from first file
-        bname = os.path.basename(files[0])
-        # chunk_0000_Region0.csv
-        parts = bname.replace('.csv','').split('_')
-        if len(parts) >= 3:
-            roi = '_'.join(parts[2:])
-        else:
-            roi = "Region0" # fallback
-        print(f"Auto-selected ROI: {roi}")
-        files = [f for f in files if f"_{roi}.csv" in f]
     
     # Stats Collection for Dataset Gating
     dataset_stats = [] # list of (tonic_proxy, peak_count)
@@ -319,22 +320,12 @@ def main():
     qc_dir = os.path.join(args.analysis_out, 'phasic_chain_qc')
     os.makedirs(qc_dir, exist_ok=True)
     
-    for f in files:
-        # Extract ID from filename (format: chunk_XXXX_ROI.csv)
-        fname = os.path.basename(f)
-        m = re.match(r'chunk_(\d+)_', fname)
-        if not m: continue
-        cid = int(m.group(1))
-        
-        # Filter if requested
-        if args.chunks and cid not in args.chunks:
-            continue
-            
-        # Load from intermediates
-        df, meta = load_chunk_artifact(args.analysis_out, cid, roi)
-        if df is None:
-            print(f"Skipping chunk {cid}: No intermediate artifacts found.")
-            continue
+    for cid in chunk_ids:
+        # Load from cache
+        try:
+            df, meta = load_chunk_artifact(cache, cid, roi)
+        except Exception as e:
+            raise RuntimeError(f"CRITICAL: Failed to read phasic cache for intermediate-chain audit (ROI={roi}, chunk={cid}): {e}")
             
         total_audited += 1
         ok, res, msg = audit_chunk(df, meta, cid)
@@ -412,6 +403,9 @@ def main():
         if not passed_gating:
              sys.exit(1)
 
+    # Clean up
+    cache.close()
+    
     # Final Summary for Tier 1
     print(f"\nSummary: {passed_chunks}/{total_audited} chunks passed individual gates (A-D).")
     if passed_chunks < total_audited:

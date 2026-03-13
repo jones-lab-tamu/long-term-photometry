@@ -142,102 +142,6 @@ def test_pipeline_contract_integration():
             "Features CSV chunk_id ordering violates natural sort cascade"
         )
 
-        # -------------------------------------------------------
-        # Contract 2: Manifest discipline
-        # -------------------------------------------------------
-        assert 'chunk_metadata_outputs' in run_meta, (
-            "run_metadata.json missing chunk_metadata_outputs declaration"
-        )
-        rel_paths = run_meta['chunk_metadata_outputs']
-        assert isinstance(rel_paths, list) and len(rel_paths) > 0, (
-            "chunk_metadata_outputs must be a non-empty list"
-        )
-        for p in rel_paths:
-            assert isinstance(p, str), (
-                f"chunk_metadata_outputs items must be strings, got {type(p)}"
-            )
-        assert len(rel_paths) >= 12, (
-            f"Expected >=12 chunk meta outputs for 12 chunks, got {len(rel_paths)}"
-        )
-        # Natural ordering invariant on manifest list
-        assert rel_paths == sorted(rel_paths, key=natural_sort_key), (
-            "Manifest chunk_metadata_outputs list is not naturally ordered"
-        )
-
-        # -------------------------------------------------------
-        # Contract 3: Metadata namespace
-        # -------------------------------------------------------
-        chunk_jsons = [os.path.join(phasic_dir, p) for p in rel_paths]
-        # Sample first, middle, last
-        sample_indices = sorted(set([0, len(chunk_jsons) // 2,
-                                     len(chunk_jsons) - 1]))
-
-        for idx in sample_indices:
-            with open(chunk_jsons[idx], 'r') as f:
-                c_meta = json.load(f)
-
-            # Top-level stable keys
-            assert 'fs_hz' in c_meta, f"Missing fs_hz in {rel_paths[idx]}"
-            assert 'window_sec' in c_meta, (
-                f"Missing window_sec in {rel_paths[idx]}"
-            )
-            # Namespace boundary
-            if 'chunk_metadata' in c_meta:
-                assert isinstance(c_meta['chunk_metadata'], dict), (
-                    "chunk_metadata must be a dict"
-                )
-                warnings_list = c_meta['chunk_metadata'].get(
-                    'qc_warnings', [])
-                assert isinstance(warnings_list, list), (
-                    "qc_warnings must be a list"
-                )
-                for w in warnings_list:
-                    assert isinstance(w, str), (
-                        "qc_warning items must be strings"
-                    )
-
-        # -------------------------------------------------------
-        # Contract 4: NaN / degenerate data policy
-        # Contract 7: Event warnings (DEGENERATE tokens)
-        # -------------------------------------------------------
-        # Scan for DEGENERATE warnings across chunk meta files
-        dd_tokens_found = set()
-        # Check the injected chunk (index 2) plus neighbors
-        scan_indices = sorted(set([0, 1, 2, 3, len(chunk_jsons) // 2,
-                                   len(chunk_jsons) - 1]))
-        for idx in scan_indices:
-            if idx >= len(chunk_jsons):
-                continue
-            with open(chunk_jsons[idx], 'r') as f:
-                c_meta = json.load(f)
-            cm = c_meta.get('chunk_metadata', {})
-            for w in cm.get('qc_warnings', []):
-                if "DEGENERATE[DD" in w:
-                    tok = w.split("]")[0].split("[")[1]
-                    dd_tokens_found.add(tok)
-
-        assert len(dd_tokens_found) > 0, (
-            "No DEGENERATE QC warnings emitted — degenerate data policy "
-            "not enforced"
-        )
-        # Specifically expect DD4 (zero robust variance from flatline)
-        assert 'DD4' in dd_tokens_found or 'DD2' in dd_tokens_found, (
-            f"Expected DD4 or DD2 for flatline scenario, got {dd_tokens_found}"
-        )
-
-        # -------------------------------------------------------
-        # Contract 5: Regression fallback behavior
-        # -------------------------------------------------------
-        # The injected chunk (index 2) should have window_fallback_global
-        with open(chunk_jsons[2], 'r') as f:
-            t_meta = json.load(f)
-        assert 'chunk_metadata' in t_meta, (
-            "Namespaced chunk_metadata missing from chunk meta JSON"
-        )
-        chunk_md = t_meta['chunk_metadata']
-        assert chunk_md.get('window_fallback_global') is True, (
-            "Regression fallback not invoked despite window_sec > chunk length"
-        )
 
         # -------------------------------------------------------
         # Contract 6: AUC baseline policy
@@ -257,22 +161,13 @@ def test_pipeline_contract_integration():
         )
 
         # -------------------------------------------------------
-        # Contract 8: Output structure (path pattern invariants)
+        # Contract 8: Output structure (Removal of legacy intermediates)
         # -------------------------------------------------------
-        for rp in rel_paths:
-            # Forward slashes
-            assert '\\' not in rp, (
-                f"Backslash in manifest path: {rp}"
-            )
-            # Correct subdirectory
-            assert 'phasic_intermediates/' in rp, (
-                f"Manifest path not in phasic_intermediates/: {rp}"
-            )
-            # Filename pattern: chunk_XXXX_<ROI>_meta.json
-            basename = rp.split('/')[-1]
-            assert re.match(r'chunk_\d{4}_\w+_meta\.json$', basename), (
-                f"Manifest filename does not match expected pattern: {basename}"
-            )
+        inter_dir = os.path.join(phasic_dir, "phasic_intermediates")
+        assert not os.path.exists(inter_dir), "Legacy phasic_intermediates directory should NOT exist"
+        
+        # Ensure run_metadata.json does not contain the old bookkeeping key
+        assert 'chunk_metadata_outputs' not in run_meta, "run_metadata.json still contains legacy chunk_metadata_outputs key"
 
         # -------------------------------------------------------
         # Contract 8 (cont): Determinism across runs

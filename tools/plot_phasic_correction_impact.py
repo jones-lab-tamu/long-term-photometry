@@ -31,49 +31,25 @@ def parse_args():
 def main():
     args = parse_args()
     
-    # Construct path to intermediate CSV
-    # Expected: <analysis-out>/phasic_intermediates/chunk_<ID>_<ROI>.csv
-    # Note: ID is 04d formatted in file generation usually?
-    # Let's check glob or try formatted.
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+        
+    from photometry_pipeline.io.hdf5_cache_reader import open_phasic_cache, load_cache_chunk_fields
     
-    inter_dir = os.path.join(args.analysis_out, 'phasic_intermediates')
-    if not os.path.exists(inter_dir):
-        print(f"CRITICAL: Intermediate directory not found: {inter_dir}")
+    # Construct path to phasic cache
+    cache_path = os.path.join(args.analysis_out, 'phasic_trace_cache.h5')
+    if not os.path.exists(cache_path):
+        print(f"CRITICAL: Phasic cache not found: {cache_path}")
         sys.exit(1)
         
-    # Try finding the file
-    candidate_pattern = f"chunk_{args.chunk_id:04d}_{args.roi}.csv"
-    csv_path = os.path.join(inter_dir, candidate_pattern)
-    
-    if not os.path.exists(csv_path):
-        # Fallback for legacy naming if any?
-        # Try unpadded?
-        cand2 = f"chunk_{args.chunk_id}_{args.roi}.csv"
-        path2 = os.path.join(inter_dir, cand2)
-        if os.path.exists(path2):
-            csv_path = path2
-        else:
-            print(f"CRITICAL: Intermediate CSV not found at {csv_path}")
-            sys.exit(1)
-            
     try:
-        df = pd.read_csv(csv_path)
+        with open_phasic_cache(cache_path) as f:
+            fields = ['time_sec', 'sig_raw', 'uv_raw', 'fit_ref', 'dff']
+            t, sig, iso, fit, dff = load_cache_chunk_fields(f, args.roi, args.chunk_id, fields)
     except Exception as e:
-        print(f"CRITICAL: Failed to read CSV: {e}")
+        print(f"CRITICAL: Failed to read cache for ROI {args.roi} Chunk {args.chunk_id}: {e}")
         sys.exit(1)
-        
-    # Columns expected: time_sec, sig_raw, iso_raw, fit_ref, dff
-    required = ['time_sec', 'sig_raw', 'iso_raw', 'fit_ref', 'dff']
-    for c in required:
-        if c not in df.columns:
-            print(f"CRITICAL: Missing column {c} in {csv_path}")
-            sys.exit(1)
-            
-    t = df['time_sec'].values
-    sig = df['sig_raw'].values
-    iso = df['iso_raw'].values
-    fit = df['fit_ref'].values
-    dff = df['dff'].values
     
     # Normalize time
     t = t - t[0]
