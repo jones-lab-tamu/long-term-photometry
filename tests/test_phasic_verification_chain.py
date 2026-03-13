@@ -158,7 +158,7 @@ class TestPhasicVerificationChain(unittest.TestCase):
         
         print("Step 4a: Strict Chain Audit (Tier 1 - Default)...")
         chain_cmd_default = [
-            sys.executable, "tools/plot_phasic_intermediate_chain.py",
+            sys.executable, "tools/verification/plot_phasic_intermediate_chain.py",
             "--analysis-out", phasic_out
         ]
         self.run_cmd(chain_cmd_default)
@@ -166,7 +166,7 @@ class TestPhasicVerificationChain(unittest.TestCase):
         
         print("Step 4b: Strict Chain Audit (Tier 2 - Synth Gating)...")
         chain_cmd_gated = [
-            sys.executable, "tools/plot_phasic_intermediate_chain.py",
+            sys.executable, "tools/verification/plot_phasic_intermediate_chain.py",
             "--analysis-out", phasic_out,
             "--enable-synth-gating-check"
         ]

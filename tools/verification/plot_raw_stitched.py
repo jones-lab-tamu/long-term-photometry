@@ -16,7 +16,7 @@ import datetime
 
 # Ensure we can import config
 sys.path.append(os.getcwd())
-p = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+p = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if p not in sys.path:
     sys.path.append(p)
 

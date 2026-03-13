@@ -12,8 +12,8 @@ Generates 48h (or custom) synthetic data with biological nuisance parameters,
 runs the photometry pipeline (Tonic AND Phasic modes), and generates verification plots.
 
 Usage:
-    python tools/run_biological_synth_verification.py --hours 48 --out tests/out_verify_bio --overwrite
-    python tools/run_biological_synth_verification.py --hours 6 --out tests/out_verify_bio_fast --overwrite --fast
+    python tools/verification/run_biological_synth_verification.py --hours 48 --out tests/out_verify_bio --overwrite
+    python tools/verification/run_biological_synth_verification.py --hours 6 --out tests/out_verify_bio_fast --overwrite --fast
 """
 
 import os
@@ -134,7 +134,7 @@ def main():
     # B) Phasic QC Grid (DFF)
     # Source: analysis_phasic/phasic_qc/day_000.png --> figures/fig_phasic_qc_grid.png
     run_command([
-        sys.executable, 'tools/plot_phasic_qc_grid.py', 
+        sys.executable, 'tools/verification/plot_phasic_qc_grid.py', 
         '--analysis-out', analysis_phasic, 
         '--roi', 'Region0',
         '--mode', 'dff'
@@ -150,7 +150,7 @@ def main():
     # Source: analysis_phasic/phasic_qc/fig_phasic_raw_qc_grid.png (named by tool in raw mode) 
     #         --> figures/fig_phasic_raw_qc_grid.png
     run_command([
-        sys.executable, 'tools/plot_phasic_qc_grid.py', 
+        sys.executable, 'tools/verification/plot_phasic_qc_grid.py', 
         '--analysis-out', analysis_phasic, 
         '--roi', 'Region0',
         '--mode', 'raw' 
@@ -163,11 +163,11 @@ def main():
         # Fallback if raw mode didn't name it perfectly or multiple days?
         # Tool logic: if mode=raw and day=0, names it fig_phasic_raw_qc_grid.png
         print(f"WARNING: Phasic Raw Grid missing at {grid_raw_src}")
-
+ 
     # D) Phasic Stacked (Strict DFF)
     # Source: analysis_phasic/phasic_qc/plot_C_stacked_Region0.png --> figures/fig_phasic_stacked.png
     run_command([
-        sys.executable, 'tools/plot_phasic_stacked.py', 
+        sys.executable, 'tools/verification/plot_phasic_stacked.py', 
         '--analysis-out', analysis_phasic, 
         '--roi', 'Region0'
     ], cwd=repo_root)

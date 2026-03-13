@@ -19,7 +19,7 @@ Requirements:
 - <analysis-out>/traces/chunk_*.csv
 
 Usage:
-    python tools/plot_phasic_qc_grid.py --analysis-out <DIR> [--signal <COL>]
+    python tools/verification/plot_phasic_qc_grid.py --analysis-out <DIR> [--signal <COL>]
 
 Verification:
     The tool internally constructs a Chunk and calls extract_features.
@@ -45,7 +45,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 
 # Ensure repo root is in path
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 

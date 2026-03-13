@@ -16,7 +16,7 @@ import tempfile
 import shutil
 
 # Command to reproduce this specific verification panel:
-# python tools/plot_verification_panel.py --out outputs/verification_panel.png --seed 42
+# python tools/legacy/plot_verification_panel.py --out outputs/verification_panel.png --seed 42
 
 def generate_data(temp_root, tonic_mode, seed):
     """

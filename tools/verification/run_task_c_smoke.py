@@ -22,7 +22,7 @@ import string
 from pathlib import Path
 
 # Simple Repo Root Bootstrap
-_repo_root = Path(__file__).resolve().parents[1]
+_repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
@@ -259,7 +259,7 @@ def main():
     
     # Artifact 2: Event Detection
     run_command([
-        sys.executable, 'tools/plot_phasic_qc_grid.py',
+        sys.executable, 'tools/verification/plot_phasic_qc_grid.py',
         '--analysis-out', phasic_out,
         '--roi', roi_name,
         '--mode', 'dff',
@@ -273,7 +273,7 @@ def main():
 
     # Artifact 3: Continuity
     run_command([
-        sys.executable, 'tools/plot_raw_stitched.py',
+        sys.executable, 'tools/verification/plot_raw_stitched.py',
         '--input', dataset_dir,
         '--format', 'rwd',
         '--config', config_path,

@@ -173,9 +173,11 @@ The supported workflow for this repository is the GUI-deliverables path centered
 - `photometry_pipeline/pipeline.py`
 - HDF5 cache-backed plotting and deliverables
 
-Some scripts under `tools/` are retained as verification-only utilities or deprecated legacy utilities. These non-GUI scripts are not part of the supported artifact contract and are not maintained as part of the live GUI runtime path.
+These supported tools remain at their current paths. Other scripts under `tools/` have been moved into dedicated subdirectories:
+- `tools/verification/`: Verification-only utilities for diagnostics, smoke tests, and migration validation.
+- `tools/legacy/`: Deprecated legacy scripts that may still reference obsolete outputs such as `traces/` or `viz/`.
 
-Legacy scripts may still reference obsolete outputs such as `traces/`, `viz/`, or older standalone workflows. Verification-only scripts may still be useful for diagnostics, smoke tests, and migration validation, but they are not part of the live GUI runtime path.
+These non-GUI scripts are not part of the supported artifact contract and are not maintained as part of the live GUI runtime path.
 
 ## Configuration (`config.yaml`)
 

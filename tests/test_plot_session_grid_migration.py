@@ -47,7 +47,7 @@ class TestPlotSessionGridMigration(unittest.TestCase):
 
         # Run the tool
         cmd = [
-            sys.executable, "tools/plot_session_grid.py",
+            sys.executable, "tools/verification/plot_session_grid.py",
             "--analysis-out", self.analysis_out,
             "--roi", "Region0",
             "--sessions-per-hour", "1"

@@ -14,7 +14,7 @@ from typing import Dict, Any, List
 
 # To allow importing from parent directories when run as script
 current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
+parent_dir = os.path.dirname(os.path.dirname(current_dir))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
     
@@ -32,7 +32,7 @@ with the core requirements of the linked paper:
 4. Core QC and Reporting requirements
 
 Usage:
-  python tools/verify_paper_alignment.py --input <path> --out <path> --config <path>
+  python tools/legacy/verify_paper_alignment.py --input <path> --out <path> --config <path>
 """
 
 def fail(reason: str):

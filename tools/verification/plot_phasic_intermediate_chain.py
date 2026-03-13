@@ -18,7 +18,7 @@ Audits:
 4. Gating Check: Median peak intensity/count in Upstate > Downstate.
 
 Usage:
-    python tools/plot_phasic_intermediate_chain.py --analysis-out <DIR>
+    python tools/verification/plot_phasic_intermediate_chain.py --analysis-out <DIR>
 """
 
 import os
@@ -31,6 +31,11 @@ import json
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
+# Ensure repo root is in path
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
 from photometry_pipeline.io.hdf5_cache_reader import (
     open_phasic_cache,
     resolve_cache_roi,

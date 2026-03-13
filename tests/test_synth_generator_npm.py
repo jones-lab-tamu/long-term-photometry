@@ -368,7 +368,7 @@ step_sec: 5.0
         # Plot
         plot_out = os.path.join(self.test_dir, 'plots')
         cmd_plot = [
-            sys.executable, 'tools/plot_raw_stitched.py',
+            sys.executable, 'tools/verification/plot_raw_stitched.py',
             '--input', out_dir, '--format', 'npm', '--config', self.config_path,
             '--out', plot_out, '--auto-ylims-robust', '--decimate', '10'
         ]

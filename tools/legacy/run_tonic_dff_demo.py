@@ -21,10 +21,10 @@ def run_command(cmd, desc):
         print("OK")
 
 def main():
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     script_synth = str(root / 'tools' / 'synth_photometry_dataset.py')
     script_pipeline = str(root / 'analyze_photometry.py')
-    script_viz = str(root / 'tools' / 'plot_tonic_dff_panel.py')
+    script_viz = str(root / 'tools' / 'legacy' / 'plot_tonic_dff_panel.py')
     
     demo_dir = root / 'outputs' / 'tonic_dff_demo'
     if demo_dir.exists():

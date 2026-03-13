@@ -24,7 +24,7 @@ PIPELINE_AVAILABLE = False
 PIPELINE_ERROR = None
 
 try:
-    PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
     
@@ -37,7 +37,7 @@ except (ImportError, ModuleNotFoundError) as e:
     PIPELINE_ERROR = str(e)
 
 # Command to reproduce this specific verification panel:
-# python tools/plot_verification_panel.py --out outputs/verification_panel.png --seed 42
+# python tools/legacy/plot_verification_panel.py --out outputs/verification_panel.png --seed 42
 
 def generate_data(temp_root, tonic_mode, seed):
     """

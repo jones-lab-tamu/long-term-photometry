@@ -73,7 +73,7 @@ class TestPlotPhasicQCGridMigration(unittest.TestCase):
 
         # 4. Run the tool
         cmd = [
-            sys.executable, "tools/plot_phasic_qc_grid.py",
+            sys.executable, "tools/verification/plot_phasic_qc_grid.py",
             "--analysis-out", self.analysis_out,
             "--roi", "Region0",
             "--sessions-per-hour", "1"

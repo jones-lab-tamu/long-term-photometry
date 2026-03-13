@@ -45,7 +45,7 @@ class TestPlotPhasicStackedMigration(unittest.TestCase):
 
         # Run the tool
         cmd = [
-            sys.executable, "tools/plot_phasic_stacked.py",
+            sys.executable, "tools/verification/plot_phasic_stacked.py",
             "--analysis-out", self.analysis_out,
             "--roi", "Region0"
         ]
