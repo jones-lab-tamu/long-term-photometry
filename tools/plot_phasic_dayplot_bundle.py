@@ -56,6 +56,12 @@ from scipy.signal import find_peaks
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
+
+PNG_SAVE_KWARGS = {
+    # Keep PNG artifact format unchanged while reducing encoder CPU cost.
+    "pil_kwargs": {"compress_level": 1},
+}
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Unified Phasic Day-Plot Generator")
     parser.add_argument('--analysis-out', required=True, help="Path to analysis output directory")
@@ -186,6 +192,32 @@ def infer_fs(time_arr, config, context=""):
     dt = np.median(np.diff(time_arr))
     if dt <= 0 or not np.isfinite(dt): return getattr(config, 'sampling_rate_hz_fallback', config.target_fs_hz)
     return 1.0 / dt
+
+
+def build_day_slot_maps(cached_by_day, sph):
+    day_slots = {}
+    for day, items in cached_by_day.items():
+        slot_map = {}
+        for p in items:
+            c = p['col']
+            if c >= sph:
+                continue
+            slot_map[(p['hour'], c)] = p
+        day_slots[day] = slot_map
+    return day_slots
+
+
+def init_grid_figure(sph, top=0.95):
+    fig, axes = plt.subplots(nrows=24, ncols=sph, figsize=(4 * sph + 2, 24), sharex=True)
+    if sph == 1:
+        axes = axes.reshape(-1, 1)
+    # Pre-set static spacing once; avoids per-day tight_layout solve on a dense grid.
+    fig.subplots_adjust(left=0.07, right=0.995, bottom=0.02, top=top, hspace=0.28, wspace=0.18)
+    return fig, axes
+
+
+def save_png_fast(fig, out_path, dpi):
+    fig.savefig(out_path, dpi=dpi, **PNG_SAVE_KWARGS)
 
 
 # ======================================================================
@@ -365,6 +397,7 @@ def main():
         if args.write_sig_iso_grid:
             c_rec['sig'] = rec['y_sig']
             c_rec['uv'] = rec['y_uv']
+            c_rec['xlim_600'] = bool(np.max(t_norm) > 550)
         if needs_dff_trace:
             c_rec['dff'] = rec['y_dff']
         if needs_peak_verification:
@@ -399,6 +432,7 @@ def main():
         global_ymin, global_ymax = -1, 1
 
     unique_days = sorted(pds.chunks_by_day.keys())
+    day_slot_maps = build_day_slot_maps(cached_by_day, sph)
     print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=global_limits elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
     
     
@@ -406,93 +440,102 @@ def main():
     # 2. Render Family 1: dFF Grid
     # ------------------------------------------------------------------
     if args.write_dff_grid:
+        fig_dff, axes_dff = init_grid_figure(sph, top=0.95)
+        y_span = global_ymax - global_ymin
+        eps = 0.01 * y_span if y_span > 0 else 1e-6
         for d in unique_days:
-            day_items = cached_by_day.get(d, [])
-            if not day_items: continue
-                
-            fig, axes = plt.subplots(nrows=24, ncols=sph, figsize=(4*sph + 2, 24), sharex=True)
-            if sph == 1: axes = axes.reshape(-1, 1)
-                
-            fig.suptitle(f"Phasic QC - Day {d} - ROI {plot_roi} - Mode: DFF", fontsize=16)
-            y_span = global_ymax - global_ymin
-            eps = 0.01 * y_span if y_span > 0 else 1e-6
-            
-            for p in day_items:
-                h, c = p['hour'], p['col']
-                if c >= sph: continue
-                ax = axes[h, c]
-                ax.set_title(f"Chunk {p['chunk_id']}", fontsize=6, pad=2)
-                
-                ax.plot(p['t'], p['dff'], 'k', lw=0.8)
-                ax.set_ylim(global_ymin, global_ymax)
-                
-                # Peak Overlays (Clipped vs unclipped)
-                p_idxs = p['peak_indices']
-                n_clipped = 0
-                if len(p_idxs) > 0:
-                    px = p['t'][p_idxs]
-                    py_true = p['dff'][p_idxs]
-                    py_plot = np.clip(py_true, global_ymin + eps, global_ymax - eps)
-                    
-                    mask_hi = py_true > (global_ymax - eps)
-                    mask_lo = py_true < (global_ymin + eps)
-                    mask_ok = ~(mask_hi | mask_lo)
-                    
-                    if np.any(mask_ok): ax.scatter(px[mask_ok], py_plot[mask_ok], s=10, c='red', alpha=0.6, zorder=3)
-                    if np.any(mask_hi): ax.scatter(px[mask_hi], py_plot[mask_hi], s=12, marker='^', c='red', alpha=0.8, zorder=4)
-                    if np.any(mask_lo): ax.scatter(px[mask_lo], py_plot[mask_lo], s=12, marker='v', c='red', alpha=0.8, zorder=4)
-                    n_clipped = np.sum(mask_hi) + np.sum(mask_lo)
-                    
-                # Annotation
-                val = p['count']
-                txt = "peaks=NaN" if pd.isna(val) else f"peaks={int(val)}"
-                if n_clipped > 0: txt += f"\n({n_clipped} clipped)"
-                color = 'red' if pd.isna(val) else 'blue'
-                ax.text(0.95, 0.9, txt, transform=ax.transAxes, ha='right', va='top', fontsize=8, color=color, bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
-                
-                if c == 0: ax.set_ylabel(f"H{h:02d}", rotation=0, labelpad=15, va='center', fontweight='bold')
-                    
-            # Cleanup Empty
-            for r in range(24):
+            slot_map = day_slot_maps.get(d, {})
+            if not slot_map:
+                continue
+
+            fig_dff.suptitle(f"Phasic QC - Day {d} - ROI {plot_roi} - Mode: DFF", fontsize=16)
+
+            for h in range(24):
                 for c in range(sph):
-                    if not any(pi['hour'] == r and pi['col'] == c for pi in day_items): axes[r, c].axis('off')
-                        
-            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+                    ax = axes_dff[h, c]
+                    p = slot_map.get((h, c))
+                    ax.cla()
+                    if p is None:
+                        ax.axis('off')
+                        continue
+                    ax.axis('on')
+                    ax.set_ylim(global_ymin, global_ymax)
+                    if c == 0:
+                        ax.set_ylabel(f"H{h:02d}", rotation=0, labelpad=15, va='center', fontweight='bold')
+                    ax.set_title(f"Chunk {p['chunk_id']}", fontsize=6, pad=2)
+                    ax.plot(p['t'], p['dff'], 'k', lw=0.8)
+
+                    # Peak Overlays (Clipped vs unclipped)
+                    p_idxs = p['peak_indices']
+                    n_clipped = 0
+                    if len(p_idxs) > 0:
+                        px = p['t'][p_idxs]
+                        py_true = p['dff'][p_idxs]
+                        py_plot = np.clip(py_true, global_ymin + eps, global_ymax - eps)
+
+                        mask_hi = py_true > (global_ymax - eps)
+                        mask_lo = py_true < (global_ymin + eps)
+                        mask_ok = ~(mask_hi | mask_lo)
+
+                        if np.any(mask_ok):
+                            ax.scatter(px[mask_ok], py_plot[mask_ok], s=10, c='red', alpha=0.6, zorder=3)
+                        if np.any(mask_hi):
+                            ax.scatter(px[mask_hi], py_plot[mask_hi], s=12, marker='^', c='red', alpha=0.8, zorder=4)
+                        if np.any(mask_lo):
+                            ax.scatter(px[mask_lo], py_plot[mask_lo], s=12, marker='v', c='red', alpha=0.8, zorder=4)
+                        n_clipped = np.sum(mask_hi) + np.sum(mask_lo)
+
+                    # Annotation
+                    val = p['count']
+                    txt = "peaks=NaN" if pd.isna(val) else f"peaks={int(val)}"
+                    if n_clipped > 0:
+                        txt += f"\n({n_clipped} clipped)"
+                    color = 'red' if pd.isna(val) else 'blue'
+                    ax.text(
+                        0.95, 0.9, txt, transform=ax.transAxes, ha='right', va='top', fontsize=8, color=color,
+                        bbox=dict(facecolor='white', alpha=0.7, edgecolor='none')
+                    )
+
             out_path = os.path.join(args.output_dir, f"phasic_dFF_day_{d:03d}.png")
             print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=plotting family=dff day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
-            plt.savefig(out_path, dpi=args.dpi)
+            save_png_fast(fig_dff, out_path, args.dpi)
             print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=figure_save family=dff day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
-            plt.close(fig)
-            
+        plt.close(fig_dff)
 
     # ------------------------------------------------------------------
     # 3. Render Family 2: Sig/Iso Grid
     # ------------------------------------------------------------------
     if args.write_sig_iso_grid:
+        fig_sig, axes_sig = init_grid_figure(sph, top=0.97)
         for d in unique_days:
-            day_items = cached_by_day.get(d, [])
-            if not day_items: continue
-                
-            fig, axes = plt.subplots(nrows=24, ncols=sph, figsize=(4*sph + 2, 24), sharex=True)
-            if sph == 1: axes = axes.reshape(-1, 1)
-            fig.suptitle(f"Day {d} Raw/Iso - {plot_roi}", fontsize=16)
-            
-            for p in day_items:
-                ax = axes[p['hour'], p['col']]
-                ax.plot(p['t'], p['sig'], 'g', lw=0.5, label='Sig')
-                ax.plot(p['t'], p['uv'], 'm', lw=0.5, label='Iso')
-                if p['t'].max() > 550: ax.set_xlim(0, 600)
-                
-            for i in range(24): axes[i,0].set_ylabel(f"H{i:02d}", rotation=0, labelpad=20)
-                
-            plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+            slot_map = day_slot_maps.get(d, {})
+            if not slot_map:
+                continue
+
+            fig_sig.suptitle(f"Day {d} Raw/Iso - {plot_roi}", fontsize=16)
+
+            for h in range(24):
+                for c in range(sph):
+                    ax = axes_sig[h, c]
+                    p = slot_map.get((h, c))
+                    ax.cla()
+                    if p is None:
+                        ax.axis('off')
+                        continue
+                    ax.axis('on')
+                    ax.plot(p['t'], p['sig'], 'g', lw=0.5, label='Sig')
+                    ax.plot(p['t'], p['uv'], 'm', lw=0.5, label='Iso')
+                    if p.get('xlim_600', False):
+                        ax.set_xlim(0, 600)
+                    if c == 0:
+                        ax.set_ylabel(f"H{h:02d}", rotation=0, labelpad=20)
+
             out_path = os.path.join(args.output_dir, f"phasic_sig_iso_day_{d:03d}.png")
             print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=plotting family=sig_iso day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
-            plt.savefig(out_path, dpi=args.dpi)
+            save_png_fast(fig_sig, out_path, args.dpi)
             print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=figure_save family=sig_iso day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
-            plt.close(fig)
-            
-            
+        plt.close(fig_sig)
+
     # ------------------------------------------------------------------
     # 4. Render Family 3: Stacked Smoothed
     # ------------------------------------------------------------------
