@@ -299,6 +299,49 @@ def _yrange_from_panel(panel, x0, x1):
     return y0 - pad, y1 + pad
 
 
+def _sig_iso_panel_ranges_with_day_min_span(slot_map):
+    local_ranges = {}
+    local_spans = []
+
+    for slot, panel in slot_map.items():
+        x0, x1 = _trace_domain(panel['t'], panel.get('xlim_600', False))
+        y0, y1 = _yrange_from_panel(panel, x0, x1)
+        if not np.isfinite(y0) or not np.isfinite(y1) or y1 <= y0:
+            y0, y1 = -1.0, 1.0
+        span = y1 - y0
+        local_ranges[slot] = (float(y0), float(y1))
+        if np.isfinite(span) and span > 0:
+            local_spans.append(float(span))
+
+    if not local_ranges:
+        return {}
+
+    if local_spans:
+        day_min_span = float(np.median(np.asarray(local_spans, dtype=np.float64)))
+    else:
+        day_min_span = 2.0
+    if not np.isfinite(day_min_span) or day_min_span <= 0:
+        day_min_span = 2.0
+
+    final_ranges = {}
+    for slot, (y0, y1) in local_ranges.items():
+        span = y1 - y0
+        if not np.isfinite(span) or span <= 0:
+            center = 0.5 * (y0 + y1) if np.isfinite(y0) and np.isfinite(y1) else 0.0
+            half = 0.5 * day_min_span
+            final_ranges[slot] = (center - half, center + half)
+            continue
+
+        if span < day_min_span:
+            center = 0.5 * (y0 + y1)
+            half = 0.5 * day_min_span
+            final_ranges[slot] = (center - half, center + half)
+        else:
+            final_ranges[slot] = (y0, y1)
+
+    return final_ranges
+
+
 def _paint_trace_minmax(tile_arr, x_idx, y_idx, plot_x0, plot_y0, plot_w, plot_h, color, stroke=1):
     if x_idx.size == 0:
         return
@@ -326,7 +369,7 @@ def _paint_trace_minmax(tile_arr, x_idx, y_idx, plot_x0, plot_y0, plot_w, plot_h
             tile_arr[plot_y0 + yy0:plot_y0 + yy1 + 1, px2, :] = color
 
 
-def _render_sig_iso_panel_tile_lightweight(panel, layout, title_font):
+def _render_sig_iso_panel_tile_lightweight(panel, layout, title_font, panel_y_range=None):
     tile_h = layout["tile_h"]
     tile_w = layout["tile_w"]
     arr = np.full((tile_h, tile_w, 3), 255, dtype=np.uint8)
@@ -348,7 +391,10 @@ def _render_sig_iso_panel_tile_lightweight(panel, layout, title_font):
 
     t = panel['t']
     x0, x1 = _trace_domain(t, panel.get('xlim_600', False))
-    y0, y1 = _yrange_from_panel(panel, x0, x1)
+    if panel_y_range is None:
+        y0, y1 = _yrange_from_panel(panel, x0, x1)
+    else:
+        y0, y1 = panel_y_range
     x_span = x1 - x0
     y_span = y1 - y0
     if x_span <= 0 or not np.isfinite(x_span):
@@ -406,7 +452,7 @@ def _build_blank_sig_iso_tile(layout):
     return Image.fromarray(arr, mode='RGB')
 
 
-def _compose_sig_iso_day_tile_canvas(day, plot_roi, sph, slot_map, layout):
+def _compose_sig_iso_day_tile_canvas(day, plot_roi, sph, slot_map, layout, panel_y_ranges=None):
     tile_w = layout["tile_w"]
     tile_h = layout["tile_h"]
     col_gap = layout["col_gap"]
@@ -438,7 +484,13 @@ def _compose_sig_iso_day_tile_canvas(day, plot_roi, sph, slot_map, layout):
             if panel is None:
                 day_canvas.paste(blank_tile, (x, y))
             else:
-                day_canvas.paste(_render_sig_iso_panel_tile_lightweight(panel, layout, chunk_font), (x, y))
+                day_canvas.paste(
+                    _render_sig_iso_panel_tile_lightweight(
+                        panel, layout, chunk_font,
+                        panel_y_range=None if panel_y_ranges is None else panel_y_ranges.get((h, c))
+                    ),
+                    (x, y)
+                )
 
     return day_canvas
 
@@ -743,6 +795,7 @@ def main():
                 slot_map = day_slot_maps.get(d, {})
                 if not slot_map:
                     continue
+                panel_y_ranges = _sig_iso_panel_ranges_with_day_min_span(slot_map)
 
                 fig_sig.suptitle(f"Day {d} Raw/Iso - {plot_roi}", fontsize=16)
 
@@ -755,6 +808,11 @@ def main():
                             ax.axis('off')
                             continue
                         ax.axis('on')
+                        panel_y = panel_y_ranges.get((h, c))
+                        if panel_y is None:
+                            x0, x1 = _trace_domain(p['t'], p.get('xlim_600', False))
+                            panel_y = _yrange_from_panel(p, x0, x1)
+                        ax.set_ylim(panel_y[0], panel_y[1])
                         ax.plot(p['t'], p['sig'], 'g', lw=0.5, label='Sig')
                         ax.plot(p['t'], p['uv'], 'm', lw=0.5, label='Iso')
                         if p.get('xlim_600', False):
@@ -781,6 +839,7 @@ def main():
                 slot_map = day_slot_maps.get(d, {})
                 if not slot_map:
                     continue
+                panel_y_ranges = _sig_iso_panel_ranges_with_day_min_span(slot_map)
 
                 day_canvas = _compose_sig_iso_day_tile_canvas(
                     day=d,
@@ -788,6 +847,7 @@ def main():
                     sph=sph,
                     slot_map=slot_map,
                     layout=qc_layout,
+                    panel_y_ranges=panel_y_ranges,
                 )
                 out_path = os.path.join(args.output_dir, f"phasic_sig_iso_day_{d:03d}.png")
                 print(
