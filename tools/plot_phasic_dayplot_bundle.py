@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.ndimage import uniform_filter1d
+from PIL import Image, ImageDraw, ImageFont
 
 # Ensure repo root is in path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -63,6 +64,10 @@ PNG_SAVE_KWARGS = {
 }
 
 def parse_args():
+    default_sig_iso_mode = os.getenv("PHOTOMETRY_SIGISO_RENDER_MODE", "qc").strip().lower()
+    if default_sig_iso_mode not in {"qc", "full"}:
+        default_sig_iso_mode = "qc"
+
     parser = argparse.ArgumentParser(description="Unified Phasic Day-Plot Generator")
     parser.add_argument('--analysis-out', required=True, help="Path to analysis output directory")
     parser.add_argument('--roi', required=True, help="Specific ROI to plot")
@@ -81,6 +86,12 @@ def parse_args():
     
     parser.add_argument('--write-sig-iso-grid', action='store_true', default=True, help="(default true)")
     parser.add_argument('--no-write-sig-iso-grid', dest='write_sig_iso_grid', action='store_false')
+    parser.add_argument(
+        '--sig-iso-render-mode',
+        choices=['qc', 'full'],
+        default=default_sig_iso_mode,
+        help="Sig/iso renderer mode: 'qc' (default fast lightweight renderer) or 'full' (higher-fidelity Matplotlib renderer)"
+    )
     
     parser.add_argument('--write-stacked', action='store_true', default=True, help="(default true)")
     parser.add_argument('--no-write-stacked', dest='write_stacked', action='store_false')
@@ -218,6 +229,218 @@ def init_grid_figure(sph, top=0.95):
 
 def save_png_fast(fig, out_path, dpi):
     fig.savefig(out_path, dpi=dpi, **PNG_SAVE_KWARGS)
+
+
+def _sig_iso_tile_layout(sph: int, dpi: int):
+    panel_w_in = 4.0
+    panel_h_in = 0.9
+    tile_w = max(240, int(round(panel_w_in * dpi)))
+    tile_h = max(54, int(round(panel_h_in * dpi)))
+    return {
+        "tile_w": tile_w,
+        "tile_h": tile_h,
+        "left_label_w": max(48, int(round(0.45 * dpi))),
+        "right_pad": max(16, int(round(0.15 * dpi))),
+        "top_title_h": max(42, int(round(0.35 * dpi))),
+        "bottom_pad": max(14, int(round(0.12 * dpi))),
+        "col_gap": max(10, int(round(0.12 * dpi))),
+        "row_gap": max(6, int(round(0.06 * dpi))),
+        "sph": sph,
+        "dpi": dpi,
+    }
+
+
+def _get_font(size):
+    candidates = [
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
+        "arial.ttf",
+        "DejaVuSans.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _trace_domain(panel_t, xlim_600):
+    t_finite = np.isfinite(panel_t)
+    if xlim_600:
+        return 0.0, 600.0
+    if not np.any(t_finite):
+        return 0.0, 1.0
+    x0 = float(np.min(panel_t[t_finite]))
+    x1 = float(np.max(panel_t[t_finite]))
+    if not np.isfinite(x0) or not np.isfinite(x1) or x1 <= x0:
+        return 0.0, 1.0
+    return x0, x1
+
+
+def _yrange_from_panel(panel, x0, x1):
+    t = panel['t']
+    sig = panel['sig']
+    uv = panel['uv']
+    base_mask = np.isfinite(t) & (t >= x0) & (t <= x1)
+    sig_vals = sig[base_mask & np.isfinite(sig)]
+    uv_vals = uv[base_mask & np.isfinite(uv)]
+    if sig_vals.size == 0 and uv_vals.size == 0:
+        return -1.0, 1.0
+    vals = np.concatenate([sig_vals, uv_vals])
+    y0 = float(np.min(vals))
+    y1 = float(np.max(vals))
+    if not np.isfinite(y0) or not np.isfinite(y1):
+        return -1.0, 1.0
+    if y1 <= y0:
+        delta = 1.0 if y0 == 0.0 else max(1e-3, 0.1 * abs(y0))
+        return y0 - delta, y1 + delta
+    pad = 0.05 * (y1 - y0)
+    return y0 - pad, y1 + pad
+
+
+def _paint_trace_minmax(tile_arr, x_idx, y_idx, plot_x0, plot_y0, plot_w, plot_h, color, stroke=1):
+    if x_idx.size == 0:
+        return
+    y_min = np.full(plot_w, plot_h, dtype=np.int32)
+    y_max = np.full(plot_w, -1, dtype=np.int32)
+    np.minimum.at(y_min, x_idx, y_idx)
+    np.maximum.at(y_max, x_idx, y_idx)
+    cols = np.where(y_max >= 0)[0]
+    if cols.size == 0:
+        return
+
+    half = max(0, stroke // 2)
+    for col in cols:
+        y0 = int(y_min[col])
+        y1 = int(y_max[col])
+        if y1 < y0:
+            y0, y1 = y1, y0
+        yy0 = max(0, min(plot_h - 1, y0))
+        yy1 = max(0, min(plot_h - 1, y1))
+        px = plot_x0 + int(col)
+        for dx in range(-half, half + 1):
+            px2 = px + dx
+            if px2 < plot_x0 or px2 >= plot_x0 + plot_w:
+                continue
+            tile_arr[plot_y0 + yy0:plot_y0 + yy1 + 1, px2, :] = color
+
+
+def _render_sig_iso_panel_tile_lightweight(panel, layout, title_font):
+    tile_h = layout["tile_h"]
+    tile_w = layout["tile_w"]
+    arr = np.full((tile_h, tile_w, 3), 255, dtype=np.uint8)
+
+    pad_x = max(8, int(0.02 * tile_w))
+    title_h = max(14, int(0.18 * tile_h))
+    plot_x0 = pad_x
+    plot_x1 = tile_w - pad_x - 1
+    plot_y0 = title_h + 2
+    plot_y1 = tile_h - max(6, int(0.08 * tile_h)) - 1
+    plot_w = max(2, plot_x1 - plot_x0 + 1)
+    plot_h = max(2, plot_y1 - plot_y0 + 1)
+
+    # Plot frame
+    arr[plot_y0, plot_x0:plot_x1 + 1, :] = (220, 220, 220)
+    arr[plot_y1, plot_x0:plot_x1 + 1, :] = (220, 220, 220)
+    arr[plot_y0:plot_y1 + 1, plot_x0, :] = (220, 220, 220)
+    arr[plot_y0:plot_y1 + 1, plot_x1, :] = (220, 220, 220)
+
+    t = panel['t']
+    x0, x1 = _trace_domain(t, panel.get('xlim_600', False))
+    y0, y1 = _yrange_from_panel(panel, x0, x1)
+    x_span = x1 - x0
+    y_span = y1 - y0
+    if x_span <= 0 or not np.isfinite(x_span):
+        x_span = 1.0
+    if y_span <= 0 or not np.isfinite(y_span):
+        y_span = 1.0
+
+    domain_mask = np.isfinite(t) & (t >= x0) & (t <= x1)
+    x_float = ((t[domain_mask] - x0) / x_span) * (plot_w - 1)
+    x_idx = np.rint(x_float).astype(np.int32)
+    x_idx = np.clip(x_idx, 0, plot_w - 1)
+
+    sig = panel['sig'][domain_mask]
+    sig_mask = np.isfinite(sig)
+    if np.any(sig_mask):
+        y_float = ((sig[sig_mask] - y0) / y_span) * (plot_h - 1)
+        y_idx = (plot_h - 1) - np.rint(y_float).astype(np.int32)
+        y_idx = np.clip(y_idx, 0, plot_h - 1)
+        _paint_trace_minmax(
+            arr, x_idx[sig_mask], y_idx, plot_x0, plot_y0, plot_w, plot_h,
+            color=(0, 140, 0), stroke=1
+        )
+
+    uv = panel['uv'][domain_mask]
+    uv_mask = np.isfinite(uv)
+    if np.any(uv_mask):
+        y_float = ((uv[uv_mask] - y0) / y_span) * (plot_h - 1)
+        y_idx = (plot_h - 1) - np.rint(y_float).astype(np.int32)
+        y_idx = np.clip(y_idx, 0, plot_h - 1)
+        _paint_trace_minmax(
+            arr, x_idx[uv_mask], y_idx, plot_x0, plot_y0, plot_w, plot_h,
+            color=(180, 0, 180), stroke=1
+        )
+
+    tile = Image.fromarray(arr, mode='RGB')
+    draw = ImageDraw.Draw(tile)
+    draw.text((plot_x0, max(1, int(0.03 * tile_h))), f"Chunk {panel['chunk_id']}", fill='black', font=title_font)
+    return tile
+
+
+def _build_blank_sig_iso_tile(layout):
+    tile_h = layout["tile_h"]
+    tile_w = layout["tile_w"]
+    arr = np.full((tile_h, tile_w, 3), 255, dtype=np.uint8)
+    pad_x = max(8, int(0.02 * tile_w))
+    title_h = max(14, int(0.18 * tile_h))
+    plot_x0 = pad_x
+    plot_x1 = tile_w - pad_x - 1
+    plot_y0 = title_h + 2
+    plot_y1 = tile_h - max(6, int(0.08 * tile_h)) - 1
+    arr[plot_y0, plot_x0:plot_x1 + 1, :] = (235, 235, 235)
+    arr[plot_y1, plot_x0:plot_x1 + 1, :] = (235, 235, 235)
+    arr[plot_y0:plot_y1 + 1, plot_x0, :] = (235, 235, 235)
+    arr[plot_y0:plot_y1 + 1, plot_x1, :] = (235, 235, 235)
+    return Image.fromarray(arr, mode='RGB')
+
+
+def _compose_sig_iso_day_tile_canvas(day, plot_roi, sph, slot_map, layout):
+    tile_w = layout["tile_w"]
+    tile_h = layout["tile_h"]
+    col_gap = layout["col_gap"]
+    row_gap = layout["row_gap"]
+    left_label_w = layout["left_label_w"]
+    top_title_h = layout["top_title_h"]
+    right_pad = layout["right_pad"]
+    bottom_pad = layout["bottom_pad"]
+
+    canvas_w = left_label_w + (sph * tile_w) + ((sph - 1) * col_gap) + right_pad
+    canvas_h = top_title_h + (24 * tile_h) + (23 * row_gap) + bottom_pad
+    day_canvas = Image.new('RGB', (canvas_w, canvas_h), color='white')
+
+    blank_tile = _build_blank_sig_iso_tile(layout)
+    draw = ImageDraw.Draw(day_canvas)
+    title_font = _get_font(max(13, int(round(0.11 * layout["dpi"]))))
+    label_font = _get_font(max(11, int(round(0.09 * layout["dpi"]))))
+    chunk_font = _get_font(max(10, int(round(0.08 * layout["dpi"]))))
+    title_txt = f"Day {day} Raw/Iso - {plot_roi}"
+    draw.text((canvas_w // 2, max(6, top_title_h // 4)), title_txt, fill='black', anchor='ma', font=title_font)
+
+    for h in range(24):
+        y = top_title_h + h * (tile_h + row_gap)
+        # Keep left-column hour labels visible as part of contract semantics.
+        draw.text((max(4, left_label_w // 2), y + (tile_h // 2)), f"H{h:02d}", fill='black', anchor='mm', font=label_font)
+        for c in range(sph):
+            x = left_label_w + c * (tile_w + col_gap)
+            panel = slot_map.get((h, c))
+            if panel is None:
+                day_canvas.paste(blank_tile, (x, y))
+            else:
+                day_canvas.paste(_render_sig_iso_panel_tile_lightweight(panel, layout, chunk_font), (x, y))
+
+    return day_canvas
 
 
 # ======================================================================
@@ -514,35 +737,70 @@ def main():
     # 3. Render Family 2: Sig/Iso Grid
     # ------------------------------------------------------------------
     if args.write_sig_iso_grid:
-        fig_sig, axes_sig = init_grid_figure(sph, top=0.97)
-        for d in unique_days:
-            slot_map = day_slot_maps.get(d, {})
-            if not slot_map:
-                continue
+        if args.sig_iso_render_mode == 'full':
+            fig_sig, axes_sig = init_grid_figure(sph, top=0.97)
+            for d in unique_days:
+                slot_map = day_slot_maps.get(d, {})
+                if not slot_map:
+                    continue
 
-            fig_sig.suptitle(f"Day {d} Raw/Iso - {plot_roi}", fontsize=16)
+                fig_sig.suptitle(f"Day {d} Raw/Iso - {plot_roi}", fontsize=16)
 
-            for h in range(24):
-                for c in range(sph):
-                    ax = axes_sig[h, c]
-                    p = slot_map.get((h, c))
-                    ax.cla()
-                    if p is None:
-                        ax.axis('off')
-                        continue
-                    ax.axis('on')
-                    ax.plot(p['t'], p['sig'], 'g', lw=0.5, label='Sig')
-                    ax.plot(p['t'], p['uv'], 'm', lw=0.5, label='Iso')
-                    if p.get('xlim_600', False):
-                        ax.set_xlim(0, 600)
-                    if c == 0:
-                        ax.set_ylabel(f"H{h:02d}", rotation=0, labelpad=20)
+                for h in range(24):
+                    for c in range(sph):
+                        ax = axes_sig[h, c]
+                        p = slot_map.get((h, c))
+                        ax.cla()
+                        if p is None:
+                            ax.axis('off')
+                            continue
+                        ax.axis('on')
+                        ax.plot(p['t'], p['sig'], 'g', lw=0.5, label='Sig')
+                        ax.plot(p['t'], p['uv'], 'm', lw=0.5, label='Iso')
+                        if p.get('xlim_600', False):
+                            ax.set_xlim(0, 600)
+                        if c == 0:
+                            ax.set_ylabel(f"H{h:02d}", rotation=0, labelpad=20)
 
-            out_path = os.path.join(args.output_dir, f"phasic_sig_iso_day_{d:03d}.png")
-            print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=plotting family=sig_iso day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
-            save_png_fast(fig_sig, out_path, args.dpi)
-            print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=figure_save family=sig_iso day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
-        plt.close(fig_sig)
+                out_path = os.path.join(args.output_dir, f"phasic_sig_iso_day_{d:03d}.png")
+                print(
+                    f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py "
+                    f"step=plotting family=sig_iso_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
+                    flush=True
+                )
+                save_png_fast(fig_sig, out_path, args.dpi)
+                print(
+                    f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py "
+                    f"step=figure_save family=sig_iso_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
+                    flush=True
+                )
+            plt.close(fig_sig)
+        else:
+            qc_layout = _sig_iso_tile_layout(sph, args.dpi)
+            for d in unique_days:
+                slot_map = day_slot_maps.get(d, {})
+                if not slot_map:
+                    continue
+
+                day_canvas = _compose_sig_iso_day_tile_canvas(
+                    day=d,
+                    plot_roi=plot_roi,
+                    sph=sph,
+                    slot_map=slot_map,
+                    layout=qc_layout,
+                )
+                out_path = os.path.join(args.output_dir, f"phasic_sig_iso_day_{d:03d}.png")
+                print(
+                    f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py "
+                    f"step=plotting family=sig_iso_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
+                    flush=True
+                )
+                day_canvas.save(out_path, compress_level=1)
+                print(
+                    f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py "
+                    f"step=figure_save family=sig_iso_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
+                    flush=True
+                )
 
     # ------------------------------------------------------------------
     # 4. Render Family 3: Stacked Smoothed
