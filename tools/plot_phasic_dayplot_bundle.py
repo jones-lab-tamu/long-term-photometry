@@ -72,7 +72,7 @@ def parse_args():
     # Optional / Tuning
     parser.add_argument('--session-duration-s', type=float, default=None, help="Expected session duration in seconds")
     parser.add_argument('--smooth-window-s', type=float, default=1.0, help="Smoothing window for stacked plots")
-    parser.add_argument('--dpi', type=int, default=150, help="Output DPI")
+    parser.add_argument('--dpi', type=int, default=120, help="Output DPI")
     parser.add_argument('--signal', default='auto', help="Trace column for dFF (default: auto detects *_dff)")
     
     # Enable/Disable Families (default: all generated)
