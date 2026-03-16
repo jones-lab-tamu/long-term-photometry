@@ -70,6 +70,9 @@ def parse_args():
     default_dff_mode = os.getenv("PHOTOMETRY_DFF_RENDER_MODE", "qc").strip().lower()
     if default_dff_mode not in {"qc", "full"}:
         default_dff_mode = "qc"
+    default_stacked_mode = os.getenv("PHOTOMETRY_STACKED_RENDER_MODE", "qc").strip().lower()
+    if default_stacked_mode not in {"qc", "full"}:
+        default_stacked_mode = "qc"
 
     parser = argparse.ArgumentParser(description="Unified Phasic Day-Plot Generator")
     parser.add_argument('--analysis-out', required=True, help="Path to analysis output directory")
@@ -104,6 +107,12 @@ def parse_args():
     
     parser.add_argument('--write-stacked', action='store_true', default=True, help="(default true)")
     parser.add_argument('--no-write-stacked', dest='write_stacked', action='store_false')
+    parser.add_argument(
+        '--stacked-render-mode',
+        choices=['qc', 'full'],
+        default=default_stacked_mode,
+        help="Stacked renderer mode: 'qc' (default lightweight renderer) or 'full' (higher-fidelity Matplotlib renderer)"
+    )
     
     # Limits for dFF Grid
     parser.add_argument('--dff-y-percentile-low', type=float, default=0.5)
@@ -691,6 +700,136 @@ def _compose_dff_day_tile_canvas_lightweight(day, plot_roi, sph, slot_map, layou
     return day_canvas, stats
 
 
+def _render_stacked_day_canvas_lightweight(day, plot_roi, traces, smooth_window_s, dpi):
+    n_traces = len(traces)
+    fig_w_in = 6.0
+    fig_h_in = max(2.0, (n_traces * 0.285) + 1.6)
+    canvas_w = max(640, int(round(fig_w_in * dpi)))
+    canvas_h = max(320, int(round(fig_h_in * dpi)))
+
+    left_pad = max(44, int(0.075 * canvas_w))
+    right_pad = max(12, int(0.02 * canvas_w))
+    top_pad = max(28, int(0.03 * canvas_h))
+    bottom_pad = max(34, int(0.055 * canvas_h))
+    plot_x0 = left_pad
+    plot_x1 = canvas_w - right_pad - 1
+    plot_y0 = top_pad
+    plot_y1 = canvas_h - bottom_pad - 1
+    plot_w = max(2, plot_x1 - plot_x0 + 1)
+    plot_h = max(2, plot_y1 - plot_y0 + 1)
+
+    ranges = [np.ptp(y[np.isfinite(y)]) if np.any(np.isfinite(y)) else 0.0 for _, y in traces]
+    avg_rng = float(np.median(ranges)) if ranges else 1.0
+    if not np.isfinite(avg_rng) or avg_rng <= 0:
+        avg_rng = 1.0
+    step = max(0.1, avg_rng * 0.8)
+
+    xmins, xmaxs, ymins, ymaxs = [], [], [], []
+    for i, (t, y) in enumerate(traces):
+        mask = np.isfinite(t) & np.isfinite(y)
+        if not np.any(mask):
+            continue
+        offset = (n_traces - 1 - i) * step
+        tv = t[mask]
+        yv = y[mask] + offset
+        xmins.append(float(np.min(tv)))
+        xmaxs.append(float(np.max(tv)))
+        ymins.append(float(np.min(yv)))
+        ymaxs.append(float(np.max(yv)))
+
+    if xmins and xmaxs:
+        x0 = min(xmins)
+        x1 = max(xmaxs)
+    else:
+        x0, x1 = 0.0, 1.0
+    if not np.isfinite(x0) or not np.isfinite(x1) or x1 <= x0:
+        x0, x1 = 0.0, 1.0
+
+    if ymins and ymaxs:
+        y0 = min(ymins)
+        y1 = max(ymaxs)
+    else:
+        y0, y1 = -1.0, 1.0
+    if not np.isfinite(y0) or not np.isfinite(y1) or y1 <= y0:
+        y0, y1 = -1.0, 1.0
+    y_span = y1 - y0
+    y_pad = 0.05 * y_span
+    if not np.isfinite(y_pad) or y_pad <= 0:
+        y_pad = 0.1
+    y0 -= y_pad
+    y1 += y_pad
+
+    x_span = x1 - x0
+    y_span = y1 - y0
+    if x_span <= 0 or not np.isfinite(x_span):
+        x_span = 1.0
+    if y_span <= 0 or not np.isfinite(y_span):
+        y_span = 1.0
+
+    arr = np.full((canvas_h, canvas_w, 3), 255, dtype=np.uint8)
+    arr[plot_y0, plot_x0:plot_x1 + 1, :] = (205, 205, 205)
+    arr[plot_y1, plot_x0:plot_x1 + 1, :] = (205, 205, 205)
+    arr[plot_y0:plot_y1 + 1, plot_x0, :] = (205, 205, 205)
+    arr[plot_y0:plot_y1 + 1, plot_x1, :] = (205, 205, 205)
+
+    for i, (t, y) in enumerate(traces):
+        mask = np.isfinite(t) & np.isfinite(y)
+        if not np.any(mask):
+            continue
+        offset = (n_traces - 1 - i) * step
+        tv = t[mask]
+        yv = y[mask] + offset
+        x_float = ((tv - x0) / x_span) * (plot_w - 1)
+        x_idx = np.rint(x_float).astype(np.int32)
+        x_idx = np.clip(x_idx, 0, plot_w - 1)
+        y_float = ((yv - y0) / y_span) * (plot_h - 1)
+        y_idx = (plot_h - 1) - np.rint(y_float).astype(np.int32)
+        y_idx = np.clip(y_idx, 0, plot_h - 1)
+        _paint_trace_minmax(
+            arr, x_idx, y_idx, plot_x0, plot_y0, plot_w, plot_h,
+            color=(0, 0, 0), stroke=1
+        )
+
+    img = Image.fromarray(arr, mode='RGB')
+    draw = ImageDraw.Draw(img)
+    title_font = _get_font(max(12, int(round(0.11 * dpi))))
+    label_font = _get_font(max(10, int(round(0.09 * dpi))))
+    tick_font = _get_font(max(9, int(round(0.08 * dpi))))
+    draw.text(
+        (canvas_w // 2, max(10, top_pad // 2)),
+        f"Day {day} Stacked (Smoothed {smooth_window_s}s) - {plot_roi}",
+        fill='black',
+        anchor='ma',
+        font=title_font
+    )
+
+    # Add simple x ticks to better match the full renderer's axis readability.
+    tick_values = np.linspace(x0, x1, 7)
+    for tv in tick_values:
+        tx = int(round(plot_x0 + np.clip(((tv - x0) / x_span) * (plot_w - 1), 0, plot_w - 1)))
+        draw.line([(tx, plot_y1 + 1), (tx, plot_y1 + 5)], fill=(80, 80, 80), width=1)
+        draw.text((tx, plot_y1 + 7), f"{int(round(tv))}", fill=(70, 70, 70), anchor='ma', font=tick_font)
+
+    draw.text((plot_x0 + (plot_w // 2), canvas_h - max(12, bottom_pad // 3)), "Time (s)", fill='black', anchor='ma', font=label_font)
+
+    # Draw rotated y-axis label for closer visual alignment with full Matplotlib output.
+    y_label = f"Sessions ({n_traces})"
+    tmp = Image.new('RGBA', (1, 1), (0, 0, 0, 0))
+    tmp_draw = ImageDraw.Draw(tmp)
+    bbox = tmp_draw.textbbox((0, 0), y_label, font=label_font)
+    tw = max(1, bbox[2] - bbox[0])
+    th = max(1, bbox[3] - bbox[1])
+    label_img = Image.new('RGBA', (tw + 2, th + 2), (0, 0, 0, 0))
+    label_draw = ImageDraw.Draw(label_img)
+    label_draw.text((1, 1), y_label, fill=(0, 0, 0, 255), font=label_font)
+    label_rot = label_img.rotate(90, expand=True)
+    label_x = max(2, int(0.012 * canvas_w))
+    label_y = max(2, (plot_y0 + plot_y1) // 2 - label_rot.height // 2)
+    img.paste(label_rot, (label_x, label_y), label_rot)
+
+    return img
+
+
 # ======================================================================
 # Main Driver
 # ======================================================================
@@ -1117,34 +1256,54 @@ def main():
             w_samples = max(1, int(round(fs * args.smooth_window_s)))
             y_smooth = uniform_filter1d(y, size=w_samples)
             smoothed_data[c['chunk_id']] = (t, y_smooth)
-            
-        for d in unique_days:
-            # Sort chronologically
-            day_items = sorted(cached_by_day.get(d, []), key=lambda x: x['chunk_id'])
-            traces = [smoothed_data[c['chunk_id']] for c in day_items if c['chunk_id'] in smoothed_data]
-            if not traces: continue
-                
-            fig, ax = plt.subplots(figsize=(6, len(traces)*0.3 + 2))
-            
-            ranges = [np.ptp(tr[1]) for tr in traces]
-            avg_rng = np.median(ranges) if ranges else 1.0
-            step = max(0.1, avg_rng * 0.8)
-            
-            for i, (t, y) in enumerate(traces):
-                offset = (len(traces) - 1 - i) * step
-                ax.plot(t, y + offset, 'k', lw=0.5)
-                
-            ax.set_yticks([])
-            ax.set_xlabel("Time (s)")
-            ax.set_ylabel(f"Sessions ({len(traces)})")
-            ax.set_title(f"Day {d} Stacked (Smoothed {args.smooth_window_s}s) - {plot_roi}")
-            
-            plt.tight_layout()
-            out_path = os.path.join(args.output_dir, f"phasic_stacked_day_{d:03d}.png")
-            print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=plotting family=stacked day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
-            plt.savefig(out_path, dpi=args.dpi)
-            print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=figure_save family=stacked day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
-            plt.close(fig)
+
+        if args.stacked_render_mode == 'full':
+            for d in unique_days:
+                # Sort chronologically
+                day_items = sorted(cached_by_day.get(d, []), key=lambda x: x['chunk_id'])
+                traces = [smoothed_data[c['chunk_id']] for c in day_items if c['chunk_id'] in smoothed_data]
+                if not traces:
+                    continue
+
+                fig, ax = plt.subplots(figsize=(6, len(traces)*0.3 + 2))
+
+                ranges = [np.ptp(tr[1]) for tr in traces]
+                avg_rng = np.median(ranges) if ranges else 1.0
+                step = max(0.1, avg_rng * 0.8)
+
+                for i, (t, y) in enumerate(traces):
+                    offset = (len(traces) - 1 - i) * step
+                    ax.plot(t, y + offset, 'k', lw=0.5)
+
+                ax.set_yticks([])
+                ax.set_xlabel("Time (s)")
+                ax.set_ylabel(f"Sessions ({len(traces)})")
+                ax.set_title(f"Day {d} Stacked (Smoothed {args.smooth_window_s}s) - {plot_roi}")
+
+                plt.tight_layout()
+                out_path = os.path.join(args.output_dir, f"phasic_stacked_day_{d:03d}.png")
+                print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=plotting family=stacked_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+                plt.savefig(out_path, dpi=args.dpi)
+                print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=figure_save family=stacked_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+                plt.close(fig)
+        else:
+            for d in unique_days:
+                day_items = sorted(cached_by_day.get(d, []), key=lambda x: x['chunk_id'])
+                traces = [smoothed_data[c['chunk_id']] for c in day_items if c['chunk_id'] in smoothed_data]
+                if not traces:
+                    continue
+
+                out_path = os.path.join(args.output_dir, f"phasic_stacked_day_{d:03d}.png")
+                print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=plotting family=stacked_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+                canvas = _render_stacked_day_canvas_lightweight(
+                    day=d,
+                    plot_roi=plot_roi,
+                    traces=traces,
+                    smooth_window_s=args.smooth_window_s,
+                    dpi=args.dpi,
+                )
+                canvas.save(out_path, compress_level=1)
+                print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=figure_save family=stacked_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
 
     print(f"PLOT_TIMING DONE script=plot_phasic_dayplot_bundle.py total_sec={time.perf_counter() - t_start:.3f}", flush=True)
 
