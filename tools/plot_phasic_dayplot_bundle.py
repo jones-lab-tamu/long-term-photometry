@@ -67,6 +67,9 @@ def parse_args():
     default_sig_iso_mode = os.getenv("PHOTOMETRY_SIGISO_RENDER_MODE", "qc").strip().lower()
     if default_sig_iso_mode not in {"qc", "full"}:
         default_sig_iso_mode = "qc"
+    default_dff_mode = os.getenv("PHOTOMETRY_DFF_RENDER_MODE", "qc").strip().lower()
+    if default_dff_mode not in {"qc", "full"}:
+        default_dff_mode = "qc"
 
     parser = argparse.ArgumentParser(description="Unified Phasic Day-Plot Generator")
     parser.add_argument('--analysis-out', required=True, help="Path to analysis output directory")
@@ -83,6 +86,12 @@ def parse_args():
     # Enable/Disable Families (default: all generated)
     parser.add_argument('--write-dff-grid', action='store_true', default=True, help="(default true)")
     parser.add_argument('--no-write-dff-grid', dest='write_dff_grid', action='store_false')
+    parser.add_argument(
+        '--dff-render-mode',
+        choices=['qc', 'full'],
+        default=default_dff_mode,
+        help="dFF renderer mode: 'qc' (default fast lightweight renderer) or 'full' (higher-fidelity Matplotlib renderer)"
+    )
     
     parser.add_argument('--write-sig-iso-grid', action='store_true', default=True, help="(default true)")
     parser.add_argument('--no-write-sig-iso-grid', dest='write_sig_iso_grid', action='store_false')
@@ -495,6 +504,193 @@ def _compose_sig_iso_day_tile_canvas(day, plot_roi, sph, slot_map, layout, panel
     return day_canvas
 
 
+def _dff_tile_layout(sph: int, dpi: int):
+    panel_w_in = 4.0
+    panel_h_in = 0.95
+    tile_w = max(240, int(round(panel_w_in * dpi)))
+    tile_h = max(58, int(round(panel_h_in * dpi)))
+    return {
+        "tile_w": tile_w,
+        "tile_h": tile_h,
+        "left_label_w": max(48, int(round(0.45 * dpi))),
+        "right_pad": max(16, int(round(0.15 * dpi))),
+        "top_title_h": max(42, int(round(0.35 * dpi))),
+        "bottom_pad": max(14, int(round(0.12 * dpi))),
+        "col_gap": max(10, int(round(0.12 * dpi))),
+        "row_gap": max(6, int(round(0.06 * dpi))),
+        "sph": sph,
+        "dpi": dpi,
+    }
+
+
+def _build_blank_dff_tile(layout):
+    tile_h = layout["tile_h"]
+    tile_w = layout["tile_w"]
+    arr = np.full((tile_h, tile_w, 3), 255, dtype=np.uint8)
+    pad_x = max(8, int(0.02 * tile_w))
+    title_h = max(14, int(0.16 * tile_h))
+    plot_x0 = pad_x
+    plot_x1 = tile_w - pad_x - 1
+    plot_y0 = title_h + 2
+    plot_y1 = tile_h - max(6, int(0.08 * tile_h)) - 1
+    arr[plot_y0, plot_x0:plot_x1 + 1, :] = (235, 235, 235)
+    arr[plot_y1, plot_x0:plot_x1 + 1, :] = (235, 235, 235)
+    arr[plot_y0:plot_y1 + 1, plot_x0, :] = (235, 235, 235)
+    arr[plot_y0:plot_y1 + 1, plot_x1, :] = (235, 235, 235)
+    return Image.fromarray(arr, mode='RGB')
+
+
+def _render_dff_panel_tile_lightweight(panel, layout, title_font, global_ymin, global_ymax):
+    trace_sec = 0.0
+    marker_sec = 0.0
+    title_text_sec = 0.0
+
+    tile_h = layout["tile_h"]
+    tile_w = layout["tile_w"]
+    arr = np.full((tile_h, tile_w, 3), 255, dtype=np.uint8)
+
+    pad_x = max(8, int(0.02 * tile_w))
+    title_h = max(14, int(0.16 * tile_h))
+    plot_x0 = pad_x
+    plot_x1 = tile_w - pad_x - 1
+    plot_y0 = title_h + 2
+    plot_y1 = tile_h - max(6, int(0.08 * tile_h)) - 1
+    plot_w = max(2, plot_x1 - plot_x0 + 1)
+    plot_h = max(2, plot_y1 - plot_y0 + 1)
+
+    arr[plot_y0, plot_x0:plot_x1 + 1, :] = (220, 220, 220)
+    arr[plot_y1, plot_x0:plot_x1 + 1, :] = (220, 220, 220)
+    arr[plot_y0:plot_y1 + 1, plot_x0, :] = (220, 220, 220)
+    arr[plot_y0:plot_y1 + 1, plot_x1, :] = (220, 220, 220)
+
+    t = panel['t']
+    y = panel['dff']
+    x0, x1 = _trace_domain(t, False)
+
+    y0 = float(global_ymin)
+    y1 = float(global_ymax)
+    if not np.isfinite(y0) or not np.isfinite(y1) or y1 <= y0:
+        y0, y1 = -1.0, 1.0
+
+    x_span = x1 - x0
+    y_span = y1 - y0
+    if x_span <= 0 or not np.isfinite(x_span):
+        x_span = 1.0
+    if y_span <= 0 or not np.isfinite(y_span):
+        y_span = 1.0
+
+    trace_t0 = time.perf_counter()
+    domain_mask = np.isfinite(t) & np.isfinite(y) & (t >= x0) & (t <= x1)
+    if np.any(domain_mask):
+        x_float = ((t[domain_mask] - x0) / x_span) * (plot_w - 1)
+        x_idx = np.rint(x_float).astype(np.int32)
+        x_idx = np.clip(x_idx, 0, plot_w - 1)
+
+        y_float = ((y[domain_mask] - y0) / y_span) * (plot_h - 1)
+        y_idx = (plot_h - 1) - np.rint(y_float).astype(np.int32)
+        y_idx = np.clip(y_idx, 0, plot_h - 1)
+
+        _paint_trace_minmax(
+            arr, x_idx, y_idx, plot_x0, plot_y0, plot_w, plot_h,
+            color=(0, 0, 0), stroke=1
+        )
+    trace_sec = time.perf_counter() - trace_t0
+
+    tile = Image.fromarray(arr, mode='RGB')
+    draw = ImageDraw.Draw(tile)
+    title_t0 = time.perf_counter()
+    draw.text((plot_x0, max(1, int(0.02 * tile_h))), f"Chunk {panel['chunk_id']}", fill='black', font=title_font)
+    title_text_sec = time.perf_counter() - title_t0
+
+    p_idxs = panel.get('peak_indices', np.array([], dtype=int))
+    y_eps = 0.01 * y_span if y_span > 0 else 1e-6
+
+    marker_t0 = time.perf_counter()
+    for idx in p_idxs:
+        if idx < 0 or idx >= len(t):
+            continue
+        px_t = t[idx]
+        py_true = y[idx]
+        if not np.isfinite(px_t) or not np.isfinite(py_true) or px_t < x0 or px_t > x1:
+            continue
+
+        x_float = ((px_t - x0) / x_span) * (plot_w - 1)
+        px = int(round(plot_x0 + np.clip(x_float, 0, plot_w - 1)))
+
+        if py_true > (y1 - y_eps):
+            top_y = plot_y0 + 1
+            draw.polygon([(px, top_y), (px - 3, top_y + 6), (px + 3, top_y + 6)], fill=(220, 0, 0))
+        elif py_true < (y0 + y_eps):
+            bot_y = plot_y1 - 1
+            draw.polygon([(px, bot_y), (px - 3, bot_y - 6), (px + 3, bot_y - 6)], fill=(220, 0, 0))
+        else:
+            y_float = ((py_true - y0) / y_span) * (plot_h - 1)
+            py = int(round(plot_y0 + (plot_h - 1) - np.clip(y_float, 0, plot_h - 1)))
+            draw.ellipse((px - 2, py - 2, px + 2, py + 2), fill=(220, 0, 0))
+    marker_sec = time.perf_counter() - marker_t0
+
+    return tile, {
+        "trace_sec": trace_sec,
+        "marker_sec": marker_sec,
+        "title_text_sec": title_text_sec,
+    }
+
+
+def _compose_dff_day_tile_canvas_lightweight(day, plot_roi, sph, slot_map, layout, global_ymin, global_ymax):
+    tile_w = layout["tile_w"]
+    tile_h = layout["tile_h"]
+    col_gap = layout["col_gap"]
+    row_gap = layout["row_gap"]
+    left_label_w = layout["left_label_w"]
+    top_title_h = layout["top_title_h"]
+    right_pad = layout["right_pad"]
+    bottom_pad = layout["bottom_pad"]
+
+    canvas_w = left_label_w + (sph * tile_w) + ((sph - 1) * col_gap) + right_pad
+    canvas_h = top_title_h + (24 * tile_h) + (23 * row_gap) + bottom_pad
+    day_canvas = Image.new('RGB', (canvas_w, canvas_h), color='white')
+
+    blank_tile = _build_blank_dff_tile(layout)
+    draw = ImageDraw.Draw(day_canvas)
+    title_font = _get_font(max(13, int(round(0.11 * layout["dpi"]))))
+    label_font = _get_font(max(11, int(round(0.09 * layout["dpi"]))))
+    chunk_font = _get_font(max(10, int(round(0.08 * layout["dpi"]))))
+    title_txt = f"Phasic QC - Day {day} - ROI {plot_roi} - Mode: DFF"
+    draw.text((canvas_w // 2, max(6, top_title_h // 4)), title_txt, fill='black', anchor='ma', font=title_font)
+    stats = {
+        "trace_sec": 0.0,
+        "marker_sec": 0.0,
+        "title_text_sec": 0.0,
+        "paste_sec": 0.0,
+        "panels": 0,
+    }
+
+    for h in range(24):
+        y = top_title_h + h * (tile_h + row_gap)
+        draw.text((max(4, left_label_w // 2), y + (tile_h // 2)), f"H{h:02d}", fill='black', anchor='mm', font=label_font)
+        for c in range(sph):
+            x = left_label_w + c * (tile_w + col_gap)
+            panel = slot_map.get((h, c))
+            if panel is None:
+                day_canvas.paste(blank_tile, (x, y))
+            else:
+                panel_tile, panel_stats = _render_dff_panel_tile_lightweight(
+                    panel, layout, chunk_font, global_ymin, global_ymax
+                )
+                paste_t0 = time.perf_counter()
+                day_canvas.paste(
+                    panel_tile,
+                    (x, y)
+                )
+                stats["paste_sec"] += time.perf_counter() - paste_t0
+                stats["trace_sec"] += panel_stats["trace_sec"]
+                stats["marker_sec"] += panel_stats["marker_sec"]
+                stats["title_text_sec"] += panel_stats["title_text_sec"]
+                stats["panels"] += 1
+
+    return day_canvas, stats
+
+
 # ======================================================================
 # Main Driver
 # ======================================================================
@@ -723,67 +919,109 @@ def main():
     # 2. Render Family 1: dFF Grid
     # ------------------------------------------------------------------
     if args.write_dff_grid:
-        fig_dff, axes_dff = init_grid_figure(sph, top=0.95)
-        y_span = global_ymax - global_ymin
-        eps = 0.01 * y_span if y_span > 0 else 1e-6
-        for d in unique_days:
-            slot_map = day_slot_maps.get(d, {})
-            if not slot_map:
-                continue
+        if args.dff_render_mode == 'full':
+            fig_dff, axes_dff = init_grid_figure(sph, top=0.95)
+            y_span = global_ymax - global_ymin
+            eps = 0.01 * y_span if y_span > 0 else 1e-6
+            for d in unique_days:
+                slot_map = day_slot_maps.get(d, {})
+                if not slot_map:
+                    continue
 
-            fig_dff.suptitle(f"Phasic QC - Day {d} - ROI {plot_roi} - Mode: DFF", fontsize=16)
+                fig_dff.suptitle(f"Phasic QC - Day {d} - ROI {plot_roi} - Mode: DFF", fontsize=16)
 
-            for h in range(24):
-                for c in range(sph):
-                    ax = axes_dff[h, c]
-                    p = slot_map.get((h, c))
-                    ax.cla()
-                    if p is None:
-                        ax.axis('off')
-                        continue
-                    ax.axis('on')
-                    ax.set_ylim(global_ymin, global_ymax)
-                    if c == 0:
-                        ax.set_ylabel(f"H{h:02d}", rotation=0, labelpad=15, va='center', fontweight='bold')
-                    ax.set_title(f"Chunk {p['chunk_id']}", fontsize=6, pad=2)
-                    ax.plot(p['t'], p['dff'], 'k', lw=0.8)
+                for h in range(24):
+                    for c in range(sph):
+                        ax = axes_dff[h, c]
+                        p = slot_map.get((h, c))
+                        ax.cla()
+                        if p is None:
+                            ax.axis('off')
+                            continue
+                        ax.axis('on')
+                        ax.set_ylim(global_ymin, global_ymax)
+                        if c == 0:
+                            ax.set_ylabel(f"H{h:02d}", rotation=0, labelpad=15, va='center', fontweight='bold')
+                        ax.set_title(f"Chunk {p['chunk_id']}", fontsize=6, pad=2)
+                        ax.plot(p['t'], p['dff'], 'k', lw=0.8)
 
-                    # Peak Overlays (Clipped vs unclipped)
-                    p_idxs = p['peak_indices']
-                    n_clipped = 0
-                    if len(p_idxs) > 0:
-                        px = p['t'][p_idxs]
-                        py_true = p['dff'][p_idxs]
-                        py_plot = np.clip(py_true, global_ymin + eps, global_ymax - eps)
+                        # Peak Overlays (Clipped vs unclipped)
+                        p_idxs = p['peak_indices']
+                        n_clipped = 0
+                        if len(p_idxs) > 0:
+                            px = p['t'][p_idxs]
+                            py_true = p['dff'][p_idxs]
+                            py_plot = np.clip(py_true, global_ymin + eps, global_ymax - eps)
 
-                        mask_hi = py_true > (global_ymax - eps)
-                        mask_lo = py_true < (global_ymin + eps)
-                        mask_ok = ~(mask_hi | mask_lo)
+                            mask_hi = py_true > (global_ymax - eps)
+                            mask_lo = py_true < (global_ymin + eps)
+                            mask_ok = ~(mask_hi | mask_lo)
 
-                        if np.any(mask_ok):
-                            ax.scatter(px[mask_ok], py_plot[mask_ok], s=10, c='red', alpha=0.6, zorder=3)
-                        if np.any(mask_hi):
-                            ax.scatter(px[mask_hi], py_plot[mask_hi], s=12, marker='^', c='red', alpha=0.8, zorder=4)
-                        if np.any(mask_lo):
-                            ax.scatter(px[mask_lo], py_plot[mask_lo], s=12, marker='v', c='red', alpha=0.8, zorder=4)
-                        n_clipped = np.sum(mask_hi) + np.sum(mask_lo)
+                            if np.any(mask_ok):
+                                ax.scatter(px[mask_ok], py_plot[mask_ok], s=10, c='red', alpha=0.6, zorder=3)
+                            if np.any(mask_hi):
+                                ax.scatter(px[mask_hi], py_plot[mask_hi], s=12, marker='^', c='red', alpha=0.8, zorder=4)
+                            if np.any(mask_lo):
+                                ax.scatter(px[mask_lo], py_plot[mask_lo], s=12, marker='v', c='red', alpha=0.8, zorder=4)
+                            n_clipped = np.sum(mask_hi) + np.sum(mask_lo)
 
-                    # Annotation
-                    val = p['count']
-                    txt = "peaks=NaN" if pd.isna(val) else f"peaks={int(val)}"
-                    if n_clipped > 0:
-                        txt += f"\n({n_clipped} clipped)"
-                    color = 'red' if pd.isna(val) else 'blue'
-                    ax.text(
-                        0.95, 0.9, txt, transform=ax.transAxes, ha='right', va='top', fontsize=8, color=color,
-                        bbox=dict(facecolor='white', alpha=0.7, edgecolor='none')
-                    )
+                        # Annotation
+                        val = p['count']
+                        txt = "peaks=NaN" if pd.isna(val) else f"peaks={int(val)}"
+                        if n_clipped > 0:
+                            txt += f"\n({n_clipped} clipped)"
+                        color = 'red' if pd.isna(val) else 'blue'
+                        ax.text(
+                            0.95, 0.9, txt, transform=ax.transAxes, ha='right', va='top', fontsize=8, color=color,
+                            bbox=dict(facecolor='white', alpha=0.7, edgecolor='none')
+                        )
 
-            out_path = os.path.join(args.output_dir, f"phasic_dFF_day_{d:03d}.png")
-            print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=plotting family=dff day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
-            save_png_fast(fig_dff, out_path, args.dpi)
-            print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=figure_save family=dff day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
-        plt.close(fig_dff)
+                out_path = os.path.join(args.output_dir, f"phasic_dFF_day_{d:03d}.png")
+                print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=plotting family=dff_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+                save_png_fast(fig_dff, out_path, args.dpi)
+                print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=figure_save family=dff_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+            plt.close(fig_dff)
+        else:
+            dff_qc_layout = _dff_tile_layout(sph, args.dpi)
+            for d in unique_days:
+                slot_map = day_slot_maps.get(d, {})
+                if not slot_map:
+                    continue
+
+                compose_t0 = time.perf_counter()
+                proto_canvas, proto_stats = _compose_dff_day_tile_canvas_lightweight(
+                    day=d,
+                    plot_roi=plot_roi,
+                    sph=sph,
+                    slot_map=slot_map,
+                    layout=dff_qc_layout,
+                    global_ymin=global_ymin,
+                    global_ymax=global_ymax,
+                )
+                compose_sec = time.perf_counter() - compose_t0
+                out_path = os.path.join(args.output_dir, f"phasic_dFF_day_{d:03d}.png")
+                print(
+                    f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py "
+                    f"step=plotting family=dff_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
+                    flush=True
+                )
+                save_t0 = time.perf_counter()
+                proto_canvas.save(out_path, compress_level=1)
+                save_sec = time.perf_counter() - save_t0
+                print(
+                    f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py "
+                    f"step=figure_save family=dff_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
+                    flush=True
+                )
+                print(
+                    f"PLOT_TIMING DETAIL script=plot_phasic_dayplot_bundle.py "
+                    f"family=dff_qc day={d} "
+                    f"trace_sec={proto_stats['trace_sec']:.4f} marker_sec={proto_stats['marker_sec']:.4f} "
+                    f"title_text_sec={proto_stats['title_text_sec']:.4f} "
+                    f"paste_sec={proto_stats['paste_sec']:.4f} compose_sec={compose_sec:.4f} save_sec={save_sec:.4f} "
+                    f"panels={proto_stats['panels']}",
+                    flush=True
+                )
 
     # ------------------------------------------------------------------
     # 3. Render Family 2: Sig/Iso Grid
