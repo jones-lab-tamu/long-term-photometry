@@ -5,6 +5,7 @@ import json
 import yaml
 import logging
 import pathlib
+import time
 import pandas as pd
 import numpy as np
 from typing import List, Optional
@@ -52,6 +53,54 @@ class Pipeline:
         self._selected_rois = None
         self.roi_selection = None
         self.traces_only = False
+        self._phasic_started_at = None
+        self._phasic_phase_buckets = {}
+        self._phasic_detail_buckets = {}
+        self._phasic_metrics = {}
+
+    def _is_phasic_timing_enabled(self) -> bool:
+        return self.mode == 'phasic'
+
+    def _add_phasic_phase_bucket(self, bucket: str, elapsed_sec: float):
+        if not self._is_phasic_timing_enabled():
+            return
+        self._phasic_phase_buckets[bucket] = self._phasic_phase_buckets.get(bucket, 0.0) + float(elapsed_sec)
+
+    def _add_phasic_detail_bucket(self, bucket: str, elapsed_sec: float):
+        if not self._is_phasic_timing_enabled():
+            return
+        self._phasic_detail_buckets[bucket] = self._phasic_detail_buckets.get(bucket, 0.0) + float(elapsed_sec)
+
+    def _set_phasic_metric(self, name: str, value):
+        if not self._is_phasic_timing_enabled():
+            return
+        self._phasic_metrics[name] = value
+
+    def _add_phasic_metric(self, name: str, delta):
+        if not self._is_phasic_timing_enabled():
+            return
+        self._phasic_metrics[name] = self._phasic_metrics.get(name, 0) + delta
+
+    def _emit_phasic_timing_details(self, total_elapsed_sec: float):
+        if not self._is_phasic_timing_enabled():
+            return
+
+        for bucket in sorted(self._phasic_phase_buckets.keys()):
+            elapsed = self._phasic_phase_buckets[bucket]
+            print(f"TIMING DETAIL phase=phasic_analysis bucket={bucket} elapsed_sec={elapsed:.3f}", flush=True)
+
+        for bucket in sorted(self._phasic_detail_buckets.keys()):
+            elapsed = self._phasic_detail_buckets[bucket]
+            print(f"TIMING DETAIL phase=phasic_analysis bucket={bucket} elapsed_sec={elapsed:.3f}", flush=True)
+
+        phase_explicit_sum = float(sum(self._phasic_phase_buckets.values()))
+        phase_remainder = max(0.0, float(total_elapsed_sec) - phase_explicit_sum)
+        print(f"TIMING DETAIL phase=phasic_analysis bucket=phase.remainder elapsed_sec={phase_remainder:.3f}", flush=True)
+        print(f"TIMING DETAIL phase=phasic_analysis bucket=phase.total elapsed_sec={float(total_elapsed_sec):.3f}", flush=True)
+
+        for name in sorted(self._phasic_metrics.keys()):
+            value = self._phasic_metrics[name]
+            print(f"TIMING METRIC phase=phasic_analysis name={name} value={value}", flush=True)
 
     def discover_files(self, input_path: str, recursive: bool = False, file_glob: str = "*.csv", force_format: str = 'auto'):
         if force_format == 'rwd':
@@ -88,6 +137,12 @@ class Pipeline:
         Baseline Computation.
         """
         print("Starting Pass 1: Baseline Computation...")
+        pass1_started = time.perf_counter()
+        pass1_chunk_load_sec = 0.0
+        pass1_filter_sec = 0.0
+        pass1_accumulate_sec = 0.0
+        pass1_solve_sec = 0.0
+        pass1_f0_compute_sec = 0.0
         
         method = self.config.baseline_method
         reservoir = baseline.DeterministicReservoir(seed=self.config.seed)
@@ -96,16 +151,20 @@ class Pipeline:
             print("Pass 1 (Reservoir)...")
             for i, fpath in enumerate(self.file_list):
                 try:
+                    t_load = time.perf_counter()
                     fmt = self._get_format(fpath, force_format)
                     chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
                     if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
+                    pass1_chunk_load_sec += (time.perf_counter() - t_load)
                     
                     if not self.roi_map and chunk.metadata.get('roi_map'):
                         self.roi_map = chunk.metadata['roi_map']
                     
+                    t_acc = time.perf_counter()
                     for ch_idx, ch_name in enumerate(chunk.channel_names):
                         uv_data = chunk.uv_raw[:, ch_idx]
                         reservoir.add(ch_name, uv_data)
+                    pass1_accumulate_sec += (time.perf_counter() - t_acc)
                         
                     if fpath not in self._pass1_manifest:
                         self._pass1_manifest.append(fpath)
@@ -117,9 +176,11 @@ class Pipeline:
                     continue
             
             self.stats.method_used = method
+            t_f0 = time.perf_counter()
             for ch in reservoir.buffer.keys():
                 f0 = reservoir.get_percentile(ch, self.config.baseline_percentile)
                 self.stats.f0_values[ch] = f0
+            pass1_f0_compute_sec += (time.perf_counter() - t_f0)
                 
         elif method == 'uv_globalfit_percentile_session':
             accumulator = baseline.GlobalFitAccumulator()
@@ -127,19 +188,25 @@ class Pipeline:
             print("Pass 1a (Stats)...")
             for i, fpath in enumerate(self.file_list):
                 try:
+                    t_load = time.perf_counter()
                     fmt = self._get_format(fpath, force_format)
                     chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
                     if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
+                    pass1_chunk_load_sec += (time.perf_counter() - t_load)
                     
                     if not self.roi_map and chunk.metadata.get('roi_map'):
                         self.roi_map = chunk.metadata['roi_map']
                     
                     # Compute filtered explicitly for fit accumulation
+                    t_filter = time.perf_counter()
                     chunk.uv_filt, _ = preprocessing.lowpass_filter_with_meta(chunk.uv_raw, chunk.fs_hz, self.config)
                     chunk.sig_filt, _ = preprocessing.lowpass_filter_with_meta(chunk.sig_raw, chunk.fs_hz, self.config)
+                    pass1_filter_sec += (time.perf_counter() - t_filter)
                     
+                    t_acc = time.perf_counter()
                     for ch_idx, ch_name in enumerate(chunk.channel_names):
                         accumulator.add(ch_name, chunk.uv_filt[:, ch_idx], chunk.sig_filt[:, ch_idx])
+                    pass1_accumulate_sec += (time.perf_counter() - t_acc)
                         
                 except Exception as e:
                     logging.warning(f"Pass 1a: Skipping {fpath}: {e}")
@@ -147,21 +214,27 @@ class Pipeline:
                         self.qc_summary['failed_chunks'].append({'file': fpath, 'error': str(e)})
                     continue
             
+            t_solve = time.perf_counter()
             self.stats.global_fit_params = accumulator.solve()
+            pass1_solve_sec += (time.perf_counter() - t_solve)
             
             print("Pass 1b (Reservoir)...")
             for i, fpath in enumerate(self.file_list):
                 try:
+                    t_load = time.perf_counter()
                     fmt = self._get_format(fpath, force_format)
                     chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
                     if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
+                    pass1_chunk_load_sec += (time.perf_counter() - t_load)
                     
+                    t_acc = time.perf_counter()
                     for ch_idx, ch_name in enumerate(chunk.channel_names):
                         params = self.stats.global_fit_params.get(ch_name)
                         if params:
                             uv_val = chunk.uv_raw[:, ch_idx]
                             uv_est = params['a'] * uv_val + params['b']
                             reservoir.add(ch_name, uv_est)
+                    pass1_accumulate_sec += (time.perf_counter() - t_acc)
                             
                     if fpath not in self._pass1_manifest:
                         self._pass1_manifest.append(fpath)
@@ -169,11 +242,32 @@ class Pipeline:
                     continue
             
             self.stats.method_used = method
+            t_f0 = time.perf_counter()
             for ch in reservoir.buffer.keys():
                 f0 = reservoir.get_percentile(ch, self.config.baseline_percentile)
                 self.stats.f0_values[ch] = f0
+            pass1_f0_compute_sec += (time.perf_counter() - t_f0)
 
         print(f"Pass 1 Complete. F0: {self.stats.f0_values}")
+        if self._is_phasic_timing_enabled():
+            pass1_total_sec = time.perf_counter() - pass1_started
+            self._add_phasic_detail_bucket("pass1.total", pass1_total_sec)
+            self._add_phasic_detail_bucket("pass1.chunk_load", pass1_chunk_load_sec)
+            self._add_phasic_detail_bucket("pass1.filter", pass1_filter_sec)
+            self._add_phasic_detail_bucket("pass1.accumulate", pass1_accumulate_sec)
+            self._add_phasic_detail_bucket("pass1.solve", pass1_solve_sec)
+            self._add_phasic_detail_bucket("pass1.f0_compute", pass1_f0_compute_sec)
+            pass1_explicit = (
+                pass1_chunk_load_sec
+                + pass1_filter_sec
+                + pass1_accumulate_sec
+                + pass1_solve_sec
+                + pass1_f0_compute_sec
+            )
+            self._add_phasic_detail_bucket("pass1.remainder", max(0.0, pass1_total_sec - pass1_explicit))
+            self._set_phasic_metric("pass1.files_seen", len(self.file_list))
+            self._set_phasic_metric("pass1.manifest_size", len(self._pass1_manifest))
+            self._set_phasic_metric("pass1.baseline_method", method)
         
         # Robustness: Check for Missing/Invalid Baselines
         from .core.reporting import append_run_report_warnings
@@ -231,8 +325,11 @@ class Pipeline:
         Shared source of truth for standard analysis steps (preprocessing -> regression -> normalization).
         Returns the processed chunk.
         """
+        t_filter = time.perf_counter()
         uv_filt, uv_meta = preprocessing.lowpass_filter_with_meta(chunk.uv_raw, chunk.fs_hz, self.config)
         sig_filt, sig_meta = preprocessing.lowpass_filter_with_meta(chunk.sig_raw, chunk.fs_hz, self.config)
+        if self._is_phasic_timing_enabled():
+            self._add_phasic_detail_bucket("pass2.filter_lowpass", time.perf_counter() - t_filter)
         
         chunk.uv_filt = uv_filt
         chunk.sig_filt = sig_filt
@@ -248,10 +345,30 @@ class Pipeline:
              self._process_chunk_tonic(chunk, chunk_id)
         else:
              # PHASIC MODE (Dynamic)
+             t_reg = time.perf_counter()
              uv_fit, delta_f = regression.fit_chunk_dynamic(chunk, self.config, mode=self.mode)
+             if self._is_phasic_timing_enabled():
+                 self._add_phasic_detail_bucket("pass2.dynamic_regression", time.perf_counter() - t_reg)
+                 dyn_timing = None
+                 if hasattr(chunk, 'metadata') and chunk.metadata:
+                     dyn_timing = chunk.metadata.get('dynamic_regression_timing')
+                 if isinstance(dyn_timing, dict):
+                     for sub_bucket, sub_elapsed in dyn_timing.get('buckets', {}).items():
+                         self._add_phasic_detail_bucket(
+                             f"pass2.dynamic_regression.{sub_bucket}",
+                             float(sub_elapsed)
+                         )
+                     for metric_name, metric_value in dyn_timing.get('metrics', {}).items():
+                         self._add_phasic_metric(
+                             f"pass2.dynamic_regression.{metric_name}",
+                             metric_value
+                         )
              chunk.uv_fit = uv_fit
              chunk.delta_f = delta_f
+             t_dff = time.perf_counter()
              chunk.dff = normalization.compute_dff(chunk, self.stats, self.config)
+             if self._is_phasic_timing_enabled():
+                 self._add_phasic_detail_bucket("pass2.dff_compute", time.perf_counter() - t_dff)
         
         return chunk
 
@@ -371,6 +488,21 @@ class Pipeline:
     def run_pass_2(self, output_dir: str, force_format: str = 'auto'):
         # Lazy import for VIZ
         from .viz import plots
+        pass2_started = time.perf_counter()
+        pass2_manifest_check_sec = 0.0
+        pass2_chunk_read_sec = 0.0
+        pass2_feature_extract_sec = 0.0
+        pass2_cache_write_sec = 0.0
+        pass2_qc_scan_sec = 0.0
+        pass2_features_csv_write_sec = 0.0
+        pass2_qc_summary_write_sec = 0.0
+        pass2_run_metadata_write_sec = 0.0
+        pass2_rep_validation_sec = 0.0
+        pass2_chunks_processed = 0
+        pass2_sample_rows_processed = 0
+        pass2_roi_samples_processed = 0
+        pass2_features_rows = 0
+        pass2_peak_count_total = 0
         
         # Robustness: strict directory creation
         os.makedirs(os.path.join(output_dir, 'qc'), exist_ok=True)
@@ -383,10 +515,12 @@ class Pipeline:
         frozen_manifest = tuple(self._pass1_manifest)
         
         # Check for new files not in pass 1 manifest
+        t_manifest = time.perf_counter()
         new_files = [f for f in self.file_list if f not in frozen_manifest]
         for f in new_files:
             if not any(x['file'] == f for x in self.qc_summary['failed_chunks']):
                 self.qc_summary['failed_chunks'].append({'file': f, 'error': 'Ignored (Not in Pass 1 manifest)'})
+        pass2_manifest_check_sec += (time.perf_counter() - t_manifest)
                 
         if new_files:
              logging.warning(f"Pass 2: Found {len(new_files)} new or skipped files not in Pass 1 manifest. First few: {new_files[:3]}. They will be ignored.")
@@ -395,9 +529,15 @@ class Pipeline:
         # Ensure we only iterate over files successfully processed in Pass 1
         for i, fpath in enumerate(frozen_manifest):
             try:
+                t_read = time.perf_counter()
                 fmt = self._get_format(fpath, force_format)
                 chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
                 if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
+                pass2_chunk_read_sec += (time.perf_counter() - t_read)
+                pass2_chunks_processed += 1
+                if hasattr(chunk, 'sig_raw') and chunk.sig_raw is not None:
+                    pass2_sample_rows_processed += int(chunk.sig_raw.shape[0])
+                    pass2_roi_samples_processed += int(chunk.sig_raw.shape[0] * chunk.sig_raw.shape[1])
                 
                 # Capture ROI map if missing (e.g. if Pass 1 failed or skipped)
                 if not self.roi_map and chunk.metadata.get("roi_map"):
@@ -419,18 +559,28 @@ class Pipeline:
                 # gated here is feature_extraction.extract_features(), which computes
                 # per-chunk statistics (peak count, AUC, mean, etc.).
                 if not self.traces_only:
+                    t_feats = time.perf_counter()
                     feats_df = feature_extraction.extract_features(chunk, self.config)
+                    pass2_feature_extract_sec += (time.perf_counter() - t_feats)
                     all_features.append(feats_df)
+                    pass2_features_rows += int(len(feats_df))
+                    if 'peak_count' in feats_df.columns:
+                        peak_sum = pd.to_numeric(feats_df['peak_count'], errors='coerce').fillna(0).sum()
+                        pass2_peak_count_total += int(peak_sum)
                 
                 
                 if hasattr(self, '_cache_writer'):
+                    t_cache = time.perf_counter()
                     self._cache_writer.add_chunk(chunk, i, fpath)
+                    pass2_cache_write_sec += (time.perf_counter() - t_cache)
                 
+                t_scan = time.perf_counter()
                 if hasattr(chunk, 'metadata') and chunk.metadata:
                     qc_warnings = chunk.metadata.get('qc_warnings', [])
                     if any("DEGENERATE" in w for w in qc_warnings):
                         if not any(x['file'] == fpath for x in self.qc_summary['failed_chunks']):
                             self.qc_summary['failed_chunks'].append({'file': fpath, 'error': 'QC: Degenerate data detected'})
+                pass2_qc_scan_sec += (time.perf_counter() - t_scan)
 
 
                 # Legacy VIZ was here, now moved out of loop for strict resolution/loading
@@ -440,11 +590,13 @@ class Pipeline:
                 raise RuntimeError(f"Pass 2: Cannot reliably read manifest file {fpath} successfully processed in Pass 1. Error: {e}")
                 
         if all_features and self.mode != 'tonic':
+            t_feats_write = time.perf_counter()
             full_feats = pd.concat(all_features, ignore_index=True)
             feats_dir = os.path.join(output_dir, 'features')
             os.makedirs(feats_dir, exist_ok=True)
             
             full_feats.to_csv(os.path.join(feats_dir, 'features.csv'), index=False)
+            pass2_features_csv_write_sec += (time.perf_counter() - t_feats_write)
 
         total_chunks = len(self.file_list)
         if total_chunks > 0:
@@ -461,8 +613,10 @@ class Pipeline:
                 logging.warning(f"Baseline invalid for {len(bad_rois)} ROIs across {total_chunks} chunks ({total_affected} pairs).")
             
         if self.mode != 'tonic':
+            t_qc_write = time.perf_counter()
             with open(os.path.join(output_dir, 'qc', 'qc_summary.json'), 'w') as f:
                 json.dump(_sanitize_metadata(self.qc_summary), f, indent=2)
+            pass2_qc_summary_write_sec += (time.perf_counter() - t_qc_write)
             
         run_meta = {
             'target_fs_hz': self.config.target_fs_hz,
@@ -482,8 +636,10 @@ class Pipeline:
             # D1: Write invalid baseline ROIs
             'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', [])
         }
+        t_meta_write = time.perf_counter()
         with open(os.path.join(output_dir, 'run_metadata.json'), 'w') as f:
             json.dump(_sanitize_metadata(run_meta), f, indent=2)
+        pass2_run_metadata_write_sec += (time.perf_counter() - t_meta_write)
             
         if self.qc_summary['chunk_fail_fraction'] > self.config.qc_max_chunk_fail_fraction:
             logging.error(f"High failure rate: {self.qc_summary['chunk_fail_fraction']:.2%}")
@@ -493,6 +649,7 @@ class Pipeline:
         # -----------------------------
         rep_fpath = self.file_list[rep_idx] if (rep_idx is not None and 0 <= rep_idx < len(self.file_list)) else None
         
+        t_rep = time.perf_counter()
         if rep_chunk_for_plotting is None:
             if self.representative_user_provided:
                 raise RuntimeError(
@@ -500,6 +657,40 @@ class Pipeline:
                     f"(index={rep_idx}, file={rep_fpath}, stage=analysis/pass-2). "
                     f"Session was not successfully processed during Pass 2."
                 )
+        pass2_rep_validation_sec += (time.perf_counter() - t_rep)
+
+        if self._is_phasic_timing_enabled():
+            pass2_total_sec = time.perf_counter() - pass2_started
+            self._add_phasic_detail_bucket("pass2.total", pass2_total_sec)
+            self._add_phasic_detail_bucket("pass2.manifest_check", pass2_manifest_check_sec)
+            self._add_phasic_detail_bucket("pass2.chunk_read", pass2_chunk_read_sec)
+            self._add_phasic_detail_bucket("pass2.feature_extraction", pass2_feature_extract_sec)
+            self._add_phasic_detail_bucket("pass2.cache_write", pass2_cache_write_sec)
+            self._add_phasic_detail_bucket("pass2.qc_warning_scan", pass2_qc_scan_sec)
+            self._add_phasic_detail_bucket("pass2.features_csv_write", pass2_features_csv_write_sec)
+            self._add_phasic_detail_bucket("pass2.qc_summary_write", pass2_qc_summary_write_sec)
+            self._add_phasic_detail_bucket("pass2.run_metadata_write", pass2_run_metadata_write_sec)
+            self._add_phasic_detail_bucket("pass2.rep_validation", pass2_rep_validation_sec)
+            pass2_explicit = (
+                pass2_manifest_check_sec
+                + pass2_chunk_read_sec
+                + pass2_feature_extract_sec
+                + pass2_cache_write_sec
+                + pass2_qc_scan_sec
+                + pass2_features_csv_write_sec
+                + pass2_qc_summary_write_sec
+                + pass2_run_metadata_write_sec
+                + pass2_rep_validation_sec
+                + self._phasic_detail_buckets.get("pass2.filter_lowpass", 0.0)
+                + self._phasic_detail_buckets.get("pass2.dynamic_regression", 0.0)
+                + self._phasic_detail_buckets.get("pass2.dff_compute", 0.0)
+            )
+            self._add_phasic_detail_bucket("pass2.remainder", max(0.0, pass2_total_sec - pass2_explicit))
+            self._set_phasic_metric("pass2.chunks_processed", pass2_chunks_processed)
+            self._set_phasic_metric("pass2.samples_processed_rows", pass2_sample_rows_processed)
+            self._set_phasic_metric("pass2.samples_processed_roi_values", pass2_roi_samples_processed)
+            self._set_phasic_metric("pass2.features_rows", pass2_features_rows)
+            self._set_phasic_metric("pass2.peaks_detected_total", pass2_peak_count_total)
                 
     def _apply_roi_filter(self, chunk):
         """Filter chunk data to only include channels in self._selected_rois."""
@@ -522,14 +713,21 @@ class Pipeline:
     def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv", include_rois: List[str] = None, exclude_rois: List[str] = None, traces_only: bool = False, emitter=None, sessions_per_hour: int = None):
         # Lazy import to avoid GUI side effects at module level
         from .viz import plots
+        run_started = time.perf_counter()
+        if self._is_phasic_timing_enabled():
+            self._phasic_started_at = run_started
         
         self.output_dir = output_dir
         os.makedirs(os.path.join(output_dir, 'qc'), exist_ok=True)
+        t_discovery = time.perf_counter()
         self.discover_files(input_dir, recursive, glob_pattern, force_format=force_format)
+        self._add_phasic_phase_bucket("phase.input_discovery", time.perf_counter() - t_discovery)
+        self._set_phasic_metric("files_discovered", len(self.file_list))
         
         # --- Preview Mode: limit to first N sessions ---
         n_total_discovered = len(self.file_list)
         preview_first_n = self.config.preview_first_n
+        t_preview = time.perf_counter()
         if preview_first_n is not None:
             limit_n = min(preview_first_n, n_total_discovered)
             self.file_list = self.file_list[:limit_n]
@@ -544,6 +742,8 @@ class Pipeline:
         else:
             self.run_type = "full"
             self.preview_info = None
+        self._add_phasic_phase_bucket("phase.preview_selection", time.perf_counter() - t_preview)
+        self._set_phasic_metric("files_after_preview", len(self.file_list))
         
         # Emit inputs:preview audit event if emitter provided
         if emitter and self.preview_info is not None:
@@ -551,19 +751,24 @@ class Pipeline:
                          payload=self.preview_info)
         
         # --- ROI Discovery & Resolution ---
+        roi_read_sec = 0.0
         channels_seen = []
         for i, fpath in enumerate(self.file_list):
             try:
+                t_roi_read = time.perf_counter()
                 fmt = self._get_format(fpath, force_format)
                 chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                roi_read_sec += (time.perf_counter() - t_roi_read)
                 channels_seen.append(chunk.channel_names)
             except Exception as e:
                 logging.warning(f"ROI Discovery: Failed to read {fpath}: {e}")
+        self._add_phasic_phase_bucket("phase.roi_discovery_read_chunks", roi_read_sec)
         
         if not channels_seen:
             raise RuntimeError("No valid data files found for ROI discovery.")
             
         # Intersection over all valid chunks, preserving discovered order from first chunk
+        t_roi_resolve = time.perf_counter()
         channel_sets = [set(cx) for cx in channels_seen]
         discovered_rois = [r for r in channels_seen[0] if all(r in cs for cs in channel_sets)]
                 
@@ -588,15 +793,21 @@ class Pipeline:
             "exclude_rois": exclude_rois,
             "selected_rois": selected_rois
         }
+        self._add_phasic_phase_bucket("phase.roi_selection_resolution", time.perf_counter() - t_roi_resolve)
+        self._set_phasic_metric("rois_discovered", len(discovered_rois))
+        self._set_phasic_metric("rois_selected", len(selected_rois))
         
         self._selected_rois = selected_rois
         self.traces_only = traces_only
 
         # --- Representative Session Resolution ---
+        t_rep = time.perf_counter()
         self._resolve_representative_session(force_format, emitter=emitter)
+        self._add_phasic_phase_bucket("phase.representative_resolution", time.perf_counter() - t_rep)
 
         # 1. Run Report (Pre-Analysis)
 
+        t_report = time.perf_counter()
         generate_run_report(
             self.config, output_dir, 
             roi_selection=self.roi_selection, 
@@ -606,8 +817,11 @@ class Pipeline:
             sessions_per_hour=sessions_per_hour,
             sessions_per_hour_source=None
         )
+        self._add_phasic_phase_bucket("phase.run_report_write", time.perf_counter() - t_report)
         
+        t_pass1 = time.perf_counter()
         self.run_pass_1(force_format)
+        self._add_phasic_phase_bucket("phase.pass1_total", time.perf_counter() - t_pass1)
         
         baseline_warnings = []
         invalid_rois = []
@@ -621,6 +835,7 @@ class Pipeline:
         keys_stats = list(self.stats.f0_values.keys())
         all_known_rois = sorted(list(set(keys_map) | set(keys_stats)))
         
+        t_baseline_check = time.perf_counter()
         for roi in all_known_rois:
             f0 = self.stats.f0_values.get(roi, float('nan'))
             if np.isnan(f0) or np.isinf(f0) or f0 <= self.config.f0_min_value:
@@ -631,16 +846,53 @@ class Pipeline:
              append_run_report_warnings(output_dir, baseline_warnings)
              self.qc_summary['invalid_baseline_rois'] = invalid_rois
              self.qc_summary['baseline_invalid_roi_count'] = len(invalid_rois)
+        self._add_phasic_phase_bucket("phase.baseline_validation", time.perf_counter() - t_baseline_check)
+        self._set_phasic_metric("baseline_invalid_roi_count", len(invalid_rois))
 
         from .io.hdf5_cache import Hdf5TraceCacheWriter
+        t_cache_init = time.perf_counter()
         cache_path = os.path.join(output_dir, f"{self.mode}_trace_cache.h5")
         self._cache_writer = Hdf5TraceCacheWriter(cache_path, self.mode, self.config)
+        self._add_phasic_phase_bucket("phase.cache_writer_init", time.perf_counter() - t_cache_init)
         
         try:
+            t_pass2 = time.perf_counter()
             self.run_pass_2(output_dir, force_format)
+            self._add_phasic_phase_bucket("phase.pass2_total", time.perf_counter() - t_pass2)
+            t_finalize = time.perf_counter()
             self._cache_writer.finalize()
+            self._add_phasic_phase_bucket("phase.cache_finalize", time.perf_counter() - t_finalize)
         except Exception:
             self._cache_writer.abort()
             raise
+
+        if self._is_phasic_timing_enabled():
+            dyn_total = self._phasic_detail_buckets.get("pass2.dynamic_regression", 0.0)
+            dyn_sub_sum = sum(
+                value
+                for key, value in self._phasic_detail_buckets.items()
+                if key.startswith("pass2.dynamic_regression.")
+                and not key.endswith(".remainder")
+                and "." not in key[len("pass2.dynamic_regression."):]
+            )
+            self._add_phasic_detail_bucket(
+                "pass2.dynamic_regression.remainder",
+                max(0.0, dyn_total - dyn_sub_sum)
+            )
+
+            wp_total = self._phasic_detail_buckets.get("pass2.dynamic_regression.window_pearson_gating", 0.0)
+            wp_sub_sum = sum(
+                value
+                for key, value in self._phasic_detail_buckets.items()
+                if key.startswith("pass2.dynamic_regression.window_pearson_gating.")
+                and not key.endswith(".remainder")
+            )
+            self._add_phasic_detail_bucket(
+                "pass2.dynamic_regression.window_pearson_gating.remainder",
+                max(0.0, wp_total - wp_sub_sum)
+            )
+
+            self._set_phasic_metric("traces_only", int(bool(self.traces_only)))
+            self._emit_phasic_timing_details(time.perf_counter() - run_started)
         
         print("Pipeline Done.")

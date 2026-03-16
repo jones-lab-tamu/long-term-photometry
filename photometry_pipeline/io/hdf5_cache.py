@@ -46,7 +46,7 @@ class Hdf5TraceCacheWriter:
         """
         if self._is_aborted:
             return
-            
+
         self._chunk_ids.append(chunk_id)
         self._source_files.append(source_file)
         
@@ -72,6 +72,7 @@ class Hdf5TraceCacheWriter:
             
             # Common core traces
             grp.create_dataset('sig_raw', data=chunk.sig_raw[:, r_idx], dtype=np.float64, compression="gzip")
+
             grp.create_dataset('uv_raw', data=chunk.uv_raw[:, r_idx], dtype=np.float64, compression="gzip")
             
             # Modes
