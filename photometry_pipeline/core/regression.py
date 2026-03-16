@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.stats import pearsonr
 import traceback
 import time
 from typing import Tuple, Optional
@@ -215,19 +214,15 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
             slope = cov_us / var_u
             timing_buckets['window_covariance_fit'] += (time.perf_counter() - t_window_cov)
             
-            # Pearson
+            # Pearson-equivalent correlation coefficient from covariance terms.
+            # This preserves gating semantics while avoiding the heavy pearsonr call.
             t_pearson_gate = time.perf_counter()
             timing_metrics['window_pearson_gating.calls_total'] += 1
             t_pearson_call = time.perf_counter()
-            try:
-                with np.errstate(all='ignore'):
-                    r, _ = pearsonr(u_w, s_w)
-            except Exception:
-                # If pearsonr fails (e.g. constant input despite variance check), skip
-                timing_buckets['window_pearson_gating.pearson_call'] += (time.perf_counter() - t_pearson_call)
-                timing_metrics['window_pearson_gating.calls_exception'] += 1
-                timing_buckets['window_pearson_gating'] += (time.perf_counter() - t_pearson_gate)
-                continue
+            with np.errstate(all='ignore'):
+                var_s = cov[1, 1]
+                denom = np.sqrt(var_u * var_s)
+                r = cov_us / denom
             timing_buckets['window_pearson_gating.pearson_call'] += (time.perf_counter() - t_pearson_call)
             
             t_finite_check = time.perf_counter()
