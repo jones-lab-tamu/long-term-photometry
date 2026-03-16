@@ -29,6 +29,15 @@ import time
 import secrets
 from datetime import datetime, timezone
 
+try:
+    import pyarrow as pa
+    import pyarrow.csv as pa_csv
+    HAS_PYARROW_CSV = True
+except Exception:
+    pa = None
+    pa_csv = None
+    HAS_PYARROW_CSV = False
+
 # Self-contained repo root bootstrap
 from pathlib import Path
 _repo_root = str(Path(__file__).resolve().parents[1])
@@ -92,6 +101,19 @@ def run_cmd(cmd, roi_label=None):
         "elapsed_sec": elapsed,
         "returncode": returncode
     }
+
+
+def _log_roi_timing_detail(roi, bucket, elapsed_sec):
+    print(f"TIMING DETAIL roi={roi} bucket={bucket} elapsed_sec={elapsed_sec:.3f}", flush=True)
+
+
+def _accumulate_roi_bucket(roi, bucket_totals, bucket, elapsed_sec):
+    bucket_totals[bucket] = bucket_totals.get(bucket, 0.0) + elapsed_sec
+    _log_roi_timing_detail(roi, bucket, elapsed_sec)
+
+
+def _log_roi_timing_metric(roi, name, value):
+    print(f"TIMING METRIC roi={roi} name={name} value={value}", flush=True)
 
 
 def _phase_start(status_data, phase_name):
@@ -1005,7 +1027,10 @@ def main():
             t_roi = time.perf_counter()
             started_utc_roi = _utc_now_iso()
             print(f"TIMING START roi={roi} at {started_utc_roi}", flush=True)
-            
+            roi_bucket_totals = {}
+            roi_child_script_elapsed = 0.0
+
+            t_bucket = time.perf_counter()
             check_cancel(cancel_flag_path, emitter, "plots", manifest_path, manifest)
             _write_status_update(f"plot_{roi}")
 
@@ -1015,12 +1040,16 @@ def main():
             s_dir = os.path.join(reg_dir, "summary")
             d_dir = os.path.join(reg_dir, "day_plots")
             t_dir = os.path.join(reg_dir, "tables")
-            
+            _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_setup", time.perf_counter() - t_bucket)
+
+            t_bucket = time.perf_counter()
             for d in [reg_dir, s_dir, d_dir, t_dir]:
                 os.makedirs(d, exist_ok=True)
+            _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_directory_prepare", time.perf_counter() - t_bucket)
             files_written = []
 
             if has_features:
+                t_bucket = time.perf_counter()
                 roi_feat = df_feat[df_feat['roi'] == roi].copy()
                 roi_feat = roi_feat.sort_values('chunk_id')
 
@@ -1034,6 +1063,7 @@ def main():
                     cid_diag = candidates[0]
 
                 manifest['deliverables'][roi] = {'diagnostic_chunk_id': int(cid_diag)}
+                _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_feature_selection", time.perf_counter() - t_bucket)
 
                 # A. Phasic Correction Impact (3-Panel)
                 cmd_impact = [sys.executable, 'tools/plot_phasic_correction_impact.py',
@@ -1041,10 +1071,13 @@ def main():
                               '--roi', roi,
                               '--chunk-id', str(cid_diag),
                               '--out', os.path.join(s_dir, "phasic_correction_impact.png")]
-                manifest['commands'].append(run_cmd(cmd_impact, roi_label=roi))
-                files_written.append("summary/phasic_correction_impact.png")                
+                cmd_result = run_cmd(cmd_impact, roi_label=roi)
+                manifest['commands'].append(cmd_result)
+                roi_child_script_elapsed += cmd_result["elapsed_sec"]
+                files_written.append("summary/phasic_correction_impact.png")
 
                 # Correction Data CSV (Migrated to HDF5 Cache)
+                t_bucket = time.perf_counter()
                 cache_path_p = os.path.join(phasic_out, 'phasic_trace_cache.h5')
                 if not os.path.exists(cache_path_p):
                     raise RuntimeError(f"CRITICAL: Phasic cache missing for required session CSV: {cache_path_p}")
@@ -1054,7 +1087,7 @@ def main():
                         # approved B3 fields: time_sec, sig_raw, uv_raw, fit_ref, dff
                         fields = ['time_sec', 'sig_raw', 'uv_raw', 'fit_ref', 'dff']
                         t, sig, uv, fit, dff = load_cache_chunk_fields(f_p, roi, int(cid_diag), fields)
-                        
+
                         df_c = pd.DataFrame({
                             't_s': t,
                             'sig_raw': sig,
@@ -1064,47 +1097,136 @@ def main():
                             'region': roi,
                             'chunk_id': int(cid_diag)
                         })
-                        
+
                         keep = ['t_s', 'sig_raw', 'iso_raw', 'iso_fit_dynamic', 'dff_dynamic', 'region', 'chunk_id']
                         df_c[keep].to_csv(os.path.join(t_dir, "phasic_correction_impact_session.csv"), index=False)
                         files_written.append("tables/phasic_correction_impact_session.csv")
                 except Exception as e:
                     raise RuntimeError(f"CRITICAL: Failed to read phasic cache for session CSV (ROI={roi}, chunk={cid_diag}): {e}")
+                _accumulate_roi_bucket(roi, roi_bucket_totals, "phasic_session_csv_packaging", time.perf_counter() - t_bucket)
             else:
+                t_bucket = time.perf_counter()
                 manifest['deliverables'][roi] = {}
+                _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_feature_selection", time.perf_counter() - t_bucket)
 
             # B. Tonic Overview
             out_tonic = os.path.join(s_dir, "tonic_overview.png")
             cmd_tonic_roi = [sys.executable, 'tools/plot_tonic_48h.py',
                              '--analysis-out', tonic_out, '--roi', roi,
                              '--out', out_tonic]
-            run_cmd(cmd_tonic_roi, roi_label=roi)
+            cmd_result = run_cmd(cmd_tonic_roi, roi_label=roi)
+            roi_child_script_elapsed += cmd_result["elapsed_sec"]
 
+            t_bucket = time.perf_counter()
             if os.path.exists(out_tonic):
                 files_written.append("summary/tonic_overview.png")
+            _accumulate_roi_bucket(roi, roi_bucket_totals, "tonic_image_packaging", time.perf_counter() - t_bucket)
 
             # Tonic DF Timeseries (Migrated to HDF5 Cache)
-            t_rows = []
+            t_bucket = time.perf_counter()
+            tonic_csv_path = os.path.join(t_dir, "tonic_df_timeseries.csv")
             cache_path = os.path.join(tonic_out, 'tonic_trace_cache.h5')
+            tonic_subbucket_totals = {
+                "cache_path_check": 0.0,
+                "cache_open": 0.0,
+                "chunk_enumeration": 0.0,
+                "per_chunk_cache_read": 0.0,
+                "per_chunk_transform": 0.0,
+                "row_accumulation": 0.0,
+                "dataframe_concat": 0.0,
+                "csv_write": 0.0,
+                "cache_close": 0.0
+            }
+            chunks_processed = 0
+            rows_written = 0
+            frames_accumulated = 0
+            csv_file_handle = None
+            t_rows = []
+            arrow_write_header = None
+            arrow_write_no_header = None
+            if HAS_PYARROW_CSV:
+                arrow_write_header = pa_csv.WriteOptions(include_header=True, delimiter=',')
+                arrow_write_no_header = pa_csv.WriteOptions(include_header=False, delimiter=',')
+
+            t_sub = time.perf_counter()
             if os.path.exists(cache_path):
+                tonic_subbucket_totals["cache_path_check"] += time.perf_counter() - t_sub
+
+                t_sub = time.perf_counter()
                 cache = open_tonic_cache(cache_path)
+                tonic_subbucket_totals["cache_open"] += time.perf_counter() - t_sub
                 try:
+                    t_sub = time.perf_counter()
                     cids = list_cache_chunk_ids(cache)
+                    tonic_subbucket_totals["chunk_enumeration"] += time.perf_counter() - t_sub
                     for i, cid in enumerate(cids):
+                        chunks_processed += 1
+                        t_sub = time.perf_counter()
                         t_arr, df_arr = load_cache_chunk_fields(cache, roi, cid, ['time_sec', 'deltaF'])
+                        tonic_subbucket_totals["per_chunk_cache_read"] += time.perf_counter() - t_sub
+
+                        t_sub = time.perf_counter()
                         t_abs = (i * stride_s) + t_arr
-                        df_sub = pd.DataFrame({
-                            'time_hours': t_abs / 3600.0,
-                            'tonic_df': df_arr
-                        })
-                        t_rows.append(df_sub)
+                        time_hours = t_abs / 3600.0
+                        tonic_subbucket_totals["per_chunk_transform"] += time.perf_counter() - t_sub
+
+                        t_sub = time.perf_counter()
+                        rows_written += len(time_hours)
+                        frames_accumulated += 1
+                        tonic_subbucket_totals["row_accumulation"] += time.perf_counter() - t_sub
+
+                        if HAS_PYARROW_CSV:
+                            t_sub = time.perf_counter()
+                            if csv_file_handle is None:
+                                csv_file_handle = pa.OSFile(tonic_csv_path, 'wb')
+                            table = pa.table({
+                                'time_hours': pa.array(time_hours),
+                                'tonic_df': pa.array(df_arr)
+                            })
+                            write_opts = arrow_write_header if chunks_processed == 1 else arrow_write_no_header
+                            pa_csv.write_csv(table, csv_file_handle, write_options=write_opts)
+                            tonic_subbucket_totals["csv_write"] += time.perf_counter() - t_sub
+                        else:
+                            t_sub = time.perf_counter()
+                            t_rows.append(pd.DataFrame({
+                                'time_hours': time_hours,
+                                'tonic_df': df_arr
+                            }))
+                            tonic_subbucket_totals["row_accumulation"] += time.perf_counter() - t_sub
                 finally:
+                    if csv_file_handle is not None:
+                        t_sub = time.perf_counter()
+                        csv_file_handle.close()
+                        tonic_subbucket_totals["csv_write"] += time.perf_counter() - t_sub
+                    t_sub = time.perf_counter()
                     cache.close()
+                    tonic_subbucket_totals["cache_close"] += time.perf_counter() - t_sub
+            else:
+                tonic_subbucket_totals["cache_path_check"] += time.perf_counter() - t_sub
 
             if t_rows:
+                t_sub = time.perf_counter()
                 full_tonic = pd.concat(t_rows, ignore_index=True)
-                full_tonic.to_csv(os.path.join(t_dir, "tonic_df_timeseries.csv"), index=False)
+                tonic_subbucket_totals["dataframe_concat"] += time.perf_counter() - t_sub
+
+                t_sub = time.perf_counter()
+                full_tonic.to_csv(tonic_csv_path, index=False)
+                tonic_subbucket_totals["csv_write"] += time.perf_counter() - t_sub
+
+            if frames_accumulated > 0 and os.path.exists(tonic_csv_path):
                 files_written.append("tables/tonic_df_timeseries.csv")
+
+            tonic_table_total_elapsed = time.perf_counter() - t_bucket
+            tonic_subbucket_sum = sum(tonic_subbucket_totals.values())
+            tonic_subbucket_remainder = tonic_table_total_elapsed - tonic_subbucket_sum
+            for subbucket_name, subbucket_elapsed in tonic_subbucket_totals.items():
+                _log_roi_timing_detail(roi, f"tonic_table_packaging.{subbucket_name}", subbucket_elapsed)
+            _log_roi_timing_detail(roi, "tonic_table_packaging.subbucket_sum", tonic_subbucket_sum)
+            _log_roi_timing_detail(roi, "tonic_table_packaging.subbucket_remainder", tonic_subbucket_remainder)
+            _log_roi_timing_metric(roi, "tonic_table_packaging.chunks_processed", chunks_processed)
+            _log_roi_timing_metric(roi, "tonic_table_packaging.rows_written", rows_written)
+            _log_roi_timing_metric(roi, "tonic_table_packaging.frames_accumulated", frames_accumulated)
+            _accumulate_roi_bucket(roi, roi_bucket_totals, "tonic_table_packaging", tonic_table_total_elapsed)
 
             if has_features:
                 # C. Phasic Time Series (Plots & CSV) — requires features
@@ -1112,7 +1234,7 @@ def main():
                 out_auc_png = os.path.join(s_dir, "phasic_auc_timeseries.png")
                 out_rate_csv = os.path.join(t_dir, "phasic_peak_rate_timeseries.csv")
                 out_auc_csv = os.path.join(t_dir, "phasic_auc_timeseries.csv")
-                
+
                 cmd_ts = [sys.executable, 'tools/plot_phasic_time_series_summary.py',
                           '--analysis-out', phasic_out,
                           '--roi', roi,
@@ -1122,15 +1244,21 @@ def main():
                           '--out-auc-png', out_auc_png,
                           '--out-rate-csv', out_rate_csv,
                           '--out-auc-csv', out_auc_csv]
-                manifest['commands'].append(run_cmd(cmd_ts, roi_label=roi))
+                cmd_result = run_cmd(cmd_ts, roi_label=roi)
+                manifest['commands'].append(cmd_result)
+                roi_child_script_elapsed += cmd_result["elapsed_sec"]
 
                 # Record Results
+                t_bucket = time.perf_counter()
                 for dst in [out_rate_png, out_auc_png, out_rate_csv, out_auc_csv]:
                     if os.path.exists(dst):
                         rel_path = os.path.relpath(dst, reg_dir).replace('\\', '/')
                         files_written.append(rel_path)
+                _accumulate_roi_bucket(roi, roi_bucket_totals, "phasic_ts_packaging", time.perf_counter() - t_bucket)
 
+            t_bucket = time.perf_counter()
             check_cancel(cancel_flag_path, emitter, "plots", manifest_path, manifest)
+            _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_cancel_check", time.perf_counter() - t_bucket)
 
             # D. Per-Day Plots (Sig/Iso, dFF, Stacked) via Unified Bundle Driver
             cmd_bundle = [sys.executable, 'tools/plot_phasic_dayplot_bundle.py',
@@ -1140,13 +1268,16 @@ def main():
                           '--sessions-per-hour', str(sessions_per_hour),
                           '--session-duration-s', str(session_duration_s),
                           '--smooth-window-s', str(args.smooth_window_s)]
-                          
+
             if not has_features:
                 cmd_bundle.extend(['--no-write-dff-grid', '--no-write-stacked'])
-                
-            manifest['commands'].append(run_cmd(cmd_bundle, roi_label=roi))
+
+            cmd_result = run_cmd(cmd_bundle, roi_label=roi)
+            manifest['commands'].append(cmd_result)
+            roi_child_script_elapsed += cmd_result["elapsed_sec"]
 
             # Collect Per-Day Files
+            t_bucket = time.perf_counter()
             days_generated = set()
             days_dff = set()
             days_sig_iso = set()
@@ -1173,11 +1304,13 @@ def main():
                 m = re.match(r'phasic_stacked_day_(\d+)\.png', os.path.basename(f))
                 if m:
                     days_stacked.add(m.group(1))
+            _accumulate_roi_bucket(roi, roi_bucket_totals, "dayplot_file_discovery", time.perf_counter() - t_bucket)
 
+            t_bucket = time.perf_counter()
             s_dff = sorted(list(days_dff))
             s_sig = sorted(list(days_sig_iso))
             s_stk = sorted(list(days_stacked))
-            
+
             manifest['deliverables'][roi]['days_dff'] = s_dff
             manifest['deliverables'][roi]['days_sig_iso'] = s_sig
             manifest['deliverables'][roi]['days_stacked'] = s_stk
@@ -1188,6 +1321,7 @@ def main():
 
             manifest['deliverables'][roi]['files'] = sorted(list(set(files_written)))
             manifest['deliverables'][roi]['days_generated'] = s_dff if has_features else s_stk
+            _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_manifest_bookkeeping", time.perf_counter() - t_bucket)
 
             # ROI timing finalize
             elapsed_roi = time.perf_counter() - t_roi
@@ -1197,6 +1331,11 @@ def main():
                 "finished_utc": finished_utc_roi,
                 "elapsed_sec": elapsed_roi
             }
+            explicit_in_process_elapsed = sum(roi_bucket_totals.values())
+            residual_remainder = elapsed_roi - roi_child_script_elapsed - explicit_in_process_elapsed
+            _log_roi_timing_detail(roi, "child_script_timings_sum", roi_child_script_elapsed)
+            _log_roi_timing_detail(roi, "explicit_in_process_sum", explicit_in_process_elapsed)
+            _log_roi_timing_detail(roi, "residual_remainder", residual_remainder)
             print(f"TIMING DONE roi={roi} elapsed_sec={elapsed_roi:.3f}", flush=True)
 
         emitter.emit("plots", "done", "All ROI deliverables complete")
