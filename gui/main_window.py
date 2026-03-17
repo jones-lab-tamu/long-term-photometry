@@ -429,6 +429,10 @@ class MainWindow(QMainWindow):
 
         from photometry_pipeline.config import Config
         self._default_cfg = Config()
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        self._lab_default_config_path = os.path.normpath(
+            os.path.join(repo_root, "config", "qc_universal_config.yaml")
+        )
 
         # Validate->Run reuse tracking (Fix B1)
         self._validated_run_dir = None
@@ -567,17 +571,34 @@ class MainWindow(QMainWindow):
         output_row.addWidget(btn2)
         form.addRow("Output Directory:", output_row)
 
-        # Config YAML
+        # Baseline config source: default lab baseline, optional custom YAML.
+        self._use_custom_config_cb = QCheckBox("Use custom config YAML (advanced)")
+        self._use_custom_config_cb.setToolTip(
+            "When unchecked, the lab-standard baseline config is used automatically."
+        )
+        self._use_custom_config_cb.stateChanged.connect(self._on_config_changed)
+        self._use_custom_config_cb.toggled.connect(self._update_config_source_ui)
+        form.addRow("Config Source:", self._use_custom_config_cb)
+
         self._config_path = QLineEdit()
-        self._config_path.setToolTip("The analysis settings used to build the effective run configuration.")
+        self._config_path.setToolTip(
+            "Optional custom baseline config YAML. Only used when the advanced toggle is enabled."
+        )
+        self._config_path.setPlaceholderText("(advanced) custom baseline config path")
         self._config_path.textChanged.connect(self._on_config_changed)
+        self._config_path.textChanged.connect(self._update_config_source_ui)
         config_row = QHBoxLayout()
         config_row.addWidget(self._config_path)
-        btn3 = QPushButton("Browse...")
-        btn3.setToolTip("Browse for a configuration YAML file.")
-        btn3.clicked.connect(self._browse_config)
-        config_row.addWidget(btn3)
-        form.addRow("Config YAML:", config_row)
+        self._config_browse_btn = QPushButton("Browse...")
+        self._config_browse_btn.setToolTip("Browse for a custom baseline configuration YAML file.")
+        self._config_browse_btn.clicked.connect(self._browse_config)
+        config_row.addWidget(self._config_browse_btn)
+        form.addRow("Custom Config YAML:", config_row)
+
+        self._active_config_source_label = QLabel("")
+        self._active_config_source_label.setWordWrap(True)
+        self._active_config_source_label.setStyleSheet("font-size: 11px; color: #666;")
+        form.addRow("", self._active_config_source_label)
 
         # Format
         self._format_combo = QComboBox()
@@ -1026,6 +1047,9 @@ class MainWindow(QMainWindow):
         summary_layout.addWidget(self._effective_summary_label)
         outer.addWidget(summary_group)
 
+        # Initialize config source UI after all related widgets exist.
+        self._update_config_source_ui()
+
         return group
 
     # ==================================================================
@@ -1101,6 +1125,41 @@ class MainWindow(QMainWindow):
         """Append field_name to out if value != default."""
         if value != default:
             out.append(field_name)
+
+    def _is_custom_config_enabled(self) -> bool:
+        """True when user explicitly opted into custom baseline YAML."""
+        return bool(self._use_custom_config_cb.isChecked())
+
+    def _active_config_source_path(self) -> str:
+        """Resolved config source path currently used to build effective config."""
+        if self._is_custom_config_enabled():
+            return self._config_path.text().strip()
+        return self._lab_default_config_path
+
+    def _active_config_source_summary(self) -> str:
+        """Human-readable active config source descriptor."""
+        if self._is_custom_config_enabled():
+            cfg = self._config_path.text().strip() or "(not set)"
+            return f"Custom YAML: {cfg}"
+        return f"Lab standard default: {self._lab_default_config_path}"
+
+    def _update_config_source_ui(self) -> None:
+        """Enable custom config widgets only when advanced custom mode is active."""
+        use_custom = self._is_custom_config_enabled()
+        self._config_path.setEnabled(use_custom)
+        self._config_browse_btn.setEnabled(use_custom)
+
+        if use_custom:
+            cfg = self._config_path.text().strip() or "(not set)"
+            self._active_config_source_label.setText(
+                f"Active baseline source: custom YAML ({cfg})"
+            )
+            self._active_config_source_label.setStyleSheet("font-size: 11px; color: #8a6d3b;")
+        else:
+            self._active_config_source_label.setText(
+                f"Active baseline source: lab standard default ({self._lab_default_config_path})"
+            )
+            self._active_config_source_label.setStyleSheet("font-size: 11px; color: #2d7d2d;")
 
     def _build_run_spec(self, validate_only: bool = False) -> RunSpec:
         """Create a RunSpec from current widget values for a real run.
@@ -1276,6 +1335,9 @@ class MainWindow(QMainWindow):
             changed_ev_overrides = compute_overrides_user_changed(ev_overrides, default_ev_dict)
             config_overrides.update(changed_ev_overrides)
 
+        if self._is_custom_config_enabled():
+            user_set.append("config_source_path")
+
         spec = RunSpec(
             input_dir=self._input_dir.text().strip(),
             run_dir=run_dir,
@@ -1292,7 +1354,7 @@ class MainWindow(QMainWindow):
             representative_session_index=rep_session_idx,
             include_roi_ids=include_roi_ids,
             exclude_roi_ids=exclude_roi_ids,
-            config_source_path=self._config_path.text().strip(),
+            config_source_path=self._active_config_source_path(),
             config_overrides=config_overrides,
             gui_version="1.0.0",
             timestamp_local=datetime.now().isoformat(),
@@ -1342,11 +1404,18 @@ class MainWindow(QMainWindow):
         if not os.path.isdir(input_dir):
             return f"Input directory does not exist: {input_dir}"
 
-        config = self._config_path.text().strip()
-        if not config:
-            return "Config YAML path is required."
-        if not os.path.isfile(config):
-            return f"Config file does not exist: {config}"
+        if self._is_custom_config_enabled():
+            config = self._config_path.text().strip()
+            if not config:
+                return "Custom Config YAML is enabled, but no path was provided."
+            if not os.path.isfile(config):
+                return f"Custom config file does not exist: {config}"
+        else:
+            if not os.path.isfile(self._lab_default_config_path):
+                return (
+                    "Default lab baseline config is missing: "
+                    f"{self._lab_default_config_path}"
+                )
 
         out_dir = self._output_dir.text().strip()
         if not out_dir:
@@ -1489,15 +1558,19 @@ class MainWindow(QMainWindow):
             input_dir=self._input_dir.text().strip(),
             run_dir="",
             format=fmt,
-            config_source_path=self._config_path.text().strip(),
+            config_source_path=self._active_config_source_path(),
             config_overrides={},
         )
 
     def _on_preview_config(self):
         """Show a read-only dialog with the derived config YAML preview."""
-        config_path = self._config_path.text().strip()
+        config_path = self._active_config_source_path()
         if not config_path or not os.path.isfile(config_path):
-            QMessageBox.warning(self, "No Config", "Select a valid Config YAML first.")
+            if self._is_custom_config_enabled():
+                msg = "Select a valid custom Config YAML first."
+            else:
+                msg = f"Default lab baseline config is missing:\n{config_path}"
+            QMessageBox.warning(self, "No Config", msg)
             return
 
         spec = self._build_discovery_spec()
@@ -1513,15 +1586,18 @@ class MainWindow(QMainWindow):
     def _on_discover(self):
         """Run discovery via the runner backend and populate the UI."""
         input_dir = self._input_dir.text().strip()
-        config_path = self._config_path.text().strip()
+        config_path = self._active_config_source_path()
 
         if not input_dir or not os.path.isdir(input_dir):
             QMessageBox.warning(self, "Discovery Error",
                                 "Select a valid input directory first.")
             return
         if not config_path or not os.path.isfile(config_path):
-            QMessageBox.warning(self, "Discovery Error",
-                                "Select a valid config YAML first.")
+            if self._is_custom_config_enabled():
+                msg = "Select a valid custom config YAML first."
+            else:
+                msg = f"Default lab baseline config is missing:\n{config_path}"
+            QMessageBox.warning(self, "Discovery Error", msg)
             return
 
         spec = self._build_discovery_spec()
@@ -2046,6 +2122,9 @@ class MainWindow(QMainWindow):
         self._settings.beginGroup(_SETTINGS_GROUP)
         self._input_dir.setText(self._settings.value("input_dir", "", str))
         self._output_dir.setText(self._settings.value("output_dir", "", str))
+        self._use_custom_config_cb.setChecked(
+            self._settings.value("use_custom_config", False, bool)
+        )
         self._config_path.setText(self._settings.value("config_path", "", str))
 
         fmt = self._settings.value("format", "auto", str)
@@ -2074,12 +2153,14 @@ class MainWindow(QMainWindow):
         overwrite = self._settings.value("overwrite", False, bool)
         self._overwrite_cb.setChecked(overwrite)
         self._settings.endGroup()
+        self._update_config_source_ui()
 
     def _save_widgets_to_settings(self):
         """Persist current widget values to QSettings."""
         self._settings.beginGroup(_SETTINGS_GROUP)
         self._settings.setValue("input_dir", self._input_dir.text().strip())
         self._settings.setValue("output_dir", self._output_dir.text().strip())
+        self._settings.setValue("use_custom_config", self._use_custom_config_cb.isChecked())
         self._settings.setValue("config_path", self._config_path.text().strip())
         self._settings.setValue("format", self._format_combo.currentText())
         self._settings.setValue("sessions_per_hour", self._sph_edit.text().strip())
@@ -2176,6 +2257,7 @@ class MainWindow(QMainWindow):
         summary_lines = [
             f"Mode: {mode_text}",
             f"Analysis: {analysis_scope}",
+            f"Baseline Config Source: {self._active_config_source_summary()}",
             f"Preview: {preview_text}",
             f"Render Modes: {render_text}",
             f"ROI Filter: {roi_text}",

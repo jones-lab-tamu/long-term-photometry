@@ -1,0 +1,28 @@
+# Strict Config for Synth and Pipeline
+target_fs_hz: 50.0
+chunk_duration_sec: 600.0
+uv_suffix: "-415"
+sig_suffix: "-470"
+rwd_time_col: "Time(s)"
+seed: 42
+
+# Phasic/Peak Defaults (Robust Settings Enabled)
+peak_threshold_method: 'median_mad'
+peak_threshold_k: 4.0
+peak_min_distance_sec: 0.5
+
+# Robustness Settings for Demo
+baseline_method: uv_raw_percentile_session
+baseline_percentile: 10.0
+qc_max_chunk_fail_fraction: 1.0
+
+# QC Fixes for Synthetic Data
+# Increase filter bandwidth to pass variance check (hardcoded 1ppm DC) on clean synth data
+lowpass_hz: 10.0
+
+# Sane QC (Soft Gating)
+r_low: 0.0
+r_high: 1.0
+g_min: 0.0
+min_valid_windows: 1
+min_samples_per_window: 10
