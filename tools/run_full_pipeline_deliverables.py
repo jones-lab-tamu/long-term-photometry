@@ -27,6 +27,7 @@ import pandas as pd
 import numpy as np
 import time
 import secrets
+import errno
 from datetime import datetime, timezone
 
 try:
@@ -146,7 +147,7 @@ def _phase_done(status_data, manifest, phase_name, t0, started_utc, status_path=
     }
     
     if status_path:
-        _atomic_write_json(status_path, status_data)
+        _write_status_json(status_path, status_data)
     
     print(f"TIMING DONE phase={phase_name} elapsed_sec={elapsed:.3f}", flush=True)
 
@@ -157,12 +158,48 @@ def _generate_run_id():
     return f"run_{ts}_{secrets.token_hex(4)}"
 
 
-def _atomic_write_json(path, obj):
-    """Write JSON atomically via tmp + os.replace."""
+def _is_windows_lock_error(exc):
+    """Best-effort detection for transient Windows file-lock contention."""
+    if isinstance(exc, PermissionError):
+        return True
+    if not isinstance(exc, OSError):
+        return False
+    winerror = getattr(exc, "winerror", None)
+    if winerror in (5, 32):  # ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION
+        return True
+    err_no = getattr(exc, "errno", None)
+    return err_no in (errno.EACCES, errno.EPERM)
+
+
+def _atomic_write_json(path, obj, *, replace_retries=0, replace_retry_delay_sec=0.05):
+    """Write JSON atomically via tmp + os.replace, with bounded replace retries."""
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
-    os.replace(tmp, path)
+
+    retries = max(0, int(replace_retries))
+    for attempt in range(retries + 1):
+        try:
+            os.replace(tmp, path)
+            return
+        except OSError as e:
+            is_retryable = _is_windows_lock_error(e)
+            if attempt >= retries or not is_retryable:
+                raise
+            time.sleep(replace_retry_delay_sec)
+
+
+def _write_status_json(path, obj):
+    """
+    Status-writer wrapper: keep atomic tmp+replace semantics, but tolerate
+    short Windows lock windows from concurrent status polling.
+    """
+    _atomic_write_json(
+        path,
+        obj,
+        replace_retries=20,          # ~1s bounded retry window at 50ms
+        replace_retry_delay_sec=0.05
+    )
 
 def _normalize_event_dict(event: dict) -> dict:
     """Ensure event dict has schema_version: 1 (int), overriding any existing key."""
@@ -624,7 +661,7 @@ def main():
             if error_msg:
                 sd["errors"].append(str(error_msg))
             vo_status_path = os.path.join(run_dir, "status.json")
-            _atomic_write_json(vo_status_path, sd)
+            _write_status_json(vo_status_path, sd)
 
         try:
             validate_inputs(args)
@@ -763,21 +800,21 @@ def main():
                 pass
 
         status_data["status"] = state
-        _atomic_write_json(status_path, status_data)
+        _write_status_json(status_path, status_data)
 
     def _write_status_update(phase):
         """Perform a non-terminal status update with current duration."""
         status_data["phase"] = phase
         status_data["status"] = "running"
         status_data["duration_sec"] = time.time() - t0_status
-        _atomic_write_json(status_path, status_data)
+        _write_status_json(status_path, status_data)
 
     # Update status_data with resolved preview info before initial write
     status_data["run_type"] = "preview" if effective_preview_first_n is not None else "full"
     status_data["preview"] = {"selector": "first_n", "first_n": effective_preview_first_n} if effective_preview_first_n is not None else None
 
     # Initial write (phase="running")
-    _atomic_write_json(status_path, status_data)
+    _write_status_json(status_path, status_data)
     _write_status_update("initializing")
 
     # -- Open event emitter --
@@ -793,6 +830,7 @@ def main():
         "sessions_per_hour": resolved_sessions_per_hour,
         "sessions_per_hour_source": sessions_per_hour_source
     })
+    substantive_work_completed = False
 
     try:
         # -- Check cancel immediately --
@@ -1396,6 +1434,7 @@ def main():
         manifest["timing"]["total_runtime_sec"] = time.perf_counter() - t0_total
         _atomic_write_json(manifest_path, manifest)
 
+        substantive_work_completed = True
         _finalize_status("success", error_msg=err_payload)
         emitter.emit("engine", "done", "Execution complete")
         emitter.close()
@@ -1427,6 +1466,23 @@ def main():
         # --- Catch-all Error Handling ---
         import traceback
         traceback.print_exc()
+
+        # If substantive work already completed, avoid rewriting terminal status as
+        # generic pipeline failure when the remaining error is status-write bookkeeping.
+        if substantive_work_completed and _is_windows_lock_error(e):
+            if emitter:
+                emitter.emit(
+                    "engine",
+                    "error",
+                    "Substantive work completed, but terminal status.json write failed",
+                    error_code="STATUS_WRITE_FAILED_POST_SUCCESS"
+                )
+            print(
+                "ERROR: Substantive pipeline work completed, but terminal status.json "
+                "could not be finalized due file-lock contention.",
+                flush=True
+            )
+            raise SystemExit(1)
         
         # ============================================================
         # Finalize Artifacts (Strict Ordering Gate) - Error path
@@ -1447,7 +1503,10 @@ def main():
             msg_body = f"{msg_body} | {viol_msg}"
 
         # --- Finalize Status: Error ---
-        _finalize_status("error", error_msg=msg_body)
+        try:
+            _finalize_status("error", error_msg=msg_body)
+        except Exception as status_err:
+            print(f"ERROR: Failed to finalize error status.json: {status_err}", flush=True)
         raise SystemExit(1)
 
 if __name__ == '__main__':
