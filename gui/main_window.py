@@ -656,6 +656,34 @@ class MainWindow(QMainWindow):
         form.addRow("Mode:", self._mode_combo)
         self._mode_combo.currentIndexChanged.connect(self._on_config_changed)
 
+        # Render modes (phasic day-plot families)
+        self._sig_iso_render_mode_combo = QComboBox()
+        self._sig_iso_render_mode_combo.addItems(["qc", "full"])
+        self._sig_iso_render_mode_combo.setCurrentText("qc")
+        self._sig_iso_render_mode_combo.setToolTip(
+            "Render mode for sig/iso day plots. 'qc' is the fast default; 'full' is higher-fidelity rendering."
+        )
+        self._sig_iso_render_mode_combo.currentIndexChanged.connect(self._on_config_changed)
+        form.addRow("Sig/Iso Render Mode:", self._sig_iso_render_mode_combo)
+
+        self._dff_render_mode_combo = QComboBox()
+        self._dff_render_mode_combo.addItems(["qc", "full"])
+        self._dff_render_mode_combo.setCurrentText("qc")
+        self._dff_render_mode_combo.setToolTip(
+            "Render mode for dFF day plots. 'qc' is the fast default; 'full' is higher-fidelity rendering."
+        )
+        self._dff_render_mode_combo.currentIndexChanged.connect(self._on_config_changed)
+        form.addRow("dFF Render Mode:", self._dff_render_mode_combo)
+
+        self._stacked_render_mode_combo = QComboBox()
+        self._stacked_render_mode_combo.addItems(["qc", "full"])
+        self._stacked_render_mode_combo.setCurrentText("qc")
+        self._stacked_render_mode_combo.setToolTip(
+            "Render mode for stacked day plots. 'qc' is the fast default; 'full' is higher-fidelity rendering."
+        )
+        self._stacked_render_mode_combo.currentIndexChanged.connect(self._on_config_changed)
+        form.addRow("Stacked Render Mode:", self._stacked_render_mode_combo)
+
         # Traces-only (--traces-only CLI flag)
         self._traces_only_cb = QCheckBox("Skip feature extraction (traces and QC only)")
         self._traces_only_cb.setToolTip("Run preprocessing and QC only. Skip feature extraction and downstream deliverable generation.")
@@ -1061,6 +1089,18 @@ class MainWindow(QMainWindow):
         smooth = self._smooth_spin.value()
         self._track_if_changed("smooth_window_s", smooth, 1.0, user_set)
 
+        sig_iso_render_mode_text = self._sig_iso_render_mode_combo.currentText()
+        sig_iso_render_mode_val = None if sig_iso_render_mode_text == "qc" else sig_iso_render_mode_text
+        self._track_if_changed("sig_iso_render_mode", sig_iso_render_mode_text, "qc", user_set)
+
+        dff_render_mode_text = self._dff_render_mode_combo.currentText()
+        dff_render_mode_val = None if dff_render_mode_text == "qc" else dff_render_mode_text
+        self._track_if_changed("dff_render_mode", dff_render_mode_text, "qc", user_set)
+
+        stacked_render_mode_text = self._stacked_render_mode_combo.currentText()
+        stacked_render_mode_val = None if stacked_render_mode_text == "qc" else stacked_render_mode_text
+        self._track_if_changed("stacked_render_mode", stacked_render_mode_text, "qc", user_set)
+
         fmt = self._format_combo.currentText()
         self._track_if_changed("format", fmt, "auto", user_set)
 
@@ -1203,6 +1243,9 @@ class MainWindow(QMainWindow):
             sessions_per_hour=sph_val,
             session_duration_s=dur_val,
             smooth_window_s=smooth,
+            sig_iso_render_mode=sig_iso_render_mode_val,
+            dff_render_mode=dff_render_mode_val,
+            stacked_render_mode=stacked_render_mode_val,
             traces_only=traces_only,
             preview_first_n=preview_first_n,
             representative_session_index=rep_session_idx,
@@ -1919,6 +1962,18 @@ class MainWindow(QMainWindow):
         smooth = self._settings.value("smooth_window_s", 1.0, float)
         self._smooth_spin.setValue(smooth)
 
+        sig_iso_render_mode = self._settings.value("sig_iso_render_mode", "qc", str)
+        if self._sig_iso_render_mode_combo.findText(sig_iso_render_mode) >= 0:
+            self._sig_iso_render_mode_combo.setCurrentText(sig_iso_render_mode)
+
+        dff_render_mode = self._settings.value("dff_render_mode", "qc", str)
+        if self._dff_render_mode_combo.findText(dff_render_mode) >= 0:
+            self._dff_render_mode_combo.setCurrentText(dff_render_mode)
+
+        stacked_render_mode = self._settings.value("stacked_render_mode", "qc", str)
+        if self._stacked_render_mode_combo.findText(stacked_render_mode) >= 0:
+            self._stacked_render_mode_combo.setCurrentText(stacked_render_mode)
+
         overwrite = self._settings.value("overwrite", False, bool)
         self._overwrite_cb.setChecked(overwrite)
         self._settings.endGroup()
@@ -1933,6 +1988,9 @@ class MainWindow(QMainWindow):
         self._settings.setValue("sessions_per_hour", self._sph_edit.text().strip())
         self._settings.setValue("session_duration_s", self._duration_edit.text().strip())
         self._settings.setValue("smooth_window_s", self._smooth_spin.value())
+        self._settings.setValue("sig_iso_render_mode", self._sig_iso_render_mode_combo.currentText())
+        self._settings.setValue("dff_render_mode", self._dff_render_mode_combo.currentText())
+        self._settings.setValue("stacked_render_mode", self._stacked_render_mode_combo.currentText())
         self._settings.setValue("overwrite", self._overwrite_cb.isChecked())
         self._settings.endGroup()
         self._settings.sync()

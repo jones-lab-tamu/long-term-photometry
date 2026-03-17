@@ -630,6 +630,39 @@ class TestRunSpec(unittest.TestCase):
         self.assertNotIn("--preview-first-n", spec_off.build_runner_argv())
 
     # ----------------------------------------------------------------
+    # Render mode flags: only present when explicitly set away from default
+    # ----------------------------------------------------------------
+    def test_argv_render_modes(self):
+        """Render mode flags are emitted only when set on RunSpec."""
+        run_dir = os.path.join(self.tmp_dir, "run_render_modes_on")
+        spec_on = RunSpec(
+            input_dir="/data/in", run_dir=run_dir,
+            format="rwd", config_source_path=self.config_path,
+            sig_iso_render_mode="full",
+            dff_render_mode="full",
+            stacked_render_mode="full",
+        )
+        spec_on.generate_derived_config(run_dir)
+        argv_on = spec_on.build_runner_argv()
+        self.assertIn("--sig-iso-render-mode", argv_on)
+        self.assertEqual(argv_on[argv_on.index("--sig-iso-render-mode") + 1], "full")
+        self.assertIn("--dff-render-mode", argv_on)
+        self.assertEqual(argv_on[argv_on.index("--dff-render-mode") + 1], "full")
+        self.assertIn("--stacked-render-mode", argv_on)
+        self.assertEqual(argv_on[argv_on.index("--stacked-render-mode") + 1], "full")
+
+        run_dir2 = os.path.join(self.tmp_dir, "run_render_modes_off")
+        spec_off = RunSpec(
+            input_dir="/data/in", run_dir=run_dir2,
+            format="rwd", config_source_path=self.config_path,
+        )
+        spec_off.generate_derived_config(run_dir2)
+        argv_off = spec_off.build_runner_argv()
+        self.assertNotIn("--sig-iso-render-mode", argv_off)
+        self.assertNotIn("--dff-render-mode", argv_off)
+        self.assertNotIn("--stacked-render-mode", argv_off)
+
+    # ----------------------------------------------------------------
     # Step 4: --representative-session-index in argv when set
     # ----------------------------------------------------------------
     def test_argv_representative_session_index(self):
@@ -1035,7 +1068,9 @@ class TestRunSpec(unittest.TestCase):
         # Runner-wired flags MUST exist
         for flag in ("--include-rois", "--exclude-rois",
                      "--traces-only", "--preview-first-n",
-                     "--representative-session-index", "--mode"):
+                     "--representative-session-index", "--mode",
+                     "--sig-iso-render-mode", "--dff-render-mode",
+                     "--stacked-render-mode"):
             self.assertIn(flag, src,
                           f"Runner missing expected flag: {flag}")
         # Intent-only flags MUST NOT exist in runner

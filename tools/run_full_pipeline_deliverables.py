@@ -316,6 +316,12 @@ def parse_args():
     parser.add_argument('--sessions-per-hour', type=int, help="Force sessions per hour (integer)")
     parser.add_argument('--session-duration-s', type=float, help="Recording duration in seconds (data length per chunk). If provided, validated against traces.")
     parser.add_argument('--smooth-window-s', type=float, default=1.0)
+    parser.add_argument('--sig-iso-render-mode', choices=['qc', 'full'], default='qc',
+                        help="Render mode for sig/iso day plots (qc or full).")
+    parser.add_argument('--dff-render-mode', choices=['qc', 'full'], default='qc',
+                        help="Render mode for dFF day plots (qc or full).")
+    parser.add_argument('--stacked-render-mode', choices=['qc', 'full'], default='qc',
+                        help="Render mode for stacked day plots (qc or full).")
     parser.add_argument('--event-signal', type=str, choices=['dff', 'delta_f'], help="Signal to use for peak/event detection")
     parser.add_argument('--representative-session-index', type=int, default=None, help="Force a specific session index for representative artifacts (0-based)")
     parser.add_argument('--preview-first-n', type=int, default=None, help="Preview mode: process only the first N discovered sessions (after discovery/sort).")
@@ -653,6 +659,9 @@ def main():
         if args.session_duration_s is not None:
             argv.extend(["--session-duration-s", str(args.session_duration_s)])
         argv.extend(["--smooth-window-s", str(args.smooth_window_s)])
+        argv.extend(["--sig-iso-render-mode", str(args.sig_iso_render_mode)])
+        argv.extend(["--dff-render-mode", str(args.dff_render_mode)])
+        argv.extend(["--stacked-render-mode", str(args.stacked_render_mode)])
 
         print("VALIDATE-ONLY: OK", flush=True)
         print(f"VALIDATE-ONLY: run_dir={run_dir}", flush=True)
@@ -1267,7 +1276,10 @@ def main():
                           '--output-dir', d_dir,
                           '--sessions-per-hour', str(sessions_per_hour),
                           '--session-duration-s', str(session_duration_s),
-                          '--smooth-window-s', str(args.smooth_window_s)]
+                          '--smooth-window-s', str(args.smooth_window_s),
+                          '--sig-iso-render-mode', str(args.sig_iso_render_mode),
+                          '--dff-render-mode', str(args.dff_render_mode),
+                          '--stacked-render-mode', str(args.stacked_render_mode)]
 
             if not has_features:
                 cmd_bundle.extend(['--no-write-dff-grid', '--no-write-stacked'])

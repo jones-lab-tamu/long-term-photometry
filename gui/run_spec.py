@@ -63,6 +63,10 @@ class RunSpec:
     sessions_per_hour: Optional[int] = None    # _sph_edit widget
     session_duration_s: Optional[float] = None # _duration_edit widget
     smooth_window_s: float = 1.0    # _smooth_spin widget
+    # Render mode controls (None => rely on runner/backend default = qc)
+    sig_iso_render_mode: Optional[str] = None  # _sig_iso_render_mode_combo
+    dff_render_mode: Optional[str] = None      # _dff_render_mode_combo
+    stacked_render_mode: Optional[str] = None  # _stacked_render_mode_combo
 
     # --- (B) Config source + overrides ---
     config_source_path: str = ""
@@ -94,6 +98,10 @@ class RunSpec:
     def __post_init__(self):
         if self.include_roi_ids is not None and self.exclude_roi_ids is not None:
             raise ValueError("include_roi_ids and exclude_roi_ids are mutually exclusive")
+        for field_name in ("sig_iso_render_mode", "dff_render_mode", "stacked_render_mode"):
+            value = getattr(self, field_name)
+            if value is not None and value not in ("qc", "full"):
+                raise ValueError(f"{field_name} must be 'qc', 'full', or None")
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-safe dictionary."""
@@ -245,6 +253,15 @@ class RunSpec:
             argv.extend(["--session-duration-s", str(self.session_duration_s)])
 
         argv.extend(["--smooth-window-s", str(self.smooth_window_s)])
+
+        if self.sig_iso_render_mode is not None:
+            argv.extend(["--sig-iso-render-mode", self.sig_iso_render_mode])
+
+        if self.dff_render_mode is not None:
+            argv.extend(["--dff-render-mode", self.dff_render_mode])
+
+        if self.stacked_render_mode is not None:
+            argv.extend(["--stacked-render-mode", self.stacked_render_mode])
 
         if self.traces_only:
             argv.append("--traces-only")

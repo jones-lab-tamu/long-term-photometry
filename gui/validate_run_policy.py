@@ -41,6 +41,7 @@ def compute_run_signature(run_dir: str) -> str:
     STABLE_FIELDS = {
         "input_dir", "format", "sessions_per_hour", "session_duration_s",
         "smooth_window_s", "config_source_path", "config_overrides",
+        "sig_iso_render_mode", "dff_render_mode", "stacked_render_mode",
         "mode", "traces_only", "preview_first_n", "representative_session_index",
         "include_roi_ids", "exclude_roi_ids"
     }

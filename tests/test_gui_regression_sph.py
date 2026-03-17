@@ -86,6 +86,18 @@ class TestGuiSphRegression(unittest.TestCase):
         
         win._smooth_spin = QDoubleSpinBox()
         win._smooth_spin.setValue(1.0)
+
+        win._sig_iso_render_mode_combo = QComboBox()
+        win._sig_iso_render_mode_combo.addItems(["qc", "full"])
+        win._sig_iso_render_mode_combo.setCurrentText("qc")
+
+        win._dff_render_mode_combo = QComboBox()
+        win._dff_render_mode_combo.addItems(["qc", "full"])
+        win._dff_render_mode_combo.setCurrentText("qc")
+
+        win._stacked_render_mode_combo = QComboBox()
+        win._stacked_render_mode_combo.addItems(["qc", "full"])
+        win._stacked_render_mode_combo.setCurrentText("qc")
         
         win._mode_combo = QComboBox()
         win._mode_combo.addItem("both")
