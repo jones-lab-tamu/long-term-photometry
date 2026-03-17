@@ -67,6 +67,16 @@ def _open_folder(path: str) -> None:
         _subprocess.run(["xdg-open", path], check=False)
 
 
+def _open_file(path: str) -> None:
+    """Cross-platform open a file with the default associated app."""
+    if sys.platform == "win32":
+        os.startfile(path)
+    elif sys.platform == "darwin":
+        _subprocess.run(["open", path], check=False)
+    else:
+        _subprocess.run(["xdg-open", path], check=False)
+
+
 def parse_and_validate_isosbestic_knobs(
     window_sec_str: str,
     step_sec_str: str,
@@ -645,6 +655,11 @@ class MainWindow(QMainWindow):
         self._stacked_render_mode_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Stacked Render Mode:", self._stacked_render_mode_combo)
 
+        self._mode_context_label = QLabel("")
+        self._mode_context_label.setWordWrap(True)
+        self._mode_context_label.setStyleSheet("font-size: 11px; color: #666;")
+        form.addRow("", self._mode_context_label)
+
         # Traces-only (--traces-only CLI flag)
         self._traces_only_cb = QCheckBox("Skip feature extraction (traces and QC only)")
         self._traces_only_cb.setToolTip("Run preprocessing and QC only. Skip feature extraction and downstream deliverable generation.")
@@ -661,6 +676,7 @@ class MainWindow(QMainWindow):
         self._preview_n_spin.setMaximumWidth(120)
         self._preview_n_spin.setEnabled(False)
         self._preview_enabled_cb.toggled.connect(self._preview_n_spin.setEnabled)
+        self._preview_n_spin.valueChanged.connect(self._on_config_changed)
         preview_row = QHBoxLayout()
         preview_row.addWidget(self._preview_enabled_cb)
         preview_row.addWidget(self._preview_n_spin)
@@ -858,6 +874,13 @@ class MainWindow(QMainWindow):
         self._discovery_summary.setStyleSheet("color: #666; font-size: 11px;")
         disc_layout.addWidget(self._discovery_summary)
 
+        self._discovery_controls_hint = QLabel(
+            "ROI and representative controls require discovery."
+        )
+        self._discovery_controls_hint.setStyleSheet("color: #8a6d3b; font-size: 11px;")
+        self._discovery_controls_hint.setWordWrap(True)
+        disc_layout.addWidget(self._discovery_controls_hint)
+
         # Sessions list (read-only, exact discovery order)
         disc_lists = QHBoxLayout()
 
@@ -906,9 +929,18 @@ class MainWindow(QMainWindow):
         self._rep_session_combo.addItem("(auto)")
         self._rep_session_combo.setMinimumWidth(200)
         self._rep_session_combo.setToolTip("Select a specific session to use for representative summary plots. Leave at (auto) for default selection.")
+        self._rep_session_combo.currentIndexChanged.connect(self._on_config_changed)
         rep_row.addWidget(self._rep_session_combo)
         rep_row.addStretch()
         disc_layout.addLayout(rep_row)
+
+        self._rep_preview_hint = QLabel("")
+        self._rep_preview_hint.setWordWrap(True)
+        self._rep_preview_hint.setStyleSheet("color: #666; font-size: 11px;")
+        disc_layout.addWidget(self._rep_preview_hint)
+
+        # Track manual ROI checklist changes as configuration intent changes.
+        self._roi_list.itemChanged.connect(lambda _item: self._on_config_changed())
 
         outer.addWidget(disc_group)
 
@@ -945,6 +977,54 @@ class MainWindow(QMainWindow):
 
         btn_row.addStretch()
         outer.addLayout(btn_row)
+
+        artifact_row = QHBoxLayout()
+        artifact_row.addWidget(QLabel("Key Files:"))
+
+        self._open_cmd_file_btn = QPushButton("Command")
+        self._open_cmd_file_btn.setToolTip("Open command_invoked.txt for reproducible CLI argv.")
+        self._open_cmd_file_btn.clicked.connect(lambda: self._on_open_key_artifact("command_invoked.txt"))
+        artifact_row.addWidget(self._open_cmd_file_btn)
+
+        self._open_spec_file_btn = QPushButton("Run Spec")
+        self._open_spec_file_btn.setToolTip("Open gui_run_spec.json (GUI intent/provenance).")
+        self._open_spec_file_btn.clicked.connect(lambda: self._on_open_key_artifact("gui_run_spec.json"))
+        artifact_row.addWidget(self._open_spec_file_btn)
+
+        self._open_cfg_file_btn = QPushButton("Effective Config")
+        self._open_cfg_file_btn.setToolTip("Open config_effective.yaml actually passed to runner.")
+        self._open_cfg_file_btn.clicked.connect(lambda: self._on_open_key_artifact("config_effective.yaml"))
+        artifact_row.addWidget(self._open_cfg_file_btn)
+
+        self._open_manifest_file_btn = QPushButton("Manifest")
+        self._open_manifest_file_btn.setToolTip("Open MANIFEST.json for delivered artifact metadata.")
+        self._open_manifest_file_btn.clicked.connect(lambda: self._on_open_key_artifact("MANIFEST.json"))
+        artifact_row.addWidget(self._open_manifest_file_btn)
+
+        self._open_report_file_btn = QPushButton("Run Report")
+        self._open_report_file_btn.setToolTip("Open run_report.json for run context and summary metadata.")
+        self._open_report_file_btn.clicked.connect(lambda: self._on_open_key_artifact("run_report.json"))
+        artifact_row.addWidget(self._open_report_file_btn)
+
+        artifact_row.addStretch()
+        outer.addLayout(artifact_row)
+
+        # Compact, read-only readiness hint near Run controls.
+        self._run_reason_label = QLabel("Run status: Validation required before first run.")
+        self._run_reason_label.setWordWrap(True)
+        self._run_reason_label.setStyleSheet("color: #8a6d3b; font-size: 11px;")
+        outer.addWidget(self._run_reason_label)
+
+        # Compact, read-only pre-run intent summary.
+        summary_group = QGroupBox("Effective Run Summary")
+        summary_layout = QVBoxLayout(summary_group)
+        summary_layout.setContentsMargins(8, 6, 8, 6)
+        self._effective_summary_label = QLabel()
+        self._effective_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._effective_summary_label.setWordWrap(True)
+        self._effective_summary_label.setStyleSheet("font-size: 11px;")
+        summary_layout.addWidget(self._effective_summary_label)
+        outer.addWidget(summary_group)
 
         return group
 
@@ -1487,18 +1567,25 @@ class MainWindow(QMainWindow):
         # ROIs checklist (all checked by default, exact order)
         self._roi_list.clear()
         rois = disco.get("rois", [])
+        self._roi_list.blockSignals(True)
         for roi in rois:
             roi_id = roi.get("roi_id", "?")
             item = QListWidgetItem(roi_id)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
             self._roi_list.addItem(item)
+        self._roi_list.blockSignals(False)
 
         # Representative session dropdown
+        self._rep_session_combo.blockSignals(True)
         self._rep_session_combo.clear()
         self._rep_session_combo.addItem("(auto)")
         for sess in sessions:
             self._rep_session_combo.addItem(sess.get("session_id", "?"))
+        self._rep_session_combo.blockSignals(False)
+
+        # Discovery outcome changes run intent; force readiness/summary refresh.
+        self._on_config_changed()
 
     def _on_roi_select_all(self):
         """Check all ROI items in the checklist."""
@@ -1613,6 +1700,7 @@ class MainWindow(QMainWindow):
 
         # ManifestViewer.load_manifest handles missing/invalid file gracefully
         self._report_viewer.load_report(selected)
+        self._update_button_states()
 
     def _on_open_folder(self):
         """Open the current run_dir in the system file manager."""
@@ -1643,6 +1731,34 @@ class MainWindow(QMainWindow):
             self._append_run_log("Manifest not created")
 
         _open_folder(run_dir)
+
+    def _artifact_path_in_current_run(self, filename: str) -> str:
+        """Absolute path for a key artifact in the current run directory."""
+        if not self._current_run_dir:
+            return ""
+        return os.path.join(self._current_run_dir, filename)
+
+    def _on_open_key_artifact(self, filename: str):
+        """Open a key provenance artifact from the current run directory."""
+        run_dir = self._current_run_dir
+        if not run_dir or not os.path.isdir(run_dir):
+            QMessageBox.information(
+                self, "No Run Folder",
+                "No run directory available. Run or open results first."
+            )
+            return
+
+        artifact_path = self._artifact_path_in_current_run(filename)
+        if not os.path.isfile(artifact_path):
+            QMessageBox.information(
+                self,
+                "Artifact Not Available",
+                f"{filename} is not present in the current run directory.\n\n{run_dir}",
+            )
+            return
+
+        self._append_run_log(f"Opening {filename}: {artifact_path}")
+        _open_file(artifact_path)
 
     # ==================================================================
     # Status follower integration
@@ -1829,27 +1945,38 @@ class MainWindow(QMainWindow):
         
         if state == RunnerState.SUCCESS:
             self._append_run_log(f"--- Finished (status: {code}) ---")
+            self._last_status_msg = ""
             if self._is_validate_only:
                 self._validation_passed = True
                 self._append_run_log("Validation PASSED (per status.json). Run is now enabled.")
         elif state == RunnerState.FAILED:
             self._append_run_log(f"--- Run FAILED (status: {code}) ---")
+            self._append_run_log("Run failed during execution. Inspect Live Log and open the run folder for artifacts and status details.")
+            self._last_status_msg = "Run failed; inspect logs and run folder."
             if self._runner.final_errors:
                 self._append_run_log("ERRORS from status.json:")
                 for e in self._runner.final_errors:
                     self._append_run_log(f"  \u2022 {e}")
         elif state == RunnerState.FAIL_CLOSED:
             class_id = self._runner.fail_closed_code or "FAIL_CLOSED"
+            detail = self._runner.fail_closed_detail or "Status contract check failed."
+            remediation = self._runner.fail_closed_remediation
             self._append_run_log(f"Run failed (FAIL_CLOSED): {class_id}")
+            self._append_run_log(f"Reason: {detail}")
+            if remediation:
+                self._append_run_log(f"Next step: {remediation}")
+            self._last_status_msg = f"FAIL_CLOSED: {class_id}"
         elif state == RunnerState.CANCELLED:
             self._append_run_log("--- Run CANCELLED ---")
+            self._append_run_log("Run was cancelled before normal completion. Partial outputs may exist; inspect the run folder.")
+            self._last_status_msg = "Run cancelled; partial outputs may exist."
 
         # Step 8 Rendering Hardening:
         # Load report if it exists on disk, regardless of runner state or flag.
         report_on_disk = os.path.join(self._current_run_dir, "run_report.json")
         if os.path.exists(report_on_disk):
             if state != RunnerState.SUCCESS:
-                 self._append_run_log(f"Report present, runner state = {state.name}")
+                 self._append_run_log(f"Report present, runner state = {state.name}. You can inspect available outputs via Open Run Folder.")
             
             if not self._is_validate_only:
                  self._report_viewer.load_report(self._current_run_dir)
@@ -1976,6 +2103,220 @@ class MainWindow(QMainWindow):
         """Append a message from the wrapper/GUI with a 'RUN: ' prefix."""
         self._append_log(f"RUN: {text}")
 
+    def _compute_roi_filter_summary(self) -> str:
+        """Human-readable summary of current ROI filtering intent."""
+        if self._discovery_cache is None:
+            return "Unknown (run Discovery to inspect/include/exclude explicitly)"
+
+        total = self._roi_list.count()
+        checked = sum(
+            1 for i in range(total)
+            if self._roi_list.item(i).checkState() == Qt.Checked
+        )
+        exclude_mode = (self._roi_filter_combo.currentIndex() == 1)
+
+        if not exclude_mode:
+            if checked == total:
+                return f"Include all discovered ROIs ({total})"
+            if checked == 0:
+                return "Include none (invalid)"
+            return f"Include subset ({checked}/{total})"
+
+        if checked == 0:
+            return f"Exclude none (all {total} discovered ROIs)"
+        if checked == total:
+            return "Exclude all discovered ROIs (invalid)"
+        return f"Exclude subset ({checked}/{total})"
+
+    def _compute_representative_summary(self) -> str:
+        """Human-readable summary of representative-session behavior."""
+        idx = self._rep_session_combo.currentIndex()
+        if idx <= 0:
+            if self._discovery_cache is None:
+                return "Auto (runtime selection; run Discovery for explicit choice)"
+            return "Auto"
+
+        session_idx = idx - 1
+        session_label = self._rep_session_combo.currentText().strip() or "?"
+        return f"Session index {session_idx} ({session_label})"
+
+    def _refresh_effective_run_summary(self) -> None:
+        """Refresh compact pre-run intent summary from current GUI state."""
+        mode_text = self._mode_combo.currentText()
+        phasic_active = is_isosbestic_active(mode_text)
+        analysis_scope = (
+            "Traces-only (feature extraction skipped)"
+            if self._traces_only_cb.isChecked()
+            else "Full analysis"
+        )
+        preview_text = (
+            f"first N = {self._preview_n_spin.value()}"
+            if self._preview_enabled_cb.isChecked()
+            else "off"
+        )
+        render_text = (
+            f"sig/iso={self._sig_iso_render_mode_combo.currentText()}, "
+            f"dFF={self._dff_render_mode_combo.currentText()}, "
+            f"stacked={self._stacked_render_mode_combo.currentText()}"
+        )
+        if not phasic_active:
+            render_text += " (inactive in tonic mode)"
+        roi_text = self._compute_roi_filter_summary()
+        rep_text = self._compute_representative_summary()
+
+        out_base = self._output_dir.text().strip()
+        if out_base:
+            out_text = (
+                f"{out_base} "
+                "(a timestamped run folder will be created for Validate/Run)"
+            )
+        else:
+            out_text = "(not set)"
+
+        summary_lines = [
+            f"Mode: {mode_text}",
+            f"Analysis: {analysis_scope}",
+            f"Preview: {preview_text}",
+            f"Render Modes: {render_text}",
+            f"ROI Filter: {roi_text}",
+            f"Representative Session: {rep_text}",
+            f"Output Destination: {out_text}",
+        ]
+        self._effective_summary_label.setText("\n".join(summary_lines))
+
+    def _update_context_sensitive_controls(self) -> None:
+        """Enable/disable controls that are irrelevant in current mode/context."""
+        mode_text = self._mode_combo.currentText()
+        phasic_active = is_isosbestic_active(mode_text)
+
+        # Phasic-only controls: render family selectors + event/features group.
+        for combo in (
+            self._sig_iso_render_mode_combo,
+            self._dff_render_mode_combo,
+            self._stacked_render_mode_combo,
+        ):
+            combo.setEnabled(phasic_active)
+        self._adv_ev_group.setEnabled(phasic_active)
+        if phasic_active:
+            self._mode_context_label.setText("Phasic controls are active for this mode.")
+            self._mode_context_label.setStyleSheet("font-size: 11px; color: #666;")
+        else:
+            self._mode_context_label.setText(
+                "Phasic-only controls are disabled in tonic mode."
+            )
+            self._mode_context_label.setStyleSheet("font-size: 11px; color: #8a6d3b;")
+
+        # Discovery-dependent ROI/representative controls.
+        discovery_ready = self._discovery_cache is not None and self._roi_list.count() > 0
+        self._roi_filter_combo.setEnabled(discovery_ready)
+        self._roi_list.setEnabled(discovery_ready)
+        self._roi_select_all_btn.setEnabled(discovery_ready)
+        self._roi_select_none_btn.setEnabled(discovery_ready)
+        self._rep_session_combo.setEnabled(discovery_ready)
+
+        if not discovery_ready:
+            self._discovery_controls_hint.setText(
+                "ROI and representative controls are unresolved. Run Discovery to enable them."
+            )
+            self._discovery_controls_hint.setStyleSheet("color: #8a6d3b; font-size: 11px;")
+            self._rep_preview_hint.setText(
+                "Representative selection requires discovery session ordering."
+            )
+            self._rep_preview_hint.setStyleSheet("color: #8a6d3b; font-size: 11px;")
+            return
+
+        self._discovery_controls_hint.setText(
+            "Discovery loaded: ROI and representative controls are active."
+        )
+        self._discovery_controls_hint.setStyleSheet("color: #2d7d2d; font-size: 11px;")
+
+        if not self._preview_enabled_cb.isChecked():
+            self._rep_preview_hint.setText(
+                "Representative selection applies to the full discovered session list."
+            )
+            self._rep_preview_hint.setStyleSheet("color: #666; font-size: 11px;")
+            return
+
+        preview_n = self._preview_n_spin.value()
+        rep_idx = self._rep_session_combo.currentIndex() - 1
+        rep_preview_err = validate_representative_index_preview_compatibility(rep_idx, preview_n)
+        if rep_preview_err:
+            self._rep_preview_hint.setText(rep_preview_err)
+            self._rep_preview_hint.setStyleSheet("color: #a94442; font-size: 11px;")
+            return
+
+        if rep_idx >= 0:
+            self._rep_preview_hint.setText(
+                f"Representative session index {rep_idx} is within preview first N={preview_n}."
+            )
+        else:
+            self._rep_preview_hint.setText(
+                f"Preview first N={preview_n}; representative session remains auto."
+            )
+        self._rep_preview_hint.setStyleSheet("color: #666; font-size: 11px;")
+
+    def _update_key_artifact_buttons(self, running: bool) -> None:
+        """Enable post-run key-file shortcuts when files exist."""
+        run_dir_ok = bool(self._current_run_dir and os.path.isdir(self._current_run_dir))
+
+        def has_file(name: str) -> bool:
+            if not run_dir_ok:
+                return False
+            return os.path.isfile(self._artifact_path_in_current_run(name))
+
+        can_open = not running
+        self._open_cmd_file_btn.setEnabled(can_open and has_file("command_invoked.txt"))
+        self._open_spec_file_btn.setEnabled(can_open and has_file("gui_run_spec.json"))
+        self._open_cfg_file_btn.setEnabled(can_open and has_file("config_effective.yaml"))
+        self._open_manifest_file_btn.setEnabled(can_open and has_file("MANIFEST.json"))
+        self._open_report_file_btn.setEnabled(can_open and has_file("run_report.json"))
+
+    def _compute_run_readiness_reason(self) -> tuple[str, str]:
+        """
+        Returns (reason_text, severity) for run-state guidance.
+        severity in {"ready", "info", "warn", "error"}.
+        """
+        running = self._runner.is_running()
+        if running and self._ui_state == RunnerState.RUNNING:
+            return "Run unavailable while a pipeline run is in progress.", "info"
+        if running and self._ui_state == RunnerState.VALIDATING:
+            return "Run unavailable while validation is in progress.", "info"
+
+        err = self._validate_gui_inputs()
+        if err:
+            return f"Invalid setting combination: {err}", "error"
+
+        if not self._validation_passed:
+            if self._discovery_cache is None:
+                return (
+                    "Validation required before Run. Discovery is recommended to verify ROI/"
+                    "representative-session intent.",
+                    "warn",
+                )
+            return "Validation required after config change. Click 'Validate Only'.", "warn"
+
+        if self._discovery_cache is None:
+            return (
+                "Ready to run. ROI subset and representative session will auto-resolve "
+                "unless Discovery is run.",
+                "ready",
+            )
+
+        return "Ready to run.", "ready"
+
+    def _update_run_reason_label(self) -> None:
+        """Render concise run-state reason text near the Run button."""
+        reason, severity = self._compute_run_readiness_reason()
+        color_map = {
+            "ready": "#2d7d2d",
+            "info": "#555555",
+            "warn": "#8a6d3b",
+            "error": "#a94442",
+        }
+        color = color_map.get(severity, "#555555")
+        self._run_reason_label.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self._run_reason_label.setText(f"Run status: {reason}")
+
     def _update_button_states(self):
         state = self._ui_state
         running = self._runner.is_running()
@@ -2003,6 +2344,11 @@ class MainWindow(QMainWindow):
         # Open Run Folder: enabled when done and run_dir exists
         has_run_dir = bool(self._current_run_dir and os.path.isdir(self._current_run_dir))
         self._open_folder_btn.setEnabled(bool(is_done and has_run_dir and not running))
+
+        self._update_context_sensitive_controls()
+        self._update_key_artifact_buttons(running)
+        self._update_run_reason_label()
+        self._refresh_effective_run_summary()
 
     def _browse_dir(self, line_edit: QLineEdit, title: str):
         path = QFileDialog.getExistingDirectory(self, title, line_edit.text())
