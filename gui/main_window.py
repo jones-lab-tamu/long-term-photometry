@@ -290,71 +290,32 @@ def parse_and_validate_preproc_baseline_knobs(
 
     return overrides, None
 
-_cached_peak_reqs = {}  # type: dict[tuple[str, str], bool]
-
-def _peak_threshold_method_requires_param(method_str: str, param_name: str, val1: float, val2: float) -> bool:
-    global _cached_peak_reqs
-    cache_key = (method_str, param_name)
-    if cache_key in _cached_peak_reqs:
-        return _cached_peak_reqs[cache_key]
-
-    try:
-        from photometry_pipeline.config import Config
-    except Exception:
-        # If import fails entirely, we cannot determine requirement. Fail-closed: assume required.
-        _cached_peak_reqs[cache_key] = True
-        return True
-
-    try:
-        allowed = get_allowed_peak_threshold_methods_from_config()
-        if method_str not in allowed:
-            _cached_peak_reqs[cache_key] = False
-            return False
-
-        kwargs1 = {"peak_threshold_method": method_str, param_name: val1}
-        kwargs2 = {"peak_threshold_method": method_str, param_name: val2}
-        cfg1 = Config(**kwargs1)
-        cfg2 = Config(**kwargs2)
-        req = (getattr(cfg1, param_name) != getattr(cfg2, param_name))
-        _cached_peak_reqs[cache_key] = req
-        return req
-    except Exception:
-        # Fallback approach if construction fails without validation
-        try:
-            Config(peak_threshold_method=method_str)
-            base_succeeds = True
-        except Exception:
-            base_succeeds = False
-            
-        if not base_succeeds:
-            # Cannot determine. Fail-closed: assume required.
-            _cached_peak_reqs[cache_key] = True
-            return True
-            
-        # Base succeeds. Does adding the param fail?
-        try:
-            Config(peak_threshold_method=method_str, **{param_name: val1})
-            param_succeeds = True
-        except Exception:
-            param_succeeds = False
-            
-        if param_succeeds:
-            # Both succeed. Cannot determine. Fail-closed: assume required. (Conservative)
-            _cached_peak_reqs[cache_key] = True
-            return True
-        else:
-            # Base succeeds but adding param explicitly rejected -> deterministic False
-            _cached_peak_reqs[cache_key] = False
-            return False
-
 def peak_threshold_method_requires_k(method_str: str) -> bool:
-    return _peak_threshold_method_requires_param(method_str, "peak_threshold_k", 1.0, 2.0)
+    """K-threshold applies to std/mad-style methods only."""
+    return method_str in {"mean_std", "median_mad"}
 
 def peak_threshold_method_requires_percentile(method_str: str) -> bool:
-    return _peak_threshold_method_requires_param(method_str, "peak_threshold_percentile", 10.0, 50.0)
+    """Percentile threshold applies only to percentile method."""
+    return method_str == "percentile"
 
 def peak_threshold_method_requires_abs(method_str: str) -> bool:
-    return _peak_threshold_method_requires_param(method_str, "peak_threshold_abs", 0.5, 1.0)
+    """Absolute threshold applies only to absolute method."""
+    return method_str == "absolute"
+
+
+def validate_representative_index_preview_compatibility(
+    representative_session_index: int | None,
+    preview_first_n: int | None,
+) -> str | None:
+    """Validate representative-session selection against preview truncation."""
+    if representative_session_index is None or preview_first_n is None:
+        return None
+    if representative_session_index >= preview_first_n:
+        return (
+            f"Representative Session index {representative_session_index} is out of range for "
+            f"Preview first N={preview_first_n}. Choose (auto) or a lower session index."
+        )
+    return None
 
 def parse_and_validate_event_feature_knobs(
     event_signal_text: str,
@@ -1343,6 +1304,15 @@ class MainWindow(QMainWindow):
             if is_exclude_mode and checked_count == total_rois:
                 return ("All ROIs excluded. Uncheck at least one ROI "
                         "or click Select none.")
+
+        # Representative session must remain valid under preview truncation.
+        rep_session_idx = None
+        if self._rep_session_combo.currentIndex() > 0:
+            rep_session_idx = self._rep_session_combo.currentIndex() - 1
+        preview_n = self._preview_n_spin.value() if self._preview_enabled_cb.isChecked() else None
+        rep_preview_err = validate_representative_index_preview_compatibility(rep_session_idx, preview_n)
+        if rep_preview_err:
+            return rep_preview_err
 
         fmt = self._format_combo.currentText()
         if not fmt or fmt not in FORMAT_CHOICES:

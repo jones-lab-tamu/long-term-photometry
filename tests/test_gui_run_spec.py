@@ -1979,86 +1979,53 @@ class TestEventFeatureKnobs(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    def test_t6_peak_threshold_gating_schema_locked(self):
-        """T6: Assert peak threshold parameters are evaluated by schema constraint probing, not heuristics."""
+    def test_t6_peak_threshold_gating_method_locked(self):
+        """T6: Peak-threshold parameter gating follows method semantics."""
         from gui.main_window import (
             peak_threshold_method_requires_k,
             peak_threshold_method_requires_percentile,
             peak_threshold_method_requires_abs,
             get_allowed_peak_threshold_methods_from_config
         )
-        from photometry_pipeline.config import Config
         
         allowed_methods = get_allowed_peak_threshold_methods_from_config()
         self.assertTrue(len(allowed_methods) > 0, "No peak threshold methods returned.")
         
         for method in allowed_methods:
-            # check k
-            try:
-                c1 = Config(peak_threshold_method=method, peak_threshold_k=1.0)
-                c2 = Config(peak_threshold_method=method, peak_threshold_k=2.0)
-                expected_k = (c1.peak_threshold_k != c2.peak_threshold_k)
-            except Exception:
-                try:
-                    Config(peak_threshold_method=method)
-                    b_k = True
-                except Exception:
-                    b_k = False
-                
-                if not b_k:
-                    expected_k = True
-                else:
-                    try:
-                        Config(peak_threshold_method=method, peak_threshold_k=1.0)
-                        p_k = True
-                    except Exception:
-                        p_k = False
-                    expected_k = True if p_k else False
+            expected_k = method in {"mean_std", "median_mad"}
+            expected_pct = method == "percentile"
+            expected_abs = method == "absolute"
             self.assertEqual(expected_k, peak_threshold_method_requires_k(method), f"Method {method} expected K:{expected_k}")
-            
-            # check percentile
-            try:
-                c1 = Config(peak_threshold_method=method, peak_threshold_percentile=10.0)
-                c2 = Config(peak_threshold_method=method, peak_threshold_percentile=50.0)
-                expected_pct = (c1.peak_threshold_percentile != c2.peak_threshold_percentile)
-            except Exception:
-                try:
-                    Config(peak_threshold_method=method)
-                    b_pct = True
-                except Exception:
-                    b_pct = False
-                if not b_pct:
-                    expected_pct = True
-                else:
-                    try:
-                        Config(peak_threshold_method=method, peak_threshold_percentile=10.0)
-                        p_pct = True
-                    except Exception:
-                        p_pct = False
-                    expected_pct = True if p_pct else False
             self.assertEqual(expected_pct, peak_threshold_method_requires_percentile(method), f"Method {method} expected PCT:{expected_pct}")
-            
-            # check abs
-            try:
-                c1 = Config(peak_threshold_method=method, peak_threshold_abs=0.5)
-                c2 = Config(peak_threshold_method=method, peak_threshold_abs=1.0)
-                expected_abs = (c1.peak_threshold_abs != c2.peak_threshold_abs)
-            except Exception:
-                try:
-                    Config(peak_threshold_method=method)
-                    b_abs = True
-                except Exception:
-                    b_abs = False
-                if not b_abs:
-                    expected_abs = True
-                else:
-                    try:
-                        Config(peak_threshold_method=method, peak_threshold_abs=0.5)
-                        p_abs = True
-                    except Exception:
-                        p_abs = False
-                    expected_abs = True if p_abs else False
             self.assertEqual(expected_abs, peak_threshold_method_requires_abs(method), f"Method {method} expected ABS:{expected_abs}")
+
+    def test_t6b_default_event_knobs_are_valid(self):
+        """Untouched default event knobs must validate cleanly."""
+        from gui.main_window import parse_and_validate_event_feature_knobs
+        from photometry_pipeline.config import Config
+
+        cfg0 = Config()
+        defaults = {
+            "event_signal": cfg0.event_signal,
+            "peak_threshold_method": cfg0.peak_threshold_method,
+            "peak_threshold_k": cfg0.peak_threshold_k,
+            "peak_threshold_percentile": cfg0.peak_threshold_percentile,
+            "peak_threshold_abs": cfg0.peak_threshold_abs,
+            "peak_min_distance_sec": cfg0.peak_min_distance_sec,
+            "event_auc_baseline": cfg0.event_auc_baseline,
+        }
+        overrides, err = parse_and_validate_event_feature_knobs(
+            defaults["event_signal"],
+            defaults["peak_threshold_method"],
+            str(defaults["peak_threshold_k"]),
+            str(defaults["peak_threshold_percentile"]),
+            str(defaults["peak_threshold_abs"]),
+            str(defaults["peak_min_distance_sec"]),
+            defaults["event_auc_baseline"],
+            defaults=defaults,
+        )
+        self.assertIsNone(err)
+        self.assertIsNotNone(overrides)
 
     def test_t7_peak_threshold_not_parsed_when_gating_false(self):
         """T7: Prove parameters are not validated or sent to the config dictionary if their gating is False."""
@@ -2094,6 +2061,15 @@ class TestEventFeatureKnobs(unittest.TestCase):
         self.assertIsNotNone(overrides)
         self.assertNotIn("peak_threshold_percentile", overrides)
         self.assertNotIn("peak_threshold_abs", overrides)
+
+    def test_t8_representative_preview_guard(self):
+        """Representative-session index must be compatible with preview-first-n."""
+        from gui.main_window import validate_representative_index_preview_compatibility
+
+        self.assertIsNone(validate_representative_index_preview_compatibility(None, 1))
+        self.assertIsNone(validate_representative_index_preview_compatibility(0, None))
+        self.assertIsNone(validate_representative_index_preview_compatibility(0, 1))
+        self.assertIsNotNone(validate_representative_index_preview_compatibility(1, 1))
 
 if __name__ == "__main__":
     unittest.main()
