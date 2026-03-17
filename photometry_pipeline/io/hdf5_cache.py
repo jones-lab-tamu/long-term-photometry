@@ -39,6 +39,14 @@ class Hdf5TraceCacheWriter:
         
         self.roi_group = self.f.create_group('roi')
         self._is_aborted = False
+        self._dataset_create_kwargs = {
+            'dtype': np.float64,
+            'compression': 'gzip',
+        }
+        if self.mode == 'phasic':
+            # Keep gzip for compatibility while reducing compression CPU on the
+            # measured phasic cache-write hotspot.
+            self._dataset_create_kwargs['compression_opts'] = 1
 
     def add_chunk(self, chunk, chunk_id: int, source_file: str):
         """
@@ -65,28 +73,28 @@ class Hdf5TraceCacheWriter:
 
             if self.mode == 'phasic' and self.config:
                 grp.attrs['peak_threshold_method'] = str(self.config.peak_threshold_method)
-                grp.attrs['peak_threshold_k'] = float(self.config.peak_threshold_k)                      
+                grp.attrs['peak_threshold_k'] = float(self.config.peak_threshold_k)
             
             # Required Time axis
-            grp.create_dataset('time_sec', data=chunk.time_sec, dtype=np.float64, compression="gzip")
+            grp.create_dataset('time_sec', data=chunk.time_sec, **self._dataset_create_kwargs)
             
             # Common core traces
-            grp.create_dataset('sig_raw', data=chunk.sig_raw[:, r_idx], dtype=np.float64, compression="gzip")
+            grp.create_dataset('sig_raw', data=chunk.sig_raw[:, r_idx], **self._dataset_create_kwargs)
 
-            grp.create_dataset('uv_raw', data=chunk.uv_raw[:, r_idx], dtype=np.float64, compression="gzip")
+            grp.create_dataset('uv_raw', data=chunk.uv_raw[:, r_idx], **self._dataset_create_kwargs)
             
             # Modes
             if self.mode == 'tonic' and chunk.delta_f is not None:
-                grp.create_dataset('deltaF', data=chunk.delta_f[:, r_idx], dtype=np.float64, compression="gzip")
+                grp.create_dataset('deltaF', data=chunk.delta_f[:, r_idx], **self._dataset_create_kwargs)
             elif self.mode == 'phasic':
                 if chunk.dff is not None:
-                    grp.create_dataset('dff', data=chunk.dff[:, r_idx], dtype=np.float64, compression="gzip")
+                    grp.create_dataset('dff', data=chunk.dff[:, r_idx], **self._dataset_create_kwargs)
 
                 if chunk.uv_fit is not None:
-                    grp.create_dataset('fit_ref', data=chunk.uv_fit[:, r_idx], dtype=np.float64, compression="gzip")
+                    grp.create_dataset('fit_ref', data=chunk.uv_fit[:, r_idx], **self._dataset_create_kwargs)
 
                 if chunk.delta_f is not None:
-                    grp.create_dataset('delta_f', data=chunk.delta_f[:, r_idx], dtype=np.float64, compression="gzip")
+                    grp.create_dataset('delta_f', data=chunk.delta_f[:, r_idx], **self._dataset_create_kwargs)
 
     def __enter__(self):
         return self
