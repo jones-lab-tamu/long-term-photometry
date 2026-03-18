@@ -23,6 +23,7 @@ import sys
 import os
 import secrets
 import subprocess as _subprocess
+import time
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QSettings, QTimer
@@ -479,9 +480,17 @@ class MainWindow(QMainWindow):
         self._last_status_phase = "\u2014"
         self._last_status_state = "\u2014"
         self._last_status_duration = ""
+        self._last_status_duration_sec = None
         self._last_status_errors = []
         self._last_status_msg = ""
+        self._last_status_pct = None
+        self._ui_progress_pct = 0
+        self._run_started_monotonic = None
+        self._last_elapsed_sec = 0.0
         self._saw_cancel_status = False
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(250)
+        self._elapsed_timer.timeout.connect(self._on_elapsed_timer_tick)
 
         # Build UI
         central = QWidget()
@@ -505,12 +514,15 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout(strip)
         row.setContentsMargins(0, 0, 0, 0)
 
-        self._status_label = QLabel("Status: IDLE")
+        self._status_label = QLabel("Run status: IDLE")
         self._status_label.setStyleSheet("font-weight: bold;")
         row.addWidget(self._status_label, 0)
 
-        self._phase_label = QLabel("Phase: \u2014")
+        self._phase_label = QLabel("Run phase: \u2014")
         row.addWidget(self._phase_label, 0)
+
+        self._elapsed_label = QLabel("Elapsed: \u2014")
+        row.addWidget(self._elapsed_label, 0)
 
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
@@ -1396,8 +1408,14 @@ class MainWindow(QMainWindow):
         self._last_status_phase = "\u2014"
         self._last_status_state = "\u2014"
         self._last_status_duration = ""
+        self._last_status_duration_sec = None
         self._last_status_errors = []
         self._last_status_msg = ""
+        self._last_status_pct = None
+        self._ui_progress_pct = 0
+        self._run_started_monotonic = None
+        self._last_elapsed_sec = 0.0
+        self._elapsed_timer.stop()
         self._render_status_label()
 
     def _on_status_parse_error(self, msg: str):
@@ -1416,6 +1434,16 @@ class MainWindow(QMainWindow):
 
     def _on_run_started(self):
         self._did_finalize_run_ui = False
+        self._run_started_monotonic = time.monotonic()
+        self._last_elapsed_sec = 0.0
+        self._elapsed_timer.start()
+        if hasattr(self._report_viewer, "_title_label"):
+            if self._ui_state == RunnerState.VALIDATING:
+                msg = "Validation in progress..."
+            else:
+                msg = "Run in progress..."
+            self._report_viewer._title_label.setText(msg)
+            self._report_viewer._title_label.setStyleSheet("color: #666; font-size: 14px;")
         self._update_button_states()
 
     def _on_state_changed(self, state_str: str):
@@ -1423,6 +1451,11 @@ class MainWindow(QMainWindow):
         self._state_str = state_str
         try:
             self._ui_state = RunnerState(state_str)
+            if self._ui_state in (RunnerState.RUNNING, RunnerState.VALIDATING):
+                if self._run_started_monotonic is None:
+                    self._run_started_monotonic = time.monotonic()
+                if not self._elapsed_timer.isActive():
+                    self._elapsed_timer.start()
             
             # Terminal state transition
             terminal_states = (
@@ -1430,6 +1463,7 @@ class MainWindow(QMainWindow):
                 RunnerState.CANCELLED, RunnerState.FAIL_CLOSED
             )
             if self._ui_state in terminal_states:
+                self._elapsed_timer.stop()
                 self._stop_status_follower()
                 self._stop_log_follower()
                 self._finalize_run_ui()
@@ -1442,6 +1476,7 @@ class MainWindow(QMainWindow):
     def _on_run_finished_failsafe(self, exit_code: int):
         """Backup handler to ensure finalization if state_changed was missed."""
         # Ensure finalization exactly once
+        self._elapsed_timer.stop()
         self._stop_status_follower()
         self._stop_log_follower()
         self._finalize_run_ui()
@@ -1465,8 +1500,15 @@ class MainWindow(QMainWindow):
             
             dur = data.get("duration_sec")
             if isinstance(dur, (int, float)):
+                self._last_status_duration_sec = float(dur)
                 self._last_status_duration = f"{dur:.1f}s"
-            
+
+            for key in ("progress_pct", "progress_percent", "pct", "percent_complete"):
+                value = data.get(key)
+                if isinstance(value, (int, float)):
+                    self._last_status_pct = value
+                    break
+
             self._last_status_errors = data.get("errors", self._last_status_errors)
             self._last_status_msg = "" # Clear warnings on final valid read
             
@@ -1479,6 +1521,10 @@ class MainWindow(QMainWindow):
         if self._did_finalize_run_ui:
             return
         self._did_finalize_run_ui = True
+        self._elapsed_timer.stop()
+        if self._run_started_monotonic is not None:
+            self._last_elapsed_sec = max(0.0, time.monotonic() - self._run_started_monotonic)
+            self._run_started_monotonic = None
         
         # Sync terminal values from disk before rendering (Fix stale top-status)
         self._refresh_status_from_disk_final()
@@ -1577,6 +1623,10 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_run_error(self, msg: str):
+        self._elapsed_timer.stop()
+        if self._run_started_monotonic is not None:
+            self._last_elapsed_sec = max(0.0, time.monotonic() - self._run_started_monotonic)
+            self._run_started_monotonic = None
         self._stop_status_follower()
         self._stop_log_follower()
         self._update_button_states()
@@ -1876,6 +1926,7 @@ class MainWindow(QMainWindow):
     def _update_button_states(self):
         state = self._ui_state
         running = self._runner.is_running()
+        editing_enabled = not running
         
         is_done = state in (RunnerState.SUCCESS, RunnerState.FAILED,
                             RunnerState.CANCELLED, RunnerState.FAIL_CLOSED)
@@ -1900,6 +1951,11 @@ class MainWindow(QMainWindow):
         # Open Run Folder: enabled when done and run_dir exists
         has_run_dir = bool(self._current_run_dir and os.path.isdir(self._current_run_dir))
         self._open_folder_btn.setEnabled(bool(is_done and has_run_dir and not running))
+
+        # Keep upper-left controls visible but disable editing during active validate/run.
+        self._run_config_inputs_container.setEnabled(editing_enabled)
+        self._plotting_group.setEnabled(editing_enabled)
+        self._advanced_group.setEnabled(editing_enabled)
 
         self._update_context_sensitive_controls()
         self._update_key_artifact_buttons(running)
@@ -1930,9 +1986,12 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         outer = QVBoxLayout(panel)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(self._build_run_configuration_group())
-        outer.addWidget(self._build_plotting_group())
-        outer.addWidget(self._build_advanced_group())
+        self._run_config_group = self._build_run_configuration_group()
+        self._plotting_group = self._build_plotting_group()
+        self._advanced_group = self._build_advanced_group()
+        outer.addWidget(self._run_config_group)
+        outer.addWidget(self._plotting_group)
+        outer.addWidget(self._advanced_group)
         # Demoted controls are kept for behavior compatibility but hidden from idle layout.
         outer.addWidget(self._build_hidden_compatibility_group())
         return panel
@@ -1993,7 +2052,10 @@ class MainWindow(QMainWindow):
         )
         self._sph_warning.setStyleSheet("color: #cc6600; font-size: 11px;")
         form.addRow("", self._sph_warning)
-        layout.addLayout(form)
+        self._run_config_inputs_container = QWidget()
+        inputs_layout = QVBoxLayout(self._run_config_inputs_container)
+        inputs_layout.setContentsMargins(0, 0, 0, 0)
+        inputs_layout.addLayout(form)
 
         roi_group = QGroupBox("ROI Selection")
         roi_layout = QVBoxLayout(roi_group)
@@ -2059,7 +2121,8 @@ class MainWindow(QMainWindow):
         hidden_discovery_layout.addWidget(self._rep_preview_hint)
         roi_layout.addWidget(hidden_discovery_details)
 
-        layout.addWidget(roi_group)
+        inputs_layout.addWidget(roi_group)
+        layout.addWidget(self._run_config_inputs_container)
 
         actions = QHBoxLayout()
         self._validate_btn = QPushButton("Validate Only")
@@ -2412,60 +2475,193 @@ class MainWindow(QMainWindow):
         self._last_event_message = str(data.get("message", "")).strip()
         self._render_status_label()
 
+    def _on_elapsed_timer_tick(self) -> None:
+        """Refresh elapsed wall-clock display while validate/run is active."""
+        if self._ui_state not in (RunnerState.RUNNING, RunnerState.VALIDATING):
+            self._elapsed_timer.stop()
+            return
+        self._render_status_label()
+
+    def _friendly_run_status(self) -> str:
+        """Map internal runner state to user-facing run status text."""
+        state_map = {
+            RunnerState.IDLE: "IDLE",
+            RunnerState.VALIDATING: "VALIDATING",
+            RunnerState.RUNNING: "RUNNING",
+            RunnerState.SUCCESS: "COMPLETE",
+            RunnerState.FAILED: "FAILED",
+            RunnerState.FAIL_CLOSED: "FAILED",
+            RunnerState.CANCELLED: "CANCELLED",
+        }
+        return state_map.get(self._ui_state, str(self._state_str or "IDLE"))
+
+    @staticmethod
+    def _normalize_phase_token(raw: str) -> str:
+        token = (raw or "").strip().lower()
+        return token.replace("-", "_").replace(" ", "_")
+
+    def _friendly_run_phase(self) -> str:
+        """Return user-facing phase label from status tokens and runner state."""
+        if self._ui_state == RunnerState.VALIDATING:
+            return "Validation"
+        if self._ui_state == RunnerState.SUCCESS:
+            return "Complete"
+        if self._ui_state == RunnerState.CANCELLED:
+            return "Cancelled"
+        if self._ui_state in (RunnerState.FAILED, RunnerState.FAIL_CLOSED):
+            return "Failed"
+        if self._ui_state == RunnerState.IDLE:
+            return "\u2014"
+
+        phase_token = self._normalize_phase_token(self._last_status_phase)
+        status_token = self._normalize_phase_token(self._last_status_state)
+        token = phase_token or status_token
+        if not token or token in {"?", "\u2014", "unknown"}:
+            return "Setup"
+        if "valid" in token:
+            return "Validation"
+        if "setup" in token or "init" in token or "bootstrap" in token:
+            return "Setup"
+        if "tonic" in token:
+            return "Tonic analysis"
+        if "phasic" in token:
+            return "Phasic analysis"
+        if "plot" in token or "render" in token or "figure" in token:
+            return "Plotting"
+        if (
+            "final" in token
+            or "manifest" in token
+            or "artifact" in token
+            or "package" in token
+            or "write" in token
+        ):
+            return "Finalizing"
+        if "cancel" in token:
+            return "Cancelled"
+        if "fail" in token or "error" in token:
+            return "Failed"
+        if "success" in token or "complete" in token or "done" in token:
+            return "Complete"
+        return token.replace("_", " ").strip().title()
+
+    def _milestone_progress_pct(self) -> int:
+        """Fallback milestone-based progress when no explicit percent is available."""
+        if self._ui_state == RunnerState.IDLE:
+            return 0
+        if self._ui_state == RunnerState.VALIDATING:
+            return 20
+        if self._ui_state in (
+            RunnerState.SUCCESS,
+            RunnerState.FAILED,
+            RunnerState.FAIL_CLOSED,
+            RunnerState.CANCELLED,
+        ):
+            return 100
+
+        phase = self._friendly_run_phase()
+        if phase == "Setup":
+            return 10
+        if phase == "Validation":
+            return 20
+        if phase == "Tonic analysis":
+            return 35
+        if phase == "Phasic analysis":
+            return 60
+        if phase == "Plotting":
+            return 82
+        if phase == "Finalizing":
+            return 94
+        if phase == "Complete":
+            return 100
+        return 12
+
+    def _effective_progress_pct(self) -> int:
+        """Compute stable user-facing progress percentage for the status strip."""
+        if self._ui_state == RunnerState.IDLE:
+            self._ui_progress_pct = 0
+            return 0
+
+        if self._ui_state in (
+            RunnerState.SUCCESS,
+            RunnerState.FAILED,
+            RunnerState.FAIL_CLOSED,
+            RunnerState.CANCELLED,
+        ):
+            self._ui_progress_pct = 100
+            return 100
+
+        milestone_pct = self._milestone_progress_pct()
+        explicit_pct = None
+        if isinstance(self._last_status_pct, (int, float)):
+            explicit_pct = max(0, min(100, int(round(float(self._last_status_pct)))))
+
+        candidate = milestone_pct if explicit_pct is None else max(milestone_pct, explicit_pct)
+        self._ui_progress_pct = max(self._ui_progress_pct, candidate)
+        return self._ui_progress_pct
+
+    def _effective_elapsed_seconds(self) -> float | None:
+        """Elapsed wall-clock seconds since validate/run start."""
+        if self._run_started_monotonic is not None:
+            self._last_elapsed_sec = max(0.0, time.monotonic() - self._run_started_monotonic)
+            return self._last_elapsed_sec
+        if isinstance(self._last_status_duration_sec, (int, float)):
+            return float(self._last_status_duration_sec)
+        if self._last_elapsed_sec > 0:
+            return self._last_elapsed_sec
+        return None
+
     def _render_status_label(self, is_updating: bool = False):
         """Compose top-strip status and phase/progress labels."""
-        state_part = f"State: {self._state_str}"
-        stage = getattr(self, "_last_event_stage", "")
-        evt_type = getattr(self, "_last_event_type", "")
-        evt_msg = getattr(self, "_last_event_message", "")
-        extras = []
-        if stage:
-            extras.append(f"Stage: {stage}")
-        if evt_type:
-            extras.append(f"Type: {evt_type}")
-        if evt_msg:
-            extras.append(evt_msg)
+        status_text = f"Run status: {self._friendly_run_status()}"
         if is_updating and not self._last_status_msg:
-            extras.append("updating...")
+            status_text += " | updating..."
         if self._last_status_msg:
-            extras.append(self._last_status_msg)
-        self._status_label.setText(" | ".join([state_part] + extras))
+            status_text += f" | {self._last_status_msg}"
+        self._status_label.setText(status_text)
 
-        phase_text = f"Phase: {self._last_status_phase} | Status: {self._last_status_state}"
-        if self._last_status_duration:
-            phase_text += f" | Duration: {self._last_status_duration}"
+        phase_text = self._friendly_run_phase()
         if self._last_status_errors:
-            phase_text += f" | Errors: {len(self._last_status_errors)}"
-        self._phase_label.setText(phase_text)
+            phase_text += f" | errors: {len(self._last_status_errors)}"
+        self._phase_label.setText(f"Run phase: {phase_text}")
 
-        pct = getattr(self, "_last_status_pct", None)
-        if isinstance(pct, (int, float)):
-            pct_i = max(0, min(100, int(round(float(pct)))))
-            self._progress_bar.setValue(pct_i)
-            self._progress_bar.setFormat(f"{pct_i}%")
-        elif self._ui_state in (RunnerState.RUNNING, RunnerState.VALIDATING):
-            self._progress_bar.setValue(0)
-            self._progress_bar.setFormat("running")
+        elapsed_sec = self._effective_elapsed_seconds()
+        if elapsed_sec is None:
+            self._elapsed_label.setText("Elapsed: \u2014")
         else:
-            self._progress_bar.setValue(0)
+            self._elapsed_label.setText(f"Elapsed: {elapsed_sec:.1f}s")
+
+        pct_i = self._effective_progress_pct()
+        self._progress_bar.setValue(pct_i)
+        if self._ui_state == RunnerState.IDLE:
             self._progress_bar.setFormat("idle")
+        elif self._ui_state == RunnerState.VALIDATING:
+            self._progress_bar.setFormat(f"validating {pct_i}%")
+        elif self._ui_state == RunnerState.RUNNING:
+            self._progress_bar.setFormat(f"running {pct_i}%")
+        else:
+            self._progress_bar.setFormat(f"{pct_i}%")
 
     def _on_status(self, data: dict):
         """Handle parsed status.json updates and refresh top-strip progress."""
         self._last_status_phase = str(data.get("phase", "?"))
         self._last_status_state = str(data.get("status", "?"))
         dur = data.get("duration_sec")
-        self._last_status_duration = f"{dur:.1f}s" if isinstance(dur, (int, float)) else ""
+        if isinstance(dur, (int, float)):
+            self._last_status_duration_sec = float(dur)
+            self._last_status_duration = f"{dur:.1f}s"
+        else:
+            self._last_status_duration_sec = None
+            self._last_status_duration = ""
         self._last_status_errors = data.get("errors", [])
         self._last_status_msg = ""
 
-        pct = None
+        explicit_pct = None
         for key in ("progress_pct", "progress_percent", "pct", "percent_complete"):
             value = data.get(key)
             if isinstance(value, (int, float)):
-                pct = value
+                explicit_pct = value
                 break
-        self._last_status_pct = pct
+        self._last_status_pct = explicit_pct
         self._render_status_label(is_updating=False)
         if self._last_status_state.lower() == "cancelled":
             self._saw_cancel_status = True

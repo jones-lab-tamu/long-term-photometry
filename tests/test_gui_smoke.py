@@ -327,7 +327,7 @@ class TestGuiSmoke(unittest.TestCase):
     # NEW: Status label composition (requirement C)
     # ------------------------------------------------------------------
     def test_status_label_composition(self):
-        """Status label shows BOTH state and last event fields together."""
+        """Status strip shows user-facing status and phase labels."""
         from gui.main_window import MainWindow
         settings = self._make_temp_settings()
         w = MainWindow(settings=settings)
@@ -335,24 +335,20 @@ class TestGuiSmoke(unittest.TestCase):
         # Simulate state change to RUNNING
         w._on_state_changed("RUNNING")
         label_text = w._status_label.text()
-        self.assertIn("State: RUNNING", label_text)
+        self.assertIn("Run status: RUNNING", label_text)
+        self.assertIn("Run phase:", w._phase_label.text())
 
-        # Simulate an event arriving (must have schema_version=1)
+        # Simulate an event arriving (must not break status rendering)
         w._on_event({"schema_version": 1, "stage": "engine", "type": "start", "message": "hi"})
         label_text = w._status_label.text()
-        self.assertIn("State: RUNNING", label_text,
-                      "State must survive event update")
-        self.assertIn("Stage: engine", label_text) 
-        self.assertIn("Type: start", label_text)
-        self.assertIn("hi", label_text)
+        self.assertIn("Run status: RUNNING", label_text,
+                      "Status must survive event update")
 
-        # Simulate state change to SUCCESS - state updates, event fields remain
+        # Simulate state change to SUCCESS
         w._on_state_changed("SUCCESS")
         label_text = w._status_label.text()
-        self.assertIn("State: SUCCESS", label_text)
-        self.assertIn("Stage: engine", label_text,
-                      "Last event fields should persist across state changes")
-        self.assertIn("Type: start", label_text)
+        self.assertIn("Run status: COMPLETE", label_text)
+        self.assertIn("Run phase: Complete", w._phase_label.text())
 
         w.close()
 
