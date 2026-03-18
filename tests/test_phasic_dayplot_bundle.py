@@ -5,6 +5,9 @@ import tempfile
 import pandas as pd
 import numpy as np
 from unittest.mock import patch
+from photometry_pipeline.config import Config
+from photometry_pipeline.core.types import Chunk
+from photometry_pipeline.core.feature_extraction import extract_features
 
 # Add project root to path
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -79,7 +82,18 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         }])
         df.to_csv(os.path.join(self.features_dir, 'features.csv'), index=False)
 
-    def create_synthetic_phasic_cache(self, cid=0, include_dff=False, include_sig=True):
+    def create_synthetic_phasic_cache(
+        self,
+        cid=0,
+        include_dff=False,
+        include_sig=True,
+        include_delta_f=False,
+        dff_data=None,
+        delta_f_data=None,
+        sig_data=None,
+        uv_data=None,
+        time_data=None,
+    ):
         import h5py
         cache_path = os.path.join(self.analysis_out, 'phasic_trace_cache.h5')
         
@@ -105,7 +119,7 @@ class TestPhasicDayplotBundle(unittest.TestCase):
             roi_grp = f.require_group('roi/Region0')
             c_grp = roi_grp.require_group(f'chunk_{cid}')
             
-            t = np.arange(0, 600, 0.1)
+            t = np.arange(0, 600, 0.1) if time_data is None else np.asarray(time_data)
             
             if 'time_sec' in c_grp: del c_grp['time_sec']
             c_grp.create_dataset('time_sec', data=t)
@@ -113,13 +127,17 @@ class TestPhasicDayplotBundle(unittest.TestCase):
             if include_sig:
                 if 'sig_raw' in c_grp: del c_grp['sig_raw']
                 if 'uv_raw' in c_grp: del c_grp['uv_raw']
-                c_grp.create_dataset('sig_raw', data=np.sin(t))
-                c_grp.create_dataset('uv_raw', data=np.cos(t))
+                c_grp.create_dataset('sig_raw', data=np.sin(t) if sig_data is None else np.asarray(sig_data))
+                c_grp.create_dataset('uv_raw', data=np.cos(t) if uv_data is None else np.asarray(uv_data))
                 
             if include_dff:
                 if 'dff' in c_grp: del c_grp['dff']
                 # The prompt tests with some high peaks. Let's make sure test_full_dff_mode can overwrite this.
-                c_grp.create_dataset('dff', data=np.sin(t) - np.cos(t))
+                c_grp.create_dataset('dff', data=(np.sin(t) - np.cos(t)) if dff_data is None else np.asarray(dff_data))
+
+            if include_delta_f:
+                if 'delta_f' in c_grp: del c_grp['delta_f']
+                c_grp.create_dataset('delta_f', data=np.sin(t) if delta_f_data is None else np.asarray(delta_f_data))
 
     def test_sig_iso_only_mode_no_dff(self):
         # A. sig/iso-only mode: no features.csv, no dff column -> success
@@ -282,6 +300,78 @@ class TestPhasicDayplotBundle(unittest.TestCase):
                     # Check exact fields requested are strictly equal
                     fields_requested = mock_load.call_args[0][3]
                     self.assertEqual(fields_requested, expected_fields, f"{name}: requested fields mismatch")
+
+    def test_dff_grid_verification_uses_configured_event_signal_and_ignores_display_smoothing(self):
+        t = np.arange(0, 600, 0.1)
+        fs_hz = 10.0
+        rng = np.random.default_rng(7)
+
+        # Detection trace (delta_f): few broad events.
+        delta_f = 0.02 * np.sin(0.07 * t)
+        for center in (90.0, 260.0, 430.0):
+            delta_f += 2.2 * np.exp(-0.5 * ((t - center) / 0.9) ** 2)
+
+        # Display trace (dff): many oscillatory peaks that should NOT drive authoritative count.
+        dff = 0.9 * np.sin(2 * np.pi * 1.4 * t) + 0.4 * np.sin(2 * np.pi * 3.2 * t)
+        dff += 0.05 * rng.standard_normal(len(t))
+
+        with open(os.path.join(self.analysis_out, 'config_used.yaml'), 'w', encoding='utf-8') as f:
+            f.write("target_fs_hz: 10.0\n")
+            f.write("lowpass_hz: 1.0\n")
+            f.write("filter_order: 3\n")
+            f.write("event_signal: 'delta_f'\n")
+            f.write("peak_threshold_method: 'mean_std'\n")
+            f.write("peak_threshold_k: 1.5\n")
+            f.write("peak_min_distance_sec: 0.5\n")
+            f.write("peak_pre_filter: 'lowpass'\n")
+
+        cfg = Config.from_yaml(os.path.join(self.analysis_out, 'config_used.yaml'))
+        chunk = Chunk(
+            chunk_id=0,
+            source_file='chunk_0.csv',
+            format='rwd',
+            time_sec=t,
+            uv_raw=np.zeros((len(t), 1), dtype=float),
+            sig_raw=np.zeros((len(t), 1), dtype=float),
+            fs_hz=fs_hz,
+            channel_names=['Region0'],
+            dff=dff.reshape(-1, 1),
+            delta_f=delta_f.reshape(-1, 1),
+        )
+        feat_df = extract_features(chunk, cfg)
+        expected_count = int(feat_df.iloc[0]['peak_count'])
+        self.assertGreater(expected_count, 0)
+
+        self.create_features_csv(peak_count=expected_count)
+        self.create_synthetic_phasic_cache(
+            cid=0,
+            include_dff=True,
+            include_sig=True,
+            include_delta_f=True,
+            dff_data=dff,
+            delta_f_data=delta_f,
+            sig_data=np.zeros_like(t),
+            uv_data=np.zeros_like(t),
+            time_data=t,
+        )
+
+        for smooth in ('0.2', '20.0'):
+            test_args = [
+                'plot_phasic_dayplot_bundle.py',
+                '--analysis-out', self.analysis_out,
+                '--roi', 'Region0',
+                '--output-dir', self.output_dir,
+                '--sessions-per-hour', '1',
+                '--write-dff-grid',
+                '--no-write-sig-iso-grid',
+                '--write-stacked',
+                '--smooth-window-s', smooth,
+            ]
+            with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
+                bundle.main()
+
+        self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_dFF_day_000.png')))
+        self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_stacked_day_000.png')))
 
 if __name__ == '__main__':
     unittest.main()

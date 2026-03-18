@@ -44,15 +44,7 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     list_cache_chunk_ids, list_cache_source_files
 )
 
-# We need the strict peak verification logic from the qc grid script
-# We can just import it from there to avoid duplication, OR recreate it here if preferred.
-# For isolation, it's safer to reproduce the peak verification here or extract it to a helper.
-# Since we must NOT modify the old scripts and we want minimal new helpers, we'll
-# recreate the minimal necessary `verify_peak_count_strict` and `get_local_peak_indices` 
-# logic here.
-from photometry_pipeline.core.feature_extraction import extract_features
-from photometry_pipeline.core.types import Chunk
-from scipy.signal import find_peaks
+from photometry_pipeline.core.feature_extraction import get_peak_indices_for_trace
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -152,66 +144,24 @@ def check_continuity(time_arr, expected_dt):
     diffs = np.diff(time_arr)
     return np.all(diffs < (2.0 * expected_dt))
 
-def get_local_peak_indices(trace_arr, fs, config):
-    is_valid = np.isfinite(trace_arr)
-    clean_trace = trace_arr[is_valid]
-    if len(clean_trace) == 0: return np.array([], dtype=int)
-    
-    method = config.peak_threshold_method
-    if method == 'absolute':
-        thresh = getattr(config, 'peak_threshold_abs', 0.0)
-    elif method == 'mean_std':
-        mu, sigma = np.mean(clean_trace), np.std(clean_trace)
-        thresh = mu + config.peak_threshold_k * sigma
-    elif method == 'percentile':
-        thresh = np.percentile(clean_trace, config.peak_threshold_percentile)
-    elif method == 'median_mad':
-        median = np.median(clean_trace)
-        mad = np.median(np.abs(clean_trace - median))
-        sigma_robust = 1.4826 * mad
-        if sigma_robust == 0:
-             thresh = median if config.peak_threshold_k == 0 else float('inf') 
-        else:
-             thresh = median + config.peak_threshold_k * sigma_robust
-
-    dist_samples = max(1, int(config.peak_min_distance_sec * fs))
-    padded = np.concatenate(([False], is_valid, [False]))
-    diff = np.diff(padded.astype(int))
-    starts = np.where(diff == 1)[0]
-    ends = np.where(diff == -1)[0]
-    
-    all_peaks = []
-    for s, e in zip(starts, ends):
-        seg_trace = trace_arr[s:e]
-        p_inds, _ = find_peaks(seg_trace, height=thresh, distance=dist_samples)
-        all_peaks.append(p_inds + s)
-        
-    return np.concatenate(all_peaks) if all_peaks else np.array([], dtype=int)
-
-def verify_peak_count_strict(trace_arr, time_arr, fs, config, expected_count, roi, cid, src_file):
+def verify_peak_count_strict(detection_trace, time_arr, fs, config, expected_count, roi, cid, src_file):
     if pd.isna(expected_count):
         print(f"CRITICAL: Expected count is NaN for Chunk {cid}.")
         sys.exit(1)
-
-    dff_in = trace_arr.reshape(-1, 1)
-    raw = np.zeros_like(dff_in)
-    chunk = Chunk(
-        chunk_id=cid, source_file=src_file, format='rwd', time_sec=time_arr,
-        dff=dff_in, uv_raw=raw, sig_raw=raw, fs_hz=fs, channel_names=[roi]
-    )
-    df_feat = extract_features(chunk, config)
-    if df_feat.empty:
-        print(f"CRITICAL: extract_features returned empty for Chunk {cid}")
-        sys.exit(1)
-        
-    pipeline_count = df_feat.iloc[0]['peak_count']
-    if pipeline_count != expected_count:
-        print(f"CRITICAL: Verification Failed for Chunk {cid}, ROI {roi} (expected {expected_count}, got {pipeline_count})")
+    if detection_trace is None:
+        print(
+            f"CRITICAL: Missing detection trace for Chunk {cid}, ROI {roi}; "
+            f"required by event_signal='{getattr(config, 'event_signal', 'dff')}'."
+        )
         sys.exit(1)
 
-    local_peaks = get_local_peak_indices(trace_arr, fs, config)
-    if len(local_peaks) != pipeline_count:
-        print(f"CRITICAL: Plotting Logic Mismatch for Chunk {cid}, ROI {roi} ({pipeline_count} vs {len(local_peaks)})")
+    # Source of truth: phasic analysis output features.csv peak_count.
+    expected_i = int(expected_count)
+
+    # Plot-time indices must come from the same detector logic used by analysis.
+    local_peaks = get_peak_indices_for_trace(detection_trace, fs, config)
+    if len(local_peaks) != expected_i:
+        print(f"CRITICAL: Plotting Logic Mismatch for Chunk {cid}, ROI {roi} ({expected_i} vs {len(local_peaks)})")
         sys.exit(1)
         
     return local_peaks
@@ -909,6 +859,13 @@ def main():
     else:
         # Fallback minimal
         fields_to_load = ['time_sec']
+
+    detection_field = None
+    if needs_peak_verification:
+        signal_cfg = getattr(config, 'event_signal', 'dff')
+        detection_field = 'dff' if signal_cfg == 'dff' else 'delta_f'
+        if detection_field not in fields_to_load:
+            fields_to_load.append(detection_field)
         
     print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=discovery elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
 
@@ -931,6 +888,7 @@ def main():
                 'y_sig': arr_map.get('sig_raw'),
                 'y_uv': arr_map.get('uv_raw'),
                 'y_dff': arr_map.get('dff'),
+                'y_detect': arr_map.get(detection_field) if detection_field else None,
                 # N must be derived from the actual length of an array we got
                 'N': len(arrays[0]) if arrays else 0
             }
@@ -986,7 +944,7 @@ def main():
             exp_count = feat_row['peak_count'] if feat_row is not None else np.nan
                 
             peak_indices = verify_peak_count_strict(
-                rec['y_dff'], x, fs, config, exp_count, plot_roi, cr.chunk_id, cr.source_file
+                rec['y_detect'], x, fs, config, exp_count, plot_roi, cr.chunk_id, cr.source_file
             )
             rec['peak_indices'] = peak_indices
             rec['exp_count'] = exp_count

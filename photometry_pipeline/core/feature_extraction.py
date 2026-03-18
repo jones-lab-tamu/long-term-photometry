@@ -55,6 +55,96 @@ def get_event_signal_array(chunk, config):
     else:
         raise ValueError(f"Unknown event_signal: {signal_type}")
 
+
+def _compute_detection_threshold(clean_finite: np.ndarray, config) -> float:
+    """Compute peak threshold from the configured method on finite detection samples."""
+    method = config.peak_threshold_method
+    if method == 'absolute':
+        return float(getattr(config, 'peak_threshold_abs', 0.0))
+    if method == 'mean_std':
+        mu = np.mean(clean_finite)
+        sigma = np.std(clean_finite)
+        return float(mu + config.peak_threshold_k * sigma)
+    if method == 'percentile':
+        thresh = np.nanpercentile(clean_finite, config.peak_threshold_percentile)
+        if np.isnan(thresh):
+            raise ValueError("Feature Extraction Error: Percentile threshold is NaN.")
+        return float(thresh)
+    if method == 'median_mad':
+        median = np.median(clean_finite)
+        mad = np.median(np.abs(clean_finite - median))
+        sigma_robust = 1.4826 * mad
+        if sigma_robust == 0:
+            if config.peak_threshold_k == 0:
+                return float(median)
+            return float('inf')
+        return float(median + config.peak_threshold_k * sigma_robust)
+    raise ValueError(
+        f"Unknown peak_threshold_method: {config.peak_threshold_method}. "
+        "Supported: ['mean_std', 'percentile', 'median_mad', 'absolute']"
+    )
+
+
+def get_peak_indices_for_trace(
+    trace: np.ndarray,
+    fs_hz: float,
+    config,
+    *,
+    trace_use: np.ndarray | None = None,
+    threshold: float | None = None,
+) -> np.ndarray:
+    """
+    Authoritative per-trace event index detection used by both analysis and plotting.
+
+    The returned indices are derived from the same thresholding/min-distance logic as
+    extract_features(). Display smoothing in plotting must never modify these indices.
+    """
+    trace_arr = np.asarray(trace)
+    if trace_use is None:
+        if getattr(config, 'peak_pre_filter', 'none') == 'lowpass':
+            trace_use_arr = lowpass_filter(trace_arr, fs_hz, config)
+        else:
+            trace_use_arr = trace_arr
+    else:
+        trace_use_arr = np.asarray(trace_use)
+
+    if threshold is None:
+        finite_vals = trace_use_arr[np.isfinite(trace_use_arr)]
+        if len(finite_vals) < 2:
+            return np.array([], dtype=int)
+        threshold = _compute_detection_threshold(finite_vals, config)
+
+    is_valid = np.isfinite(trace_arr)
+    padded = np.concatenate(([False], is_valid, [False]))
+    diff = np.diff(padded.astype(int))
+    starts = np.where(diff == 1)[0]
+    ends = np.where(diff == -1)[0]
+
+    dist_samples = max(1, int(config.peak_min_distance_sec * fs_hz))
+    all_peaks = []
+    for s, e in zip(starts, ends):
+        seg_y = trace_use_arr[s:e]
+        seg_valid = np.isfinite(seg_y)
+        if not np.any(seg_valid):
+            continue
+
+        padded_run = np.concatenate(([False], seg_valid, [False]))
+        diff_run = np.diff(padded_run.astype(int))
+        run_starts = np.where(diff_run == 1)[0]
+        run_ends = np.where(diff_run == -1)[0]
+
+        for rs, re in zip(run_starts, run_ends):
+            run_y = seg_y[rs:re]
+            if len(run_y) < 2:
+                continue
+            peaks, _ = find_peaks(run_y, height=threshold, distance=dist_samples)
+            if len(peaks):
+                all_peaks.append((s + rs + peaks).astype(int))
+
+    if not all_peaks:
+        return np.array([], dtype=int)
+    return np.concatenate(all_peaks)
+
 def extract_features(chunk, config):
     """
     Extracts phasic features from a Chunk object.
@@ -123,28 +213,14 @@ def extract_features(chunk, config):
             mad = np.median(np.abs(clean_finite - med))
             sigma_robust = 1.4826 * mad
             
-            # Determine Threshold
-            if config.peak_threshold_method == 'absolute':
-                thresh = getattr(config, 'peak_threshold_abs', 0.0)
-            elif config.peak_threshold_method == 'mean_std':
-                thresh = mu + config.peak_threshold_k * sigma
-            elif config.peak_threshold_method == 'percentile':
-                thresh = np.nanpercentile(clean_finite, config.peak_threshold_percentile)
-                if np.isnan(thresh):
-                    raise ValueError(f"Feature Extraction Error: Percentile threshold is NaN for ROI '{roi}' (Chunk {chunk.chunk_id}).")
-            elif config.peak_threshold_method == 'median_mad':
-                if sigma_robust == 0:
-                     if not hasattr(chunk, 'metadata') or chunk.metadata is None: chunk.metadata = {}
-                     chunk.metadata.setdefault('qc_warnings', []).append(f"DEGENERATE[DD4] Zero robust variance in ROI '{roi}'")
-                     # If MAD is 0 (e.g. quantization or flat signal), threshold is effectively infinite unless k=0
-                     if config.peak_threshold_k == 0:
-                         thresh = med
-                     else:
-                         thresh = float('inf') 
-                else:
-                    thresh = med + config.peak_threshold_k * sigma_robust
-            else:
-                raise ValueError(f"Unknown peak_threshold_method: {config.peak_threshold_method}. Supported: ['mean_std', 'percentile', 'median_mad', 'absolute']")
+            # Determine threshold from the same helper used by plotting verification.
+            if config.peak_threshold_method == 'median_mad' and sigma_robust == 0:
+                if not hasattr(chunk, 'metadata') or chunk.metadata is None:
+                    chunk.metadata = {}
+                chunk.metadata.setdefault('qc_warnings', []).append(
+                    f"DEGENERATE[DD4] Zero robust variance in ROI '{roi}'"
+                )
+            thresh = _compute_detection_threshold(clean_finite, config)
                 
             # AUC Baseline
             auc_baseline_method = getattr(config, 'event_auc_baseline', 'zero')
@@ -154,9 +230,15 @@ def extract_features(chunk, config):
                 auc_baseline = 0.0
                 
             # Constraints
-            dist_samples = max(1, int(config.peak_min_distance_sec * chunk.fs_hz))
+            peak_indices = get_peak_indices_for_trace(
+                trace,
+                chunk.fs_hz,
+                config,
+                trace_use=trace_use,
+                threshold=thresh,
+            )
 
-            total_peaks = 0
+            total_peaks = int(len(peak_indices))
             total_auc = 0.0
 
             # Segment iteration
@@ -207,9 +289,8 @@ def extract_features(chunk, config):
                         qc_counts['DD5'] = qc_counts.get('DD5', 0) + 1
                         continue
                 
-                    # Compute peaks and AUC for this run
-                    peaks, _ = find_peaks(run_y, height=thresh, distance=dist_samples)
-                    total_peaks += len(peaks)
+                    # Compute AUC for this run. Peak count comes from
+                    # get_peak_indices_for_trace() so plotting and analysis share one detector.
                     total_auc += compute_auc_above_threshold(
                         run_y, auc_baseline, 
                         fs_hz=chunk.fs_hz, 
