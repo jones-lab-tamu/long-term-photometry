@@ -6,6 +6,8 @@ import os
 import json
 import tempfile
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from gui.run_report_parser import (
     resolve_region_deliverables,
     resolve_internal_artifacts,
@@ -112,7 +114,7 @@ def test_successful_completed_run_dir_rejects_artifacts_only():
             json.dump({"run_context": {"run_type": "full"}}, f)
         ok, reason = is_successful_completed_run_dir(tmpdir)
         assert ok is False
-        assert "no explicit success/completion" in reason.lower()
+        assert "does not explicitly report successful completion" in reason.lower()
 
 
 def test_successful_completed_run_dir_accepts_status_success():
@@ -160,3 +162,38 @@ def test_run_report_viewer_tab_discovery_is_explicit(qapp):
         assert [os.path.basename(p) for p in tab_map["Phasic Raw"]] == ["phasic_sig_iso_day_000.png"]
         assert [os.path.basename(p) for p in tab_map["Phasic dFF"]] == ["phasic_dFF_day_000.png"]
         assert [os.path.basename(p) for p in tab_map["Phasic Stacked"]] == ["phasic_stacked_day_000.png"]
+
+
+def test_run_report_viewer_click_to_zoom_toggle(qapp):
+    """Clicking image toggles fit mode and full-size inspection mode."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        img_path = os.path.join(tmpdir, "tall_plot.png")
+        pix = QPixmap(900, 1800)
+        pix.fill(Qt.red)
+        assert pix.save(img_path)
+
+        viewer = RunReportViewer()
+        viewer.resize(1200, 800)
+        viewer.show()
+        qapp.processEvents()
+
+        viewer._active_image_path = img_path
+        viewer._set_image(img_path)
+        qapp.processEvents()
+
+        assert viewer._zoom_mode is False
+        fit_h = viewer._image_label.pixmap().height()
+        assert fit_h <= viewer._image_scroll.viewport().height()
+
+        viewer._on_image_clicked()
+        qapp.processEvents()
+        assert viewer._zoom_mode is True
+        assert viewer._image_label.pixmap().height() == 1800
+        assert viewer._image_label.height() > viewer._image_scroll.viewport().height()
+
+        viewer._on_image_clicked()
+        qapp.processEvents()
+        assert viewer._zoom_mode is False
+        assert viewer._image_label.pixmap().height() <= viewer._image_scroll.viewport().height()
+
+        viewer.close()

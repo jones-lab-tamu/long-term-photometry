@@ -1,21 +1,15 @@
 """
-MainWindow, primary GUI window for the Photometry Pipeline Deliverables runner.
+MainWindow for the Long-Term Photometry Analysis GUI.
 
-Three zones:
-  1) Config panel (top) -- run parameters, Validate/Run/Cancel/Open Results buttons
-  2) Log panel (middle) -- live stdout/stderr from pipeline
-  3) Results panel (bottom) -- ManifestViewer, populated on successful run
+UI shell:
+  - Top status strip (status, phase, elapsed, progress)
+  - Left pane (run configuration, plotting, advanced, live log)
+  - Right pane (results workspace)
 
-State machine:
-  IDLE -> VALIDATING -> (SUCCESS -> IDLE with _validation_passed)
-  IDLE -> RUNNING -> SUCCESS / FAILED / CANCELLED
-  Any DONE state allows re-validate.
-
-Button gating:
-  IDLE: Validate YES, Run YES (only if _validation_passed), Cancel NO, Open Folder NO
-  VALIDATING: Validate NO, Run NO, Cancel NO, Open Folder NO
-  RUNNING: Validate NO, Run NO, Cancel YES, Open Folder NO
-  DONE: Validate YES, Run NO (re-validate required), Cancel NO, Open Folder YES
+State model:
+  - IDLE / VALIDATING / RUNNING / terminal states
+  - Successful full runs can enter complete-state workspace mode
+  - "New Run" returns to editable idle controls while keeping prior values
 """
 
 import json
@@ -33,7 +27,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QLabel, QLineEdit, QComboBox, QCheckBox, QSpinBox,
     QDoubleSpinBox, QPushButton, QPlainTextEdit, QScrollArea,
     QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem, QToolButton, QStackedWidget,
-    QProgressBar,
+    QProgressBar, QLayout,
 )
 
 from gui.process_runner import PipelineRunner, RunnerState
@@ -433,11 +427,13 @@ def compute_overrides_user_changed(parsed: dict, defaults: dict) -> dict:
     return changed
 
 class MainWindow(QMainWindow):
-    """Photometry Pipeline Deliverables GUI."""
+    """Long-Term Photometry Analysis GUI."""
+
+    WINDOW_TITLE_BASE = "Long-Term Photometry Analysis"
 
     def __init__(self, parent=None, settings: QSettings | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Photometry Pipeline Deliverables")
+        self.setWindowTitle(self.WINDOW_TITLE_BASE)
         self.resize(1100, 850)
 
         # Settings (injectable for testing)
@@ -518,18 +514,39 @@ class MainWindow(QMainWindow):
 
         self._status_label = QLabel("Run status: IDLE")
         self._status_label.setStyleSheet("font-weight: bold;")
+        self._status_label.setToolTip("Overall run state.")
         row.addWidget(self._status_label, 0)
 
         self._phase_label = QLabel("Run phase: \u2014")
+        self._phase_label.setToolTip("Current pipeline phase.")
         row.addWidget(self._phase_label, 0)
 
         self._elapsed_label = QLabel("Elapsed: \u2014")
+        self._elapsed_label.setToolTip("Elapsed wall-clock time for active validation/run.")
         row.addWidget(self._elapsed_label, 0)
 
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
         self._progress_bar.setTextVisible(True)
+        self._progress_bar.setMinimumHeight(24)
+        self._progress_bar.setMaximumHeight(24)
+        self._progress_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._progress_bar.setStyleSheet(
+            "QProgressBar {"
+            " min-height: 24px;"
+            " max-height: 24px;"
+            " border: 1px solid #7f7f7f;"
+            " border-radius: 3px;"
+            " text-align: center;"
+            " background-color: #f2f2f2;"
+            "}"
+            "QProgressBar::chunk {"
+            " background-color: #2d89ef;"
+            " margin: 0px;"
+            "}"
+        )
+        self._progress_bar.setToolTip("Milestone-based run progress.")
         row.addWidget(self._progress_bar, 1)
 
         self._preview_badge = QLabel("PREVIEW")
@@ -596,9 +613,11 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        card = QGroupBox("Run Complete")
+        card = QGroupBox("Completed Run")
         card_layout = QVBoxLayout(card)
-        self._complete_summary_label = QLabel("No completed run loaded.")
+        self._complete_summary_label = QLabel(
+            "No completed run selected. Run the pipeline or open completed results."
+        )
         self._complete_summary_label.setWordWrap(True)
         self._complete_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         card_layout.addWidget(self._complete_summary_label)
@@ -1246,6 +1265,7 @@ class MainWindow(QMainWindow):
         self._validation_passed = False
         self._is_validate_only = True
         self._validate_stdout = []
+        self._reset_status_flags(next_state=RunnerState.VALIDATING)
 
         # Validate->Run reuse tracking (Fix B1)
         self._validated_run_dir = None
@@ -1300,7 +1320,7 @@ class MainWindow(QMainWindow):
 
         self._is_validate_only = False
         self._validation_passed = False
-        self._reset_status_flags()
+        self._reset_status_flags(next_state=RunnerState.RUNNING)
 
         self._runner.set_run_dir(run_dir)
         self._start_status_follower()
@@ -1331,8 +1351,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Results Not Opened",
-                "The selected directory does not have a defensible successful-complete run status.\n\n"
-                f"{evidence}",
+                "The selected directory is not confirmed as a successfully completed run.\n\n"
+                "Choose a run folder with final-success metadata (status.json or MANIFEST).\n\n"
+                f"Details: {evidence}",
             )
             self._report_viewer.clear()
             self._exit_complete_state_workspace()
@@ -1468,7 +1489,7 @@ class MainWindow(QMainWindow):
             self._log_follower.deleteLater()
             self._log_follower = None
 
-    def _reset_status_flags(self):
+    def _reset_status_flags(self, next_state: RunnerState | None = None):
         """Reset status-derived fields at the start of each validate/run."""
         self._saw_cancel_status = False
         self._last_status_phase = "\u2014"
@@ -1482,6 +1503,9 @@ class MainWindow(QMainWindow):
         self._run_started_monotonic = None
         self._last_elapsed_sec = 0.0
         self._elapsed_timer.stop()
+        if next_state is not None:
+            self._ui_state = next_state
+            self._state_str = next_state.value
         self._render_status_label()
 
     def _on_status_parse_error(self, msg: str):
@@ -1672,7 +1696,7 @@ class MainWindow(QMainWindow):
         """Source preview state from run_report.json and update window/badge."""
         # Preview controls are demoted from idle layout, but preview mode may still
         # be active via compatibility state; keep explicit top-strip indication.
-        self.setWindowTitle("Photometry Pipeline Deliverables")
+        self.setWindowTitle(self.WINDOW_TITLE_BASE)
         self._preview_badge.hide()
         
         if not self._current_run_dir:
@@ -1688,7 +1712,7 @@ class MainWindow(QMainWindow):
             
             from gui.run_report_parser import get_preview_mode
             if get_preview_mode(data):
-                self.setWindowTitle("Photometry Pipeline Deliverables [PREVIEW]")
+                self.setWindowTitle(f"{self.WINDOW_TITLE_BASE} [PREVIEW]")
                 self._preview_badge.show()
         except Exception:
             pass
@@ -1702,7 +1726,7 @@ class MainWindow(QMainWindow):
         roi_summary = self._compute_roi_filter_summary()
         summary_lines = [
             f"Input: {input_dir}",
-            f"Run directory: {run_dir}",
+            f"Output run directory: {run_dir}",
             f"Mode: {mode_text}",
             f"Plotting mode: {plotting_mode}",
             f"ROI selection: {roi_summary}",
@@ -1727,6 +1751,8 @@ class MainWindow(QMainWindow):
         """Exit complete-state workspace and restore idle editable controls."""
         self._exit_complete_state_workspace()
         self._report_viewer.clear()
+        self.setWindowTitle(self.WINDOW_TITLE_BASE)
+        self._preview_badge.hide()
         self._is_validate_only = False
         self._validation_passed = False
         self._state_str = RunnerState.IDLE.value
@@ -2119,6 +2145,49 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._build_hidden_compatibility_group())
         return panel
 
+    def _first_layout_tooltip(self, layout: QLayout) -> str:
+        """Return first non-empty tooltip found in a layout tree."""
+        for idx in range(layout.count()):
+            item = layout.itemAt(idx)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                tip = widget.toolTip().strip()
+                if tip:
+                    return tip
+            child_layout = item.layout()
+            if child_layout is not None:
+                tip = self._first_layout_tooltip(child_layout)
+                if tip:
+                    return tip
+        return ""
+
+    def _apply_form_row_tooltips(self, form_layout: QFormLayout) -> None:
+        """Mirror tooltip text onto visible row labels for hover usability."""
+        for row in range(form_layout.rowCount()):
+            label_item = form_layout.itemAt(row, QFormLayout.LabelRole)
+            if label_item is None:
+                continue
+            label_widget = label_item.widget()
+            if not isinstance(label_widget, QLabel):
+                continue
+
+            tooltip = label_widget.toolTip().strip()
+            if not tooltip:
+                field_item = form_layout.itemAt(row, QFormLayout.FieldRole)
+                if field_item is not None:
+                    field_widget = field_item.widget()
+                    if field_widget is not None:
+                        tooltip = field_widget.toolTip().strip()
+                    if not tooltip:
+                        field_layout = field_item.layout()
+                        if field_layout is not None:
+                            tooltip = self._first_layout_tooltip(field_layout)
+
+            if tooltip:
+                label_widget.setToolTip(tooltip)
+
     def _build_run_configuration_group(self) -> QGroupBox:
         group = QGroupBox("Run Configuration")
         layout = QVBoxLayout(group)
@@ -2150,23 +2219,35 @@ class MainWindow(QMainWindow):
 
         self._format_combo = QComboBox()
         self._format_combo.addItems(list(FORMAT_CHOICES))
+        self._format_combo.setToolTip(
+            "Input format hint. Use auto to detect format from the selected input directory."
+        )
         self._format_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Format:", self._format_combo)
 
         self._sph_edit = QLineEdit()
         self._sph_edit.setPlaceholderText("(optional, integer >= 1)")
         self._sph_edit.setMaximumWidth(200)
+        self._sph_edit.setToolTip(
+            "Sessions per hour used for duty-cycled/sessionized data when timestamps are incomplete."
+        )
         self._sph_edit.textChanged.connect(self._on_config_changed)
         form.addRow("Sessions/Hour:", self._sph_edit)
 
         self._duration_edit = QLineEdit()
         self._duration_edit.setPlaceholderText("(optional, seconds > 0)")
         self._duration_edit.setMaximumWidth(200)
+        self._duration_edit.setToolTip(
+            "Session duration in seconds. Leave blank to infer from timestamps where supported."
+        )
         self._duration_edit.textChanged.connect(self._on_config_changed)
         form.addRow("Session Duration (s):", self._duration_edit)
 
         self._mode_combo = QComboBox()
         self._mode_combo.addItems(["both", "phasic", "tonic"])
+        self._mode_combo.setToolTip(
+            "Select which analysis family to run: tonic, phasic, or both."
+        )
         self._mode_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Mode:", self._mode_combo)
 
@@ -2175,6 +2256,7 @@ class MainWindow(QMainWindow):
         )
         self._sph_warning.setStyleSheet("color: #cc6600; font-size: 11px;")
         form.addRow("", self._sph_warning)
+        self._apply_form_row_tooltips(form)
         self._run_config_inputs_container = QWidget()
         inputs_layout = QVBoxLayout(self._run_config_inputs_container)
         inputs_layout.setContentsMargins(0, 0, 0, 0)
@@ -2202,9 +2284,16 @@ class MainWindow(QMainWindow):
         self._roi_selection_container.setVisible(False)
         roi_selection_layout = QVBoxLayout(self._roi_selection_container)
         roi_selection_layout.setContentsMargins(0, 0, 0, 0)
-        roi_selection_layout.addWidget(QLabel("ROIs (checked = included):"))
+        self._roi_checked_label = QLabel("ROIs (checked = included):")
+        self._roi_checked_label.setToolTip(
+            "Checked ROIs are included in analysis and deliverables; unchecked ROIs are excluded."
+        )
+        roi_selection_layout.addWidget(self._roi_checked_label)
         self._roi_list = QListWidget()
         self._roi_list.setMaximumHeight(120)
+        self._roi_list.setToolTip(
+            "Select which ROIs to include in this run. Checked means included."
+        )
         self._roi_list.itemChanged.connect(lambda _item: self._on_config_changed())
         roi_selection_layout.addWidget(self._roi_list)
         roi_layout.addWidget(self._roi_selection_container)
@@ -2281,6 +2370,9 @@ class MainWindow(QMainWindow):
         self._plotting_mode_combo = QComboBox()
         self._plotting_mode_combo.addItems(["Standard", "Full"])
         self._plotting_mode_combo.setCurrentText("Standard")
+        self._plotting_mode_combo.setToolTip(
+            "Standard uses QC-oriented rendering. Full generates all detailed plot variants."
+        )
         self._plotting_mode_combo.currentIndexChanged.connect(self._on_plotting_mode_changed)
         self._plotting_mode_combo.currentIndexChanged.connect(self._on_config_changed)
         layout.addRow("Plotting Mode:", self._plotting_mode_combo)
@@ -2291,8 +2383,12 @@ class MainWindow(QMainWindow):
         self._smooth_spin.setDecimals(2)
         self._smooth_spin.setSingleStep(0.1)
         self._smooth_spin.setMaximumWidth(200)
+        self._smooth_spin.setToolTip(
+            "Smoothing window in seconds used by plotting scripts when smoothing is supported."
+        )
         self._smooth_spin.valueChanged.connect(self._on_config_changed)
         layout.addRow("Smooth Window (s):", self._smooth_spin)
+        self._apply_form_row_tooltips(layout)
 
         self._mode_context_label = QLabel("")
         self._mode_context_label.setWordWrap(True)
@@ -2342,11 +2438,18 @@ class MainWindow(QMainWindow):
         iso_sampling = QGroupBox("Sampling Geometry")
         iso_sampling_form = QFormLayout(iso_sampling)
         self._window_sec_edit = QLineEdit(str(self._default_cfg.window_sec))
+        self._window_sec_edit.setToolTip(
+            "Length of each regression window (seconds) used for isosbestic fit estimation."
+        )
         self._window_sec_edit.textChanged.connect(self._on_config_changed)
         iso_sampling_form.addRow("Regression Window:", self._window_sec_edit)
         self._step_sec_edit = QLineEdit(str(self._default_cfg.step_sec))
+        self._step_sec_edit.setToolTip(
+            "Step size between regression windows (seconds). Smaller values increase overlap."
+        )
         self._step_sec_edit.textChanged.connect(self._on_config_changed)
         iso_sampling_form.addRow("Regression Step:", self._step_sec_edit)
+        self._apply_form_row_tooltips(iso_sampling_form)
         iso_layout.addWidget(iso_sampling)
 
         iso_accept = QGroupBox("Window Acceptance")
@@ -2354,34 +2457,55 @@ class MainWindow(QMainWindow):
         self._min_valid_windows_spin = QSpinBox()
         self._min_valid_windows_spin.setRange(1, 1000)
         self._min_valid_windows_spin.setValue(self._default_cfg.min_valid_windows)
+        self._min_valid_windows_spin.setToolTip(
+            "Minimum accepted windows required before a session-level isosbestic fit is trusted."
+        )
         self._min_valid_windows_spin.valueChanged.connect(self._on_config_changed)
         iso_accept_form.addRow("Min Valid Windows:", self._min_valid_windows_spin)
         self._min_samples_per_window_spin = QSpinBox()
         self._min_samples_per_window_spin.setRange(1, 100000)
         self._min_samples_per_window_spin.setValue(max(1, self._default_cfg.min_samples_per_window))
+        self._min_samples_per_window_spin.setToolTip(
+            "Minimum samples needed inside a window for that window to be considered valid."
+        )
         self._min_samples_per_window_spin.valueChanged.connect(self._on_config_changed)
         iso_accept_form.addRow("Min Samples per Window:", self._min_samples_per_window_spin)
+        self._apply_form_row_tooltips(iso_accept_form)
         iso_layout.addWidget(iso_accept)
 
         iso_trust = QGroupBox("Correlation-Based Trust of Slope")
         iso_trust_form = QFormLayout(iso_trust)
         self._r_low_edit = QLineEdit(str(self._default_cfg.r_low))
+        self._r_low_edit.setToolTip(
+            "Lower correlation threshold for window-level slope trust."
+        )
         self._r_low_edit.textChanged.connect(self._on_config_changed)
         iso_trust_form.addRow("R-Low Threshold:", self._r_low_edit)
         self._r_high_edit = QLineEdit(str(self._default_cfg.r_high))
+        self._r_high_edit.setToolTip(
+            "Upper correlation threshold used in slope trust weighting."
+        )
         self._r_high_edit.textChanged.connect(self._on_config_changed)
         iso_trust_form.addRow("R-High Threshold:", self._r_high_edit)
         self._g_min_edit = QLineEdit(str(self._default_cfg.g_min))
+        self._g_min_edit.setToolTip(
+            "Minimum gain floor for trusted-slope aggregation across windows."
+        )
         self._g_min_edit.textChanged.connect(self._on_config_changed)
         iso_trust_form.addRow("G-Min Threshold:", self._g_min_edit)
+        self._apply_form_row_tooltips(iso_trust_form)
         iso_layout.addWidget(iso_trust)
         content_layout.addWidget(self._adv_group)
 
         self._adv_prep_group = QGroupBox("Preprocessing")
         prep_layout = QFormLayout(self._adv_prep_group)
         self._lowpass_hz_edit = QLineEdit(str(self._default_cfg.lowpass_hz))
+        self._lowpass_hz_edit.setToolTip(
+            "Lowpass cutoff (Hz) applied before feature-oriented computations."
+        )
         self._lowpass_hz_edit.textChanged.connect(self._on_config_changed)
         prep_layout.addRow("Lowpass Filter:", self._lowpass_hz_edit)
+        self._apply_form_row_tooltips(prep_layout)
         content_layout.addWidget(self._adv_prep_group)
 
         baseline_group = QGroupBox("Baseline / Normalization")
@@ -2394,15 +2518,25 @@ class MainWindow(QMainWindow):
         idx = self._baseline_method_combo.findText(self._default_cfg.baseline_method)
         if idx >= 0:
             self._baseline_method_combo.setCurrentIndex(idx)
+        self._baseline_method_combo.setToolTip(
+            "Method used to estimate baseline F0 for normalization."
+        )
         self._baseline_method_combo.currentIndexChanged.connect(self._on_config_changed)
         baseline_layout.addRow("Baseline Method:", self._baseline_method_combo)
         self._baseline_percentile_label = QLabel("Baseline Percentile:")
         self._baseline_percentile_edit = QLineEdit(str(self._default_cfg.baseline_percentile))
+        self._baseline_percentile_edit.setToolTip(
+            "Percentile value used when the selected baseline method is percentile-based."
+        )
         self._baseline_percentile_edit.textChanged.connect(self._on_config_changed)
         baseline_layout.addRow(self._baseline_percentile_label, self._baseline_percentile_edit)
         self._f0_min_value_edit = QLineEdit(str(self._default_cfg.f0_min_value))
+        self._f0_min_value_edit.setToolTip(
+            "Lower bound applied to F0 to avoid unstable normalization near zero."
+        )
         self._f0_min_value_edit.textChanged.connect(self._on_config_changed)
         baseline_layout.addRow("F0 Min Value:", self._f0_min_value_edit)
+        self._apply_form_row_tooltips(baseline_layout)
         content_layout.addWidget(baseline_group)
 
         self._adv_ev_group = QGroupBox("Feature Detection")
@@ -2415,6 +2549,9 @@ class MainWindow(QMainWindow):
         idx = self._event_signal_combo.findText(self._default_cfg.event_signal)
         if idx >= 0:
             self._event_signal_combo.setCurrentIndex(idx)
+        self._event_signal_combo.setToolTip(
+            "Signal channel used for peak detection and event-derived metrics."
+        )
         self._event_signal_combo.currentIndexChanged.connect(self._on_config_changed)
         ev_layout.addRow("Event Signal:", self._event_signal_combo)
 
@@ -2426,22 +2563,37 @@ class MainWindow(QMainWindow):
         idx = self._peak_method_combo.findText(self._default_cfg.peak_threshold_method)
         if idx >= 0:
             self._peak_method_combo.setCurrentIndex(idx)
+        self._peak_method_combo.setToolTip(
+            "Thresholding method used to determine which peaks are counted as events."
+        )
         self._peak_method_combo.currentIndexChanged.connect(self._on_config_changed)
         ev_layout.addRow("Peak Threshold Method:", self._peak_method_combo)
 
         self._peak_k_label = QLabel("Peak Threshold K:")
         self._peak_k_edit = QLineEdit(str(self._default_cfg.peak_threshold_k))
+        self._peak_k_edit.setToolTip(
+            "Scale factor used by threshold methods that require a K parameter."
+        )
         self._peak_k_edit.textChanged.connect(self._on_config_changed)
         ev_layout.addRow(self._peak_k_label, self._peak_k_edit)
         self._peak_pct_label = QLabel("Peak Threshold Percentile:")
         self._peak_pct_edit = QLineEdit(str(self._default_cfg.peak_threshold_percentile))
+        self._peak_pct_edit.setToolTip(
+            "Percentile cutoff used by percentile-based threshold methods."
+        )
         self._peak_pct_edit.textChanged.connect(self._on_config_changed)
         ev_layout.addRow(self._peak_pct_label, self._peak_pct_edit)
         self._peak_abs_label = QLabel("Peak Threshold Absolute:")
         self._peak_abs_edit = QLineEdit(str(self._default_cfg.peak_threshold_abs))
+        self._peak_abs_edit.setToolTip(
+            "Absolute threshold used only when the selected method requires a fixed cutoff."
+        )
         self._peak_abs_edit.textChanged.connect(self._on_config_changed)
         ev_layout.addRow(self._peak_abs_label, self._peak_abs_edit)
         self._peak_dist_edit = QLineEdit(str(self._default_cfg.peak_min_distance_sec))
+        self._peak_dist_edit.setToolTip(
+            "Minimum spacing between detected peaks, in seconds."
+        )
         self._peak_dist_edit.textChanged.connect(self._on_config_changed)
         ev_layout.addRow("Peak Min Distance:", self._peak_dist_edit)
 
@@ -2454,6 +2606,9 @@ class MainWindow(QMainWindow):
         idx = self._peak_pre_filter_combo.findText(default_pre_filter)
         if idx >= 0:
             self._peak_pre_filter_combo.setCurrentIndex(idx)
+        self._peak_pre_filter_combo.setToolTip(
+            "Optional pre-filter applied before running peak detection."
+        )
         self._peak_pre_filter_combo.currentIndexChanged.connect(self._on_config_changed)
         ev_layout.addRow("Peak Pre-Filter:", self._peak_pre_filter_combo)
 
@@ -2465,24 +2620,35 @@ class MainWindow(QMainWindow):
         idx = self._event_auc_combo.findText(self._default_cfg.event_auc_baseline)
         if idx >= 0:
             self._event_auc_combo.setCurrentIndex(idx)
+        self._event_auc_combo.setToolTip(
+            "Reference baseline convention used when integrating event AUC."
+        )
         self._event_auc_combo.currentIndexChanged.connect(self._on_config_changed)
         ev_layout.addRow("Event AUC Baseline:", self._event_auc_combo)
+        self._apply_form_row_tooltips(ev_layout)
         content_layout.addWidget(self._adv_ev_group)
 
         cfg_group = QGroupBox("Config Source (Advanced)")
         cfg_layout = QFormLayout(cfg_group)
         cfg_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         self._use_custom_config_cb = QCheckBox("Use custom config YAML")
+        self._use_custom_config_cb.setToolTip(
+            "Enable only if you need a non-standard baseline YAML instead of the lab default."
+        )
         self._use_custom_config_cb.stateChanged.connect(self._on_config_changed)
         self._use_custom_config_cb.toggled.connect(self._update_config_source_ui)
         cfg_layout.addRow("Baseline Source:", self._use_custom_config_cb)
         self._config_path = QLineEdit()
         self._config_path.setPlaceholderText("(optional) custom baseline config path")
+        self._config_path.setToolTip(
+            "Path to custom baseline YAML used when custom config mode is enabled."
+        )
         self._config_path.textChanged.connect(self._on_config_changed)
         self._config_path.textChanged.connect(self._update_config_source_ui)
         cfg_row = QHBoxLayout()
         cfg_row.addWidget(self._config_path)
         self._config_browse_btn = QPushButton("Browse...")
+        self._config_browse_btn.setToolTip("Browse for a custom baseline YAML file.")
         self._config_browse_btn.clicked.connect(self._browse_config)
         cfg_row.addWidget(self._config_browse_btn)
         cfg_layout.addRow("Custom Config YAML:", cfg_row)
@@ -2490,6 +2656,7 @@ class MainWindow(QMainWindow):
         self._active_config_source_label.setWordWrap(True)
         self._active_config_source_label.setStyleSheet("font-size: 11px; color: #666;")
         cfg_layout.addRow("", self._active_config_source_label)
+        self._apply_form_row_tooltips(cfg_layout)
         content_layout.addWidget(cfg_group)
 
         content_layout.addStretch()
@@ -2719,6 +2886,9 @@ class MainWindow(QMainWindow):
             explicit_pct = max(0, min(100, int(round(float(self._last_status_pct)))))
 
         candidate = milestone_pct if explicit_pct is None else max(milestone_pct, explicit_pct)
+        # Never show 100% while still actively validating/running.
+        if self._ui_state in (RunnerState.VALIDATING, RunnerState.RUNNING):
+            candidate = min(candidate, 99)
         self._ui_progress_pct = max(self._ui_progress_pct, candidate)
         return self._ui_progress_pct
 
@@ -2754,6 +2924,9 @@ class MainWindow(QMainWindow):
             self._elapsed_label.setText(f"Elapsed: {elapsed_sec:.1f}s")
 
         pct_i = self._effective_progress_pct()
+        if self._ui_state in (RunnerState.VALIDATING, RunnerState.RUNNING):
+            pct_i = min(pct_i, 99)
+            self._ui_progress_pct = min(self._ui_progress_pct, 99)
         self._progress_bar.setValue(pct_i)
         if self._ui_state == RunnerState.IDLE:
             self._progress_bar.setFormat("idle")

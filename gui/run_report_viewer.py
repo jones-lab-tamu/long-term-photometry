@@ -8,7 +8,7 @@ import os
 import re
 from typing import Dict, List, Tuple
 
-from PySide6.QtCore import Qt, QSize, QUrl
+from PySide6.QtCore import Qt, QSize, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QWidget,
@@ -56,10 +56,14 @@ class RunReportViewer(QWidget):
         self._region_tab_images: Dict[str, Dict[str, List[str]]] = {}
         self._tab_indices: Dict[Tuple[str, str], int] = {}
         self._active_image_path = ""
+        self._active_pixmap = QPixmap()
+        self._zoom_mode = False
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(8)
 
-        self._status_label = QLabel("No run report loaded.")
+        self._status_label = QLabel("No completed results loaded.")
         self._status_label.setAlignment(Qt.AlignCenter)
         self._status_label.setStyleSheet("color: gray; font-size: 14px;")
         root.addWidget(self._status_label)
@@ -72,12 +76,14 @@ class RunReportViewer(QWidget):
         selector_row = QHBoxLayout()
         selector_row.addWidget(QLabel("Region:"))
         self._region_combo = QComboBox()
+        self._region_combo.setToolTip("Select the ROI region shown in the results viewer.")
         self._region_combo.currentIndexChanged.connect(self._on_region_changed)
         selector_row.addWidget(self._region_combo, 1)
         selector_row.addStretch()
         ws.addLayout(selector_row)
 
         self._tabs = QTabWidget()
+        self._tabs.setToolTip("Available result views for the selected region.")
         self._tabs.currentChanged.connect(self._on_tab_changed)
         ws.addWidget(self._tabs)
 
@@ -87,31 +93,45 @@ class RunReportViewer(QWidget):
         self._image_title_label.setAlignment(Qt.AlignCenter)
         viewer_col.addWidget(self._image_title_label)
 
-        self._image_label = QLabel()
+        self._image_label = _ClickableImageLabel()
         self._image_label.setAlignment(Qt.AlignCenter)
-        self._image_label.setMinimumSize(640, 400)
         self._image_label.setStyleSheet(
             "QLabel { background: #111; color: #ddd; border: 1px solid #444; }"
         )
         self._image_label.setText("No image available.")
         self._image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        viewer_col.addWidget(self._image_label, 1)
+        self._image_label.setToolTip("Click image to toggle fit/full-size inspection.")
+        self._image_label.clicked.connect(self._on_image_clicked)
+
+        self._image_scroll = QScrollArea()
+        self._image_scroll.setWidgetResizable(False)
+        self._image_scroll.setAlignment(Qt.AlignCenter)
+        self._image_scroll.setFrameShape(QFrame.NoFrame)
+        self._image_scroll.setWidget(self._image_label)
+        self._image_scroll.setMinimumHeight(400)
+        viewer_col.addWidget(self._image_scroll, 1)
+
+        self._zoom_hint_label = QLabel("Click image to toggle fit/full size.")
+        self._zoom_hint_label.setAlignment(Qt.AlignCenter)
+        self._zoom_hint_label.setStyleSheet("font-size: 11px; color: #666;")
+        viewer_col.addWidget(self._zoom_hint_label)
 
         nav_row = QHBoxLayout()
         self._prev_btn = QPushButton("<")
+        self._prev_btn.setToolTip("Previous image in this tab.")
         self._prev_btn.clicked.connect(self._on_prev_image)
         nav_row.addWidget(self._prev_btn)
         self._image_counter_label = QLabel("")
         self._image_counter_label.setAlignment(Qt.AlignCenter)
         nav_row.addWidget(self._image_counter_label, 1)
         self._next_btn = QPushButton(">")
+        self._next_btn.setToolTip("Next image in this tab.")
         self._next_btn.clicked.connect(self._on_next_image)
         nav_row.addWidget(self._next_btn)
         viewer_col.addLayout(nav_row)
         ws.addLayout(viewer_col, 1)
 
         action_group = QGroupBox("Selected Region Actions")
-        self._actions_group = action_group
         action_group_layout = QVBoxLayout(action_group)
         self._actions_scroll = QScrollArea()
         self._actions_scroll.setWidgetResizable(True)
@@ -138,9 +158,13 @@ class RunReportViewer(QWidget):
         self._region_tab_images = {}
         self._tab_indices = {}
         self._active_image_path = ""
+        self._active_pixmap = QPixmap()
+        self._set_zoom_mode(False)
 
-        self._status_label.setText("No run report loaded.")
-        self._status_label.setStyleSheet("color: gray; font-size: 14px;")
+        self._set_status_message(
+            "No completed results loaded. Run the pipeline or open a completed run folder.",
+            level="idle",
+        )
 
         self._region_combo.blockSignals(True)
         self._region_combo.clear()
@@ -151,15 +175,14 @@ class RunReportViewer(QWidget):
             self._tabs.removeTab(0)
         self._tabs.blockSignals(False)
 
-        self._show_no_image("No image available.")
+        self._show_no_image("No image available in the current results workspace.")
         self._clear_action_rows()
         self._workspace.hide()
 
     def set_running_message(self, message: str):
         """Show a minimal running-state message in the Results pane."""
         self.clear()
-        self._status_label.setText(message)
-        self._status_label.setStyleSheet("color: #666; font-size: 14px;")
+        self._set_status_message(message, level="running")
 
     def load_report(self, out_dir: str) -> bool:
         """Load complete-state workspace from a run directory."""
@@ -189,21 +212,22 @@ class RunReportViewer(QWidget):
 
         if not self._region_paths:
             if parse_err:
-                self._status_label.setText(
-                    f"Missing or invalid run_report.json ({parse_err}) and no region deliverables were found."
+                self._set_status_message(
+                    f"Could not load results metadata ({parse_err}). No region deliverables were found.",
+                    level="error",
                 )
-                self._status_label.setStyleSheet("color: #a94442; font-size: 12px;")
             else:
-                self._status_label.setText("No region deliverables discovered in selected run directory.")
-                self._status_label.setStyleSheet("color: #a94442; font-size: 12px;")
+                self._set_status_message(
+                    "No region deliverables were found in the selected run directory.",
+                    level="error",
+                )
             self._workspace.hide()
             return False
 
         title = "Results workspace"
         if is_preview:
             title += " [PREVIEW]"
-        self._status_label.setText(title)
-        self._status_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self._set_status_message(title, level="ready")
         self._workspace.show()
 
         region_names = sorted(self._region_paths.keys(), key=lambda s: s.lower())
@@ -362,7 +386,7 @@ class RunReportViewer(QWidget):
         self._tabs.blockSignals(False)
 
         if not available_tabs:
-            self._show_no_image("No images available for this region.")
+            self._show_no_image("No images available for the selected region.")
             return
 
         if current_tab in available_tabs:
@@ -385,7 +409,7 @@ class RunReportViewer(QWidget):
     def _refresh_active_image(self, reset_index: bool):
         images = self._current_tab_images()
         if not images:
-            self._show_no_image("No images available.")
+            self._show_no_image("No images available for this tab.")
             return
 
         key = self._tab_key()
@@ -399,6 +423,7 @@ class RunReportViewer(QWidget):
         path = images[idx]
         self._active_image_path = path
         self._image_title_label.setText(os.path.basename(path))
+        self._set_zoom_mode(False)
         self._set_image(path)
 
         n = len(images)
@@ -416,18 +441,51 @@ class RunReportViewer(QWidget):
             self._show_no_image(f"Unable to render image:\n{os.path.basename(path)}")
             return
 
-        target = self._image_label.size()
-        if target.width() < 10 or target.height() < 10:
-            target = QSize(1000, 700)
+        self._active_pixmap = pix
+        self._render_image()
 
-        scaled = pix.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    def _on_image_clicked(self) -> None:
+        """Toggle between fit-to-view and full-size inspection mode."""
+        if self._active_pixmap.isNull():
+            return
+        self._set_zoom_mode(not self._zoom_mode)
+        self._render_image()
+
+    def _set_zoom_mode(self, enabled: bool) -> None:
+        self._zoom_mode = bool(enabled)
+        self._zoom_hint_label.setText(
+            "Click image to return to fit mode." if self._zoom_mode
+            else "Click image to toggle fit/full size."
+        )
+
+    def _render_image(self) -> None:
+        """Render active image in fit or full-size mode."""
+        if self._active_pixmap.isNull():
+            return
+        if self._zoom_mode:
+            self._image_label.setPixmap(self._active_pixmap)
+            self._image_label.resize(self._active_pixmap.size())
+            self._image_label.setText("")
+            return
+
+        viewport = self._image_scroll.viewport().size()
+        if viewport.width() < 10 or viewport.height() < 10:
+            viewport = QSize(1000, 700)
+        scaled = self._active_pixmap.scaled(viewport, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._image_label.setPixmap(scaled)
+        self._image_label.resize(scaled.size())
         self._image_label.setText("")
 
     def _show_no_image(self, message: str):
         self._active_image_path = ""
+        self._active_pixmap = QPixmap()
+        self._set_zoom_mode(False)
         self._image_label.setPixmap(QPixmap())
         self._image_label.setText(message)
+        viewport = self._image_scroll.viewport().size()
+        if viewport.width() < 10 or viewport.height() < 10:
+            viewport = QSize(640, 400)
+        self._image_label.resize(viewport)
         self._image_title_label.setText("No image selected.")
         self._prev_btn.setVisible(False)
         self._next_btn.setVisible(False)
@@ -479,6 +537,8 @@ class RunReportViewer(QWidget):
         btn.setFixedWidth(64)
         exists = bool(path and os.path.exists(path))
         btn.setEnabled(exists)
+        if path:
+            btn.setToolTip(path if exists else f"Not available: {path}")
         btn.clicked.connect(lambda _checked=False, p=path: self._open_path(p))
         lay.addWidget(btn)
         lay.addStretch()
@@ -504,7 +564,27 @@ class RunReportViewer(QWidget):
                 if child is not None:
                     self._clear_layout(child)
 
+    def _set_status_message(self, text: str, level: str) -> None:
+        """Centralized status-label styling for workspace states."""
+        style_map = {
+            "idle": "color: gray; font-size: 13px;",
+            "running": "color: #666; font-size: 13px;",
+            "ready": "font-weight: bold; font-size: 14px;",
+            "error": "color: #a94442; font-size: 12px;",
+        }
+        self._status_label.setText(text)
+        self._status_label.setStyleSheet(style_map.get(level, style_map["idle"]))
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self._active_image_path and os.path.isfile(self._active_image_path):
-            self._set_image(self._active_image_path)
+            self._render_image()
+
+
+class _ClickableImageLabel(QLabel):
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)

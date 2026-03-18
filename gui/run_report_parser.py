@@ -106,15 +106,16 @@ def is_successful_completed_run_dir(run_dir: str) -> Tuple[bool, str]:
     if report_err:
         reasons.append(f"run_report.json: {report_err}")
     else:
-        reasons.append("run_report.json present but no explicit success/completion status fields.")
+        reasons.append("run_report.json present but does not explicitly report successful completion.")
     if status_err:
         reasons.append(f"status.json: {status_err}")
     else:
-        reasons.append("status.json present but not terminal schema_version=1 phase=final status=success.")
+        reasons.append("status.json present but does not match terminal success contract (schema_version=1, phase=final, status=success).")
     if manifest_err:
         reasons.append(f"MANIFEST.json: {manifest_err}")
     else:
         reasons.append("MANIFEST.json present but status is not success/completed.")
+    reasons.append("Select a run directory that contains final-success metadata.")
     return False, " | ".join(reasons)
 
 
