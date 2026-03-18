@@ -44,9 +44,9 @@ def test_discovery_dependent_state_signaling(window):
     window._discovery_cache = None
     window._roi_list.clear()
     window._update_button_states()
-    assert not window._roi_filter_combo.isEnabled()
+    assert not window._roi_list.isEnabled()
     assert not window._rep_session_combo.isEnabled()
-    assert "Run Discovery" in window._discovery_controls_hint.text()
+    assert "Select ROIs..." in window._discovery_controls_hint.text()
 
     discovered = {
         "n_total_discovered": 3,
@@ -61,9 +61,9 @@ def test_discovery_dependent_state_signaling(window):
     }
     window._discovery_cache = discovered
     window._populate_discovery_ui(discovered)
-    assert window._roi_filter_combo.isEnabled()
+    assert window._roi_list.isEnabled()
     assert window._rep_session_combo.isEnabled()
-    assert "Discovery loaded" in window._discovery_controls_hint.text()
+    assert "ROI choices loaded" in window._discovery_controls_hint.text()
 
     window._preview_enabled_cb.setChecked(True)
     window._preview_n_spin.setValue(1)
@@ -102,4 +102,3 @@ def test_key_artifact_access_buttons(window, tmp_path, monkeypatch):
     monkeypatch.setattr("gui.main_window._open_file", _fake_open)
     window._on_open_key_artifact("command_invoked.txt")
     assert opened and opened[0].endswith("command_invoked.txt")
-

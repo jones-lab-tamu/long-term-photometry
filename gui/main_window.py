@@ -30,8 +30,9 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QCheckBox, QSpinBox,
-    QDoubleSpinBox, QPushButton, QPlainTextEdit, QSplitter, QScrollArea,
-    QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem,
+    QDoubleSpinBox, QPushButton, QPlainTextEdit, QScrollArea,
+    QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem, QToolButton,
+    QProgressBar,
 )
 
 from gui.process_runner import PipelineRunner, RunnerState
@@ -218,6 +219,9 @@ def get_allowed_peak_threshold_methods_from_config() -> list[str]:
 def get_allowed_event_auc_baselines_from_config() -> list[str]:
     return _get_allowed_from_config_field("event_auc_baseline")
 
+def get_allowed_peak_pre_filters_from_config() -> list[str]:
+    return _get_allowed_from_config_field("peak_pre_filter")
+
 _cached_percentile_reqs = {}
 
 def baseline_method_requires_percentile(method_str: str) -> bool:
@@ -336,6 +340,7 @@ def parse_and_validate_event_feature_knobs(
     peak_dist_str: str,
     event_auc_text: str,
     defaults: dict,
+    peak_pre_filter_text: str | None = None,
 ) -> tuple[dict | None, str | None]:
     """
     Parses and validates the event + feature advanced knobs.
@@ -357,6 +362,14 @@ def parse_and_validate_event_feature_knobs(
     if auc_baseline not in allowed_auc_baselines:
         return None, "Invalid Event AUC Baseline."
 
+    if peak_pre_filter_text is None:
+        peak_pre_filter = str(defaults.get("peak_pre_filter", "none"))
+    else:
+        peak_pre_filter = peak_pre_filter_text.strip()
+    allowed_peak_pre_filters = get_allowed_peak_pre_filters_from_config()
+    if peak_pre_filter not in allowed_peak_pre_filters:
+        return None, "Invalid Peak Pre-Filter."
+
     try:
         dist_val = peak_dist_str.strip()
         peak_dist = float(dist_val if dist_val else defaults["peak_min_distance_sec"])
@@ -369,6 +382,7 @@ def parse_and_validate_event_feature_knobs(
         "event_signal": event_sig_method,
         "peak_threshold_method": peak_method,
         "peak_min_distance_sec": peak_dist,
+        "peak_pre_filter": peak_pre_filter,
         "event_auc_baseline": auc_baseline,
     }
 
@@ -474,62 +488,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(8, 8, 8, 8)
-
-        main_splitter = QSplitter(Qt.Horizontal)
-
-        # --- Zone A: Config Panel (Scrollable Sidebar) ---
-        config_group = self._build_config_panel()
-        config_scroll = QScrollArea()
-        config_scroll.setWidgetResizable(True)
-        config_scroll.setWidget(config_group)
-        config_scroll.setFrameShape(QScrollArea.NoFrame)
-        config_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        config_scroll.setMinimumWidth(480)
-        main_splitter.addWidget(config_scroll)
-
-        # Right side: Content (Log + Results)
-        content_splitter = QSplitter(Qt.Vertical)
-        main_splitter.addWidget(content_splitter)
-
-        # --- Status label & Preview Badge ---
-        status_row = QHBoxLayout()
-        self._status_label = QLabel("Runner State: IDLE")
-        self._status_label.setStyleSheet(
-            "font-weight: bold; padding: 4px; background: #f0f0f0;"
-        )
-        status_row.addWidget(self._status_label, 1)
-
-        self._preview_badge = QLabel("PREVIEW")
-        self._preview_badge.setStyleSheet(
-            "font-weight: bold; color: white; background: #d9534f; "
-            "padding: 2px 8px; border-radius: 4px;"
-        )
-        self._preview_badge.hide()
-        status_row.addWidget(self._preview_badge)
-
-        main_layout.addLayout(status_row, 0)
-
-        # --- Zone B: Log Panel ---
-        log_group = self._build_log_panel()
-        content_splitter.addWidget(log_group)
-
-        # --- Zone C: Results Panel ---
-        results_group = QGroupBox("Results")
-        results_lay = QVBoxLayout(results_group)
-        self._report_viewer = RunReportViewer()
-        results_lay.addWidget(self._report_viewer)
-        content_splitter.addWidget(results_group)
-
-        # Sidebar vs Content stretch
-        main_splitter.setStretchFactor(0, 0)
-        main_splitter.setStretchFactor(1, 1)
-
-        # Inner Content stretch (Log vs Results)
-        content_splitter.setStretchFactor(0, 1)
-        content_splitter.setStretchFactor(1, 2)
-
-        main_splitter.setSizes([500, 1000])
-        main_layout.addWidget(main_splitter, 1)
+        main_layout.addWidget(self._build_status_strip(), 0)
+        main_layout.addWidget(self._build_main_body(), 1)
         self._update_button_states()
 
         # Restore persisted settings
@@ -539,518 +499,75 @@ class MainWindow(QMainWindow):
     # Config Panel
     # ==================================================================
 
-    def _build_config_panel(self) -> QGroupBox:
-        group = QGroupBox("Run Configuration")
-        # Relaxed size policy returned to Preferred to allow scroll area to function correctly
-        outer = QVBoxLayout(group)
+    def _build_status_strip(self) -> QWidget:
+        """Top status strip with status/phase labels and progress."""
+        strip = QWidget()
+        row = QHBoxLayout(strip)
+        row.setContentsMargins(0, 0, 0, 0)
 
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        self._status_label = QLabel("Status: IDLE")
+        self._status_label.setStyleSheet("font-weight: bold;")
+        row.addWidget(self._status_label, 0)
 
-        # Input directory
-        self._input_dir = QLineEdit()
-        self._input_dir.setToolTip("The source recording/session folder to analyze.")
-        self._input_dir.textChanged.connect(self._on_config_changed)
-        input_row = QHBoxLayout()
-        input_row.addWidget(self._input_dir)
-        btn = QPushButton("Browse...")
-        btn.setToolTip("Browse for the input directory.")
-        btn.clicked.connect(lambda: self._browse_dir(self._input_dir, "Select Input Directory"))
-        input_row.addWidget(btn)
-        form.addRow("Input Directory:", input_row)
+        self._phase_label = QLabel("Phase: \u2014")
+        row.addWidget(self._phase_label, 0)
 
-        # Output base directory (run_dir = out_base / run_id)
-        self._output_dir = QLineEdit()
-        self._output_dir.setToolTip("Where the run folder and deliverables will be created. Each run generates a unique timestamped subfolder.")
-        self._output_dir.textChanged.connect(self._on_config_changed)
-        output_row = QHBoxLayout()
-        output_row.addWidget(self._output_dir)
-        btn2 = QPushButton("Browse...")
-        btn2.setToolTip("Browse for the output base directory.")
-        btn2.clicked.connect(lambda: self._browse_dir(self._output_dir, "Select Output Base Directory"))
-        output_row.addWidget(btn2)
-        form.addRow("Output Directory:", output_row)
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setTextVisible(True)
+        row.addWidget(self._progress_bar, 1)
 
-        # Baseline config source: default lab baseline, optional custom YAML.
-        self._use_custom_config_cb = QCheckBox("Use custom config YAML (advanced)")
-        self._use_custom_config_cb.setToolTip(
-            "When unchecked, the lab-standard baseline config is used automatically."
+        self._preview_badge = QLabel("PREVIEW")
+        self._preview_badge.setStyleSheet(
+            "font-weight: bold; color: white; background: #d9534f; "
+            "padding: 2px 8px; border-radius: 4px;"
         )
-        self._use_custom_config_cb.stateChanged.connect(self._on_config_changed)
-        self._use_custom_config_cb.toggled.connect(self._update_config_source_ui)
-        form.addRow("Config Source:", self._use_custom_config_cb)
-
-        self._config_path = QLineEdit()
-        self._config_path.setToolTip(
-            "Optional custom baseline config YAML. Only used when the advanced toggle is enabled."
-        )
-        self._config_path.setPlaceholderText("(advanced) custom baseline config path")
-        self._config_path.textChanged.connect(self._on_config_changed)
-        self._config_path.textChanged.connect(self._update_config_source_ui)
-        config_row = QHBoxLayout()
-        config_row.addWidget(self._config_path)
-        self._config_browse_btn = QPushButton("Browse...")
-        self._config_browse_btn.setToolTip("Browse for a custom baseline configuration YAML file.")
-        self._config_browse_btn.clicked.connect(self._browse_config)
-        config_row.addWidget(self._config_browse_btn)
-        form.addRow("Custom Config YAML:", config_row)
-
-        self._active_config_source_label = QLabel("")
-        self._active_config_source_label.setWordWrap(True)
-        self._active_config_source_label.setStyleSheet("font-size: 11px; color: #666;")
-        form.addRow("", self._active_config_source_label)
-
-        # Format
-        self._format_combo = QComboBox()
-        self._format_combo.addItems(list(FORMAT_CHOICES))
-        self._format_combo.setToolTip("Tells the pipeline how to interpret the input data layout.")
-        self._format_combo.currentIndexChanged.connect(self._on_config_changed)
-        form.addRow("Format:", self._format_combo)
-
-        # sessions_per_hour (optional)
-        self._sph_edit = QLineEdit()
-        self._sph_edit.setPlaceholderText("(optional, integer >= 1)")
-        self._sph_edit.setMaximumWidth(200)
-        self._sph_edit.setToolTip("Required for duty-cycled recordings when session spacing cannot be inferred from timestamps. Leave blank only if the pipeline can determine the spacing on its own.")
-        self._sph_edit.textChanged.connect(self._on_config_changed)
-        form.addRow("Sessions/Hour:", self._sph_edit)
-
-        # SPH warning
-        self._sph_warning = QLabel(
-            "Warning: Duty-cycled data requires sessions_per_hour unless timestamps exist."
-        )
-        self._sph_warning.setStyleSheet("color: #cc6600; font-size: 11px;")
-        form.addRow("", self._sph_warning)
-
-        # session_duration_s (optional)
-        self._duration_edit = QLineEdit()
-        self._duration_edit.setPlaceholderText("(optional, seconds > 0)")
-        self._duration_edit.setMaximumWidth(200)
-        self._duration_edit.setToolTip("The expected duration of each session. Mainly matters when timing cannot be inferred reliably from the data.")
-        self._duration_edit.textChanged.connect(self._on_config_changed)
-        form.addRow("Session Duration (s):", self._duration_edit)
-
-        # smooth_window_s
-        self._smooth_spin = QDoubleSpinBox()
-        self._smooth_spin.setRange(0.01, 100.0)
-        self._smooth_spin.setValue(1.0)
-        self._smooth_spin.setDecimals(2)
-        self._smooth_spin.setSingleStep(0.1)
-        self._smooth_spin.setMaximumWidth(200)
-        self._smooth_spin.setToolTip("Affects smoothing of plotted and output time-series. Higher values result in smoother traces but may mask fast transients.")
-        self._smooth_spin.valueChanged.connect(self._on_config_changed)
-        form.addRow("Smooth Window (s):", self._smooth_spin)
-
-        # Mode
-        self._mode_combo = QComboBox()
-        self._mode_combo.addItems(["both", "phasic", "tonic"])
-        self._mode_combo.setToolTip("Select whether to run tonic analysis, phasic analysis, or both.")
-        form.addRow("Mode:", self._mode_combo)
-        self._mode_combo.currentIndexChanged.connect(self._on_config_changed)
-
-        # Render modes (phasic day-plot families)
-        self._sig_iso_render_mode_combo = QComboBox()
-        self._sig_iso_render_mode_combo.addItems(["qc", "full"])
-        self._sig_iso_render_mode_combo.setCurrentText("qc")
-        self._sig_iso_render_mode_combo.setToolTip(
-            "Render mode for sig/iso day plots. 'qc' is the fast default; 'full' is higher-fidelity rendering."
-        )
-        self._sig_iso_render_mode_combo.currentIndexChanged.connect(self._on_config_changed)
-        form.addRow("Sig/Iso Render Mode:", self._sig_iso_render_mode_combo)
-
-        self._dff_render_mode_combo = QComboBox()
-        self._dff_render_mode_combo.addItems(["qc", "full"])
-        self._dff_render_mode_combo.setCurrentText("qc")
-        self._dff_render_mode_combo.setToolTip(
-            "Render mode for dFF day plots. 'qc' is the fast default; 'full' is higher-fidelity rendering."
-        )
-        self._dff_render_mode_combo.currentIndexChanged.connect(self._on_config_changed)
-        form.addRow("dFF Render Mode:", self._dff_render_mode_combo)
-
-        self._stacked_render_mode_combo = QComboBox()
-        self._stacked_render_mode_combo.addItems(["qc", "full"])
-        self._stacked_render_mode_combo.setCurrentText("qc")
-        self._stacked_render_mode_combo.setToolTip(
-            "Render mode for stacked day plots. 'qc' is the fast default; 'full' is higher-fidelity rendering."
-        )
-        self._stacked_render_mode_combo.currentIndexChanged.connect(self._on_config_changed)
-        form.addRow("Stacked Render Mode:", self._stacked_render_mode_combo)
-
-        self._mode_context_label = QLabel("")
-        self._mode_context_label.setWordWrap(True)
-        self._mode_context_label.setStyleSheet("font-size: 11px; color: #666;")
-        form.addRow("", self._mode_context_label)
-
-        # Traces-only (--traces-only CLI flag)
-        self._traces_only_cb = QCheckBox("Skip feature extraction (traces and QC only)")
-        self._traces_only_cb.setToolTip("Run preprocessing and QC only. Skip feature extraction and downstream deliverable generation.")
-        self._traces_only_cb.stateChanged.connect(self._on_config_changed)
-        form.addRow("Traces-only:", self._traces_only_cb)
-
-        # Preview first N (--preview-first-n CLI flag)
-        self._preview_enabled_cb = QCheckBox("Limit sessions")
-        self._preview_enabled_cb.setToolTip("Limit processing to the first N sessions for a quick test run. Useful for checking settings before a full run.")
-        self._preview_enabled_cb.stateChanged.connect(self._on_config_changed)
-        self._preview_n_spin = QSpinBox()
-        self._preview_n_spin.setRange(1, 100000)
-        self._preview_n_spin.setValue(5)
-        self._preview_n_spin.setMaximumWidth(120)
-        self._preview_n_spin.setEnabled(False)
-        self._preview_enabled_cb.toggled.connect(self._preview_n_spin.setEnabled)
-        self._preview_n_spin.valueChanged.connect(self._on_config_changed)
-        preview_row = QHBoxLayout()
-        preview_row.addWidget(self._preview_enabled_cb)
-        preview_row.addWidget(self._preview_n_spin)
-        preview_row.addStretch()
-        form.addRow("Preview first N:", preview_row)
-
-        # Recursive (always enabled by runner; informational only)
-        self._recursive_cb = QCheckBox("Always enabled by runner")
-        self._recursive_cb.setChecked(True)
-        self._recursive_cb.setEnabled(False)
-        self._recursive_cb.setToolTip(
-            "Always enabled by the runner currently "
-            "(it always passes --recursive)."
-        )
-        form.addRow("Recursive:", self._recursive_cb)
-
-
-
-        # Overwrite (legacy CLI only; disabled in GUI mode)
-        self._overwrite_cb = QCheckBox("Overwrite existing output (legacy CLI only)")
-        self._overwrite_cb.setEnabled(False)
-        self._overwrite_cb.setToolTip(
-            "Not applicable in GUI mode. Each run gets a unique run directory."
-        )
-        form.addRow("", self._overwrite_cb)
-
-        outer.addLayout(form)
-
-        # --- Advanced: Isosbestic Correction ---
-        adv_group = QGroupBox("Advanced: Isosbestic Correction")
-        adv_layout = QFormLayout(adv_group)
-        adv_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-
-        self._window_sec_edit = QLineEdit(str(self._default_cfg.window_sec))
-        self._window_sec_edit.setToolTip("The duration of the sliding window used for isosbestic regression fitting.")
-        adv_layout.addRow("Regression Window (sec):", self._window_sec_edit)
-
-        self._step_sec_edit = QLineEdit(str(self._default_cfg.step_sec))
-        self._step_sec_edit.setToolTip("How far the sliding window moves between regression fits.")
-        adv_layout.addRow("Regression Step (sec):", self._step_sec_edit)
-
-        self._min_valid_windows_spin = QSpinBox()
-        self._min_valid_windows_spin.setRange(1, 1000)
-        self._min_valid_windows_spin.setValue(self._default_cfg.min_valid_windows)
-        self._min_valid_windows_spin.setToolTip("Minimum number of valid regression windows required to compute a stable fit.")
-        adv_layout.addRow("Min Valid Windows:", self._min_valid_windows_spin)
-
-        self._r_low_edit = QLineEdit(str(self._default_cfg.r_low))
-        self._r_low_edit.setToolTip("Lower threshold for the correlation coefficient (R) to consider a regression window valid.")
-        adv_layout.addRow("R-Low Threshold:", self._r_low_edit)
-
-        self._r_high_edit = QLineEdit(str(self._default_cfg.r_high))
-        self._r_high_edit.setToolTip("Upper threshold for the correlation coefficient (R) to consider a regression window valid.")
-        adv_layout.addRow("R-High Threshold:", self._r_high_edit)
-
-        self._g_min_edit = QLineEdit(str(self._default_cfg.g_min))
-        self._g_min_edit.setToolTip("Minimum green channel intensity required for a window to be included in the regression.")
-        adv_layout.addRow("G-Min Threshold:", self._g_min_edit)
-
-        self._min_samples_per_window_spin = QSpinBox()
-        self._min_samples_per_window_spin.setRange(1, 100000)
-        
-        # In our schema, min_samples_per_window defaults to 0 (dynamic).
-        # But the strict GUI spec for Step 5 says to enforce >= 1.
-        default_min_samples = self._default_cfg.min_samples_per_window
-        if default_min_samples < 1:
-            default_min_samples = 1
-        
-        self._min_samples_per_window_spin.setValue(default_min_samples)
-        self._min_samples_per_window_spin.setToolTip("Minimum valid samples per window.")
-        adv_layout.addRow("Min Samples per Window:", self._min_samples_per_window_spin)
-
-        self._adv_group = adv_group
-        outer.addWidget(adv_group)
-
-        # Step 6 baseline and preprocessing knobs apply to all modes, only percentile is method-dependent.
-        # --- Advanced: Preprocessing + Baseline ---
-        adv_prep_group = QGroupBox("Advanced: Preprocessing + Baseline")
-        adv_prep_layout = QFormLayout(adv_prep_group)
-        adv_prep_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-
-        self._lowpass_hz_edit = QLineEdit(str(self._default_cfg.lowpass_hz))
-        self._lowpass_hz_edit.setToolTip("Frequency cutoff for the low-pass filter applied to raw traces to remove high-frequency noise.")
-        adv_prep_layout.addRow("Lowpass Filter (Hz):", self._lowpass_hz_edit)
-
-        self._baseline_method_combo = QComboBox()
-        allowed_methods = get_allowed_baseline_methods_from_config()
-        if self._default_cfg.baseline_method not in allowed_methods:
-            allowed_methods.append(self._default_cfg.baseline_method)
-            
-        self._baseline_method_combo.addItems(sorted(allowed_methods))
-        
-        # Set combo box to the default value
-        idx = self._baseline_method_combo.findText(self._default_cfg.baseline_method)
-        if idx >= 0:
-            self._baseline_method_combo.setCurrentIndex(idx)
-            
-        self._baseline_method_combo.setToolTip("Controls how the baseline reference is computed before dFF/event calculations. Leave at the default unless you have a specific analysis reason to change it.")
-        adv_prep_layout.addRow("Baseline Method:", self._baseline_method_combo)
-
-        self._baseline_percentile_edit = QLineEdit(str(self._default_cfg.baseline_percentile))
-        self._baseline_percentile_edit.setToolTip("The percentile used for baseline estimation. Only applies to percentile-based methods.")
-        self._baseline_percentile_label = QLabel("Baseline Percentile:")
-        adv_prep_layout.addRow(self._baseline_percentile_label, self._baseline_percentile_edit)
-
-        self._f0_min_value_edit = QLineEdit(str(self._default_cfg.f0_min_value))
-        self._f0_min_value_edit.setToolTip("Minimum allowed value for the calculated baseline (F0) to prevent division by zero or extremely low values.")
-        adv_prep_layout.addRow("F0 Min Value:", self._f0_min_value_edit)
-
-        self._adv_prep_group = adv_prep_group
-        outer.addWidget(adv_prep_group)
-
-        # --- Advanced: Events + Features ---
-        adv_ev_group = QGroupBox("Advanced: Events + Features")
-        adv_ev_layout = QFormLayout(adv_ev_group)
-        adv_ev_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-
-        self._event_signal_combo = QComboBox()
-        allowed_sigs = get_allowed_event_signals_from_config()
-        if self._default_cfg.event_signal not in allowed_sigs:
-            allowed_sigs.append(self._default_cfg.event_signal)
-        self._event_signal_combo.addItems(sorted(allowed_sigs))
-        idx = self._event_signal_combo.findText(self._default_cfg.event_signal)
-        if idx >= 0: self._event_signal_combo.setCurrentIndex(idx)
-        self._event_signal_combo.setToolTip("The signal type used for event detection (e.g., dFF or detrended delta_f).")
-        adv_ev_layout.addRow("Event Signal:", self._event_signal_combo)
-
-        self._peak_method_combo = QComboBox()
-        allowed_peak_methods = get_allowed_peak_threshold_methods_from_config()
-        if self._default_cfg.peak_threshold_method not in allowed_peak_methods:
-            allowed_peak_methods.append(self._default_cfg.peak_threshold_method)
-        self._peak_method_combo.addItems(sorted(allowed_peak_methods))
-        idx = self._peak_method_combo.findText(self._default_cfg.peak_threshold_method)
-        if idx >= 0: self._peak_method_combo.setCurrentIndex(idx)
-        self._peak_method_combo.setToolTip("Algorithm used to determine the threshold for identifying significant peaks/events.")
-        adv_ev_layout.addRow("Peak Threshold Method:", self._peak_method_combo)
-
-        self._peak_k_edit = QLineEdit(str(self._default_cfg.peak_threshold_k))
-        self._peak_k_edit.setToolTip("Multiplier for Standard Deviation or MAD based thresholding methods.")
-        self._peak_k_label = QLabel("Peak Threshold K:")
-        adv_ev_layout.addRow(self._peak_k_label, self._peak_k_edit)
-
-        self._peak_pct_edit = QLineEdit(str(self._default_cfg.peak_threshold_percentile))
-        self._peak_pct_edit.setToolTip("Percentile used for identifying peaks if using a percentile-based threshold method.")
-        self._peak_pct_label = QLabel("Peak Threshold Percentile:")
-        adv_ev_layout.addRow(self._peak_pct_label, self._peak_pct_edit)
-
-        self._peak_abs_edit = QLineEdit(str(self._default_cfg.peak_threshold_abs))
-        self._peak_abs_edit.setToolTip("Fixed absolute value threshold for identifying peaks.")
-        self._peak_abs_label = QLabel("Peak Threshold Absolute:")
-        adv_ev_layout.addRow(self._peak_abs_label, self._peak_abs_edit)
-
-        self._peak_dist_edit = QLineEdit(str(self._default_cfg.peak_min_distance_sec))
-        self._peak_dist_edit.setToolTip("Minimum time separation required between adjacent peaks to be counted as distinct events.")
-        adv_ev_layout.addRow("Peak Min Distance (sec):", self._peak_dist_edit)
-
-        self._event_auc_combo = QComboBox()
-        allowed_auc = get_allowed_event_auc_baselines_from_config()
-        if self._default_cfg.event_auc_baseline not in allowed_auc:
-            allowed_auc.append(self._default_cfg.event_auc_baseline)
-        self._event_auc_combo.addItems(sorted(allowed_auc))
-        idx = self._event_auc_combo.findText(self._default_cfg.event_auc_baseline)
-        if idx >= 0: self._event_auc_combo.setCurrentIndex(idx)
-        self._event_auc_combo.setToolTip("Determines the baseline reference used for calculating the Area Under the Curve (AUC) for detected events.")
-        adv_ev_layout.addRow("Event AUC Baseline:", self._event_auc_combo)
-
-        self._adv_ev_group = adv_ev_group
-        outer.addWidget(adv_ev_group)
-
-        # Wire visibility based on baseline method
-        self._baseline_method_combo.currentIndexChanged.connect(self._update_adv_prep_visibility)
-        self._update_adv_prep_visibility()
-
-        # Wire visibility based on peak threshold method
-        self._peak_method_combo.currentIndexChanged.connect(self._update_adv_ev_visibility)
-        self._update_adv_ev_visibility()
-
-        # Wire visibility based on mode
-        self._mode_combo.currentIndexChanged.connect(self._update_adv_group_visibility)
-        self._update_adv_group_visibility()
-
-        # --- Discovery Section ---
-        disc_group = QGroupBox("Session / ROI Discovery")
-        disc_layout = QVBoxLayout(disc_group)
-
-        disc_btn_row = QHBoxLayout()
-        self._discover_btn = QPushButton("Discover Sessions / ROIs")
-        self._discover_btn.setToolTip("Search the input directory for sessions and ROIs based on the selected format.")
-        self._discover_btn.clicked.connect(self._on_discover)
-        disc_btn_row.addWidget(self._discover_btn)
-        disc_btn_row.addStretch()
-        disc_layout.addLayout(disc_btn_row)
-
-        self._discovery_summary = QLabel("No discovery run yet.")
-        self._discovery_summary.setStyleSheet("color: #666; font-size: 11px;")
-        disc_layout.addWidget(self._discovery_summary)
-
-        self._discovery_controls_hint = QLabel(
-            "ROI and representative controls require discovery."
-        )
-        self._discovery_controls_hint.setStyleSheet("color: #8a6d3b; font-size: 11px;")
-        self._discovery_controls_hint.setWordWrap(True)
-        disc_layout.addWidget(self._discovery_controls_hint)
-
-        # Sessions list (read-only, exact discovery order)
-        disc_lists = QHBoxLayout()
-
-        sess_col = QVBoxLayout()
-        sess_col.addWidget(QLabel("Sessions (discovery order):"))
-        self._sessions_list = QListWidget()
-        self._sessions_list.setMaximumHeight(120)
-        self._sessions_list.setSelectionMode(QListWidget.NoSelection)
-        sess_col.addWidget(self._sessions_list)
-        disc_lists.addLayout(sess_col)
-
-        # ROI filter mode (Include vs Exclude)
-        roi_filter_row = QHBoxLayout()
-        roi_filter_row.addWidget(QLabel("ROI Filter Mode:"))
-        self._roi_filter_combo = QComboBox()
-        self._roi_filter_combo.addItems(["Include selected", "Exclude selected"])
-        self._roi_filter_combo.setMaximumWidth(200)
-        self._roi_filter_combo.currentIndexChanged.connect(self._on_config_changed)
-        roi_filter_row.addWidget(self._roi_filter_combo)
-        roi_filter_row.addStretch()
-        disc_layout.addLayout(roi_filter_row)
-
-        # ROIs checklist (checkable, exact discovery order)
-        roi_col = QVBoxLayout()
-        roi_col.addWidget(QLabel("ROIs (check to include/exclude):"))
-        self._roi_list = QListWidget()
-        self._roi_list.setMaximumHeight(120)
-        roi_col.addWidget(self._roi_list)
-        roi_btn_row = QHBoxLayout()
-        self._roi_select_all_btn = QPushButton("Select all")
-        self._roi_select_all_btn.clicked.connect(self._on_roi_select_all)
-        roi_btn_row.addWidget(self._roi_select_all_btn)
-        self._roi_select_none_btn = QPushButton("Select none")
-        self._roi_select_none_btn.clicked.connect(self._on_roi_select_none)
-        roi_btn_row.addWidget(self._roi_select_none_btn)
-        roi_btn_row.addStretch()
-        roi_col.addLayout(roi_btn_row)
-        disc_lists.addLayout(roi_col)
-
-        disc_layout.addLayout(disc_lists)
-
-        # Representative session dropdown
-        rep_row = QHBoxLayout()
-        rep_row.addWidget(QLabel("Representative Session:"))
-        self._rep_session_combo = QComboBox()
-        self._rep_session_combo.addItem("(auto)")
-        self._rep_session_combo.setMinimumWidth(200)
-        self._rep_session_combo.setToolTip("Select a specific session to use for representative summary plots. Leave at (auto) for default selection.")
-        self._rep_session_combo.currentIndexChanged.connect(self._on_config_changed)
-        rep_row.addWidget(self._rep_session_combo)
-        rep_row.addStretch()
-        disc_layout.addLayout(rep_row)
-
-        self._rep_preview_hint = QLabel("")
-        self._rep_preview_hint.setWordWrap(True)
-        self._rep_preview_hint.setStyleSheet("color: #666; font-size: 11px;")
-        disc_layout.addWidget(self._rep_preview_hint)
-
-        # Track manual ROI checklist changes as configuration intent changes.
-        self._roi_list.itemChanged.connect(lambda _item: self._on_config_changed())
-
-        outer.addWidget(disc_group)
-
-        # Buttons row
-        btn_row = QHBoxLayout()
-        self._validate_btn = QPushButton("Validate Only")
-        self._validate_btn.setToolTip("Check settings and directory structure without running the full analysis.")
-        self._validate_btn.clicked.connect(self._on_validate)
-        btn_row.addWidget(self._validate_btn)
-
-        self._run_btn = QPushButton("Run Pipeline")
-        self._run_btn.setStyleSheet("font-weight: bold;")
-        self._run_btn.setToolTip("Start the full analysis pipeline using the current settings.")
-        self._run_btn.clicked.connect(self._on_run)
-        btn_row.addWidget(self._run_btn)
-
-        self._cancel_btn = QPushButton("Cancel")
-        self._cancel_btn.setToolTip("Stop the currently running pipeline.")
-        self._cancel_btn.clicked.connect(self._on_cancel)
-        btn_row.addWidget(self._cancel_btn)
-
-        self._preview_config_btn = QPushButton("Preview Config")
-        self._preview_config_btn.setToolTip("Show the exact configuration that will be used for the run, combining the YAML file and GUI overrides.")
-        self._preview_config_btn.clicked.connect(self._on_preview_config)
-        btn_row.addWidget(self._preview_config_btn)
-
-        self._open_results_btn = QPushButton("Open Results...")
-        self._open_results_btn.clicked.connect(self._on_open_results)
-        btn_row.addWidget(self._open_results_btn)
-
-        self._open_folder_btn = QPushButton("Open Run Folder")
-        self._open_folder_btn.clicked.connect(self._on_open_folder)
-        btn_row.addWidget(self._open_folder_btn)
-
-        btn_row.addStretch()
-        outer.addLayout(btn_row)
-
-        artifact_row = QHBoxLayout()
-        artifact_row.addWidget(QLabel("Key Files:"))
-
-        self._open_cmd_file_btn = QPushButton("Command")
-        self._open_cmd_file_btn.setToolTip("Open command_invoked.txt for reproducible CLI argv.")
-        self._open_cmd_file_btn.clicked.connect(lambda: self._on_open_key_artifact("command_invoked.txt"))
-        artifact_row.addWidget(self._open_cmd_file_btn)
-
-        self._open_spec_file_btn = QPushButton("Run Spec")
-        self._open_spec_file_btn.setToolTip("Open gui_run_spec.json (GUI intent/provenance).")
-        self._open_spec_file_btn.clicked.connect(lambda: self._on_open_key_artifact("gui_run_spec.json"))
-        artifact_row.addWidget(self._open_spec_file_btn)
-
-        self._open_cfg_file_btn = QPushButton("Effective Config")
-        self._open_cfg_file_btn.setToolTip("Open config_effective.yaml actually passed to runner.")
-        self._open_cfg_file_btn.clicked.connect(lambda: self._on_open_key_artifact("config_effective.yaml"))
-        artifact_row.addWidget(self._open_cfg_file_btn)
-
-        self._open_manifest_file_btn = QPushButton("Manifest")
-        self._open_manifest_file_btn.setToolTip("Open MANIFEST.json for delivered artifact metadata.")
-        self._open_manifest_file_btn.clicked.connect(lambda: self._on_open_key_artifact("MANIFEST.json"))
-        artifact_row.addWidget(self._open_manifest_file_btn)
-
-        self._open_report_file_btn = QPushButton("Run Report")
-        self._open_report_file_btn.setToolTip("Open run_report.json for run context and summary metadata.")
-        self._open_report_file_btn.clicked.connect(lambda: self._on_open_key_artifact("run_report.json"))
-        artifact_row.addWidget(self._open_report_file_btn)
-
-        artifact_row.addStretch()
-        outer.addLayout(artifact_row)
-
-        # Compact, read-only readiness hint near Run controls.
-        self._run_reason_label = QLabel("Run status: Validation required before first run.")
-        self._run_reason_label.setWordWrap(True)
-        self._run_reason_label.setStyleSheet("color: #8a6d3b; font-size: 11px;")
-        outer.addWidget(self._run_reason_label)
-
-        # Compact, read-only pre-run intent summary.
-        summary_group = QGroupBox("Effective Run Summary")
-        summary_layout = QVBoxLayout(summary_group)
-        summary_layout.setContentsMargins(8, 6, 8, 6)
-        self._effective_summary_label = QLabel()
-        self._effective_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._effective_summary_label.setWordWrap(True)
-        self._effective_summary_label.setStyleSheet("font-size: 11px;")
-        summary_layout.addWidget(self._effective_summary_label)
-        outer.addWidget(summary_group)
-
-        # Initialize config source UI after all related widgets exist.
-        self._update_config_source_ui()
-
-        return group
+        self._preview_badge.hide()
+        row.addWidget(self._preview_badge, 0)
+        return strip
+
+    def _build_main_body(self) -> QWidget:
+        """Fixed major panes: upper-left controls, lower-left log, right results."""
+        body = QWidget()
+        row = QHBoxLayout(body)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        left_pane = self._build_left_pane()
+        left_pane.setMinimumWidth(520)
+        row.addWidget(left_pane, 0)
+        row.addWidget(self._build_results_pane(), 1)
+        return body
+
+    def _build_left_pane(self) -> QWidget:
+        """Fixed left column with control area above and log pane below."""
+        pane = QWidget()
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QScrollArea.NoFrame)
+        controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        controls_scroll.setWidget(self._build_config_panel())
+
+        log_group = self._build_log_panel()
+        log_group.setMinimumHeight(180)
+
+        layout.addWidget(controls_scroll, 3)
+        layout.addWidget(log_group, 2)
+        return pane
+
+    def _build_results_pane(self) -> QGroupBox:
+        """Right pane with the large results viewer."""
+        results_group = QGroupBox("Results")
+        results_lay = QVBoxLayout(results_group)
+        self._report_viewer = RunReportViewer()
+        results_lay.addWidget(self._report_viewer)
+        return results_group
 
     # ==================================================================
     # Log Panel
@@ -1189,15 +706,16 @@ class MainWindow(QMainWindow):
         smooth = self._smooth_spin.value()
         self._track_if_changed("smooth_window_s", smooth, 1.0, user_set)
 
-        sig_iso_render_mode_text = self._sig_iso_render_mode_combo.currentText()
+        plot_mode_full = self._plotting_mode_combo.currentText() == "Full"
+        sig_iso_render_mode_text = "full" if plot_mode_full else "qc"
         sig_iso_render_mode_val = None if sig_iso_render_mode_text == "qc" else sig_iso_render_mode_text
         self._track_if_changed("sig_iso_render_mode", sig_iso_render_mode_text, "qc", user_set)
 
-        dff_render_mode_text = self._dff_render_mode_combo.currentText()
+        dff_render_mode_text = "full" if plot_mode_full else "qc"
         dff_render_mode_val = None if dff_render_mode_text == "qc" else dff_render_mode_text
         self._track_if_changed("dff_render_mode", dff_render_mode_text, "qc", user_set)
 
-        stacked_render_mode_text = self._stacked_render_mode_combo.currentText()
+        stacked_render_mode_text = "full" if plot_mode_full else "qc"
         stacked_render_mode_val = None if stacked_render_mode_text == "qc" else stacked_render_mode_text
         self._track_if_changed("stacked_render_mode", stacked_render_mode_text, "qc", user_set)
 
@@ -1237,7 +755,6 @@ class MainWindow(QMainWindow):
         # --- ROI selection (include vs exclude) ---
         include_roi_ids = None
         exclude_roi_ids = None
-        is_exclude_mode = (self._roi_filter_combo.currentIndex() == 1)
         if self._discovery_cache is not None:
             all_rois = [r["roi_id"] for r in self._discovery_cache.get("rois", [])]
             checked = []
@@ -1245,26 +762,14 @@ class MainWindow(QMainWindow):
                 item = self._roi_list.item(i)
                 if item.checkState() == Qt.Checked:
                     checked.append(item.text())
-            if is_exclude_mode:
-                # Exclude mode: checked = excluded ROIs
-                if len(checked) == 0:
-                    exclude_roi_ids = None  # exclude nothing
-                elif len(checked) == len(all_rois):
-                    exclude_roi_ids = []  # all excluded (blocked by GUI)
-                    user_set.append("exclude_roi_ids")
-                else:
-                    exclude_roi_ids = checked
-                    user_set.append("exclude_roi_ids")
+            if len(checked) == len(all_rois):
+                include_roi_ids = None
+            elif len(checked) == 0:
+                include_roi_ids = []
+                user_set.append("include_roi_ids")
             else:
-                # Include mode: checked = included ROIs
-                if len(checked) == len(all_rois):
-                    include_roi_ids = None  # all included (default)
-                elif len(checked) == 0:
-                    include_roi_ids = []  # none included (blocked by GUI)
-                    user_set.append("include_roi_ids")
-                else:
-                    include_roi_ids = checked
-                    user_set.append("include_roi_ids")
+                include_roi_ids = checked
+                user_set.append("include_roi_ids")
 
         # --- Config Overrides ---
         config_overrides = {}
@@ -1319,6 +824,7 @@ class MainWindow(QMainWindow):
             "peak_threshold_percentile": self._default_cfg.peak_threshold_percentile,
             "peak_threshold_abs": self._default_cfg.peak_threshold_abs,
             "peak_min_distance_sec": self._default_cfg.peak_min_distance_sec,
+            "peak_pre_filter": getattr(self._default_cfg, "peak_pre_filter", "none"),
             "event_auc_baseline": self._default_cfg.event_auc_baseline,
         }
         ev_overrides, _ = parse_and_validate_event_feature_knobs(
@@ -1330,6 +836,7 @@ class MainWindow(QMainWindow):
             self._peak_dist_edit.text(),
             self._event_auc_combo.currentText(),
             defaults=default_ev_dict,
+            peak_pre_filter_text=self._peak_pre_filter_combo.currentText(),
         )
         if ev_overrides is not None:
             changed_ev_overrides = compute_overrides_user_changed(ev_overrides, default_ev_dict)
@@ -1439,20 +946,15 @@ class MainWindow(QMainWindow):
             except ValueError:
                 return f"Session Duration must be a number, got: '{dur}'"
 
-        # ROI selection: block "process nothing" states
+        # ROI selection: include-only semantics (checked == included)
         if self._discovery_cache is not None:
             total_rois = self._roi_list.count()
             checked_count = sum(
                 1 for i in range(total_rois)
                 if self._roi_list.item(i).checkState() == Qt.Checked
             )
-            is_exclude_mode = (self._roi_filter_combo.currentIndex() == 1)
-            if not is_exclude_mode and checked_count == 0:
-                return ("No ROIs selected. Select at least one ROI "
-                        "or click Select all.")
-            if is_exclude_mode and checked_count == total_rois:
-                return ("All ROIs excluded. Uncheck at least one ROI "
-                        "or click Select none.")
+            if checked_count == 0:
+                return "No ROIs selected. Check at least one ROI."
 
         # Representative session must remain valid under preview truncation.
         rep_session_idx = None
@@ -1516,6 +1018,7 @@ class MainWindow(QMainWindow):
             "peak_threshold_percentile": self._default_cfg.peak_threshold_percentile,
             "peak_threshold_abs": self._default_cfg.peak_threshold_abs,
             "peak_min_distance_sec": self._default_cfg.peak_min_distance_sec,
+            "peak_pre_filter": getattr(self._default_cfg, "peak_pre_filter", "none"),
             "event_auc_baseline": self._default_cfg.event_auc_baseline,
         }
         _, err = parse_and_validate_event_feature_knobs(
@@ -1527,6 +1030,7 @@ class MainWindow(QMainWindow):
             self._peak_dist_edit.text(),
             self._event_auc_combo.currentText(),
             defaults=default_ev_dict,
+            peak_pre_filter_text=self._peak_pre_filter_combo.currentText(),
         )
         if err:
             return err
@@ -1584,12 +1088,12 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _on_discover(self):
-        """Run discovery via the runner backend and populate the UI."""
+        """Resolve available ROIs via the runner backend and populate ROI selection."""
         input_dir = self._input_dir.text().strip()
         config_path = self._active_config_source_path()
 
         if not input_dir or not os.path.isdir(input_dir):
-            QMessageBox.warning(self, "Discovery Error",
+            QMessageBox.warning(self, "ROI Selection Error",
                                 "Select a valid input directory first.")
             return
         if not config_path or not os.path.isfile(config_path):
@@ -1597,7 +1101,7 @@ class MainWindow(QMainWindow):
                 msg = "Select a valid custom config YAML first."
             else:
                 msg = f"Default lab baseline config is missing:\n{config_path}"
-            QMessageBox.warning(self, "Discovery Error", msg)
+            QMessageBox.warning(self, "ROI Selection Error", msg)
             return
 
         spec = self._build_discovery_spec()
@@ -1608,21 +1112,26 @@ class MainWindow(QMainWindow):
             self._discovery_summary.setText("Discovery failed.")
             self._sessions_list.clear()
             self._roi_list.clear()
+            if hasattr(self, "_roi_selection_container"):
+                self._roi_selection_container.setVisible(False)
             self._rep_session_combo.clear()
             self._rep_session_combo.addItem("(auto)")
             self._append_log(f"Discovery error: {e}")
-            QMessageBox.critical(self, "Discovery Failed", str(e))
+            QMessageBox.critical(self, "ROI Selection Failed", str(e))
             return
 
         self._discovery_cache = result
         self._populate_discovery_ui(result)
         self._append_log(
-            f"Discovery complete: {result.get('n_total_discovered', 0)} sessions, "
-            f"{len(result.get('rois', []))} ROIs, format={result.get('resolved_format', '?')}"
+            f"ROI selection ready: {len(result.get('rois', []))} ROIs found "
+            f"(format={result.get('resolved_format', '?')})."
         )
 
     def _populate_discovery_ui(self, disco: dict):
-        """Fill sessions list, ROI checklist, and rep session combo from discovery JSON."""
+        """Fill ROI checklist and compatibility session data from discovery JSON."""
+        if hasattr(self, "_roi_selection_container"):
+            self._roi_selection_container.setVisible(True)
+
         # Summary
         n_total = disco.get("n_total_discovered", 0)
         n_preview = disco.get("n_preview", 0)
@@ -1891,47 +1400,6 @@ class MainWindow(QMainWindow):
         self._last_status_msg = ""
         self._render_status_label()
 
-    def _render_status_label(self, is_updating: bool = False):
-        """Compose status label from Runner state + status.json fields."""
-        parts = [f"Runner State: {self._state_str}"]
-        parts.append(f"Phase: {self._last_status_phase}")
-        parts.append(f"Status: {self._last_status_state}")
-        
-        if self._last_status_duration:
-            parts.append(f"Duration: {self._last_status_duration}")
-            
-        if self._last_status_errors:
-            parts.append(f"({len(self._last_status_errors)} Error(s))")
-
-        if self._last_status_msg:
-            parts.append(f"[{self._last_status_msg}]")
-
-        if is_updating and not self._last_status_msg:
-            parts.append("[updating...]")
-
-        self._status_label.setText(" | ".join(parts))
-
-    def _on_status(self, data: dict):
-        """Handle a successfully parsed status.json dictionary."""
-        self._last_status_phase = str(data.get("phase", "?"))
-        self._last_status_state = str(data.get("status", "?"))
-        
-        # Format duration to 1 decimal place if available
-        dur = data.get("duration_sec")
-        if isinstance(dur, (int, float)):
-            self._last_status_duration = f"{dur:.1f}s"
-        else:
-            self._last_status_duration = ""
-            
-        self._last_status_errors = data.get("errors", [])
-        self._last_status_msg = "" # Clear warnings on valid parse
-        
-        self._render_status_label(is_updating=False)
-
-        # Detect cancellation via status.json
-        if self._last_status_state.lower() == "cancelled":
-            self._saw_cancel_status = True
-
     def _on_status_parse_error(self, msg: str):
         """Update UI to show partial write / reading state (non-critical)."""
         self._last_status_msg = msg
@@ -2085,6 +1553,8 @@ class MainWindow(QMainWindow):
 
     def _apply_preview_labeling(self):
         """Source preview state from run_report.json and update window/badge."""
+        # Preview controls are demoted from idle layout, but preview mode may still
+        # be active via compatibility state; keep explicit top-strip indication.
         self.setWindowTitle("Photometry Pipeline Deliverables")
         self._preview_badge.hide()
         
@@ -2138,6 +1608,18 @@ class MainWindow(QMainWindow):
         smooth = self._settings.value("smooth_window_s", 1.0, float)
         self._smooth_spin.setValue(smooth)
 
+        plotting_mode = self._settings.value("plotting_mode", "", str).strip()
+        if not plotting_mode:
+            legacy_modes = [
+                self._settings.value("sig_iso_render_mode", "qc", str),
+                self._settings.value("dff_render_mode", "qc", str),
+                self._settings.value("stacked_render_mode", "qc", str),
+            ]
+            plotting_mode = "Full" if any(m == "full" for m in legacy_modes) else "Standard"
+        if self._plotting_mode_combo.findText(plotting_mode) >= 0:
+            self._plotting_mode_combo.setCurrentText(plotting_mode)
+        self._on_plotting_mode_changed()
+
         sig_iso_render_mode = self._settings.value("sig_iso_render_mode", "qc", str)
         if self._sig_iso_render_mode_combo.findText(sig_iso_render_mode) >= 0:
             self._sig_iso_render_mode_combo.setCurrentText(sig_iso_render_mode)
@@ -2149,6 +1631,14 @@ class MainWindow(QMainWindow):
         stacked_render_mode = self._settings.value("stacked_render_mode", "qc", str)
         if self._stacked_render_mode_combo.findText(stacked_render_mode) >= 0:
             self._stacked_render_mode_combo.setCurrentText(stacked_render_mode)
+
+        peak_pre_filter = self._settings.value(
+            "peak_pre_filter",
+            str(getattr(self._default_cfg, "peak_pre_filter", "none")),
+            str,
+        )
+        if self._peak_pre_filter_combo.findText(peak_pre_filter) >= 0:
+            self._peak_pre_filter_combo.setCurrentText(peak_pre_filter)
 
         overwrite = self._settings.value("overwrite", False, bool)
         self._overwrite_cb.setChecked(overwrite)
@@ -2166,9 +1656,11 @@ class MainWindow(QMainWindow):
         self._settings.setValue("sessions_per_hour", self._sph_edit.text().strip())
         self._settings.setValue("session_duration_s", self._duration_edit.text().strip())
         self._settings.setValue("smooth_window_s", self._smooth_spin.value())
+        self._settings.setValue("plotting_mode", self._plotting_mode_combo.currentText())
         self._settings.setValue("sig_iso_render_mode", self._sig_iso_render_mode_combo.currentText())
         self._settings.setValue("dff_render_mode", self._dff_render_mode_combo.currentText())
         self._settings.setValue("stacked_render_mode", self._stacked_render_mode_combo.currentText())
+        self._settings.setValue("peak_pre_filter", self._peak_pre_filter_combo.currentText())
         self._settings.setValue("overwrite", self._overwrite_cb.isChecked())
         self._settings.endGroup()
         self._settings.sync()
@@ -2187,34 +1679,25 @@ class MainWindow(QMainWindow):
     def _compute_roi_filter_summary(self) -> str:
         """Human-readable summary of current ROI filtering intent."""
         if self._discovery_cache is None:
-            return "Unknown (run Discovery to inspect/include/exclude explicitly)"
+            return "Unknown (run Select ROIs...)"
 
         total = self._roi_list.count()
         checked = sum(
             1 for i in range(total)
             if self._roi_list.item(i).checkState() == Qt.Checked
         )
-        exclude_mode = (self._roi_filter_combo.currentIndex() == 1)
-
-        if not exclude_mode:
-            if checked == total:
-                return f"Include all discovered ROIs ({total})"
-            if checked == 0:
-                return "Include none (invalid)"
-            return f"Include subset ({checked}/{total})"
-
-        if checked == 0:
-            return f"Exclude none (all {total} discovered ROIs)"
         if checked == total:
-            return "Exclude all discovered ROIs (invalid)"
-        return f"Exclude subset ({checked}/{total})"
+            return f"Include all discovered ROIs ({total})"
+        if checked == 0:
+            return "Include none (invalid)"
+        return f"Include subset ({checked}/{total})"
 
     def _compute_representative_summary(self) -> str:
         """Human-readable summary of representative-session behavior."""
         idx = self._rep_session_combo.currentIndex()
         if idx <= 0:
             if self._discovery_cache is None:
-                return "Auto (runtime selection; run Discovery for explicit choice)"
+                return "Auto (runtime selection; use Select ROIs... for explicit choice)"
             return "Auto"
 
         session_idx = idx - 1
@@ -2235,11 +1718,7 @@ class MainWindow(QMainWindow):
             if self._preview_enabled_cb.isChecked()
             else "off"
         )
-        render_text = (
-            f"sig/iso={self._sig_iso_render_mode_combo.currentText()}, "
-            f"dFF={self._dff_render_mode_combo.currentText()}, "
-            f"stacked={self._stacked_render_mode_combo.currentText()}"
-        )
+        render_text = self._plotting_mode_combo.currentText()
         if not phasic_active:
             render_text += " (inactive in tonic mode)"
         roi_text = self._compute_roi_filter_summary()
@@ -2259,7 +1738,7 @@ class MainWindow(QMainWindow):
             f"Analysis: {analysis_scope}",
             f"Baseline Config Source: {self._active_config_source_summary()}",
             f"Preview: {preview_text}",
-            f"Render Modes: {render_text}",
+            f"Plotting Mode: {render_text}",
             f"ROI Filter: {roi_text}",
             f"Representative Session: {rep_text}",
             f"Output Destination: {out_text}",
@@ -2272,6 +1751,7 @@ class MainWindow(QMainWindow):
         phasic_active = is_isosbestic_active(mode_text)
 
         # Phasic-only controls: render family selectors + event/features group.
+        self._plotting_mode_combo.setEnabled(phasic_active)
         for combo in (
             self._sig_iso_render_mode_combo,
             self._dff_render_mode_combo,
@@ -2292,13 +1772,11 @@ class MainWindow(QMainWindow):
         discovery_ready = self._discovery_cache is not None and self._roi_list.count() > 0
         self._roi_filter_combo.setEnabled(discovery_ready)
         self._roi_list.setEnabled(discovery_ready)
-        self._roi_select_all_btn.setEnabled(discovery_ready)
-        self._roi_select_none_btn.setEnabled(discovery_ready)
         self._rep_session_combo.setEnabled(discovery_ready)
 
         if not discovery_ready:
             self._discovery_controls_hint.setText(
-                "ROI and representative controls are unresolved. Run Discovery to enable them."
+                "ROI choices are unresolved. Click 'Select ROIs...' to populate ROI choices."
             )
             self._discovery_controls_hint.setStyleSheet("color: #8a6d3b; font-size: 11px;")
             self._rep_preview_hint.setText(
@@ -2307,9 +1785,7 @@ class MainWindow(QMainWindow):
             self._rep_preview_hint.setStyleSheet("color: #8a6d3b; font-size: 11px;")
             return
 
-        self._discovery_controls_hint.setText(
-            "Discovery loaded: ROI and representative controls are active."
-        )
+        self._discovery_controls_hint.setText("ROI choices loaded. Checked ROIs will be included.")
         self._discovery_controls_hint.setStyleSheet("color: #2d7d2d; font-size: 11px;")
 
         if not self._preview_enabled_cb.isChecked():
@@ -2371,16 +1847,14 @@ class MainWindow(QMainWindow):
         if not self._validation_passed:
             if self._discovery_cache is None:
                 return (
-                    "Validation required before Run. Discovery is recommended to verify ROI/"
-                    "representative-session intent.",
+                    "Validation required before Run. ROI selection is optional but recommended.",
                     "warn",
                 )
             return "Validation required after config change. Click 'Validate Only'.", "warn"
 
         if self._discovery_cache is None:
             return (
-                "Ready to run. ROI subset and representative session will auto-resolve "
-                "unless Discovery is run.",
+                "Ready to run. ROI choices will auto-resolve unless 'Select ROIs...' is used.",
                 "ready",
             )
 
@@ -2447,3 +1921,551 @@ class MainWindow(QMainWindow):
         if path:
             self._config_path.setText(path)
             self._save_widgets_to_settings()
+
+    # ==================================================================
+    # Patch 1: Structural GUI shell rebuild (layout/grouping only)
+    # ==================================================================
+
+    def _build_config_panel(self) -> QWidget:
+        panel = QWidget()
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._build_run_configuration_group())
+        outer.addWidget(self._build_plotting_group())
+        outer.addWidget(self._build_advanced_group())
+        # Demoted controls are kept for behavior compatibility but hidden from idle layout.
+        outer.addWidget(self._build_hidden_compatibility_group())
+        return panel
+
+    def _build_run_configuration_group(self) -> QGroupBox:
+        group = QGroupBox("Run Configuration")
+        layout = QVBoxLayout(group)
+
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
+        self._input_dir = QLineEdit()
+        self._input_dir.setToolTip("The source recording/session folder to analyze.")
+        self._input_dir.textChanged.connect(self._on_config_changed)
+        input_row = QHBoxLayout()
+        input_row.addWidget(self._input_dir)
+        input_browse = QPushButton("Browse...")
+        input_browse.clicked.connect(lambda: self._browse_dir(self._input_dir, "Select Input Directory"))
+        input_row.addWidget(input_browse)
+        form.addRow("Input Directory:", input_row)
+
+        self._output_dir = QLineEdit()
+        self._output_dir.setToolTip(
+            "Where the run folder and deliverables will be created. Each run generates a unique timestamped subfolder."
+        )
+        self._output_dir.textChanged.connect(self._on_config_changed)
+        output_row = QHBoxLayout()
+        output_row.addWidget(self._output_dir)
+        output_browse = QPushButton("Browse...")
+        output_browse.clicked.connect(lambda: self._browse_dir(self._output_dir, "Select Output Base Directory"))
+        output_row.addWidget(output_browse)
+        form.addRow("Output Directory:", output_row)
+
+        self._format_combo = QComboBox()
+        self._format_combo.addItems(list(FORMAT_CHOICES))
+        self._format_combo.currentIndexChanged.connect(self._on_config_changed)
+        form.addRow("Format:", self._format_combo)
+
+        self._sph_edit = QLineEdit()
+        self._sph_edit.setPlaceholderText("(optional, integer >= 1)")
+        self._sph_edit.setMaximumWidth(200)
+        self._sph_edit.textChanged.connect(self._on_config_changed)
+        form.addRow("Sessions/Hour:", self._sph_edit)
+
+        self._duration_edit = QLineEdit()
+        self._duration_edit.setPlaceholderText("(optional, seconds > 0)")
+        self._duration_edit.setMaximumWidth(200)
+        self._duration_edit.textChanged.connect(self._on_config_changed)
+        form.addRow("Session Duration (s):", self._duration_edit)
+
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItems(["both", "phasic", "tonic"])
+        self._mode_combo.currentIndexChanged.connect(self._on_config_changed)
+        form.addRow("Mode:", self._mode_combo)
+
+        self._sph_warning = QLabel(
+            "Warning: Duty-cycled data requires sessions_per_hour unless timestamps exist."
+        )
+        self._sph_warning.setStyleSheet("color: #cc6600; font-size: 11px;")
+        form.addRow("", self._sph_warning)
+        layout.addLayout(form)
+
+        roi_group = QGroupBox("ROI Selection")
+        roi_layout = QVBoxLayout(roi_group)
+
+        discover_row = QHBoxLayout()
+        self._discover_btn = QPushButton("Select ROIs...")
+        self._discover_btn.setToolTip("Discover and populate ROI choices from the selected input directory.")
+        self._discover_btn.clicked.connect(self._on_discover)
+        discover_row.addWidget(self._discover_btn)
+        discover_row.addStretch()
+        roi_layout.addLayout(discover_row)
+
+        self._discovery_controls_hint = QLabel(
+            "Click 'Select ROIs...' to populate ROI choices from the input directory."
+        )
+        self._discovery_controls_hint.setWordWrap(True)
+        self._discovery_controls_hint.setStyleSheet("color: #8a6d3b; font-size: 11px;")
+        roi_layout.addWidget(self._discovery_controls_hint)
+
+        self._roi_selection_container = QWidget()
+        self._roi_selection_container.setVisible(False)
+        roi_selection_layout = QVBoxLayout(self._roi_selection_container)
+        roi_selection_layout.setContentsMargins(0, 0, 0, 0)
+        roi_selection_layout.addWidget(QLabel("ROIs (checked = included):"))
+        self._roi_list = QListWidget()
+        self._roi_list.setMaximumHeight(120)
+        self._roi_list.itemChanged.connect(lambda _item: self._on_config_changed())
+        roi_selection_layout.addWidget(self._roi_list)
+        roi_layout.addWidget(self._roi_selection_container)
+
+        # Keep include/exclude mode and bulk buttons for compatibility plumbing only.
+        self._roi_filter_combo = QComboBox()
+        self._roi_filter_combo.addItems(["Include selected", "Exclude selected"])
+        self._roi_filter_combo.setCurrentIndex(0)
+        self._roi_filter_combo.setVisible(False)
+        self._roi_filter_combo.currentIndexChanged.connect(self._on_config_changed)
+        roi_layout.addWidget(self._roi_filter_combo)
+
+        self._roi_select_all_btn = QPushButton("Select all")
+        self._roi_select_all_btn.clicked.connect(self._on_roi_select_all)
+        self._roi_select_all_btn.setVisible(False)
+        roi_layout.addWidget(self._roi_select_all_btn)
+        self._roi_select_none_btn = QPushButton("Select none")
+        self._roi_select_none_btn.clicked.connect(self._on_roi_select_none)
+        self._roi_select_none_btn.setVisible(False)
+        roi_layout.addWidget(self._roi_select_none_btn)
+
+        # Discovery/session details are retained for plumbing but demoted from idle layout.
+        hidden_discovery_details = QWidget()
+        hidden_discovery_details.setVisible(False)
+        hidden_discovery_layout = QVBoxLayout(hidden_discovery_details)
+        self._discovery_summary = QLabel("No discovery run yet.")
+        hidden_discovery_layout.addWidget(self._discovery_summary)
+        self._sessions_list = QListWidget()
+        self._sessions_list.setSelectionMode(QListWidget.NoSelection)
+        hidden_discovery_layout.addWidget(self._sessions_list)
+        self._rep_session_combo = QComboBox()
+        self._rep_session_combo.addItem("(auto)")
+        self._rep_session_combo.currentIndexChanged.connect(self._on_config_changed)
+        hidden_discovery_layout.addWidget(self._rep_session_combo)
+        self._rep_preview_hint = QLabel("")
+        self._rep_preview_hint.setWordWrap(True)
+        hidden_discovery_layout.addWidget(self._rep_preview_hint)
+        roi_layout.addWidget(hidden_discovery_details)
+
+        layout.addWidget(roi_group)
+
+        actions = QHBoxLayout()
+        self._validate_btn = QPushButton("Validate Only")
+        self._validate_btn.clicked.connect(self._on_validate)
+        actions.addWidget(self._validate_btn)
+        self._run_btn = QPushButton("Run Pipeline")
+        self._run_btn.setStyleSheet("font-weight: bold;")
+        self._run_btn.clicked.connect(self._on_run)
+        actions.addWidget(self._run_btn)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        actions.addWidget(self._cancel_btn)
+        self._open_results_btn = QPushButton("Open Results...")
+        self._open_results_btn.clicked.connect(self._on_open_results)
+        actions.addWidget(self._open_results_btn)
+        self._open_folder_btn = QPushButton("Open Run Folder")
+        self._open_folder_btn.clicked.connect(self._on_open_folder)
+        actions.addWidget(self._open_folder_btn)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        self._run_reason_label = QLabel("Run status: Validation required before first run.")
+        self._run_reason_label.setWordWrap(True)
+        self._run_reason_label.setStyleSheet("color: #8a6d3b; font-size: 11px;")
+        layout.addWidget(self._run_reason_label)
+        return group
+
+    def _build_plotting_group(self) -> QGroupBox:
+        group = QGroupBox("Plotting")
+        layout = QFormLayout(group)
+        layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
+        self._plotting_mode_combo = QComboBox()
+        self._plotting_mode_combo.addItems(["Standard", "Full"])
+        self._plotting_mode_combo.setCurrentText("Standard")
+        self._plotting_mode_combo.currentIndexChanged.connect(self._on_plotting_mode_changed)
+        self._plotting_mode_combo.currentIndexChanged.connect(self._on_config_changed)
+        layout.addRow("Plotting Mode:", self._plotting_mode_combo)
+
+        self._smooth_spin = QDoubleSpinBox()
+        self._smooth_spin.setRange(0.01, 100.0)
+        self._smooth_spin.setValue(1.0)
+        self._smooth_spin.setDecimals(2)
+        self._smooth_spin.setSingleStep(0.1)
+        self._smooth_spin.setMaximumWidth(200)
+        self._smooth_spin.valueChanged.connect(self._on_config_changed)
+        layout.addRow("Smooth Window (s):", self._smooth_spin)
+
+        self._mode_context_label = QLabel("")
+        self._mode_context_label.setWordWrap(True)
+        self._mode_context_label.setStyleSheet("font-size: 11px; color: #666;")
+        layout.addRow("", self._mode_context_label)
+        return group
+
+    def _on_plotting_mode_changed(self) -> None:
+        """Map single plotting mode control to legacy per-family render settings."""
+        target = "full" if self._plotting_mode_combo.currentText() == "Full" else "qc"
+        for attr in (
+            "_sig_iso_render_mode_combo",
+            "_dff_render_mode_combo",
+            "_stacked_render_mode_combo",
+        ):
+            combo = getattr(self, attr, None)
+            if combo is not None and combo.findText(target) >= 0:
+                combo.blockSignals(True)
+                combo.setCurrentText(target)
+                combo.blockSignals(False)
+
+    def _build_advanced_group(self) -> QGroupBox:
+        group = QGroupBox("Advanced")
+        outer = QVBoxLayout(group)
+
+        disclosure_row = QHBoxLayout()
+        self._advanced_disclosure_btn = QToolButton()
+        self._advanced_disclosure_btn.setText("Advanced controls")
+        self._advanced_disclosure_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._advanced_disclosure_btn.setArrowType(Qt.RightArrow)
+        self._advanced_disclosure_btn.setCheckable(True)
+        self._advanced_disclosure_btn.setChecked(False)
+        self._advanced_disclosure_btn.setAutoRaise(True)
+        self._advanced_disclosure_btn.toggled.connect(self._on_advanced_disclosure_toggled)
+        disclosure_row.addWidget(self._advanced_disclosure_btn)
+        disclosure_row.addStretch()
+        outer.addLayout(disclosure_row)
+
+        self._advanced_content = QWidget()
+        content_layout = QVBoxLayout(self._advanced_content)
+        outer.addWidget(self._advanced_content)
+        self._advanced_content.setVisible(False)
+
+        self._adv_group = QGroupBox("Isosbestic Correction")
+        iso_layout = QVBoxLayout(self._adv_group)
+
+        iso_sampling = QGroupBox("Sampling Geometry")
+        iso_sampling_form = QFormLayout(iso_sampling)
+        self._window_sec_edit = QLineEdit(str(self._default_cfg.window_sec))
+        self._window_sec_edit.textChanged.connect(self._on_config_changed)
+        iso_sampling_form.addRow("Regression Window:", self._window_sec_edit)
+        self._step_sec_edit = QLineEdit(str(self._default_cfg.step_sec))
+        self._step_sec_edit.textChanged.connect(self._on_config_changed)
+        iso_sampling_form.addRow("Regression Step:", self._step_sec_edit)
+        iso_layout.addWidget(iso_sampling)
+
+        iso_accept = QGroupBox("Window Acceptance")
+        iso_accept_form = QFormLayout(iso_accept)
+        self._min_valid_windows_spin = QSpinBox()
+        self._min_valid_windows_spin.setRange(1, 1000)
+        self._min_valid_windows_spin.setValue(self._default_cfg.min_valid_windows)
+        self._min_valid_windows_spin.valueChanged.connect(self._on_config_changed)
+        iso_accept_form.addRow("Min Valid Windows:", self._min_valid_windows_spin)
+        self._min_samples_per_window_spin = QSpinBox()
+        self._min_samples_per_window_spin.setRange(1, 100000)
+        self._min_samples_per_window_spin.setValue(max(1, self._default_cfg.min_samples_per_window))
+        self._min_samples_per_window_spin.valueChanged.connect(self._on_config_changed)
+        iso_accept_form.addRow("Min Samples per Window:", self._min_samples_per_window_spin)
+        iso_layout.addWidget(iso_accept)
+
+        iso_trust = QGroupBox("Correlation-Based Trust of Slope")
+        iso_trust_form = QFormLayout(iso_trust)
+        self._r_low_edit = QLineEdit(str(self._default_cfg.r_low))
+        self._r_low_edit.textChanged.connect(self._on_config_changed)
+        iso_trust_form.addRow("R-Low Threshold:", self._r_low_edit)
+        self._r_high_edit = QLineEdit(str(self._default_cfg.r_high))
+        self._r_high_edit.textChanged.connect(self._on_config_changed)
+        iso_trust_form.addRow("R-High Threshold:", self._r_high_edit)
+        self._g_min_edit = QLineEdit(str(self._default_cfg.g_min))
+        self._g_min_edit.textChanged.connect(self._on_config_changed)
+        iso_trust_form.addRow("G-Min Threshold:", self._g_min_edit)
+        iso_layout.addWidget(iso_trust)
+        content_layout.addWidget(self._adv_group)
+
+        self._adv_prep_group = QGroupBox("Preprocessing")
+        prep_layout = QFormLayout(self._adv_prep_group)
+        self._lowpass_hz_edit = QLineEdit(str(self._default_cfg.lowpass_hz))
+        self._lowpass_hz_edit.textChanged.connect(self._on_config_changed)
+        prep_layout.addRow("Lowpass Filter:", self._lowpass_hz_edit)
+        content_layout.addWidget(self._adv_prep_group)
+
+        baseline_group = QGroupBox("Baseline / Normalization")
+        baseline_layout = QFormLayout(baseline_group)
+        self._baseline_method_combo = QComboBox()
+        allowed_methods = get_allowed_baseline_methods_from_config()
+        if self._default_cfg.baseline_method not in allowed_methods:
+            allowed_methods.append(self._default_cfg.baseline_method)
+        self._baseline_method_combo.addItems(sorted(allowed_methods))
+        idx = self._baseline_method_combo.findText(self._default_cfg.baseline_method)
+        if idx >= 0:
+            self._baseline_method_combo.setCurrentIndex(idx)
+        self._baseline_method_combo.currentIndexChanged.connect(self._on_config_changed)
+        baseline_layout.addRow("Baseline Method:", self._baseline_method_combo)
+        self._baseline_percentile_label = QLabel("Baseline Percentile:")
+        self._baseline_percentile_edit = QLineEdit(str(self._default_cfg.baseline_percentile))
+        self._baseline_percentile_edit.textChanged.connect(self._on_config_changed)
+        baseline_layout.addRow(self._baseline_percentile_label, self._baseline_percentile_edit)
+        self._f0_min_value_edit = QLineEdit(str(self._default_cfg.f0_min_value))
+        self._f0_min_value_edit.textChanged.connect(self._on_config_changed)
+        baseline_layout.addRow("F0 Min Value:", self._f0_min_value_edit)
+        content_layout.addWidget(baseline_group)
+
+        self._adv_ev_group = QGroupBox("Feature Detection")
+        ev_layout = QFormLayout(self._adv_ev_group)
+        self._event_signal_combo = QComboBox()
+        allowed_sigs = get_allowed_event_signals_from_config()
+        if self._default_cfg.event_signal not in allowed_sigs:
+            allowed_sigs.append(self._default_cfg.event_signal)
+        self._event_signal_combo.addItems(sorted(allowed_sigs))
+        idx = self._event_signal_combo.findText(self._default_cfg.event_signal)
+        if idx >= 0:
+            self._event_signal_combo.setCurrentIndex(idx)
+        self._event_signal_combo.currentIndexChanged.connect(self._on_config_changed)
+        ev_layout.addRow("Event Signal:", self._event_signal_combo)
+
+        self._peak_method_combo = QComboBox()
+        allowed_peak_methods = get_allowed_peak_threshold_methods_from_config()
+        if self._default_cfg.peak_threshold_method not in allowed_peak_methods:
+            allowed_peak_methods.append(self._default_cfg.peak_threshold_method)
+        self._peak_method_combo.addItems(sorted(allowed_peak_methods))
+        idx = self._peak_method_combo.findText(self._default_cfg.peak_threshold_method)
+        if idx >= 0:
+            self._peak_method_combo.setCurrentIndex(idx)
+        self._peak_method_combo.currentIndexChanged.connect(self._on_config_changed)
+        ev_layout.addRow("Peak Threshold Method:", self._peak_method_combo)
+
+        self._peak_k_label = QLabel("Peak Threshold K:")
+        self._peak_k_edit = QLineEdit(str(self._default_cfg.peak_threshold_k))
+        self._peak_k_edit.textChanged.connect(self._on_config_changed)
+        ev_layout.addRow(self._peak_k_label, self._peak_k_edit)
+        self._peak_pct_label = QLabel("Peak Threshold Percentile:")
+        self._peak_pct_edit = QLineEdit(str(self._default_cfg.peak_threshold_percentile))
+        self._peak_pct_edit.textChanged.connect(self._on_config_changed)
+        ev_layout.addRow(self._peak_pct_label, self._peak_pct_edit)
+        self._peak_abs_label = QLabel("Peak Threshold Absolute:")
+        self._peak_abs_edit = QLineEdit(str(self._default_cfg.peak_threshold_abs))
+        self._peak_abs_edit.textChanged.connect(self._on_config_changed)
+        ev_layout.addRow(self._peak_abs_label, self._peak_abs_edit)
+        self._peak_dist_edit = QLineEdit(str(self._default_cfg.peak_min_distance_sec))
+        self._peak_dist_edit.textChanged.connect(self._on_config_changed)
+        ev_layout.addRow("Peak Min Distance:", self._peak_dist_edit)
+
+        self._peak_pre_filter_combo = QComboBox()
+        allowed_pre_filters = get_allowed_peak_pre_filters_from_config()
+        default_pre_filter = str(getattr(self._default_cfg, "peak_pre_filter", "none"))
+        if default_pre_filter not in allowed_pre_filters:
+            allowed_pre_filters.append(default_pre_filter)
+        self._peak_pre_filter_combo.addItems(sorted(allowed_pre_filters))
+        idx = self._peak_pre_filter_combo.findText(default_pre_filter)
+        if idx >= 0:
+            self._peak_pre_filter_combo.setCurrentIndex(idx)
+        self._peak_pre_filter_combo.currentIndexChanged.connect(self._on_config_changed)
+        ev_layout.addRow("Peak Pre-Filter:", self._peak_pre_filter_combo)
+
+        self._event_auc_combo = QComboBox()
+        allowed_auc = get_allowed_event_auc_baselines_from_config()
+        if self._default_cfg.event_auc_baseline not in allowed_auc:
+            allowed_auc.append(self._default_cfg.event_auc_baseline)
+        self._event_auc_combo.addItems(sorted(allowed_auc))
+        idx = self._event_auc_combo.findText(self._default_cfg.event_auc_baseline)
+        if idx >= 0:
+            self._event_auc_combo.setCurrentIndex(idx)
+        self._event_auc_combo.currentIndexChanged.connect(self._on_config_changed)
+        ev_layout.addRow("Event AUC Baseline:", self._event_auc_combo)
+        content_layout.addWidget(self._adv_ev_group)
+
+        cfg_group = QGroupBox("Config Source (Advanced)")
+        cfg_layout = QFormLayout(cfg_group)
+        cfg_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        self._use_custom_config_cb = QCheckBox("Use custom config YAML")
+        self._use_custom_config_cb.stateChanged.connect(self._on_config_changed)
+        self._use_custom_config_cb.toggled.connect(self._update_config_source_ui)
+        cfg_layout.addRow("Baseline Source:", self._use_custom_config_cb)
+        self._config_path = QLineEdit()
+        self._config_path.setPlaceholderText("(optional) custom baseline config path")
+        self._config_path.textChanged.connect(self._on_config_changed)
+        self._config_path.textChanged.connect(self._update_config_source_ui)
+        cfg_row = QHBoxLayout()
+        cfg_row.addWidget(self._config_path)
+        self._config_browse_btn = QPushButton("Browse...")
+        self._config_browse_btn.clicked.connect(self._browse_config)
+        cfg_row.addWidget(self._config_browse_btn)
+        cfg_layout.addRow("Custom Config YAML:", cfg_row)
+        self._active_config_source_label = QLabel("")
+        self._active_config_source_label.setWordWrap(True)
+        self._active_config_source_label.setStyleSheet("font-size: 11px; color: #666;")
+        cfg_layout.addRow("", self._active_config_source_label)
+        content_layout.addWidget(cfg_group)
+
+        content_layout.addStretch()
+
+        self._baseline_method_combo.currentIndexChanged.connect(self._update_adv_prep_visibility)
+        self._peak_method_combo.currentIndexChanged.connect(self._update_adv_ev_visibility)
+        self._mode_combo.currentIndexChanged.connect(self._update_adv_group_visibility)
+        self._update_adv_prep_visibility()
+        self._update_adv_ev_visibility()
+        self._update_adv_group_visibility()
+        self._update_config_source_ui()
+        return group
+
+    def _on_advanced_disclosure_toggled(self, expanded: bool) -> None:
+        """Toggle advanced section content via disclosure-style header."""
+        self._advanced_content.setVisible(expanded)
+        self._advanced_disclosure_btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+
+    def _build_hidden_compatibility_group(self) -> QWidget:
+        group = QGroupBox("Compatibility Controls")
+        group.setVisible(False)
+        layout = QVBoxLayout(group)
+
+        self._traces_only_cb = QCheckBox("Skip feature extraction (traces and QC only)")
+        self._traces_only_cb.stateChanged.connect(self._on_config_changed)
+        layout.addWidget(self._traces_only_cb)
+
+        # Legacy per-family render controls retained for compatibility plumbing.
+        self._sig_iso_render_mode_combo = QComboBox()
+        self._sig_iso_render_mode_combo.addItems(["qc", "full"])
+        self._sig_iso_render_mode_combo.setVisible(False)
+        self._dff_render_mode_combo = QComboBox()
+        self._dff_render_mode_combo.addItems(["qc", "full"])
+        self._dff_render_mode_combo.setVisible(False)
+        self._stacked_render_mode_combo = QComboBox()
+        self._stacked_render_mode_combo.addItems(["qc", "full"])
+        self._stacked_render_mode_combo.setVisible(False)
+        layout.addWidget(self._sig_iso_render_mode_combo)
+        layout.addWidget(self._dff_render_mode_combo)
+        layout.addWidget(self._stacked_render_mode_combo)
+        self._on_plotting_mode_changed()
+
+        preview_row = QHBoxLayout()
+        self._preview_enabled_cb = QCheckBox("Limit sessions")
+        self._preview_enabled_cb.stateChanged.connect(self._on_config_changed)
+        preview_row.addWidget(self._preview_enabled_cb)
+        self._preview_n_spin = QSpinBox()
+        self._preview_n_spin.setRange(1, 100000)
+        self._preview_n_spin.setValue(5)
+        self._preview_n_spin.setEnabled(False)
+        self._preview_enabled_cb.toggled.connect(self._preview_n_spin.setEnabled)
+        self._preview_n_spin.valueChanged.connect(self._on_config_changed)
+        preview_row.addWidget(self._preview_n_spin)
+        preview_row.addStretch()
+        layout.addLayout(preview_row)
+
+        self._recursive_cb = QCheckBox("Always enabled by runner")
+        self._recursive_cb.setChecked(True)
+        self._recursive_cb.setEnabled(False)
+        layout.addWidget(self._recursive_cb)
+
+        self._overwrite_cb = QCheckBox("Overwrite existing output (legacy CLI only)")
+        self._overwrite_cb.setEnabled(False)
+        layout.addWidget(self._overwrite_cb)
+
+        self._preview_config_btn = QPushButton("Preview Config")
+        self._preview_config_btn.clicked.connect(self._on_preview_config)
+        self._preview_config_btn.setVisible(False)
+        layout.addWidget(self._preview_config_btn)
+
+        artifact_row = QHBoxLayout()
+        self._open_cmd_file_btn = QPushButton("Command")
+        self._open_cmd_file_btn.clicked.connect(lambda: self._on_open_key_artifact("command_invoked.txt"))
+        artifact_row.addWidget(self._open_cmd_file_btn)
+        self._open_spec_file_btn = QPushButton("Run Spec")
+        self._open_spec_file_btn.clicked.connect(lambda: self._on_open_key_artifact("gui_run_spec.json"))
+        artifact_row.addWidget(self._open_spec_file_btn)
+        self._open_cfg_file_btn = QPushButton("Effective Config")
+        self._open_cfg_file_btn.clicked.connect(lambda: self._on_open_key_artifact("config_effective.yaml"))
+        artifact_row.addWidget(self._open_cfg_file_btn)
+        self._open_manifest_file_btn = QPushButton("Manifest")
+        self._open_manifest_file_btn.clicked.connect(lambda: self._on_open_key_artifact("MANIFEST.json"))
+        artifact_row.addWidget(self._open_manifest_file_btn)
+        self._open_report_file_btn = QPushButton("Run Report")
+        self._open_report_file_btn.clicked.connect(lambda: self._on_open_key_artifact("run_report.json"))
+        artifact_row.addWidget(self._open_report_file_btn)
+        layout.addLayout(artifact_row)
+
+        summary_group = QGroupBox("Effective Run Summary")
+        summary_group.setVisible(False)
+        summary_layout = QVBoxLayout(summary_group)
+        self._effective_summary_label = QLabel()
+        self._effective_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._effective_summary_label.setWordWrap(True)
+        self._effective_summary_label.setStyleSheet("font-size: 11px;")
+        summary_layout.addWidget(self._effective_summary_label)
+        layout.addWidget(summary_group)
+        return group
+
+    def _on_event(self, data: dict):
+        """Compatibility event hook used by tests and optional event integrations."""
+        if not isinstance(data, dict):
+            return
+        self._last_event_stage = str(data.get("stage", "?"))
+        self._last_event_type = str(data.get("type", "?"))
+        self._last_event_message = str(data.get("message", "")).strip()
+        self._render_status_label()
+
+    def _render_status_label(self, is_updating: bool = False):
+        """Compose top-strip status and phase/progress labels."""
+        state_part = f"State: {self._state_str}"
+        stage = getattr(self, "_last_event_stage", "")
+        evt_type = getattr(self, "_last_event_type", "")
+        evt_msg = getattr(self, "_last_event_message", "")
+        extras = []
+        if stage:
+            extras.append(f"Stage: {stage}")
+        if evt_type:
+            extras.append(f"Type: {evt_type}")
+        if evt_msg:
+            extras.append(evt_msg)
+        if is_updating and not self._last_status_msg:
+            extras.append("updating...")
+        if self._last_status_msg:
+            extras.append(self._last_status_msg)
+        self._status_label.setText(" | ".join([state_part] + extras))
+
+        phase_text = f"Phase: {self._last_status_phase} | Status: {self._last_status_state}"
+        if self._last_status_duration:
+            phase_text += f" | Duration: {self._last_status_duration}"
+        if self._last_status_errors:
+            phase_text += f" | Errors: {len(self._last_status_errors)}"
+        self._phase_label.setText(phase_text)
+
+        pct = getattr(self, "_last_status_pct", None)
+        if isinstance(pct, (int, float)):
+            pct_i = max(0, min(100, int(round(float(pct)))))
+            self._progress_bar.setValue(pct_i)
+            self._progress_bar.setFormat(f"{pct_i}%")
+        elif self._ui_state in (RunnerState.RUNNING, RunnerState.VALIDATING):
+            self._progress_bar.setValue(0)
+            self._progress_bar.setFormat("running")
+        else:
+            self._progress_bar.setValue(0)
+            self._progress_bar.setFormat("idle")
+
+    def _on_status(self, data: dict):
+        """Handle parsed status.json updates and refresh top-strip progress."""
+        self._last_status_phase = str(data.get("phase", "?"))
+        self._last_status_state = str(data.get("status", "?"))
+        dur = data.get("duration_sec")
+        self._last_status_duration = f"{dur:.1f}s" if isinstance(dur, (int, float)) else ""
+        self._last_status_errors = data.get("errors", [])
+        self._last_status_msg = ""
+
+        pct = None
+        for key in ("progress_pct", "progress_percent", "pct", "percent_complete"):
+            value = data.get(key)
+            if isinstance(value, (int, float)):
+                pct = value
+                break
+        self._last_status_pct = pct
+        self._render_status_label(is_updating=False)
+        if self._last_status_state.lower() == "cancelled":
+            self._saw_cancel_status = True

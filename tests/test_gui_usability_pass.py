@@ -36,16 +36,16 @@ def test_effective_run_summary_updates(window):
     assert "Mode: both" in text0
     assert "Analysis: Full analysis" in text0
     assert "Preview: off" in text0
-    assert "Render Modes: sig/iso=qc, dFF=qc, stacked=qc" in text0
+    assert "Plotting Mode: Standard" in text0
 
     window._traces_only_cb.setChecked(True)
     window._preview_enabled_cb.setChecked(True)
     window._preview_n_spin.setValue(7)
-    window._dff_render_mode_combo.setCurrentText("full")
+    window._plotting_mode_combo.setCurrentText("Full")
     text1 = window._effective_summary_label.text()
     assert "Analysis: Traces-only" in text1
     assert "Preview: first N = 7" in text1
-    assert "dFF=full" in text1
+    assert "Plotting Mode: Full" in text1
 
     discovered = {
         "n_total_discovered": 3,
@@ -60,11 +60,10 @@ def test_effective_run_summary_updates(window):
     }
     window._discovery_cache = discovered
     window._populate_discovery_ui(discovered)
-    window._roi_filter_combo.setCurrentIndex(1)  # Exclude selected
-    window._roi_list.item(0).setCheckState(Qt.Unchecked)
+    window._roi_list.item(0).setCheckState(Qt.Unchecked)  # Include subset
     window._rep_session_combo.setCurrentIndex(2)  # discovery index 1 (S1)
     text2 = window._effective_summary_label.text()
-    assert "ROI Filter: Exclude subset" in text2
+    assert "ROI Filter: Include subset (2/3)" in text2
     assert "Representative Session: Session index 1 (S1)" in text2
 
 
