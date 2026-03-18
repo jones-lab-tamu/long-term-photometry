@@ -1321,6 +1321,9 @@ class MainWindow(QMainWindow):
         _set_combo_if_allowed(self._event_auc_combo, self._tuning_event_auc_combo.currentText().strip())
 
         self._update_adv_ev_visibility()
+        # Ensure validate->run reuse state is invalidated even if any set* call
+        # is a no-op for the current value.
+        self._on_config_changed()
         self._append_run_log("Applied downstream tuning values to run settings.")
 
     def resizeEvent(self, event):
@@ -1401,6 +1404,35 @@ class MainWindow(QMainWindow):
             cfg = self._config_path.text().strip() or "(not set)"
             return f"Custom YAML: {cfg}"
         return f"Lab standard default: {self._lab_default_config_path}"
+
+    def _active_baseline_config(self) -> Config:
+        """
+        Resolve baseline config from the active source path for current run intent.
+
+        This keeps GUI override diffing aligned with the same baseline that is
+        written into config_effective.yaml.
+        """
+        cfg_path = self._active_config_source_path()
+        if cfg_path and os.path.isfile(cfg_path):
+            try:
+                return Config.from_yaml(cfg_path)
+            except Exception:
+                pass
+        return self._default_cfg
+
+    def _event_feature_defaults_from_active_baseline(self) -> dict:
+        """Event-feature default values sourced from active baseline config."""
+        base_cfg = self._active_baseline_config()
+        return {
+            "event_signal": base_cfg.event_signal,
+            "peak_threshold_method": base_cfg.peak_threshold_method,
+            "peak_threshold_k": base_cfg.peak_threshold_k,
+            "peak_threshold_percentile": base_cfg.peak_threshold_percentile,
+            "peak_threshold_abs": base_cfg.peak_threshold_abs,
+            "peak_min_distance_sec": base_cfg.peak_min_distance_sec,
+            "peak_pre_filter": getattr(base_cfg, "peak_pre_filter", "none"),
+            "event_auc_baseline": base_cfg.event_auc_baseline,
+        }
 
     def _update_config_source_ui(self) -> None:
         """Enable custom config widgets only when advanced custom mode is active."""
@@ -1559,16 +1591,7 @@ class MainWindow(QMainWindow):
             config_overrides.update(changed_prep_overrides)
 
         # Event + Feature overrides
-        default_ev_dict = {
-            "event_signal": self._default_cfg.event_signal,
-            "peak_threshold_method": self._default_cfg.peak_threshold_method,
-            "peak_threshold_k": self._default_cfg.peak_threshold_k,
-            "peak_threshold_percentile": self._default_cfg.peak_threshold_percentile,
-            "peak_threshold_abs": self._default_cfg.peak_threshold_abs,
-            "peak_min_distance_sec": self._default_cfg.peak_min_distance_sec,
-            "peak_pre_filter": getattr(self._default_cfg, "peak_pre_filter", "none"),
-            "event_auc_baseline": self._default_cfg.event_auc_baseline,
-        }
+        default_ev_dict = self._event_feature_defaults_from_active_baseline()
         ev_overrides, _ = parse_and_validate_event_feature_knobs(
             self._event_signal_combo.currentText(),
             self._peak_method_combo.currentText(),
@@ -1753,16 +1776,7 @@ class MainWindow(QMainWindow):
             return err
 
         # Event + Feature validation
-        default_ev_dict = {
-            "event_signal": self._default_cfg.event_signal,
-            "peak_threshold_method": self._default_cfg.peak_threshold_method,
-            "peak_threshold_k": self._default_cfg.peak_threshold_k,
-            "peak_threshold_percentile": self._default_cfg.peak_threshold_percentile,
-            "peak_threshold_abs": self._default_cfg.peak_threshold_abs,
-            "peak_min_distance_sec": self._default_cfg.peak_min_distance_sec,
-            "peak_pre_filter": getattr(self._default_cfg, "peak_pre_filter", "none"),
-            "event_auc_baseline": self._default_cfg.event_auc_baseline,
-        }
+        default_ev_dict = self._event_feature_defaults_from_active_baseline()
         _, err = parse_and_validate_event_feature_knobs(
             self._event_signal_combo.currentText(),
             self._peak_method_combo.currentText(),

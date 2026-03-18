@@ -482,6 +482,216 @@ def test_tuning_apply_back_persists_after_new_run(window, tmp_path):
     assert window._peak_dist_edit.text() == applied_dist
 
 
+def test_tuning_apply_back_source_of_truth_mean_std_delta_f(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    if window._tuning_event_signal_combo.findText("delta_f") >= 0:
+        window._tuning_event_signal_combo.setCurrentText("delta_f")
+    window._tuning_peak_method_combo.setCurrentText("mean_std")
+    window._tuning_peak_k_spin.setValue(9.875)
+
+    window._on_apply_tuning_values_to_run_settings()
+    QApplication.processEvents()
+
+    assert window._event_signal_combo.currentText() == "delta_f"
+    assert window._peak_method_combo.currentText() == "mean_std"
+    assert float(window._peak_k_edit.text()) == pytest.approx(9.875, rel=1e-6)
+
+
+def test_tuning_apply_back_invalidates_validated_state(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    window._validation_passed = True
+    window._validated_run_signature = "sig-old"
+    window._validated_run_dir = "old_run_dir"
+
+    window._tuning_peak_method_combo.setCurrentText("mean_std")
+    window._tuning_peak_k_spin.setValue(8.25)
+    window._on_apply_tuning_values_to_run_settings()
+    QApplication.processEvents()
+
+    assert window._validation_passed is False
+    assert window._validated_run_signature is None
+    assert window._peak_method_combo.currentText() == "mean_std"
+    assert float(window._peak_k_edit.text()) == pytest.approx(8.25, rel=1e-6)
+
+
+def test_tuning_apply_back_next_run_serializes_applied_values(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path / "cache_run")
+    input_dir = tmp_path / "input"
+    out_base = tmp_path / "out"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    out_base.mkdir(parents=True, exist_ok=True)
+
+    window._input_dir.setText(str(input_dir))
+    window._output_dir.setText(str(out_base))
+    window._use_custom_config_cb.setChecked(False)
+    window._update_config_source_ui()
+
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    if window._tuning_event_signal_combo.findText("delta_f") >= 0:
+        window._tuning_event_signal_combo.setCurrentText("delta_f")
+    window._tuning_peak_method_combo.setCurrentText("mean_std")
+    window._tuning_peak_k_spin.setValue(7.125)
+    window._tuning_peak_dist_spin.setValue(2.25)
+    if window._tuning_peak_pre_filter_combo.findText("lowpass") >= 0:
+        window._tuning_peak_pre_filter_combo.setCurrentText("lowpass")
+    if window._tuning_event_auc_combo.findText("median") >= 0:
+        window._tuning_event_auc_combo.setCurrentText("median")
+
+    window._on_apply_tuning_values_to_run_settings()
+    QApplication.processEvents()
+
+    argv = window._build_argv(validate_only=False, overwrite=True)
+    assert argv
+    config_path = os.path.join(window._current_run_dir, "config_effective.yaml")
+    spec_path = os.path.join(window._current_run_dir, "gui_run_spec.json")
+    assert os.path.isfile(config_path)
+    assert os.path.isfile(spec_path)
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        effective_cfg = yaml.safe_load(f) or {}
+    with open(spec_path, "r", encoding="utf-8") as f:
+        run_spec = json.load(f)
+
+    assert effective_cfg["peak_threshold_method"] == "mean_std"
+    assert effective_cfg["peak_threshold_method"] != "median_mad"
+    assert effective_cfg["event_signal"] == "delta_f"
+    assert effective_cfg["peak_threshold_k"] == pytest.approx(7.125, rel=1e-6)
+    assert effective_cfg["peak_min_distance_sec"] == pytest.approx(2.25, rel=1e-6)
+    assert effective_cfg["peak_pre_filter"] == "lowpass"
+    assert effective_cfg["event_auc_baseline"] == "median"
+
+    overrides = run_spec.get("config_overrides", {})
+    assert overrides["peak_threshold_method"] == "mean_std"
+    assert overrides["event_signal"] == "delta_f"
+    assert overrides["peak_threshold_k"] == pytest.approx(7.125, rel=1e-6)
+
+
+def test_tuning_apply_back_method_switch_serialization(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path / "switch_cache")
+    input_dir = tmp_path / "input_switch"
+    out_base = tmp_path / "out_switch"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    out_base.mkdir(parents=True, exist_ok=True)
+
+    window._input_dir.setText(str(input_dir))
+    window._output_dir.setText(str(out_base))
+    window._use_custom_config_cb.setChecked(False)
+    window._update_config_source_ui()
+
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    # percentile -> absolute
+    window._tuning_peak_method_combo.setCurrentText("absolute")
+    window._tuning_peak_abs_spin.setValue(0.333)
+    window._on_apply_tuning_values_to_run_settings()
+    QApplication.processEvents()
+
+    window._build_argv(validate_only=False, overwrite=True)
+    cfg_abs_path = os.path.join(window._current_run_dir, "config_effective.yaml")
+    with open(cfg_abs_path, "r", encoding="utf-8") as f:
+        cfg_abs = yaml.safe_load(f) or {}
+    assert cfg_abs["peak_threshold_method"] == "absolute"
+    assert cfg_abs["peak_threshold_abs"] == pytest.approx(0.333, rel=1e-6)
+
+    # absolute -> mean_std
+    window._tuning_peak_method_combo.setCurrentText("mean_std")
+    window._tuning_peak_k_spin.setValue(6.5)
+    window._on_apply_tuning_values_to_run_settings()
+    QApplication.processEvents()
+
+    window._build_argv(validate_only=False, overwrite=True)
+    cfg_k_path = os.path.join(window._current_run_dir, "config_effective.yaml")
+    with open(cfg_k_path, "r", encoding="utf-8") as f:
+        cfg_k = yaml.safe_load(f) or {}
+    assert cfg_k["peak_threshold_method"] == "mean_std"
+    assert cfg_k["peak_threshold_k"] == pytest.approx(6.5, rel=1e-6)
+
+
+def test_run_spec_event_fields_read_from_visible_main_controls(window, tmp_path, monkeypatch):
+    input_dir = tmp_path / "input_visible"
+    out_base = tmp_path / "out_visible"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    out_base.mkdir(parents=True, exist_ok=True)
+
+    window._input_dir.setText(str(input_dir))
+    window._output_dir.setText(str(out_base))
+    window._use_custom_config_cb.setChecked(False)
+    window._update_config_source_ui()
+
+    if window._event_signal_combo.findText("delta_f") >= 0:
+        window._event_signal_combo.setCurrentText("delta_f")
+    window._peak_method_combo.setCurrentText("mean_std")
+    window._peak_k_edit.setText("12.5")
+    window._peak_pct_edit.setText("91")
+    window._peak_abs_edit.setText("0.42")
+    window._peak_dist_edit.setText("1.8")
+    if window._peak_pre_filter_combo.findText("lowpass") >= 0:
+        window._peak_pre_filter_combo.setCurrentText("lowpass")
+    if window._event_auc_combo.findText("median") >= 0:
+        window._event_auc_combo.setCurrentText("median")
+
+    captured = {}
+
+    def _fake_parse(
+        event_signal_text,
+        peak_method_text,
+        k_val,
+        pct_val,
+        abs_val,
+        dist_val,
+        auc_baseline_text,
+        defaults,
+        peak_pre_filter_text=None,
+    ):
+        captured.update(
+            {
+                "event_signal_text": event_signal_text,
+                "peak_method_text": peak_method_text,
+                "k_val": k_val,
+                "pct_val": pct_val,
+                "abs_val": abs_val,
+                "dist_val": dist_val,
+                "auc_baseline_text": auc_baseline_text,
+                "peak_pre_filter_text": peak_pre_filter_text,
+            }
+        )
+        return {}, None
+
+    monkeypatch.setattr("gui.main_window.parse_and_validate_event_feature_knobs", _fake_parse)
+    spec = window._build_run_spec(validate_only=False)
+    assert spec is not None
+
+    assert captured["event_signal_text"] == window._event_signal_combo.currentText()
+    assert captured["peak_method_text"] == window._peak_method_combo.currentText()
+    assert captured["k_val"] == window._peak_k_edit.text()
+    assert captured["pct_val"] == window._peak_pct_edit.text()
+    assert captured["abs_val"] == window._peak_abs_edit.text()
+    assert captured["dist_val"] == window._peak_dist_edit.text()
+    assert captured["auc_baseline_text"] == window._event_auc_combo.currentText()
+    assert captured["peak_pre_filter_text"] == window._peak_pre_filter_combo.currentText()
+
+
 def test_tuning_workspace_boundary_message_and_controls(window, tmp_path):
     run_dir = _make_completed_run_with_cache(tmp_path)
     window._is_complete_workspace_active = True
