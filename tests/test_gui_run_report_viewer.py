@@ -7,10 +7,19 @@ import json
 import tempfile
 import pytest
 from gui.run_report_parser import (
-    resolve_region_deliverables, 
+    resolve_region_deliverables,
     resolve_internal_artifacts,
-    resolve_primary_artifacts
+    resolve_primary_artifacts,
+    is_successful_completed_run_dir,
 )
+
+from PySide6.QtWidgets import QApplication
+from gui.run_report_viewer import RunReportViewer
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    return QApplication.instance() or QApplication([])
 
 def test_discover_region_deliverables_dynamic():
     """Verify that the parser finds arbitrary region folders with semantic subfolders."""
@@ -89,3 +98,65 @@ def test_primary_artifacts_resolver():
         labels = [p[0] for p in primary]
         assert "Run Status" in labels
         assert "Output Manifest" in labels
+
+
+def test_successful_completed_run_dir_rejects_artifacts_only():
+    """Artifact presence alone must not be treated as completed success."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        reg = os.path.join(tmpdir, "Region0")
+        os.makedirs(os.path.join(reg, "summary"))
+        os.makedirs(os.path.join(reg, "day_plots"))
+        os.makedirs(os.path.join(reg, "tables"))
+        # No status.json success, no manifest success, no explicit run_report success fields
+        with open(os.path.join(tmpdir, "run_report.json"), "w", encoding="utf-8") as f:
+            json.dump({"run_context": {"run_type": "full"}}, f)
+        ok, reason = is_successful_completed_run_dir(tmpdir)
+        assert ok is False
+        assert "no explicit success/completion" in reason.lower()
+
+
+def test_successful_completed_run_dir_accepts_status_success():
+    """status.json final success should allow complete-state entry."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "status.json"), "w", encoding="utf-8") as f:
+            json.dump({"schema_version": 1, "phase": "final", "status": "success"}, f)
+        ok, reason = is_successful_completed_run_dir(tmpdir)
+        assert ok is True
+        assert "status.json" in reason
+
+
+def test_run_report_viewer_tab_discovery_is_explicit(qapp):
+    """Tab discovery should not pick unrelated wildcard files."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        summary = os.path.join(tmpdir, "summary")
+        day_plots = os.path.join(tmpdir, "day_plots")
+        os.makedirs(summary)
+        os.makedirs(day_plots)
+
+        # Canonical expected
+        open(os.path.join(summary, "phasic_correction_impact.png"), "wb").close()
+        open(os.path.join(summary, "tonic_overview.png"), "wb").close()
+        open(os.path.join(summary, "phasic_auc_timeseries.png"), "wb").close()
+        open(os.path.join(summary, "phasic_peak_rate_timeseries.png"), "wb").close()
+        open(os.path.join(day_plots, "phasic_sig_iso_day_000.png"), "wb").close()
+        open(os.path.join(day_plots, "phasic_dFF_day_000.png"), "wb").close()
+        open(os.path.join(day_plots, "phasic_stacked_day_000.png"), "wb").close()
+
+        # Should be ignored by tightened rules
+        open(os.path.join(summary, "my_verification_notes.png"), "wb").close()
+        open(os.path.join(summary, "tonic_anything.png"), "wb").close()
+        open(os.path.join(summary, "phasic_random_timeseries_plot.png"), "wb").close()
+        open(os.path.join(day_plots, "phasic_sig_iso_day_extra.png"), "wb").close()
+
+        viewer = RunReportViewer()
+        tab_map = viewer._discover_region_tab_images(tmpdir)
+
+        assert [os.path.basename(p) for p in tab_map["Verification"]] == ["phasic_correction_impact.png"]
+        assert [os.path.basename(p) for p in tab_map["Tonic"]] == ["tonic_overview.png"]
+        assert [os.path.basename(p) for p in tab_map["Phasic Summary"]] == [
+            "phasic_auc_timeseries.png",
+            "phasic_peak_rate_timeseries.png",
+        ]
+        assert [os.path.basename(p) for p in tab_map["Phasic Raw"]] == ["phasic_sig_iso_day_000.png"]
+        assert [os.path.basename(p) for p in tab_map["Phasic dFF"]] == ["phasic_dFF_day_000.png"]
+        assert [os.path.basename(p) for p in tab_map["Phasic Stacked"]] == ["phasic_stacked_day_000.png"]

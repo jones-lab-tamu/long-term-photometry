@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QCheckBox, QSpinBox,
     QDoubleSpinBox, QPushButton, QPlainTextEdit, QScrollArea,
-    QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem, QToolButton,
+    QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem, QToolButton, QStackedWidget,
     QProgressBar,
 )
 
@@ -41,6 +41,7 @@ from gui.run_spec import RunSpec, FORMAT_CHOICES
 from gui.status_follower import StatusFollower
 from gui.log_follower import LogFollower
 from gui.run_report_viewer import RunReportViewer
+from gui.run_report_parser import is_successful_completed_run_dir
 from gui.validate_run_policy import (
     compute_run_signature,
     is_validation_current
@@ -488,6 +489,7 @@ class MainWindow(QMainWindow):
         self._run_started_monotonic = None
         self._last_elapsed_sec = 0.0
         self._saw_cancel_status = False
+        self._is_complete_workspace_active = False
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(250)
         self._elapsed_timer.timeout.connect(self._on_elapsed_timer_tick)
@@ -564,7 +566,13 @@ class MainWindow(QMainWindow):
         controls_scroll.setFrameShape(QScrollArea.NoFrame)
         controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        controls_scroll.setWidget(self._build_config_panel())
+        self._controls_stack = QStackedWidget()
+        self._config_panel = self._build_config_panel()
+        self._complete_state_panel = self._build_complete_state_panel()
+        self._controls_stack.addWidget(self._config_panel)
+        self._controls_stack.addWidget(self._complete_state_panel)
+        self._controls_stack.setCurrentWidget(self._config_panel)
+        controls_scroll.setWidget(self._controls_stack)
 
         log_group = self._build_log_panel()
         log_group.setMinimumHeight(180)
@@ -580,6 +588,30 @@ class MainWindow(QMainWindow):
         self._report_viewer = RunReportViewer()
         results_lay.addWidget(self._report_viewer)
         return results_group
+
+    def _build_complete_state_panel(self) -> QWidget:
+        """Compact completion-state summary card shown after successful full runs."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        card = QGroupBox("Run Complete")
+        card_layout = QVBoxLayout(card)
+        self._complete_summary_label = QLabel("No completed run loaded.")
+        self._complete_summary_label.setWordWrap(True)
+        self._complete_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        card_layout.addWidget(self._complete_summary_label)
+        layout.addWidget(card)
+
+        action_row = QHBoxLayout()
+        self._new_run_btn = QPushButton("New Run")
+        self._new_run_btn.clicked.connect(self._on_new_run)
+        action_row.addWidget(self._new_run_btn)
+        action_row.addStretch()
+        layout.addLayout(action_row)
+        layout.addStretch()
+        return panel
 
     # ==================================================================
     # Log Panel
@@ -1200,6 +1232,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Validation Error", err)
             return
 
+        self._exit_complete_state_workspace()
         self._save_widgets_to_settings()
         self._report_viewer.clear()
         self._log_view.clear()
@@ -1233,6 +1266,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Validation Error", err)
             return
 
+        self._exit_complete_state_workspace()
         self._save_widgets_to_settings()
 
         # Build argv (also generates derived config + gui_run_spec.json)
@@ -1277,7 +1311,7 @@ class MainWindow(QMainWindow):
         self._runner.cancel()
 
     def _on_open_results(self):
-        """Open a previously-completed output directory and load its MANIFEST."""
+        """Open a completed successful output directory into complete-state workspace."""
         selected = QFileDialog.getExistingDirectory(
             self, "Select Output Directory with MANIFEST.json",
             self._output_dir.text().strip(),
@@ -1289,14 +1323,46 @@ class MainWindow(QMainWindow):
         self._output_dir.setText(selected)
         self._save_widgets_to_settings()
 
-        manifest_path = os.path.join(selected, "MANIFEST.json")
-        if not os.path.isfile(manifest_path):
-            self._append_run_log(f"No MANIFEST.json found in {selected}")
-        else:
-            self._append_run_log(f"--- Opening results from {selected} ---")
+        is_successful_complete, evidence = is_successful_completed_run_dir(selected)
+        if not is_successful_complete:
+            self._append_run_log(
+                f"Open Results blocked: selected directory is not a confirmed successful completed run. {evidence}"
+            )
+            QMessageBox.information(
+                self,
+                "Results Not Opened",
+                "The selected directory does not have a defensible successful-complete run status.\n\n"
+                f"{evidence}",
+            )
+            self._report_viewer.clear()
+            self._exit_complete_state_workspace()
+            self._state_str = RunnerState.IDLE.value
+            self._ui_state = RunnerState.IDLE
+            self._render_status_label()
+            self._update_button_states()
+            return
 
-        # ManifestViewer.load_manifest handles missing/invalid file gracefully
-        self._report_viewer.load_report(selected)
+        self._append_run_log(f"--- Opening results from {selected} ---")
+
+        loaded = self._report_viewer.load_report(selected)
+        if loaded:
+            self._is_validate_only = False
+            self._validation_passed = False
+            self._elapsed_timer.stop()
+            self._run_started_monotonic = None
+            self._state_str = RunnerState.SUCCESS.value
+            self._ui_state = RunnerState.SUCCESS
+            self._last_status_phase = "final"
+            self._last_status_state = "success"
+            self._last_status_msg = ""
+            self._last_status_errors = []
+            self._last_status_pct = 100
+            self._refresh_status_from_disk_final()
+            self._enter_complete_state_workspace()
+            self._append_run_log("Complete-state results workspace loaded.")
+        else:
+            self._append_run_log("Could not load complete-state workspace from selected directory.")
+            self._exit_complete_state_workspace()
         self._update_button_states()
 
     def _on_open_folder(self):
@@ -1437,13 +1503,11 @@ class MainWindow(QMainWindow):
         self._run_started_monotonic = time.monotonic()
         self._last_elapsed_sec = 0.0
         self._elapsed_timer.start()
-        if hasattr(self._report_viewer, "_title_label"):
-            if self._ui_state == RunnerState.VALIDATING:
-                msg = "Validation in progress..."
-            else:
-                msg = "Run in progress..."
-            self._report_viewer._title_label.setText(msg)
-            self._report_viewer._title_label.setStyleSheet("color: #666; font-size: 14px;")
+        if self._ui_state == RunnerState.VALIDATING:
+            msg = "Validation in progress..."
+        else:
+            msg = "Run in progress..."
+        self._report_viewer.set_running_message(msg)
         self._update_button_states()
 
     def _on_state_changed(self, state_str: str):
@@ -1561,17 +1625,24 @@ class MainWindow(QMainWindow):
             self._append_run_log("Run was cancelled before normal completion. Partial outputs may exist; inspect the run folder.")
             self._last_status_msg = "Run cancelled; partial outputs may exist."
 
-        # Step 8 Rendering Hardening:
-        # Load report if it exists on disk, regardless of runner state or flag.
-        report_on_disk = os.path.join(self._current_run_dir, "run_report.json")
-        if os.path.exists(report_on_disk):
-            if state != RunnerState.SUCCESS:
-                 self._append_run_log(f"Report present, runner state = {state.name}. You can inspect available outputs via Open Run Folder.")
-            
-            if not self._is_validate_only:
-                 self._report_viewer.load_report(self._current_run_dir)
-                 if state == RunnerState.SUCCESS:
-                      self._append_run_log(f"Analysis completed successfully in {self._current_run_dir}")
+        # Complete-state workspace is shown only for successful full runs.
+        workspace_loaded = False
+        if state == RunnerState.SUCCESS and not self._is_validate_only:
+            workspace_loaded = self._report_viewer.load_report(self._current_run_dir)
+            if workspace_loaded:
+                self._append_run_log(f"Analysis completed successfully in {self._current_run_dir}")
+            else:
+                self._append_run_log(
+                    "Run succeeded, but complete-state artifacts were not found. "
+                    "Inspect the run folder for available outputs."
+                )
+        else:
+            self._report_viewer.clear()
+
+        if state == RunnerState.SUCCESS and not self._is_validate_only and workspace_loaded:
+            self._enter_complete_state_workspace()
+        else:
+            self._exit_complete_state_workspace()
 
         # Step 8 Preview Mode labeling (Requirement)
         self._apply_preview_labeling()
@@ -1621,6 +1692,58 @@ class MainWindow(QMainWindow):
                 self._preview_badge.show()
         except Exception:
             pass
+
+    def _update_complete_state_summary(self) -> None:
+        """Populate compact completion-state summary card from current GUI/run context."""
+        run_dir = self._current_run_dir or "(not set)"
+        input_dir = self._input_dir.text().strip() or "(not set)"
+        mode_text = self._mode_combo.currentText().strip() or "(not set)"
+        plotting_mode = self._plotting_mode_combo.currentText().strip() or "(not set)"
+        roi_summary = self._compute_roi_filter_summary()
+        summary_lines = [
+            f"Input: {input_dir}",
+            f"Run directory: {run_dir}",
+            f"Mode: {mode_text}",
+            f"Plotting mode: {plotting_mode}",
+            f"ROI selection: {roi_summary}",
+        ]
+        self._complete_summary_label.setText("\n".join(summary_lines))
+
+    def _enter_complete_state_workspace(self) -> None:
+        """Switch left pane to compact completion card after successful full runs."""
+        self._is_complete_workspace_active = True
+        self._update_complete_state_summary()
+        if hasattr(self, "_controls_stack"):
+            self._controls_stack.setCurrentWidget(self._complete_state_panel)
+        self._render_status_label()
+
+    def _exit_complete_state_workspace(self) -> None:
+        """Return left pane to editable run controls."""
+        self._is_complete_workspace_active = False
+        if hasattr(self, "_controls_stack"):
+            self._controls_stack.setCurrentWidget(self._config_panel)
+
+    def _on_new_run(self) -> None:
+        """Exit complete-state workspace and restore idle editable controls."""
+        self._exit_complete_state_workspace()
+        self._report_viewer.clear()
+        self._is_validate_only = False
+        self._validation_passed = False
+        self._state_str = RunnerState.IDLE.value
+        self._ui_state = RunnerState.IDLE
+        self._last_status_phase = "\u2014"
+        self._last_status_state = "\u2014"
+        self._last_status_duration = ""
+        self._last_status_duration_sec = None
+        self._last_status_errors = []
+        self._last_status_msg = ""
+        self._last_status_pct = None
+        self._ui_progress_pct = 0
+        self._run_started_monotonic = None
+        self._last_elapsed_sec = 0.0
+        self._elapsed_timer.stop()
+        self._render_status_label()
+        self._update_button_states()
 
     def _on_run_error(self, msg: str):
         self._elapsed_timer.stop()
