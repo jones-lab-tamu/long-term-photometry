@@ -20,8 +20,8 @@ import subprocess as _subprocess
 import time
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QSettings, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt, QSettings, QTimer, QSize
+from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QCheckBox, QSpinBox,
@@ -41,6 +41,11 @@ from gui.validate_run_policy import (
     is_validation_current
 )
 from photometry_pipeline.config import Config
+from photometry_pipeline.io.hdf5_cache_reader import (
+    open_phasic_cache,
+    resolve_cache_roi,
+)
+from photometry_pipeline.tuning.cache_downstream_retune import run_cache_downstream_retune
 import dataclasses
 from typing import get_args
 
@@ -166,6 +171,13 @@ def compute_isosbestic_overrides_user_changed(parsed: dict, defaults: dict) -> d
     return changed
 
 _cached_allowed_fields = {}
+_KNOWN_ALLOWED_VALUES = {
+    "baseline_method": ["uv_raw_percentile_session", "uv_globalfit_percentile_session"],
+    "event_signal": ["dff", "delta_f"],
+    "peak_threshold_method": ["mean_std", "percentile", "median_mad", "absolute"],
+    "event_auc_baseline": ["zero", "median"],
+    "peak_pre_filter": ["none", "lowpass"],
+}
 
 def _get_allowed_from_config_field(field_name: str) -> list[str]:
     """
@@ -198,6 +210,10 @@ def _get_allowed_from_config_field(field_name: str) -> list[str]:
             
     except Exception:
         pass
+
+    if field_name in _KNOWN_ALLOWED_VALUES:
+        _cached_allowed_fields[field_name] = list(_KNOWN_ALLOWED_VALUES[field_name])
+        return _cached_allowed_fields[field_name]
         
     default_val = getattr(Config(), field_name)
     _cached_allowed_fields[field_name] = [str(default_val)]
@@ -486,6 +502,10 @@ class MainWindow(QMainWindow):
         self._last_elapsed_sec = 0.0
         self._saw_cancel_status = False
         self._is_complete_workspace_active = False
+        self._tuning_workspace_available = False
+        self._tuning_last_result = None
+        self._tuning_active_overlay_path = ""
+        self._tuning_active_overlay_pixmap = QPixmap()
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(250)
         self._elapsed_timer.timeout.connect(self._on_elapsed_timer_tick)
@@ -497,6 +517,7 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.addWidget(self._build_status_strip(), 0)
         main_layout.addWidget(self._build_main_body(), 1)
+        self._refresh_tuning_workspace_availability()
         self._update_button_states()
 
         # Restore persisted settings
@@ -602,8 +623,14 @@ class MainWindow(QMainWindow):
         """Right pane with the large results viewer."""
         results_group = QGroupBox("Results")
         results_lay = QVBoxLayout(results_group)
+        self._results_layout = results_lay
         self._report_viewer = RunReportViewer()
-        results_lay.addWidget(self._report_viewer)
+        self._report_viewer.region_changed.connect(self._on_results_region_changed)
+        results_lay.addWidget(self._report_viewer, 1)
+        self._tuning_group = self._build_tuning_workspace_group()
+        self._tuning_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        results_lay.addWidget(self._tuning_group)
+        self._update_results_pane_mode_for_tuning()
         return results_group
 
     def _build_complete_state_panel(self) -> QWidget:
@@ -632,6 +659,209 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return panel
 
+    def _build_tuning_workspace_group(self) -> QGroupBox:
+        """Bounded post-run tuning surface for downstream cache retuning only."""
+        group = QGroupBox("Post-Run Tuning (Downstream Only)")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        disclosure_row = QHBoxLayout()
+        self._tuning_disclosure_btn = QToolButton()
+        self._tuning_disclosure_btn.setText("Tuning controls")
+        self._tuning_disclosure_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._tuning_disclosure_btn.setArrowType(Qt.RightArrow)
+        self._tuning_disclosure_btn.setCheckable(True)
+        self._tuning_disclosure_btn.setChecked(False)
+        self._tuning_disclosure_btn.setAutoRaise(True)
+        self._tuning_disclosure_btn.toggled.connect(self._on_tuning_disclosure_toggled)
+        disclosure_row.addWidget(self._tuning_disclosure_btn)
+        disclosure_row.addStretch()
+        layout.addLayout(disclosure_row)
+
+        self._tuning_collapsed_status_label = QLabel(
+            "Tuning is available only after a successful completed run is loaded."
+        )
+        self._tuning_collapsed_status_label.setWordWrap(True)
+        self._tuning_collapsed_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._tuning_collapsed_status_label.setMinimumWidth(0)
+        self._tuning_collapsed_status_label.setStyleSheet("font-size: 11px; color: #8a6d3b;")
+        layout.addWidget(self._tuning_collapsed_status_label)
+
+        self._tuning_content = QWidget()
+        tuning_content_outer = QVBoxLayout(self._tuning_content)
+        tuning_content_outer.setContentsMargins(0, 0, 0, 0)
+        tuning_content_outer.setSpacing(0)
+        self._tuning_scroll = QScrollArea()
+        self._tuning_scroll.setWidgetResizable(True)
+        self._tuning_scroll.setFrameShape(QScrollArea.NoFrame)
+        self._tuning_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._tuning_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._tuning_scroll_content = QWidget()
+        content_layout = QVBoxLayout(self._tuning_scroll_content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        self._tuning_scroll.setWidget(self._tuning_scroll_content)
+        tuning_content_outer.addWidget(self._tuning_scroll)
+        layout.addWidget(self._tuning_content)
+        self._tuning_content.setVisible(False)
+
+        self._tuning_scope_note = QLabel(
+            "This workspace retunes downstream event-detection settings from cached phasic traces. "
+            "Correction-sensitive settings are not available in this workspace. "
+            "Recomputing correction context will require a future workflow that is not implemented yet."
+        )
+        self._tuning_scope_note.setWordWrap(True)
+        self._tuning_scope_note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._tuning_scope_note.setMinimumWidth(0)
+        self._tuning_scope_note.setStyleSheet("font-size: 11px; color: #555;")
+        content_layout.addWidget(self._tuning_scope_note)
+
+        self._tuning_availability_label = QLabel("Tuning is available only after a successful completed run is loaded.")
+        self._tuning_availability_label.setWordWrap(True)
+        self._tuning_availability_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._tuning_availability_label.setMinimumWidth(0)
+        self._tuning_availability_label.setStyleSheet("font-size: 11px; color: #8a6d3b;")
+        content_layout.addWidget(self._tuning_availability_label)
+
+        self._tuning_controls_container = QWidget()
+        self._tuning_controls_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self._tuning_controls_container.setMaximumWidth(640)
+        form_row = QHBoxLayout()
+        form_row.setContentsMargins(0, 0, 0, 0)
+        form_row.setSpacing(0)
+        form_row.addWidget(self._tuning_controls_container, 0, Qt.AlignLeft | Qt.AlignTop)
+        form_row.addStretch(1)
+        content_layout.addLayout(form_row)
+
+        tuning_form = QFormLayout(self._tuning_controls_container)
+        tuning_form.setContentsMargins(0, 0, 0, 0)
+        tuning_form.setSpacing(6)
+        tuning_form.setHorizontalSpacing(12)
+        tuning_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        tuning_form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        tuning_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        def _tuning_row_label(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setMinimumWidth(170)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            return lbl
+
+        self._tuning_roi_combo = QComboBox()
+        self._tuning_roi_combo.setMinimumWidth(220)
+        self._tuning_roi_combo.currentIndexChanged.connect(self._on_tuning_roi_changed)
+        tuning_form.addRow(_tuning_row_label("ROI:"), self._tuning_roi_combo)
+
+        self._tuning_chunk_combo = QComboBox()
+        self._tuning_chunk_combo.setMinimumWidth(220)
+        tuning_form.addRow(_tuning_row_label("Chunk:"), self._tuning_chunk_combo)
+
+        self._tuning_event_signal_combo = QComboBox()
+        self._tuning_event_signal_combo.setMinimumWidth(220)
+        self._tuning_event_signal_combo.addItems(get_allowed_event_signals_from_config())
+        tuning_form.addRow(_tuning_row_label("Event Signal:"), self._tuning_event_signal_combo)
+
+        self._tuning_peak_method_combo = QComboBox()
+        self._tuning_peak_method_combo.setMinimumWidth(220)
+        self._tuning_peak_method_combo.addItems(get_allowed_peak_threshold_methods_from_config())
+        self._tuning_peak_method_combo.currentIndexChanged.connect(self._on_tuning_peak_method_changed)
+        tuning_form.addRow(_tuning_row_label("Peak Threshold Method:"), self._tuning_peak_method_combo)
+
+        self._tuning_peak_k_spin = QDoubleSpinBox()
+        self._tuning_peak_k_spin.setMinimumWidth(140)
+        self._tuning_peak_k_spin.setRange(0.000001, 1_000_000.0)
+        self._tuning_peak_k_spin.setDecimals(6)
+        self._tuning_peak_k_spin.setSingleStep(0.1)
+        self._tuning_peak_k_label = _tuning_row_label("Peak Threshold K:")
+        tuning_form.addRow(self._tuning_peak_k_label, self._tuning_peak_k_spin)
+
+        self._tuning_peak_pct_spin = QDoubleSpinBox()
+        self._tuning_peak_pct_spin.setMinimumWidth(140)
+        self._tuning_peak_pct_spin.setRange(0.0, 100.0)
+        self._tuning_peak_pct_spin.setDecimals(3)
+        self._tuning_peak_pct_spin.setSingleStep(1.0)
+        self._tuning_peak_pct_label = _tuning_row_label("Peak Threshold Percentile:")
+        tuning_form.addRow(self._tuning_peak_pct_label, self._tuning_peak_pct_spin)
+
+        self._tuning_peak_abs_spin = QDoubleSpinBox()
+        self._tuning_peak_abs_spin.setMinimumWidth(140)
+        self._tuning_peak_abs_spin.setRange(0.0, 1_000_000.0)
+        self._tuning_peak_abs_spin.setDecimals(6)
+        self._tuning_peak_abs_spin.setSingleStep(0.05)
+        self._tuning_peak_abs_label = _tuning_row_label("Peak Threshold Absolute:")
+        tuning_form.addRow(self._tuning_peak_abs_label, self._tuning_peak_abs_spin)
+
+        self._tuning_peak_dist_spin = QDoubleSpinBox()
+        self._tuning_peak_dist_spin.setMinimumWidth(140)
+        self._tuning_peak_dist_spin.setRange(0.0, 10_000.0)
+        self._tuning_peak_dist_spin.setDecimals(3)
+        self._tuning_peak_dist_spin.setSingleStep(0.1)
+        tuning_form.addRow(_tuning_row_label("Peak Min Distance (s):"), self._tuning_peak_dist_spin)
+
+        self._tuning_peak_pre_filter_combo = QComboBox()
+        self._tuning_peak_pre_filter_combo.setMinimumWidth(220)
+        self._tuning_peak_pre_filter_combo.addItems(get_allowed_peak_pre_filters_from_config())
+        tuning_form.addRow(_tuning_row_label("Peak Pre-Filter:"), self._tuning_peak_pre_filter_combo)
+
+        self._tuning_event_auc_combo = QComboBox()
+        self._tuning_event_auc_combo.setMinimumWidth(220)
+        self._tuning_event_auc_combo.addItems(get_allowed_event_auc_baselines_from_config())
+        tuning_form.addRow(_tuning_row_label("Event AUC Baseline:"), self._tuning_event_auc_combo)
+
+        btn_row = QHBoxLayout()
+        self._run_tuning_btn = QPushButton("Run Tuning")
+        self._run_tuning_btn.clicked.connect(self._on_run_tuning)
+        btn_row.addWidget(self._run_tuning_btn)
+        self._open_tuning_dir_btn = QPushButton("Open Tuning Output")
+        self._open_tuning_dir_btn.clicked.connect(self._on_open_tuning_output)
+        btn_row.addWidget(self._open_tuning_dir_btn)
+        btn_row.addStretch()
+        content_layout.addLayout(btn_row)
+
+        apply_row = QHBoxLayout()
+        self._apply_tuning_btn = QPushButton("Apply tuning values to run settings")
+        self._apply_tuning_btn.setToolTip(
+            "Copy downstream tuning values into the main run settings controls."
+        )
+        self._apply_tuning_btn.clicked.connect(self._on_apply_tuning_values_to_run_settings)
+        apply_row.addWidget(self._apply_tuning_btn)
+        apply_row.addStretch()
+        content_layout.addLayout(apply_row)
+
+        self._tuning_summary_label = QLabel("No tuning result yet.")
+        self._tuning_summary_label.setWordWrap(True)
+        self._tuning_summary_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._tuning_summary_label.setMinimumWidth(0)
+        self._tuning_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        content_layout.addWidget(self._tuning_summary_label)
+
+        self._tuning_overlay_title = QLabel("No tuning overlay loaded.")
+        self._tuning_overlay_title.setAlignment(Qt.AlignCenter)
+        content_layout.addWidget(self._tuning_overlay_title)
+
+        self._tuning_overlay_label = QLabel("Run tuning to generate an ROI/chunk event overlay.")
+        self._tuning_overlay_label.setAlignment(Qt.AlignCenter)
+        self._tuning_overlay_label.setStyleSheet(
+            "QLabel { background: #111; color: #ddd; border: 1px solid #444; }"
+        )
+        self._tuning_overlay_scroll = QScrollArea()
+        self._tuning_overlay_scroll.setWidgetResizable(False)
+        self._tuning_overlay_scroll.setAlignment(Qt.AlignCenter)
+        self._tuning_overlay_scroll.setFrameShape(QScrollArea.NoFrame)
+        self._tuning_overlay_scroll.setMinimumHeight(180)
+        self._tuning_overlay_scroll.setMaximumHeight(520)
+        self._tuning_overlay_scroll.setWidget(self._tuning_overlay_label)
+        content_layout.addWidget(self._tuning_overlay_scroll)
+
+        self._on_tuning_peak_method_changed()
+        self._set_tuning_workspace_unavailable(
+            "Tuning is available only after a successful completed run is loaded."
+        )
+        self._set_tuning_disclosure_expanded(False)
+        group.setVisible(False)
+        return group
+
     # ==================================================================
     # Log Panel
     # ==================================================================
@@ -647,6 +877,455 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._log_view)
 
         return group
+
+    # ==================================================================
+    # Post-run tuning workspace (Patch D)
+    # ==================================================================
+
+    def _update_results_pane_mode_for_tuning(self) -> None:
+        if not hasattr(self, "_report_viewer") or not hasattr(self, "_tuning_group"):
+            return
+        expanded_tuning = bool(
+            self._is_complete_workspace_active
+            and not self._tuning_group.isHidden()
+            and hasattr(self, "_tuning_disclosure_btn")
+            and self._tuning_disclosure_btn.isChecked()
+        )
+        self._report_viewer.setVisible(not expanded_tuning)
+        if expanded_tuning:
+            self._tuning_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self._tuning_group.setMaximumHeight(16777215)
+        else:
+            self._tuning_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+            self._tuning_group.setMaximumHeight(16777215)
+        if hasattr(self, "_results_layout"):
+            self._results_layout.invalidate()
+            self._results_layout.activate()
+
+    def _on_tuning_disclosure_toggled(self, expanded: bool) -> None:
+        if expanded and hasattr(self, "_report_viewer"):
+            selected_region = self._report_viewer.selected_region().strip()
+            if selected_region and self._tuning_roi_combo.findText(selected_region) >= 0:
+                self._tuning_roi_combo.setCurrentText(selected_region)
+        self._tuning_content.setVisible(expanded)
+        self._tuning_disclosure_btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self._update_results_pane_mode_for_tuning()
+        QTimer.singleShot(0, self._render_tuning_overlay)
+
+    def _set_tuning_disclosure_expanded(self, expanded: bool) -> None:
+        if not hasattr(self, "_tuning_disclosure_btn"):
+            return
+        self._tuning_disclosure_btn.blockSignals(True)
+        self._tuning_disclosure_btn.setChecked(expanded)
+        self._tuning_disclosure_btn.blockSignals(False)
+        self._on_tuning_disclosure_toggled(expanded)
+
+    def _set_tuning_collapsed_status(self, message: str, *, ready: bool) -> None:
+        self._tuning_collapsed_status_label.setText(message)
+        color = "#2d7d2d" if ready else "#8a6d3b"
+        self._tuning_collapsed_status_label.setStyleSheet(f"font-size: 11px; color: {color};")
+
+    def _set_tuning_workspace_unavailable(self, reason: str) -> None:
+        self._tuning_workspace_available = False
+        self._tuning_controls_container.setEnabled(False)
+        self._run_tuning_btn.setEnabled(False)
+        self._open_tuning_dir_btn.setEnabled(False)
+        self._apply_tuning_btn.setEnabled(False)
+        self._tuning_availability_label.setText(reason)
+        self._tuning_availability_label.setStyleSheet("font-size: 11px; color: #8a6d3b;")
+        self._set_tuning_collapsed_status(reason, ready=False)
+        self._update_results_pane_mode_for_tuning()
+
+    def _set_tuning_workspace_available(self, message: str) -> None:
+        self._tuning_workspace_available = True
+        self._tuning_controls_container.setEnabled(True)
+        self._run_tuning_btn.setEnabled(True)
+        self._open_tuning_dir_btn.setEnabled(bool(self._tuning_last_result))
+        self._apply_tuning_btn.setEnabled(True)
+        self._tuning_availability_label.setText(message)
+        self._tuning_availability_label.setStyleSheet("font-size: 11px; color: #2d7d2d;")
+        self._set_tuning_collapsed_status(message, ready=True)
+        self._update_results_pane_mode_for_tuning()
+
+    def _current_phasic_out_dir(self) -> str:
+        return os.path.join(self._current_run_dir, "_analysis", "phasic_out")
+
+    def _current_phasic_cache_path(self) -> str:
+        return os.path.join(self._current_phasic_out_dir(), "phasic_trace_cache.h5")
+
+    def _current_phasic_config_path(self) -> str:
+        return os.path.join(self._current_phasic_out_dir(), "config_used.yaml")
+
+    def _set_tuning_overlay_message(self, text: str) -> None:
+        self._tuning_active_overlay_path = ""
+        self._tuning_active_overlay_pixmap = QPixmap()
+        self._tuning_overlay_title.setText("No tuning overlay loaded.")
+        self._tuning_overlay_label.setPixmap(QPixmap())
+        self._tuning_overlay_label.setText(text)
+        viewport = self._tuning_overlay_scroll.viewport().size()
+        if viewport.width() < 10 or viewport.height() < 10:
+            viewport = QSize(640, 300)
+        target = QSize(max(10, viewport.width() - 8), max(10, viewport.height() - 8))
+        self._tuning_overlay_label.resize(target)
+
+    def _render_tuning_overlay(self) -> None:
+        """Render tuning overlay in fit-to-view mode inside the scroll viewport."""
+        if self._tuning_active_overlay_pixmap.isNull():
+            return
+        viewport = self._tuning_overlay_scroll.viewport().size()
+        if viewport.width() < 10 or viewport.height() < 10:
+            viewport = QSize(1000, 700)
+        target = QSize(max(10, viewport.width() - 8), max(10, viewport.height() - 8))
+        scaled = self._tuning_active_overlay_pixmap.scaled(
+            target,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self._tuning_overlay_label.setText("")
+        self._tuning_overlay_label.setPixmap(scaled)
+        self._tuning_overlay_label.resize(scaled.size())
+
+    def _set_tuning_overlay_image(self, image_path: str) -> None:
+        if not image_path or not os.path.isfile(image_path):
+            self._set_tuning_overlay_message("Tuning overlay image is missing.")
+            return
+        pix = QPixmap(image_path)
+        if pix.isNull():
+            self._set_tuning_overlay_message("Unable to render tuning overlay image.")
+            return
+        self._tuning_active_overlay_path = image_path
+        self._tuning_active_overlay_pixmap = pix
+        self._tuning_overlay_title.setText(os.path.basename(image_path))
+        self._render_tuning_overlay()
+
+    def _load_tuning_base_config(self) -> Config:
+        cfg_path = self._current_phasic_config_path()
+        if os.path.isfile(cfg_path):
+            try:
+                return Config.from_yaml(cfg_path)
+            except Exception:
+                pass
+        return self._default_cfg
+
+    def _roi_chunk_ids_map(self, cache_path: str) -> dict[str, list[int]]:
+        """
+        Return ROI->chunk_id map using ROI-group membership, not global chunk ids.
+        """
+        roi_chunk_map: dict[str, list[int]] = {}
+        with open_phasic_cache(cache_path) as cache:
+            roi_group = cache.get("roi")
+            if roi_group is None:
+                return roi_chunk_map
+            for roi_name in roi_group.keys():
+                grp = roi_group.get(str(roi_name))
+                if grp is None:
+                    continue
+                chunk_ids: list[int] = []
+                for key in grp.keys():
+                    if not str(key).startswith("chunk_"):
+                        continue
+                    try:
+                        cid = int(str(key).split("_", 1)[1])
+                    except (ValueError, IndexError):
+                        continue
+                    chunk_ids.append(cid)
+                if chunk_ids:
+                    roi_chunk_map[str(roi_name)] = sorted(set(chunk_ids))
+        return roi_chunk_map
+
+    def _populate_tuning_chunk_choices(self, roi: str) -> None:
+        cache_path = self._current_phasic_cache_path()
+        self._tuning_chunk_combo.blockSignals(True)
+        self._tuning_chunk_combo.clear()
+        if not os.path.isfile(cache_path) or not roi:
+            self._tuning_chunk_combo.blockSignals(False)
+            return
+        try:
+            with open_phasic_cache(cache_path) as cache:
+                resolved_roi = resolve_cache_roi(cache, roi)
+                roi_grp = cache.get(f"roi/{resolved_roi}")
+                chunk_ids = []
+                if roi_grp is not None:
+                    for key in roi_grp.keys():
+                        if not str(key).startswith("chunk_"):
+                            continue
+                        try:
+                            chunk_ids.append(int(str(key).split("_", 1)[1]))
+                        except (ValueError, IndexError):
+                            continue
+                chunk_ids = sorted(set(chunk_ids))
+        except Exception:
+            chunk_ids = []
+        for cid in chunk_ids:
+            self._tuning_chunk_combo.addItem(str(cid), cid)
+        self._tuning_chunk_combo.blockSignals(False)
+
+    def _populate_tuning_roi_choices(
+        self,
+        *,
+        cache_rois_with_chunks: list[str],
+        prefer_roi: str | None = None,
+    ) -> None:
+        cache_rois = list(cache_rois_with_chunks)
+        viewer_rois = self._report_viewer.available_regions()
+        if viewer_rois:
+            merged = [r for r in viewer_rois if r in cache_rois]
+            if not merged:
+                merged = cache_rois
+        else:
+            merged = cache_rois
+
+        current = self._tuning_roi_combo.currentText().strip()
+        target = (prefer_roi or current or "").strip()
+
+        self._tuning_roi_combo.blockSignals(True)
+        self._tuning_roi_combo.clear()
+        self._tuning_roi_combo.addItems(merged)
+        self._tuning_roi_combo.blockSignals(False)
+
+        if merged:
+            if target in merged:
+                self._tuning_roi_combo.setCurrentText(target)
+            else:
+                self._tuning_roi_combo.setCurrentIndex(0)
+        self._populate_tuning_chunk_choices(self._tuning_roi_combo.currentText().strip())
+
+    def _apply_tuning_defaults_from_config(self, cfg: Config) -> None:
+        if self._tuning_event_signal_combo.findText(str(cfg.event_signal)) >= 0:
+            self._tuning_event_signal_combo.setCurrentText(str(cfg.event_signal))
+        if self._tuning_peak_method_combo.findText(str(cfg.peak_threshold_method)) >= 0:
+            self._tuning_peak_method_combo.setCurrentText(str(cfg.peak_threshold_method))
+        self._tuning_peak_k_spin.setValue(float(cfg.peak_threshold_k))
+        self._tuning_peak_pct_spin.setValue(float(cfg.peak_threshold_percentile))
+        self._tuning_peak_abs_spin.setValue(float(getattr(cfg, "peak_threshold_abs", 0.0)))
+        self._tuning_peak_dist_spin.setValue(float(cfg.peak_min_distance_sec))
+        pre_filter = str(getattr(cfg, "peak_pre_filter", "none"))
+        if self._tuning_peak_pre_filter_combo.findText(pre_filter) >= 0:
+            self._tuning_peak_pre_filter_combo.setCurrentText(pre_filter)
+        auc_base = str(cfg.event_auc_baseline)
+        if self._tuning_event_auc_combo.findText(auc_base) >= 0:
+            self._tuning_event_auc_combo.setCurrentText(auc_base)
+        self._on_tuning_peak_method_changed()
+
+    def _on_tuning_peak_method_changed(self) -> None:
+        method = self._tuning_peak_method_combo.currentText().strip()
+        show_k = peak_threshold_method_requires_k(method)
+        show_pct = peak_threshold_method_requires_percentile(method)
+        show_abs = peak_threshold_method_requires_abs(method)
+        self._tuning_peak_k_label.setVisible(show_k)
+        self._tuning_peak_k_spin.setVisible(show_k)
+        self._tuning_peak_pct_label.setVisible(show_pct)
+        self._tuning_peak_pct_spin.setVisible(show_pct)
+        self._tuning_peak_abs_label.setVisible(show_abs)
+        self._tuning_peak_abs_spin.setVisible(show_abs)
+
+    def _on_results_region_changed(self, region: str) -> None:
+        if not self._is_complete_workspace_active or not region:
+            return
+        if self._tuning_roi_combo.findText(region) >= 0:
+            self._tuning_roi_combo.setCurrentText(region)
+
+    def _on_tuning_roi_changed(self, _index: int) -> None:
+        roi = self._tuning_roi_combo.currentText().strip()
+        self._populate_tuning_chunk_choices(roi)
+
+    def _refresh_tuning_workspace_availability(self) -> None:
+        if not hasattr(self, "_tuning_group"):
+            return
+
+        self._tuning_group.setVisible(bool(self._is_complete_workspace_active))
+        if not self._is_complete_workspace_active:
+            self._set_tuning_workspace_unavailable(
+                "Tuning is available only after a successful completed run is loaded."
+            )
+            return
+
+        run_dir = self._current_run_dir
+        if not run_dir or not os.path.isdir(run_dir):
+            self._set_tuning_workspace_unavailable("No completed run directory is active.")
+            return
+
+        phasic_out_dir = self._current_phasic_out_dir()
+        if not os.path.isdir(phasic_out_dir):
+            self._set_tuning_workspace_unavailable(
+                "Tuning unavailable: missing phasic output directory at _analysis/phasic_out."
+            )
+            return
+
+        cache_path = self._current_phasic_cache_path()
+        if not os.path.isfile(cache_path):
+            self._set_tuning_workspace_unavailable(
+                "Tuning unavailable: phasic cache is missing for this completed run."
+            )
+            return
+
+        cfg_path = self._current_phasic_config_path()
+        if not os.path.isfile(cfg_path):
+            self._set_tuning_workspace_unavailable(
+                "Tuning unavailable: missing config snapshot _analysis/phasic_out/config_used.yaml."
+            )
+            return
+
+        try:
+            roi_chunk_map = self._roi_chunk_ids_map(cache_path)
+        except Exception as exc:
+            self._set_tuning_workspace_unavailable(
+                f"Tuning unavailable: unable to read ROI/chunk targets from phasic cache ({exc})."
+            )
+            return
+        valid_rois = sorted(roi_chunk_map.keys(), key=lambda s: s.lower())
+        if not valid_rois:
+            self._set_tuning_workspace_unavailable(
+                "Tuning unavailable: no valid ROI groups with chunk data found in phasic cache."
+            )
+            return
+
+        prefer_roi = self._report_viewer.selected_region()
+        self._populate_tuning_roi_choices(
+            cache_rois_with_chunks=valid_rois,
+            prefer_roi=prefer_roi,
+        )
+        selected_roi = self._tuning_roi_combo.currentText().strip()
+        if not selected_roi:
+            self._set_tuning_workspace_unavailable(
+                "Tuning unavailable: no valid ROI target is available for this run."
+            )
+            return
+        if self._tuning_chunk_combo.count() == 0:
+            self._set_tuning_workspace_unavailable(
+                f"Tuning unavailable: selected ROI '{selected_roi}' has no chunk data in phasic cache."
+            )
+            return
+
+        self._apply_tuning_defaults_from_config(self._load_tuning_base_config())
+        self._set_tuning_workspace_available(
+            "Ready: downstream-only tuning from cache. Correction-sensitive parameters are not part of this workspace."
+        )
+
+    def _collect_tuning_overrides(self) -> dict:
+        method = self._tuning_peak_method_combo.currentText().strip()
+        overrides = {
+            "event_signal": self._tuning_event_signal_combo.currentText().strip(),
+            "peak_threshold_method": method,
+            "peak_min_distance_sec": float(self._tuning_peak_dist_spin.value()),
+            "peak_pre_filter": self._tuning_peak_pre_filter_combo.currentText().strip(),
+            "event_auc_baseline": self._tuning_event_auc_combo.currentText().strip(),
+        }
+        if peak_threshold_method_requires_k(method):
+            overrides["peak_threshold_k"] = float(self._tuning_peak_k_spin.value())
+        if peak_threshold_method_requires_percentile(method):
+            overrides["peak_threshold_percentile"] = float(self._tuning_peak_pct_spin.value())
+        if peak_threshold_method_requires_abs(method):
+            overrides["peak_threshold_abs"] = float(self._tuning_peak_abs_spin.value())
+        return overrides
+
+    def _on_run_tuning(self) -> None:
+        if not self._tuning_workspace_available:
+            QMessageBox.information(self, "Tuning Unavailable", self._tuning_availability_label.text())
+            return
+
+        roi = self._tuning_roi_combo.currentText().strip()
+        if not roi:
+            QMessageBox.warning(self, "Tuning Error", "Select an ROI before running tuning.")
+            return
+        if self._tuning_chunk_combo.currentIndex() < 0:
+            QMessageBox.warning(self, "Tuning Error", "Select a chunk before running tuning.")
+            return
+        chunk_id = int(self._tuning_chunk_combo.currentData())
+        overrides = self._collect_tuning_overrides()
+
+        self._run_tuning_btn.setEnabled(False)
+        self._run_tuning_btn.setText("Running...")
+        try:
+            result = run_cache_downstream_retune(
+                run_dir=self._current_run_dir,
+                roi=roi,
+                chunk_id=chunk_id,
+                overrides=overrides,
+                out_dir=None,
+            )
+        except Exception as exc:
+            self._append_run_log(f"Tuning retune failed: {exc}")
+            QMessageBox.critical(
+                self,
+                "Tuning Failed",
+                f"Cache-driven downstream retune failed.\n\n{exc}",
+            )
+            return
+        finally:
+            self._run_tuning_btn.setEnabled(self._tuning_workspace_available)
+            self._run_tuning_btn.setText("Run Tuning")
+
+        self._tuning_last_result = result
+        self._open_tuning_dir_btn.setEnabled(True)
+        artifacts = result.get("artifacts", {}) if isinstance(result, dict) else {}
+        overlay_path = str(artifacts.get("retuned_overlay_png", "")).strip()
+        self._set_tuning_overlay_image(overlay_path)
+
+        lines = [
+            f"ROI: {result.get('selected_roi', roi)}",
+            f"Chunk: {result.get('inspection_chunk_id', chunk_id)}",
+            f"Event signal: {result.get('event_signal_used', overrides.get('event_signal', '(unknown)'))}",
+            f"Retune output: {result.get('retune_dir', '(unknown)')}",
+        ]
+        self._tuning_summary_label.setText("\n".join(lines))
+        self._append_run_log(
+            f"Tuning completed for ROI={result.get('selected_roi', roi)} chunk={result.get('inspection_chunk_id', chunk_id)} "
+            f"-> {result.get('retune_dir', '(unknown)')}"
+        )
+        QTimer.singleShot(0, self._finalize_tuning_result_layout)
+
+    def _finalize_tuning_result_layout(self) -> None:
+        """Finalize tuning-result geometry before fit-to-view overlay render."""
+        self._tuning_group.updateGeometry()
+        self._tuning_scroll_content.updateGeometry()
+        self._tuning_scroll.viewport().updateGeometry()
+        self._tuning_scroll.updateGeometry()
+        self._render_tuning_overlay()
+
+    def _on_open_tuning_output(self) -> None:
+        if not isinstance(self._tuning_last_result, dict):
+            QMessageBox.information(self, "No Tuning Output", "Run tuning first to create an output directory.")
+            return
+        retune_dir = str(self._tuning_last_result.get("retune_dir", "")).strip()
+        if not retune_dir or not os.path.isdir(retune_dir):
+            QMessageBox.information(self, "No Tuning Output", "Tuning output directory is not available.")
+            return
+        _open_folder(retune_dir)
+
+    def _on_apply_tuning_values_to_run_settings(self) -> None:
+        if not self._tuning_workspace_available:
+            QMessageBox.information(self, "Tuning Unavailable", self._tuning_availability_label.text())
+            return
+
+        def _set_combo_if_allowed(combo: QComboBox, value: str) -> None:
+            idx = combo.findText(value)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+
+        def _fmt(v: float, decimals: int = 6) -> str:
+            text = f"{float(v):.{decimals}f}"
+            return text.rstrip("0").rstrip(".") if "." in text else text
+
+        _set_combo_if_allowed(self._event_signal_combo, self._tuning_event_signal_combo.currentText().strip())
+
+        method = self._tuning_peak_method_combo.currentText().strip()
+        _set_combo_if_allowed(self._peak_method_combo, method)
+
+        self._peak_k_edit.setText(_fmt(self._tuning_peak_k_spin.value(), decimals=6))
+        self._peak_pct_edit.setText(_fmt(self._tuning_peak_pct_spin.value(), decimals=3))
+        self._peak_abs_edit.setText(_fmt(self._tuning_peak_abs_spin.value(), decimals=6))
+        self._peak_dist_edit.setText(_fmt(self._tuning_peak_dist_spin.value(), decimals=3))
+
+        _set_combo_if_allowed(self._peak_pre_filter_combo, self._tuning_peak_pre_filter_combo.currentText().strip())
+        _set_combo_if_allowed(self._event_auc_combo, self._tuning_event_auc_combo.currentText().strip())
+
+        self._update_adv_ev_visibility()
+        self._append_run_log("Applied downstream tuning values to run settings.")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._render_tuning_overlay()
 
     def _update_adv_group_visibility(self):
         # In our GUI contract, "both" maps to mode_val=None (which implies phasic runs)
@@ -1357,6 +2036,7 @@ class MainWindow(QMainWindow):
             )
             self._report_viewer.clear()
             self._exit_complete_state_workspace()
+            self._refresh_tuning_workspace_availability()
             self._state_str = RunnerState.IDLE.value
             self._ui_state = RunnerState.IDLE
             self._render_status_label()
@@ -1380,10 +2060,12 @@ class MainWindow(QMainWindow):
             self._last_status_pct = 100
             self._refresh_status_from_disk_final()
             self._enter_complete_state_workspace()
+            self._refresh_tuning_workspace_availability()
             self._append_run_log("Complete-state results workspace loaded.")
         else:
             self._append_run_log("Could not load complete-state workspace from selected directory.")
             self._exit_complete_state_workspace()
+            self._refresh_tuning_workspace_availability()
         self._update_button_states()
 
     def _on_open_folder(self):
@@ -1532,6 +2214,7 @@ class MainWindow(QMainWindow):
         else:
             msg = "Run in progress..."
         self._report_viewer.set_running_message(msg)
+        self._refresh_tuning_workspace_availability()
         self._update_button_states()
 
     def _on_state_changed(self, state_str: str):
@@ -1667,6 +2350,7 @@ class MainWindow(QMainWindow):
             self._enter_complete_state_workspace()
         else:
             self._exit_complete_state_workspace()
+        self._refresh_tuning_workspace_availability()
 
         # Step 8 Preview Mode labeling (Requirement)
         self._apply_preview_labeling()
@@ -1739,6 +2423,8 @@ class MainWindow(QMainWindow):
         self._update_complete_state_summary()
         if hasattr(self, "_controls_stack"):
             self._controls_stack.setCurrentWidget(self._complete_state_panel)
+        self._set_tuning_disclosure_expanded(False)
+        self._refresh_tuning_workspace_availability()
         self._render_status_label()
 
     def _exit_complete_state_workspace(self) -> None:
@@ -1746,11 +2432,16 @@ class MainWindow(QMainWindow):
         self._is_complete_workspace_active = False
         if hasattr(self, "_controls_stack"):
             self._controls_stack.setCurrentWidget(self._config_panel)
+        self._refresh_tuning_workspace_availability()
 
     def _on_new_run(self) -> None:
         """Exit complete-state workspace and restore idle editable controls."""
         self._exit_complete_state_workspace()
         self._report_viewer.clear()
+        self._tuning_last_result = None
+        self._set_tuning_overlay_message("Run tuning to generate an ROI/chunk event overlay.")
+        self._tuning_summary_label.setText("No tuning result yet.")
+        self._refresh_tuning_workspace_availability()
         self.setWindowTitle(self.WINDOW_TITLE_BASE)
         self._preview_badge.hide()
         self._is_validate_only = False

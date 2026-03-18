@@ -46,6 +46,7 @@ TAB_ORDER = [
 
 class RunReportViewer(QWidget):
     """Results workspace for completed runs."""
+    region_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -358,6 +359,7 @@ class RunReportViewer(QWidget):
         """Refresh tabs, viewer, and actions for selected region."""
         self._rebuild_tabs_for_selected_region()
         self._refresh_action_rows()
+        self.region_changed.emit(self._selected_region())
 
     def _on_tab_changed(self, _index: int):
         """Refresh image viewer when tab changes."""
@@ -365,6 +367,14 @@ class RunReportViewer(QWidget):
 
     def _selected_region(self) -> str:
         return self._region_combo.currentText().strip()
+
+    def selected_region(self) -> str:
+        """Public selected-region getter for parent workspace integrations."""
+        return self._selected_region()
+
+    def available_regions(self) -> List[str]:
+        """Public region list for parent workspace integrations."""
+        return sorted(self._region_paths.keys(), key=lambda s: s.lower())
 
     def _selected_tab(self) -> str:
         idx = self._tabs.currentIndex()

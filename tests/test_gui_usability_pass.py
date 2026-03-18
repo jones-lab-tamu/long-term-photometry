@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QSizePolicy
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -263,3 +263,19 @@ def test_fresh_run_reset_ignores_stale_high_water_state(window):
     assert window._progress_bar.value() < 50
     assert window._progress_bar.value() not in (99, 100)
     assert "running" in window._progress_bar.format().lower()
+
+
+def test_tuning_apply_back_affordance_and_scope_text(window):
+    assert hasattr(window, "_apply_tuning_btn")
+    assert window._apply_tuning_btn.text() == "Apply tuning values to run settings"
+
+    scope_msg = window._tuning_scope_note.text().lower()
+    assert "downstream event-detection settings from cached phasic traces" in scope_msg
+    assert "not available in this workspace" in scope_msg
+    assert "not implemented yet" in scope_msg
+    assert window._tuning_scope_note.wordWrap()
+    assert window._tuning_availability_label.wordWrap()
+    assert window._tuning_summary_label.wordWrap()
+    assert window._tuning_scope_note.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
+    assert window._tuning_availability_label.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
+    assert window._tuning_summary_label.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
