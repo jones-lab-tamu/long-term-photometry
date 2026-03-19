@@ -43,7 +43,6 @@ from gui.validate_run_policy import (
 from photometry_pipeline.config import Config
 from photometry_pipeline.io.hdf5_cache_reader import (
     open_phasic_cache,
-    resolve_cache_roi,
 )
 from photometry_pipeline.tuning.cache_downstream_retune import run_cache_downstream_retune
 from photometry_pipeline.tuning.cache_correction_retune import run_cache_correction_retune
@@ -507,6 +506,7 @@ class MainWindow(QMainWindow):
         self._tuning_last_result = None
         self._tuning_active_overlay_path = ""
         self._tuning_active_overlay_pixmap = QPixmap()
+        self._roi_chunk_ids_cache: dict[str, list[int]] = {}
         self._correction_tuning_workspace_available = False
         self._correction_tuning_last_result = None
         self._correction_tuning_active_inspection_path = ""
@@ -1404,46 +1404,57 @@ class MainWindow(QMainWindow):
             roi_group = cache.get("roi")
             if roi_group is None:
                 return roi_chunk_map
+            try:
+                meta_chunk_ids = [int(cid) for cid in cache["meta"]["chunk_ids"]]
+            except Exception:
+                meta_chunk_ids = []
             for roi_name in roi_group.keys():
                 grp = roi_group.get(str(roi_name))
                 if grp is None:
                     continue
                 chunk_ids: list[int] = []
-                for key in grp.keys():
-                    if not str(key).startswith("chunk_"):
-                        continue
-                    try:
-                        cid = int(str(key).split("_", 1)[1])
-                    except (ValueError, IndexError):
-                        continue
-                    chunk_ids.append(cid)
+                if meta_chunk_ids:
+                    for cid in meta_chunk_ids:
+                        if f"chunk_{cid}" in grp:
+                            chunk_ids.append(cid)
+                if not chunk_ids:
+                    for key in grp.keys():
+                        if not str(key).startswith("chunk_"):
+                            continue
+                        try:
+                            cid = int(str(key).split("_", 1)[1])
+                        except (ValueError, IndexError):
+                            continue
+                        chunk_ids.append(cid)
                 if chunk_ids:
                     roi_chunk_map[str(roi_name)] = sorted(set(chunk_ids))
         return roi_chunk_map
 
-    def _populate_tuning_chunk_choices(self, roi: str) -> None:
+    def _chunk_ids_for_roi(self, roi: str) -> list[int]:
+        roi = (roi or "").strip()
+        if not roi:
+            return []
+        if self._roi_chunk_ids_cache:
+            if roi in self._roi_chunk_ids_cache:
+                return list(self._roi_chunk_ids_cache[roi])
+            roi_l = roi.lower()
+            for key, ids in self._roi_chunk_ids_cache.items():
+                if str(key).lower() == roi_l:
+                    return list(ids)
+            return []
         cache_path = self._current_phasic_cache_path()
+        if not os.path.isfile(cache_path):
+            return []
+        try:
+            self._roi_chunk_ids_cache = self._roi_chunk_ids_map(cache_path)
+        except Exception:
+            return []
+        return list(self._roi_chunk_ids_cache.get(roi, []))
+
+    def _populate_tuning_chunk_choices(self, roi: str) -> None:
         self._tuning_chunk_combo.blockSignals(True)
         self._tuning_chunk_combo.clear()
-        if not os.path.isfile(cache_path) or not roi:
-            self._tuning_chunk_combo.blockSignals(False)
-            return
-        try:
-            with open_phasic_cache(cache_path) as cache:
-                resolved_roi = resolve_cache_roi(cache, roi)
-                roi_grp = cache.get(f"roi/{resolved_roi}")
-                chunk_ids = []
-                if roi_grp is not None:
-                    for key in roi_grp.keys():
-                        if not str(key).startswith("chunk_"):
-                            continue
-                        try:
-                            chunk_ids.append(int(str(key).split("_", 1)[1]))
-                        except (ValueError, IndexError):
-                            continue
-                chunk_ids = sorted(set(chunk_ids))
-        except Exception:
-            chunk_ids = []
+        chunk_ids = self._chunk_ids_for_roi(roi)
         for cid in chunk_ids:
             self._tuning_chunk_combo.addItem(str(cid), cid)
         self._tuning_chunk_combo.blockSignals(False)
@@ -1525,6 +1536,7 @@ class MainWindow(QMainWindow):
     def _refresh_tuning_workspace_availability(self) -> None:
         if not hasattr(self, "_tuning_group"):
             return
+        self._roi_chunk_ids_cache = {}
 
         self._tuning_group.setVisible(bool(self._is_complete_workspace_active))
         if not self._is_complete_workspace_active:
@@ -1594,6 +1606,7 @@ class MainWindow(QMainWindow):
                 f"Correction retune unavailable: unable to read ROI/session targets from phasic cache ({exc})."
             )
             return
+        self._roi_chunk_ids_cache = roi_chunk_map
         valid_rois = sorted(roi_chunk_map.keys(), key=lambda s: s.lower())
         if not valid_rois:
             self._set_tuning_workspace_unavailable(
@@ -1885,28 +1898,9 @@ class MainWindow(QMainWindow):
         self._render_correction_tuning_overlay()
 
     def _populate_correction_tuning_chunk_choices(self, roi: str) -> None:
-        cache_path = self._current_phasic_cache_path()
         self._correction_tuning_chunk_combo.blockSignals(True)
         self._correction_tuning_chunk_combo.clear()
-        if not os.path.isfile(cache_path) or not roi:
-            self._correction_tuning_chunk_combo.blockSignals(False)
-            return
-        try:
-            with open_phasic_cache(cache_path) as cache:
-                resolved_roi = resolve_cache_roi(cache, roi)
-                roi_grp = cache.get(f"roi/{resolved_roi}")
-                chunk_ids = []
-                if roi_grp is not None:
-                    for key in roi_grp.keys():
-                        if not str(key).startswith("chunk_"):
-                            continue
-                        try:
-                            chunk_ids.append(int(str(key).split("_", 1)[1]))
-                        except (ValueError, IndexError):
-                            continue
-                chunk_ids = sorted(set(chunk_ids))
-        except Exception:
-            chunk_ids = []
+        chunk_ids = self._chunk_ids_for_roi(roi)
         for cid in chunk_ids:
             self._correction_tuning_chunk_combo.addItem(str(cid), cid)
         self._correction_tuning_chunk_combo.blockSignals(False)

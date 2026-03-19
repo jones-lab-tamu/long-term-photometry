@@ -31,7 +31,13 @@ def window(qapp):
     w.deleteLater()
 
 
-def _make_completed_run_with_cache(tmp_path, *, with_config: bool = True, roi_chunk_keep: dict | None = None):
+def _make_completed_run_with_cache(
+    tmp_path,
+    *,
+    with_config: bool = True,
+    roi_chunk_keep: dict | None = None,
+    chunk_ids: tuple[int, ...] = (0, 1, 2),
+):
     run_dir = tmp_path / "run_complete"
     phasic_out = run_dir / "_analysis" / "phasic_out"
     phasic_out.mkdir(parents=True, exist_ok=True)
@@ -50,7 +56,7 @@ def _make_completed_run_with_cache(tmp_path, *, with_config: bool = True, roi_ch
     cache_path = phasic_out / "phasic_trace_cache.h5"
     with Hdf5TraceCacheWriter(str(cache_path), "phasic", cfg) as writer:
         t = np.arange(0, 240.0, 1.0)
-        for cid in (0, 1, 2):
+        for cid in chunk_ids:
             sig_r0 = np.sin(0.07 * t) + 0.2 * np.sin(0.4 * t) + (cid * 0.05)
             uv_r0 = 0.4 * np.sin(0.07 * t + 0.3) + 0.2
             delta_r0 = sig_r0 - uv_r0
@@ -1207,6 +1213,48 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
     assert window._correction_tuning_inspection_title.toolTip().strip()
     assert window._correction_tuning_inspection_label.toolTip().strip()
     assert window._correction_tuning_summary_label.toolTip().strip()
+
+
+def test_tuning_preview_session_selectors_show_all_roi_sessions(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(
+        tmp_path / "full_sessions",
+        chunk_ids=(0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        roi_chunk_keep={"Region0": [0, 1, 2, 5, 7, 9], "Region1": [3, 4, 8]},
+    )
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    QApplication.processEvents()
+
+    window._tuning_roi_combo.setCurrentText("Region0")
+    downstream_r0 = [
+        window._tuning_chunk_combo.itemText(i)
+        for i in range(window._tuning_chunk_combo.count())
+    ]
+    assert downstream_r0 == ["0", "1", "2", "5", "7", "9"]
+    assert len(downstream_r0) == 6
+
+    window._tuning_roi_combo.setCurrentText("Region1")
+    downstream_r1 = [
+        window._tuning_chunk_combo.itemText(i)
+        for i in range(window._tuning_chunk_combo.count())
+    ]
+    assert downstream_r1 == ["3", "4", "8"]
+
+    window._correction_tuning_roi_combo.setCurrentText("Region0")
+    correction_r0 = [
+        window._correction_tuning_chunk_combo.itemText(i)
+        for i in range(window._correction_tuning_chunk_combo.count())
+    ]
+    assert correction_r0 == ["0", "1", "2", "5", "7", "9"]
+    assert len(correction_r0) == 6
+
+    window._correction_tuning_roi_combo.setCurrentText("Region1")
+    correction_r1 = [
+        window._correction_tuning_chunk_combo.itemText(i)
+        for i in range(window._correction_tuning_chunk_combo.count())
+    ]
+    assert correction_r1 == ["3", "4", "8"]
 
 
 def test_correction_tuning_backend_wiring_and_result_refresh(window, tmp_path, monkeypatch):
