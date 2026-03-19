@@ -1,0 +1,584 @@
+"""
+Cache-driven correction-sensitive retune backend.
+
+This module implements an isolated correction recompute path for a completed run:
+- validates successful completion provenance
+- loads raw phasic cache context (time_sec, sig_raw, uv_raw)
+- applies correction-sensitive overrides only
+- recomputes baseline/correction/dff/features for one ROI across all chunks
+- writes retuned outputs into an isolated subtree
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import os
+import secrets
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, Tuple
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import yaml
+
+from photometry_pipeline.config import Config
+from photometry_pipeline.core import baseline, regression, normalization, preprocessing
+from photometry_pipeline.core.feature_extraction import extract_features
+from photometry_pipeline.core.types import Chunk, SessionStats
+from photometry_pipeline.io.hdf5_cache import Hdf5TraceCacheWriter
+from photometry_pipeline.io.hdf5_cache_reader import (
+    open_phasic_cache,
+    resolve_cache_roi,
+)
+
+
+CORRECTION_RETUNABLE_KEYS = {
+    "window_sec",
+    "step_sec",
+    "min_valid_windows",
+    "min_samples_per_window",
+    "r_low",
+    "r_high",
+    "g_min",
+    "baseline_method",
+    "baseline_percentile",
+    "lowpass_hz",
+}
+
+DOWNSTREAM_ONLY_KEYS = {
+    "event_signal",
+    "peak_threshold_method",
+    "peak_threshold_k",
+    "peak_threshold_percentile",
+    "peak_threshold_abs",
+    "peak_min_distance_sec",
+    "peak_pre_filter",
+    "event_auc_baseline",
+}
+
+EXPLICITLY_UNSUPPORTED_KEYS = {
+    "f0_min_value",
+}
+
+_OVERRIDE_VALUE_CASTERS = {
+    "window_sec": float,
+    "step_sec": float,
+    "min_valid_windows": int,
+    "min_samples_per_window": int,
+    "r_low": float,
+    "r_high": float,
+    "g_min": float,
+    "baseline_method": str,
+    "baseline_percentile": float,
+    "lowpass_hz": float,
+    "event_signal": str,
+    "peak_threshold_method": str,
+    "peak_threshold_k": float,
+    "peak_threshold_percentile": float,
+    "peak_threshold_abs": float,
+    "peak_min_distance_sec": float,
+    "peak_pre_filter": str,
+    "event_auc_baseline": str,
+    "f0_min_value": float,
+}
+
+
+def parse_key_value_overrides(items: Iterable[str]) -> Dict[str, Any]:
+    """Parse KEY=VALUE CLI items into typed overrides."""
+    parsed: Dict[str, Any] = {}
+    for raw in items:
+        if "=" not in raw:
+            raise ValueError(f"Invalid override '{raw}'. Use KEY=VALUE.")
+        key, value = raw.split("=", 1)
+        key = key.strip().replace("-", "_")
+        value = value.strip()
+        if not key:
+            raise ValueError(f"Invalid override '{raw}'. Empty key.")
+        caster = _OVERRIDE_VALUE_CASTERS.get(key, str)
+        try:
+            parsed[key] = caster(value)
+        except Exception as exc:
+            raise ValueError(f"Invalid value for override '{key}': {value}") from exc
+    return parsed
+
+
+def classify_overrides(overrides: Dict[str, Any]) -> Dict[str, list[str]]:
+    """Classify override keys by correction-retune boundary classes."""
+    keys = set(overrides.keys())
+    return {
+        "correction_supported": sorted(keys & CORRECTION_RETUNABLE_KEYS),
+        "downstream_only": sorted(keys & DOWNSTREAM_ONLY_KEYS),
+        "unsupported": sorted(keys & EXPLICITLY_UNSUPPORTED_KEYS),
+        "unknown": sorted(
+            keys
+            - CORRECTION_RETUNABLE_KEYS
+            - DOWNSTREAM_ONLY_KEYS
+            - EXPLICITLY_UNSUPPORTED_KEYS
+        ),
+    }
+
+
+def _assert_successful_completed_run(run_dir: str) -> str:
+    """
+    Verify run_dir is defensibly complete and successful.
+
+    Evidence order:
+      1) status.json (phase=final, status=success)
+      2) MANIFEST.json (status=success)
+    """
+    status_path = os.path.join(run_dir, "status.json")
+    if os.path.isfile(status_path):
+        with open(status_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        phase = str(data.get("phase", "")).strip().lower()
+        status = str(data.get("status", "")).strip().lower()
+        if phase == "final" and status == "success":
+            return "status.json"
+
+    manifest_path = os.path.join(run_dir, "MANIFEST.json")
+    if os.path.isfile(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        status = str(data.get("status", "")).strip().lower()
+        if status == "success":
+            return "MANIFEST.json"
+
+    raise RuntimeError(
+        "Run directory is not defensibly a successful completed run. "
+        "Require status.json final success or MANIFEST.json status=success."
+    )
+
+
+def _resolve_base_config(phasic_out_dir: str) -> Tuple[Config, str]:
+    cfg_path = os.path.join(phasic_out_dir, "config_used.yaml")
+    if not os.path.isfile(cfg_path):
+        raise RuntimeError(f"Missing base config snapshot: {cfg_path}")
+    return Config.from_yaml(cfg_path), cfg_path
+
+
+def _coerce_overrides(overrides: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key, value in overrides.items():
+        caster = _OVERRIDE_VALUE_CASTERS.get(key, str)
+        out[key] = caster(value)
+    return out
+
+
+def _apply_correction_overrides(base_cfg: Config, overrides: Dict[str, Any]) -> Config:
+    cfg_dict = dataclasses.asdict(base_cfg)
+    cfg_dict.update(_coerce_overrides(overrides))
+    return Config(**cfg_dict)
+
+
+def _compute_chunk_fs_hz(time_sec: np.ndarray, fallback: float) -> float:
+    if len(time_sec) < 2:
+        return float(fallback)
+    dt = np.diff(time_sec)
+    finite = dt[np.isfinite(dt) & (dt > 0)]
+    if len(finite) == 0:
+        return float(fallback)
+    return float(1.0 / np.median(finite))
+
+
+def _make_retune_dir(run_dir: str, out_dir: str | None) -> str:
+    base = os.path.abspath(out_dir) if out_dir else os.path.join(run_dir, "tuning_correction_retune")
+    os.makedirs(base, exist_ok=True)
+    run_id = datetime.now().strftime("retune_%Y%m%d_%H%M%S") + "_" + secrets.token_hex(3)
+    retune_dir = os.path.join(base, run_id)
+    os.makedirs(retune_dir, exist_ok=False)
+    return retune_dir
+
+
+def _load_roi_raw_entries(cache, roi: str, cfg: Config) -> list[dict[str, Any]]:
+    meta = cache.get("meta")
+    source_files: list[str] | None = None
+    if meta is not None and "source_files" in meta:
+        source_files = [str(x.decode("utf-8") if isinstance(x, bytes) else x) for x in meta["source_files"][()]]
+
+    roi_group = cache.get(f"roi/{roi}")
+    if roi_group is None:
+        raise RuntimeError(f"ROI group missing in cache: {roi}")
+    chunk_ids = sorted(
+        int(name.split("_", 1)[1])
+        for name in roi_group.keys()
+        if str(name).startswith("chunk_")
+    )
+    if not chunk_ids:
+        raise RuntimeError(f"No chunks found in phasic cache for ROI {roi}.")
+
+    entries: list[dict[str, Any]] = []
+    for idx, cid in enumerate(chunk_ids):
+        grp = roi_group.get(f"chunk_{cid}")
+        if grp is None:
+            raise RuntimeError(f"Missing cache chunk group for ROI {roi}: chunk_{cid}")
+
+        required = ["time_sec", "sig_raw", "uv_raw"]
+        missing = [name for name in required if name not in grp]
+        if missing:
+            raise RuntimeError(
+                f"Cache chunk missing required raw dataset(s): "
+                f"roi={roi} chunk={cid} missing={missing}"
+            )
+
+        time_sec = grp["time_sec"][()]
+        sig_raw = grp["sig_raw"][()]
+        uv_raw = grp["uv_raw"][()]
+        fs_hz = _compute_chunk_fs_hz(time_sec, cfg.target_fs_hz)
+        source_file = source_files[idx] if source_files and idx < len(source_files) else f"chunk_{cid}"
+
+        entries.append(
+            {
+                "chunk_id": int(cid),
+                "source_file": source_file,
+                "time_sec": np.asarray(time_sec),
+                "sig_raw": np.asarray(sig_raw),
+                "uv_raw": np.asarray(uv_raw),
+                "fs_hz": float(fs_hz),
+            }
+        )
+
+    return entries
+
+
+def _compute_roi_baseline_stats(entries: list[dict[str, Any]], roi: str, cfg: Config) -> SessionStats:
+    stats = SessionStats()
+    method = cfg.baseline_method
+
+    if method == "uv_raw_percentile_session":
+        reservoir = baseline.DeterministicReservoir(seed=cfg.seed)
+        for rec in entries:
+            reservoir.add(roi, rec["uv_raw"])
+        stats.method_used = method
+        stats.f0_values[roi] = float(reservoir.get_percentile(roi, cfg.baseline_percentile))
+        return stats
+
+    if method == "uv_globalfit_percentile_session":
+        accumulator = baseline.GlobalFitAccumulator()
+        for rec in entries:
+            uv_raw = rec["uv_raw"]
+            sig_raw = rec["sig_raw"]
+            fs_hz = rec["fs_hz"]
+            uv_filt, _ = preprocessing.lowpass_filter_with_meta(uv_raw, fs_hz, cfg)
+            sig_filt, _ = preprocessing.lowpass_filter_with_meta(sig_raw, fs_hz, cfg)
+            accumulator.add(roi, uv_filt, sig_filt)
+
+        solved = accumulator.solve()
+        params = solved.get(roi, {"a": 1.0, "b": 0.0})
+        stats.global_fit_params[roi] = {"a": float(params["a"]), "b": float(params["b"])}
+
+        reservoir = baseline.DeterministicReservoir(seed=cfg.seed)
+        a = float(params["a"])
+        b = float(params["b"])
+        for rec in entries:
+            uv_est = a * rec["uv_raw"] + b
+            reservoir.add(roi, uv_est)
+
+        stats.method_used = method
+        stats.f0_values[roi] = float(reservoir.get_percentile(roi, cfg.baseline_percentile))
+        return stats
+
+    raise RuntimeError(
+        "Unsupported baseline_method for correction retune: "
+        f"{method}."
+    )
+
+
+def _recompute_roi_chunks(
+    entries: list[dict[str, Any]],
+    roi: str,
+    cfg: Config,
+    stats: SessionStats,
+) -> tuple[list[Chunk], pd.DataFrame, list[float]]:
+    chunks: list[Chunk] = []
+    features_rows: list[pd.DataFrame] = []
+    durations: list[float] = []
+
+    for rec in entries:
+        chunk = Chunk(
+            chunk_id=int(rec["chunk_id"]),
+            source_file=str(rec["source_file"]),
+            format="cache",
+            time_sec=np.asarray(rec["time_sec"]),
+            uv_raw=np.asarray(rec["uv_raw"]).reshape(-1, 1),
+            sig_raw=np.asarray(rec["sig_raw"]).reshape(-1, 1),
+            fs_hz=float(rec["fs_hz"]),
+            channel_names=[roi],
+            metadata={},
+        )
+
+        chunk.uv_filt, _ = preprocessing.lowpass_filter_with_meta(chunk.uv_raw, chunk.fs_hz, cfg)
+        chunk.sig_filt, _ = preprocessing.lowpass_filter_with_meta(chunk.sig_raw, chunk.fs_hz, cfg)
+        uv_fit, delta_f = regression.fit_chunk_dynamic(chunk, cfg, mode="phasic")
+        chunk.uv_fit = uv_fit
+        chunk.delta_f = delta_f
+        chunk.dff = normalization.compute_dff(chunk, stats, cfg)
+
+        feats_df = extract_features(chunk, cfg)
+        features_rows.append(feats_df)
+        chunks.append(chunk)
+
+        if len(chunk.time_sec) >= 2:
+            durations.append(float(chunk.time_sec[-1] - chunk.time_sec[0]))
+
+    if not chunks:
+        raise RuntimeError("No chunks were recomputed for selected ROI.")
+
+    all_features = pd.concat(features_rows, ignore_index=True)
+    all_features = all_features[all_features["roi"] == roi].copy()
+    all_features.sort_values(["chunk_id", "roi"], inplace=True)
+    return chunks, all_features, durations
+
+
+def _write_features_artifacts(
+    retune_dir: str,
+    roi: str,
+    features_df: pd.DataFrame,
+    median_session_duration_s: float,
+) -> Dict[str, str]:
+    artifacts: Dict[str, str] = {}
+
+    features_csv = os.path.join(retune_dir, f"retuned_features_{roi}.csv")
+    features_df.to_csv(features_csv, index=False)
+    artifacts["retuned_features_csv"] = features_csv
+
+    summary_df = (
+        features_df.groupby("chunk_id", as_index=False)
+        .agg({"peak_count": "sum", "auc": "sum"})
+        .sort_values("chunk_id")
+    )
+    if median_session_duration_s > 0:
+        summary_df["peak_rate_per_min"] = summary_df["peak_count"] / (median_session_duration_s / 60.0)
+    else:
+        summary_df["peak_rate_per_min"] = np.nan
+
+    summary_csv = os.path.join(retune_dir, f"retuned_summary_{roi}.csv")
+    summary_df.to_csv(summary_csv, index=False)
+    artifacts["retuned_summary_csv"] = summary_csv
+
+    return artifacts
+
+
+def _write_correction_inspection(
+    retune_dir: str,
+    roi: str,
+    chunk: Chunk,
+) -> Dict[str, str]:
+    artifacts: Dict[str, str] = {}
+    cid = int(chunk.chunk_id)
+    suffix = f"{roi}_chunk_{cid:03d}"
+
+    t = np.asarray(chunk.time_sec)
+    sig = np.asarray(chunk.sig_raw[:, 0])
+    uv = np.asarray(chunk.uv_raw[:, 0])
+    fit = np.asarray(chunk.uv_fit[:, 0]) if chunk.uv_fit is not None else np.full_like(sig, np.nan)
+    delta_f = np.asarray(chunk.delta_f[:, 0]) if chunk.delta_f is not None else np.full_like(sig, np.nan)
+    dff = np.asarray(chunk.dff[:, 0]) if chunk.dff is not None else np.full_like(sig, np.nan)
+
+    csv_path = os.path.join(retune_dir, f"retuned_correction_session_{suffix}.csv")
+    pd.DataFrame(
+        {
+            "chunk_id": cid,
+            "source_file": str(chunk.source_file),
+            "t_s": t,
+            "sig_raw": sig,
+            "uv_raw": uv,
+            "fit_ref": fit,
+            "delta_f": delta_f,
+            "dff": dff,
+        }
+    ).to_csv(csv_path, index=False)
+    artifacts["retuned_correction_session_csv"] = csv_path
+
+    png_path = os.path.join(retune_dir, f"retuned_correction_inspection_{suffix}.png")
+    fig, axes = plt.subplots(4, 1, figsize=(11.5, 9.0), sharex=True)
+
+    axes[0].plot(t, sig, color="forestgreen", linewidth=0.9, label="sig_raw")
+    axes[0].plot(t, uv, color="purple", linewidth=0.8, alpha=0.8, label="uv_raw")
+    axes[0].set_ylabel("raw")
+    axes[0].set_title(f"Correction Retune Inspection ({roi}) | chunk={cid} | source={chunk.source_file}")
+    axes[0].grid(True, alpha=0.25)
+    axes[0].legend(loc="best", fontsize=8)
+
+    axes[1].plot(t, sig, color="forestgreen", linewidth=0.9, label="sig_raw")
+    axes[1].plot(t, fit, color="black", linewidth=0.9, linestyle="--", label="fit_ref")
+    axes[1].set_ylabel("fit")
+    axes[1].grid(True, alpha=0.25)
+    axes[1].legend(loc="best", fontsize=8)
+
+    axes[2].plot(t, delta_f, color="royalblue", linewidth=0.9, label="delta_f")
+    axes[2].axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
+    axes[2].set_ylabel("delta_f")
+    axes[2].grid(True, alpha=0.25)
+    axes[2].legend(loc="best", fontsize=8)
+
+    axes[3].plot(t, dff, color="darkorange", linewidth=0.9, label="dff")
+    axes[3].axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
+    axes[3].set_ylabel("dff")
+    axes[3].set_xlabel("Time (s)")
+    axes[3].grid(True, alpha=0.25)
+    axes[3].legend(loc="best", fontsize=8)
+
+    fig.tight_layout()
+    fig.savefig(png_path, dpi=150)
+    plt.close(fig)
+    artifacts["retuned_correction_inspection_png"] = png_path
+
+    return artifacts
+
+
+def _write_provenance(
+    path: str,
+    *,
+    run_dir: str,
+    phasic_out_dir: str,
+    selected_roi: str,
+    inspection_chunk_id_requested: int | None,
+    inspection_chunk_id_used: int,
+    completed_evidence: str,
+    base_config_path: str,
+    base_config: Config,
+    overrides: Dict[str, Any],
+    classes: Dict[str, list[str]],
+) -> None:
+    payload = {
+        "schema_version": 1,
+        "tool": "cache_correction_retune",
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "source_run_dir": os.path.abspath(run_dir),
+        "source_phasic_out_dir": os.path.abspath(phasic_out_dir),
+        "completed_run_evidence": completed_evidence,
+        "selected_roi": selected_roi,
+        "inspection_chunk_id_requested": inspection_chunk_id_requested,
+        "inspection_chunk_id_used": inspection_chunk_id_used,
+        "correction_overrides_applied": dict(overrides),
+        "override_classification": classes,
+        "base_config_source": os.path.abspath(base_config_path),
+        "base_config_snapshot": dataclasses.asdict(base_config),
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+
+
+def run_cache_correction_retune(
+    *,
+    run_dir: str,
+    roi: str,
+    overrides: Dict[str, Any],
+    chunk_id: int | None = None,
+    out_dir: str | None = None,
+) -> Dict[str, Any]:
+    """Execute correction-sensitive cache retune for selected ROI across all chunks."""
+    run_dir = os.path.abspath(run_dir)
+    if not os.path.isdir(run_dir):
+        raise RuntimeError(f"Run directory does not exist: {run_dir}")
+    if not roi or not roi.strip():
+        raise RuntimeError("ROI must be provided.")
+
+    classes = classify_overrides(overrides)
+    if classes["downstream_only"]:
+        raise ValueError(
+            "Downstream-only override(s) are not allowed in correction retune: "
+            f"{classes['downstream_only']}. "
+            "Use the cache_downstream_retune backend for downstream event-detection knobs."
+        )
+    if classes["unsupported"]:
+        raise ValueError(
+            "Unsupported override key(s) for correction retune: "
+            f"{classes['unsupported']}."
+        )
+    if classes["unknown"]:
+        raise ValueError(f"Unknown override key(s): {classes['unknown']}")
+
+    completed_evidence = _assert_successful_completed_run(run_dir)
+
+    phasic_out_dir = os.path.join(run_dir, "_analysis", "phasic_out")
+    if not os.path.isdir(phasic_out_dir):
+        raise RuntimeError(f"Missing phasic analysis directory: {phasic_out_dir}")
+
+    cache_path = os.path.join(phasic_out_dir, "phasic_trace_cache.h5")
+    if not os.path.isfile(cache_path):
+        raise RuntimeError(f"Missing phasic cache: {cache_path}")
+
+    base_config, base_config_path = _resolve_base_config(phasic_out_dir)
+    effective_config = _apply_correction_overrides(base_config, overrides)
+
+    with open_phasic_cache(cache_path) as cache:
+        resolved_roi = resolve_cache_roi(cache, roi)
+        entries = _load_roi_raw_entries(cache, resolved_roi, effective_config)
+
+    available_chunk_ids = sorted(int(rec["chunk_id"]) for rec in entries)
+    if chunk_id is None:
+        inspection_chunk_id = available_chunk_ids[0]
+    else:
+        inspection_chunk_id = int(chunk_id)
+        if inspection_chunk_id not in available_chunk_ids:
+            raise RuntimeError(
+                f"Requested chunk_id={inspection_chunk_id} not present for ROI {resolved_roi}. "
+                f"Available chunk_ids={available_chunk_ids}"
+            )
+
+    retune_dir = _make_retune_dir(run_dir, out_dir)
+    with open(os.path.join(retune_dir, "retune_config_effective.yaml"), "w", encoding="utf-8") as f:
+        yaml.safe_dump(dataclasses.asdict(effective_config), f, sort_keys=True)
+
+    _write_provenance(
+        os.path.join(retune_dir, "retune_request.json"),
+        run_dir=run_dir,
+        phasic_out_dir=phasic_out_dir,
+        selected_roi=resolved_roi,
+        inspection_chunk_id_requested=chunk_id,
+        inspection_chunk_id_used=inspection_chunk_id,
+        completed_evidence=completed_evidence,
+        base_config_path=base_config_path,
+        base_config=base_config,
+        overrides=overrides,
+        classes=classes,
+    )
+
+    stats = _compute_roi_baseline_stats(entries, resolved_roi, effective_config)
+    chunks, features_df, durations = _recompute_roi_chunks(entries, resolved_roi, effective_config, stats)
+
+    retune_cache_path = os.path.join(retune_dir, f"retuned_correction_trace_cache_{resolved_roi}.h5")
+    with Hdf5TraceCacheWriter(retune_cache_path, "phasic", effective_config) as writer:
+        for chunk in chunks:
+            writer.add_chunk(chunk, chunk_id=int(chunk.chunk_id), source_file=str(chunk.source_file))
+
+    median_duration_s = float(np.median(durations)) if durations else 0.0
+    artifacts: Dict[str, str] = {
+        "retuned_correction_cache_h5": retune_cache_path,
+    }
+    artifacts.update(_write_features_artifacts(retune_dir, resolved_roi, features_df, median_duration_s))
+
+    inspection_chunk = next((c for c in chunks if int(c.chunk_id) == int(inspection_chunk_id)), None)
+    if inspection_chunk is None:
+        raise RuntimeError(f"Internal error: inspection chunk {inspection_chunk_id} was not recomputed.")
+    artifacts.update(_write_correction_inspection(retune_dir, resolved_roi, inspection_chunk))
+
+    baseline_snapshot = {
+        "method_used": stats.method_used,
+        "f0_values": stats.f0_values,
+        "global_fit_params": stats.global_fit_params,
+    }
+    baseline_path = os.path.join(retune_dir, "retuned_baseline_snapshot.json")
+    with open(baseline_path, "w", encoding="utf-8") as f:
+        json.dump(baseline_snapshot, f, indent=2, sort_keys=True)
+    artifacts["retuned_baseline_snapshot_json"] = baseline_path
+
+    result = {
+        "retune_dir": retune_dir,
+        "selected_roi": resolved_roi,
+        "inspection_chunk_id": int(inspection_chunk_id),
+        "inspection_source_file": str(inspection_chunk.source_file),
+        "n_chunks": int(len(chunks)),
+        "n_rows": int(len(features_df)),
+        "correction_overrides_applied": dict(overrides),
+        "artifacts": artifacts,
+    }
+    with open(os.path.join(retune_dir, "retune_result.json"), "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, sort_keys=True)
+
+    return result

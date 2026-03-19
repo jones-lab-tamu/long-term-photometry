@@ -149,6 +149,14 @@ def test_tuning_workspace_availability_requires_prerequisites(window, tmp_path):
     # Run dir exists but phasic output tree missing.
     run_dir_missing_phasic = tmp_path / "run_missing_phasic"
     run_dir_missing_phasic.mkdir(parents=True, exist_ok=True)
+    (run_dir_missing_phasic / "status.json").write_text(
+        json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
+        encoding="utf-8",
+    )
+    (run_dir_missing_phasic / "MANIFEST.json").write_text(
+        json.dumps({"status": "success"}),
+        encoding="utf-8",
+    )
     window._current_run_dir = str(run_dir_missing_phasic)
     window._refresh_tuning_workspace_availability()
     assert not window._tuning_workspace_available
@@ -157,6 +165,14 @@ def test_tuning_workspace_availability_requires_prerequisites(window, tmp_path):
     # phasic_out exists but cache missing.
     run_dir_missing_cache = tmp_path / "run_missing_cache"
     (run_dir_missing_cache / "_analysis" / "phasic_out").mkdir(parents=True, exist_ok=True)
+    (run_dir_missing_cache / "status.json").write_text(
+        json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
+        encoding="utf-8",
+    )
+    (run_dir_missing_cache / "MANIFEST.json").write_text(
+        json.dumps({"status": "success"}),
+        encoding="utf-8",
+    )
     window._current_run_dir = str(run_dir_missing_cache)
     window._refresh_tuning_workspace_availability()
     assert not window._tuning_workspace_available
@@ -341,6 +357,124 @@ def test_tuning_expanded_mode_uses_meaningful_results_pane_height(window, tmp_pa
     assert window._report_viewer.isHidden()
     assert window._tuning_group.height() > collapsed_height + 80
     assert window._tuning_group.height() >= int(parent_height * 0.55)
+
+
+def test_correction_disclosure_alone_triggers_tuning_mode(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    _add_results_workspace_artifacts(run_dir)
+    window._current_run_dir = str(run_dir)
+    assert window._report_viewer.load_report(str(run_dir))
+    window._enter_complete_state_workspace()
+    window.resize(1400, 900)
+    window.show()
+    QApplication.processEvents()
+
+    assert not window._tuning_disclosure_btn.isChecked()
+    assert not window._correction_tuning_disclosure_btn.isChecked()
+    assert not window._report_viewer.isHidden()
+
+    collapsed_height = window._tuning_group.height()
+    window._correction_tuning_disclosure_btn.click()
+    QApplication.processEvents()
+
+    parent_height = window._tuning_group.parentWidget().height()
+    assert window._report_viewer.isHidden()
+    assert window._correction_tuning_content.isVisible()
+    assert window._tuning_group.height() > collapsed_height + 80
+    assert window._tuning_group.height() >= int(parent_height * 0.55)
+
+
+def test_tuning_mode_switch_uses_both_disclosures(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    _add_results_workspace_artifacts(run_dir)
+    window._current_run_dir = str(run_dir)
+    assert window._report_viewer.load_report(str(run_dir))
+    window._enter_complete_state_workspace()
+    window.resize(1400, 900)
+    window.show()
+    QApplication.processEvents()
+
+    assert not window._report_viewer.isHidden()
+
+    # Downstream only -> tuning mode.
+    window._tuning_disclosure_btn.click()
+    QApplication.processEvents()
+    assert window._report_viewer.isHidden()
+
+    # Both expanded -> tuning mode.
+    window._correction_tuning_disclosure_btn.click()
+    QApplication.processEvents()
+    assert window._report_viewer.isHidden()
+
+    # Collapse one while other expanded -> still tuning mode.
+    window._tuning_disclosure_btn.click()
+    QApplication.processEvents()
+    assert window._report_viewer.isHidden()
+
+    # Collapse both -> report viewer returns.
+    window._correction_tuning_disclosure_btn.click()
+    QApplication.processEvents()
+    assert not window._report_viewer.isHidden()
+
+    # Correction only -> tuning mode.
+    window._correction_tuning_disclosure_btn.click()
+    QApplication.processEvents()
+    assert window._report_viewer.isHidden()
+
+    # Both expanded -> tuning mode.
+    window._tuning_disclosure_btn.click()
+    QApplication.processEvents()
+    assert window._report_viewer.isHidden()
+
+    # Collapse one while other expanded -> still tuning mode.
+    window._correction_tuning_disclosure_btn.click()
+    QApplication.processEvents()
+    assert window._report_viewer.isHidden()
+
+    # Collapse last expanded disclosure -> normal mode.
+    window._tuning_disclosure_btn.click()
+    QApplication.processEvents()
+    assert not window._report_viewer.isHidden()
+
+
+def test_correction_mode_switch_preserves_results_region_tab_and_image(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    _add_results_workspace_artifacts(run_dir)
+    window._current_run_dir = str(run_dir)
+    assert window._report_viewer.load_report(str(run_dir))
+    window._enter_complete_state_workspace()
+    window.resize(1400, 900)
+    window.show()
+    QApplication.processEvents()
+
+    window._report_viewer._region_combo.setCurrentText("Region1")
+    phasic_raw_idx = -1
+    for i in range(window._report_viewer._tabs.count()):
+        if window._report_viewer._tabs.tabText(i) == "Phasic Raw":
+            phasic_raw_idx = i
+            break
+    assert phasic_raw_idx >= 0
+    window._report_viewer._tabs.setCurrentIndex(phasic_raw_idx)
+    QApplication.processEvents()
+
+    window._report_viewer._on_next_image()
+    before_region = window._report_viewer.selected_region()
+    before_tab = window._report_viewer._selected_tab()
+    before_key = (before_region, before_tab)
+    before_idx = window._report_viewer._tab_indices.get(before_key)
+    assert before_idx == 1
+
+    window._correction_tuning_disclosure_btn.click()
+    QApplication.processEvents()
+    assert window._report_viewer.isHidden()
+    assert window._correction_tuning_roi_combo.currentText() == before_region
+
+    window._correction_tuning_disclosure_btn.click()
+    QApplication.processEvents()
+    assert not window._report_viewer.isHidden()
+    assert window._report_viewer.selected_region() == before_region
+    assert window._report_viewer._selected_tab() == before_tab
+    assert window._report_viewer._tab_indices.get(before_key) == before_idx
 
 
 def test_tuning_workspace_wiring_and_refresh(window, tmp_path, monkeypatch):
@@ -711,7 +845,7 @@ def test_tuning_workspace_boundary_message_and_controls(window, tmp_path):
     assert not window._tuning_scope_note.isHidden()
     assert not window._tuning_availability_label.isHidden()
 
-    labels = [lbl.text() for lbl in window._tuning_group.findChildren(type(window._status_label))]
+    labels = [lbl.text() for lbl in window._tuning_controls_container.findChildren(type(window._status_label))]
     assert "Regression Window:" not in labels
     assert "Baseline Method:" not in labels
     assert "R-Low Threshold:" not in labels
@@ -870,3 +1004,232 @@ def test_tuning_overlay_fits_after_run_tuning_result_layout_change(window, tmp_p
     viewport = window._tuning_overlay_scroll.viewport().size()
     assert shown.width() <= viewport.width() + 1
     assert shown.height() <= viewport.height() + 1
+
+
+def test_correction_tuning_availability_gating(window, tmp_path):
+    window._is_complete_workspace_active = False
+    window._current_run_dir = ""
+    window._refresh_tuning_workspace_availability()
+    assert window._tuning_group.isHidden()
+    assert not window._correction_tuning_workspace_available
+
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(tmp_path / "missing")
+    window._refresh_tuning_workspace_availability()
+    assert not window._correction_tuning_workspace_available
+    assert "No completed run directory is active" in window._correction_tuning_availability_label.text()
+
+    run_dir_missing_cfg = _make_completed_run_with_cache(tmp_path / "corr_missing_cfg", with_config=False)
+    window._current_run_dir = str(run_dir_missing_cfg)
+    window._refresh_tuning_workspace_availability()
+    assert not window._correction_tuning_workspace_available
+    assert "config_used.yaml" in window._correction_tuning_availability_label.text()
+
+    run_dir = _make_completed_run_with_cache(tmp_path / "corr_ok")
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    assert window._correction_tuning_workspace_available
+    assert window._correction_tuning_roi_combo.count() >= 1
+    assert window._correction_tuning_chunk_combo.count() >= 1
+
+
+def test_correction_tuning_disclosure_collapsed_and_reset_on_reentry(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._current_run_dir = str(run_dir)
+    window._enter_complete_state_workspace()
+    QApplication.processEvents()
+
+    assert not window._correction_tuning_disclosure_btn.isChecked()
+    assert window._correction_tuning_disclosure_btn.arrowType() == Qt.RightArrow
+    assert window._correction_tuning_content.isHidden()
+
+    window._correction_tuning_disclosure_btn.click()
+    QApplication.processEvents()
+    assert window._correction_tuning_disclosure_btn.isChecked()
+    assert not window._correction_tuning_content.isHidden()
+
+    window._exit_complete_state_workspace()
+    window._enter_complete_state_workspace()
+    QApplication.processEvents()
+    assert not window._correction_tuning_disclosure_btn.isChecked()
+    assert window._correction_tuning_content.isHidden()
+
+
+def test_correction_tuning_control_population_and_defaults(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(
+        tmp_path,
+        roi_chunk_keep={"Region0": [0, 2], "Region1": [1]},
+    )
+    cfg_path = run_dir / "_analysis" / "phasic_out" / "config_used.yaml"
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    cfg.update(
+        {
+            "baseline_method": "uv_globalfit_percentile_session",
+            "baseline_percentile": 17.5,
+            "lowpass_hz": 1.7,
+            "window_sec": 44.0,
+            "step_sec": 7.0,
+            "min_valid_windows": 9,
+            "min_samples_per_window": 51,
+            "r_low": 0.11,
+            "r_high": 0.91,
+            "g_min": 0.22,
+        }
+    )
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=True)
+
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    QApplication.processEvents()
+
+    assert window._correction_tuning_workspace_available
+    rois = [window._correction_tuning_roi_combo.itemText(i) for i in range(window._correction_tuning_roi_combo.count())]
+    assert set(rois) >= {"Region0", "Region1"}
+
+    window._correction_tuning_roi_combo.setCurrentText("Region0")
+    chunks_r0 = [window._correction_tuning_chunk_combo.itemText(i) for i in range(window._correction_tuning_chunk_combo.count())]
+    assert chunks_r0 == ["0", "2"]
+
+    window._correction_tuning_roi_combo.setCurrentText("Region1")
+    chunks_r1 = [window._correction_tuning_chunk_combo.itemText(i) for i in range(window._correction_tuning_chunk_combo.count())]
+    assert chunks_r1 == ["1"]
+
+    assert window._correction_tuning_baseline_method_combo.currentText() == "uv_globalfit_percentile_session"
+    assert window._correction_tuning_baseline_pct_spin.value() == pytest.approx(17.5)
+    assert window._correction_tuning_lowpass_spin.value() == pytest.approx(1.7)
+    assert window._correction_tuning_window_spin.value() == pytest.approx(44.0)
+    assert window._correction_tuning_step_spin.value() == pytest.approx(7.0)
+    assert window._correction_tuning_min_valid_windows_spin.value() == 9
+    assert window._correction_tuning_min_samples_spin.value() == 51
+    assert window._correction_tuning_r_low_spin.value() == pytest.approx(0.11)
+    assert window._correction_tuning_r_high_spin.value() == pytest.approx(0.91)
+    assert window._correction_tuning_g_min_spin.value() == pytest.approx(0.22)
+
+
+def test_correction_tuning_backend_wiring_and_result_refresh(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    window._correction_tuning_roi_combo.setCurrentText("Region0")
+    window._correction_tuning_chunk_combo.setCurrentText("2")
+    window._correction_tuning_baseline_method_combo.setCurrentText("uv_raw_percentile_session")
+    window._correction_tuning_baseline_pct_spin.setValue(13.5)
+    window._correction_tuning_lowpass_spin.setValue(1.4)
+    window._correction_tuning_window_spin.setValue(45.0)
+    window._correction_tuning_step_spin.setValue(8.0)
+    window._correction_tuning_min_valid_windows_spin.setValue(6)
+    window._correction_tuning_min_samples_spin.setValue(21)
+    window._correction_tuning_r_low_spin.setValue(0.15)
+    window._correction_tuning_r_high_spin.setValue(0.85)
+    window._correction_tuning_g_min_spin.setValue(0.25)
+
+    inspection_path = tmp_path / "correction_inspect.png"
+    _write_png(inspection_path, width=900, height=420)
+    captured = {}
+
+    def _fake_correction_retune(**kwargs):
+        captured.update(kwargs)
+        out = tmp_path / "correction_retune_out"
+        out.mkdir(exist_ok=True)
+        return {
+            "retune_dir": str(out),
+            "selected_roi": kwargs["roi"],
+            "inspection_chunk_id": kwargs["chunk_id"],
+            "artifacts": {
+                "retuned_correction_inspection_png": str(inspection_path),
+            },
+        }
+
+    monkeypatch.setattr("gui.main_window.run_cache_correction_retune", _fake_correction_retune)
+    window._on_run_correction_tuning()
+    QApplication.processEvents()
+
+    assert captured["run_dir"] == str(run_dir)
+    assert captured["roi"] == "Region0"
+    assert captured["chunk_id"] == 2
+    assert captured["out_dir"] is None
+    overrides = captured["overrides"]
+    assert set(overrides.keys()) == {
+        "baseline_method",
+        "baseline_percentile",
+        "lowpass_hz",
+        "window_sec",
+        "step_sec",
+        "min_valid_windows",
+        "min_samples_per_window",
+        "r_low",
+        "r_high",
+        "g_min",
+    }
+
+    assert "ROI: Region0" in window._correction_tuning_summary_label.text()
+    assert "Inspection chunk: 2" in window._correction_tuning_summary_label.text()
+    assert "correction_retune_out" in window._correction_tuning_summary_label.text()
+    assert window._correction_tuning_inspection_title.text() == "correction_inspect.png"
+    shown = window._correction_tuning_inspection_label.pixmap()
+    assert shown is not None and not shown.isNull()
+    assert window._open_correction_tuning_dir_btn.isEnabled()
+
+
+def test_correction_tuning_scope_integrity_and_no_downstream_controls(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    text = window._correction_tuning_scope_note.text().lower()
+    assert "across all cached chunks" in text
+    assert "inspection diagnostics" in text
+    assert "isolated retune directory" in text
+    assert "not modified" in text
+
+    assert not hasattr(window, "_correction_tuning_event_signal_combo")
+    assert not hasattr(window, "_correction_tuning_peak_method_combo")
+
+
+def test_correction_tuning_state_resets_on_new_run(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    inspection_path = tmp_path / "correction_reset.png"
+    _write_png(inspection_path, width=700, height=380)
+
+    def _fake_correction_retune(**kwargs):
+        out = tmp_path / "correction_reset_out"
+        out.mkdir(exist_ok=True)
+        return {
+            "retune_dir": str(out),
+            "selected_roi": kwargs["roi"],
+            "inspection_chunk_id": kwargs["chunk_id"],
+            "artifacts": {"retuned_correction_inspection_png": str(inspection_path)},
+        }
+
+    monkeypatch.setattr("gui.main_window.run_cache_correction_retune", _fake_correction_retune)
+    window._on_run_correction_tuning()
+    QApplication.processEvents()
+    assert isinstance(window._correction_tuning_last_result, dict)
+    assert window._open_correction_tuning_dir_btn.isEnabled()
+
+    window._on_new_run()
+    QApplication.processEvents()
+
+    assert window._correction_tuning_last_result is None
+    assert window._correction_tuning_summary_label.text() == "No correction retune result yet."
+    assert window._correction_tuning_inspection_title.text() == "No correction inspection artifact loaded."
+    assert not window._open_correction_tuning_dir_btn.isEnabled()

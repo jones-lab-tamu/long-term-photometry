@@ -46,6 +46,7 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     resolve_cache_roi,
 )
 from photometry_pipeline.tuning.cache_downstream_retune import run_cache_downstream_retune
+from photometry_pipeline.tuning.cache_correction_retune import run_cache_correction_retune
 import dataclasses
 from typing import get_args
 
@@ -506,6 +507,10 @@ class MainWindow(QMainWindow):
         self._tuning_last_result = None
         self._tuning_active_overlay_path = ""
         self._tuning_active_overlay_pixmap = QPixmap()
+        self._correction_tuning_workspace_available = False
+        self._correction_tuning_last_result = None
+        self._correction_tuning_active_inspection_path = ""
+        self._correction_tuning_active_inspection_pixmap = QPixmap()
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(250)
         self._elapsed_timer.timeout.connect(self._on_elapsed_timer_tick)
@@ -660,8 +665,8 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_tuning_workspace_group(self) -> QGroupBox:
-        """Bounded post-run tuning surface for downstream cache retuning only."""
-        group = QGroupBox("Post-Run Tuning (Downstream Only)")
+        """Bounded post-run tuning surface for downstream and correction retune workflows."""
+        group = QGroupBox("Post-Run Tuning")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
@@ -854,13 +859,266 @@ class MainWindow(QMainWindow):
         self._tuning_overlay_scroll.setWidget(self._tuning_overlay_label)
         content_layout.addWidget(self._tuning_overlay_scroll)
 
+        self._build_correction_tuning_subsection(layout)
+
         self._on_tuning_peak_method_changed()
         self._set_tuning_workspace_unavailable(
             "Tuning is available only after a successful completed run is loaded."
         )
+        self._set_correction_tuning_workspace_unavailable(
+            "Correction retune is available only after a successful completed run is loaded."
+        )
         self._set_tuning_disclosure_expanded(False)
+        self._set_correction_tuning_disclosure_expanded(False)
         group.setVisible(False)
         return group
+
+    def _build_correction_tuning_subsection(self, parent_layout: QVBoxLayout) -> None:
+        """Build correction-sensitive retune subsection (separate from downstream tuning)."""
+        section = QGroupBox("Correction-Sensitive Retune")
+        section_layout = QVBoxLayout(section)
+        section_layout.setContentsMargins(8, 8, 8, 8)
+        section_layout.setSpacing(6)
+
+        disclosure_row = QHBoxLayout()
+        self._correction_tuning_disclosure_btn = QToolButton()
+        self._correction_tuning_disclosure_btn.setText("Correction retune controls")
+        self._correction_tuning_disclosure_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._correction_tuning_disclosure_btn.setArrowType(Qt.RightArrow)
+        self._correction_tuning_disclosure_btn.setCheckable(True)
+        self._correction_tuning_disclosure_btn.setChecked(False)
+        self._correction_tuning_disclosure_btn.setAutoRaise(True)
+        self._correction_tuning_disclosure_btn.toggled.connect(
+            self._on_correction_tuning_disclosure_toggled
+        )
+        disclosure_row.addWidget(self._correction_tuning_disclosure_btn)
+        disclosure_row.addStretch()
+        section_layout.addLayout(disclosure_row)
+
+        self._correction_tuning_collapsed_status_label = QLabel(
+            "Correction retune is available only after a successful completed run is loaded."
+        )
+        self._correction_tuning_collapsed_status_label.setWordWrap(True)
+        self._correction_tuning_collapsed_status_label.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Preferred
+        )
+        self._correction_tuning_collapsed_status_label.setMinimumWidth(0)
+        self._correction_tuning_collapsed_status_label.setStyleSheet(
+            "font-size: 11px; color: #8a6d3b;"
+        )
+        section_layout.addWidget(self._correction_tuning_collapsed_status_label)
+
+        self._correction_tuning_content = QWidget()
+        content_outer = QVBoxLayout(self._correction_tuning_content)
+        content_outer.setContentsMargins(0, 0, 0, 0)
+        content_outer.setSpacing(0)
+
+        self._correction_tuning_scroll = QScrollArea()
+        self._correction_tuning_scroll.setWidgetResizable(True)
+        self._correction_tuning_scroll.setFrameShape(QScrollArea.NoFrame)
+        self._correction_tuning_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._correction_tuning_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._correction_tuning_scroll_content = QWidget()
+        content_layout = QVBoxLayout(self._correction_tuning_scroll_content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        self._correction_tuning_scroll.setWidget(self._correction_tuning_scroll_content)
+        content_outer.addWidget(self._correction_tuning_scroll)
+        section_layout.addWidget(self._correction_tuning_content)
+        self._correction_tuning_content.setVisible(False)
+
+        self._correction_tuning_scope_note = QLabel(
+            "Recomputes correction context for the selected ROI across all cached chunks. "
+            "Selected chunk is used only for inspection diagnostics. "
+            "Outputs are written to an isolated retune directory. "
+            "Production run artifacts are not modified."
+        )
+        self._correction_tuning_scope_note.setWordWrap(True)
+        self._correction_tuning_scope_note.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Preferred
+        )
+        self._correction_tuning_scope_note.setMinimumWidth(0)
+        self._correction_tuning_scope_note.setStyleSheet("font-size: 11px; color: #555;")
+        content_layout.addWidget(self._correction_tuning_scope_note)
+
+        self._correction_tuning_availability_label = QLabel(
+            "Correction retune is available only after a successful completed run is loaded."
+        )
+        self._correction_tuning_availability_label.setWordWrap(True)
+        self._correction_tuning_availability_label.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Preferred
+        )
+        self._correction_tuning_availability_label.setMinimumWidth(0)
+        self._correction_tuning_availability_label.setStyleSheet(
+            "font-size: 11px; color: #8a6d3b;"
+        )
+        content_layout.addWidget(self._correction_tuning_availability_label)
+
+        self._correction_tuning_controls_container = QWidget()
+        self._correction_tuning_controls_container.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Fixed
+        )
+        self._correction_tuning_controls_container.setMaximumWidth(700)
+        form_row = QHBoxLayout()
+        form_row.setContentsMargins(0, 0, 0, 0)
+        form_row.setSpacing(0)
+        form_row.addWidget(
+            self._correction_tuning_controls_container, 0, Qt.AlignLeft | Qt.AlignTop
+        )
+        form_row.addStretch(1)
+        content_layout.addLayout(form_row)
+
+        form = QFormLayout(self._correction_tuning_controls_container)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+        form.setHorizontalSpacing(12)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        def _corr_row_label(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setMinimumWidth(190)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            return lbl
+
+        self._correction_tuning_roi_combo = QComboBox()
+        self._correction_tuning_roi_combo.setMinimumWidth(220)
+        self._correction_tuning_roi_combo.currentIndexChanged.connect(
+            self._on_correction_tuning_roi_changed
+        )
+        form.addRow(_corr_row_label("ROI:"), self._correction_tuning_roi_combo)
+
+        self._correction_tuning_chunk_combo = QComboBox()
+        self._correction_tuning_chunk_combo.setMinimumWidth(220)
+        form.addRow(
+            _corr_row_label("Chunk (inspection):"), self._correction_tuning_chunk_combo
+        )
+
+        self._correction_tuning_baseline_method_combo = QComboBox()
+        self._correction_tuning_baseline_method_combo.setMinimumWidth(240)
+        self._correction_tuning_baseline_method_combo.addItems(
+            get_allowed_baseline_methods_from_config()
+        )
+        form.addRow(
+            _corr_row_label("Baseline Method:"),
+            self._correction_tuning_baseline_method_combo,
+        )
+
+        self._correction_tuning_baseline_pct_spin = QDoubleSpinBox()
+        self._correction_tuning_baseline_pct_spin.setMinimumWidth(140)
+        self._correction_tuning_baseline_pct_spin.setRange(0.0, 100.0)
+        self._correction_tuning_baseline_pct_spin.setDecimals(3)
+        self._correction_tuning_baseline_pct_spin.setSingleStep(1.0)
+        form.addRow(
+            _corr_row_label("Baseline Percentile:"),
+            self._correction_tuning_baseline_pct_spin,
+        )
+
+        self._correction_tuning_lowpass_spin = QDoubleSpinBox()
+        self._correction_tuning_lowpass_spin.setMinimumWidth(140)
+        self._correction_tuning_lowpass_spin.setRange(0.000001, 10_000.0)
+        self._correction_tuning_lowpass_spin.setDecimals(6)
+        self._correction_tuning_lowpass_spin.setSingleStep(0.1)
+        form.addRow(_corr_row_label("Lowpass Filter (Hz):"), self._correction_tuning_lowpass_spin)
+
+        self._correction_tuning_window_spin = QDoubleSpinBox()
+        self._correction_tuning_window_spin.setMinimumWidth(140)
+        self._correction_tuning_window_spin.setRange(0.000001, 1_000_000.0)
+        self._correction_tuning_window_spin.setDecimals(6)
+        self._correction_tuning_window_spin.setSingleStep(1.0)
+        form.addRow(_corr_row_label("Regression Window (s):"), self._correction_tuning_window_spin)
+
+        self._correction_tuning_step_spin = QDoubleSpinBox()
+        self._correction_tuning_step_spin.setMinimumWidth(140)
+        self._correction_tuning_step_spin.setRange(0.000001, 1_000_000.0)
+        self._correction_tuning_step_spin.setDecimals(6)
+        self._correction_tuning_step_spin.setSingleStep(0.5)
+        form.addRow(_corr_row_label("Regression Step (s):"), self._correction_tuning_step_spin)
+
+        self._correction_tuning_min_valid_windows_spin = QSpinBox()
+        self._correction_tuning_min_valid_windows_spin.setMinimumWidth(120)
+        self._correction_tuning_min_valid_windows_spin.setRange(1, 1_000_000)
+        form.addRow(
+            _corr_row_label("Min Valid Windows:"),
+            self._correction_tuning_min_valid_windows_spin,
+        )
+
+        self._correction_tuning_min_samples_spin = QSpinBox()
+        self._correction_tuning_min_samples_spin.setMinimumWidth(120)
+        self._correction_tuning_min_samples_spin.setRange(1, 1_000_000)
+        form.addRow(
+            _corr_row_label("Min Samples/Window:"),
+            self._correction_tuning_min_samples_spin,
+        )
+
+        self._correction_tuning_r_low_spin = QDoubleSpinBox()
+        self._correction_tuning_r_low_spin.setMinimumWidth(140)
+        self._correction_tuning_r_low_spin.setRange(0.0, 1.0)
+        self._correction_tuning_r_low_spin.setDecimals(6)
+        self._correction_tuning_r_low_spin.setSingleStep(0.01)
+        form.addRow(_corr_row_label("R-Low Threshold:"), self._correction_tuning_r_low_spin)
+
+        self._correction_tuning_r_high_spin = QDoubleSpinBox()
+        self._correction_tuning_r_high_spin.setMinimumWidth(140)
+        self._correction_tuning_r_high_spin.setRange(0.0, 1.0)
+        self._correction_tuning_r_high_spin.setDecimals(6)
+        self._correction_tuning_r_high_spin.setSingleStep(0.01)
+        form.addRow(_corr_row_label("R-High Threshold:"), self._correction_tuning_r_high_spin)
+
+        self._correction_tuning_g_min_spin = QDoubleSpinBox()
+        self._correction_tuning_g_min_spin.setMinimumWidth(140)
+        self._correction_tuning_g_min_spin.setRange(0.0, 1_000_000.0)
+        self._correction_tuning_g_min_spin.setDecimals(6)
+        self._correction_tuning_g_min_spin.setSingleStep(0.01)
+        form.addRow(_corr_row_label("G-Min Threshold:"), self._correction_tuning_g_min_spin)
+
+        btn_row = QHBoxLayout()
+        self._run_correction_tuning_btn = QPushButton("Run Correction Retune")
+        self._run_correction_tuning_btn.clicked.connect(self._on_run_correction_tuning)
+        btn_row.addWidget(self._run_correction_tuning_btn)
+        self._open_correction_tuning_dir_btn = QPushButton("Open Correction Output")
+        self._open_correction_tuning_dir_btn.clicked.connect(
+            self._on_open_correction_tuning_output
+        )
+        btn_row.addWidget(self._open_correction_tuning_dir_btn)
+        btn_row.addStretch()
+        content_layout.addLayout(btn_row)
+
+        self._correction_tuning_summary_label = QLabel("No correction retune result yet.")
+        self._correction_tuning_summary_label.setWordWrap(True)
+        self._correction_tuning_summary_label.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Preferred
+        )
+        self._correction_tuning_summary_label.setMinimumWidth(0)
+        self._correction_tuning_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        content_layout.addWidget(self._correction_tuning_summary_label)
+
+        self._correction_tuning_inspection_title = QLabel(
+            "No correction inspection artifact loaded."
+        )
+        self._correction_tuning_inspection_title.setAlignment(Qt.AlignCenter)
+        content_layout.addWidget(self._correction_tuning_inspection_title)
+
+        self._correction_tuning_inspection_label = QLabel(
+            "Run correction retune to generate a correction inspection artifact."
+        )
+        self._correction_tuning_inspection_label.setAlignment(Qt.AlignCenter)
+        self._correction_tuning_inspection_label.setStyleSheet(
+            "QLabel { background: #111; color: #ddd; border: 1px solid #444; }"
+        )
+        self._correction_tuning_inspection_scroll = QScrollArea()
+        self._correction_tuning_inspection_scroll.setWidgetResizable(False)
+        self._correction_tuning_inspection_scroll.setAlignment(Qt.AlignCenter)
+        self._correction_tuning_inspection_scroll.setFrameShape(QScrollArea.NoFrame)
+        self._correction_tuning_inspection_scroll.setMinimumHeight(180)
+        self._correction_tuning_inspection_scroll.setMaximumHeight(520)
+        self._correction_tuning_inspection_scroll.setWidget(
+            self._correction_tuning_inspection_label
+        )
+        content_layout.addWidget(self._correction_tuning_inspection_scroll)
+
+        parent_layout.addWidget(section)
 
     # ==================================================================
     # Log Panel
@@ -882,14 +1140,27 @@ class MainWindow(QMainWindow):
     # Post-run tuning workspace (Patch D)
     # ==================================================================
 
+    def _is_downstream_tuning_expanded(self) -> bool:
+        return bool(
+            hasattr(self, "_tuning_disclosure_btn") and self._tuning_disclosure_btn.isChecked()
+        )
+
+    def _is_correction_tuning_expanded(self) -> bool:
+        return bool(
+            hasattr(self, "_correction_tuning_disclosure_btn")
+            and self._correction_tuning_disclosure_btn.isChecked()
+        )
+
+    def _is_any_tuning_subsection_expanded(self) -> bool:
+        return self._is_downstream_tuning_expanded() or self._is_correction_tuning_expanded()
+
     def _update_results_pane_mode_for_tuning(self) -> None:
         if not hasattr(self, "_report_viewer") or not hasattr(self, "_tuning_group"):
             return
         expanded_tuning = bool(
             self._is_complete_workspace_active
             and not self._tuning_group.isHidden()
-            and hasattr(self, "_tuning_disclosure_btn")
-            and self._tuning_disclosure_btn.isChecked()
+            and self._is_any_tuning_subsection_expanded()
         )
         self._report_viewer.setVisible(not expanded_tuning)
         if expanded_tuning:
@@ -1124,6 +1395,11 @@ class MainWindow(QMainWindow):
             return
         if self._tuning_roi_combo.findText(region) >= 0:
             self._tuning_roi_combo.setCurrentText(region)
+        if (
+            hasattr(self, "_correction_tuning_roi_combo")
+            and self._correction_tuning_roi_combo.findText(region) >= 0
+        ):
+            self._correction_tuning_roi_combo.setCurrentText(region)
 
     def _on_tuning_roi_changed(self, _index: int) -> None:
         roi = self._tuning_roi_combo.currentText().strip()
@@ -1138,17 +1414,36 @@ class MainWindow(QMainWindow):
             self._set_tuning_workspace_unavailable(
                 "Tuning is available only after a successful completed run is loaded."
             )
+            self._set_correction_tuning_workspace_unavailable(
+                "Correction retune is available only after a successful completed run is loaded."
+            )
             return
 
         run_dir = self._current_run_dir
         if not run_dir or not os.path.isdir(run_dir):
             self._set_tuning_workspace_unavailable("No completed run directory is active.")
+            self._set_correction_tuning_workspace_unavailable(
+                "No completed run directory is active."
+            )
+            return
+        is_successful_complete, evidence = is_successful_completed_run_dir(run_dir)
+        if not is_successful_complete:
+            reason = (
+                "Tuning unavailable: selected run directory is not confirmed as a successful completed run."
+            )
+            self._set_tuning_workspace_unavailable(reason)
+            self._set_correction_tuning_workspace_unavailable(
+                f"Correction retune unavailable: selected run directory is not confirmed as a successful completed run. ({evidence})"
+            )
             return
 
         phasic_out_dir = self._current_phasic_out_dir()
         if not os.path.isdir(phasic_out_dir):
             self._set_tuning_workspace_unavailable(
                 "Tuning unavailable: missing phasic output directory at _analysis/phasic_out."
+            )
+            self._set_correction_tuning_workspace_unavailable(
+                "Correction retune unavailable: missing phasic output directory at _analysis/phasic_out."
             )
             return
 
@@ -1157,12 +1452,18 @@ class MainWindow(QMainWindow):
             self._set_tuning_workspace_unavailable(
                 "Tuning unavailable: phasic cache is missing for this completed run."
             )
+            self._set_correction_tuning_workspace_unavailable(
+                "Correction retune unavailable: phasic cache is missing for this completed run."
+            )
             return
 
         cfg_path = self._current_phasic_config_path()
         if not os.path.isfile(cfg_path):
             self._set_tuning_workspace_unavailable(
                 "Tuning unavailable: missing config snapshot _analysis/phasic_out/config_used.yaml."
+            )
+            self._set_correction_tuning_workspace_unavailable(
+                "Correction retune unavailable: missing config snapshot _analysis/phasic_out/config_used.yaml."
             )
             return
 
@@ -1172,11 +1473,17 @@ class MainWindow(QMainWindow):
             self._set_tuning_workspace_unavailable(
                 f"Tuning unavailable: unable to read ROI/chunk targets from phasic cache ({exc})."
             )
+            self._set_correction_tuning_workspace_unavailable(
+                f"Correction retune unavailable: unable to read ROI/chunk targets from phasic cache ({exc})."
+            )
             return
         valid_rois = sorted(roi_chunk_map.keys(), key=lambda s: s.lower())
         if not valid_rois:
             self._set_tuning_workspace_unavailable(
                 "Tuning unavailable: no valid ROI groups with chunk data found in phasic cache."
+            )
+            self._set_correction_tuning_workspace_unavailable(
+                "Correction retune unavailable: no valid ROI groups with chunk data found in phasic cache."
             )
             return
 
@@ -1190,16 +1497,44 @@ class MainWindow(QMainWindow):
             self._set_tuning_workspace_unavailable(
                 "Tuning unavailable: no valid ROI target is available for this run."
             )
+            self._set_correction_tuning_workspace_unavailable(
+                "Correction retune unavailable: no valid ROI target is available for this run."
+            )
             return
         if self._tuning_chunk_combo.count() == 0:
             self._set_tuning_workspace_unavailable(
                 f"Tuning unavailable: selected ROI '{selected_roi}' has no chunk data in phasic cache."
+            )
+            self._set_correction_tuning_workspace_unavailable(
+                f"Correction retune unavailable: selected ROI '{selected_roi}' has no chunk data in phasic cache."
             )
             return
 
         self._apply_tuning_defaults_from_config(self._load_tuning_base_config())
         self._set_tuning_workspace_available(
             "Ready: downstream-only tuning from cache. Correction-sensitive parameters are not part of this workspace."
+        )
+
+        self._populate_correction_tuning_roi_choices(
+            cache_rois_with_chunks=valid_rois,
+            prefer_roi=prefer_roi,
+        )
+        selected_corr_roi = self._correction_tuning_roi_combo.currentText().strip()
+        if not selected_corr_roi:
+            self._set_correction_tuning_workspace_unavailable(
+                "Correction retune unavailable: no valid ROI target is available for this run."
+            )
+            return
+        if self._correction_tuning_chunk_combo.count() == 0:
+            self._set_correction_tuning_workspace_unavailable(
+                f"Correction retune unavailable: selected ROI '{selected_corr_roi}' has no chunk data in phasic cache."
+            )
+            return
+
+        self._apply_correction_tuning_defaults_from_config(self._load_tuning_base_config())
+        self._set_correction_tuning_workspace_available(
+            "Ready: correction retune recomputes correction context across all selected-ROI chunks. "
+            "Selected chunk is inspection target only."
         )
 
     def _collect_tuning_overrides(self) -> dict:
@@ -1326,9 +1661,316 @@ class MainWindow(QMainWindow):
         self._on_config_changed()
         self._append_run_log("Applied downstream tuning values to run settings.")
 
+    def _on_correction_tuning_disclosure_toggled(self, expanded: bool) -> None:
+        if expanded and hasattr(self, "_report_viewer"):
+            selected_region = self._report_viewer.selected_region().strip()
+            if (
+                selected_region
+                and self._correction_tuning_roi_combo.findText(selected_region) >= 0
+            ):
+                self._correction_tuning_roi_combo.setCurrentText(selected_region)
+        self._correction_tuning_content.setVisible(expanded)
+        self._correction_tuning_disclosure_btn.setArrowType(
+            Qt.DownArrow if expanded else Qt.RightArrow
+        )
+        self._update_results_pane_mode_for_tuning()
+        QTimer.singleShot(0, self._render_correction_tuning_overlay)
+
+    def _set_correction_tuning_disclosure_expanded(self, expanded: bool) -> None:
+        if not hasattr(self, "_correction_tuning_disclosure_btn"):
+            return
+        self._correction_tuning_disclosure_btn.blockSignals(True)
+        self._correction_tuning_disclosure_btn.setChecked(expanded)
+        self._correction_tuning_disclosure_btn.blockSignals(False)
+        self._on_correction_tuning_disclosure_toggled(expanded)
+
+    def _set_correction_tuning_collapsed_status(self, message: str, *, ready: bool) -> None:
+        self._correction_tuning_collapsed_status_label.setText(message)
+        color = "#2d7d2d" if ready else "#8a6d3b"
+        self._correction_tuning_collapsed_status_label.setStyleSheet(
+            f"font-size: 11px; color: {color};"
+        )
+
+    def _set_correction_tuning_workspace_unavailable(self, reason: str) -> None:
+        self._correction_tuning_workspace_available = False
+        self._correction_tuning_controls_container.setEnabled(False)
+        self._run_correction_tuning_btn.setEnabled(False)
+        self._open_correction_tuning_dir_btn.setEnabled(False)
+        self._correction_tuning_availability_label.setText(reason)
+        self._correction_tuning_availability_label.setStyleSheet(
+            "font-size: 11px; color: #8a6d3b;"
+        )
+        self._set_correction_tuning_collapsed_status(reason, ready=False)
+        self._update_results_pane_mode_for_tuning()
+
+    def _set_correction_tuning_workspace_available(self, message: str) -> None:
+        self._correction_tuning_workspace_available = True
+        self._correction_tuning_controls_container.setEnabled(True)
+        self._run_correction_tuning_btn.setEnabled(True)
+        self._open_correction_tuning_dir_btn.setEnabled(
+            bool(self._correction_tuning_last_result)
+        )
+        self._correction_tuning_availability_label.setText(message)
+        self._correction_tuning_availability_label.setStyleSheet(
+            "font-size: 11px; color: #2d7d2d;"
+        )
+        self._set_correction_tuning_collapsed_status(message, ready=True)
+        self._update_results_pane_mode_for_tuning()
+
+    def _set_correction_tuning_overlay_message(self, text: str) -> None:
+        self._correction_tuning_active_inspection_path = ""
+        self._correction_tuning_active_inspection_pixmap = QPixmap()
+        self._correction_tuning_inspection_title.setText(
+            "No correction inspection artifact loaded."
+        )
+        self._correction_tuning_inspection_label.setPixmap(QPixmap())
+        self._correction_tuning_inspection_label.setText(text)
+        viewport = self._correction_tuning_inspection_scroll.viewport().size()
+        if viewport.width() < 10 or viewport.height() < 10:
+            viewport = QSize(640, 300)
+        target = QSize(max(10, viewport.width() - 8), max(10, viewport.height() - 8))
+        self._correction_tuning_inspection_label.resize(target)
+
+    def _render_correction_tuning_overlay(self) -> None:
+        if self._correction_tuning_active_inspection_pixmap.isNull():
+            return
+        viewport = self._correction_tuning_inspection_scroll.viewport().size()
+        if viewport.width() < 10 or viewport.height() < 10:
+            viewport = QSize(1000, 700)
+        target = QSize(max(10, viewport.width() - 8), max(10, viewport.height() - 8))
+        scaled = self._correction_tuning_active_inspection_pixmap.scaled(
+            target,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self._correction_tuning_inspection_label.setText("")
+        self._correction_tuning_inspection_label.setPixmap(scaled)
+        self._correction_tuning_inspection_label.resize(scaled.size())
+
+    def _set_correction_tuning_overlay_image(self, image_path: str) -> None:
+        if not image_path or not os.path.isfile(image_path):
+            self._set_correction_tuning_overlay_message(
+                "Correction inspection artifact is missing."
+            )
+            return
+        pix = QPixmap(image_path)
+        if pix.isNull():
+            self._set_correction_tuning_overlay_message(
+                "Unable to render correction inspection artifact."
+            )
+            return
+        self._correction_tuning_active_inspection_path = image_path
+        self._correction_tuning_active_inspection_pixmap = pix
+        self._correction_tuning_inspection_title.setText(os.path.basename(image_path))
+        self._render_correction_tuning_overlay()
+
+    def _populate_correction_tuning_chunk_choices(self, roi: str) -> None:
+        cache_path = self._current_phasic_cache_path()
+        self._correction_tuning_chunk_combo.blockSignals(True)
+        self._correction_tuning_chunk_combo.clear()
+        if not os.path.isfile(cache_path) or not roi:
+            self._correction_tuning_chunk_combo.blockSignals(False)
+            return
+        try:
+            with open_phasic_cache(cache_path) as cache:
+                resolved_roi = resolve_cache_roi(cache, roi)
+                roi_grp = cache.get(f"roi/{resolved_roi}")
+                chunk_ids = []
+                if roi_grp is not None:
+                    for key in roi_grp.keys():
+                        if not str(key).startswith("chunk_"):
+                            continue
+                        try:
+                            chunk_ids.append(int(str(key).split("_", 1)[1]))
+                        except (ValueError, IndexError):
+                            continue
+                chunk_ids = sorted(set(chunk_ids))
+        except Exception:
+            chunk_ids = []
+        for cid in chunk_ids:
+            self._correction_tuning_chunk_combo.addItem(str(cid), cid)
+        self._correction_tuning_chunk_combo.blockSignals(False)
+
+    def _populate_correction_tuning_roi_choices(
+        self,
+        *,
+        cache_rois_with_chunks: list[str],
+        prefer_roi: str | None = None,
+    ) -> None:
+        cache_rois = list(cache_rois_with_chunks)
+        viewer_rois = self._report_viewer.available_regions()
+        if viewer_rois:
+            merged = [r for r in viewer_rois if r in cache_rois]
+            if not merged:
+                merged = cache_rois
+        else:
+            merged = cache_rois
+
+        current = self._correction_tuning_roi_combo.currentText().strip()
+        target = (prefer_roi or current or "").strip()
+
+        self._correction_tuning_roi_combo.blockSignals(True)
+        self._correction_tuning_roi_combo.clear()
+        self._correction_tuning_roi_combo.addItems(merged)
+        self._correction_tuning_roi_combo.blockSignals(False)
+
+        if merged:
+            if target in merged:
+                self._correction_tuning_roi_combo.setCurrentText(target)
+            else:
+                self._correction_tuning_roi_combo.setCurrentIndex(0)
+        self._populate_correction_tuning_chunk_choices(
+            self._correction_tuning_roi_combo.currentText().strip()
+        )
+
+    def _apply_correction_tuning_defaults_from_config(self, cfg: Config) -> None:
+        method = str(cfg.baseline_method)
+        if self._correction_tuning_baseline_method_combo.findText(method) >= 0:
+            self._correction_tuning_baseline_method_combo.setCurrentText(method)
+        self._correction_tuning_baseline_pct_spin.setValue(float(cfg.baseline_percentile))
+        self._correction_tuning_lowpass_spin.setValue(float(cfg.lowpass_hz))
+        self._correction_tuning_window_spin.setValue(float(cfg.window_sec))
+        self._correction_tuning_step_spin.setValue(float(cfg.step_sec))
+        self._correction_tuning_min_valid_windows_spin.setValue(int(cfg.min_valid_windows))
+        self._correction_tuning_min_samples_spin.setValue(int(cfg.min_samples_per_window))
+        self._correction_tuning_r_low_spin.setValue(float(cfg.r_low))
+        self._correction_tuning_r_high_spin.setValue(float(cfg.r_high))
+        self._correction_tuning_g_min_spin.setValue(float(cfg.g_min))
+
+    def _on_correction_tuning_roi_changed(self, _index: int) -> None:
+        roi = self._correction_tuning_roi_combo.currentText().strip()
+        self._populate_correction_tuning_chunk_choices(roi)
+
+    def _collect_correction_tuning_overrides(self) -> dict:
+        return {
+            "baseline_method": self._correction_tuning_baseline_method_combo.currentText().strip(),
+            "baseline_percentile": float(self._correction_tuning_baseline_pct_spin.value()),
+            "lowpass_hz": float(self._correction_tuning_lowpass_spin.value()),
+            "window_sec": float(self._correction_tuning_window_spin.value()),
+            "step_sec": float(self._correction_tuning_step_spin.value()),
+            "min_valid_windows": int(self._correction_tuning_min_valid_windows_spin.value()),
+            "min_samples_per_window": int(self._correction_tuning_min_samples_spin.value()),
+            "r_low": float(self._correction_tuning_r_low_spin.value()),
+            "r_high": float(self._correction_tuning_r_high_spin.value()),
+            "g_min": float(self._correction_tuning_g_min_spin.value()),
+        }
+
+    def _on_run_correction_tuning(self) -> None:
+        if not self._correction_tuning_workspace_available:
+            QMessageBox.information(
+                self,
+                "Correction Retune Unavailable",
+                self._correction_tuning_availability_label.text(),
+            )
+            return
+
+        roi = self._correction_tuning_roi_combo.currentText().strip()
+        if not roi:
+            QMessageBox.warning(
+                self,
+                "Correction Retune Error",
+                "Select an ROI before running correction retune.",
+            )
+            return
+        if self._correction_tuning_chunk_combo.currentIndex() < 0:
+            QMessageBox.warning(
+                self,
+                "Correction Retune Error",
+                "Select an inspection chunk before running correction retune.",
+            )
+            return
+
+        chunk_id = int(self._correction_tuning_chunk_combo.currentData())
+        overrides = self._collect_correction_tuning_overrides()
+
+        self._run_correction_tuning_btn.setEnabled(False)
+        self._run_correction_tuning_btn.setText("Running...")
+        try:
+            result = run_cache_correction_retune(
+                run_dir=self._current_run_dir,
+                roi=roi,
+                chunk_id=chunk_id,
+                overrides=overrides,
+                out_dir=None,
+            )
+        except Exception as exc:
+            self._append_run_log(f"Correction retune failed: {exc}")
+            QMessageBox.critical(
+                self,
+                "Correction Retune Failed",
+                f"Correction-sensitive cache retune failed.\n\n{exc}",
+            )
+            return
+        finally:
+            self._run_correction_tuning_btn.setEnabled(
+                self._correction_tuning_workspace_available
+            )
+            self._run_correction_tuning_btn.setText("Run Correction Retune")
+
+        self._correction_tuning_last_result = result
+        self._open_correction_tuning_dir_btn.setEnabled(True)
+        artifacts = result.get("artifacts", {}) if isinstance(result, dict) else {}
+        inspect_path = str(
+            artifacts.get("retuned_correction_inspection_png", "")
+        ).strip()
+        self._set_correction_tuning_overlay_image(inspect_path)
+
+        lines = [
+            f"ROI: {result.get('selected_roi', roi)}",
+            f"Inspection chunk: {result.get('inspection_chunk_id', chunk_id)}",
+            f"Retune output: {result.get('retune_dir', '(unknown)')}",
+        ]
+        self._correction_tuning_summary_label.setText("\n".join(lines))
+        self._append_run_log(
+            f"Correction retune completed for ROI={result.get('selected_roi', roi)} "
+            f"inspection_chunk={result.get('inspection_chunk_id', chunk_id)} "
+            f"-> {result.get('retune_dir', '(unknown)')}"
+        )
+        QTimer.singleShot(0, self._finalize_correction_tuning_result_layout)
+
+    def _on_open_correction_tuning_output(self) -> None:
+        if not isinstance(self._correction_tuning_last_result, dict):
+            QMessageBox.information(
+                self,
+                "No Correction Output",
+                "Run correction retune first to create an output directory.",
+            )
+            return
+        retune_dir = str(self._correction_tuning_last_result.get("retune_dir", "")).strip()
+        if not retune_dir or not os.path.isdir(retune_dir):
+            QMessageBox.information(
+                self,
+                "No Correction Output",
+                "Correction retune output directory is not available.",
+            )
+            return
+        _open_folder(retune_dir)
+
+    def _finalize_correction_tuning_result_layout(self) -> None:
+        self._tuning_group.updateGeometry()
+        self._correction_tuning_scroll_content.updateGeometry()
+        self._correction_tuning_scroll.viewport().updateGeometry()
+        self._correction_tuning_scroll.updateGeometry()
+        self._render_correction_tuning_overlay()
+
+    def _reset_correction_tuning_state(self) -> None:
+        self._correction_tuning_last_result = None
+        if hasattr(self, "_open_correction_tuning_dir_btn"):
+            self._open_correction_tuning_dir_btn.setEnabled(False)
+        if hasattr(self, "_correction_tuning_summary_label"):
+            self._correction_tuning_summary_label.setText(
+                "No correction retune result yet."
+            )
+        if hasattr(self, "_set_correction_tuning_overlay_message"):
+            self._set_correction_tuning_overlay_message(
+                "Run correction retune to generate a correction inspection artifact."
+            )
+        self._set_correction_tuning_disclosure_expanded(False)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._render_tuning_overlay()
+        self._render_correction_tuning_overlay()
 
     def _update_adv_group_visibility(self):
         # In our GUI contract, "both" maps to mode_val=None (which implies phasic runs)
@@ -2438,6 +3080,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_controls_stack"):
             self._controls_stack.setCurrentWidget(self._complete_state_panel)
         self._set_tuning_disclosure_expanded(False)
+        self._set_correction_tuning_disclosure_expanded(False)
         self._refresh_tuning_workspace_availability()
         self._render_status_label()
 
@@ -2446,6 +3089,7 @@ class MainWindow(QMainWindow):
         self._is_complete_workspace_active = False
         if hasattr(self, "_controls_stack"):
             self._controls_stack.setCurrentWidget(self._config_panel)
+        self._reset_correction_tuning_state()
         self._refresh_tuning_workspace_availability()
 
     def _on_new_run(self) -> None:
@@ -2455,6 +3099,7 @@ class MainWindow(QMainWindow):
         self._tuning_last_result = None
         self._set_tuning_overlay_message("Run tuning to generate an ROI/chunk event overlay.")
         self._tuning_summary_label.setText("No tuning result yet.")
+        self._reset_correction_tuning_state()
         self._refresh_tuning_workspace_availability()
         self.setWindowTitle(self.WINDOW_TITLE_BASE)
         self._preview_badge.hide()
