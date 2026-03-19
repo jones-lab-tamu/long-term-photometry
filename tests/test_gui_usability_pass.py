@@ -4,6 +4,7 @@ import sys
 import tempfile
 
 import pytest
+import yaml
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QSizePolicy
 
@@ -147,6 +148,8 @@ def test_advanced_tooltips_present(window):
         ("Peak Threshold Percentile:", window._peak_pct_edit),
         ("Peak Threshold Absolute:", window._peak_abs_edit),
         ("Peak Min Distance:", window._peak_dist_edit),
+        ("Peak Min Prominence K:", window._peak_min_prominence_k_edit),
+        ("Peak Min Width (s):", window._peak_min_width_sec_edit),
         ("Peak Pre-Filter:", window._peak_pre_filter_combo),
         ("Event AUC Baseline:", window._event_auc_combo),
         ("Baseline Source:", window._use_custom_config_cb),
@@ -205,6 +208,74 @@ def test_window_title_progress_bar_and_progress_cap(window, tmp_path):
     assert window.windowTitle() == "Long-Term Photometry Analysis [PREVIEW]"
     window._on_new_run()
     assert window.windowTitle() == "Long-Term Photometry Analysis"
+
+
+def test_peak_hardening_controls_follow_active_baseline_config(window, tmp_path):
+    custom_cfg = tmp_path / "custom_peak_hardening.yaml"
+    custom_cfg.write_text(
+        yaml.safe_dump(
+            {
+                "event_signal": "delta_f",
+                "peak_threshold_method": "percentile",
+                "peak_threshold_k": 3.5,
+                "peak_threshold_percentile": 91.0,
+                "peak_threshold_abs": 0.75,
+                "peak_min_distance_sec": 1.25,
+                "peak_min_prominence_k": 2.75,
+                "peak_min_width_sec": 0.42,
+                "peak_pre_filter": "lowpass",
+                "event_auc_baseline": "median",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    # Force stale mixed-state values first (legacy + new), then ensure full-section sync.
+    window._event_signal_combo.setCurrentText("dff")
+    window._peak_method_combo.setCurrentText("mean_std")
+    window._peak_k_edit.setText("8.0")
+    window._peak_pct_edit.setText("33.0")
+    window._peak_abs_edit.setText("4.0")
+    window._peak_dist_edit.setText("9.0")
+    window._peak_min_prominence_k_edit.setText("0.1")
+    window._peak_min_width_sec_edit.setText("9.9")
+    window._peak_pre_filter_combo.setCurrentText("none")
+    window._event_auc_combo.setCurrentText("zero")
+
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(custom_cfg))
+    window._update_config_source_ui()
+
+    assert window._event_signal_combo.currentText() == "delta_f"
+    assert window._peak_method_combo.currentText() == "percentile"
+    assert float(window._peak_k_edit.text()) == pytest.approx(3.5)
+    assert float(window._peak_pct_edit.text()) == pytest.approx(91.0)
+    assert float(window._peak_abs_edit.text()) == pytest.approx(0.75)
+    assert float(window._peak_dist_edit.text()) == pytest.approx(1.25)
+    assert float(window._peak_min_prominence_k_edit.text()) == pytest.approx(2.75)
+    assert float(window._peak_min_width_sec_edit.text()) == pytest.approx(0.42)
+    assert window._peak_pre_filter_combo.currentText() == "lowpass"
+    assert window._event_auc_combo.currentText() == "median"
+
+    # Switching back to lab/default baseline should restore full-section consistency.
+    window._use_custom_config_cb.setChecked(False)
+    window._update_config_source_ui()
+    expected_cfg = window._active_baseline_config()
+    assert window._event_signal_combo.currentText() == str(expected_cfg.event_signal)
+    assert window._peak_method_combo.currentText() == str(expected_cfg.peak_threshold_method)
+    assert float(window._peak_k_edit.text()) == pytest.approx(float(expected_cfg.peak_threshold_k))
+    assert float(window._peak_pct_edit.text()) == pytest.approx(float(expected_cfg.peak_threshold_percentile))
+    assert float(window._peak_abs_edit.text()) == pytest.approx(float(expected_cfg.peak_threshold_abs))
+    assert float(window._peak_dist_edit.text()) == pytest.approx(float(expected_cfg.peak_min_distance_sec))
+    assert float(window._peak_min_prominence_k_edit.text()) == pytest.approx(
+        float(getattr(expected_cfg, "peak_min_prominence_k", 0.0))
+    )
+    assert float(window._peak_min_width_sec_edit.text()) == pytest.approx(
+        float(getattr(expected_cfg, "peak_min_width_sec", 0.0))
+    )
+    assert window._peak_pre_filter_combo.currentText() == str(getattr(expected_cfg, "peak_pre_filter", "none"))
+    assert window._event_auc_combo.currentText() == str(expected_cfg.event_auc_baseline)
 
 
 def test_validate_to_run_progress_does_not_start_at_stale_99(window, monkeypatch, tmp_path):

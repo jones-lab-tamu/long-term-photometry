@@ -40,6 +40,8 @@ GUI_KNOBS_ADVANCED: Set[str] = {
     "peak_threshold_percentile",
     "peak_threshold_abs",
     "peak_min_distance_sec",
+    "peak_min_prominence_k",
+    "peak_min_width_sec",
     "peak_pre_filter",
     "event_auc_baseline",
 }
@@ -107,6 +109,16 @@ KNOB_META: Dict[str, dict] = {
         "label": "Peak Min Distance (sec)",
         "help": "Minimum time between detected peaks.",
         "range": {"min": 0.0, "max": 60.0},
+    },
+    "peak_min_prominence_k": {
+        "label": "Peak Min Prominence K",
+        "help": "Minimum peak prominence relative to robust noise (MAD-based sigma).",
+        "range": {"min": 0.0},
+    },
+    "peak_min_width_sec": {
+        "label": "Peak Min Width (sec)",
+        "help": "Minimum event width in seconds.",
+        "range": {"min": 0.0},
     },
     "peak_pre_filter": {
         "label": "Peak Pre-Filter",
@@ -285,7 +297,8 @@ try:
     required_step7 = [
         "event_signal", "peak_threshold_method", "peak_threshold_k",
         "peak_threshold_percentile", "peak_threshold_abs",
-        "peak_min_distance_sec", "event_auc_baseline"
+        "peak_min_distance_sec", "peak_min_prominence_k",
+        "peak_min_width_sec", "event_auc_baseline"
     ]
     cfg_fields = {f.name for f in dataclasses.fields(Config)}
     

@@ -1699,7 +1699,8 @@ class TestEventFeatureKnobs(unittest.TestCase):
             keys_to_check = [
                 "event_signal", "peak_threshold_method", "peak_threshold_k",
                 "peak_threshold_percentile", "peak_threshold_abs",
-                "peak_min_distance_sec", "event_auc_baseline"
+                "peak_min_distance_sec", "peak_min_prominence_k",
+                "peak_min_width_sec", "event_auc_baseline"
             ]
             for key in keys_to_check:
                 self.assertNotIn(key, loaded)
@@ -1846,6 +1847,97 @@ class TestEventFeatureKnobs(unittest.TestCase):
             else:
                 self.assertNotIn("peak_threshold_abs", changed)
 
+    def test_t3b_peak_hardening_fields_emit_and_roundtrip(self):
+        """Peak hardening GUI fields emit when changed and serialize into derived config."""
+        from gui.main_window import parse_and_validate_event_feature_knobs, compute_overrides_user_changed
+        from photometry_pipeline.config import Config
+        from gui.run_spec import RunSpec
+        import tempfile, os, shutil, yaml
+
+        cfg0 = Config()
+        defaults = {
+            "event_signal": cfg0.event_signal,
+            "peak_threshold_method": cfg0.peak_threshold_method,
+            "peak_threshold_k": cfg0.peak_threshold_k,
+            "peak_threshold_percentile": cfg0.peak_threshold_percentile,
+            "peak_threshold_abs": cfg0.peak_threshold_abs,
+            "peak_min_distance_sec": cfg0.peak_min_distance_sec,
+            "peak_min_prominence_k": cfg0.peak_min_prominence_k,
+            "peak_min_width_sec": cfg0.peak_min_width_sec,
+            "event_auc_baseline": cfg0.event_auc_baseline,
+        }
+
+        parsed, err = parse_and_validate_event_feature_knobs(
+            defaults["event_signal"],
+            defaults["peak_threshold_method"],
+            str(defaults["peak_threshold_k"]),
+            str(defaults["peak_threshold_percentile"]),
+            str(defaults["peak_threshold_abs"]),
+            str(defaults["peak_min_distance_sec"]),
+            defaults["event_auc_baseline"],
+            defaults=defaults,
+            peak_prominence_k_str="1.25",
+            peak_width_sec_str="0.35",
+        )
+        self.assertIsNone(err)
+        changed = compute_overrides_user_changed(parsed, defaults)
+        self.assertEqual(changed["peak_min_prominence_k"], 1.25)
+        self.assertEqual(changed["peak_min_width_sec"], 0.35)
+
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            run_dir = os.path.join(tmp_dir, "run_test_t3b")
+            base_config_path = os.path.join(tmp_dir, "base_config.yaml")
+            with open(base_config_path, "w") as f:
+                yaml.safe_dump({}, f)
+
+            spec = RunSpec(
+                run_dir=run_dir,
+                config_source_path=base_config_path,
+                config_overrides=changed,
+            )
+            config_path = spec.generate_derived_config(run_dir)
+            with open(config_path, "r") as f:
+                loaded = yaml.safe_load(f)
+
+            self.assertEqual(loaded["peak_min_prominence_k"], 1.25)
+            self.assertEqual(loaded["peak_min_width_sec"], 0.35)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_t3c_peak_hardening_fields_omitted_when_equal_to_baseline(self):
+        """Peak hardening fields should not emit overrides when equal to active baseline defaults."""
+        from gui.main_window import parse_and_validate_event_feature_knobs, compute_overrides_user_changed
+
+        defaults = {
+            "event_signal": "dff",
+            "peak_threshold_method": "mean_std",
+            "peak_threshold_k": 2.0,
+            "peak_threshold_percentile": 95.0,
+            "peak_threshold_abs": 1.0,
+            "peak_min_distance_sec": 0.5,
+            "peak_min_prominence_k": 1.1,
+            "peak_min_width_sec": 0.25,
+            "event_auc_baseline": "zero",
+        }
+
+        parsed, err = parse_and_validate_event_feature_knobs(
+            defaults["event_signal"],
+            defaults["peak_threshold_method"],
+            str(defaults["peak_threshold_k"]),
+            str(defaults["peak_threshold_percentile"]),
+            str(defaults["peak_threshold_abs"]),
+            str(defaults["peak_min_distance_sec"]),
+            defaults["event_auc_baseline"],
+            defaults=defaults,
+            peak_prominence_k_str=str(defaults["peak_min_prominence_k"]),
+            peak_width_sec_str=str(defaults["peak_min_width_sec"]),
+        )
+        self.assertIsNone(err)
+        changed = compute_overrides_user_changed(parsed, defaults)
+        self.assertNotIn("peak_min_prominence_k", changed)
+        self.assertNotIn("peak_min_width_sec", changed)
+
     def test_t4_validation_failures(self):
         """T4: Validation failures for numeric constraints conditional on method."""
         from gui.main_window import parse_and_validate_event_feature_knobs
@@ -1906,6 +1998,24 @@ class TestEventFeatureKnobs(unittest.TestCase):
                 str(defaults["peak_min_distance_sec"]), defaults["event_auc_baseline"], defaults
             )
             self.assertIn("Peak Threshold Absolute must be > 0", err)
+
+        # prominence < 0
+        _, err = parse_and_validate_event_feature_knobs(
+            defaults["event_signal"], method, str(defaults["peak_threshold_k"]),
+            str(defaults["peak_threshold_percentile"]), str(defaults["peak_threshold_abs"]),
+            str(defaults["peak_min_distance_sec"]), defaults["event_auc_baseline"], defaults,
+            peak_prominence_k_str="-0.1",
+        )
+        self.assertIn("Peak Min Prominence K must be >= 0", err)
+
+        # width < 0
+        _, err = parse_and_validate_event_feature_knobs(
+            defaults["event_signal"], method, str(defaults["peak_threshold_k"]),
+            str(defaults["peak_threshold_percentile"]), str(defaults["peak_threshold_abs"]),
+            str(defaults["peak_min_distance_sec"]), defaults["event_auc_baseline"], defaults,
+            peak_width_sec_str="-0.1",
+        )
+        self.assertIn("Peak Min Width (s) must be >= 0", err)
             
     def test_t5_run_report_reflects_step_7_knobs(self):
         """T5: Hard validation gate proving Step 7 config reaches run_report.json."""

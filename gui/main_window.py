@@ -353,6 +353,8 @@ def parse_and_validate_event_feature_knobs(
     event_auc_text: str,
     defaults: dict,
     peak_pre_filter_text: str | None = None,
+    peak_prominence_k_str: str | None = None,
+    peak_width_sec_str: str | None = None,
 ) -> tuple[dict | None, str | None]:
     """
     Parses and validates the event + feature advanced knobs.
@@ -390,10 +392,28 @@ def parse_and_validate_event_feature_knobs(
     except ValueError:
         return None, "Peak Min Distance (sec) must be a number."
 
+    try:
+        prom_val = peak_prominence_k_str.strip() if peak_prominence_k_str is not None else ""
+        peak_prominence_k = float(prom_val if prom_val else defaults.get("peak_min_prominence_k", 0.0))
+        if peak_prominence_k < 0:
+            return None, "Peak Min Prominence K must be >= 0."
+    except ValueError:
+        return None, "Peak Min Prominence K must be a number."
+
+    try:
+        width_val = peak_width_sec_str.strip() if peak_width_sec_str is not None else ""
+        peak_width_sec = float(width_val if width_val else defaults.get("peak_min_width_sec", 0.0))
+        if peak_width_sec < 0:
+            return None, "Peak Min Width (s) must be >= 0."
+    except ValueError:
+        return None, "Peak Min Width (s) must be a number."
+
     overrides = {
         "event_signal": event_sig_method,
         "peak_threshold_method": peak_method,
         "peak_min_distance_sec": peak_dist,
+        "peak_min_prominence_k": peak_prominence_k,
+        "peak_min_width_sec": peak_width_sec,
         "peak_pre_filter": peak_pre_filter,
         "event_auc_baseline": auc_baseline,
     }
@@ -828,6 +848,28 @@ class MainWindow(QMainWindow):
             "Minimum spacing between detected peaks, in seconds."
         )
         tuning_form.addRow(_tuning_row_label("Peak Min Distance (s):"), self._tuning_peak_dist_spin)
+
+        self._tuning_peak_prominence_k_spin = QDoubleSpinBox()
+        self._tuning_peak_prominence_k_spin.setMinimumWidth(140)
+        self._tuning_peak_prominence_k_spin.setRange(0.0, 1_000_000.0)
+        self._tuning_peak_prominence_k_spin.setDecimals(6)
+        self._tuning_peak_prominence_k_spin.setSingleStep(0.1)
+        self._tuning_peak_prominence_k_spin.setToolTip(
+            "Minimum required peak prominence relative to robust noise. "
+            "Higher values reject small fluctuations. Set to 0 to disable."
+        )
+        tuning_form.addRow(_tuning_row_label("Peak Min Prominence K:"), self._tuning_peak_prominence_k_spin)
+
+        self._tuning_peak_width_sec_spin = QDoubleSpinBox()
+        self._tuning_peak_width_sec_spin.setMinimumWidth(140)
+        self._tuning_peak_width_sec_spin.setRange(0.0, 10_000.0)
+        self._tuning_peak_width_sec_spin.setDecimals(6)
+        self._tuning_peak_width_sec_spin.setSingleStep(0.1)
+        self._tuning_peak_width_sec_spin.setToolTip(
+            "Minimum required peak width in seconds. "
+            "Higher values reject very narrow excursions. Set to 0 to disable."
+        )
+        tuning_form.addRow(_tuning_row_label("Peak Min Width (s):"), self._tuning_peak_width_sec_spin)
 
         self._tuning_peak_pre_filter_combo = QComboBox()
         self._tuning_peak_pre_filter_combo.setMinimumWidth(220)
@@ -1498,6 +1540,8 @@ class MainWindow(QMainWindow):
         self._tuning_peak_pct_spin.setValue(float(cfg.peak_threshold_percentile))
         self._tuning_peak_abs_spin.setValue(float(getattr(cfg, "peak_threshold_abs", 0.0)))
         self._tuning_peak_dist_spin.setValue(float(cfg.peak_min_distance_sec))
+        self._tuning_peak_prominence_k_spin.setValue(float(getattr(cfg, "peak_min_prominence_k", 0.0)))
+        self._tuning_peak_width_sec_spin.setValue(float(getattr(cfg, "peak_min_width_sec", 0.0)))
         pre_filter = str(getattr(cfg, "peak_pre_filter", "none"))
         if self._tuning_peak_pre_filter_combo.findText(pre_filter) >= 0:
             self._tuning_peak_pre_filter_combo.setCurrentText(pre_filter)
@@ -1673,6 +1717,8 @@ class MainWindow(QMainWindow):
             "event_signal": self._tuning_event_signal_combo.currentText().strip(),
             "peak_threshold_method": method,
             "peak_min_distance_sec": float(self._tuning_peak_dist_spin.value()),
+            "peak_min_prominence_k": float(self._tuning_peak_prominence_k_spin.value()),
+            "peak_min_width_sec": float(self._tuning_peak_width_sec_spin.value()),
             "peak_pre_filter": self._tuning_peak_pre_filter_combo.currentText().strip(),
             "event_auc_baseline": self._tuning_event_auc_combo.currentText().strip(),
         }
@@ -1781,6 +1827,12 @@ class MainWindow(QMainWindow):
         self._peak_pct_edit.setText(_fmt(self._tuning_peak_pct_spin.value(), decimals=3))
         self._peak_abs_edit.setText(_fmt(self._tuning_peak_abs_spin.value(), decimals=6))
         self._peak_dist_edit.setText(_fmt(self._tuning_peak_dist_spin.value(), decimals=3))
+        self._peak_min_prominence_k_edit.setText(
+            _fmt(self._tuning_peak_prominence_k_spin.value(), decimals=6)
+        )
+        self._peak_min_width_sec_edit.setText(
+            _fmt(self._tuning_peak_width_sec_spin.value(), decimals=3)
+        )
 
         _set_combo_if_allowed(self._peak_pre_filter_combo, self._tuning_peak_pre_filter_combo.currentText().strip())
         _set_combo_if_allowed(self._event_auc_combo, self._tuning_event_auc_combo.currentText().strip())
@@ -2187,9 +2239,80 @@ class MainWindow(QMainWindow):
             "peak_threshold_percentile": base_cfg.peak_threshold_percentile,
             "peak_threshold_abs": base_cfg.peak_threshold_abs,
             "peak_min_distance_sec": base_cfg.peak_min_distance_sec,
+            "peak_min_prominence_k": getattr(base_cfg, "peak_min_prominence_k", 0.0),
+            "peak_min_width_sec": getattr(base_cfg, "peak_min_width_sec", 0.0),
             "peak_pre_filter": getattr(base_cfg, "peak_pre_filter", "none"),
             "event_auc_baseline": base_cfg.event_auc_baseline,
         }
+
+    def _sync_event_feature_controls_from_active_baseline(self) -> None:
+        """Sync the full main-run event-feature subsection to active baseline defaults."""
+        required_attrs = (
+            "_event_signal_combo",
+            "_peak_method_combo",
+            "_peak_k_edit",
+            "_peak_pct_edit",
+            "_peak_abs_edit",
+            "_peak_dist_edit",
+            "_peak_min_prominence_k_edit",
+            "_peak_min_width_sec_edit",
+            "_peak_pre_filter_combo",
+            "_event_auc_combo",
+        )
+        if any(not hasattr(self, attr) for attr in required_attrs):
+            return
+
+        base_cfg = self._active_baseline_config()
+        defaults = {
+            "event_signal": str(base_cfg.event_signal),
+            "peak_threshold_method": str(base_cfg.peak_threshold_method),
+            "peak_threshold_k": float(base_cfg.peak_threshold_k),
+            "peak_threshold_percentile": float(base_cfg.peak_threshold_percentile),
+            "peak_threshold_abs": float(base_cfg.peak_threshold_abs),
+            "peak_min_distance_sec": float(base_cfg.peak_min_distance_sec),
+            "peak_min_prominence_k": float(getattr(base_cfg, "peak_min_prominence_k", 0.0)),
+            "peak_min_width_sec": float(getattr(base_cfg, "peak_min_width_sec", 0.0)),
+            "peak_pre_filter": str(getattr(base_cfg, "peak_pre_filter", "none")),
+            "event_auc_baseline": str(base_cfg.event_auc_baseline),
+        }
+
+        def _sync_combo(combo: QComboBox, value_text: str) -> None:
+            if combo.currentText().strip() == value_text:
+                return
+            idx = combo.findText(value_text)
+            if idx < 0:
+                return
+            blocked = combo.blockSignals(True)
+            combo.setCurrentIndex(idx)
+            combo.blockSignals(blocked)
+
+        def _sync_numeric(edit: QLineEdit, value: float) -> None:
+            current_text = edit.text().strip()
+            try:
+                if current_text and float(current_text) == float(value):
+                    return
+            except ValueError:
+                pass
+
+            target = str(float(value))
+            if current_text == target:
+                return
+
+            blocked = edit.blockSignals(True)
+            edit.setText(target)
+            edit.blockSignals(blocked)
+
+        _sync_combo(self._event_signal_combo, defaults["event_signal"])
+        _sync_combo(self._peak_method_combo, defaults["peak_threshold_method"])
+        _sync_numeric(self._peak_k_edit, defaults["peak_threshold_k"])
+        _sync_numeric(self._peak_pct_edit, defaults["peak_threshold_percentile"])
+        _sync_numeric(self._peak_abs_edit, defaults["peak_threshold_abs"])
+        _sync_numeric(self._peak_dist_edit, defaults["peak_min_distance_sec"])
+        _sync_numeric(self._peak_min_prominence_k_edit, defaults["peak_min_prominence_k"])
+        _sync_numeric(self._peak_min_width_sec_edit, defaults["peak_min_width_sec"])
+        _sync_combo(self._peak_pre_filter_combo, defaults["peak_pre_filter"])
+        _sync_combo(self._event_auc_combo, defaults["event_auc_baseline"])
+        self._update_adv_ev_visibility()
 
     def _update_config_source_ui(self) -> None:
         """Enable custom config widgets only when advanced custom mode is active."""
@@ -2208,6 +2331,7 @@ class MainWindow(QMainWindow):
                 f"Active baseline source: lab standard default ({self._lab_default_config_path})"
             )
             self._active_config_source_label.setStyleSheet("font-size: 11px; color: #2d7d2d;")
+        self._sync_event_feature_controls_from_active_baseline()
 
     def _build_run_spec(self, validate_only: bool = False) -> RunSpec:
         """Create a RunSpec from current widget values for a real run.
@@ -2359,6 +2483,8 @@ class MainWindow(QMainWindow):
             self._event_auc_combo.currentText(),
             defaults=default_ev_dict,
             peak_pre_filter_text=self._peak_pre_filter_combo.currentText(),
+            peak_prominence_k_str=self._peak_min_prominence_k_edit.text(),
+            peak_width_sec_str=self._peak_min_width_sec_edit.text(),
         )
         if ev_overrides is not None:
             changed_ev_overrides = compute_overrides_user_changed(ev_overrides, default_ev_dict)
@@ -2544,6 +2670,8 @@ class MainWindow(QMainWindow):
             self._event_auc_combo.currentText(),
             defaults=default_ev_dict,
             peak_pre_filter_text=self._peak_pre_filter_combo.currentText(),
+            peak_prominence_k_str=self._peak_min_prominence_k_edit.text(),
+            peak_width_sec_str=self._peak_min_width_sec_edit.text(),
         )
         if err:
             return err
@@ -4061,6 +4189,26 @@ class MainWindow(QMainWindow):
         )
         self._peak_dist_edit.textChanged.connect(self._on_config_changed)
         ev_layout.addRow("Peak Min Distance:", self._peak_dist_edit)
+
+        self._peak_min_prominence_k_edit = QLineEdit(
+            str(float(getattr(self._default_cfg, "peak_min_prominence_k", 0.0)))
+        )
+        self._peak_min_prominence_k_edit.setToolTip(
+            "Minimum required peak prominence relative to robust noise. "
+            "Higher values reject small fluctuations. Set to 0 to disable."
+        )
+        self._peak_min_prominence_k_edit.textChanged.connect(self._on_config_changed)
+        ev_layout.addRow("Peak Min Prominence K:", self._peak_min_prominence_k_edit)
+
+        self._peak_min_width_sec_edit = QLineEdit(
+            str(float(getattr(self._default_cfg, "peak_min_width_sec", 0.0)))
+        )
+        self._peak_min_width_sec_edit.setToolTip(
+            "Minimum required peak width in seconds. "
+            "Higher values reject very narrow excursions. Set to 0 to disable."
+        )
+        self._peak_min_width_sec_edit.textChanged.connect(self._on_config_changed)
+        ev_layout.addRow("Peak Min Width (s):", self._peak_min_width_sec_edit)
 
         self._peak_pre_filter_combo = QComboBox()
         allowed_pre_filters = get_allowed_peak_pre_filters_from_config()

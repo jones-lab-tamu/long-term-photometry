@@ -233,6 +233,59 @@ def test_tuning_workspace_roi_specific_chunk_population(window, tmp_path):
     assert region1_chunks == ["1"]
 
 
+def test_downstream_tuning_control_population_includes_hardening_defaults(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path / "downstream_defaults")
+    cfg_path = run_dir / "_analysis" / "phasic_out" / "config_used.yaml"
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    cfg.update(
+        {
+            "event_signal": "delta_f",
+            "peak_threshold_method": "absolute",
+            "peak_threshold_k": 4.2,
+            "peak_threshold_percentile": 92.0,
+            "peak_threshold_abs": 0.33,
+            "peak_min_distance_sec": 1.4,
+            "peak_min_prominence_k": 1.75,
+            "peak_min_width_sec": 0.28,
+            "peak_pre_filter": "lowpass",
+            "event_auc_baseline": "median",
+        }
+    )
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=True)
+
+    # Seed a stale mixed state first, then confirm full downstream defaults re-apply.
+    window._tuning_event_signal_combo.setCurrentText("dff")
+    window._tuning_peak_method_combo.setCurrentText("mean_std")
+    window._tuning_peak_k_spin.setValue(8.8)
+    window._tuning_peak_pct_spin.setValue(22.0)
+    window._tuning_peak_abs_spin.setValue(2.2)
+    window._tuning_peak_dist_spin.setValue(8.8)
+    window._tuning_peak_prominence_k_spin.setValue(0.11)
+    window._tuning_peak_width_sec_spin.setValue(1.11)
+    if window._tuning_peak_pre_filter_combo.findText("none") >= 0:
+        window._tuning_peak_pre_filter_combo.setCurrentText("none")
+    if window._tuning_event_auc_combo.findText("zero") >= 0:
+        window._tuning_event_auc_combo.setCurrentText("zero")
+
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    QApplication.processEvents()
+
+    assert window._tuning_event_signal_combo.currentText() == "delta_f"
+    assert window._tuning_peak_method_combo.currentText() == "absolute"
+    assert window._tuning_peak_k_spin.value() == pytest.approx(4.2)
+    assert window._tuning_peak_pct_spin.value() == pytest.approx(92.0)
+    assert window._tuning_peak_abs_spin.value() == pytest.approx(0.33)
+    assert window._tuning_peak_dist_spin.value() == pytest.approx(1.4)
+    assert window._tuning_peak_prominence_k_spin.value() == pytest.approx(1.75)
+    assert window._tuning_peak_width_sec_spin.value() == pytest.approx(0.28)
+    assert window._tuning_peak_pre_filter_combo.currentText() == "lowpass"
+    assert window._tuning_event_auc_combo.currentText() == "median"
+
+
 def test_tuning_workspace_disclosure_collapsed_by_default(window, tmp_path):
     run_dir = _make_completed_run_with_cache(tmp_path)
     window._current_run_dir = str(run_dir)
@@ -513,6 +566,8 @@ def test_tuning_workspace_wiring_and_refresh(window, tmp_path, monkeypatch):
     assert window._tuning_peak_method_combo.currentText() == "absolute"
     window._tuning_peak_abs_spin.setValue(0.15)
     window._tuning_peak_dist_spin.setValue(1.5)
+    window._tuning_peak_prominence_k_spin.setValue(1.8)
+    window._tuning_peak_width_sec_spin.setValue(0.35)
 
     overlay_path = tmp_path / "overlay_test.png"
     from PySide6.QtGui import QPixmap
@@ -543,6 +598,8 @@ def test_tuning_workspace_wiring_and_refresh(window, tmp_path, monkeypatch):
     assert captured["chunk_id"] == 2
     assert captured["overrides"]["peak_threshold_method"] == "absolute"
     assert captured["overrides"]["peak_threshold_abs"] == pytest.approx(0.15)
+    assert captured["overrides"]["peak_min_prominence_k"] == pytest.approx(1.8)
+    assert captured["overrides"]["peak_min_width_sec"] == pytest.approx(0.35)
     assert captured["out_dir"] is None
 
     assert "ROI: Region1" in window._tuning_summary_label.text()
@@ -586,6 +643,8 @@ def test_tuning_apply_back_copies_only_downstream_fields(window, tmp_path):
     window._tuning_peak_pct_spin.setValue(91.5)
     window._tuning_peak_abs_spin.setValue(0.245)
     window._tuning_peak_dist_spin.setValue(2.5)
+    window._tuning_peak_prominence_k_spin.setValue(1.65)
+    window._tuning_peak_width_sec_spin.setValue(0.55)
     if window._tuning_peak_pre_filter_combo.findText("lowpass") >= 0:
         window._tuning_peak_pre_filter_combo.setCurrentText("lowpass")
     if window._tuning_event_auc_combo.findText("median") >= 0:
@@ -600,6 +659,8 @@ def test_tuning_apply_back_copies_only_downstream_fields(window, tmp_path):
     assert float(window._peak_pct_edit.text()) == pytest.approx(91.5, rel=1e-6)
     assert float(window._peak_abs_edit.text()) == pytest.approx(0.245, rel=1e-6)
     assert float(window._peak_dist_edit.text()) == pytest.approx(2.5, rel=1e-6)
+    assert float(window._peak_min_prominence_k_edit.text()) == pytest.approx(1.65, rel=1e-6)
+    assert float(window._peak_min_width_sec_edit.text()) == pytest.approx(0.55, rel=1e-6)
     assert window._peak_pre_filter_combo.currentText() == window._tuning_peak_pre_filter_combo.currentText()
     assert window._event_auc_combo.currentText() == window._tuning_event_auc_combo.currentText()
 
@@ -704,6 +765,8 @@ def test_tuning_apply_back_next_run_serializes_applied_values(window, tmp_path):
     window._tuning_peak_method_combo.setCurrentText("mean_std")
     window._tuning_peak_k_spin.setValue(7.125)
     window._tuning_peak_dist_spin.setValue(2.25)
+    window._tuning_peak_prominence_k_spin.setValue(1.2)
+    window._tuning_peak_width_sec_spin.setValue(0.45)
     if window._tuning_peak_pre_filter_combo.findText("lowpass") >= 0:
         window._tuning_peak_pre_filter_combo.setCurrentText("lowpass")
     if window._tuning_event_auc_combo.findText("median") >= 0:
@@ -729,6 +792,8 @@ def test_tuning_apply_back_next_run_serializes_applied_values(window, tmp_path):
     assert effective_cfg["event_signal"] == "delta_f"
     assert effective_cfg["peak_threshold_k"] == pytest.approx(7.125, rel=1e-6)
     assert effective_cfg["peak_min_distance_sec"] == pytest.approx(2.25, rel=1e-6)
+    assert effective_cfg["peak_min_prominence_k"] == pytest.approx(1.2, rel=1e-6)
+    assert effective_cfg["peak_min_width_sec"] == pytest.approx(0.45, rel=1e-6)
     assert effective_cfg["peak_pre_filter"] == "lowpass"
     assert effective_cfg["event_auc_baseline"] == "median"
 
@@ -736,6 +801,8 @@ def test_tuning_apply_back_next_run_serializes_applied_values(window, tmp_path):
     assert overrides["peak_threshold_method"] == "mean_std"
     assert overrides["event_signal"] == "delta_f"
     assert overrides["peak_threshold_k"] == pytest.approx(7.125, rel=1e-6)
+    assert overrides["peak_min_prominence_k"] == pytest.approx(1.2, rel=1e-6)
+    assert overrides["peak_min_width_sec"] == pytest.approx(0.45, rel=1e-6)
 
 
 def test_tuning_apply_back_method_switch_serialization(window, tmp_path):
@@ -801,6 +868,8 @@ def test_run_spec_event_fields_read_from_visible_main_controls(window, tmp_path,
     window._peak_pct_edit.setText("91")
     window._peak_abs_edit.setText("0.42")
     window._peak_dist_edit.setText("1.8")
+    window._peak_min_prominence_k_edit.setText("1.35")
+    window._peak_min_width_sec_edit.setText("0.27")
     if window._peak_pre_filter_combo.findText("lowpass") >= 0:
         window._peak_pre_filter_combo.setCurrentText("lowpass")
     if window._event_auc_combo.findText("median") >= 0:
@@ -818,6 +887,8 @@ def test_run_spec_event_fields_read_from_visible_main_controls(window, tmp_path,
         auc_baseline_text,
         defaults,
         peak_pre_filter_text=None,
+        peak_prominence_k_str=None,
+        peak_width_sec_str=None,
     ):
         captured.update(
             {
@@ -829,6 +900,8 @@ def test_run_spec_event_fields_read_from_visible_main_controls(window, tmp_path,
                 "dist_val": dist_val,
                 "auc_baseline_text": auc_baseline_text,
                 "peak_pre_filter_text": peak_pre_filter_text,
+                "peak_prominence_k_str": peak_prominence_k_str,
+                "peak_width_sec_str": peak_width_sec_str,
             }
         )
         return {}, None
@@ -845,6 +918,8 @@ def test_run_spec_event_fields_read_from_visible_main_controls(window, tmp_path,
     assert captured["dist_val"] == window._peak_dist_edit.text()
     assert captured["auc_baseline_text"] == window._event_auc_combo.currentText()
     assert captured["peak_pre_filter_text"] == window._peak_pre_filter_combo.currentText()
+    assert captured["peak_prominence_k_str"] == window._peak_min_prominence_k_edit.text()
+    assert captured["peak_width_sec_str"] == window._peak_min_width_sec_edit.text()
 
 
 def test_tuning_workspace_boundary_message_and_controls(window, tmp_path):
@@ -1171,6 +1246,8 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
         ("Peak Threshold Percentile:", window._tuning_peak_pct_spin),
         ("Peak Threshold Absolute:", window._tuning_peak_abs_spin),
         ("Peak Min Distance (s):", window._tuning_peak_dist_spin),
+        ("Peak Min Prominence K:", window._tuning_peak_prominence_k_spin),
+        ("Peak Min Width (s):", window._tuning_peak_width_sec_spin),
         ("Peak Pre-Filter:", window._tuning_peak_pre_filter_combo),
         ("Event AUC Baseline:", window._tuning_event_auc_combo),
     ]
@@ -1346,6 +1423,8 @@ def test_correction_tuning_scope_integrity_and_no_downstream_controls(window, tm
 
     assert not hasattr(window, "_correction_tuning_event_signal_combo")
     assert not hasattr(window, "_correction_tuning_peak_method_combo")
+    assert not hasattr(window, "_correction_tuning_peak_prominence_k_spin")
+    assert not hasattr(window, "_correction_tuning_peak_width_sec_spin")
 
 
 def test_correction_tuning_state_resets_on_new_run(window, tmp_path, monkeypatch):
