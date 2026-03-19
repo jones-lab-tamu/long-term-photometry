@@ -53,6 +53,8 @@ class Config:
     peak_threshold_percentile: float = 95.0
     peak_threshold_abs: float = 0.0 # Used only when method is 'absolute'
     peak_min_distance_sec: float = 0.5 # Default kept at 0.5 per user request (was 1.0 in previous file but user asked to keep default 0.5)
+    peak_min_prominence_k: float = 0.0
+    peak_min_width_sec: float = 0.0
     peak_pre_filter: str = 'none'
     event_auc_baseline: str = 'zero'
     event_signal: Literal['dff', 'delta_f'] = 'dff'
@@ -128,6 +130,10 @@ class Config:
         if obj.peak_threshold_method == 'absolute':
             if obj.peak_threshold_abs <= 0.0:
                 raise ValueError("peak_threshold_abs must be > 0 when peak_threshold_method='absolute'")
+        if obj.peak_min_prominence_k < 0.0:
+            raise ValueError("peak_min_prominence_k must be >= 0")
+        if obj.peak_min_width_sec < 0.0:
+            raise ValueError("peak_min_width_sec must be >= 0")
 
         if obj.preview_first_n is not None:
             if not isinstance(obj.preview_first_n, int) or obj.preview_first_n <= 0:

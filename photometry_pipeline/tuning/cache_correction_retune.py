@@ -56,6 +56,8 @@ DOWNSTREAM_ONLY_KEYS = {
     "peak_threshold_percentile",
     "peak_threshold_abs",
     "peak_min_distance_sec",
+    "peak_min_prominence_k",
+    "peak_min_width_sec",
     "peak_pre_filter",
     "event_auc_baseline",
 }
@@ -81,6 +83,8 @@ _OVERRIDE_VALUE_CASTERS = {
     "peak_threshold_percentile": float,
     "peak_threshold_abs": float,
     "peak_min_distance_sec": float,
+    "peak_min_prominence_k": float,
+    "peak_min_width_sec": float,
     "peak_pre_filter": str,
     "event_auc_baseline": str,
     "f0_min_value": float,

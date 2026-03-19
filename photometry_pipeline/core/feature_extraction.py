@@ -85,6 +85,35 @@ def _compute_detection_threshold(clean_finite: np.ndarray, config) -> float:
     )
 
 
+def _resolve_prominence_requirement(clean_finite: np.ndarray, config) -> float | None:
+    """
+    Resolve optional minimum prominence from robust (MAD-based) noise.
+
+    Returns None when disabled; otherwise a non-negative scalar (or +inf).
+    """
+    k = float(getattr(config, "peak_min_prominence_k", 0.0))
+    if k <= 0.0:
+        return None
+    if clean_finite.size < 2:
+        return float("inf")
+
+    median = float(np.median(clean_finite))
+    mad = float(np.median(np.abs(clean_finite - median)))
+    sigma_robust = float(1.4826 * mad)
+    if not np.isfinite(sigma_robust) or sigma_robust <= 0.0:
+        # Degenerate robust-noise estimate: fail closed for prominence-enabled calls.
+        return float("inf")
+    return float(k * sigma_robust)
+
+
+def _resolve_width_samples(fs_hz: float, config) -> int | None:
+    """Resolve optional minimum peak width (seconds -> samples)."""
+    width_sec = float(getattr(config, "peak_min_width_sec", 0.0))
+    if width_sec <= 0.0:
+        return None
+    return max(1, int(round(width_sec * fs_hz)))
+
+
 def get_peak_indices_for_trace(
     trace: np.ndarray,
     fs_hz: float,
@@ -113,6 +142,11 @@ def get_peak_indices_for_trace(
         if len(finite_vals) < 2:
             return np.array([], dtype=int)
         threshold = _compute_detection_threshold(finite_vals, config)
+    else:
+        finite_vals = trace_use_arr[np.isfinite(trace_use_arr)]
+
+    prominence_req = _resolve_prominence_requirement(finite_vals, config)
+    width_samples = _resolve_width_samples(fs_hz, config)
 
     is_valid = np.isfinite(trace_arr)
     padded = np.concatenate(([False], is_valid, [False]))
@@ -137,7 +171,15 @@ def get_peak_indices_for_trace(
             run_y = seg_y[rs:re]
             if len(run_y) < 2:
                 continue
-            peaks, _ = find_peaks(run_y, height=threshold, distance=dist_samples)
+            peak_kwargs = {
+                "height": threshold,
+                "distance": dist_samples,
+            }
+            if prominence_req is not None:
+                peak_kwargs["prominence"] = prominence_req
+            if width_samples is not None:
+                peak_kwargs["width"] = width_samples
+            peaks, _ = find_peaks(run_y, **peak_kwargs)
             if len(peaks):
                 all_peaks.append((s + rs + peaks).astype(int))
 
@@ -150,7 +192,8 @@ def extract_features(chunk, config):
     Extracts phasic features from a Chunk object.
     
     Implements a NaN-safe segmented iteration over finite runs.
-    Peak detection uses scipy.signal.find_peaks with height threshold and minimum distance only.
+    Peak detection uses the authoritative detector helper with:
+    height threshold, minimum distance, and optional prominence/width criteria.
     Supported threshold methods include mean_std, percentile, and median_mad.
     
     Args:

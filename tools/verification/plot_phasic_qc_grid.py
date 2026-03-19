@@ -42,7 +42,6 @@ import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.signal import find_peaks
 
 # Ensure repo root is in path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -51,7 +50,7 @@ if repo_root not in sys.path:
 
 # Core Imports
 from photometry_pipeline.config import Config
-from photometry_pipeline.core.feature_extraction import extract_features
+from photometry_pipeline.core.feature_extraction import extract_features, get_peak_indices_for_trace
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.viz.phasic_data_prep import (
     build_feature_map,
@@ -124,74 +123,11 @@ def infer_fs(time_arr, config, context=""):
 
 def get_local_peak_indices(trace_arr, fs, config):
     """
-    Mirrors feature_extraction detection logic STRICTLY to return indices for plotting.
+    Uses authoritative feature_extraction detector to return indices for plotting.
     Note: verify_peak_count_strict uses the actual pipeline to verify the COUNT,
     but we still need this to know WHERE to plot points (since pipelines returns stats only).
     """
-    is_valid = np.isfinite(trace_arr)
-    clean_trace = trace_arr[is_valid]
-    
-    if len(clean_trace) == 0:
-        return np.array([], dtype=int)
-        
-    # Threshold Calculation
-    method = config.peak_threshold_method
-    thresh = np.inf
-    
-    # Calculate stats on global clean trace
-    if method == 'absolute':
-        thresh = getattr(config, 'peak_threshold_abs', 0.0)
-    elif method == 'mean_std':
-        mu = np.mean(clean_trace)
-        sigma = np.std(clean_trace)
-        thresh = mu + config.peak_threshold_k * sigma
-        sigma_robust = sigma # For prominence if needed (fallback)
-        
-    elif method == 'percentile':
-        thresh = np.percentile(clean_trace, config.peak_threshold_percentile)
-        sigma_robust = 0 # Not used for prominence usually unless mixed
-        
-    elif method == 'median_mad':
-        median = np.median(clean_trace)
-        # MAD STRICT: median(abs(x - median))
-        mad = np.median(np.abs(clean_trace - median))
-        
-        # Consistent with feature_extraction.py: sigma_robust = 1.4826 * mad
-        sigma_robust = 1.4826 * mad
-        
-        if sigma_robust == 0:
-             if config.peak_threshold_k == 0:
-                 thresh = median
-             else:
-                 thresh = float('inf') 
-        else:
-            thresh = median + config.peak_threshold_k * sigma_robust
-
-    # Constraints
-    dist_samples = max(1, int(config.peak_min_distance_sec * fs))
-    
-
-    # Segmented Detection
-    padded = np.concatenate(([False], is_valid, [False]))
-    diff = np.diff(padded.astype(int))
-    starts = np.where(diff == 1)[0]
-    ends = np.where(diff == -1)[0]
-    
-    all_peaks = []
-    for s, e in zip(starts, ends):
-        seg_trace = trace_arr[s:e]
-        
-        seg_for_peaks = seg_trace
-        
-        p_kwargs = {'height': thresh, 'distance': dist_samples}
-        
-        p_inds, _ = find_peaks(seg_for_peaks, **p_kwargs)
-        all_peaks.append(p_inds + s)
-        
-    if all_peaks:
-        return np.concatenate(all_peaks)
-    else:
-        return np.array([], dtype=int)
+    return get_peak_indices_for_trace(np.asarray(trace_arr), float(fs), config)
 
 def verify_peak_count_strict(trace_arr, time_arr, fs, config, expected_count, roi, cid, src_file):
     """

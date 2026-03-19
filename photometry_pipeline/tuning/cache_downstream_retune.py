@@ -23,11 +23,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.signal import find_peaks
 import yaml
 
 from photometry_pipeline.config import Config
-from photometry_pipeline.core.feature_extraction import extract_features
+from photometry_pipeline.core.feature_extraction import extract_features, get_peak_indices_for_trace
 from photometry_pipeline.core.preprocessing import lowpass_filter
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.io.hdf5_cache_reader import (
@@ -44,6 +43,8 @@ DOWNSTREAM_RETUNABLE_KEYS = {
     "peak_threshold_percentile",
     "peak_threshold_abs",
     "peak_min_distance_sec",
+    "peak_min_prominence_k",
+    "peak_min_width_sec",
     "peak_pre_filter",
     "event_auc_baseline",
 }
@@ -72,6 +73,8 @@ _OVERRIDE_VALUE_CASTERS = {
     "peak_threshold_percentile": float,
     "peak_threshold_abs": float,
     "peak_min_distance_sec": float,
+    "peak_min_prominence_k": float,
+    "peak_min_width_sec": float,
     "peak_pre_filter": str,
     "event_auc_baseline": str,
     "window_sec": float,
@@ -372,32 +375,13 @@ def _detect_events_for_chunk(chunk: Chunk, cfg: Config) -> Dict[str, Any]:
 
     threshold, stats = _compute_threshold(trace_use, cfg)
     dist_samples = max(1, int(cfg.peak_min_distance_sec * chunk.fs_hz))
-
-    is_valid_raw = np.isfinite(signal)
-    padded = np.concatenate(([False], is_valid_raw, [False]))
-    diff = np.diff(padded.astype(int))
-    starts = np.where(diff == 1)[0]
-    ends = np.where(diff == -1)[0]
-
-    event_indices: list[int] = []
-    for s, e in zip(starts, ends):
-        seg_y = trace_use[s:e]
-        seg_valid = np.isfinite(seg_y)
-        if not np.any(seg_valid):
-            continue
-        run_pad = np.concatenate(([False], seg_valid, [False]))
-        run_diff = np.diff(run_pad.astype(int))
-        run_starts = np.where(run_diff == 1)[0]
-        run_ends = np.where(run_diff == -1)[0]
-        for rs, re in zip(run_starts, run_ends):
-            run_y = seg_y[rs:re]
-            if len(run_y) < 2:
-                continue
-            peaks, _ = find_peaks(run_y, height=threshold, distance=dist_samples)
-            if len(peaks):
-                event_indices.extend((s + rs + peaks).astype(int).tolist())
-
-    event_idx = np.array(sorted(set(event_indices)), dtype=int)
+    event_idx = get_peak_indices_for_trace(
+        signal,
+        chunk.fs_hz,
+        cfg,
+        trace_use=trace_use,
+        threshold=threshold,
+    )
     event_times = chunk.time_sec[event_idx] if len(event_idx) else np.array([], dtype=float)
     event_values = trace_use[event_idx] if len(event_idx) else np.array([], dtype=float)
     return {
