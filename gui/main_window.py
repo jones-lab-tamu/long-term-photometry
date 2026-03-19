@@ -679,6 +679,9 @@ class MainWindow(QMainWindow):
         self._tuning_disclosure_btn.setCheckable(True)
         self._tuning_disclosure_btn.setChecked(False)
         self._tuning_disclosure_btn.setAutoRaise(True)
+        self._tuning_disclosure_btn.setToolTip(
+            "Expand downstream tuning controls for event-detection retuning from cache."
+        )
         self._tuning_disclosure_btn.toggled.connect(self._on_tuning_disclosure_toggled)
         disclosure_row.addWidget(self._tuning_disclosure_btn)
         disclosure_row.addStretch()
@@ -755,21 +758,31 @@ class MainWindow(QMainWindow):
 
         self._tuning_roi_combo = QComboBox()
         self._tuning_roi_combo.setMinimumWidth(220)
+        self._tuning_roi_combo.setToolTip("ROI shown in the downstream tuning workspace.")
         self._tuning_roi_combo.currentIndexChanged.connect(self._on_tuning_roi_changed)
         tuning_form.addRow(_tuning_row_label("ROI:"), self._tuning_roi_combo)
 
         self._tuning_chunk_combo = QComboBox()
         self._tuning_chunk_combo.setMinimumWidth(220)
+        self._tuning_chunk_combo.setToolTip(
+            "Used for preview/inspection in the tuning workspace."
+        )
         tuning_form.addRow(_tuning_row_label("Chunk:"), self._tuning_chunk_combo)
 
         self._tuning_event_signal_combo = QComboBox()
         self._tuning_event_signal_combo.setMinimumWidth(220)
         self._tuning_event_signal_combo.addItems(get_allowed_event_signals_from_config())
+        self._tuning_event_signal_combo.setToolTip(
+            "Signal used for event detection during downstream retuning."
+        )
         tuning_form.addRow(_tuning_row_label("Event Signal:"), self._tuning_event_signal_combo)
 
         self._tuning_peak_method_combo = QComboBox()
         self._tuning_peak_method_combo.setMinimumWidth(220)
         self._tuning_peak_method_combo.addItems(get_allowed_peak_threshold_methods_from_config())
+        self._tuning_peak_method_combo.setToolTip(
+            "Method used to decide which peaks count as events."
+        )
         self._tuning_peak_method_combo.currentIndexChanged.connect(self._on_tuning_peak_method_changed)
         tuning_form.addRow(_tuning_row_label("Peak Threshold Method:"), self._tuning_peak_method_combo)
 
@@ -778,6 +791,9 @@ class MainWindow(QMainWindow):
         self._tuning_peak_k_spin.setRange(0.000001, 1_000_000.0)
         self._tuning_peak_k_spin.setDecimals(6)
         self._tuning_peak_k_spin.setSingleStep(0.1)
+        self._tuning_peak_k_spin.setToolTip(
+            "Scale factor used by threshold methods that require a K parameter."
+        )
         self._tuning_peak_k_label = _tuning_row_label("Peak Threshold K:")
         tuning_form.addRow(self._tuning_peak_k_label, self._tuning_peak_k_spin)
 
@@ -786,6 +802,9 @@ class MainWindow(QMainWindow):
         self._tuning_peak_pct_spin.setRange(0.0, 100.0)
         self._tuning_peak_pct_spin.setDecimals(3)
         self._tuning_peak_pct_spin.setSingleStep(1.0)
+        self._tuning_peak_pct_spin.setToolTip(
+            "Percentile cutoff used by percentile-based threshold methods."
+        )
         self._tuning_peak_pct_label = _tuning_row_label("Peak Threshold Percentile:")
         tuning_form.addRow(self._tuning_peak_pct_label, self._tuning_peak_pct_spin)
 
@@ -794,6 +813,9 @@ class MainWindow(QMainWindow):
         self._tuning_peak_abs_spin.setRange(0.0, 1_000_000.0)
         self._tuning_peak_abs_spin.setDecimals(6)
         self._tuning_peak_abs_spin.setSingleStep(0.05)
+        self._tuning_peak_abs_spin.setToolTip(
+            "Absolute threshold used when the selected method uses a fixed cutoff."
+        )
         self._tuning_peak_abs_label = _tuning_row_label("Peak Threshold Absolute:")
         tuning_form.addRow(self._tuning_peak_abs_label, self._tuning_peak_abs_spin)
 
@@ -802,23 +824,39 @@ class MainWindow(QMainWindow):
         self._tuning_peak_dist_spin.setRange(0.0, 10_000.0)
         self._tuning_peak_dist_spin.setDecimals(3)
         self._tuning_peak_dist_spin.setSingleStep(0.1)
+        self._tuning_peak_dist_spin.setToolTip(
+            "Minimum spacing between detected peaks, in seconds."
+        )
         tuning_form.addRow(_tuning_row_label("Peak Min Distance (s):"), self._tuning_peak_dist_spin)
 
         self._tuning_peak_pre_filter_combo = QComboBox()
         self._tuning_peak_pre_filter_combo.setMinimumWidth(220)
         self._tuning_peak_pre_filter_combo.addItems(get_allowed_peak_pre_filters_from_config())
+        self._tuning_peak_pre_filter_combo.setToolTip(
+            "Optional pre-filter applied before event detection."
+        )
         tuning_form.addRow(_tuning_row_label("Peak Pre-Filter:"), self._tuning_peak_pre_filter_combo)
 
         self._tuning_event_auc_combo = QComboBox()
         self._tuning_event_auc_combo.setMinimumWidth(220)
         self._tuning_event_auc_combo.addItems(get_allowed_event_auc_baselines_from_config())
+        self._tuning_event_auc_combo.setToolTip(
+            "Reference baseline convention used when integrating event AUC."
+        )
         tuning_form.addRow(_tuning_row_label("Event AUC Baseline:"), self._tuning_event_auc_combo)
+        self._apply_form_row_tooltips(tuning_form)
 
         btn_row = QHBoxLayout()
         self._run_tuning_btn = QPushButton("Run Tuning")
+        self._run_tuning_btn.setToolTip(
+            "Run downstream cache retuning for the selected ROI and preview session."
+        )
         self._run_tuning_btn.clicked.connect(self._on_run_tuning)
         btn_row.addWidget(self._run_tuning_btn)
         self._open_tuning_dir_btn = QPushButton("Open Tuning Output")
+        self._open_tuning_dir_btn.setToolTip(
+            "Open the output folder from the most recent downstream retune."
+        )
         self._open_tuning_dir_btn.clicked.connect(self._on_open_tuning_output)
         btn_row.addWidget(self._open_tuning_dir_btn)
         btn_row.addStretch()
@@ -838,15 +876,24 @@ class MainWindow(QMainWindow):
         self._tuning_summary_label.setWordWrap(True)
         self._tuning_summary_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self._tuning_summary_label.setMinimumWidth(0)
+        self._tuning_summary_label.setToolTip(
+            "Summary of the most recent downstream tuning run."
+        )
         self._tuning_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         content_layout.addWidget(self._tuning_summary_label)
 
         self._tuning_overlay_title = QLabel("No tuning overlay loaded.")
         self._tuning_overlay_title.setAlignment(Qt.AlignCenter)
+        self._tuning_overlay_title.setToolTip(
+            "Filename of the currently displayed downstream tuning overlay."
+        )
         content_layout.addWidget(self._tuning_overlay_title)
 
         self._tuning_overlay_label = QLabel("Run tuning to generate an ROI/chunk event overlay.")
         self._tuning_overlay_label.setAlignment(Qt.AlignCenter)
+        self._tuning_overlay_label.setToolTip(
+            "Preview overlay for the selected downstream ROI and preview session."
+        )
         self._tuning_overlay_label.setStyleSheet(
             "QLabel { background: #111; color: #ddd; border: 1px solid #444; }"
         )
@@ -875,19 +922,22 @@ class MainWindow(QMainWindow):
 
     def _build_correction_tuning_subsection(self, parent_layout: QVBoxLayout) -> None:
         """Build correction-sensitive retune subsection (separate from downstream tuning)."""
-        section = QGroupBox("Correction-Sensitive Retune")
+        section = QWidget()
         section_layout = QVBoxLayout(section)
-        section_layout.setContentsMargins(8, 8, 8, 8)
+        section_layout.setContentsMargins(0, 0, 0, 0)
         section_layout.setSpacing(6)
 
         disclosure_row = QHBoxLayout()
         self._correction_tuning_disclosure_btn = QToolButton()
-        self._correction_tuning_disclosure_btn.setText("Correction retune controls")
+        self._correction_tuning_disclosure_btn.setText("Correction-Sensitive Retune")
         self._correction_tuning_disclosure_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self._correction_tuning_disclosure_btn.setArrowType(Qt.RightArrow)
         self._correction_tuning_disclosure_btn.setCheckable(True)
         self._correction_tuning_disclosure_btn.setChecked(False)
         self._correction_tuning_disclosure_btn.setAutoRaise(True)
+        self._correction_tuning_disclosure_btn.setToolTip(
+            "Expand correction-sensitive retune controls."
+        )
         self._correction_tuning_disclosure_btn.toggled.connect(
             self._on_correction_tuning_disclosure_toggled
         )
@@ -928,8 +978,8 @@ class MainWindow(QMainWindow):
         self._correction_tuning_content.setVisible(False)
 
         self._correction_tuning_scope_note = QLabel(
-            "Recomputes correction context for the selected ROI across all cached chunks. "
-            "Selected chunk is used only for inspection diagnostics. "
+            "Recomputes baseline and correction for the selected ROI across all sessions available for that ROI. "
+            "The preview session is used only for the inspection figure. "
             "Outputs are written to an isolated retune directory. "
             "Production run artifacts are not modified."
         )
@@ -984,6 +1034,9 @@ class MainWindow(QMainWindow):
 
         self._correction_tuning_roi_combo = QComboBox()
         self._correction_tuning_roi_combo.setMinimumWidth(220)
+        self._correction_tuning_roi_combo.setToolTip(
+            "ROI whose baseline and correction will be recomputed across all available sessions."
+        )
         self._correction_tuning_roi_combo.currentIndexChanged.connect(
             self._on_correction_tuning_roi_changed
         )
@@ -991,14 +1044,18 @@ class MainWindow(QMainWindow):
 
         self._correction_tuning_chunk_combo = QComboBox()
         self._correction_tuning_chunk_combo.setMinimumWidth(220)
-        form.addRow(
-            _corr_row_label("Chunk (inspection):"), self._correction_tuning_chunk_combo
+        self._correction_tuning_chunk_combo.setToolTip(
+            "Used only for the inspection figure. Does not limit recomputation."
         )
+        form.addRow(_corr_row_label("Preview session:"), self._correction_tuning_chunk_combo)
 
         self._correction_tuning_baseline_method_combo = QComboBox()
         self._correction_tuning_baseline_method_combo.setMinimumWidth(240)
         self._correction_tuning_baseline_method_combo.addItems(
             get_allowed_baseline_methods_from_config()
+        )
+        self._correction_tuning_baseline_method_combo.setToolTip(
+            "Method used to estimate baseline context before normalization."
         )
         form.addRow(
             _corr_row_label("Baseline Method:"),
@@ -1010,6 +1067,9 @@ class MainWindow(QMainWindow):
         self._correction_tuning_baseline_pct_spin.setRange(0.0, 100.0)
         self._correction_tuning_baseline_pct_spin.setDecimals(3)
         self._correction_tuning_baseline_pct_spin.setSingleStep(1.0)
+        self._correction_tuning_baseline_pct_spin.setToolTip(
+            "Percentile used when estimating the session baseline."
+        )
         form.addRow(
             _corr_row_label("Baseline Percentile:"),
             self._correction_tuning_baseline_pct_spin,
@@ -1020,6 +1080,9 @@ class MainWindow(QMainWindow):
         self._correction_tuning_lowpass_spin.setRange(0.000001, 10_000.0)
         self._correction_tuning_lowpass_spin.setDecimals(6)
         self._correction_tuning_lowpass_spin.setSingleStep(0.1)
+        self._correction_tuning_lowpass_spin.setToolTip(
+            "Lowpass cutoff applied before correction-related computations."
+        )
         form.addRow(_corr_row_label("Lowpass Filter (Hz):"), self._correction_tuning_lowpass_spin)
 
         self._correction_tuning_window_spin = QDoubleSpinBox()
@@ -1027,6 +1090,9 @@ class MainWindow(QMainWindow):
         self._correction_tuning_window_spin.setRange(0.000001, 1_000_000.0)
         self._correction_tuning_window_spin.setDecimals(6)
         self._correction_tuning_window_spin.setSingleStep(1.0)
+        self._correction_tuning_window_spin.setToolTip(
+            "Length of each regression window used for isosbestic fitting."
+        )
         form.addRow(_corr_row_label("Regression Window (s):"), self._correction_tuning_window_spin)
 
         self._correction_tuning_step_spin = QDoubleSpinBox()
@@ -1034,11 +1100,17 @@ class MainWindow(QMainWindow):
         self._correction_tuning_step_spin.setRange(0.000001, 1_000_000.0)
         self._correction_tuning_step_spin.setDecimals(6)
         self._correction_tuning_step_spin.setSingleStep(0.5)
+        self._correction_tuning_step_spin.setToolTip(
+            "Step between consecutive regression windows."
+        )
         form.addRow(_corr_row_label("Regression Step (s):"), self._correction_tuning_step_spin)
 
         self._correction_tuning_min_valid_windows_spin = QSpinBox()
         self._correction_tuning_min_valid_windows_spin.setMinimumWidth(120)
         self._correction_tuning_min_valid_windows_spin.setRange(1, 1_000_000)
+        self._correction_tuning_min_valid_windows_spin.setToolTip(
+            "Minimum accepted windows required before a session-level fit is trusted."
+        )
         form.addRow(
             _corr_row_label("Min Valid Windows:"),
             self._correction_tuning_min_valid_windows_spin,
@@ -1047,6 +1119,9 @@ class MainWindow(QMainWindow):
         self._correction_tuning_min_samples_spin = QSpinBox()
         self._correction_tuning_min_samples_spin.setMinimumWidth(120)
         self._correction_tuning_min_samples_spin.setRange(1, 1_000_000)
+        self._correction_tuning_min_samples_spin.setToolTip(
+            "Minimum number of samples required inside a regression window."
+        )
         form.addRow(
             _corr_row_label("Min Samples/Window:"),
             self._correction_tuning_min_samples_spin,
@@ -1057,6 +1132,9 @@ class MainWindow(QMainWindow):
         self._correction_tuning_r_low_spin.setRange(0.0, 1.0)
         self._correction_tuning_r_low_spin.setDecimals(6)
         self._correction_tuning_r_low_spin.setSingleStep(0.01)
+        self._correction_tuning_r_low_spin.setToolTip(
+            "Lower correlation threshold used in slope trust weighting."
+        )
         form.addRow(_corr_row_label("R-Low Threshold:"), self._correction_tuning_r_low_spin)
 
         self._correction_tuning_r_high_spin = QDoubleSpinBox()
@@ -1064,6 +1142,9 @@ class MainWindow(QMainWindow):
         self._correction_tuning_r_high_spin.setRange(0.0, 1.0)
         self._correction_tuning_r_high_spin.setDecimals(6)
         self._correction_tuning_r_high_spin.setSingleStep(0.01)
+        self._correction_tuning_r_high_spin.setToolTip(
+            "Upper correlation threshold used in slope trust weighting."
+        )
         form.addRow(_corr_row_label("R-High Threshold:"), self._correction_tuning_r_high_spin)
 
         self._correction_tuning_g_min_spin = QDoubleSpinBox()
@@ -1071,13 +1152,23 @@ class MainWindow(QMainWindow):
         self._correction_tuning_g_min_spin.setRange(0.0, 1_000_000.0)
         self._correction_tuning_g_min_spin.setDecimals(6)
         self._correction_tuning_g_min_spin.setSingleStep(0.01)
+        self._correction_tuning_g_min_spin.setToolTip(
+            "Minimum gain floor used when aggregating trusted window slopes."
+        )
         form.addRow(_corr_row_label("G-Min Threshold:"), self._correction_tuning_g_min_spin)
+        self._apply_form_row_tooltips(form)
 
         btn_row = QHBoxLayout()
         self._run_correction_tuning_btn = QPushButton("Run Correction Retune")
+        self._run_correction_tuning_btn.setToolTip(
+            "Run correction-sensitive recomputation for the selected ROI."
+        )
         self._run_correction_tuning_btn.clicked.connect(self._on_run_correction_tuning)
         btn_row.addWidget(self._run_correction_tuning_btn)
         self._open_correction_tuning_dir_btn = QPushButton("Open Correction Output")
+        self._open_correction_tuning_dir_btn.setToolTip(
+            "Open the output folder from the most recent correction retune."
+        )
         self._open_correction_tuning_dir_btn.clicked.connect(
             self._on_open_correction_tuning_output
         )
@@ -1091,6 +1182,9 @@ class MainWindow(QMainWindow):
             QSizePolicy.Ignored, QSizePolicy.Preferred
         )
         self._correction_tuning_summary_label.setMinimumWidth(0)
+        self._correction_tuning_summary_label.setToolTip(
+            "Summary of the most recent correction retune run."
+        )
         self._correction_tuning_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         content_layout.addWidget(self._correction_tuning_summary_label)
 
@@ -1098,12 +1192,18 @@ class MainWindow(QMainWindow):
             "No correction inspection artifact loaded."
         )
         self._correction_tuning_inspection_title.setAlignment(Qt.AlignCenter)
+        self._correction_tuning_inspection_title.setToolTip(
+            "Filename of the current correction inspection figure."
+        )
         content_layout.addWidget(self._correction_tuning_inspection_title)
 
         self._correction_tuning_inspection_label = QLabel(
             "Run correction retune to generate a correction inspection artifact."
         )
         self._correction_tuning_inspection_label.setAlignment(Qt.AlignCenter)
+        self._correction_tuning_inspection_label.setToolTip(
+            "Inspection figure for the selected preview session after correction retune."
+        )
         self._correction_tuning_inspection_label.setStyleSheet(
             "QLabel { background: #111; color: #ddd; border: 1px solid #444; }"
         )
@@ -1154,6 +1254,20 @@ class MainWindow(QMainWindow):
     def _is_any_tuning_subsection_expanded(self) -> bool:
         return self._is_downstream_tuning_expanded() or self._is_correction_tuning_expanded()
 
+    def _sync_tuning_status_visibility(self) -> None:
+        expanded = self._is_downstream_tuning_expanded()
+        if hasattr(self, "_tuning_collapsed_status_label"):
+            self._tuning_collapsed_status_label.setVisible(not expanded)
+        if hasattr(self, "_tuning_availability_label"):
+            self._tuning_availability_label.setVisible(expanded)
+
+    def _sync_correction_tuning_status_visibility(self) -> None:
+        expanded = self._is_correction_tuning_expanded()
+        if hasattr(self, "_correction_tuning_collapsed_status_label"):
+            self._correction_tuning_collapsed_status_label.setVisible(not expanded)
+        if hasattr(self, "_correction_tuning_availability_label"):
+            self._correction_tuning_availability_label.setVisible(expanded)
+
     def _update_results_pane_mode_for_tuning(self) -> None:
         if not hasattr(self, "_report_viewer") or not hasattr(self, "_tuning_group"):
             return
@@ -1179,6 +1293,7 @@ class MainWindow(QMainWindow):
             if selected_region and self._tuning_roi_combo.findText(selected_region) >= 0:
                 self._tuning_roi_combo.setCurrentText(selected_region)
         self._tuning_content.setVisible(expanded)
+        self._sync_tuning_status_visibility()
         self._tuning_disclosure_btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
         self._update_results_pane_mode_for_tuning()
         QTimer.singleShot(0, self._render_tuning_overlay)
@@ -1205,6 +1320,7 @@ class MainWindow(QMainWindow):
         self._tuning_availability_label.setText(reason)
         self._tuning_availability_label.setStyleSheet("font-size: 11px; color: #8a6d3b;")
         self._set_tuning_collapsed_status(reason, ready=False)
+        self._sync_tuning_status_visibility()
         self._update_results_pane_mode_for_tuning()
 
     def _set_tuning_workspace_available(self, message: str) -> None:
@@ -1216,6 +1332,7 @@ class MainWindow(QMainWindow):
         self._tuning_availability_label.setText(message)
         self._tuning_availability_label.setStyleSheet("font-size: 11px; color: #2d7d2d;")
         self._set_tuning_collapsed_status(message, ready=True)
+        self._sync_tuning_status_visibility()
         self._update_results_pane_mode_for_tuning()
 
     def _current_phasic_out_dir(self) -> str:
@@ -1474,7 +1591,7 @@ class MainWindow(QMainWindow):
                 f"Tuning unavailable: unable to read ROI/chunk targets from phasic cache ({exc})."
             )
             self._set_correction_tuning_workspace_unavailable(
-                f"Correction retune unavailable: unable to read ROI/chunk targets from phasic cache ({exc})."
+                f"Correction retune unavailable: unable to read ROI/session targets from phasic cache ({exc})."
             )
             return
         valid_rois = sorted(roi_chunk_map.keys(), key=lambda s: s.lower())
@@ -1483,7 +1600,7 @@ class MainWindow(QMainWindow):
                 "Tuning unavailable: no valid ROI groups with chunk data found in phasic cache."
             )
             self._set_correction_tuning_workspace_unavailable(
-                "Correction retune unavailable: no valid ROI groups with chunk data found in phasic cache."
+                "Correction retune unavailable: no valid ROI groups with session data found in phasic cache."
             )
             return
 
@@ -1506,7 +1623,7 @@ class MainWindow(QMainWindow):
                 f"Tuning unavailable: selected ROI '{selected_roi}' has no chunk data in phasic cache."
             )
             self._set_correction_tuning_workspace_unavailable(
-                f"Correction retune unavailable: selected ROI '{selected_roi}' has no chunk data in phasic cache."
+                f"Correction retune unavailable: selected ROI '{selected_roi}' has no available sessions in phasic cache."
             )
             return
 
@@ -1527,14 +1644,14 @@ class MainWindow(QMainWindow):
             return
         if self._correction_tuning_chunk_combo.count() == 0:
             self._set_correction_tuning_workspace_unavailable(
-                f"Correction retune unavailable: selected ROI '{selected_corr_roi}' has no chunk data in phasic cache."
+                f"Correction retune unavailable: selected ROI '{selected_corr_roi}' has no available sessions in phasic cache."
             )
             return
 
         self._apply_correction_tuning_defaults_from_config(self._load_tuning_base_config())
         self._set_correction_tuning_workspace_available(
-            "Ready: correction retune recomputes correction context across all selected-ROI chunks. "
-            "Selected chunk is inspection target only."
+            "Ready: correction retune recomputes the selected ROI across all available sessions. "
+            "The preview session is used only for inspection."
         )
 
     def _collect_tuning_overrides(self) -> dict:
@@ -1670,6 +1787,7 @@ class MainWindow(QMainWindow):
             ):
                 self._correction_tuning_roi_combo.setCurrentText(selected_region)
         self._correction_tuning_content.setVisible(expanded)
+        self._sync_correction_tuning_status_visibility()
         self._correction_tuning_disclosure_btn.setArrowType(
             Qt.DownArrow if expanded else Qt.RightArrow
         )
@@ -1701,6 +1819,7 @@ class MainWindow(QMainWindow):
             "font-size: 11px; color: #8a6d3b;"
         )
         self._set_correction_tuning_collapsed_status(reason, ready=False)
+        self._sync_correction_tuning_status_visibility()
         self._update_results_pane_mode_for_tuning()
 
     def _set_correction_tuning_workspace_available(self, message: str) -> None:
@@ -1715,6 +1834,7 @@ class MainWindow(QMainWindow):
             "font-size: 11px; color: #2d7d2d;"
         )
         self._set_correction_tuning_collapsed_status(message, ready=True)
+        self._sync_correction_tuning_status_visibility()
         self._update_results_pane_mode_for_tuning()
 
     def _set_correction_tuning_overlay_message(self, text: str) -> None:
@@ -1876,7 +1996,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Correction Retune Error",
-                "Select an inspection chunk before running correction retune.",
+                "Select a preview session before running correction retune.",
             )
             return
 
@@ -1917,13 +2037,14 @@ class MainWindow(QMainWindow):
 
         lines = [
             f"ROI: {result.get('selected_roi', roi)}",
-            f"Inspection chunk: {result.get('inspection_chunk_id', chunk_id)}",
+            "Recomputed across: all available sessions for this ROI",
+            f"Preview session: {result.get('inspection_chunk_id', chunk_id)}",
             f"Retune output: {result.get('retune_dir', '(unknown)')}",
         ]
         self._correction_tuning_summary_label.setText("\n".join(lines))
         self._append_run_log(
             f"Correction retune completed for ROI={result.get('selected_roi', roi)} "
-            f"inspection_chunk={result.get('inspection_chunk_id', chunk_id)} "
+            f"preview_session={result.get('inspection_chunk_id', chunk_id)} "
             f"-> {result.get('retune_dir', '(unknown)')}"
         )
         QTimer.singleShot(0, self._finalize_correction_tuning_result_layout)

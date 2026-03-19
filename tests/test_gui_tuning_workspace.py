@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import yaml
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QGroupBox
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -237,6 +237,17 @@ def test_tuning_workspace_disclosure_collapsed_by_default(window, tmp_path):
     assert window._tuning_disclosure_btn.arrowType() == Qt.RightArrow
     assert window._tuning_content.isHidden()
     assert not window._tuning_collapsed_status_label.isHidden()
+    assert window._tuning_availability_label.isHidden()
+
+
+def test_tuning_hierarchy_normalized_no_nested_correction_groupbox(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._current_run_dir = str(run_dir)
+    window._enter_complete_state_workspace()
+    QApplication.processEvents()
+
+    child_group_boxes = window._tuning_group.findChildren(QGroupBox)
+    assert all(box.title() != "Correction-Sensitive Retune" for box in child_group_boxes)
 
 
 def test_tuning_workspace_disclosure_toggle(window, tmp_path):
@@ -251,6 +262,8 @@ def test_tuning_workspace_disclosure_toggle(window, tmp_path):
     assert window._tuning_disclosure_btn.isChecked()
     assert window._tuning_disclosure_btn.arrowType() == Qt.DownArrow
     assert not window._tuning_content.isHidden()
+    assert not window._tuning_availability_label.isHidden()
+    assert window._tuning_collapsed_status_label.isHidden()
     assert window._report_viewer.isHidden()
 
     window._tuning_disclosure_btn.click()
@@ -258,6 +271,8 @@ def test_tuning_workspace_disclosure_toggle(window, tmp_path):
     assert not window._tuning_disclosure_btn.isChecked()
     assert window._tuning_disclosure_btn.arrowType() == Qt.RightArrow
     assert window._tuning_content.isHidden()
+    assert not window._tuning_collapsed_status_label.isHidden()
+    assert window._tuning_availability_label.isHidden()
     assert not window._report_viewer.isHidden()
 
 
@@ -1031,6 +1046,9 @@ def test_correction_tuning_availability_gating(window, tmp_path):
     assert window._correction_tuning_workspace_available
     assert window._correction_tuning_roi_combo.count() >= 1
     assert window._correction_tuning_chunk_combo.count() >= 1
+    ready_msg = window._correction_tuning_availability_label.text().lower()
+    assert "all available sessions" in ready_msg
+    assert "cached chunks" not in ready_msg
 
 
 def test_correction_tuning_disclosure_collapsed_and_reset_on_reentry(window, tmp_path):
@@ -1042,17 +1060,23 @@ def test_correction_tuning_disclosure_collapsed_and_reset_on_reentry(window, tmp
     assert not window._correction_tuning_disclosure_btn.isChecked()
     assert window._correction_tuning_disclosure_btn.arrowType() == Qt.RightArrow
     assert window._correction_tuning_content.isHidden()
+    assert not window._correction_tuning_collapsed_status_label.isHidden()
+    assert window._correction_tuning_availability_label.isHidden()
 
     window._correction_tuning_disclosure_btn.click()
     QApplication.processEvents()
     assert window._correction_tuning_disclosure_btn.isChecked()
     assert not window._correction_tuning_content.isHidden()
+    assert window._correction_tuning_collapsed_status_label.isHidden()
+    assert not window._correction_tuning_availability_label.isHidden()
 
     window._exit_complete_state_workspace()
     window._enter_complete_state_workspace()
     QApplication.processEvents()
     assert not window._correction_tuning_disclosure_btn.isChecked()
     assert window._correction_tuning_content.isHidden()
+    assert not window._correction_tuning_collapsed_status_label.isHidden()
+    assert window._correction_tuning_availability_label.isHidden()
 
 
 def test_correction_tuning_control_population_and_defaults(window, tmp_path):
@@ -1107,6 +1131,82 @@ def test_correction_tuning_control_population_and_defaults(window, tmp_path):
     assert window._correction_tuning_r_low_spin.value() == pytest.approx(0.11)
     assert window._correction_tuning_r_high_spin.value() == pytest.approx(0.91)
     assert window._correction_tuning_g_min_spin.value() == pytest.approx(0.22)
+    labels = [
+        lbl.text()
+        for lbl in window._correction_tuning_controls_container.findChildren(
+            type(window._status_label)
+        )
+    ]
+    assert "Preview session:" in labels
+    assert "Chunk (inspection):" not in labels
+
+
+def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    def _label(root, text: str):
+        for candidate in root.findChildren(type(window._status_label)):
+            if candidate.text() == text:
+                return candidate
+        return None
+
+    downstream_pairs = [
+        ("ROI:", window._tuning_roi_combo),
+        ("Chunk:", window._tuning_chunk_combo),
+        ("Event Signal:", window._tuning_event_signal_combo),
+        ("Peak Threshold Method:", window._tuning_peak_method_combo),
+        ("Peak Threshold K:", window._tuning_peak_k_spin),
+        ("Peak Threshold Percentile:", window._tuning_peak_pct_spin),
+        ("Peak Threshold Absolute:", window._tuning_peak_abs_spin),
+        ("Peak Min Distance (s):", window._tuning_peak_dist_spin),
+        ("Peak Pre-Filter:", window._tuning_peak_pre_filter_combo),
+        ("Event AUC Baseline:", window._tuning_event_auc_combo),
+    ]
+    for label_text, control in downstream_pairs:
+        label = _label(window._tuning_controls_container, label_text)
+        assert label is not None, f"Missing downstream label {label_text}"
+        assert label.toolTip().strip(), f"Missing downstream label tooltip {label_text}"
+        assert control.toolTip().strip(), f"Missing downstream control tooltip {label_text}"
+
+    correction_pairs = [
+        ("ROI:", window._correction_tuning_roi_combo),
+        ("Preview session:", window._correction_tuning_chunk_combo),
+        ("Baseline Method:", window._correction_tuning_baseline_method_combo),
+        ("Baseline Percentile:", window._correction_tuning_baseline_pct_spin),
+        ("Lowpass Filter (Hz):", window._correction_tuning_lowpass_spin),
+        ("Regression Window (s):", window._correction_tuning_window_spin),
+        ("Regression Step (s):", window._correction_tuning_step_spin),
+        ("Min Valid Windows:", window._correction_tuning_min_valid_windows_spin),
+        ("Min Samples/Window:", window._correction_tuning_min_samples_spin),
+        ("R-Low Threshold:", window._correction_tuning_r_low_spin),
+        ("R-High Threshold:", window._correction_tuning_r_high_spin),
+        ("G-Min Threshold:", window._correction_tuning_g_min_spin),
+    ]
+    for label_text, control in correction_pairs:
+        label = _label(window._correction_tuning_controls_container, label_text)
+        assert label is not None, f"Missing correction label {label_text}"
+        assert label.toolTip().strip(), f"Missing correction label tooltip {label_text}"
+        assert control.toolTip().strip(), f"Missing correction control tooltip {label_text}"
+
+    assert window._tuning_disclosure_btn.toolTip().strip()
+    assert window._correction_tuning_disclosure_btn.toolTip().strip()
+    assert window._run_tuning_btn.toolTip().strip()
+    assert window._open_tuning_dir_btn.toolTip().strip()
+    assert window._apply_tuning_btn.toolTip().strip()
+    assert window._run_correction_tuning_btn.toolTip().strip()
+    assert window._open_correction_tuning_dir_btn.toolTip().strip()
+    assert window._tuning_overlay_title.toolTip().strip()
+    assert window._tuning_overlay_label.toolTip().strip()
+    assert window._tuning_summary_label.toolTip().strip()
+    assert window._correction_tuning_inspection_title.toolTip().strip()
+    assert window._correction_tuning_inspection_label.toolTip().strip()
+    assert window._correction_tuning_summary_label.toolTip().strip()
 
 
 def test_correction_tuning_backend_wiring_and_result_refresh(window, tmp_path, monkeypatch):
@@ -1171,7 +1271,9 @@ def test_correction_tuning_backend_wiring_and_result_refresh(window, tmp_path, m
     }
 
     assert "ROI: Region0" in window._correction_tuning_summary_label.text()
-    assert "Inspection chunk: 2" in window._correction_tuning_summary_label.text()
+    assert "Recomputed across: all available sessions for this ROI" in window._correction_tuning_summary_label.text()
+    assert "Preview session: 2" in window._correction_tuning_summary_label.text()
+    assert "Inspection chunk:" not in window._correction_tuning_summary_label.text()
     assert "correction_retune_out" in window._correction_tuning_summary_label.text()
     assert window._correction_tuning_inspection_title.text() == "correction_inspect.png"
     shown = window._correction_tuning_inspection_label.pixmap()
@@ -1189,8 +1291,8 @@ def test_correction_tuning_scope_integrity_and_no_downstream_controls(window, tm
     QApplication.processEvents()
 
     text = window._correction_tuning_scope_note.text().lower()
-    assert "across all cached chunks" in text
-    assert "inspection diagnostics" in text
+    assert "across all sessions available for that roi" in text
+    assert "preview session is used only for the inspection figure" in text
     assert "isolated retune directory" in text
     assert "not modified" in text
 
