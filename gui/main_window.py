@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QLabel, QLineEdit, QComboBox, QCheckBox, QSpinBox,
     QDoubleSpinBox, QPushButton, QPlainTextEdit, QScrollArea,
     QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem, QToolButton, QStackedWidget,
-    QProgressBar, QLayout,
+    QProgressBar, QLayout, QSplitter,
 )
 
 from gui.process_runner import PipelineRunner, RunnerState
@@ -522,6 +522,13 @@ class MainWindow(QMainWindow):
         self._last_elapsed_sec = 0.0
         self._saw_cancel_status = False
         self._is_complete_workspace_active = False
+        self._shell_left_width_floor = 500
+        self._shell_workspace_left_floor = 480
+        self._shell_setup_left_min = 540
+        self._shell_setup_left_ratio = 0.45
+        self._shell_workspace_left_ratio = 0.32
+        self._shell_setup_right_min = 420
+        self._shell_workspace_right_min = 560
         self._tuning_workspace_available = False
         self._tuning_last_result = None
         self._tuning_active_overlay_path = ""
@@ -537,13 +544,18 @@ class MainWindow(QMainWindow):
 
         # Build UI
         central = QWidget()
+        central.setObjectName("appShellRoot")
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(12)
         main_layout.addWidget(self._build_status_strip(), 0)
         main_layout.addWidget(self._build_main_body(), 1)
+        self._apply_shell_chrome_styles()
+        self._apply_results_idle_placeholder()
         self._refresh_tuning_workspace_availability()
         self._update_button_states()
+        self._refresh_splitter_workspace_policy()
 
         # Restore persisted settings
         self._load_settings_into_widgets()
@@ -555,21 +567,50 @@ class MainWindow(QMainWindow):
     def _build_status_strip(self) -> QWidget:
         """Top status strip with status/phase labels and progress."""
         strip = QWidget()
-        row = QHBoxLayout(strip)
-        row.setContentsMargins(0, 0, 0, 0)
+        outer = QVBoxLayout(strip)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._status_header_card = QWidget()
+        self._status_header_card.setObjectName("statusHeaderCard")
+        card = QVBoxLayout(self._status_header_card)
+        card.setContentsMargins(12, 10, 12, 10)
+        card.setSpacing(6)
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(10)
 
         self._status_label = QLabel("Run status: IDLE")
         self._status_label.setStyleSheet("font-weight: bold;")
         self._status_label.setToolTip("Overall run state.")
-        row.addWidget(self._status_label, 0)
+        top_row.addWidget(self._status_label, 0)
 
         self._phase_label = QLabel("Run phase: \u2014")
         self._phase_label.setToolTip("Current pipeline phase.")
-        row.addWidget(self._phase_label, 0)
+        top_row.addWidget(self._phase_label, 0)
 
         self._elapsed_label = QLabel("Elapsed: \u2014")
         self._elapsed_label.setToolTip("Elapsed wall-clock time for active validation/run.")
-        row.addWidget(self._elapsed_label, 0)
+        top_row.addWidget(self._elapsed_label, 0)
+
+        top_row.addStretch(1)
+
+        self._preview_badge = QLabel("PREVIEW")
+        self._preview_badge.setStyleSheet(
+            "font-weight: bold; color: white; background: #d9534f; "
+            "padding: 2px 8px; border-radius: 4px;"
+        )
+        self._preview_badge.hide()
+        top_row.addWidget(self._preview_badge, 0)
+        card.addLayout(top_row)
+
+        progress_row = QHBoxLayout()
+        progress_row.setContentsMargins(0, 0, 0, 0)
+        progress_row.setSpacing(8)
+        self._progress_caption_label = QLabel("Progress")
+        self._progress_caption_label.setStyleSheet("font-size: 11px; color: #555;")
+        progress_row.addWidget(self._progress_caption_label, 0)
 
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
@@ -593,36 +634,155 @@ class MainWindow(QMainWindow):
             "}"
         )
         self._progress_bar.setToolTip("Milestone-based run progress.")
-        row.addWidget(self._progress_bar, 1)
-
-        self._preview_badge = QLabel("PREVIEW")
-        self._preview_badge.setStyleSheet(
-            "font-weight: bold; color: white; background: #d9534f; "
-            "padding: 2px 8px; border-radius: 4px;"
-        )
-        self._preview_badge.hide()
-        row.addWidget(self._preview_badge, 0)
+        progress_row.addWidget(self._progress_bar, 1)
+        card.addLayout(progress_row)
+        outer.addWidget(self._status_header_card)
         return strip
 
     def _build_main_body(self) -> QWidget:
         """Fixed major panes: upper-left controls, lower-left log, right results."""
         body = QWidget()
-        row = QHBoxLayout(body)
+        row = QVBoxLayout(body)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
+        row.setSpacing(0)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(2)
+        splitter.setFocusPolicy(Qt.NoFocus)
+        self._main_splitter = splitter
 
         left_pane = self._build_left_pane()
-        left_pane.setMinimumWidth(520)
-        row.addWidget(left_pane, 0)
-        row.addWidget(self._build_results_pane(), 1)
+        self._left_pane = left_pane
+        left_pane.setMinimumWidth(self._shell_left_width_floor)
+        left_pane.setMaximumWidth(700)
+        splitter.addWidget(left_pane)
+        self._results_pane = self._build_results_pane()
+        splitter.addWidget(self._results_pane)
+        self._lock_main_splitter_handle()
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        self._apply_splitter_setup_mode()
+        row.addWidget(splitter, 1)
         return body
+
+    def _lock_main_splitter_handle(self) -> None:
+        """Keep shell widths mode-controlled; divider is not user-adjustable."""
+        splitter = getattr(self, "_main_splitter", None)
+        if splitter is None or splitter.count() < 2:
+            return
+        handle = splitter.handle(1)
+        if handle is None:
+            return
+        handle.setEnabled(False)
+        handle.setFocusPolicy(Qt.NoFocus)
+        handle.setCursor(Qt.ArrowCursor)
+        handle.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def _splitter_total_width(self) -> int:
+        splitter = getattr(self, "_main_splitter", None)
+        if splitter is None:
+            return 0
+        total = splitter.width()
+        if total > 0:
+            return total
+        total = sum(splitter.sizes())
+        if total > 0:
+            return total
+        return max(self.width() - 24, 1100)
+
+    def _target_splitter_left_width(self, *, setup_mode: bool) -> int:
+        left_pane = getattr(self, "_left_pane", None)
+        if left_pane is None:
+            return 0
+        total = self._splitter_total_width()
+        left_floor = left_pane.minimumWidth()
+        if setup_mode:
+            left = max(
+                int(total * self._shell_setup_left_ratio),
+                self._shell_setup_left_min,
+                left_floor,
+            )
+            right_floor = self._shell_setup_right_min
+        else:
+            left = max(int(total * self._shell_workspace_left_ratio), left_floor)
+            right_floor = self._shell_workspace_right_min
+        left = min(left, left_pane.maximumWidth())
+        max_left_for_right_floor = total - right_floor
+        if max_left_for_right_floor >= left_floor:
+            left = min(left, max_left_for_right_floor)
+        return left
+
+    def _set_shell_left_floor(self, *, setup_mode: bool) -> None:
+        left_pane = getattr(self, "_left_pane", None)
+        if left_pane is None:
+            return
+        floor = self._shell_left_width_floor if setup_mode else self._shell_workspace_left_floor
+        if left_pane.minimumWidth() != floor:
+            left_pane.setMinimumWidth(floor)
+
+    def _apply_splitter_setup_mode(self) -> None:
+        splitter = getattr(self, "_main_splitter", None)
+        left_pane = getattr(self, "_left_pane", None)
+        if splitter is None or left_pane is None:
+            return
+        self._set_shell_left_floor(setup_mode=True)
+        total = self._splitter_total_width()
+        left = self._target_splitter_left_width(setup_mode=True)
+        right = max(1, total - left)
+        splitter.setSizes([left, right])
+
+    def _apply_splitter_workspace_mode(self) -> None:
+        splitter = getattr(self, "_main_splitter", None)
+        left_pane = getattr(self, "_left_pane", None)
+        if splitter is None or left_pane is None:
+            return
+        self._set_shell_left_floor(setup_mode=False)
+        total = self._splitter_total_width()
+        left = self._target_splitter_left_width(setup_mode=False)
+        right = max(1, total - left)
+        splitter.setSizes([left, right])
+
+    def _is_workspace_splitter_mode(self) -> bool:
+        if self._is_complete_workspace_active:
+            return True
+        if self._validation_passed:
+            return True
+        if self._ui_state in (RunnerState.RUNNING, RunnerState.VALIDATING):
+            return True
+        if self._runner.is_running():
+            return True
+        return False
+
+    def _apply_splitter_workspace_policy(self) -> None:
+        if self._is_workspace_splitter_mode():
+            self._apply_splitter_workspace_mode()
+        else:
+            self._apply_splitter_setup_mode()
+
+    def _refresh_splitter_workspace_policy(self) -> None:
+        self._apply_splitter_workspace_policy()
+        if hasattr(self, "_main_splitter"):
+            QTimer.singleShot(0, self._apply_splitter_workspace_policy)
 
     def _build_left_pane(self) -> QWidget:
         """Fixed left column with control area above and log pane below."""
         pane = QWidget()
+        pane.setObjectName("workflowColumn")
         layout = QVBoxLayout(pane)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
+
+        workflow_title = QLabel("Workflow Setup")
+        workflow_title.setObjectName("workflowColumnTitle")
+        layout.addWidget(workflow_title)
+
+        workflow_subtitle = QLabel(
+            "Configure inputs, validate settings, and launch runs from top to bottom."
+        )
+        workflow_subtitle.setWordWrap(True)
+        workflow_subtitle.setObjectName("workflowColumnSubtitle")
+        layout.addWidget(workflow_subtitle)
 
         controls_scroll = QScrollArea()
         controls_scroll.setWidgetResizable(True)
@@ -636,9 +796,10 @@ class MainWindow(QMainWindow):
         self._controls_stack.addWidget(self._complete_state_panel)
         self._controls_stack.setCurrentWidget(self._config_panel)
         controls_scroll.setWidget(self._controls_stack)
+        controls_scroll.setObjectName("workflowControlsScroll")
 
         log_group = self._build_log_panel()
-        log_group.setMinimumHeight(180)
+        log_group.setMinimumHeight(200)
 
         layout.addWidget(controls_scroll, 3)
         layout.addWidget(log_group, 2)
@@ -647,9 +808,14 @@ class MainWindow(QMainWindow):
     def _build_results_pane(self) -> QGroupBox:
         """Right pane with the large results viewer."""
         results_group = QGroupBox("Results")
+        results_group.setObjectName("resultsPaneShell")
         results_lay = QVBoxLayout(results_group)
+        results_lay.setContentsMargins(10, 10, 10, 10)
+        results_lay.setSpacing(10)
         self._results_layout = results_lay
         self._report_viewer = RunReportViewer()
+        if hasattr(self._report_viewer, "_status_label"):
+            self._report_viewer._status_label.setWordWrap(True)
         self._report_viewer.region_changed.connect(self._on_results_region_changed)
         results_lay.addWidget(self._report_viewer, 1)
         self._tuning_group = self._build_tuning_workspace_group()
@@ -1268,6 +1434,8 @@ class MainWindow(QMainWindow):
 
     def _build_log_panel(self) -> QGroupBox:
         group = QGroupBox("Live Log")
+        group.setObjectName("liveLogSection")
+        group.setProperty("workflowSection", True)
         layout = QVBoxLayout(group)
 
         self._log_view = QPlainTextEdit()
@@ -1277,6 +1445,84 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._log_view)
 
         return group
+
+    def _results_idle_placeholder_text(self) -> str:
+        return (
+            "Results workspace\n"
+            "Run the pipeline or open a completed run folder.\n"
+            "Results and plots appear here after completion."
+        )
+
+    def _results_running_placeholder_text(self, message: str) -> str:
+        return (
+            "Results workspace\n"
+            f"{message}\n"
+            "Results and plots will appear here after completion."
+        )
+
+    def _apply_results_idle_placeholder(self) -> None:
+        self._report_viewer.clear()
+        if hasattr(self._report_viewer, "_set_status_message"):
+            self._report_viewer._set_status_message(
+                self._results_idle_placeholder_text(),
+                level="idle",
+            )
+
+    def _apply_shell_chrome_styles(self) -> None:
+        """Shell-level framing and spacing styles (workflow/header modernization only)."""
+        self.setStyleSheet(
+            """
+            QWidget#appShellRoot {
+                background: #f4f6f9;
+            }
+            QWidget#statusHeaderCard {
+                background: #ffffff;
+                border: 1px solid #d9e0e8;
+                border-radius: 10px;
+            }
+            QLabel#workflowColumnTitle {
+                font-size: 15px;
+                font-weight: 700;
+                color: #1f2937;
+            }
+            QLabel#workflowColumnSubtitle {
+                font-size: 11px;
+                color: #5f6b7a;
+            }
+            QScrollArea#workflowControlsScroll {
+                border: none;
+                background: transparent;
+            }
+            QGroupBox[workflowSection="true"] {
+                background: #ffffff;
+                border: 1px solid #d9e0e8;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding-top: 8px;
+            }
+            QGroupBox[workflowSection="true"]::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 4px;
+                font-weight: 600;
+                color: #2a3644;
+            }
+            QGroupBox#resultsPaneShell {
+                background: #ffffff;
+                border: 1px solid #d9e0e8;
+                border-radius: 10px;
+                margin-top: 12px;
+                padding-top: 8px;
+            }
+            QGroupBox#resultsPaneShell::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 4px;
+                font-weight: 700;
+                color: #223040;
+            }
+            """
+        )
 
     # ==================================================================
     # Post-run tuning workspace (Patch D)
@@ -2136,6 +2382,7 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._apply_splitter_workspace_policy()
         self._render_tuning_overlay()
         self._render_correction_tuning_overlay()
 
@@ -2685,6 +2932,7 @@ class MainWindow(QMainWindow):
         """Any config widget change invalidates prior validation."""
         self._validation_passed = False
         self._validated_run_signature = None
+        self._refresh_splitter_workspace_policy()
         self._update_button_states()
 
     # ==================================================================
@@ -2831,7 +3079,7 @@ class MainWindow(QMainWindow):
 
         self._exit_complete_state_workspace()
         self._save_widgets_to_settings()
-        self._report_viewer.clear()
+        self._apply_results_idle_placeholder()
         self._log_view.clear()
         
         # Narrative start (Fix Readability 2: Append BEFORE starting followers/runner)
@@ -2888,7 +3136,7 @@ class MainWindow(QMainWindow):
             return
 
         # Clear past results
-        self._report_viewer.clear()
+        self._apply_results_idle_placeholder()
         self._log_view.clear()
         
         # Narrative start (Fix Readability 2: Append BEFORE starting followers/runner)
@@ -2933,7 +3181,7 @@ class MainWindow(QMainWindow):
                 "Choose a run folder with final-success metadata (status.json or MANIFEST).\n\n"
                 f"Details: {evidence}",
             )
-            self._report_viewer.clear()
+            self._apply_results_idle_placeholder()
             self._exit_complete_state_workspace()
             self._refresh_tuning_workspace_availability()
             self._state_str = RunnerState.IDLE.value
@@ -3087,6 +3335,7 @@ class MainWindow(QMainWindow):
         if next_state is not None:
             self._ui_state = next_state
             self._state_str = next_state.value
+        self._refresh_splitter_workspace_policy()
         self._render_status_label()
 
     def _on_status_parse_error(self, msg: str):
@@ -3112,7 +3361,7 @@ class MainWindow(QMainWindow):
             msg = "Validation in progress..."
         else:
             msg = "Run in progress..."
-        self._report_viewer.set_running_message(msg)
+        self._report_viewer.set_running_message(self._results_running_placeholder_text(msg))
         self._refresh_tuning_workspace_availability()
         self._update_button_states()
 
@@ -3243,7 +3492,7 @@ class MainWindow(QMainWindow):
                     "Inspect the run folder for available outputs."
                 )
         else:
-            self._report_viewer.clear()
+            self._apply_results_idle_placeholder()
 
         if state == RunnerState.SUCCESS and not self._is_validate_only and workspace_loaded:
             self._enter_complete_state_workspace()
@@ -3270,6 +3519,7 @@ class MainWindow(QMainWindow):
                 self._validated_config_effective_yaml_path = None
                 self._validated_run_signature = None
 
+        self._refresh_splitter_workspace_policy()
         self._render_status_label()
         # Ensure _is_validate_only is False before updating buttons so we are no longer "validating"
         self._is_validate_only = False
@@ -3322,6 +3572,7 @@ class MainWindow(QMainWindow):
         self._update_complete_state_summary()
         if hasattr(self, "_controls_stack"):
             self._controls_stack.setCurrentWidget(self._complete_state_panel)
+        self._refresh_splitter_workspace_policy()
         self._set_tuning_disclosure_expanded(False)
         self._set_correction_tuning_disclosure_expanded(False)
         self._refresh_tuning_workspace_availability()
@@ -3332,13 +3583,14 @@ class MainWindow(QMainWindow):
         self._is_complete_workspace_active = False
         if hasattr(self, "_controls_stack"):
             self._controls_stack.setCurrentWidget(self._config_panel)
+        self._refresh_splitter_workspace_policy()
         self._reset_correction_tuning_state()
         self._refresh_tuning_workspace_availability()
 
     def _on_new_run(self) -> None:
         """Exit complete-state workspace and restore idle editable controls."""
         self._exit_complete_state_workspace()
-        self._report_viewer.clear()
+        self._apply_results_idle_placeholder()
         self._tuning_last_result = None
         self._set_tuning_overlay_message("Run tuning to generate an ROI/chunk event overlay.")
         self._tuning_summary_label.setText("No tuning result yet.")
@@ -3728,9 +3980,18 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         outer = QVBoxLayout(panel)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(12)
+
+        intro = QLabel("Primary workflow stages")
+        intro.setStyleSheet("font-size: 11px; color: #5f6b7a; font-weight: 600;")
+        outer.addWidget(intro)
+
         self._run_config_group = self._build_run_configuration_group()
         self._plotting_group = self._build_plotting_group()
         self._advanced_group = self._build_advanced_group()
+        self._run_config_group.setProperty("workflowSection", True)
+        self._plotting_group.setProperty("workflowSection", True)
+        self._advanced_group.setProperty("workflowSection", True)
         outer.addWidget(self._run_config_group)
         outer.addWidget(self._plotting_group)
         outer.addWidget(self._advanced_group)

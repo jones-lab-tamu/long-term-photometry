@@ -5,8 +5,9 @@ import tempfile
 
 import pytest
 import yaml
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QSizePolicy
+from PySide6.QtCore import Qt, QPoint
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QSizePolicy, QGroupBox, QSplitter
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -208,6 +209,179 @@ def test_window_title_progress_bar_and_progress_cap(window, tmp_path):
     assert window.windowTitle() == "Long-Term Photometry Analysis [PREVIEW]"
     window._on_new_run()
     assert window.windowTitle() == "Long-Term Photometry Analysis"
+
+
+def test_results_workspace_idle_placeholder_is_deliberate(window):
+    status_text = window._report_viewer._status_label.text()
+    assert "Results workspace" in status_text
+    assert "Run the pipeline or open a completed run folder." in status_text
+    assert "Results and plots appear here after completion." in status_text
+
+
+def test_results_workspace_running_placeholder_is_present(window):
+    window._ui_state = RunnerState.RUNNING
+    window._on_run_started()
+    status_text = window._report_viewer._status_label.text()
+    assert "Results workspace" in status_text
+    assert "Run in progress..." in status_text
+    assert "Results and plots will appear here after completion." in status_text
+
+
+def test_m1_shell_sections_and_header_structure(window, qapp):
+    window.show()
+    qapp.processEvents()
+
+    group_titles = {g.title() for g in window.findChildren(QGroupBox)}
+    assert "Run Configuration" in group_titles
+    assert "Plotting" in group_titles
+    assert "Advanced" in group_titles
+    assert "Live Log" in group_titles
+    assert "Results" in group_titles
+
+    assert window._status_header_card is not None
+    assert window._status_header_card.objectName() == "statusHeaderCard"
+    assert window._status_label.parentWidget() is not None
+    assert window._progress_bar.parentWidget() is not None
+    assert window._status_header_card.isVisibleTo(window)
+
+
+def test_shell_splitter_handle_is_non_interactive(window, qapp):
+    window.show()
+    window.resize(1400, 900)
+    qapp.processEvents()
+
+    splitter = window._main_splitter
+    assert isinstance(splitter, QSplitter)
+    handle = splitter.handle(1)
+    assert handle is not None
+    assert not handle.isEnabled()
+    assert handle.testAttribute(Qt.WA_TransparentForMouseEvents)
+
+    before = splitter.sizes()
+    center = handle.rect().center()
+    drag_to = QPoint(center.x() + 160, center.y())
+    QTest.mousePress(handle, Qt.LeftButton, Qt.NoModifier, center)
+    QTest.mouseMove(handle, drag_to)
+    QTest.mouseRelease(handle, Qt.LeftButton, Qt.NoModifier, drag_to)
+    qapp.processEvents()
+    after = splitter.sizes()
+    assert abs(after[0] - before[0]) <= 2
+    assert abs(after[1] - before[1]) <= 2
+
+
+def test_setup_vs_workspace_right_pane_width(window, qapp):
+    window.show()
+    window.resize(1400, 900)
+    qapp.processEvents()
+
+    window._validation_passed = False
+    window._ui_state = RunnerState.IDLE
+    window._is_complete_workspace_active = False
+    window._refresh_splitter_workspace_policy()
+    qapp.processEvents()
+    setup_left = window._left_pane.width()
+    setup_right = window._results_pane.width()
+
+    window._validation_passed = True
+    window._ui_state = RunnerState.SUCCESS
+    window._refresh_splitter_workspace_policy()
+    qapp.processEvents()
+    workspace_left = window._left_pane.width()
+    workspace_right = window._results_pane.width()
+
+    assert workspace_right > setup_right
+    assert workspace_left < setup_left
+
+
+def test_complete_results_width_not_narrower_than_validate(window, qapp):
+    window.show()
+    window.resize(1400, 900)
+    qapp.processEvents()
+
+    window._validation_passed = True
+    window._ui_state = RunnerState.SUCCESS
+    window._refresh_splitter_workspace_policy()
+    qapp.processEvents()
+    validate_right = window._results_pane.width()
+
+    window._validation_passed = False
+    window._ui_state = RunnerState.RUNNING
+    window._refresh_splitter_workspace_policy()
+    qapp.processEvents()
+    running_right = window._results_pane.width()
+
+    window._enter_complete_state_workspace()
+    qapp.processEvents()
+    complete_right = window._results_pane.width()
+
+    assert abs(running_right - validate_right) <= 4
+    assert complete_right >= validate_right - 2
+    assert complete_right >= running_right - 2
+
+
+def test_shell_left_pane_width_floor_in_setup_and_workspace(window, qapp):
+    window.show()
+    window.resize(1300, 900)
+    qapp.processEvents()
+
+    setup_floor = max(420, getattr(window, "_shell_left_width_floor", 500))
+    workspace_floor = max(
+        420,
+        min(
+            setup_floor,
+            getattr(window, "_shell_workspace_left_floor", setup_floor),
+        ),
+    )
+
+    window._validation_passed = False
+    window._ui_state = RunnerState.IDLE
+    window._is_complete_workspace_active = False
+    window._refresh_splitter_workspace_policy()
+    qapp.processEvents()
+    setup_left = window._left_pane.width()
+
+    window._validation_passed = True
+    window._ui_state = RunnerState.SUCCESS
+    window._refresh_splitter_workspace_policy()
+    qapp.processEvents()
+    workspace_left = window._left_pane.width()
+
+    assert setup_left >= setup_floor
+    assert workspace_left >= workspace_floor
+
+
+def test_shell_restores_setup_mode_after_new_run(window, qapp):
+    window.show()
+    window.resize(1400, 900)
+    qapp.processEvents()
+
+    window._validation_passed = False
+    window._ui_state = RunnerState.IDLE
+    window._is_complete_workspace_active = False
+    window._refresh_splitter_workspace_policy()
+    qapp.processEvents()
+    setup_left = window._left_pane.width()
+    setup_right = window._results_pane.width()
+
+    window._validation_passed = True
+    window._ui_state = RunnerState.SUCCESS
+    window._refresh_splitter_workspace_policy()
+    qapp.processEvents()
+    workspace_left = window._left_pane.width()
+    workspace_right = window._results_pane.width()
+
+    window._enter_complete_state_workspace()
+    qapp.processEvents()
+    window._on_new_run()
+    qapp.processEvents()
+
+    restored_left = window._left_pane.width()
+    restored_right = window._results_pane.width()
+
+    assert workspace_right > setup_right
+    assert restored_right < workspace_right
+    assert restored_left > workspace_left
+    assert abs(restored_left - setup_left) <= 8
 
 
 def test_peak_hardening_controls_follow_active_baseline_config(window, tmp_path):
