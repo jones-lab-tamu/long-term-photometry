@@ -7,7 +7,7 @@ import pytest
 import yaml
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QSizePolicy, QGroupBox, QSplitter
+from PySide6.QtWidgets import QApplication, QSizePolicy, QGroupBox, QScrollArea, QSplitter
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -243,6 +243,80 @@ def test_m1_shell_sections_and_header_structure(window, qapp):
     assert window._status_label.parentWidget() is not None
     assert window._progress_bar.parentWidget() is not None
     assert window._status_header_card.isVisibleTo(window)
+
+
+def test_sessions_per_hour_warning_is_contextual_and_wrapped(window, qapp):
+    window.show()
+    qapp.processEvents()
+
+    assert hasattr(window, "_sph_edit")
+    assert hasattr(window, "_sph_warning")
+    assert hasattr(window, "_sph_field_container")
+    assert window._sph_warning.text() == "Required for duty-cycled data unless timestamps are available."
+    assert window._sph_warning.wordWrap()
+    assert window._sph_warning.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
+    assert window._sph_warning.isVisibleTo(window)
+    assert window._sph_warning.parentWidget() is window._sph_field_container
+    assert window._sph_edit.parentWidget() is window._sph_field_container
+
+
+def _left_column_width_snapshot(window):
+    controls_scroll = window.findChild(QScrollArea, "workflowControlsScroll")
+    assert controls_scroll is not None
+    live_log = window.findChild(QGroupBox, "liveLogSection")
+    assert live_log is not None
+    return {
+        "left_pane": window._left_pane.width(),
+        "controls_viewport": controls_scroll.viewport().width(),
+        "run_config": window._run_config_group.width(),
+        "plotting": window._plotting_group.width(),
+        "advanced": window._advanced_group.width(),
+        "live_log": live_log.width(),
+    }
+
+
+def test_left_column_width_clamps_with_advanced_collapsed_and_expanded(window, qapp):
+    window.show()
+    window.resize(1100, 850)
+    qapp.processEvents()
+
+    window._advanced_disclosure_btn.setChecked(False)
+    qapp.processEvents()
+    collapsed = _left_column_width_snapshot(window)
+
+    assert collapsed["run_config"] <= collapsed["controls_viewport"] + 2
+    assert collapsed["plotting"] <= collapsed["controls_viewport"] + 2
+    assert collapsed["advanced"] <= collapsed["controls_viewport"] + 2
+    assert collapsed["live_log"] <= collapsed["left_pane"] + 2
+
+    window._advanced_disclosure_btn.setChecked(True)
+    qapp.processEvents()
+    qapp.processEvents()
+    expanded = _left_column_width_snapshot(window)
+
+    assert expanded["run_config"] <= expanded["controls_viewport"] + 2
+    assert expanded["plotting"] <= expanded["controls_viewport"] + 2
+    assert expanded["advanced"] <= expanded["controls_viewport"] + 2
+    assert expanded["live_log"] <= expanded["left_pane"] + 2
+
+
+def test_advanced_toggle_does_not_widen_sibling_sections(window, qapp):
+    window.show()
+    window.resize(1100, 850)
+    qapp.processEvents()
+
+    window._advanced_disclosure_btn.setChecked(False)
+    qapp.processEvents()
+    collapsed = _left_column_width_snapshot(window)
+
+    window._advanced_disclosure_btn.setChecked(True)
+    qapp.processEvents()
+    qapp.processEvents()
+    expanded = _left_column_width_snapshot(window)
+
+    assert expanded["run_config"] <= collapsed["run_config"] + 2
+    assert expanded["plotting"] <= collapsed["plotting"] + 2
+    assert expanded["live_log"] <= collapsed["live_log"] + 2
 
 
 def test_shell_splitter_handle_is_non_interactive(window, qapp):

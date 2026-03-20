@@ -789,9 +789,14 @@ class MainWindow(QMainWindow):
         controls_scroll.setFrameShape(QScrollArea.NoFrame)
         controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._controls_scroll = controls_scroll
         self._controls_stack = QStackedWidget()
+        self._controls_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._controls_stack.setMinimumWidth(0)
         self._config_panel = self._build_config_panel()
         self._complete_state_panel = self._build_complete_state_panel()
+        self._complete_state_panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._complete_state_panel.setMinimumWidth(0)
         self._controls_stack.addWidget(self._config_panel)
         self._controls_stack.addWidget(self._complete_state_panel)
         self._controls_stack.setCurrentWidget(self._config_panel)
@@ -804,6 +809,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(controls_scroll, 3)
         layout.addWidget(log_group, 2)
         return pane
+
+    def _refresh_left_column_width_clamp(self) -> None:
+        """Refresh geometry so controls track left-pane viewport width after disclosure toggles."""
+        controls_scroll = getattr(self, "_controls_scroll", None)
+        controls_stack = getattr(self, "_controls_stack", None)
+        if controls_scroll is None or controls_stack is None:
+            return
+        controls_stack.updateGeometry()
+        config_panel = getattr(self, "_config_panel", None)
+        if config_panel is not None:
+            config_panel.updateGeometry()
+        controls_scroll.updateGeometry()
+        controls_scroll.viewport().updateGeometry()
 
     def _build_results_pane(self) -> QGroupBox:
         """Right pane with the large results viewer."""
@@ -3978,6 +3996,8 @@ class MainWindow(QMainWindow):
 
     def _build_config_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        panel.setMinimumWidth(0)
         outer = QVBoxLayout(panel)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(12)
@@ -3989,9 +4009,10 @@ class MainWindow(QMainWindow):
         self._run_config_group = self._build_run_configuration_group()
         self._plotting_group = self._build_plotting_group()
         self._advanced_group = self._build_advanced_group()
-        self._run_config_group.setProperty("workflowSection", True)
-        self._plotting_group.setProperty("workflowSection", True)
-        self._advanced_group.setProperty("workflowSection", True)
+        for section in (self._run_config_group, self._plotting_group, self._advanced_group):
+            section.setProperty("workflowSection", True)
+            section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            section.setMinimumWidth(0)
         outer.addWidget(self._run_config_group)
         outer.addWidget(self._plotting_group)
         outer.addWidget(self._advanced_group)
@@ -4083,10 +4104,26 @@ class MainWindow(QMainWindow):
         self._sph_edit.setPlaceholderText("(optional, integer >= 1)")
         self._sph_edit.setMaximumWidth(200)
         self._sph_edit.setToolTip(
-            "Sessions per hour used for duty-cycled/sessionized data when timestamps are incomplete."
+            "Sessions per hour used for duty-cycled/sessionized data when timestamps are incomplete. "
+            "Required for duty-cycled data unless timestamps are available."
         )
         self._sph_edit.textChanged.connect(self._on_config_changed)
-        form.addRow("Sessions/Hour:", self._sph_edit)
+        self._sph_warning = QLabel(
+            "Required for duty-cycled data unless timestamps are available."
+        )
+        self._sph_warning.setObjectName("sessionsPerHourWarning")
+        self._sph_warning.setWordWrap(True)
+        self._sph_warning.setStyleSheet("color: #8a6d3b; font-size: 11px;")
+        self._sph_warning.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._sph_field_container = QWidget()
+        self._sph_field_container.setObjectName("sessionsPerHourField")
+        self._sph_field_container.setToolTip(self._sph_edit.toolTip())
+        sph_layout = QVBoxLayout(self._sph_field_container)
+        sph_layout.setContentsMargins(0, 0, 0, 0)
+        sph_layout.setSpacing(2)
+        sph_layout.addWidget(self._sph_edit)
+        sph_layout.addWidget(self._sph_warning)
+        form.addRow("Sessions/Hour:", self._sph_field_container)
 
         self._duration_edit = QLineEdit()
         self._duration_edit.setPlaceholderText("(optional, seconds > 0)")
@@ -4105,11 +4142,6 @@ class MainWindow(QMainWindow):
         self._mode_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Mode:", self._mode_combo)
 
-        self._sph_warning = QLabel(
-            "Warning: Duty-cycled data requires sessions_per_hour unless timestamps exist."
-        )
-        self._sph_warning.setStyleSheet("color: #cc6600; font-size: 11px;")
-        form.addRow("", self._sph_warning)
         self._apply_form_row_tooltips(form)
         self._run_config_inputs_container = QWidget()
         inputs_layout = QVBoxLayout(self._run_config_inputs_container)
@@ -4548,6 +4580,8 @@ class MainWindow(QMainWindow):
         """Toggle advanced section content via disclosure-style header."""
         self._advanced_content.setVisible(expanded)
         self._advanced_disclosure_btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self._refresh_left_column_width_clamp()
+        QTimer.singleShot(0, self._refresh_left_column_width_clamp)
 
     def _build_hidden_compatibility_group(self) -> QWidget:
         group = QGroupBox("Compatibility Controls")
