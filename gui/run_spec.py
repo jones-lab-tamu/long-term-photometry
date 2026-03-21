@@ -27,6 +27,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
 import yaml
+from gui.knobs_schema import is_config_key
 
 FORMAT_CHOICES = ("auto", "rwd", "npm")
 
@@ -71,6 +72,10 @@ class RunSpec:
     # --- (B) Config source + overrides ---
     config_source_path: str = ""
     config_overrides: Dict[str, Any] = field(default_factory=dict)
+    # Dataset-derived acquisition contract overrides (e.g. RWD time/suffix/fs).
+    # These are not user knob edits and therefore bypass GUI knob allowlists,
+    # but they must still map to real Config schema keys.
+    data_contract_overrides: Dict[str, Any] = field(default_factory=dict)
 
     # --- (C) Provenance ---
     gui_version: str = "1.0.0"
@@ -134,6 +139,19 @@ class RunSpec:
         if self.config_overrides:
             filtered = filter_config_overrides(self.config_overrides)
             for key, value in filtered.items():
+                base[key] = value
+
+        # Dataset-derived overrides are not GUI knob edits, but still must
+        # target real Config schema keys.
+        if self.data_contract_overrides:
+            invalid = sorted(
+                k for k in self.data_contract_overrides.keys() if not is_config_key(k)
+            )
+            if invalid:
+                raise ValueError(
+                    f"Unknown config keys in data_contract_overrides: {invalid}"
+                )
+            for key, value in self.data_contract_overrides.items():
                 base[key] = value
 
         os.makedirs(run_dir, exist_ok=True)
@@ -213,6 +231,17 @@ class RunSpec:
         if self.config_overrides:
             filtered = filter_config_overrides(self.config_overrides)
             for key, value in filtered.items():
+                base[key] = value
+
+        if self.data_contract_overrides:
+            invalid = sorted(
+                k for k in self.data_contract_overrides.keys() if not is_config_key(k)
+            )
+            if invalid:
+                raise ValueError(
+                    f"Unknown config keys in data_contract_overrides: {invalid}"
+                )
+            for key, value in self.data_contract_overrides.items():
                 base[key] = value
 
         return _stable_yaml_dump(base)

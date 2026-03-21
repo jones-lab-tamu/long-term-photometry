@@ -15,10 +15,14 @@ State model:
 import json
 import sys
 import os
+import csv
+import re
+import math
 import secrets
 import subprocess as _subprocess
 import time
 from datetime import datetime
+from statistics import median
 
 from PySide6.QtCore import Qt, QSettings, QTimer, QSize
 from PySide6.QtGui import QFont, QPixmap
@@ -2545,6 +2549,275 @@ class MainWindow(QMainWindow):
             return f"Custom YAML: {cfg}"
         return f"Lab standard default: {self._lab_default_config_path}"
 
+    @staticmethod
+    def _normalize_csv_cells(row: list[str]) -> list[str]:
+        return [str(cell).strip().lstrip("\ufeff") for cell in row]
+
+    @staticmethod
+    def _discover_rwd_csv_files(input_path: str) -> list[str]:
+        if os.path.isfile(input_path) and input_path.lower().endswith(".csv"):
+            return [input_path]
+        if not os.path.isdir(input_path):
+            return []
+
+        from photometry_pipeline.io.adapters import discover_rwd_chunks
+
+        try:
+            chunk_files = discover_rwd_chunks(input_path)
+            if chunk_files:
+                return chunk_files
+        except Exception:
+            pass
+
+        return sorted(
+            os.path.join(input_path, name)
+            for name in os.listdir(input_path)
+            if name.lower().endswith(".csv")
+        )
+
+    @staticmethod
+    def _infer_rwd_suffixes_from_header(columns: list[str]) -> tuple[str, str] | None:
+        base_to_suffixes: dict[str, set[str]] = {}
+        for col in columns:
+            m = re.match(r"^(.*?)(-\d+)$", col)
+            if not m:
+                continue
+            base = m.group(1)
+            suffix = m.group(2)
+            if not base:
+                continue
+            base_to_suffixes.setdefault(base, set()).add(suffix)
+
+        pair_counts: dict[tuple[str, str], int] = {}
+        for suffixes in base_to_suffixes.values():
+            if "-470" in suffixes:
+                for uv_candidate in ("-410", "-415"):
+                    if uv_candidate in suffixes:
+                        key = (uv_candidate, "-470")
+                        pair_counts[key] = pair_counts.get(key, 0) + 1
+
+        if not pair_counts:
+            return None
+
+        return max(pair_counts.items(), key=lambda kv: kv[1])[0]
+
+    @staticmethod
+    def _extract_metadata_fps_from_row(row: list[str]) -> float | None:
+        if not row:
+            return None
+        first_cell = str(row[0]).strip()
+        if not first_cell:
+            return None
+        m = re.search(r'"Fps"\s*:\s*([0-9]+(?:\.[0-9]+)?)', first_cell)
+        if not m:
+            return None
+        try:
+            fps = float(m.group(1))
+        except Exception:
+            return None
+        if fps <= 0:
+            return None
+        return fps
+
+    @staticmethod
+    def _resolve_timestamp_unit_and_fs(median_dt: float, metadata_fps: float | None) -> tuple[str, float]:
+        """
+        Determine timestamp units deterministically.
+
+        Rules:
+        - If metadata FPS is available, require timestamp-derived FPS to match
+          either seconds (1/dt) or milliseconds (1000/dt) semantics within a
+          tight tolerance. If both or neither match, fail explicitly.
+        - If metadata FPS is unavailable, only accept clearly separated dt
+          ranges to avoid silent unit guessing:
+            dt < 0.5   -> seconds
+            dt > 2.0   -> milliseconds
+            else       -> ambiguous (error)
+        """
+        if median_dt <= 0:
+            raise ValueError(f"Invalid non-positive median timestamp delta: {median_dt}")
+
+        fs_seconds = 1.0 / median_dt
+        fs_milliseconds = 1000.0 / median_dt
+
+        if metadata_fps is not None and metadata_fps > 0:
+            rel_tol = 0.03
+            sec_match = abs(fs_seconds - metadata_fps) / metadata_fps <= rel_tol
+            ms_match = abs(fs_milliseconds - metadata_fps) / metadata_fps <= rel_tol
+            if sec_match and not ms_match:
+                return "seconds", fs_seconds
+            if ms_match and not sec_match:
+                return "milliseconds", fs_milliseconds
+            if sec_match and ms_match:
+                raise ValueError(
+                    "Ambiguous RWD timestamp units: both seconds and milliseconds "
+                    f"fit metadata FPS={metadata_fps:.6f} (dt={median_dt:.6f})."
+                )
+            raise ValueError(
+                "RWD timestamps are incompatible with metadata FPS: "
+                f"dt={median_dt:.6f}, fs_seconds={fs_seconds:.6f}, "
+                f"fs_milliseconds={fs_milliseconds:.6f}, metadata_fps={metadata_fps:.6f}."
+            )
+
+        if median_dt < 0.5:
+            return "seconds", fs_seconds
+        if median_dt > 2.0:
+            return "milliseconds", fs_milliseconds
+        raise ValueError(
+            "Ambiguous RWD timestamp units: metadata FPS unavailable and median dt "
+            f"{median_dt:.6f} is not clearly seconds (<0.5) or milliseconds (>2.0)."
+        )
+
+    def _infer_rwd_chunk_contract(self, csv_path: str) -> dict:
+        time_candidates = ("TimeStamp", "Time(s)", "Timestamp", "Time")
+        header_row_idx = None
+        header_cols: list[str] = []
+        time_col = None
+        rows: list[list[str]] = []
+
+        with open(csv_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+
+        for idx, row in enumerate(rows[:60]):
+            cols = self._normalize_csv_cells(row)
+            candidate_time = next((c for c in time_candidates if c in cols), None)
+            if candidate_time:
+                header_row_idx = idx
+                header_cols = cols
+                time_col = candidate_time
+                break
+
+        if header_row_idx is None or not time_col:
+            raise ValueError(f"No recognizable RWD header row found in: {csv_path}")
+
+        suffix_pair = self._infer_rwd_suffixes_from_header(header_cols)
+        if suffix_pair is None:
+            raise ValueError(f"No valid UV/SIG channel suffix pair found in header: {csv_path}")
+        uv_suffix, sig_suffix = suffix_pair
+
+        metadata_fps = None
+        if header_row_idx > 0:
+            metadata_fps = self._extract_metadata_fps_from_row(
+                self._normalize_csv_cells(rows[header_row_idx - 1])
+            )
+
+        cols = self._normalize_csv_cells(rows[header_row_idx])
+        if time_col not in cols:
+            raise ValueError(f"Configured RWD time column '{time_col}' not found in: {csv_path}")
+        time_idx = cols.index(time_col)
+
+        t_vals: list[float] = []
+        for row in rows[header_row_idx + 1:]:
+            norm = self._normalize_csv_cells(row)
+            if time_idx >= len(norm):
+                continue
+            cell = norm[time_idx]
+            if not cell:
+                continue
+            try:
+                t_vals.append(float(cell))
+            except Exception:
+                continue
+
+        if len(t_vals) < 2:
+            raise ValueError(f"Insufficient numeric timestamps in RWD file: {csv_path}")
+
+        dt_all = [t_vals[i + 1] - t_vals[i] for i in range(len(t_vals) - 1)]
+        if any(x <= 0 for x in dt_all):
+            raise ValueError(f"Non-monotonic or repeated timestamps in RWD file: {csv_path}")
+
+        median_dt = float(median(dt_all))
+        unit, inferred_fs = self._resolve_timestamp_unit_and_fs(median_dt, metadata_fps)
+        if inferred_fs <= 0:
+            raise ValueError(f"Inferred non-positive fs in RWD file: {csv_path}")
+
+        sample_count = len(t_vals)
+        # Align with strict reader semantics:
+        # n_target = round(chunk_duration_sec * target_fs_hz), grid = arange(n_target)/fs.
+        # Setting chunk_duration_sec = sample_count / fs guarantees n_target equals
+        # observed sample_count for full chunks.
+        chunk_duration_sec = sample_count / inferred_fs
+        n_target = int(round(chunk_duration_sec * inferred_fs))
+        if n_target != sample_count:
+            raise ValueError(
+                "RWD contract inference failed strict grid compatibility for "
+                f"{csv_path}: sample_count={sample_count}, fs={inferred_fs:.9f}, "
+                f"chunk_duration_sec={chunk_duration_sec:.9f}, n_target={n_target}."
+            )
+
+        return {
+            "csv_path": csv_path,
+            "time_col": time_col,
+            "uv_suffix": uv_suffix,
+            "sig_suffix": sig_suffix,
+            "timestamp_unit": unit,
+            "fs_hz": float(inferred_fs),
+            "sample_count": int(sample_count),
+            "chunk_duration_sec": float(chunk_duration_sec),
+        }
+
+    def _infer_rwd_dataset_contract_overrides(self, fmt_text: str) -> dict:
+        """
+        Infer RWD acquisition contract from selected input data.
+
+        Returns overrides for config_effective.yaml when format is auto/rwd:
+        target_fs_hz, chunk_duration_sec, rwd_time_col, uv_suffix, sig_suffix.
+        """
+        if fmt_text not in ("auto", "rwd"):
+            return {}
+
+        input_path = self._input_dir.text().strip()
+        csv_paths = self._discover_rwd_csv_files(input_path)
+        if not csv_paths:
+            return {}
+
+        contracts = [self._infer_rwd_chunk_contract(path) for path in csv_paths]
+        base = contracts[0]
+        fs_tol = max(1e-6, base["fs_hz"] * 1e-4)
+        dur_tol = max(1e-6, base["chunk_duration_sec"] * 1e-4)
+        for idx, contract in enumerate(contracts[1:], start=1):
+            path = contract["csv_path"]
+            if contract["time_col"] != base["time_col"]:
+                raise ValueError(
+                    "Inconsistent RWD contract across chunks: "
+                    f"time column mismatch at chunk {idx} ({path}). "
+                    f"Expected '{base['time_col']}', got '{contract['time_col']}'."
+                )
+            if contract["uv_suffix"] != base["uv_suffix"] or contract["sig_suffix"] != base["sig_suffix"]:
+                raise ValueError(
+                    "Inconsistent RWD contract across chunks: "
+                    f"channel suffix mismatch at chunk {idx} ({path}). "
+                    f"Expected ({base['uv_suffix']}, {base['sig_suffix']}), "
+                    f"got ({contract['uv_suffix']}, {contract['sig_suffix']})."
+                )
+            if contract["sample_count"] != base["sample_count"]:
+                raise ValueError(
+                    "Inconsistent RWD contract across chunks: "
+                    f"sample_count mismatch at chunk {idx} ({path}). "
+                    f"Expected {base['sample_count']}, got {contract['sample_count']}."
+                )
+            if not math.isclose(contract["fs_hz"], base["fs_hz"], rel_tol=0.0, abs_tol=fs_tol):
+                raise ValueError(
+                    "Inconsistent RWD contract across chunks: "
+                    f"fs mismatch at chunk {idx} ({path}). "
+                    f"Expected {base['fs_hz']:.9f}, got {contract['fs_hz']:.9f}."
+                )
+            if not math.isclose(contract["chunk_duration_sec"], base["chunk_duration_sec"], rel_tol=0.0, abs_tol=dur_tol):
+                raise ValueError(
+                    "Inconsistent RWD contract across chunks: "
+                    f"chunk_duration mismatch at chunk {idx} ({path}). "
+                    f"Expected {base['chunk_duration_sec']:.9f}, got {contract['chunk_duration_sec']:.9f}."
+                )
+
+        return {
+            "target_fs_hz": float(round(base["fs_hz"], 9)),
+            "chunk_duration_sec": float(round(base["chunk_duration_sec"], 9)),
+            "rwd_time_col": str(base["time_col"]),
+            "uv_suffix": str(base["uv_suffix"]),
+            "sig_suffix": str(base["sig_suffix"]),
+        }
+
     def _active_baseline_config(self) -> Config:
         """
         Resolve baseline config from the active source path for current run intent.
@@ -2821,6 +3094,13 @@ class MainWindow(QMainWindow):
             changed_ev_overrides = compute_overrides_user_changed(ev_overrides, default_ev_dict)
             config_overrides.update(changed_ev_overrides)
 
+        # Ensure effective config tracks the selected RWD dataset contract.
+        # This prevents stale/default baseline config values (e.g., fs/suffix/time-col)
+        # from conflicting with the currently selected input data.
+        data_contract_overrides = self._infer_rwd_dataset_contract_overrides(fmt)
+        if not isinstance(data_contract_overrides, dict):
+            data_contract_overrides = {}
+
         if self._is_custom_config_enabled():
             user_set.append("config_source_path")
 
@@ -2842,6 +3122,7 @@ class MainWindow(QMainWindow):
             exclude_roi_ids=exclude_roi_ids,
             config_source_path=self._active_config_source_path(),
             config_overrides=config_overrides,
+            data_contract_overrides=data_contract_overrides,
             gui_version="1.0.0",
             timestamp_local=datetime.now().isoformat(),
             mode=mode_val,
@@ -3031,12 +3312,15 @@ class MainWindow(QMainWindow):
         run_dir is left empty since discovery never writes to it.
         """
         fmt = self._format_combo.currentText()
+        data_contract_overrides = self._infer_rwd_dataset_contract_overrides(fmt)
+        if not isinstance(data_contract_overrides, dict):
+            data_contract_overrides = {}
         return RunSpec(
             input_dir=self._input_dir.text().strip(),
             run_dir="",
             format=fmt,
             config_source_path=self._active_config_source_path(),
-            config_overrides={},
+            data_contract_overrides=data_contract_overrides,
         )
 
     def _on_preview_config(self):
