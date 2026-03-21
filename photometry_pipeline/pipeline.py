@@ -116,6 +116,13 @@ class Pipeline:
             else:
                 search_pattern = os.path.join(input_path, file_glob)
                 self.file_list = glob.glob(search_pattern)
+                if force_format == 'auto' and not self.file_list:
+                    # Auto-mode parity: allow RWD roots with chunk subdirectories.
+                    from .io.adapters import discover_rwd_chunks
+                    try:
+                        self.file_list = discover_rwd_chunks(input_path)
+                    except Exception:
+                        self.file_list = []
         
         self.file_list.sort(key=natural_sort_key)
         if not self.file_list:

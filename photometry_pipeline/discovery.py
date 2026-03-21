@@ -65,6 +65,14 @@ def discover_inputs(
         # Default non-recursive *.csv search — same as Pipeline.discover_files
         search_pattern = os.path.join(input_dir, "*.csv")
         file_list = glob.glob(search_pattern)
+        if resolved_format == "auto" and not file_list:
+            # Auto-mode parity with Pipeline: accept RWD roots that only contain
+            # timestamped chunk subdirectories with fluorescence.csv files.
+            from photometry_pipeline.io.adapters import discover_rwd_chunks
+            try:
+                file_list = discover_rwd_chunks(input_dir)
+            except Exception:
+                file_list = []
 
     file_list.sort(key=natural_sort_key)
 

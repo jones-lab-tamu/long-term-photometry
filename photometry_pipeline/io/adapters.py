@@ -3,12 +3,107 @@ import numpy as np
 import os
 import warnings
 import itertools
+import csv
 from typing import Optional, List, Dict, Tuple
 from ..config import Config
 from ..core.types import Chunk, SessionTimeMetadata
 from dataclasses import asdict
 import pathlib
 import logging
+
+
+def _unique_ordered(values: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _rwd_time_candidates(config: Config) -> List[str]:
+    return _unique_ordered(
+        [
+            str(getattr(config, "rwd_time_col", "")).strip(),
+            "TimeStamp",
+            "Time(s)",
+            "Timestamp",
+            "Time",
+        ]
+    )
+
+
+def _rwd_suffix_candidates(config: Config) -> Tuple[List[str], List[str]]:
+    uv = _unique_ordered(
+        [
+            str(getattr(config, "uv_suffix", "")).strip(),
+            "-410",
+            "-415",
+        ]
+    )
+    sig = _unique_ordered(
+        [
+            str(getattr(config, "sig_suffix", "")).strip(),
+            "-470",
+        ]
+    )
+    return uv, sig
+
+
+def _parse_csv_header_fields(line: str) -> List[str]:
+    try:
+        fields = next(csv.reader([line]))
+    except Exception:
+        fields = line.split(",")
+    return [str(field).strip().lstrip("\ufeff") for field in fields]
+
+
+def _extract_rwd_channel_pairs(
+    columns: List[str], uv_suffixes: List[str], sig_suffixes: List[str]
+) -> List[Tuple[str, str, str]]:
+    col_set = set(columns)
+    pairs: List[Tuple[str, str, str]] = []
+    seen_bases = set()
+
+    for uv_suffix in uv_suffixes:
+        for sig_suffix in sig_suffixes:
+            for col in columns:
+                if not col.endswith(uv_suffix):
+                    continue
+                base = col[: -len(uv_suffix)]
+                if not base or base in seen_bases:
+                    continue
+                expected_sig = f"{base}{sig_suffix}"
+                if expected_sig in col_set:
+                    pairs.append((base, col, expected_sig))
+                    seen_bases.add(base)
+
+    pairs.sort(key=lambda x: x[0])
+    return pairs
+
+
+def _detect_rwd_header(path: str, config: Config) -> Optional[Tuple[int, str]]:
+    time_candidates = _rwd_time_candidates(config)
+    uv_suffixes, sig_suffixes = _rwd_suffix_candidates(config)
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for idx, line in enumerate(itertools.islice(f, 60)):
+                columns = _parse_csv_header_fields(line)
+                if len(columns) < 3:
+                    continue
+
+                time_col = next((c for c in time_candidates if c in columns), None)
+                if time_col is None:
+                    continue
+
+                if _extract_rwd_channel_pairs(columns, uv_suffixes, sig_suffixes):
+                    return idx, time_col
+    except Exception:
+        return None
+
+    return None
 
 def _interp_with_nan_policy(time_sec, xp, fp, config, roi_idx, channel_name):
     mask = np.isfinite(xp) & np.isfinite(fp)
@@ -63,14 +158,12 @@ def sniff_format(path: str, config: Config) -> Optional[str]:
     Detects if a file is 'rwd' or 'npm' based on header/column analysis.
     """
     try:
+        if _detect_rwd_header(path, config) is not None:
+            return 'rwd'
+
         with open(path, 'r', encoding='utf-8', errors='ignore') as f:
             head_iter = itertools.islice(f, 50)
             head = list(head_iter)
-        
-        for line in head:
-            if config.rwd_time_col in line:
-                return 'rwd'
-
         if head:
             first_line = head[0]
             if config.npm_frame_col in first_line and config.npm_system_ts_col in first_line:
@@ -184,35 +277,36 @@ def load_chunk(path: str, format_type: str, config: Config, chunk_id: int) -> Ch
     return chunk
 
 def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
-    # Parsing (Simplified for brevity, assuming standard logic)
-    header_row = None
-    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-        for i, line in enumerate(f):
-            if config.rwd_time_col in line:
-                header_row = i
-                break
-    if header_row is None: raise ValueError(f"RWD: Missing time col header in {path}")
-    
-    df = pd.read_csv(path, header=header_row)
-    
-    if config.rwd_time_col not in df.columns: raise ValueError(f"Missing col: {config.rwd_time_col}")
-    if df[config.rwd_time_col].isnull().any(): raise ValueError("Time column contains NaNs")
+    header_info = _detect_rwd_header(path, config)
+    if header_info is None:
+        raise ValueError(
+            "RWD: No recognizable header row found. Expected a time column "
+            "(e.g., TimeStamp/Time(s)) and paired UV/SIG channels (e.g., CH1-410/CH1-470)."
+        )
 
-    t_raw = df[config.rwd_time_col].values
-    
-    cols = df.columns
-    uv_cols = [c for c in cols if c.endswith(config.uv_suffix)]
-    sig_cols = [c for c in cols if c.endswith(config.sig_suffix)]
-    
-    channel_data = []
-    for uv_c in uv_cols:
-        base = uv_c[: -len(config.uv_suffix)]
-        expected_sig = base + config.sig_suffix
-        if expected_sig in sig_cols:
-            channel_data.append((base, uv_c, expected_sig))
-            
-    if not channel_data: raise ValueError("No RWD pairs found")
-    channel_data.sort(key=lambda x: x[0])
+    header_row, detected_time_col = header_info
+    df = pd.read_csv(path, header=header_row)
+
+    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+    time_candidates = _rwd_time_candidates(config)
+    time_col = detected_time_col if detected_time_col in df.columns else None
+    if time_col is None:
+        time_col = next((c for c in time_candidates if c in df.columns), None)
+    if time_col is None:
+        raise ValueError("RWD: Missing supported time column after header parse.")
+
+    t_raw = pd.to_numeric(df[time_col], errors='coerce').values
+    if np.isnan(t_raw).any():
+        raise ValueError(f"RWD: Time column '{time_col}' contains non-numeric or NaN values.")
+
+    cols = [str(c) for c in df.columns]
+    uv_suffixes, sig_suffixes = _rwd_suffix_candidates(config)
+    channel_data = _extract_rwd_channel_pairs(cols, uv_suffixes, sig_suffixes)
+    if not channel_data:
+        raise ValueError(
+            "RWD: No UV/SIG channel pairs found. "
+            f"Checked UV suffixes={uv_suffixes} and SIG suffixes={sig_suffixes}."
+        )
     
     n_rois = len(channel_data)
     # POLICY: We preserve ROI base names derived directly from column headers (e.g., Region_0).
