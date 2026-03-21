@@ -469,7 +469,27 @@ def test_rwd_contract_cache_hit_reuses_chunk_scan(window, tmp_path, monkeypatch)
     spec_b = window._build_run_spec(validate_only=True)
     assert calls["n"] == first_calls, "Second call should reuse cached contract and skip rescanning chunks."
     assert spec_a.data_contract_overrides == spec_b.data_contract_overrides
-    assert "GUI_TIMING CACHE_HIT action=unknown step=rwd_contract" in window._log_view.toPlainText()
+
+
+def test_gui_timing_logs_disabled_by_default(window):
+    assert window._gui_timing_enabled is False
+    before = window._log_view.toPlainText()
+    window._emit_gui_timing("START", "unit_test_probe")
+    after = window._log_view.toPlainText()
+    assert after == before
+
+
+def test_gui_timing_logs_enabled_via_env(qapp, monkeypatch):
+    monkeypatch.setenv("PHOTOMETRY_GUI_TIMING", "1")
+    w = MainWindow()
+    try:
+        assert w._gui_timing_enabled is True
+        w._emit_gui_timing("START", "unit_test_probe")
+        text = w._log_view.toPlainText()
+        assert "GUI_TIMING START action=unknown step=unit_test_probe" in text
+    finally:
+        w.close()
+        w.deleteLater()
 
 
 def test_rwd_contract_cache_invalidates_on_input_change(window, tmp_path, monkeypatch):

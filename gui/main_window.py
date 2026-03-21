@@ -63,6 +63,12 @@ def _generate_run_id():
     return f"run_{ts}_{secrets.token_hex(4)}"
 
 
+def _env_flag_enabled(name: str) -> bool:
+    """Return True if an environment flag is set to a truthy value."""
+    value = os.environ.get(name, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def _open_folder(path: str) -> None:
     """Cross-platform open a folder in the file manager."""
     if sys.platform == "win32":
@@ -542,6 +548,9 @@ class MainWindow(QMainWindow):
         self._correction_tuning_last_result = None
         self._correction_tuning_active_inspection_path = ""
         self._correction_tuning_active_inspection_pixmap = QPixmap()
+        # Debug-only GUI preflight timing. Disabled by default.
+        # Enable with PHOTOMETRY_GUI_TIMING=1.
+        self._gui_timing_enabled = _env_flag_enabled("PHOTOMETRY_GUI_TIMING")
         self._timing_action = ""
         self._timing_click_monotonic = None
         self._elapsed_first_tick_logged = False
@@ -3851,7 +3860,7 @@ class MainWindow(QMainWindow):
         self._last_elapsed_sec = 0.0
         self._elapsed_first_tick_logged = False
         self._elapsed_timer.start()
-        if self._timing_click_monotonic is not None:
+        if self._gui_timing_enabled and self._timing_click_monotonic is not None:
             delay = time.perf_counter() - self._timing_click_monotonic
             self._emit_gui_timing(
                 "END",
@@ -4225,6 +4234,8 @@ class MainWindow(QMainWindow):
 
     def _emit_gui_timing(self, event: str, step: str, elapsed_sec: float | None = None, extra: str = "") -> None:
         """Emit grep-friendly GUI preflight timing lines."""
+        if not self._gui_timing_enabled:
+            return
         action = self._timing_action or "unknown"
         if elapsed_sec is None:
             msg = f"GUI_TIMING {event} action={action} step={step}"
@@ -4239,11 +4250,15 @@ class MainWindow(QMainWindow):
             pass
 
     def _timing_start(self, step: str, extra: str = "") -> float:
+        if not self._gui_timing_enabled:
+            return 0.0
         t0 = time.perf_counter()
         self._emit_gui_timing("START", step, extra=extra)
         return t0
 
     def _timing_end(self, step: str, t0: float, extra: str = "") -> None:
+        if not self._gui_timing_enabled:
+            return
         elapsed = time.perf_counter() - t0
         self._emit_gui_timing("END", step, elapsed_sec=elapsed, extra=extra)
 
@@ -5187,7 +5202,7 @@ class MainWindow(QMainWindow):
         if self._ui_state not in (RunnerState.RUNNING, RunnerState.VALIDATING):
             self._elapsed_timer.stop()
             return
-        if not self._elapsed_first_tick_logged:
+        if self._gui_timing_enabled and not self._elapsed_first_tick_logged:
             self._elapsed_first_tick_logged = True
             if self._run_started_monotonic is not None:
                 first_tick_delay = max(0.0, time.monotonic() - self._run_started_monotonic)
