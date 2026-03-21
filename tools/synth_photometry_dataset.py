@@ -5,6 +5,7 @@ import sys
 import numpy as np
 import pandas as pd
 import datetime
+import csv
 
 # Self-contained repo root bootstrap
 from pathlib import Path
@@ -549,6 +550,32 @@ def generate_ar1_wobble(n, args, rng):
         
     return generate_ar1_series(n, args, rng, 0.0, args.shared_wobble_amp, args.shared_wobble_tau_sec)
 
+
+def _build_vendor_rwd_metadata_blob(n_rois, fs_hz, chunk_duration_sec):
+    channels = []
+    for idx in range(1, n_rois + 1):
+        channels.append(
+            f'{{"Name":"CH{idx}";"ChanelColor":"#00000000";'
+            '"Roi1":"0;0;90;90";"Roi2":"0;0;90;90"}}'
+        )
+    channels_blob = ";".join(channels)
+    return (
+        '{"Light":{"Led410Enable":true;"Led470Enable":true;"Led560Enable":false;'
+        '"Led410Value":15.0;"Led470Value":45.0;"Led560Value":0.0};'
+        f'"Excitation":{{"mode":1;"discontinuous":true;"interval_time":1200;"continuous_time":{int(chunk_duration_sec)}}};'
+        f'"Channels":[{channels_blob}];'
+        f'"Fps":{float(fs_hz):.1f}}}'
+    )
+
+
+def _write_vendor_rwd_chunk_csv(path, frame_df, metadata_blob):
+    header = list(frame_df.columns)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([metadata_blob] + [""] * (len(header) - 1))
+        writer.writerow(header)
+        writer.writerows(frame_df.itertuples(index=False, name=None))
+
 def main():
     args = parse_args()
     
@@ -623,10 +650,6 @@ def main():
         if args.day_variation_enable:
              daily_var = rng.normal(0, args.day_variation_au)
              
-        data = {}
-        if args.format == 'rwd':
-             data[cfg.rwd_time_col] = t_local
-        
         uv_data_all = []
         sig_data_all = []
         
@@ -873,18 +896,31 @@ def main():
             
             uv_data_all.append(uv)
             sig_data_all.append(sig)
-            if args.format == 'rwd':
-                r_name = f"Region{i}"
-                if cfg.npm_region_prefix: pass 
-                data[f"{r_name}{cfg.sig_suffix}"] = sig
-                data[f"{r_name}{cfg.uv_suffix}"] = uv
 
         if args.format == 'rwd':
             dirname = chunk_start_dt.strftime("%Y_%m_%d-%H_%M_%S") 
             chunk_dir = os.path.join(args.out, dirname)
             os.makedirs(chunk_dir, exist_ok=True)
-            df = pd.DataFrame(data)
-            df.to_csv(os.path.join(chunk_dir, "fluorescence.csv"), index=False)
+            cols = {
+                "TimeStamp": t_local,
+                "Events": [""] * n_samples_chunk,
+            }
+            for i in range(args.n_rois):
+                ch_name = f"CH{i + 1}"
+                cols[f"{ch_name}{cfg.uv_suffix}"] = uv_data_all[i]
+                cols[f"{ch_name}{cfg.sig_suffix}"] = sig_data_all[i]
+
+            df_vendor = pd.DataFrame(cols)
+            metadata_blob = _build_vendor_rwd_metadata_blob(
+                n_rois=args.n_rois,
+                fs_hz=args.fs_hz,
+                chunk_duration_sec=expected_chunk_dur,
+            )
+            _write_vendor_rwd_chunk_csv(
+                os.path.join(chunk_dir, "fluorescence.csv"),
+                df_vendor,
+                metadata_blob,
+            )
             
         elif args.format == 'npm':
             fname = f"photometryData{chunk_start_dt.strftime('%Y-%m-%dT%H_%M_%S')}.csv"

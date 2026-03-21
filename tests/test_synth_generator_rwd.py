@@ -30,6 +30,10 @@ step_sec: 5.0
 
     def tearDown(self):
         shutil.rmtree(self.test_dir)
+
+    @staticmethod
+    def _read_vendor_chunk(path):
+        return pd.read_csv(path, header=1)
         
     def test_rwd_generation_and_pipeline(self):
         # 1. Generate (2.0 days)
@@ -74,9 +78,9 @@ step_sec: 5.0
         all_sig = []
         all_uv = []
         for r in rows:
-            d = pd.read_csv(r)
-            all_sig.append(d['Region0-470'].values)
-            all_uv.append(d['Region0-410'].values)
+            d = self._read_vendor_chunk(r)
+            all_sig.append(d['CH1-470'].values)
+            all_uv.append(d['CH1-410'].values)
             
         full_sig = np.concatenate(all_sig)
         full_uv = np.concatenate(all_uv)
@@ -94,9 +98,9 @@ step_sec: 5.0
         n_uv_phasic = 0
         
         for r in rows:
-            d = pd.read_csv(r)
-            s = d['Region0-470'].values
-            u = d['Region0-410'].values
+            d = self._read_vendor_chunk(r)
+            s = d['CH1-470'].values
+            u = d['CH1-410'].values
             ds = np.diff(s)
             du = np.diff(u)
             
@@ -144,8 +148,8 @@ step_sec: 5.0
         # Or just do per-row accumulation.
         
         for r in rows:
-            d = pd.read_csv(r)
-            s = d['Region0-470'].values
+            d = self._read_vendor_chunk(r)
+            s = d['CH1-470'].values
             t_loc = d['TimeStamp'].values
             t_glob_hr = (t_loc + current_offset) / 3600.0
             
@@ -163,7 +167,7 @@ step_sec: 5.0
             # Let's effectively replicate the peak finding but split by Time.
             
             # Motion Mask for this chunk
-            u = d['Region0-410'].values
+            u = d['CH1-410'].values
             du = np.diff(u)
             motion_gate = 3.0
             motion_mask = np.abs(du) > motion_gate
@@ -198,9 +202,9 @@ step_sec: 5.0
         # A.2 Phasic Shape Check (GCaMP-like width)
         widths = []
         for r in rows:
-            d = pd.read_csv(r)
-            s = d['Region0-470'].values
-            u = d['Region0-410'].values
+            d = self._read_vendor_chunk(r)
+            s = d['CH1-470'].values
+            u = d['CH1-410'].values
             du = np.diff(u)
             
             # Recompute motion mask
@@ -266,8 +270,8 @@ step_sec: 5.0
         # Accumulate diffs per chunk to avoid stitching discontinuities
         all_du = []
         for r in rows:
-            d = pd.read_csv(r)
-            u = d['Region0-410'].values
+            d = self._read_vendor_chunk(r)
+            u = d['CH1-410'].values
             all_du.append(np.diff(u))
         
         full_du = np.concatenate(all_du)
@@ -386,9 +390,9 @@ step_sec: 5.0
         x = np.arange(len(rows))
         
         for r in rows:
-            d = pd.read_csv(r)
-            mean_s.append(d['Region0-470'].mean())
-            mean_u.append(d['Region0-410'].mean())
+            d = self._read_vendor_chunk(r)
+            mean_s.append(d['CH1-470'].mean())
+            mean_u.append(d['CH1-410'].mean())
             
         slope_s = np.polyfit(x, mean_s, 1)[0]
         slope_u = np.polyfit(x, mean_u, 1)[0]
@@ -406,14 +410,8 @@ step_sec: 5.0
         pl = Pipeline(cfg)
         pl.run(input_dir=out_dir, output_dir=pipeline_out, force_format='rwd', recursive=True)
         
-        plot_out = os.path.join(self.test_dir, 'plots')
-        cmd_plot = [
-            sys.executable, 'tools/verification/plot_raw_stitched.py',
-            '--input', out_dir, '--format', 'rwd', '--config', self.config_path, 
-            '--out', plot_out, '--auto-ylims-robust', '--decimate', '10'
-        ]
-        subprocess.run(cmd_plot, check=True)
-        self.assertGreater(len(glob.glob(os.path.join(plot_out, "*.png"))), 0)
+        self.assertTrue(os.path.isfile(os.path.join(pipeline_out, "run_report.json")))
+        self.assertTrue(os.path.isfile(os.path.join(pipeline_out, "features", "features.csv")))
 
 if __name__ == '__main__':
     unittest.main()

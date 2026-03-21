@@ -1,12 +1,14 @@
 import pandas as pd
 import numpy as np
 import os
+import glob
 import warnings
 import itertools
 import csv
 from typing import Optional, List, Dict, Tuple
 from ..config import Config
 from ..core.types import Chunk, SessionTimeMetadata
+from ..core.utils import natural_sort_key
 from dataclasses import asdict
 import pathlib
 import logging
@@ -79,8 +81,15 @@ def _extract_rwd_channel_pairs(
                     pairs.append((base, col, expected_sig))
                     seen_bases.add(base)
 
-    pairs.sort(key=lambda x: x[0])
+    pairs.sort(key=lambda x: natural_sort_key(x[0]))
     return pairs
+
+
+def _looks_like_rwd_channel_header(
+    columns: List[str], uv_suffixes: List[str], sig_suffixes: List[str]
+) -> bool:
+    candidate_suffixes = tuple(_unique_ordered(uv_suffixes + sig_suffixes))
+    return any(col.endswith(candidate_suffixes) for col in columns)
 
 
 def _detect_rwd_header(path: str, config: Config) -> Optional[Tuple[int, str]]:
@@ -98,7 +107,7 @@ def _detect_rwd_header(path: str, config: Config) -> Optional[Tuple[int, str]]:
                 if time_col is None:
                     continue
 
-                if _extract_rwd_channel_pairs(columns, uv_suffixes, sig_suffixes):
+                if _looks_like_rwd_channel_header(columns, uv_suffixes, sig_suffixes):
                     return idx, time_col
     except Exception:
         return None
@@ -152,6 +161,18 @@ def discover_rwd_chunks(root_path: str) -> List[str]:
         raise ValueError(f"RWD Discovery: No valid RWD chunk directories found in {root_path} (subfolders must contain fluorescence.csv)")
         
     return chunks
+
+
+def discover_csv_or_rwd_chunks(input_dir: str, file_glob: str = "*.csv") -> List[str]:
+    """Discover top-level CSV files, falling back to chunked RWD roots."""
+    search_pattern = os.path.join(input_dir, file_glob)
+    file_list = glob.glob(search_pattern)
+    if file_list:
+        return file_list
+    try:
+        return discover_rwd_chunks(input_dir)
+    except Exception:
+        return []
 
 def sniff_format(path: str, config: Config) -> Optional[str]:
     """
@@ -304,7 +325,7 @@ def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
     channel_data = _extract_rwd_channel_pairs(cols, uv_suffixes, sig_suffixes)
     if not channel_data:
         raise ValueError(
-            "RWD: No UV/SIG channel pairs found. "
+            "RWD: Recognizable header found, but no valid UV/SIG channel pairs were found. "
             f"Checked UV suffixes={uv_suffixes} and SIG suffixes={sig_suffixes}."
         )
     
