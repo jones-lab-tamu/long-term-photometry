@@ -770,6 +770,7 @@ class MainWindow(QMainWindow):
         pane = QWidget()
         pane.setObjectName("workflowColumn")
         layout = QVBoxLayout(pane)
+        self._left_pane_layout = layout
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
@@ -804,10 +805,16 @@ class MainWindow(QMainWindow):
         controls_scroll.setObjectName("workflowControlsScroll")
 
         log_group = self._build_log_panel()
-        log_group.setMinimumHeight(200)
+        self._log_group = log_group
 
-        layout.addWidget(controls_scroll, 3)
-        layout.addWidget(log_group, 2)
+        layout.addWidget(controls_scroll, 1)
+        layout.addWidget(log_group, 0)
+        self._sync_live_log_disclosure_layout(
+            expanded=bool(
+                hasattr(self, "_live_log_disclosure_btn")
+                and self._live_log_disclosure_btn.isChecked()
+            )
+        )
         return pane
 
     def _refresh_left_column_width_clamp(self) -> None:
@@ -1455,14 +1462,73 @@ class MainWindow(QMainWindow):
         group.setObjectName("liveLogSection")
         group.setProperty("workflowSection", True)
         layout = QVBoxLayout(group)
+        layout.setSpacing(6)
+
+        disclosure_row = QHBoxLayout()
+        self._live_log_disclosure_btn = QToolButton()
+        self._live_log_disclosure_btn.setText("Log output")
+        self._live_log_disclosure_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._live_log_disclosure_btn.setArrowType(Qt.RightArrow)
+        self._live_log_disclosure_btn.setCheckable(True)
+        self._live_log_disclosure_btn.setChecked(False)
+        self._live_log_disclosure_btn.setAutoRaise(True)
+        self._live_log_disclosure_btn.setToolTip(
+            "Expand to inspect accumulated run output and diagnostics."
+        )
+        self._live_log_disclosure_btn.toggled.connect(self._on_live_log_disclosure_toggled)
+        disclosure_row.addWidget(self._live_log_disclosure_btn)
+        disclosure_row.addStretch()
+        layout.addLayout(disclosure_row)
+
+        self._live_log_collapsed_hint = QLabel(
+            "Hidden during normal use. Expand to inspect run output."
+        )
+        self._live_log_collapsed_hint.setWordWrap(True)
+        self._live_log_collapsed_hint.setStyleSheet("font-size: 11px; color: #5f6b7a;")
+        layout.addWidget(self._live_log_collapsed_hint)
+
+        self._live_log_content_container = QWidget()
+        content_layout = QVBoxLayout(self._live_log_content_container)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        layout.addWidget(self._live_log_content_container)
 
         self._log_view = QPlainTextEdit()
         self._log_view.setReadOnly(True)
         self._log_view.setFont(QFont("Consolas", 9))
         self._log_view.setMaximumBlockCount(10000)
-        layout.addWidget(self._log_view)
+        self._log_view.setMinimumHeight(180)
+        content_layout.addWidget(self._log_view)
+        self._on_live_log_disclosure_toggled(False)
 
         return group
+
+    def _sync_live_log_disclosure_layout(self, *, expanded: bool) -> None:
+        left_layout = getattr(self, "_left_pane_layout", None)
+        if left_layout is not None:
+            left_layout.setStretch(2, 3 if expanded else 1)
+            left_layout.setStretch(3, 2 if expanded else 0)
+            left_layout.invalidate()
+            left_layout.activate()
+        log_group = getattr(self, "_log_group", None)
+        if log_group is not None:
+            if expanded:
+                log_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+                log_group.setMaximumHeight(16777215)
+            else:
+                log_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+                log_group.setMaximumHeight(120)
+
+    def _on_live_log_disclosure_toggled(self, expanded: bool) -> None:
+        if hasattr(self, "_live_log_content_container"):
+            self._live_log_content_container.setVisible(expanded)
+        if hasattr(self, "_live_log_collapsed_hint"):
+            self._live_log_collapsed_hint.setVisible(not expanded)
+        if hasattr(self, "_live_log_disclosure_btn"):
+            self._live_log_disclosure_btn.setArrowType(
+                Qt.DownArrow if expanded else Qt.RightArrow
+            )
+        self._sync_live_log_disclosure_layout(expanded=expanded)
 
     def _results_idle_placeholder_text(self) -> str:
         return (

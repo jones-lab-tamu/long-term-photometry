@@ -2,6 +2,8 @@ import os
 import sys
 import unittest
 import tempfile
+import subprocess
+import textwrap
 import pandas as pd
 import numpy as np
 from unittest.mock import patch
@@ -15,6 +17,10 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import tools.plot_phasic_dayplot_bundle as bundle
+
+
+def _run_cli(cmd, cwd):
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
 
 class TestPhasicDayplotBundle(unittest.TestCase):
     
@@ -372,6 +378,117 @@ class TestPhasicDayplotBundle(unittest.TestCase):
 
         self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_dFF_day_000.png')))
         self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_stacked_day_000.png')))
+
+def test_dayplot_bundle_uses_analysis_fs_for_strict_peak_verification(tmp_path):
+    repo_root = PROJECT_ROOT
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        textwrap.dedent(
+            """\
+            chunk_duration_sec: 600
+            target_fs_hz: 20
+            baseline_method: uv_raw_percentile_session
+            baseline_percentile: 10
+            rwd_time_col: TimeStamp
+            uv_suffix: "-410"
+            sig_suffix: "-470"
+            peak_threshold_method: mean_std
+            peak_threshold_k: 2.0
+            peak_threshold_percentile: 95.0
+            peak_threshold_abs: 0.0
+            peak_min_distance_sec: 0.5
+            peak_pre_filter: none
+            event_signal: dff
+            window_sec: 20.0
+            step_sec: 5.0
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    input_dir = tmp_path / "input_rwd"
+    phasic_out = tmp_path / "phasic_out"
+    output_dir = tmp_path / "day_plots"
+
+    synth_cmd = [
+        sys.executable,
+        "tools/synth_photometry_dataset.py",
+        "--out",
+        str(input_dir),
+        "--format",
+        "rwd",
+        "--config",
+        str(cfg_path),
+        "--preset",
+        "biological_shared_nuisance",
+        "--total-days",
+        "0.125",
+        "--recording-duration-min",
+        "10",
+        "--recordings-per-hour",
+        "2",
+        "--n-rois",
+        "2",
+        "--start-iso",
+        "2025-01-01T00:00:00",
+        "--seed",
+        "42",
+    ]
+    synth_res = _run_cli(synth_cmd, cwd=repo_root)
+    assert synth_res.returncode == 0, (
+        "Synthetic input generation failed.\n"
+        f"STDOUT:\n{synth_res.stdout}\nSTDERR:\n{synth_res.stderr}"
+    )
+
+    analyze_cmd = [
+        sys.executable,
+        "analyze_photometry.py",
+        "--input",
+        str(input_dir),
+        "--config",
+        str(cfg_path),
+        "--out",
+        str(phasic_out),
+        "--mode",
+        "phasic",
+        "--format",
+        "rwd",
+        "--recursive",
+        "--overwrite",
+        "--sessions-per-hour",
+        "2",
+    ]
+    analyze_res = _run_cli(analyze_cmd, cwd=repo_root)
+    assert analyze_res.returncode == 0, (
+        "Phasic analysis failed.\n"
+        f"STDOUT:\n{analyze_res.stdout}\nSTDERR:\n{analyze_res.stderr}"
+    )
+    assert (phasic_out / "phasic_trace_cache.h5").exists()
+    assert (phasic_out / "features" / "features.csv").exists()
+
+    # Regression contract: before this fix, this exact path could fail with:
+    # "CRITICAL: Plotting Logic Mismatch ... (X vs Y)" due to inferred-fs drift.
+    dayplot_cmd = [
+        sys.executable,
+        "tools/plot_phasic_dayplot_bundle.py",
+        "--analysis-out",
+        str(phasic_out),
+        "--roi",
+        "Region0",
+        "--output-dir",
+        str(output_dir),
+        "--sessions-per-hour",
+        "2",
+    ]
+    dayplot_res = _run_cli(dayplot_cmd, cwd=repo_root)
+    combined = f"{dayplot_res.stdout}\n{dayplot_res.stderr}"
+    assert dayplot_res.returncode == 0, (
+        "Dayplot bundle failed unexpectedly.\n"
+        f"STDOUT:\n{dayplot_res.stdout}\nSTDERR:\n{dayplot_res.stderr}"
+    )
+    assert "Plotting Logic Mismatch" not in combined
+    assert (output_dir / "phasic_dFF_day_000.png").exists()
+
 
 if __name__ == '__main__':
     unittest.main()

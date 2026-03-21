@@ -260,6 +260,57 @@ def test_sessions_per_hour_warning_is_contextual_and_wrapped(window, qapp):
     assert window._sph_edit.parentWidget() is window._sph_field_container
 
 
+def test_live_log_disclosure_defaults_collapsed(window, qapp):
+    window.show()
+    qapp.processEvents()
+
+    assert hasattr(window, "_live_log_disclosure_btn")
+    assert hasattr(window, "_live_log_content_container")
+    assert hasattr(window, "_live_log_collapsed_hint")
+    assert hasattr(window, "_log_view")
+    assert not window._live_log_disclosure_btn.isChecked()
+    assert not window._live_log_content_container.isVisibleTo(window)
+    assert window._live_log_collapsed_hint.isVisibleTo(window)
+
+
+def test_live_log_disclosure_toggle_and_log_content_persists(window, qapp):
+    window.show()
+    qapp.processEvents()
+
+    window._log_view.clear()
+    window._live_log_disclosure_btn.setChecked(False)
+    qapp.processEvents()
+    assert not window._live_log_content_container.isVisibleTo(window)
+
+    window._append_log("line while collapsed")
+    assert "line while collapsed" in window._log_view.toPlainText()
+
+    window._live_log_disclosure_btn.setChecked(True)
+    qapp.processEvents()
+    assert window._live_log_content_container.isVisibleTo(window)
+    assert "line while collapsed" in window._log_view.toPlainText()
+
+    window._append_log("line while expanded")
+    window._live_log_disclosure_btn.setChecked(False)
+    qapp.processEvents()
+    window._live_log_disclosure_btn.setChecked(True)
+    qapp.processEvents()
+    log_text = window._log_view.toPlainText()
+    assert "line while collapsed" in log_text
+    assert "line while expanded" in log_text
+
+
+def test_live_log_disclosure_keeps_workflow_sections_accessible(window, qapp):
+    window.show()
+    qapp.processEvents()
+
+    window._live_log_disclosure_btn.setChecked(False)
+    qapp.processEvents()
+    assert window._run_config_group.isVisibleTo(window)
+    assert window._plotting_group.isVisibleTo(window)
+    assert window._advanced_group.isVisibleTo(window)
+
+
 def _left_column_width_snapshot(window):
     controls_scroll = window.findChild(QScrollArea, "workflowControlsScroll")
     assert controls_scroll is not None

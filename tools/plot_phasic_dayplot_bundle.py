@@ -911,10 +911,21 @@ def main():
         cr = rec['cr']
         x = rec['x']
         
-        fs = infer_fs(x, config, context=f"Chunk {cr.chunk_id}") if x is not None else config.target_fs_hz
+        fs_plot = infer_fs(x, config, context=f"Chunk {cr.chunk_id}") if x is not None else float(getattr(config, 'target_fs_hz', 0.0))
         if x is None:
-            x = np.arange(rec['N']) / fs
+            if not np.isfinite(fs_plot) or fs_plot <= 0:
+                fs_plot = float(getattr(config, 'sampling_rate_hz_fallback', 1.0))
+            x = np.arange(rec['N']) / fs_plot
             rec['x'] = x
+
+        # Strict peak-count verification must mirror analysis-time feature extraction
+        # semantics. Analysis uses the authoritative config sampling rate, so do not
+        # prefer floating-point inferred plotting fs for this invariant check.
+        fs_cfg = float(getattr(config, 'target_fs_hz', np.nan))
+        if np.isfinite(fs_cfg) and fs_cfg > 0:
+            fs_verify = fs_cfg
+        else:
+            fs_verify = fs_plot
             
         # Monotonicity & Continuity & Duration Audits (from session grid)
         if not check_monotonicity(x):
@@ -944,7 +955,7 @@ def main():
             exp_count = feat_row['peak_count'] if feat_row is not None else np.nan
                 
             peak_indices = verify_peak_count_strict(
-                rec['y_detect'], x, fs, config, exp_count, plot_roi, cr.chunk_id, cr.source_file
+                rec['y_detect'], x, fs_verify, config, exp_count, plot_roi, cr.chunk_id, cr.source_file
             )
             rec['peak_indices'] = peak_indices
             rec['exp_count'] = exp_count
