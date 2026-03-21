@@ -3,6 +3,7 @@ import os
 import shutil
 import sys
 import csv
+from contextlib import contextmanager
 
 import pytest
 import yaml
@@ -622,3 +623,55 @@ def test_cached_and_uncached_effective_configs_are_identical(window, tmp_path):
         data_b = yaml.safe_load(f)
 
     assert data_a == data_b
+
+
+def test_busy_cursor_scope_restores_real_cursor_on_exception(window):
+    assert QApplication.overrideCursor() is None
+    with pytest.raises(RuntimeError):
+        with window._busy_cursor_scope():
+            assert QApplication.overrideCursor() is not None
+            raise RuntimeError("boom")
+    assert QApplication.overrideCursor() is None
+
+
+def test_validate_path_uses_busy_cursor_scope(window, monkeypatch):
+    calls = {"enter": 0, "exit": 0}
+
+    @contextmanager
+    def _probe_scope():
+        calls["enter"] += 1
+        try:
+            yield
+        finally:
+            calls["exit"] += 1
+
+    monkeypatch.setattr(window, "_busy_cursor_scope", _probe_scope)
+    monkeypatch.setattr(window, "_validate_gui_inputs", lambda: "invalid")
+    monkeypatch.setattr("gui.main_window.QMessageBox.warning", lambda *args, **kwargs: None)
+
+    window._on_validate()
+    assert calls == {"enter": 1, "exit": 1}
+
+
+def test_run_path_busy_cursor_scope_restores_on_exception(window, monkeypatch):
+    calls = {"enter": 0, "exit": 0}
+
+    @contextmanager
+    def _probe_scope():
+        calls["enter"] += 1
+        try:
+            yield
+        finally:
+            calls["exit"] += 1
+
+    monkeypatch.setattr(window, "_busy_cursor_scope", _probe_scope)
+    monkeypatch.setattr(window, "_validate_gui_inputs", lambda: None)
+
+    def _raise_build_argv(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(window, "_build_argv", _raise_build_argv)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        window._on_run()
+    assert calls == {"enter": 1, "exit": 1}

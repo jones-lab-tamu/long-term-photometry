@@ -21,13 +21,14 @@ import math
 import secrets
 import subprocess as _subprocess
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from statistics import median
 
-from PySide6.QtCore import Qt, QSettings, QTimer, QSize
+from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop
 from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QCheckBox, QSpinBox,
     QDoubleSpinBox, QPushButton, QPlainTextEdit, QScrollArea,
     QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem, QToolButton, QStackedWidget,
@@ -3534,125 +3535,133 @@ class MainWindow(QMainWindow):
     def _on_validate(self):
         self._timing_action = "validate"
         self._timing_click_monotonic = time.perf_counter()
-        t_handler = self._timing_start("button_validate_handler")
-        t_validate_inputs = self._timing_start("validate_gui_inputs")
-        err = self._validate_gui_inputs()
-        self._timing_end("validate_gui_inputs", t_validate_inputs)
-        if err:
-            self._timing_end("button_validate_handler", t_handler, extra="aborted=invalid_inputs")
-            QMessageBox.warning(self, "Validation Error", err)
-            return
+        with self._busy_cursor_scope():
+            t_handler = self._timing_start("button_validate_handler")
+            t_validate_inputs = self._timing_start("validate_gui_inputs")
+            err = self._validate_gui_inputs()
+            self._timing_end("validate_gui_inputs", t_validate_inputs)
+            if err:
+                self._timing_end("button_validate_handler", t_handler, extra="aborted=invalid_inputs")
+                QMessageBox.warning(self, "Validation Error", err)
+                return
 
-        t_preflight = self._timing_start("shared_preflight_setup")
-        self._exit_complete_state_workspace()
-        self._save_widgets_to_settings()
-        self._apply_results_idle_placeholder()
-        self._log_view.clear()
-        self._timing_end("shared_preflight_setup", t_preflight)
-        
-        # Narrative start (Fix Readability 2: Append BEFORE starting followers/runner)
-        self._append_run_log("--- Validate Only ---")
-        t_build_argv = self._timing_start("build_argv_validate")
-        argv = self._build_argv(validate_only=True)
-        self._timing_end("build_argv_validate", t_build_argv)
-        self._append_run_log(f"Run directory: {self._current_run_dir}")
-        self._append_run_log(f"Config (temp): {os.path.join(self._current_run_dir, 'config_effective.yaml')}")
+            t_preflight = self._timing_start("shared_preflight_setup")
+            self._exit_complete_state_workspace()
+            self._save_widgets_to_settings()
+            self._apply_results_idle_placeholder()
+            self._log_view.clear()
+            self._timing_end("shared_preflight_setup", t_preflight)
 
-        self._validation_passed = False
-        self._is_validate_only = True
-        self._validate_stdout = []
-        self._reset_status_flags(next_state=RunnerState.VALIDATING)
+            # Narrative start (Fix Readability 2: Append BEFORE starting followers/runner)
+            self._append_run_log("--- Validate Only ---")
+            t_build_argv = self._timing_start("build_argv_validate")
+            argv = self._build_argv(validate_only=True)
+            self._timing_end("build_argv_validate", t_build_argv)
+            self._append_run_log(f"Run directory: {self._current_run_dir}")
+            self._append_run_log(f"Config (temp): {os.path.join(self._current_run_dir, 'config_effective.yaml')}")
 
-        # Validate->Run reuse tracking (Fix B1)
-        self._validated_run_dir = None
-        self._validated_gui_run_spec_json_path = None
-        self._validated_config_effective_yaml_path = None
-        self._validated_run_signature = None
+            self._validation_passed = False
+            self._is_validate_only = True
+            self._validate_stdout = []
+            self._reset_status_flags(next_state=RunnerState.VALIDATING)
 
-        # run_dir already created by _build_argv -> _build_run_spec
+            # Validate->Run reuse tracking (Fix B1)
+            self._validated_run_dir = None
+            self._validated_gui_run_spec_json_path = None
+            self._validated_config_effective_yaml_path = None
+            self._validated_run_signature = None
 
-        self._runner.set_run_dir(self._current_run_dir)
-        t_status_follow = self._timing_start("start_status_follower")
-        self._start_status_follower()
-        self._timing_end("start_status_follower", t_status_follow)
-        t_log_follow = self._timing_start("start_log_follower")
-        self._start_log_follower(self._current_run_dir)
-        self._timing_end("start_log_follower", t_log_follow)
-        t_runner_start = self._timing_start("subprocess_launch_validate")
-        self._runner.start(argv, state=RunnerState.VALIDATING)
-        self._timing_end("subprocess_launch_validate", t_runner_start)
-        self._timing_end("button_validate_handler", t_handler)
+            # run_dir already created by _build_argv -> _build_run_spec
+
+            self._runner.set_run_dir(self._current_run_dir)
+            t_status_follow = self._timing_start("start_status_follower")
+            self._start_status_follower()
+            self._timing_end("start_status_follower", t_status_follow)
+            t_log_follow = self._timing_start("start_log_follower")
+            self._start_log_follower(self._current_run_dir)
+            self._timing_end("start_log_follower", t_log_follow)
+            t_runner_start = self._timing_start("subprocess_launch_validate")
+            self._runner.start(argv, state=RunnerState.VALIDATING)
+            self._timing_end("subprocess_launch_validate", t_runner_start)
+            self._timing_end("button_validate_handler", t_handler)
 
     def _on_run(self):
         self._timing_action = "run"
         self._timing_click_monotonic = time.perf_counter()
-        t_handler = self._timing_start("button_run_handler")
-        t_validate_inputs = self._timing_start("validate_gui_inputs")
-        err = self._validate_gui_inputs()
-        self._timing_end("validate_gui_inputs", t_validate_inputs)
-        if err:
-            self._timing_end("button_run_handler", t_handler, extra="aborted=invalid_inputs")
-            QMessageBox.warning(self, "Validation Error", err)
-            return
-
-        t_preflight = self._timing_start("shared_preflight_setup")
-        self._exit_complete_state_workspace()
-        self._save_widgets_to_settings()
-        self._timing_end("shared_preflight_setup", t_preflight)
-
-        # Build argv (also generates derived config + gui_run_spec.json)
-        t_build_argv = self._timing_start("build_argv_run")
-        argv = self._build_argv(validate_only=False, overwrite=True)
-        self._timing_end("build_argv_run", t_build_argv)
-        run_dir = self._current_run_dir
-        
-        # --- Fix B1v4: Validate->Run Consistency Policy ---
-        # Same-directory reuse is abandoned due to handle conflicts on Windows and
-        # destructive runner semantics. Instead, we use distinct directories but 
-        # ensure the user intent is still validly validated.
-        try:
-            t_sig = self._timing_start("compute_run_signature")
-            current_sig = compute_run_signature(run_dir)
-            self._timing_end("compute_run_signature", t_sig)
-            t_validate_current = self._timing_start("is_validation_current")
-            if not is_validation_current(self._validated_run_signature, current_sig):
-                self._timing_end("is_validation_current", t_validate_current, extra="result=False")
-                self._timing_end("button_run_handler", t_handler, extra="aborted=needs_revalidation")
-                QMessageBox.warning(self, "Re-validation Required", 
-                                    "The current settings differ from the last successful validation. "
-                                    "Please run 'Validate Only' again before proceeding.")
+        with self._busy_cursor_scope():
+            t_handler = self._timing_start("button_run_handler")
+            t_validate_inputs = self._timing_start("validate_gui_inputs")
+            err = self._validate_gui_inputs()
+            self._timing_end("validate_gui_inputs", t_validate_inputs)
+            if err:
+                self._timing_end("button_run_handler", t_handler, extra="aborted=invalid_inputs")
+                QMessageBox.warning(self, "Validation Error", err)
                 return
-            self._timing_end("is_validation_current", t_validate_current, extra="result=True")
-        except Exception as e:
-            self._timing_end("button_run_handler", t_handler, extra="aborted=signature_error")
-            QMessageBox.warning(self, "Validation State Error", 
-                                f"Could not verify consistency with prior validation: {e}")
-            return
 
-        # Clear past results
-        self._apply_results_idle_placeholder()
-        self._log_view.clear()
-        
-        # Narrative start (Fix Readability 2: Append BEFORE starting followers/runner)
-        self._append_run_log("--- Starting Pipeline ---")
-        self._append_run_log(f"Run directory: {run_dir}")
-        self._append_run_log(f"Config: {os.path.join(run_dir, 'config_effective.yaml')}")
+            t_preflight = self._timing_start("shared_preflight_setup")
+            self._exit_complete_state_workspace()
+            self._save_widgets_to_settings()
+            self._timing_end("shared_preflight_setup", t_preflight)
 
-        self._is_validate_only = False
-        self._validation_passed = False
-        self._reset_status_flags(next_state=RunnerState.RUNNING)
+            # Build argv (also generates derived config + gui_run_spec.json)
+            t_build_argv = self._timing_start("build_argv_run")
+            argv = self._build_argv(validate_only=False, overwrite=True)
+            self._timing_end("build_argv_run", t_build_argv)
+            run_dir = self._current_run_dir
 
-        self._runner.set_run_dir(run_dir)
-        t_status_follow = self._timing_start("start_status_follower")
-        self._start_status_follower()
-        self._timing_end("start_status_follower", t_status_follow)
-        t_log_follow = self._timing_start("start_log_follower")
-        self._start_log_follower(run_dir)
-        self._timing_end("start_log_follower", t_log_follow)
-        t_runner_start = self._timing_start("subprocess_launch_run")
-        self._runner.start(argv, state=RunnerState.RUNNING)
-        self._timing_end("subprocess_launch_run", t_runner_start)
-        self._timing_end("button_run_handler", t_handler)
+            # --- Fix B1v4: Validate->Run Consistency Policy ---
+            # Same-directory reuse is abandoned due to handle conflicts on Windows and
+            # destructive runner semantics. Instead, we use distinct directories but
+            # ensure the user intent is still validly validated.
+            try:
+                t_sig = self._timing_start("compute_run_signature")
+                current_sig = compute_run_signature(run_dir)
+                self._timing_end("compute_run_signature", t_sig)
+                t_validate_current = self._timing_start("is_validation_current")
+                if not is_validation_current(self._validated_run_signature, current_sig):
+                    self._timing_end("is_validation_current", t_validate_current, extra="result=False")
+                    self._timing_end("button_run_handler", t_handler, extra="aborted=needs_revalidation")
+                    QMessageBox.warning(
+                        self,
+                        "Re-validation Required",
+                        "The current settings differ from the last successful validation. "
+                        "Please run 'Validate Only' again before proceeding.",
+                    )
+                    return
+                self._timing_end("is_validation_current", t_validate_current, extra="result=True")
+            except Exception as e:
+                self._timing_end("button_run_handler", t_handler, extra="aborted=signature_error")
+                QMessageBox.warning(
+                    self,
+                    "Validation State Error",
+                    f"Could not verify consistency with prior validation: {e}",
+                )
+                return
+
+            # Clear past results
+            self._apply_results_idle_placeholder()
+            self._log_view.clear()
+
+            # Narrative start (Fix Readability 2: Append BEFORE starting followers/runner)
+            self._append_run_log("--- Starting Pipeline ---")
+            self._append_run_log(f"Run directory: {run_dir}")
+            self._append_run_log(f"Config: {os.path.join(run_dir, 'config_effective.yaml')}")
+
+            self._is_validate_only = False
+            self._validation_passed = False
+            self._reset_status_flags(next_state=RunnerState.RUNNING)
+
+            self._runner.set_run_dir(run_dir)
+            t_status_follow = self._timing_start("start_status_follower")
+            self._start_status_follower()
+            self._timing_end("start_status_follower", t_status_follow)
+            t_log_follow = self._timing_start("start_log_follower")
+            self._start_log_follower(run_dir)
+            self._timing_end("start_log_follower", t_log_follow)
+            t_runner_start = self._timing_start("subprocess_launch_run")
+            self._runner.start(argv, state=RunnerState.RUNNING)
+            self._timing_end("subprocess_launch_run", t_runner_start)
+            self._timing_end("button_run_handler", t_handler)
 
     def _on_cancel(self):
         self._runner.cancel()
@@ -4224,6 +4233,26 @@ class MainWindow(QMainWindow):
     # ==================================================================
     # Helpers
     # ==================================================================
+
+    def _push_busy_cursor(self) -> None:
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+
+    def _pop_busy_cursor(self) -> None:
+        if QApplication.overrideCursor() is not None:
+            QApplication.restoreOverrideCursor()
+
+    @contextmanager
+    def _busy_cursor_scope(self):
+        """
+        Brief non-modal busy cursor scope for synchronous preflight/start work.
+        Restores reliably on success, early return, and exceptions.
+        """
+        self._push_busy_cursor()
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        try:
+            yield
+        finally:
+            self._pop_busy_cursor()
 
     def _append_log(self, text: str):
         self._log_view.appendPlainText(text)
