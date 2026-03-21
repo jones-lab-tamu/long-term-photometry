@@ -542,6 +542,10 @@ class MainWindow(QMainWindow):
         self._correction_tuning_last_result = None
         self._correction_tuning_active_inspection_path = ""
         self._correction_tuning_active_inspection_pixmap = QPixmap()
+        self._timing_action = ""
+        self._timing_click_monotonic = None
+        self._elapsed_first_tick_logged = False
+        self._rwd_contract_cache = None
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(250)
         self._elapsed_timer.timeout.connect(self._on_elapsed_timer_tick)
@@ -2669,6 +2673,7 @@ class MainWindow(QMainWindow):
         )
 
     def _infer_rwd_chunk_contract(self, csv_path: str) -> dict:
+        t_chunk = self._timing_start("rwd_chunk_contract", extra=f"path={csv_path}")
         time_candidates = ("TimeStamp", "Time(s)", "Timestamp", "Time")
         header_row_idx = None
         header_cols: list[str] = []
@@ -2746,7 +2751,7 @@ class MainWindow(QMainWindow):
                 f"chunk_duration_sec={chunk_duration_sec:.9f}, n_target={n_target}."
             )
 
-        return {
+        out = {
             "csv_path": csv_path,
             "time_col": time_col,
             "uv_suffix": uv_suffix,
@@ -2756,6 +2761,15 @@ class MainWindow(QMainWindow):
             "sample_count": int(sample_count),
             "chunk_duration_sec": float(chunk_duration_sec),
         }
+        self._timing_end(
+            "rwd_chunk_contract",
+            t_chunk,
+            extra=(
+                f"time_col={time_col} uv={uv_suffix} sig={sig_suffix} "
+                f"fs={out['fs_hz']:.6f} samples={sample_count}"
+            ),
+        )
+        return out
 
     def _infer_rwd_dataset_contract_overrides(self, fmt_text: str) -> dict:
         """
@@ -2767,15 +2781,52 @@ class MainWindow(QMainWindow):
         if fmt_text not in ("auto", "rwd"):
             return {}
 
+        t_total = self._timing_start("rwd_contract_inference_total", extra=f"format={fmt_text}")
         input_path = self._input_dir.text().strip()
+        t_inspect = self._timing_start("selected_input_inspection", extra=f"input={input_path}")
         csv_paths = self._discover_rwd_csv_files(input_path)
+        self._timing_end("selected_input_inspection", t_inspect, extra=f"csv_files={len(csv_paths)}")
         if not csv_paths:
+            if self._rwd_contract_cache is not None:
+                self._emit_gui_timing("CACHE_INVALIDATE", "rwd_contract", extra="reason=no_csv_files")
+                self._rwd_contract_cache = None
+            self._timing_end("rwd_contract_inference_total", t_total, extra="no_csv_files")
             return {}
 
+        # Cheap signature for cache invalidation:
+        # path + format + ordered csv path list + per-file (size, mtime_ns).
+        # This detects ordinary file additions/removals/edits while remaining much
+        # cheaper than reparsing every chunk on every click.
+        t_sig = self._timing_start("rwd_contract_signature")
+        file_sigs = []
+        for path in csv_paths:
+            st = os.stat(path)
+            file_sigs.append((path, int(st.st_size), int(st.st_mtime_ns)))
+        signature = (input_path, fmt_text, tuple(file_sigs))
+        self._timing_end("rwd_contract_signature", t_sig)
+
+        cache = self._rwd_contract_cache
+        if cache is not None and cache.get("signature") == signature:
+            self._emit_gui_timing("CACHE_HIT", "rwd_contract", extra=f"chunks={len(csv_paths)}")
+            self._timing_end("rwd_contract_inference_total", t_total, extra="cache_hit")
+            return dict(cache["overrides"])
+        if cache is None:
+            self._emit_gui_timing("CACHE_MISS", "rwd_contract", extra="reason=no_cache")
+        else:
+            reason = "signature_changed"
+            if cache.get("input_path") != input_path:
+                reason = "input_path_changed"
+            elif cache.get("format") != fmt_text:
+                reason = "format_changed"
+            self._emit_gui_timing("CACHE_INVALIDATE", "rwd_contract", extra=f"reason={reason}")
+
+        t_chunks = self._timing_start("rwd_contract_scan_chunks", extra=f"chunk_count={len(csv_paths)}")
         contracts = [self._infer_rwd_chunk_contract(path) for path in csv_paths]
+        self._timing_end("rwd_contract_scan_chunks", t_chunks)
         base = contracts[0]
         fs_tol = max(1e-6, base["fs_hz"] * 1e-4)
         dur_tol = max(1e-6, base["chunk_duration_sec"] * 1e-4)
+        t_cross = self._timing_start("rwd_contract_cross_chunk_validation")
         for idx, contract in enumerate(contracts[1:], start=1):
             path = contract["csv_path"]
             if contract["time_col"] != base["time_col"]:
@@ -2809,14 +2860,23 @@ class MainWindow(QMainWindow):
                     f"chunk_duration mismatch at chunk {idx} ({path}). "
                     f"Expected {base['chunk_duration_sec']:.9f}, got {contract['chunk_duration_sec']:.9f}."
                 )
+        self._timing_end("rwd_contract_cross_chunk_validation", t_cross)
 
-        return {
+        out = {
             "target_fs_hz": float(round(base["fs_hz"], 9)),
             "chunk_duration_sec": float(round(base["chunk_duration_sec"], 9)),
             "rwd_time_col": str(base["time_col"]),
             "uv_suffix": str(base["uv_suffix"]),
             "sig_suffix": str(base["sig_suffix"]),
         }
+        self._rwd_contract_cache = {
+            "input_path": input_path,
+            "format": fmt_text,
+            "signature": signature,
+            "overrides": dict(out),
+        }
+        self._timing_end("rwd_contract_inference_total", t_total)
+        return out
 
     def _active_baseline_config(self) -> Config:
         """
@@ -2946,6 +3006,7 @@ class MainWindow(QMainWindow):
 
         Discovery and preview use _build_discovery_spec() instead.
         """
+        t_spec = self._timing_start("build_run_spec", extra=f"validate_only={validate_only}")
         out_base = self._output_dir.text().strip()
         run_id = _generate_run_id()
         run_dir = os.path.join(out_base, run_id)
@@ -3097,7 +3158,9 @@ class MainWindow(QMainWindow):
         # Ensure effective config tracks the selected RWD dataset contract.
         # This prevents stale/default baseline config values (e.g., fs/suffix/time-col)
         # from conflicting with the currently selected input data.
+        t_contract = self._timing_start("rwd_contract_inference")
         data_contract_overrides = self._infer_rwd_dataset_contract_overrides(fmt)
+        self._timing_end("rwd_contract_inference", t_contract)
         if not isinstance(data_contract_overrides, dict):
             data_contract_overrides = {}
 
@@ -3128,6 +3191,7 @@ class MainWindow(QMainWindow):
             mode=mode_val,
             user_set_fields=user_set,
         )
+        self._timing_end("build_run_spec", t_spec)
         return spec
 
     def _build_argv(self, validate_only: bool = False, overwrite: bool = False) -> list:
@@ -3141,22 +3205,36 @@ class MainWindow(QMainWindow):
         Validates derived config before returning.
         Uses --out <run_dir> mode.
         """
+        t_argv = self._timing_start("build_argv", extra=f"validate_only={validate_only} overwrite={overwrite}")
+        t_spec = self._timing_start("build_run_spec_from_build_argv")
         spec = self._build_run_spec(validate_only=validate_only)
+        self._timing_end("build_run_spec_from_build_argv", t_spec)
         spec.overwrite = overwrite
         run_dir = self._current_run_dir
         os.makedirs(run_dir, exist_ok=True)
 
         # Write derived config and validate it
+        t_cfg = self._timing_start("generate_derived_config")
         config_path = spec.generate_derived_config(run_dir)
+        self._timing_end("generate_derived_config", t_cfg)
+        t_cfg_valid = self._timing_start("validate_effective_config")
         RunSpec.validate_effective_config(config_path)
+        self._timing_end("validate_effective_config", t_cfg_valid)
 
         # Build argv
+        t_build_runner = self._timing_start("build_runner_argv")
         argv = spec.build_runner_argv()
+        self._timing_end("build_runner_argv", t_build_runner)
 
         # Write intent record and command log
+        t_write_spec = self._timing_start("write_gui_run_spec")
         spec.write_gui_run_spec(run_dir)
+        self._timing_end("write_gui_run_spec", t_write_spec)
+        t_write_cmd = self._timing_start("write_command_invoked")
         spec.write_command_invoked(run_dir, argv)
+        self._timing_end("write_command_invoked", t_write_cmd)
 
+        self._timing_end("build_argv", t_argv)
         return argv
 
     # ==================================================================
@@ -3311,17 +3389,22 @@ class MainWindow(QMainWindow):
         and does NOT depend on the output directory widget.
         run_dir is left empty since discovery never writes to it.
         """
+        t_discovery_spec = self._timing_start("build_discovery_spec")
         fmt = self._format_combo.currentText()
+        t_contract = self._timing_start("rwd_contract_inference_discovery")
         data_contract_overrides = self._infer_rwd_dataset_contract_overrides(fmt)
+        self._timing_end("rwd_contract_inference_discovery", t_contract)
         if not isinstance(data_contract_overrides, dict):
             data_contract_overrides = {}
-        return RunSpec(
+        spec = RunSpec(
             input_dir=self._input_dir.text().strip(),
             run_dir="",
             format=fmt,
             config_source_path=self._active_config_source_path(),
             data_contract_overrides=data_contract_overrides,
         )
+        self._timing_end("build_discovery_spec", t_discovery_spec)
+        return spec
 
     def _on_preview_config(self):
         """Show a read-only dialog with the derived config YAML preview."""
@@ -3440,19 +3523,29 @@ class MainWindow(QMainWindow):
             self._roi_list.item(i).setCheckState(Qt.Unchecked)
 
     def _on_validate(self):
+        self._timing_action = "validate"
+        self._timing_click_monotonic = time.perf_counter()
+        t_handler = self._timing_start("button_validate_handler")
+        t_validate_inputs = self._timing_start("validate_gui_inputs")
         err = self._validate_gui_inputs()
+        self._timing_end("validate_gui_inputs", t_validate_inputs)
         if err:
+            self._timing_end("button_validate_handler", t_handler, extra="aborted=invalid_inputs")
             QMessageBox.warning(self, "Validation Error", err)
             return
 
+        t_preflight = self._timing_start("shared_preflight_setup")
         self._exit_complete_state_workspace()
         self._save_widgets_to_settings()
         self._apply_results_idle_placeholder()
         self._log_view.clear()
+        self._timing_end("shared_preflight_setup", t_preflight)
         
         # Narrative start (Fix Readability 2: Append BEFORE starting followers/runner)
         self._append_run_log("--- Validate Only ---")
+        t_build_argv = self._timing_start("build_argv_validate")
         argv = self._build_argv(validate_only=True)
+        self._timing_end("build_argv_validate", t_build_argv)
         self._append_run_log(f"Run directory: {self._current_run_dir}")
         self._append_run_log(f"Config (temp): {os.path.join(self._current_run_dir, 'config_effective.yaml')}")
 
@@ -3470,21 +3563,38 @@ class MainWindow(QMainWindow):
         # run_dir already created by _build_argv -> _build_run_spec
 
         self._runner.set_run_dir(self._current_run_dir)
+        t_status_follow = self._timing_start("start_status_follower")
         self._start_status_follower()
+        self._timing_end("start_status_follower", t_status_follow)
+        t_log_follow = self._timing_start("start_log_follower")
         self._start_log_follower(self._current_run_dir)
+        self._timing_end("start_log_follower", t_log_follow)
+        t_runner_start = self._timing_start("subprocess_launch_validate")
         self._runner.start(argv, state=RunnerState.VALIDATING)
+        self._timing_end("subprocess_launch_validate", t_runner_start)
+        self._timing_end("button_validate_handler", t_handler)
 
     def _on_run(self):
+        self._timing_action = "run"
+        self._timing_click_monotonic = time.perf_counter()
+        t_handler = self._timing_start("button_run_handler")
+        t_validate_inputs = self._timing_start("validate_gui_inputs")
         err = self._validate_gui_inputs()
+        self._timing_end("validate_gui_inputs", t_validate_inputs)
         if err:
+            self._timing_end("button_run_handler", t_handler, extra="aborted=invalid_inputs")
             QMessageBox.warning(self, "Validation Error", err)
             return
 
+        t_preflight = self._timing_start("shared_preflight_setup")
         self._exit_complete_state_workspace()
         self._save_widgets_to_settings()
+        self._timing_end("shared_preflight_setup", t_preflight)
 
         # Build argv (also generates derived config + gui_run_spec.json)
+        t_build_argv = self._timing_start("build_argv_run")
         argv = self._build_argv(validate_only=False, overwrite=True)
+        self._timing_end("build_argv_run", t_build_argv)
         run_dir = self._current_run_dir
         
         # --- Fix B1v4: Validate->Run Consistency Policy ---
@@ -3492,13 +3602,20 @@ class MainWindow(QMainWindow):
         # destructive runner semantics. Instead, we use distinct directories but 
         # ensure the user intent is still validly validated.
         try:
+            t_sig = self._timing_start("compute_run_signature")
             current_sig = compute_run_signature(run_dir)
+            self._timing_end("compute_run_signature", t_sig)
+            t_validate_current = self._timing_start("is_validation_current")
             if not is_validation_current(self._validated_run_signature, current_sig):
+                self._timing_end("is_validation_current", t_validate_current, extra="result=False")
+                self._timing_end("button_run_handler", t_handler, extra="aborted=needs_revalidation")
                 QMessageBox.warning(self, "Re-validation Required", 
                                     "The current settings differ from the last successful validation. "
                                     "Please run 'Validate Only' again before proceeding.")
                 return
+            self._timing_end("is_validation_current", t_validate_current, extra="result=True")
         except Exception as e:
+            self._timing_end("button_run_handler", t_handler, extra="aborted=signature_error")
             QMessageBox.warning(self, "Validation State Error", 
                                 f"Could not verify consistency with prior validation: {e}")
             return
@@ -3517,9 +3634,16 @@ class MainWindow(QMainWindow):
         self._reset_status_flags(next_state=RunnerState.RUNNING)
 
         self._runner.set_run_dir(run_dir)
+        t_status_follow = self._timing_start("start_status_follower")
         self._start_status_follower()
+        self._timing_end("start_status_follower", t_status_follow)
+        t_log_follow = self._timing_start("start_log_follower")
         self._start_log_follower(run_dir)
+        self._timing_end("start_log_follower", t_log_follow)
+        t_runner_start = self._timing_start("subprocess_launch_run")
         self._runner.start(argv, state=RunnerState.RUNNING)
+        self._timing_end("subprocess_launch_run", t_runner_start)
+        self._timing_end("button_run_handler", t_handler)
 
     def _on_cancel(self):
         self._runner.cancel()
@@ -3721,10 +3845,20 @@ class MainWindow(QMainWindow):
     # ==================================================================
 
     def _on_run_started(self):
+        t_started = self._timing_start("runner_started_signal")
         self._did_finalize_run_ui = False
         self._run_started_monotonic = time.monotonic()
         self._last_elapsed_sec = 0.0
+        self._elapsed_first_tick_logged = False
         self._elapsed_timer.start()
+        if self._timing_click_monotonic is not None:
+            delay = time.perf_counter() - self._timing_click_monotonic
+            self._emit_gui_timing(
+                "END",
+                "click_to_runner_started",
+                elapsed_sec=delay,
+                extra=f"action={self._timing_action or 'unknown'}",
+            )
         if self._ui_state == RunnerState.VALIDATING:
             msg = "Validation in progress..."
         else:
@@ -3732,6 +3866,7 @@ class MainWindow(QMainWindow):
         self._report_viewer.set_running_message(self._results_running_placeholder_text(msg))
         self._refresh_tuning_workspace_availability()
         self._update_button_states()
+        self._timing_end("runner_started_signal", t_started)
 
     def _on_state_changed(self, state_str: str):
         """Update status label and button states on state transitions."""
@@ -4087,6 +4222,30 @@ class MainWindow(QMainWindow):
     def _append_run_log(self, text: str):
         """Append a message from the wrapper/GUI with a 'RUN: ' prefix."""
         self._append_log(f"RUN: {text}")
+
+    def _emit_gui_timing(self, event: str, step: str, elapsed_sec: float | None = None, extra: str = "") -> None:
+        """Emit grep-friendly GUI preflight timing lines."""
+        action = self._timing_action or "unknown"
+        if elapsed_sec is None:
+            msg = f"GUI_TIMING {event} action={action} step={step}"
+        else:
+            msg = f"GUI_TIMING {event} action={action} step={step} elapsed_sec={elapsed_sec:.6f}"
+        if extra:
+            msg = f"{msg} {extra}"
+        self._append_run_log(msg)
+        try:
+            print(msg, flush=True)
+        except Exception:
+            pass
+
+    def _timing_start(self, step: str, extra: str = "") -> float:
+        t0 = time.perf_counter()
+        self._emit_gui_timing("START", step, extra=extra)
+        return t0
+
+    def _timing_end(self, step: str, t0: float, extra: str = "") -> None:
+        elapsed = time.perf_counter() - t0
+        self._emit_gui_timing("END", step, elapsed_sec=elapsed, extra=extra)
 
     def _compute_roi_filter_summary(self) -> str:
         """Human-readable summary of current ROI filtering intent."""
@@ -5028,6 +5187,15 @@ class MainWindow(QMainWindow):
         if self._ui_state not in (RunnerState.RUNNING, RunnerState.VALIDATING):
             self._elapsed_timer.stop()
             return
+        if not self._elapsed_first_tick_logged:
+            self._elapsed_first_tick_logged = True
+            if self._run_started_monotonic is not None:
+                first_tick_delay = max(0.0, time.monotonic() - self._run_started_monotonic)
+                self._emit_gui_timing(
+                    "END",
+                    "elapsed_timer_first_tick",
+                    elapsed_sec=first_tick_delay,
+                )
         self._render_status_label()
 
     def _friendly_run_status(self) -> str:

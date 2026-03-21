@@ -429,3 +429,176 @@ def test_effective_config_export_and_launch_tokens_use_inferred_contract(window,
     # Mirrors strict reader coverage semantics:
     # require raw_end >= grid_end - 1/fs.
     assert raw_end >= (grid_end - tol)
+
+
+def test_rwd_contract_cache_hit_reuses_chunk_scan(window, tmp_path, monkeypatch):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_cache_hit"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=60.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        chunk_names=["2025_01_01-00_00_00", "2025_01_01-00_10_00"],
+    )
+
+    stale_cfg = tmp_path / "stale_baseline_cache_hit.yaml"
+    _write_stale_baseline_config(stale_cfg)
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    orig = window._infer_rwd_chunk_contract
+    calls = {"n": 0}
+
+    def _wrapped(path):
+        calls["n"] += 1
+        return orig(path)
+
+    monkeypatch.setattr(window, "_infer_rwd_chunk_contract", _wrapped)
+
+    spec_a = window._build_run_spec(validate_only=True)
+    first_calls = calls["n"]
+    assert first_calls > 0
+
+    spec_b = window._build_run_spec(validate_only=True)
+    assert calls["n"] == first_calls, "Second call should reuse cached contract and skip rescanning chunks."
+    assert spec_a.data_contract_overrides == spec_b.data_contract_overrides
+    assert "GUI_TIMING CACHE_HIT action=unknown step=rwd_contract" in window._log_view.toPlainText()
+
+
+def test_rwd_contract_cache_invalidates_on_input_change(window, tmp_path, monkeypatch):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_a = tmp_path / "vendor_rwd_cache_input_a"
+    _write_vendor_style_rwd_dataset(
+        dataset_a,
+        fs_hz=20.0,
+        chunk_duration_sec=60.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        chunk_names=["2025_01_01-00_00_00"],
+    )
+    dataset_b = tmp_path / "vendor_rwd_cache_input_b"
+    _write_vendor_style_rwd_dataset(
+        dataset_b,
+        fs_hz=20.0,
+        chunk_duration_sec=60.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        chunk_names=["2025_01_01-00_00_00"],
+    )
+
+    stale_cfg = tmp_path / "stale_baseline_cache_input.yaml"
+    _write_stale_baseline_config(stale_cfg)
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._format_combo.setCurrentText("rwd")
+
+    orig = window._infer_rwd_chunk_contract
+    calls = {"n": 0}
+
+    def _wrapped(path):
+        calls["n"] += 1
+        return orig(path)
+
+    monkeypatch.setattr(window, "_infer_rwd_chunk_contract", _wrapped)
+
+    window._input_dir.setText(str(dataset_a))
+    window._build_run_spec(validate_only=True)
+    first_calls = calls["n"]
+    assert first_calls > 0
+
+    window._input_dir.setText(str(dataset_b))
+    window._build_run_spec(validate_only=True)
+    assert calls["n"] > first_calls, "Input path change should invalidate cache and trigger fresh scan."
+
+
+def test_rwd_contract_cache_invalidates_on_dataset_change(window, tmp_path, monkeypatch):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_cache_mutation"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=60.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        chunk_names=["2025_01_01-00_00_00", "2025_01_01-00_10_00"],
+    )
+
+    stale_cfg = tmp_path / "stale_baseline_cache_mutation.yaml"
+    _write_stale_baseline_config(stale_cfg)
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    orig = window._infer_rwd_chunk_contract
+    calls = {"n": 0}
+
+    def _wrapped(path):
+        calls["n"] += 1
+        return orig(path)
+
+    monkeypatch.setattr(window, "_infer_rwd_chunk_contract", _wrapped)
+
+    window._build_run_spec(validate_only=True)
+    first_calls = calls["n"]
+    assert first_calls > 0
+
+    # Mutate one chunk file so mtime/size signature changes.
+    csv_path = dataset_root / "2025_01_01-00_10_00" / "fluorescence.csv"
+    with open(csv_path, "a", encoding="utf-8") as f:
+        f.write("\n")
+
+    window._build_run_spec(validate_only=True)
+    assert calls["n"] > first_calls, "Dataset mutation should invalidate cache and trigger fresh scan."
+
+
+def test_cached_and_uncached_effective_configs_are_identical(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_cache_equiv"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        chunk_names=["2025_01_01-00_00_00", "2025_01_01-00_10_00"],
+    )
+
+    stale_cfg = tmp_path / "stale_baseline_cache_equiv.yaml"
+    _write_stale_baseline_config(stale_cfg)
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    argv_a = window._build_argv(validate_only=True)
+    assert "--config" in argv_a
+    cfg_a = argv_a[argv_a.index("--config") + 1]
+    with open(cfg_a, "r", encoding="utf-8") as f:
+        data_a = yaml.safe_load(f)
+
+    argv_b = window._build_argv(validate_only=True)
+    assert "--config" in argv_b
+    cfg_b = argv_b[argv_b.index("--config") + 1]
+    with open(cfg_b, "r", encoding="utf-8") as f:
+        data_b = yaml.safe_load(f)
+
+    assert data_a == data_b
