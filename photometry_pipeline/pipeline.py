@@ -12,7 +12,7 @@ from typing import List, Optional
 
 from .config import Config
 from .core.types import Chunk, SessionStats
-from .io.adapters import load_chunk, sniff_format
+from .io.adapters import load_chunk, sniff_format, sort_npm_files
 from .core import preprocessing, regression, normalization, feature_extraction, baseline
 from .core.utils import natural_sort_key
 from .core.reporting import generate_run_report, append_run_report_warnings
@@ -120,9 +120,18 @@ class Pipeline:
                     from .io.adapters import discover_csv_or_rwd_chunks
                     self.file_list = discover_csv_or_rwd_chunks(input_path, file_glob=file_glob)
         
-        self.file_list.sort(key=natural_sort_key)
         if not self.file_list:
             raise ValueError(f"No files found in {input_path}")
+
+        resolved_for_order = force_format
+        if resolved_for_order == 'auto' and self.file_list:
+            sniffed = sniff_format(self.file_list[0], self.config)
+            resolved_for_order = sniffed if sniffed is not None else 'auto'
+
+        if resolved_for_order == 'npm':
+            self.file_list = sort_npm_files(self.file_list)
+        else:
+            self.file_list.sort(key=natural_sort_key)
             
         print(f"Found {len(self.file_list)} files.")
 

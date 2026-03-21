@@ -5,7 +5,9 @@ import glob
 import warnings
 import itertools
 import csv
+import re
 from typing import Optional, List, Dict, Tuple
+from datetime import datetime
 from ..config import Config
 from ..core.types import Chunk, SessionTimeMetadata
 from ..core.utils import natural_sort_key
@@ -186,12 +188,84 @@ def sniff_format(path: str, config: Config) -> Optional[str]:
             head_iter = itertools.islice(f, 50)
             head = list(head_iter)
         if head:
-            first_line = head[0]
-            if config.npm_frame_col in first_line and config.npm_system_ts_col in first_line:
+            first_cols = _parse_csv_header_fields(head[0])
+            if _looks_like_npm_header(first_cols, config):
                 return 'npm'
         return None
     except Exception:
         return None
+
+
+def _looks_like_npm_header(columns: List[str], config: Config) -> bool:
+    """Heuristic NPM header check aligned with actual _load_npm requirements."""
+    if not columns:
+        return False
+
+    time_col = (
+        config.npm_system_ts_col
+        if config.npm_time_axis == "system_timestamp"
+        else config.npm_computer_ts_col
+    )
+    has_time = time_col in columns
+    has_led = config.npm_led_col in columns
+    has_roi = any(
+        c.startswith(config.npm_region_prefix) and c.endswith(config.npm_region_suffix)
+        for c in columns
+    )
+    return has_time and has_led and has_roi
+
+
+def _npm_roi_sort_key(col: str, prefix: str, suffix: str) -> Tuple[int, int, str]:
+    """
+    Natural ROI ordering for NPM region columns.
+
+    Preferred form is prefix + <integer> + suffix (e.g., Region10G). These
+    sort by numeric index. Non-matching or non-numeric forms fall back after
+    numeric columns and are ordered lexicographically.
+    """
+    if col.startswith(prefix) and col.endswith(suffix):
+        end_idx = len(col) - len(suffix) if suffix else len(col)
+        core = col[len(prefix):end_idx]
+        if core.isdigit():
+            return (0, int(core), col)
+    return (1, 0, col)
+
+
+def _parse_vendor_npm_timestamp(path: str) -> Optional[datetime]:
+    """
+    Parse vendor-style NPM timestamp from filename stem.
+    Expected pattern fragment: YYYY-MM-DDTHH_MM_SS (e.g., photometryData2025-03-05T15_37_44.csv).
+    """
+    stem = os.path.splitext(os.path.basename(path))[0]
+    m = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2})", stem)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y-%m-%dT%H_%M_%S")
+    except ValueError:
+        return None
+
+
+def sort_npm_files(paths: List[str]) -> List[str]:
+    """
+    Deterministic NPM session ordering.
+
+    If ALL candidate paths contain a parseable vendor-style timestamp in the
+    filename, sort by parsed datetime (full timestamp semantics). Otherwise,
+    fall back to natural_sort_key for backward compatibility.
+    """
+    if not paths:
+        return []
+
+    stamped: List[Tuple[datetime, str]] = []
+    for p in paths:
+        ts = _parse_vendor_npm_timestamp(p)
+        if ts is None:
+            return sorted(paths, key=natural_sort_key)
+        stamped.append((ts, p))
+
+    stamped.sort(key=lambda x: (x[0], natural_sort_key(x[1])))
+    return [p for _, p in stamped]
 
 def _create_canonical_names(n_rois: int) -> List[str]:
     return [f"Region{i}" for i in range(n_rois)]
@@ -367,6 +441,7 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
     
     time_col = config.npm_system_ts_col if config.npm_time_axis == 'system_timestamp' else config.npm_computer_ts_col
     if time_col not in df.columns: raise ValueError(f"NPM: Missing {time_col}")
+    if config.npm_led_col not in df.columns: raise ValueError(f"NPM: Missing {config.npm_led_col}")
         
     t_full = df[time_col].values
     led = df[config.npm_led_col].values
@@ -377,8 +452,11 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
     
     if len(t_uv) < 2 or len(t_sig) < 2: raise ValueError("NPM: Insufficient data")
     
-    roi_cols = [c for c in df.columns if c.startswith(config.npm_region_prefix) and c.endswith(config.npm_region_suffix)]
-    roi_cols.sort()
+    roi_cols = [
+        c for c in df.columns
+        if c.startswith(config.npm_region_prefix) and c.endswith(config.npm_region_suffix)
+    ]
+    roi_cols.sort(key=lambda c: _npm_roi_sort_key(c, config.npm_region_prefix, config.npm_region_suffix))
     if not roi_cols: raise ValueError("NPM: No Region columns")
         
     n_rois = len(roi_cols)

@@ -16,7 +16,7 @@ import pathlib
 from typing import Optional, Dict, Any
 
 from photometry_pipeline.config import Config
-from photometry_pipeline.io.adapters import sniff_format, load_chunk
+from photometry_pipeline.io.adapters import sniff_format, load_chunk, sort_npm_files
 from photometry_pipeline.core.utils import natural_sort_key
 
 
@@ -69,8 +69,6 @@ def discover_inputs(
             from photometry_pipeline.io.adapters import discover_csv_or_rwd_chunks
             file_list = discover_csv_or_rwd_chunks(input_dir, file_glob="*.csv")
 
-    file_list.sort(key=natural_sort_key)
-
     if not file_list:
         raise ValueError(f"No files found in {input_dir}")
 
@@ -83,6 +81,11 @@ def discover_inputs(
             raise ValueError(
                 f"Could not automatically detect format for {file_list[0]}"
             )
+
+    if resolved_format == "npm":
+        file_list = sort_npm_files(file_list)
+    else:
+        file_list.sort(key=natural_sort_key)
 
     n_total_discovered = len(file_list)
 
