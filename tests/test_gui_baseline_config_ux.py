@@ -87,6 +87,34 @@ def _write_vendor_style_rwd_dataset(
                 writer.writerow(row)
 
 
+def _write_vendor_style_npm_dataset(
+    root_dir,
+    *,
+    n_rois: int = 2,
+    time_col: str = "Timestamp",
+    filenames: list[str] | None = None,
+):
+    root_dir.mkdir(parents=True, exist_ok=True)
+    if filenames is None:
+        filenames = ["photometryData2025-03-05T15_37_44.csv"]
+
+    header = ["FrameCounter", time_col, "LedState"]
+    for i in range(n_rois):
+        header.append(f"Region{i}G")
+    header.extend(["Stimulation", "Output0", "Output1", "Input0", "Input1"])
+
+    for fname in filenames:
+        csv_path = root_dir / fname
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            writer.writerow([1, -0.25, 7] + [999.0] * n_rois + [0, 0, 0, 0, 0])
+            writer.writerow([2, 0.0, 1] + [10.0 + i for i in range(n_rois)] + [0, 0, 0, 0, 0])
+            writer.writerow([3, 0.0, 2] + [100.0 + i for i in range(n_rois)] + [0, 0, 0, 0, 0])
+            writer.writerow([4, 1.0, 1] + [20.0 + i for i in range(n_rois)] + [0, 0, 0, 0, 0])
+            writer.writerow([5, 1.0, 2] + [200.0 + i for i in range(n_rois)] + [0, 0, 0, 0, 0])
+
+
 def _write_stale_baseline_config(path):
     stale_cfg = {
         "target_fs_hz": 50.0,
@@ -283,6 +311,59 @@ def test_dataset_switch_recomputes_contract_without_stale_values(window, tmp_pat
     assert effective["chunk_duration_sec"] == pytest.approx(60.0, abs=1e-6)
     assert effective["rwd_time_col"] == "Time(s)"
     assert effective["uv_suffix"] == "-415"
+
+
+def test_vendor_style_npm_selection_overrides_stale_time_column(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_npm_timestamp"
+    _write_vendor_style_npm_dataset(
+        dataset_root,
+        n_rois=2,
+        time_col="Timestamp",
+        filenames=[
+            "photometryData2025-03-05T15_37_44.csv",
+            "photometryData2025-03-05T15_38_01.csv",
+        ],
+    )
+
+    stale_cfg = tmp_path / "stale_npm_baseline.yaml"
+    stale_cfg.write_text(
+        yaml.safe_dump(
+            {
+                "target_fs_hz": 20.0,
+                "chunk_duration_sec": 600.0,
+                "npm_time_axis": "system_timestamp",
+                "npm_system_ts_col": "SystemTimestamp",
+                "npm_computer_ts_col": "ComputerTimestamp",
+                "npm_led_col": "LedState",
+                "npm_region_prefix": "Region",
+                "npm_region_suffix": "G",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("auto")
+
+    spec = window._build_run_spec(validate_only=True)
+    assert spec.data_contract_overrides["npm_time_axis"] == "system_timestamp"
+    assert spec.data_contract_overrides["npm_system_ts_col"] == "Timestamp"
+    assert spec.data_contract_overrides["npm_led_col"] == "LedState"
+
+    argv = window._build_argv(validate_only=True)
+    assert "--config" in argv
+    cfg_path = os.path.join(window._current_run_dir, "config_effective.yaml")
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        effective = yaml.safe_load(f)
+
+    assert effective["npm_time_axis"] == "system_timestamp"
+    assert effective["npm_system_ts_col"] == "Timestamp"
+    assert effective["npm_led_col"] == "LedState"
 
 
 def test_rwd_contract_inference_supports_clear_millisecond_timestamps(window, tmp_path):

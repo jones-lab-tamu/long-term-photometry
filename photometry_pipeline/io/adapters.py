@@ -201,18 +201,36 @@ def _looks_like_npm_header(columns: List[str], config: Config) -> bool:
     if not columns:
         return False
 
-    time_col = (
-        config.npm_system_ts_col
-        if config.npm_time_axis == "system_timestamp"
-        else config.npm_computer_ts_col
-    )
-    has_time = time_col in columns
+    time_col = _resolve_npm_time_col(columns, config)
+    has_time = time_col is not None
     has_led = config.npm_led_col in columns
     has_roi = any(
         c.startswith(config.npm_region_prefix) and c.endswith(config.npm_region_suffix)
         for c in columns
     )
     return has_time and has_led and has_roi
+
+
+def _resolve_npm_time_col(columns: List[str], config: Config) -> Optional[str]:
+    """
+    Resolve active NPM time column for loader/sniff.
+
+    Primary rule is config-driven. For system-timestamp mode only, allow the
+    narrow vendor alias `Timestamp` when configured `npm_system_ts_col` is
+    absent, so default config can ingest real vendor exports.
+    """
+    if config.npm_time_axis == "system_timestamp":
+        primary = config.npm_system_ts_col
+        if primary in columns:
+            return primary
+        if "Timestamp" in columns:
+            return "Timestamp"
+        return None
+
+    primary = config.npm_computer_ts_col
+    if primary in columns:
+        return primary
+    return None
 
 
 def _npm_roi_sort_key(col: str, prefix: str, suffix: str) -> Tuple[int, int, str]:
@@ -439,8 +457,14 @@ def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
 def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
     df = pd.read_csv(path)
     
-    time_col = config.npm_system_ts_col if config.npm_time_axis == 'system_timestamp' else config.npm_computer_ts_col
-    if time_col not in df.columns: raise ValueError(f"NPM: Missing {time_col}")
+    time_col = _resolve_npm_time_col([str(c) for c in df.columns], config)
+    expected_time_col = (
+        config.npm_system_ts_col
+        if config.npm_time_axis == 'system_timestamp'
+        else config.npm_computer_ts_col
+    )
+    if time_col is None:
+        raise ValueError(f"NPM: Missing {expected_time_col}")
     if config.npm_led_col not in df.columns: raise ValueError(f"NPM: Missing {config.npm_led_col}")
         
     t_full = df[time_col].values

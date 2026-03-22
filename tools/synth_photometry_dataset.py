@@ -576,6 +576,59 @@ def _write_vendor_rwd_chunk_csv(path, frame_df, metadata_blob):
         writer.writerow(header)
         writer.writerows(frame_df.itertuples(index=False, name=None))
 
+
+def _build_vendor_npm_filename(chunk_start_dt):
+    return f"photometryData{chunk_start_dt.strftime('%Y-%m-%dT%H_%M_%S')}.csv"
+
+
+def _build_vendor_npm_frame_df(cfg, t_local, uv_data_all, sig_data_all):
+    """
+    Build one vendor-style NPM session CSV frame.
+
+    Output contract:
+    - flat CSV session file
+    - alternating LedState rows (1=UV, 2=SIG)
+    - per-ROI Region*G-style value columns driven by config prefix/suffix
+    - active and secondary timestamp columns both present and aligned
+    """
+    n_samples_chunk = int(len(t_local))
+    n_total = 2 * n_samples_chunk
+
+    frames = np.arange(n_total, dtype=int)
+    leds = np.zeros(n_total, dtype=int)
+    leds[0::2] = 1  # UV
+    leds[1::2] = 2  # SIG
+
+    # Vendor-style paired rows: UV/SIG share the same nominal sample timestamp.
+    t_interleaved = np.zeros(n_total, dtype=float)
+    t_interleaved[0::2] = t_local
+    t_interleaved[1::2] = t_local
+
+    if cfg.npm_time_axis == "system_timestamp":
+        t_col_primary = cfg.npm_system_ts_col
+        t_col_secondary = cfg.npm_computer_ts_col
+    else:
+        t_col_primary = cfg.npm_computer_ts_col
+        t_col_secondary = cfg.npm_system_ts_col
+
+    cols = {
+        cfg.npm_frame_col: frames,
+        t_col_primary: t_interleaved,
+        cfg.npm_led_col: leds,
+    }
+    if t_col_secondary != t_col_primary:
+        cols[t_col_secondary] = t_interleaved
+
+    for i in range(len(uv_data_all)):
+        col_name = f"{cfg.npm_region_prefix}{i}{cfg.npm_region_suffix}"
+        vals = np.zeros(n_total, dtype=float)
+        vals[0::2] = uv_data_all[i]
+        vals[1::2] = sig_data_all[i]
+        cols[col_name] = vals
+
+    return pd.DataFrame(cols)
+
+
 def main():
     args = parse_args()
     
@@ -923,46 +976,15 @@ def main():
             )
             
         elif args.format == 'npm':
-            fname = f"photometryData{chunk_start_dt.strftime('%Y-%m-%dT%H_%M_%S')}.csv"
+            fname = _build_vendor_npm_filename(chunk_start_dt)
             fpath = os.path.join(args.out, fname)
-            
-            half_dt = 0.5 / args.fs_hz
-            n_total = 2 * n_samples_chunk
-            
-            frames = np.arange(n_total)
-            leds = np.zeros(n_total, dtype=int)
-            leds[0::2] = 1 # UV
-            leds[1::2] = 2 # Sig
-            
-            # Timestamps
-            t_base = t_local
-            t_interleaved = np.zeros(n_total)
-            t_interleaved[0::2] = t_base
-            t_interleaved[1::2] = t_base + half_dt
-            
-            cols = {}
-            cols[cfg.npm_frame_col] = frames
-            cols[cfg.npm_led_col] = leds
-            
-            t_col_sys = cfg.npm_system_ts_col
-            t_col_comp = cfg.npm_computer_ts_col
-            
-            if cfg.npm_time_axis == 'system_timestamp':
-                cols[t_col_sys] = t_interleaved
-                cols[t_col_comp] = t_interleaved 
-            else:
-                cols[t_col_comp] = t_interleaved
-                cols[t_col_sys] = t_interleaved
-            
-            for i in range(args.n_rois):
-                col_name = f"{cfg.npm_region_prefix}{i}{cfg.npm_region_suffix}"
-                vals = np.zeros(n_total)
-                vals[0::2] = uv_data_all[i]
-                vals[1::2] = sig_data_all[i]
-                cols[col_name] = vals
-                
-            df_temp = pd.DataFrame(cols)
-            df_temp.to_csv(fpath, index=False)
+            df_vendor_npm = _build_vendor_npm_frame_df(
+                cfg=cfg,
+                t_local=t_local,
+                uv_data_all=uv_data_all,
+                sig_data_all=sig_data_all,
+            )
+            df_vendor_npm.to_csv(fpath, index=False)
             
     # Verify Phase Locking
     # Verify Phase Locking

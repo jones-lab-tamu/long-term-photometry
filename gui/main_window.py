@@ -2590,6 +2590,136 @@ class MainWindow(QMainWindow):
         )
 
     @staticmethod
+    def _discover_npm_csv_files(input_path: str) -> list[str]:
+        if os.path.isfile(input_path) and input_path.lower().endswith(".csv"):
+            return [input_path]
+        if not os.path.isdir(input_path):
+            return []
+        files = sorted(
+            os.path.join(input_path, name)
+            for name in os.listdir(input_path)
+            if name.lower().endswith(".csv")
+        )
+        from photometry_pipeline.io.adapters import sort_npm_files
+        return sort_npm_files(files)
+
+    @staticmethod
+    def _looks_like_npm_header_row(columns: list[str], cfg: Config) -> bool:
+        has_led = cfg.npm_led_col in columns
+        has_roi = any(
+            col.startswith(cfg.npm_region_prefix) and col.endswith(cfg.npm_region_suffix)
+            for col in columns
+        )
+        has_time = (
+            "Timestamp" in columns
+            or cfg.npm_system_ts_col in columns
+            or cfg.npm_computer_ts_col in columns
+            or "SystemTimestamp" in columns
+            or "ComputerTimestamp" in columns
+        )
+        return has_time and has_led and has_roi
+
+    def _infer_npm_chunk_contract(self, csv_path: str, cfg: Config) -> dict:
+        with open(csv_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
+            reader = csv.reader(f)
+            try:
+                header = next(reader)
+            except StopIteration:
+                raise ValueError(f"Empty NPM CSV: {csv_path}")
+        cols = self._normalize_csv_cells(header)
+        if not self._looks_like_npm_header_row(cols, cfg):
+            raise ValueError(f"No recognizable NPM header row found in: {csv_path}")
+
+        if "Timestamp" in cols:
+            time_col = "Timestamp"
+            time_axis = "system_timestamp"
+        elif cfg.npm_system_ts_col in cols:
+            time_col = cfg.npm_system_ts_col
+            time_axis = "system_timestamp"
+        elif "SystemTimestamp" in cols:
+            time_col = "SystemTimestamp"
+            time_axis = "system_timestamp"
+        elif cfg.npm_computer_ts_col in cols:
+            time_col = cfg.npm_computer_ts_col
+            time_axis = "computer_timestamp"
+        elif "ComputerTimestamp" in cols:
+            time_col = "ComputerTimestamp"
+            time_axis = "computer_timestamp"
+        else:
+            raise ValueError(f"No recognizable NPM time column found in: {csv_path}")
+
+        return {
+            "csv_path": csv_path,
+            "time_col": time_col,
+            "time_axis": time_axis,
+            "led_col": cfg.npm_led_col,
+            "region_prefix": cfg.npm_region_prefix,
+            "region_suffix": cfg.npm_region_suffix,
+        }
+
+    def _infer_npm_dataset_contract_overrides(self, fmt_text: str) -> dict:
+        if fmt_text not in ("auto", "npm"):
+            return {}
+
+        input_path = self._input_dir.text().strip()
+        csv_paths = self._discover_npm_csv_files(input_path)
+        if not csv_paths:
+            return {}
+
+        cfg = self._active_baseline_config()
+        try:
+            base = self._infer_npm_chunk_contract(csv_paths[0], cfg)
+        except ValueError:
+            if fmt_text == "npm":
+                raise
+            return {}
+        contracts = [base]
+        for path in csv_paths[1:]:
+            contracts.append(self._infer_npm_chunk_contract(path, cfg))
+
+        for idx, contract in enumerate(contracts[1:], start=1):
+            if contract["time_col"] != base["time_col"] or contract["time_axis"] != base["time_axis"]:
+                raise ValueError(
+                    "Inconsistent NPM contract across files: "
+                    f"time column mismatch at file {idx} ({contract['csv_path']}). "
+                    f"Expected axis/col ({base['time_axis']}, {base['time_col']}), "
+                    f"got ({contract['time_axis']}, {contract['time_col']})."
+                )
+            if (
+                contract["led_col"] != base["led_col"]
+                or contract["region_prefix"] != base["region_prefix"]
+                or contract["region_suffix"] != base["region_suffix"]
+            ):
+                raise ValueError(
+                    "Inconsistent NPM contract across files: "
+                    f"header semantics mismatch at file {idx} ({contract['csv_path']})."
+                )
+
+        out = {
+            "npm_time_axis": str(base["time_axis"]),
+            "npm_led_col": str(base["led_col"]),
+            "npm_region_prefix": str(base["region_prefix"]),
+            "npm_region_suffix": str(base["region_suffix"]),
+        }
+        if base["time_axis"] == "system_timestamp":
+            out["npm_system_ts_col"] = str(base["time_col"])
+        else:
+            out["npm_computer_ts_col"] = str(base["time_col"])
+        return out
+
+    def _infer_dataset_contract_overrides(self, fmt_text: str) -> dict:
+        """
+        Resolve dataset-derived overrides for NPM/RWD without broad guessing.
+
+        For auto format, prefer NPM contract detection first, then fall back to
+        existing RWD contract inference.
+        """
+        npm_overrides = self._infer_npm_dataset_contract_overrides(fmt_text)
+        if npm_overrides:
+            return npm_overrides
+        return self._infer_rwd_dataset_contract_overrides(fmt_text)
+
+    @staticmethod
     def _infer_rwd_suffixes_from_header(columns: list[str]) -> tuple[str, str] | None:
         base_to_suffixes: dict[str, set[str]] = {}
         for col in columns:
@@ -3168,9 +3298,9 @@ class MainWindow(QMainWindow):
         # Ensure effective config tracks the selected RWD dataset contract.
         # This prevents stale/default baseline config values (e.g., fs/suffix/time-col)
         # from conflicting with the currently selected input data.
-        t_contract = self._timing_start("rwd_contract_inference")
-        data_contract_overrides = self._infer_rwd_dataset_contract_overrides(fmt)
-        self._timing_end("rwd_contract_inference", t_contract)
+        t_contract = self._timing_start("dataset_contract_inference")
+        data_contract_overrides = self._infer_dataset_contract_overrides(fmt)
+        self._timing_end("dataset_contract_inference", t_contract)
         if not isinstance(data_contract_overrides, dict):
             data_contract_overrides = {}
 
@@ -3401,9 +3531,9 @@ class MainWindow(QMainWindow):
         """
         t_discovery_spec = self._timing_start("build_discovery_spec")
         fmt = self._format_combo.currentText()
-        t_contract = self._timing_start("rwd_contract_inference_discovery")
-        data_contract_overrides = self._infer_rwd_dataset_contract_overrides(fmt)
-        self._timing_end("rwd_contract_inference_discovery", t_contract)
+        t_contract = self._timing_start("dataset_contract_inference_discovery")
+        data_contract_overrides = self._infer_dataset_contract_overrides(fmt)
+        self._timing_end("dataset_contract_inference_discovery", t_contract)
         if not isinstance(data_contract_overrides, dict):
             data_contract_overrides = {}
         spec = RunSpec(

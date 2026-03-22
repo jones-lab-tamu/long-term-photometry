@@ -1,5 +1,8 @@
 import csv
+import json
 import os
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -348,3 +351,70 @@ def test_npm_auto_sniff_uses_loader_required_columns_not_framecounter(tmp_path):
     _write_csv(str(path), header, rows)
 
     assert sniff_format(str(path), cfg) == "npm"
+
+
+def test_npm_vendor_timestamp_alias_loads_with_default_config(tmp_path):
+    cfg = Config(
+        allow_partial_final_chunk=True,
+        target_fs_hz=1.0,
+        chunk_duration_sec=2.0,
+    )
+    path = tmp_path / "vendor_timestamp.csv"
+    header = ["FrameCounter", "Timestamp", "LedState", "Region0G"]
+    rows = [
+        [1, -0.25, 7, 999.0],  # vendor startup/system noise row should be ignored
+        [2, 0.0, 1, 10.0],
+        [3, 0.0, 2, 100.0],
+        [4, 1.0, 1, 20.0],
+        [5, 1.0, 2, 200.0],
+    ]
+    _write_csv(str(path), header, rows)
+
+    assert sniff_format(str(path), cfg) == "npm"
+    chunk = load_chunk(str(path), "npm", cfg, chunk_id=0)
+    np.testing.assert_allclose(chunk.uv_raw[:, 0], np.array([10.0, 20.0]))
+    np.testing.assert_allclose(chunk.sig_raw[:, 0], np.array([100.0, 200.0]))
+
+
+def test_cli_discovery_accepts_vendor_timestamp_with_default_npm_config(tmp_path):
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "allow_partial_final_chunk: true",
+                "target_fs_hz: 1.0",
+                "chunk_duration_sec: 2.0",
+                # Intentionally omit npm_* overrides so Config defaults apply.
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    csv_path = tmp_path / "photometryData2025-03-05T15_37_44.csv"
+    header = ["FrameCounter", "Timestamp", "LedState", "Region0G", "Stimulation", "Output0", "Input0"]
+    rows = [
+        [1, -0.25, 7, 999.0, 0, 0, 0],
+        [2, 0.0, 1, 10.0, 0, 0, 0],
+        [3, 0.0, 2, 100.0, 0, 0, 0],
+        [4, 1.0, 1, 20.0, 0, 0, 0],
+        [5, 1.0, 2, 200.0, 0, 0, 0],
+    ]
+    _write_csv(str(csv_path), header, rows)
+
+    cmd = [
+        sys.executable,
+        "tools/run_full_pipeline_deliverables.py",
+        "--input",
+        str(tmp_path),
+        "--config",
+        str(cfg_path),
+        "--format",
+        "auto",
+        "--discover",
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    assert res.returncode == 0, f"STDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+    payload = json.loads(res.stdout)
+    assert payload["resolved_format"] == "NPM"
+    assert payload["n_total_discovered"] == 1
