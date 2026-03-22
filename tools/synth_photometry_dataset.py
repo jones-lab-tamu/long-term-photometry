@@ -587,9 +587,10 @@ def _build_vendor_npm_frame_df(cfg, t_local, uv_data_all, sig_data_all):
 
     Output contract:
     - flat CSV session file
+    - vendor-style active time column: Timestamp
     - alternating LedState rows (1=UV, 2=SIG)
-    - per-ROI Region*G-style value columns driven by config prefix/suffix
-    - active and secondary timestamp columns both present and aligned
+    - vendor-style control/digital columns present
+    - per-ROI Region*G-style value columns
     """
     n_samples_chunk = int(len(t_local))
     n_total = 2 * n_samples_chunk
@@ -604,23 +605,19 @@ def _build_vendor_npm_frame_df(cfg, t_local, uv_data_all, sig_data_all):
     t_interleaved[0::2] = t_local
     t_interleaved[1::2] = t_local
 
-    if cfg.npm_time_axis == "system_timestamp":
-        t_col_primary = cfg.npm_system_ts_col
-        t_col_secondary = cfg.npm_computer_ts_col
-    else:
-        t_col_primary = cfg.npm_computer_ts_col
-        t_col_secondary = cfg.npm_system_ts_col
-
     cols = {
-        cfg.npm_frame_col: frames,
-        t_col_primary: t_interleaved,
-        cfg.npm_led_col: leds,
+        "FrameCounter": frames,
+        "Timestamp": t_interleaved,
+        "LedState": leds,
+        "Stimulation": np.zeros(n_total, dtype=int),
+        "Output0": np.zeros(n_total, dtype=int),
+        "Output1": np.zeros(n_total, dtype=int),
+        "Input0": np.zeros(n_total, dtype=int),
+        "Input1": np.zeros(n_total, dtype=int),
     }
-    if t_col_secondary != t_col_primary:
-        cols[t_col_secondary] = t_interleaved
 
     for i in range(len(uv_data_all)):
-        col_name = f"{cfg.npm_region_prefix}{i}{cfg.npm_region_suffix}"
+        col_name = f"Region{i}G"
         vals = np.zeros(n_total, dtype=float)
         vals[0::2] = uv_data_all[i]
         vals[1::2] = sig_data_all[i]

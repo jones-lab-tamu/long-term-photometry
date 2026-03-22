@@ -2648,6 +2648,98 @@ class MainWindow(QMainWindow):
         else:
             raise ValueError(f"No recognizable NPM time column found in: {csv_path}")
 
+        if cfg.npm_led_col not in cols:
+            raise ValueError(f"Missing required NPM LED column '{cfg.npm_led_col}' in: {csv_path}")
+        led_idx = cols.index(cfg.npm_led_col)
+        time_idx = cols.index(time_col)
+
+        t_uv: list[float] = []
+        t_sig: list[float] = []
+        with open(csv_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
+            reader = csv.reader(f)
+            next(reader, None)  # header
+            for row in reader:
+                norm = self._normalize_csv_cells(row)
+                if time_idx >= len(norm) or led_idx >= len(norm):
+                    continue
+                t_cell = norm[time_idx]
+                led_cell = norm[led_idx]
+                if not t_cell or not led_cell:
+                    continue
+                try:
+                    t_val = float(t_cell)
+                    led_val = int(float(led_cell))
+                except Exception:
+                    continue
+                if led_val == 1:
+                    t_uv.append(t_val)
+                elif led_val == 2:
+                    t_sig.append(t_val)
+
+        def _finite_strict(values: list[float], label: str) -> list[float]:
+            out = [v for v in values if math.isfinite(v)]
+            if len(out) < 2:
+                raise ValueError(
+                    f"NPM contract inference: insufficient finite {label} samples in: {csv_path}"
+                )
+            if any((out[i + 1] - out[i]) <= 0 for i in range(len(out) - 1)):
+                raise ValueError(
+                    f"NPM contract inference: non-increasing {label} timestamps in: {csv_path}"
+                )
+            return out
+
+        t_uv_f = _finite_strict(t_uv, "UV (LedState=1)")
+        t_sig_f = _finite_strict(t_sig, "SIG (LedState=2)")
+
+        # Match strict loader alignment semantics:
+        # t0 = max(min(t_uv), min(t_sig)), then derive relative streams.
+        t0 = max(float(t_uv_f[0]), float(t_sig_f[0]))
+        t_uv_rel = [t - t0 for t in t_uv_f if (t - t0) >= 0.0]
+        t_sig_rel = [t - t0 for t in t_sig_f if (t - t0) >= 0.0]
+
+        t_uv_rel = _finite_strict(t_uv_rel, "UV relative")
+        t_sig_rel = _finite_strict(t_sig_rel, "SIG relative")
+
+        def _infer_fs(rel_values: list[float], label: str) -> float:
+            dt = [rel_values[i + 1] - rel_values[i] for i in range(len(rel_values) - 1)]
+            if any(x <= 0 for x in dt):
+                raise ValueError(
+                    f"NPM contract inference: invalid {label} dt (non-positive) in: {csv_path}"
+                )
+            med_dt = float(median(dt))
+            if med_dt <= 0:
+                raise ValueError(
+                    f"NPM contract inference: invalid {label} median dt in: {csv_path}"
+                )
+            return 1.0 / med_dt
+
+        fs_uv = _infer_fs(t_uv_rel, "UV")
+        fs_sig = _infer_fs(t_sig_rel, "SIG")
+        fs_tol = max(1e-6, max(fs_uv, fs_sig) * 1e-3)
+        if not math.isclose(fs_uv, fs_sig, rel_tol=0.0, abs_tol=fs_tol):
+            raise ValueError(
+                "NPM contract inference: UV/SIG cadence mismatch in "
+                f"{csv_path}. UV fs={fs_uv:.9f}, SIG fs={fs_sig:.9f}."
+            )
+        inferred_fs = float((fs_uv + fs_sig) / 2.0)
+
+        # Align chunk_duration to strict loader grid semantics:
+        # n_target = round(chunk_duration_sec * target_fs_hz),
+        # grid = arange(n_target) / target_fs_hz.
+        sample_count = min(len(t_uv_rel), len(t_sig_rel))
+        if sample_count < 2:
+            raise ValueError(
+                f"NPM contract inference: insufficient aligned UV/SIG samples in: {csv_path}"
+            )
+        chunk_duration_sec = sample_count / inferred_fs
+        n_target = int(round(chunk_duration_sec * inferred_fs))
+        if n_target != sample_count:
+            raise ValueError(
+                "NPM contract inference failed strict grid compatibility for "
+                f"{csv_path}: sample_count={sample_count}, fs={inferred_fs:.9f}, "
+                f"chunk_duration_sec={chunk_duration_sec:.9f}, n_target={n_target}."
+            )
+
         return {
             "csv_path": csv_path,
             "time_col": time_col,
@@ -2655,6 +2747,9 @@ class MainWindow(QMainWindow):
             "led_col": cfg.npm_led_col,
             "region_prefix": cfg.npm_region_prefix,
             "region_suffix": cfg.npm_region_suffix,
+            "fs_hz": float(inferred_fs),
+            "chunk_duration_sec": float(chunk_duration_sec),
+            "sample_count": int(sample_count),
         }
 
     def _infer_npm_dataset_contract_overrides(self, fmt_text: str) -> dict:
@@ -2677,6 +2772,8 @@ class MainWindow(QMainWindow):
         for path in csv_paths[1:]:
             contracts.append(self._infer_npm_chunk_contract(path, cfg))
 
+        fs_tol = max(1e-6, base["fs_hz"] * 1e-4)
+        dur_tol = max(1e-6, base["chunk_duration_sec"] * 1e-4)
         for idx, contract in enumerate(contracts[1:], start=1):
             if contract["time_col"] != base["time_col"] or contract["time_axis"] != base["time_axis"]:
                 raise ValueError(
@@ -2694,12 +2791,37 @@ class MainWindow(QMainWindow):
                     "Inconsistent NPM contract across files: "
                     f"header semantics mismatch at file {idx} ({contract['csv_path']})."
                 )
+            if not math.isclose(contract["fs_hz"], base["fs_hz"], rel_tol=0.0, abs_tol=fs_tol):
+                raise ValueError(
+                    "Inconsistent NPM contract across files: "
+                    f"timing mismatch at file {idx} ({contract['csv_path']}). "
+                    f"Expected fs {base['fs_hz']:.9f}, got {contract['fs_hz']:.9f}."
+                )
+            if not math.isclose(
+                contract["chunk_duration_sec"],
+                base["chunk_duration_sec"],
+                rel_tol=0.0,
+                abs_tol=dur_tol,
+            ):
+                raise ValueError(
+                    "Inconsistent NPM contract across files: "
+                    f"chunk duration mismatch at file {idx} ({contract['csv_path']}). "
+                    f"Expected {base['chunk_duration_sec']:.9f}, got {contract['chunk_duration_sec']:.9f}."
+                )
+            if contract["sample_count"] != base["sample_count"]:
+                raise ValueError(
+                    "Inconsistent NPM contract across files: "
+                    f"sample_count mismatch at file {idx} ({contract['csv_path']}). "
+                    f"Expected {base['sample_count']}, got {contract['sample_count']}."
+                )
 
         out = {
             "npm_time_axis": str(base["time_axis"]),
             "npm_led_col": str(base["led_col"]),
             "npm_region_prefix": str(base["region_prefix"]),
             "npm_region_suffix": str(base["region_suffix"]),
+            "target_fs_hz": float(round(base["fs_hz"], 9)),
+            "chunk_duration_sec": float(round(base["chunk_duration_sec"], 9)),
         }
         if base["time_axis"] == "system_timestamp":
             out["npm_system_ts_col"] = str(base["time_col"])

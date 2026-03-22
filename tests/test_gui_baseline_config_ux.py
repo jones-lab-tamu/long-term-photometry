@@ -93,26 +93,49 @@ def _write_vendor_style_npm_dataset(
     n_rois: int = 2,
     time_col: str = "Timestamp",
     filenames: list[str] | None = None,
+    fs_hz: float | None = None,
+    chunk_duration_sec: float | None = None,
 ):
     root_dir.mkdir(parents=True, exist_ok=True)
     if filenames is None:
         filenames = ["photometryData2025-03-05T15_37_44.csv"]
 
-    header = ["FrameCounter", time_col, "LedState"]
+    header = [
+        "FrameCounter",
+        time_col,
+        "LedState",
+        "Stimulation",
+        "Output0",
+        "Output1",
+        "Input0",
+        "Input1",
+    ]
     for i in range(n_rois):
         header.append(f"Region{i}G")
-    header.extend(["Stimulation", "Output0", "Output1", "Input0", "Input1"])
 
     for fname in filenames:
         csv_path = root_dir / fname
         with open(csv_path, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(header)
-            writer.writerow([1, -0.25, 7] + [999.0] * n_rois + [0, 0, 0, 0, 0])
-            writer.writerow([2, 0.0, 1] + [10.0 + i for i in range(n_rois)] + [0, 0, 0, 0, 0])
-            writer.writerow([3, 0.0, 2] + [100.0 + i for i in range(n_rois)] + [0, 0, 0, 0, 0])
-            writer.writerow([4, 1.0, 1] + [20.0 + i for i in range(n_rois)] + [0, 0, 0, 0, 0])
-            writer.writerow([5, 1.0, 2] + [200.0 + i for i in range(n_rois)] + [0, 0, 0, 0, 0])
+            if fs_hz is None or chunk_duration_sec is None:
+                writer.writerow([1, -0.25, 7, 0, 0, 0, 0, 0] + [999.0] * n_rois)
+                writer.writerow([2, 0.0, 1, 0, 0, 0, 0, 0] + [10.0 + i for i in range(n_rois)])
+                writer.writerow([3, 0.0, 2, 0, 0, 0, 0, 0] + [100.0 + i for i in range(n_rois)])
+                writer.writerow([4, 1.0, 1, 0, 0, 0, 0, 0] + [20.0 + i for i in range(n_rois)])
+                writer.writerow([5, 1.0, 2, 0, 0, 0, 0, 0] + [200.0 + i for i in range(n_rois)])
+                continue
+
+            n_samples = int(round(float(fs_hz) * float(chunk_duration_sec)))
+            frame = 1
+            for idx in range(n_samples):
+                t_val = idx / float(fs_hz)
+                uv_vals = [10.0 + i + 0.001 * idx for i in range(n_rois)]
+                sig_vals = [100.0 + i + 0.001 * idx for i in range(n_rois)]
+                writer.writerow([frame, t_val, 1, 0, 0, 0, 0, 0] + uv_vals)
+                frame += 1
+                writer.writerow([frame, t_val, 2, 0, 0, 0, 0, 0] + sig_vals)
+                frame += 1
 
 
 def _write_stale_baseline_config(path):
@@ -364,6 +387,127 @@ def test_vendor_style_npm_selection_overrides_stale_time_column(window, tmp_path
     assert effective["npm_time_axis"] == "system_timestamp"
     assert effective["npm_system_ts_col"] == "Timestamp"
     assert effective["npm_led_col"] == "LedState"
+
+
+def test_vendor_style_npm_selection_overrides_stale_timing_contract(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_npm_20hz_600s"
+    _write_vendor_style_npm_dataset(
+        dataset_root,
+        n_rois=2,
+        time_col="Timestamp",
+        filenames=["photometryData2025-03-05T15_37_44.csv"],
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+    )
+
+    stale_cfg = tmp_path / "stale_npm_timing_baseline.yaml"
+    stale_cfg.write_text(
+        yaml.safe_dump(
+            {
+                "target_fs_hz": 50.0,
+                "chunk_duration_sec": 600.0,
+                "npm_time_axis": "system_timestamp",
+                "npm_system_ts_col": "SystemTimestamp",
+                "npm_computer_ts_col": "ComputerTimestamp",
+                "npm_led_col": "LedState",
+                "npm_region_prefix": "Region",
+                "npm_region_suffix": "G",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("npm")
+
+    spec = window._build_run_spec(validate_only=True)
+    assert spec.data_contract_overrides["npm_system_ts_col"] == "Timestamp"
+    assert spec.data_contract_overrides["target_fs_hz"] == pytest.approx(20.0, abs=1e-6)
+    assert spec.data_contract_overrides["chunk_duration_sec"] == pytest.approx(600.0, abs=1e-6)
+
+    argv = window._build_argv(validate_only=True)
+    assert "--config" in argv
+    cfg_path = os.path.join(window._current_run_dir, "config_effective.yaml")
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        effective = yaml.safe_load(f)
+
+    fs = float(effective["target_fs_hz"])
+    chunk_duration = float(effective["chunk_duration_sec"])
+    n_target = int(round(chunk_duration * fs))
+    grid_end = (n_target - 1) / fs
+    tol = 1.0 / fs
+
+    csv_path = dataset_root / "photometryData2025-03-05T15_37_44.csv"
+    with open(csv_path, "r", encoding="utf-8", newline="") as f:
+        rows = list(csv.reader(f))
+    header = rows[0]
+    time_idx = header.index("Timestamp")
+    led_idx = header.index("LedState")
+    uv_times = [
+        float(r[time_idx])
+        for r in rows[1:]
+        if int(float(r[led_idx])) == 1
+    ]
+    raw_end = max(uv_times)
+
+    assert fs == pytest.approx(20.0, abs=1e-6)
+    assert chunk_duration == pytest.approx(600.0, abs=1e-6)
+    assert raw_end == pytest.approx(599.95, abs=1e-6)
+    assert grid_end == pytest.approx(599.95, abs=1e-6)
+    assert raw_end >= (grid_end - tol)
+
+
+def test_npm_contract_inference_rejects_inconsistent_multifile_timing(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_npm_inconsistent_timing"
+    _write_vendor_style_npm_dataset(
+        dataset_root,
+        n_rois=2,
+        time_col="Timestamp",
+        filenames=["photometryData2025-03-05T15_37_44.csv"],
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+    )
+    _write_vendor_style_npm_dataset(
+        dataset_root,
+        n_rois=2,
+        time_col="Timestamp",
+        filenames=["photometryData2025-03-05T16_07_44.csv"],
+        fs_hz=25.0,
+        chunk_duration_sec=600.0,
+    )
+
+    stale_cfg = tmp_path / "stale_npm_inconsistent_timing.yaml"
+    stale_cfg.write_text(
+        yaml.safe_dump(
+            {
+                "target_fs_hz": 50.0,
+                "chunk_duration_sec": 600.0,
+                "npm_time_axis": "system_timestamp",
+                "npm_system_ts_col": "SystemTimestamp",
+                "npm_computer_ts_col": "ComputerTimestamp",
+                "npm_led_col": "LedState",
+                "npm_region_prefix": "Region",
+                "npm_region_suffix": "G",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("npm")
+
+    with pytest.raises(ValueError, match="Inconsistent NPM contract across files: timing mismatch"):
+        window._build_run_spec(validate_only=True)
 
 
 def test_rwd_contract_inference_supports_clear_millisecond_timestamps(window, tmp_path):

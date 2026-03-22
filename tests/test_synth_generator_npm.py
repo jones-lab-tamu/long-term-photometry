@@ -23,8 +23,8 @@ baseline_percentile: 10
 uv_suffix: "G" 
 sig_suffix: "R" 
 npm_frame_col: FrameCounter
-npm_system_ts_col: SystemTimestamp
-npm_computer_ts_col: ComputerTimestamp
+npm_system_ts_col: Timestamp
+npm_computer_ts_col: Timestamp
 npm_led_col: LedState
 npm_region_prefix: Region
 npm_region_suffix: G
@@ -131,7 +131,7 @@ step_sec: 5.0
         n_night_peaks = 0
         
         # NPM logic: timestamps are in dataframe?
-        # Yes, SystemTimestamp.
+        # Yes, Timestamp.
         
         for i in range(len(files)):
             # Need to get timestamps from file

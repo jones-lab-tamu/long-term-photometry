@@ -130,14 +130,20 @@ def test_legacy_generator_emits_required_npm_columns_and_ledstate_layout(tmp_pat
 
     expected_cols = [
         "FrameCounter",
-        "SystemTimestamp",
+        "Timestamp",
         "LedState",
-        "ComputerTimestamp",
+        "Stimulation",
+        "Output0",
+        "Output1",
+        "Input0",
+        "Input1",
         "Region0G",
         "Region1G",
         "Region2G",
     ]
     assert list(df.columns) == expected_cols
+    assert "SystemTimestamp" not in df.columns
+    assert "ComputerTimestamp" not in df.columns
 
     expected_rows = 2 * fs_hz * (recording_duration_min * 60)
     assert len(df) == expected_rows
@@ -146,6 +152,8 @@ def test_legacy_generator_emits_required_npm_columns_and_ledstate_layout(tmp_pat
     assert set(leds.tolist()) == {1, 2}
     assert (leds[0::2] == 1).all()
     assert (leds[1::2] == 2).all()
+    for col in ("Stimulation", "Output0", "Output1", "Input0", "Input1"):
+        assert (df[col].to_numpy() == 0).all()
 
 
 def test_generated_vendor_npm_is_discoverable_and_loadable_via_shared_paths(tmp_path: Path):
@@ -224,6 +232,9 @@ def test_generated_vendor_npm_runs_cli_and_gui_adjacent_contract(tmp_path: Path)
     )
     effective_cfg = spec.generate_derived_config(str(gui_run_dir))
     RunSpec.validate_effective_config(effective_cfg)
+    disco = spec.run_discovery()
+    assert disco["resolved_format"] == "NPM"
+    assert disco["n_total_discovered"] > 0
     argv = spec.build_runner_argv()
     assert "--format" in argv
     assert argv[argv.index("--format") + 1] == "npm"
