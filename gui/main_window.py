@@ -895,18 +895,97 @@ class MainWindow(QMainWindow):
         """Right pane with the large results viewer."""
         results_group = QGroupBox("Results")
         results_group.setObjectName("resultsPaneShell")
+        results_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         results_lay = QVBoxLayout(results_group)
-        results_lay.setContentsMargins(10, 10, 10, 10)
-        results_lay.setSpacing(10)
+        results_lay.setContentsMargins(8, 8, 8, 8)
+        results_lay.setSpacing(8)
         self._results_layout = results_lay
+
+        self._results_summary_group = QGroupBox("Run Summary")
+        self._results_summary_group.setProperty("workflowSection", True)
+        self._results_summary_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self._results_summary_group.setMaximumHeight(124)
+        summary_layout = QVBoxLayout(self._results_summary_group)
+        summary_layout.setContentsMargins(8, 3, 8, 4)
+        summary_layout.setSpacing(2)
+
+        self._results_summary_title_label = QLabel("No completed run loaded.")
+        self._results_summary_title_label.setObjectName("resultsSummaryHeadline")
+        self._results_summary_title_label.setWordWrap(False)
+        summary_layout.addWidget(self._results_summary_title_label)
+
+        self._results_summary_compact_label = QLabel("Idle")
+        self._results_summary_compact_label.setObjectName("resultsSummaryHint")
+        self._results_summary_compact_label.setWordWrap(False)
+        self._results_summary_compact_label.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Preferred
+        )
+        self._results_summary_compact_label.setVisible(False)
+        summary_layout.addWidget(self._results_summary_compact_label)
+
+        self._results_summary_details_widget = QWidget()
+        summary_details_layout = QVBoxLayout(self._results_summary_details_widget)
+        summary_details_layout.setContentsMargins(0, 0, 0, 0)
+        summary_details_layout.setSpacing(1)
+
+        summary_form = QFormLayout()
+        summary_form.setContentsMargins(0, 0, 0, 0)
+        summary_form.setHorizontalSpacing(8)
+        summary_form.setVerticalSpacing(2)
+        summary_form.setLabelAlignment(Qt.AlignRight | Qt.AlignTop)
+        summary_form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        summary_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        self._results_summary_run_value = QLabel("(none)")
+        self._results_summary_run_value.setWordWrap(False)
+        self._results_summary_run_value.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._results_summary_run_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        summary_form.addRow("Run:", self._results_summary_run_value)
+
+        self._results_summary_state_value = QLabel("Idle")
+        self._results_summary_state_value.setWordWrap(False)
+        self._results_summary_state_value.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        summary_form.addRow("State:", self._results_summary_state_value)
+        summary_details_layout.addLayout(summary_form)
+
+        self._results_summary_hint_label = QLabel(
+            "Run the pipeline or open completed results to populate this workspace."
+        )
+        self._results_summary_hint_label.setObjectName("resultsSummaryHint")
+        self._results_summary_hint_label.setWordWrap(True)
+        self._results_summary_hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        summary_details_layout.addWidget(self._results_summary_hint_label)
+        summary_layout.addWidget(self._results_summary_details_widget)
+        results_lay.addWidget(self._results_summary_group, 0)
+
+        self._results_views_group = QGroupBox("Analysis Outputs")
+        self._results_views_group.setProperty("workflowSection", True)
+        self._results_views_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        views_layout = QVBoxLayout(self._results_views_group)
+        views_layout.setContentsMargins(10, 8, 10, 10)
+        views_layout.setSpacing(8)
+        self._results_views_hint_label = QLabel(
+            "Use the region selector and tabs below to inspect deliverables."
+        )
+        self._results_views_hint_label.setObjectName("resultsSummaryHint")
+        self._results_views_hint_label.setWordWrap(True)
+        views_layout.addWidget(self._results_views_hint_label)
+
         self._report_viewer = RunReportViewer()
         if hasattr(self._report_viewer, "_status_label"):
             self._report_viewer._status_label.setWordWrap(True)
         self._report_viewer.region_changed.connect(self._on_results_region_changed)
-        results_lay.addWidget(self._report_viewer, 1)
+        views_layout.addWidget(self._report_viewer, 1)
+        results_lay.addWidget(self._results_views_group, 1)
+
         self._tuning_group = self._build_tuning_workspace_group()
+        self._tuning_group.setProperty("workflowSection", True)
         self._tuning_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         results_lay.addWidget(self._tuning_group)
+        results_lay.setStretch(0, 0)
+        results_lay.setStretch(1, 1)
+        results_lay.setStretch(2, 0)
+        self._refresh_results_workspace_summary()
         self._update_results_pane_mode_for_tuning()
         return results_group
 
@@ -1592,9 +1671,65 @@ class MainWindow(QMainWindow):
             )
         self._sync_live_log_disclosure_layout(expanded=expanded)
 
+    def _refresh_results_workspace_summary(self) -> None:
+        if not hasattr(self, "_results_summary_title_label"):
+            return
+
+        run_dir = (self._current_run_dir or "").strip()
+        run_name = os.path.basename(run_dir) if run_dir else ""
+        run_display = run_name or "(none)"
+        compact_text = ""
+        show_compact = False
+        show_hint = True
+        show_details = True
+        summary_max_height = 116
+
+        has_loaded_results = bool(
+            hasattr(self, "_report_viewer") and self._report_viewer.has_loaded_results()
+        )
+        if has_loaded_results and run_dir:
+            self._results_summary_title_label.setText("Completed results loaded.")
+            state_text = "Complete-state workspace"
+            if "[PREVIEW]" in self.windowTitle():
+                state_text += " [PREVIEW]"
+            if self._is_any_tuning_subsection_expanded():
+                state_text += " (Post-Run Tuning focused)"
+            hint_text = "Use Analysis Outputs to inspect deliverables."
+            compact_text = f"Run: {run_display} | {state_text}"
+            show_compact = True
+            show_hint = False
+            show_details = False
+            summary_max_height = 68
+        elif self._ui_state in (RunnerState.RUNNING, RunnerState.VALIDATING) or self._runner.is_running():
+            self._results_summary_title_label.setText("Run in progress.")
+            state_text = (
+                "Validating inputs"
+                if self._ui_state == RunnerState.VALIDATING
+                else "Pipeline running"
+            )
+            hint_text = "Monitor progress in the status strip and live log while this run is active."
+        else:
+            self._results_summary_title_label.setText("No completed run loaded.")
+            state_text = "Idle"
+            hint_text = "Run the pipeline or open completed results."
+
+        self._results_summary_run_value.setText(run_display)
+        self._results_summary_run_value.setToolTip(run_dir or "No run directory selected.")
+        self._results_summary_state_value.setText(state_text)
+        self._results_summary_compact_label.setText(compact_text)
+        self._results_summary_compact_label.setToolTip(run_dir or state_text)
+        self._results_summary_compact_label.setVisible(show_compact)
+        self._results_summary_hint_label.setText(hint_text)
+        self._results_summary_hint_label.setVisible(show_hint)
+        self._results_summary_details_widget.setVisible(show_details)
+        self._results_summary_group.setMaximumHeight(summary_max_height)
+        if hasattr(self, "_results_views_hint_label"):
+            self._results_views_hint_label.setVisible(not has_loaded_results)
+
     def _results_idle_placeholder_text(self) -> str:
         return (
             "Results workspace\n"
+            "No completed run is loaded yet.\n"
             "Run the pipeline or open a completed run folder.\n"
             "Results and plots appear here after completion."
         )
@@ -1613,6 +1748,7 @@ class MainWindow(QMainWindow):
                 self._results_idle_placeholder_text(),
                 level="idle",
             )
+        self._refresh_results_workspace_summary()
 
     def _apply_shell_chrome_styles(self) -> None:
         """Shell-level framing and spacing styles (workflow/header modernization only)."""
@@ -1667,6 +1803,15 @@ class MainWindow(QMainWindow):
                 font-weight: 700;
                 color: #223040;
             }
+            QLabel#resultsSummaryHeadline {
+                font-size: 13px;
+                font-weight: 700;
+                color: #1f2937;
+            }
+            QLabel#resultsSummaryHint {
+                font-size: 11px;
+                color: #5f6b7a;
+            }
             """
         )
 
@@ -1710,16 +1855,20 @@ class MainWindow(QMainWindow):
             and not self._tuning_group.isHidden()
             and self._is_any_tuning_subsection_expanded()
         )
+        collapsed_tuning_max_height = 188
+        if hasattr(self, "_results_views_group"):
+            self._results_views_group.setVisible(not expanded_tuning)
         self._report_viewer.setVisible(not expanded_tuning)
         if expanded_tuning:
             self._tuning_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self._tuning_group.setMaximumHeight(16777215)
         else:
             self._tuning_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-            self._tuning_group.setMaximumHeight(16777215)
+            self._tuning_group.setMaximumHeight(collapsed_tuning_max_height)
         if hasattr(self, "_results_layout"):
             self._results_layout.invalidate()
             self._results_layout.activate()
+        self._refresh_results_workspace_summary()
 
     def _on_tuning_disclosure_toggled(self, expanded: bool) -> None:
         if expanded and hasattr(self, "_report_viewer"):
@@ -2022,6 +2171,7 @@ class MainWindow(QMainWindow):
 
     def _on_results_region_changed(self, region: str) -> None:
         if not self._is_complete_workspace_active or not region:
+            self._refresh_results_workspace_summary()
             return
         if self._tuning_roi_combo.findText(region) >= 0:
             self._tuning_roi_combo.setCurrentText(region)
@@ -2030,6 +2180,7 @@ class MainWindow(QMainWindow):
             and self._correction_tuning_roi_combo.findText(region) >= 0
         ):
             self._correction_tuning_roi_combo.setCurrentText(region)
+        self._refresh_results_workspace_summary()
 
     def _on_tuning_roi_changed(self, _index: int) -> None:
         roi = self._tuning_roi_combo.currentText().strip()
@@ -4257,6 +4408,7 @@ class MainWindow(QMainWindow):
         else:
             msg = "Run in progress..."
         self._report_viewer.set_running_message(self._results_running_placeholder_text(msg))
+        self._refresh_results_workspace_summary()
         self._refresh_tuning_workspace_availability()
         self._update_button_states()
         self._timing_end("runner_started_signal", t_started)
@@ -4466,6 +4618,7 @@ class MainWindow(QMainWindow):
         """Switch left pane to compact completion card after successful full runs."""
         self._is_complete_workspace_active = True
         self._update_complete_state_summary()
+        self._refresh_results_workspace_summary()
         if hasattr(self, "_controls_stack"):
             self._controls_stack.setCurrentWidget(self._complete_state_panel)
         self._refresh_splitter_workspace_policy()
@@ -4477,6 +4630,7 @@ class MainWindow(QMainWindow):
     def _exit_complete_state_workspace(self) -> None:
         """Return left pane to editable run controls."""
         self._is_complete_workspace_active = False
+        self._refresh_results_workspace_summary()
         if hasattr(self, "_controls_stack"):
             self._controls_stack.setCurrentWidget(self._config_panel)
         self._refresh_splitter_workspace_policy()

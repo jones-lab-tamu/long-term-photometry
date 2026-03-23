@@ -6,6 +6,7 @@ import tempfile
 import pytest
 import yaml
 from PySide6.QtCore import Qt, QPoint
+from PySide6.QtGui import QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QSizePolicy, QGroupBox, QScrollArea, QSplitter
 
@@ -33,6 +34,39 @@ def _set_minimally_valid_paths(w: MainWindow):
     w._input_dir.setText("tests/out_manual_complex_5roi_5day_2sph_shared")
     w._config_path.setText("tests/qc_universal_config.yaml")
     w._output_dir.setText(tempfile.mkdtemp(prefix="gui_usability_out_"))
+
+
+def _write_png(path: str, width: int = 360, height: int = 220):
+    pix = QPixmap(width, height)
+    pix.fill(Qt.white)
+    assert pix.save(path)
+
+
+def _make_completed_results_fixture(base_dir: str) -> str:
+    run_dir = os.path.join(base_dir, "run_complete_results_m3")
+    os.makedirs(run_dir, exist_ok=True)
+    with open(os.path.join(run_dir, "status.json"), "w", encoding="utf-8") as f:
+        json.dump({"schema_version": 1, "phase": "final", "status": "success"}, f)
+    with open(os.path.join(run_dir, "MANIFEST.json"), "w", encoding="utf-8") as f:
+        json.dump({"status": "success"}, f)
+    with open(os.path.join(run_dir, "run_report.json"), "w", encoding="utf-8") as f:
+        json.dump({"run_context": {"run_type": "full"}}, f)
+
+    for region in ("Region0", "Region1"):
+        summary = os.path.join(run_dir, region, "summary")
+        day_plots = os.path.join(run_dir, region, "day_plots")
+        tables = os.path.join(run_dir, region, "tables")
+        os.makedirs(summary, exist_ok=True)
+        os.makedirs(day_plots, exist_ok=True)
+        os.makedirs(tables, exist_ok=True)
+        _write_png(os.path.join(summary, "phasic_correction_impact.png"))
+        _write_png(os.path.join(summary, "tonic_overview.png"))
+        _write_png(os.path.join(summary, "phasic_auc_timeseries.png"))
+        _write_png(os.path.join(summary, "phasic_peak_rate_timeseries.png"))
+        _write_png(os.path.join(day_plots, "phasic_sig_iso_day_000.png"), 600, 1500)
+        _write_png(os.path.join(day_plots, "phasic_dFF_day_000.png"), 600, 1500)
+        _write_png(os.path.join(day_plots, "phasic_stacked_day_000.png"), 600, 1500)
+    return run_dir
 
 
 def test_effective_run_summary_updates(window):
@@ -218,13 +252,109 @@ def test_results_workspace_idle_placeholder_is_deliberate(window):
     assert "Results and plots appear here after completion." in status_text
 
 
+def test_results_workspace_m3_sections_are_structured(window):
+    assert hasattr(window, "_results_summary_group")
+    assert hasattr(window, "_results_views_group")
+    assert hasattr(window, "_tuning_group")
+    assert hasattr(window, "_open_results_btn")
+    assert window._open_results_btn.text() == "Open Results..."
+    assert window._results_summary_group.title() == "Run Summary"
+    assert window._results_views_group.title() == "Analysis Outputs"
+    assert window._results_summary_group.parentWidget() is window._results_pane
+    assert window._results_views_group.parentWidget() is window._results_pane
+    assert window._report_viewer.parentWidget() is window._results_views_group
+    assert hasattr(window._report_viewer, "_region_combo")
+    assert hasattr(window._report_viewer, "_open_run_report_btn")
+    assert window._report_viewer._open_run_report_btn.text() == "Run Report"
+    assert (
+        window._report_viewer._open_run_report_btn.parentWidget()
+        is window._report_viewer._region_combo.parentWidget()
+    )
+
+
+def test_results_workspace_m3_idle_summary_is_intentional(window):
+    assert "No completed run loaded" in window._results_summary_title_label.text()
+    assert window._results_summary_run_value.text() == "(none)"
+    assert window._results_summary_state_value.text() == "Idle"
+    assert not hasattr(window, "_results_summary_roi_value")
+    assert not hasattr(window, "_results_summary_views_value")
+    assert not window._results_summary_compact_label.isVisible()
+    assert "open completed results" in window._results_summary_hint_label.text().lower()
+    assert not window._results_summary_details_widget.isHidden()
+
+
+def test_results_workspace_m3_loaded_summary_and_roi_context(window, qapp, tmp_path):
+    run_dir = _make_completed_results_fixture(str(tmp_path))
+    window._current_run_dir = run_dir
+    assert window._report_viewer.load_report(run_dir)
+    window._enter_complete_state_workspace()
+    qapp.processEvents()
+
+    assert "Completed results loaded." in window._results_summary_title_label.text()
+    assert window._results_summary_run_value.text() == os.path.basename(run_dir)
+    assert "Complete-state workspace" in window._results_summary_state_value.text()
+    assert not window._results_summary_details_widget.isVisibleTo(window)
+    assert window._results_summary_group.maximumHeight() <= 80
+    assert window._results_summary_compact_label.isVisibleTo(window)
+    assert "Run:" in window._results_summary_compact_label.text()
+    assert "Complete-state workspace" in window._results_summary_compact_label.text()
+    assert not window._results_views_hint_label.isVisibleTo(window)
+    assert window._report_viewer._open_run_report_btn.isEnabled()
+
+    window._report_viewer._region_combo.setCurrentText("Region1")
+    qapp.processEvents()
+    assert window._report_viewer._region_combo.currentText() == "Region1"
+
+
+def test_results_workspace_m3_fit_layout_prioritizes_outputs(window, qapp, tmp_path):
+    run_dir = _make_completed_results_fixture(str(tmp_path))
+    window.resize(1400, 900)
+    window.show()
+    qapp.processEvents()
+
+    window._current_run_dir = run_dir
+    assert window._report_viewer.load_report(run_dir)
+    window._enter_complete_state_workspace()
+    qapp.processEvents()
+
+    assert window._results_summary_group.maximumHeight() <= 130
+    assert window._results_summary_group.sizePolicy().verticalPolicy() == QSizePolicy.Maximum
+    assert window._results_views_group.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
+    assert window._results_layout.stretch(1) == 1
+    assert window._tuning_group.maximumHeight() <= 200
+
+    viewer = window._report_viewer
+    assert viewer._tabs.maximumHeight() <= 50
+    assert viewer._image_scroll.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
+    group_titles = {g.title() for g in viewer.findChildren(QGroupBox)}
+    assert "Selected Region Actions" not in group_titles
+    assert viewer._open_run_report_btn.isEnabled()
+    assert viewer._open_region_summary_btn.isEnabled()
+    assert viewer._open_region_day_plots_btn.isEnabled()
+    assert viewer._open_region_tables_btn.isEnabled()
+
+    results_geo = window._results_views_group.geometry()
+    tuning_geo = window._tuning_group.geometry()
+    assert tuning_geo.top() >= results_geo.bottom() - 1
+    assert viewer._image_scroll.geometry().height() >= 250
+
+
 def test_results_workspace_running_placeholder_is_present(window):
+    window.resize(1200, 850)
+    window.show()
     window._ui_state = RunnerState.RUNNING
     window._on_run_started()
+    qapp = QApplication.instance()
+    if qapp is not None:
+        qapp.processEvents()
     status_text = window._report_viewer._status_label.text()
     assert "Results workspace" in status_text
     assert "Run in progress..." in status_text
     assert "Results and plots will appear here after completion." in status_text
+    assert window._results_summary_details_widget.isVisibleTo(window)
+    assert not window._results_summary_compact_label.isVisibleTo(window)
+    assert window._results_summary_run_value.height() >= max(1, window._results_summary_run_value.sizeHint().height() - 2)
+    assert window._results_summary_state_value.height() >= max(1, window._results_summary_state_value.sizeHint().height() - 2)
 
 
 def test_m1_shell_sections_and_header_structure(window, qapp):

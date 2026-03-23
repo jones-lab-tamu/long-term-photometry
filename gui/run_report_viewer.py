@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
-    QGroupBox,
     QScrollArea,
     QFrame,
     QPushButton,
@@ -60,19 +59,23 @@ class RunReportViewer(QWidget):
         self._active_pixmap = QPixmap()
         self._zoom_mode = False
 
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(8)
+        root.setSpacing(6)
 
         self._status_label = QLabel("No completed results loaded.")
         self._status_label.setAlignment(Qt.AlignCenter)
         self._status_label.setStyleSheet("color: gray; font-size: 14px;")
+        self._status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         root.addWidget(self._status_label)
 
         self._workspace = QWidget()
+        self._workspace.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._workspace.setMinimumHeight(0)
         ws = QVBoxLayout(self._workspace)
         ws.setContentsMargins(0, 0, 0, 0)
-        ws.setSpacing(8)
+        ws.setSpacing(6)
 
         selector_row = QHBoxLayout()
         selector_row.addWidget(QLabel("Region:"))
@@ -80,11 +83,39 @@ class RunReportViewer(QWidget):
         self._region_combo.setToolTip("Select the ROI region shown in the results viewer.")
         self._region_combo.currentIndexChanged.connect(self._on_region_changed)
         selector_row.addWidget(self._region_combo, 1)
+        self._open_run_report_btn = QPushButton("Run Report")
+        self._open_run_report_btn.setToolTip(
+            "Open run_report.json (or MANIFEST.json fallback) for this run."
+        )
+        self._open_run_report_btn.clicked.connect(
+            lambda _checked=False: self._open_path(self._run_summary_path)
+        )
+        selector_row.addWidget(self._open_run_report_btn)
+        self._open_region_summary_btn = QPushButton("Summary")
+        self._open_region_summary_btn.setToolTip("Open the selected region summary folder.")
+        self._open_region_summary_btn.clicked.connect(
+            lambda _checked=False: self._open_selected_region_subpath("summary")
+        )
+        selector_row.addWidget(self._open_region_summary_btn)
+        self._open_region_day_plots_btn = QPushButton("Day Plots")
+        self._open_region_day_plots_btn.setToolTip("Open the selected region day_plots folder.")
+        self._open_region_day_plots_btn.clicked.connect(
+            lambda _checked=False: self._open_selected_region_subpath("day_plots")
+        )
+        selector_row.addWidget(self._open_region_day_plots_btn)
+        self._open_region_tables_btn = QPushButton("Tables")
+        self._open_region_tables_btn.setToolTip("Open the selected region tables folder.")
+        self._open_region_tables_btn.clicked.connect(
+            lambda _checked=False: self._open_selected_region_subpath("tables")
+        )
+        selector_row.addWidget(self._open_region_tables_btn)
         selector_row.addStretch()
         ws.addLayout(selector_row)
 
         self._tabs = QTabWidget()
         self._tabs.setToolTip("Available result views for the selected region.")
+        self._tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self._tabs.setMaximumHeight(44)
         self._tabs.currentChanged.connect(self._on_tab_changed)
         ws.addWidget(self._tabs)
 
@@ -92,6 +123,7 @@ class RunReportViewer(QWidget):
         viewer_col.setSpacing(8)
         self._image_title_label = QLabel("No image selected.")
         self._image_title_label.setAlignment(Qt.AlignCenter)
+        self._image_title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         viewer_col.addWidget(self._image_title_label)
 
         self._image_label = _ClickableImageLabel()
@@ -100,7 +132,7 @@ class RunReportViewer(QWidget):
             "QLabel { background: #111; color: #ddd; border: 1px solid #444; }"
         )
         self._image_label.setText("No image available.")
-        self._image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._image_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self._image_label.setToolTip("Click image to toggle fit/full-size inspection.")
         self._image_label.clicked.connect(self._on_image_clicked)
 
@@ -109,7 +141,8 @@ class RunReportViewer(QWidget):
         self._image_scroll.setAlignment(Qt.AlignCenter)
         self._image_scroll.setFrameShape(QFrame.NoFrame)
         self._image_scroll.setWidget(self._image_label)
-        self._image_scroll.setMinimumHeight(400)
+        self._image_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._image_scroll.setMinimumHeight(260)
         viewer_col.addWidget(self._image_scroll, 1)
 
         self._zoom_hint_label = QLabel("Click image to toggle fit/full size.")
@@ -131,22 +164,7 @@ class RunReportViewer(QWidget):
         nav_row.addWidget(self._next_btn)
         viewer_col.addLayout(nav_row)
         ws.addLayout(viewer_col, 1)
-
-        action_group = QGroupBox("Selected Region Actions")
-        action_group_layout = QVBoxLayout(action_group)
-        self._actions_scroll = QScrollArea()
-        self._actions_scroll.setWidgetResizable(True)
-        self._actions_scroll.setFrameShape(QFrame.NoFrame)
-        self._actions_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._actions_container = QWidget()
-        self._actions_layout = QVBoxLayout(self._actions_container)
-        self._actions_layout.setContentsMargins(0, 0, 0, 0)
-        self._actions_layout.setSpacing(6)
-        self._actions_layout.addStretch()
-        self._actions_scroll.setWidget(self._actions_container)
-        action_group_layout.addWidget(self._actions_scroll)
-        action_group.setMaximumHeight(220)
-        ws.addWidget(action_group, 0)
+        ws.setStretch(2, 1)
         root.addWidget(self._workspace, 1)
 
         self.clear()
@@ -177,7 +195,7 @@ class RunReportViewer(QWidget):
         self._tabs.blockSignals(False)
 
         self._show_no_image("No image available in the current results workspace.")
-        self._clear_action_rows()
+        self._refresh_inline_actions()
         self._workspace.hide()
 
     def set_running_message(self, message: str):
@@ -242,7 +260,7 @@ class RunReportViewer(QWidget):
             self._on_region_changed(0)
         else:
             self._show_no_image("No region available.")
-            self._clear_action_rows()
+            self._refresh_inline_actions()
 
         return True
 
@@ -358,7 +376,7 @@ class RunReportViewer(QWidget):
     def _on_region_changed(self, _index: int):
         """Refresh tabs, viewer, and actions for selected region."""
         self._rebuild_tabs_for_selected_region()
-        self._refresh_action_rows()
+        self._refresh_inline_actions()
         self.region_changed.emit(self._selected_region())
 
     def _on_tab_changed(self, _index: int):
@@ -375,6 +393,19 @@ class RunReportViewer(QWidget):
     def available_regions(self) -> List[str]:
         """Public region list for parent workspace integrations."""
         return sorted(self._region_paths.keys(), key=lambda s: s.lower())
+
+    def has_loaded_results(self) -> bool:
+        """Return True when a completed run workspace is currently loaded."""
+        return bool(self._region_paths)
+
+    def available_view_tabs(self) -> List[str]:
+        """Return currently visible tab labels for the selected region."""
+        labels: List[str] = []
+        for i in range(self._tabs.count()):
+            text = self._tabs.tabText(i).strip()
+            if text:
+                labels.append(text)
+        return labels
 
     def _selected_tab(self) -> str:
         idx = self._tabs.currentIndex()
@@ -480,7 +511,7 @@ class RunReportViewer(QWidget):
 
         viewport = self._image_scroll.viewport().size()
         if viewport.width() < 10 or viewport.height() < 10:
-            viewport = QSize(1000, 700)
+            viewport = QSize(640, 360)
         scaled = self._active_pixmap.scaled(viewport, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._image_label.setPixmap(scaled)
         self._image_label.resize(scaled.size())
@@ -494,7 +525,7 @@ class RunReportViewer(QWidget):
         self._image_label.setText(message)
         viewport = self._image_scroll.viewport().size()
         if viewport.width() < 10 or viewport.height() < 10:
-            viewport = QSize(640, 400)
+            viewport = QSize(640, 320)
         self._image_label.resize(viewport)
         self._image_title_label.setText("No image selected.")
         self._prev_btn.setVisible(False)
@@ -519,60 +550,40 @@ class RunReportViewer(QWidget):
         self._tab_indices[key] = (cur + 1) % len(images)
         self._refresh_active_image(reset_index=False)
 
-    def _refresh_action_rows(self):
-        self._clear_action_rows()
-
-        # Run-level summary action
-        self._add_action_row("Run summary", self._run_summary_path)
-
+    def _refresh_inline_actions(self) -> None:
+        self._set_open_button_state(self._open_run_report_btn, self._run_summary_path)
         region = self._selected_region()
-        reg_path = self._region_paths.get(region, "")
+        region_path = self._region_paths.get(region, "")
+        self._set_open_button_state(
+            self._open_region_summary_btn,
+            os.path.join(region_path, "summary") if region_path else "",
+        )
+        self._set_open_button_state(
+            self._open_region_day_plots_btn,
+            os.path.join(region_path, "day_plots") if region_path else "",
+        )
+        self._set_open_button_state(
+            self._open_region_tables_btn,
+            os.path.join(region_path, "tables") if region_path else "",
+        )
 
-        region_lbl = QLabel(f"Selected region: {region or '(none)'}")
-        region_lbl.setWordWrap(True)
-        self._actions_layout.addWidget(region_lbl)
-
-        self._add_action_row("Open Summary", os.path.join(reg_path, "summary"))
-        self._add_action_row("Open Day Plots", os.path.join(reg_path, "day_plots"))
-        self._add_action_row("Open Tables", os.path.join(reg_path, "tables"))
-        self._actions_layout.addStretch()
-
-    def _add_action_row(self, label: str, path: str):
-        row = QWidget()
-        lay = QHBoxLayout(row)
-        lay.setContentsMargins(0, 0, 0, 0)
-        name = QLabel(label)
-        lay.addWidget(name)
-        btn = QPushButton("Open")
-        btn.setFixedWidth(64)
+    def _set_open_button_state(self, button: QPushButton, path: str) -> None:
         exists = bool(path and os.path.exists(path))
-        btn.setEnabled(exists)
+        button.setEnabled(exists)
         if path:
-            btn.setToolTip(path if exists else f"Not available: {path}")
-        btn.clicked.connect(lambda _checked=False, p=path: self._open_path(p))
-        lay.addWidget(btn)
-        lay.addStretch()
-        self._actions_layout.addWidget(row)
+            button.setToolTip(path if exists else f"Not available: {path}")
+        else:
+            button.setToolTip("Not available for the current selection.")
+
+    def _open_selected_region_subpath(self, child: str) -> None:
+        region = self._selected_region()
+        region_path = self._region_paths.get(region, "")
+        target = os.path.join(region_path, child) if region_path else ""
+        self._open_path(target)
 
     def _open_path(self, path: str):
         if path and os.path.exists(path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-
-    def _clear_action_rows(self):
-        self._clear_layout(self._actions_layout)
-
-    def _clear_layout(self, layout):
-        if layout is None:
-            return
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-            else:
-                child = item.layout()
-                if child is not None:
-                    self._clear_layout(child)
 
     def _set_status_message(self, text: str, level: str) -> None:
         """Centralized status-label styling for workspace states."""
