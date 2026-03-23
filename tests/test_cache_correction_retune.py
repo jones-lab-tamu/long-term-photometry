@@ -1,6 +1,7 @@
 import dataclasses
 import json
 import os
+import struct
 
 import h5py
 import numpy as np
@@ -13,6 +14,16 @@ from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.io.hdf5_cache import Hdf5TraceCacheWriter
 from photometry_pipeline.pipeline import Pipeline
 from photometry_pipeline.tuning.cache_correction_retune import run_cache_correction_retune
+
+
+def _read_png_size(path: str) -> tuple[int, int]:
+    with open(path, "rb") as f:
+        header = f.read(24)
+    if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+        raise AssertionError(f"Not a valid PNG header: {path}")
+    width = struct.unpack(">I", header[16:20])[0]
+    height = struct.unpack(">I", header[20:24])[0]
+    return int(width), int(height)
 
 
 def _make_completed_run_fixture(tmp_path):
@@ -304,6 +315,20 @@ def test_correction_retune_required_correction_diagnostic_exists(tmp_path):
     csv = result["artifacts"]["retuned_correction_session_csv"]
     assert os.path.isfile(png)
     assert os.path.isfile(csv)
+
+
+def test_correction_retune_inspection_png_has_useful_preview_resolution(tmp_path):
+    run_dir = _make_completed_run_fixture(tmp_path)
+    result = run_cache_correction_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={"window_sec": 45.0, "step_sec": 8.0},
+    )
+    png = result["artifacts"]["retuned_correction_inspection_png"]
+    assert os.path.isfile(png)
+    width, height = _read_png_size(png)
+    assert width >= 2800
+    assert height >= 1100
 
 
 def test_correction_retune_hdf5_internal_contract(tmp_path):

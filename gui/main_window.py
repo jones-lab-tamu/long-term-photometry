@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from statistics import median
 
-from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice
+from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, Signal
 from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -513,6 +513,16 @@ def compute_overrides_user_changed(parsed: dict, defaults: dict) -> dict:
             changed[k] = v
     return changed
 
+
+class _ClickableImageLabel(QLabel):
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class MainWindow(QMainWindow):
     """Long-Term Photometry Analysis GUI."""
 
@@ -589,11 +599,13 @@ class MainWindow(QMainWindow):
         self._tuning_active_overlay_pixmap = QPixmap()
         self._tuning_last_loaded_overlay_sha256 = ""
         self._tuning_last_loaded_overlay_size = 0
+        self._tuning_overlay_zoom_mode = False
         self._roi_chunk_ids_cache: dict[str, list[int]] = {}
         self._correction_tuning_workspace_available = False
         self._correction_tuning_last_result = None
         self._correction_tuning_active_inspection_path = ""
         self._correction_tuning_active_inspection_pixmap = QPixmap()
+        self._correction_tuning_zoom_mode = False
         # Debug-only GUI preflight timing. Disabled by default.
         # Enable with PHOTOMETRY_GUI_TIMING=1.
         self._gui_timing_enabled = _env_flag_enabled("PHOTOMETRY_GUI_TIMING")
@@ -1309,14 +1321,16 @@ class MainWindow(QMainWindow):
         )
         content_layout.addWidget(self._tuning_overlay_title)
 
-        self._tuning_overlay_label = QLabel("Run tuning to generate an ROI/chunk event overlay.")
+        self._tuning_overlay_label = _ClickableImageLabel("Run tuning to generate an ROI/chunk event overlay.")
         self._tuning_overlay_label.setAlignment(Qt.AlignCenter)
         self._tuning_overlay_label.setToolTip(
-            "Preview overlay for the selected downstream ROI and preview session."
+            "Preview overlay for the selected downstream ROI and preview session. "
+            "Click image to toggle fit/full-size inspection."
         )
         self._tuning_overlay_label.setStyleSheet(
             "QLabel { background: #111; color: #ddd; border: 1px solid #444; }"
         )
+        self._tuning_overlay_label.clicked.connect(self._on_tuning_overlay_clicked)
         self._tuning_overlay_scroll = QScrollArea()
         self._tuning_overlay_scroll.setWidgetResizable(False)
         self._tuning_overlay_scroll.setAlignment(Qt.AlignCenter)
@@ -1325,6 +1339,10 @@ class MainWindow(QMainWindow):
         self._tuning_overlay_scroll.setMaximumHeight(520)
         self._tuning_overlay_scroll.setWidget(self._tuning_overlay_label)
         content_layout.addWidget(self._tuning_overlay_scroll)
+        self._tuning_overlay_zoom_hint_label = QLabel("Click image to toggle fit/full size.")
+        self._tuning_overlay_zoom_hint_label.setAlignment(Qt.AlignCenter)
+        self._tuning_overlay_zoom_hint_label.setStyleSheet("font-size: 11px; color: #666;")
+        content_layout.addWidget(self._tuning_overlay_zoom_hint_label)
 
         self._build_correction_tuning_subsection(layout)
 
@@ -1624,26 +1642,42 @@ class MainWindow(QMainWindow):
         )
         content_layout.addWidget(self._correction_tuning_inspection_title)
 
-        self._correction_tuning_inspection_label = QLabel(
+        self._correction_tuning_inspection_label = _ClickableImageLabel(
             "Run correction retune to generate a correction inspection artifact."
         )
         self._correction_tuning_inspection_label.setAlignment(Qt.AlignCenter)
         self._correction_tuning_inspection_label.setToolTip(
-            "Inspection figure for the selected preview session after correction retune."
+            "Inspection figure for the selected preview session after correction retune. "
+            "Click image to toggle fit/full-size inspection."
         )
         self._correction_tuning_inspection_label.setStyleSheet(
             "QLabel { background: #111; color: #ddd; border: 1px solid #444; }"
+        )
+        self._correction_tuning_inspection_label.clicked.connect(
+            self._on_correction_tuning_inspection_clicked
         )
         self._correction_tuning_inspection_scroll = QScrollArea()
         self._correction_tuning_inspection_scroll.setWidgetResizable(False)
         self._correction_tuning_inspection_scroll.setAlignment(Qt.AlignCenter)
         self._correction_tuning_inspection_scroll.setFrameShape(QScrollArea.NoFrame)
-        self._correction_tuning_inspection_scroll.setMinimumHeight(180)
-        self._correction_tuning_inspection_scroll.setMaximumHeight(520)
+        self._correction_tuning_inspection_scroll.setMinimumHeight(220)
+        self._correction_tuning_inspection_scroll.setMaximumHeight(680)
+        self._correction_tuning_inspection_scroll.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Expanding,
+        )
         self._correction_tuning_inspection_scroll.setWidget(
             self._correction_tuning_inspection_label
         )
-        content_layout.addWidget(self._correction_tuning_inspection_scroll)
+        content_layout.addWidget(self._correction_tuning_inspection_scroll, 1)
+        self._correction_tuning_zoom_hint_label = QLabel(
+            "Click image to toggle fit/full size."
+        )
+        self._correction_tuning_zoom_hint_label.setAlignment(Qt.AlignCenter)
+        self._correction_tuning_zoom_hint_label.setStyleSheet(
+            "font-size: 11px; color: #666;"
+        )
+        content_layout.addWidget(self._correction_tuning_zoom_hint_label)
 
         parent_layout.addWidget(section)
 
@@ -1996,6 +2030,7 @@ class MainWindow(QMainWindow):
         self._tuning_active_overlay_pixmap = QPixmap()
         self._tuning_last_loaded_overlay_sha256 = ""
         self._tuning_last_loaded_overlay_size = 0
+        self._set_tuning_overlay_zoom_mode(False)
         self._tuning_overlay_title.setText("No tuning overlay loaded.")
         self._tuning_overlay_label.setPixmap(QPixmap())
         self._tuning_overlay_label.setText(text)
@@ -2008,6 +2043,11 @@ class MainWindow(QMainWindow):
     def _render_tuning_overlay(self) -> None:
         """Render tuning overlay in fit-to-view mode inside the scroll viewport."""
         if self._tuning_active_overlay_pixmap.isNull():
+            return
+        if self._tuning_overlay_zoom_mode:
+            self._tuning_overlay_label.setText("")
+            self._tuning_overlay_label.setPixmap(self._tuning_active_overlay_pixmap)
+            self._tuning_overlay_label.resize(self._tuning_active_overlay_pixmap.size())
             return
         viewport = self._tuning_overlay_scroll.viewport().size()
         if viewport.width() < 10 or viewport.height() < 10:
@@ -2046,7 +2086,23 @@ class MainWindow(QMainWindow):
         self._tuning_active_overlay_path = image_path
         self._tuning_active_overlay_pixmap = pix
         self._tuning_overlay_title.setText(os.path.basename(image_path))
+        self._set_tuning_overlay_zoom_mode(False)
         self._render_tuning_overlay()
+
+    def _on_tuning_overlay_clicked(self) -> None:
+        if self._tuning_active_overlay_pixmap.isNull():
+            return
+        self._set_tuning_overlay_zoom_mode(not self._tuning_overlay_zoom_mode)
+        self._render_tuning_overlay()
+
+    def _set_tuning_overlay_zoom_mode(self, enabled: bool) -> None:
+        self._tuning_overlay_zoom_mode = bool(enabled)
+        if hasattr(self, "_tuning_overlay_zoom_hint_label"):
+            self._tuning_overlay_zoom_hint_label.setText(
+                "Click image to return to fit mode."
+                if self._tuning_overlay_zoom_mode
+                else "Click image to toggle fit/full size."
+            )
 
     def _write_tuning_display_debug_record(
         self,
@@ -2698,6 +2754,7 @@ class MainWindow(QMainWindow):
     def _set_correction_tuning_overlay_message(self, text: str) -> None:
         self._correction_tuning_active_inspection_path = ""
         self._correction_tuning_active_inspection_pixmap = QPixmap()
+        self._set_correction_tuning_zoom_mode(False)
         self._correction_tuning_inspection_title.setText(
             "No correction inspection artifact loaded."
         )
@@ -2711,6 +2768,15 @@ class MainWindow(QMainWindow):
 
     def _render_correction_tuning_overlay(self) -> None:
         if self._correction_tuning_active_inspection_pixmap.isNull():
+            return
+        if self._correction_tuning_zoom_mode:
+            self._correction_tuning_inspection_label.setText("")
+            self._correction_tuning_inspection_label.setPixmap(
+                self._correction_tuning_active_inspection_pixmap
+            )
+            self._correction_tuning_inspection_label.resize(
+                self._correction_tuning_active_inspection_pixmap.size()
+            )
             return
         viewport = self._correction_tuning_inspection_scroll.viewport().size()
         if viewport.width() < 10 or viewport.height() < 10:
@@ -2740,7 +2806,23 @@ class MainWindow(QMainWindow):
         self._correction_tuning_active_inspection_path = image_path
         self._correction_tuning_active_inspection_pixmap = pix
         self._correction_tuning_inspection_title.setText(os.path.basename(image_path))
+        self._set_correction_tuning_zoom_mode(False)
         self._render_correction_tuning_overlay()
+
+    def _on_correction_tuning_inspection_clicked(self) -> None:
+        if self._correction_tuning_active_inspection_pixmap.isNull():
+            return
+        self._set_correction_tuning_zoom_mode(not self._correction_tuning_zoom_mode)
+        self._render_correction_tuning_overlay()
+
+    def _set_correction_tuning_zoom_mode(self, enabled: bool) -> None:
+        self._correction_tuning_zoom_mode = bool(enabled)
+        if hasattr(self, "_correction_tuning_zoom_hint_label"):
+            self._correction_tuning_zoom_hint_label.setText(
+                "Click image to return to fit mode."
+                if self._correction_tuning_zoom_mode
+                else "Click image to toggle fit/full size."
+            )
 
     def _populate_correction_tuning_chunk_choices(self, roi: str) -> None:
         self._correction_tuning_chunk_combo.blockSignals(True)

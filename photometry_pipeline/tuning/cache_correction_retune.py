@@ -90,6 +90,9 @@ _OVERRIDE_VALUE_CASTERS = {
     "f0_min_value": float,
 }
 
+_CORRECTION_INSPECTION_FIGSIZE = (14.5, 6.0)
+_CORRECTION_INSPECTION_DPI = 200
+
 
 def parse_key_value_overrides(items: Iterable[str]) -> Dict[str, Any]:
     """Parse KEY=VALUE CLI items into typed overrides."""
@@ -398,7 +401,7 @@ def _write_correction_inspection(
     artifacts["retuned_correction_session_csv"] = csv_path
 
     png_path = os.path.join(retune_dir, f"retuned_correction_inspection_{suffix}.png")
-    fig, axes = plt.subplots(4, 1, figsize=(11.5, 9.0), sharex=True)
+    fig, axes = plt.subplots(4, 1, figsize=_CORRECTION_INSPECTION_FIGSIZE, sharex=True)
 
     axes[0].plot(t, sig, color="forestgreen", linewidth=0.9, label="sig_raw")
     axes[0].plot(t, uv, color="purple", linewidth=0.8, alpha=0.8, label="uv_raw")
@@ -427,7 +430,7 @@ def _write_correction_inspection(
     axes[3].legend(loc="best", fontsize=8)
 
     fig.tight_layout()
-    fig.savefig(png_path, dpi=150)
+    fig.savefig(png_path, dpi=_CORRECTION_INSPECTION_DPI)
     plt.close(fig)
     artifacts["retuned_correction_inspection_png"] = png_path
 

@@ -10,7 +10,7 @@ import pytest
 import yaml
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication, QGroupBox
+from PySide6.QtWidgets import QApplication, QGroupBox, QSizePolicy
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -926,6 +926,179 @@ def test_tuning_overlay_fit_render_does_not_upscale_past_native_size(window):
     assert shown is not None and not shown.isNull()
     assert shown.width() <= 240
     assert shown.height() <= 120
+
+
+def test_tuning_preview_click_toggles_fit_and_full_size(window, qapp, tmp_path):
+    image_path = tmp_path / "tuning_zoom_toggle.png"
+    _write_png(image_path, width=2000, height=1200)
+
+    window._set_tuning_overlay_image(str(image_path))
+    qapp.processEvents()
+
+    assert window._tuning_overlay_zoom_mode is False
+    assert "toggle fit/full size" in window._tuning_overlay_zoom_hint_label.text().lower()
+    fit_pix = window._tuning_overlay_label.pixmap()
+    assert fit_pix is not None and not fit_pix.isNull()
+    viewport = window._tuning_overlay_scroll.viewport().size()
+    assert fit_pix.width() <= viewport.width()
+    assert fit_pix.height() <= viewport.height()
+
+    window._tuning_overlay_label.clicked.emit()
+    qapp.processEvents()
+    assert window._tuning_overlay_zoom_mode is True
+    assert "return to fit mode" in window._tuning_overlay_zoom_hint_label.text().lower()
+    full_pix = window._tuning_overlay_label.pixmap()
+    assert full_pix is not None and not full_pix.isNull()
+    assert full_pix.size() == window._tuning_active_overlay_pixmap.size()
+
+    window._tuning_overlay_label.clicked.emit()
+    qapp.processEvents()
+    assert window._tuning_overlay_zoom_mode is False
+    assert "toggle fit/full size" in window._tuning_overlay_zoom_hint_label.text().lower()
+    fit_pix_2 = window._tuning_overlay_label.pixmap()
+    assert fit_pix_2 is not None and not fit_pix_2.isNull()
+    assert fit_pix_2.width() <= viewport.width()
+    assert fit_pix_2.height() <= viewport.height()
+    assert fit_pix_2.size() != full_pix.size()
+
+
+def test_tuning_preview_new_image_resets_zoom_to_fit(window, qapp, tmp_path):
+    img_a = tmp_path / "tuning_zoom_reset_a.png"
+    img_b = tmp_path / "tuning_zoom_reset_b.png"
+    _write_png(img_a, width=1800, height=900)
+    _write_png(img_b, width=1600, height=800)
+
+    window._set_tuning_overlay_image(str(img_a))
+    qapp.processEvents()
+    window._tuning_overlay_label.clicked.emit()
+    qapp.processEvents()
+    assert window._tuning_overlay_zoom_mode is True
+
+    window._set_tuning_overlay_image(str(img_b))
+    qapp.processEvents()
+    assert window._tuning_overlay_zoom_mode is False
+    assert "toggle fit/full size" in window._tuning_overlay_zoom_hint_label.text().lower()
+
+
+def test_tuning_same_slot_overlay_refresh_resets_zoom_and_updates_pixels(window, qapp, tmp_path):
+    from PySide6.QtGui import QColor, QPixmap
+
+    overlay_path = tmp_path / "tuning_same_slot_zoom.png"
+
+    red = QPixmap(1600, 900)
+    red.fill(QColor("red"))
+    assert red.save(str(overlay_path))
+    window._set_tuning_overlay_image(str(overlay_path))
+    qapp.processEvents()
+
+    window._tuning_overlay_label.clicked.emit()
+    qapp.processEvents()
+    assert window._tuning_overlay_zoom_mode is True
+
+    blue = QPixmap(1600, 900)
+    blue.fill(QColor("blue"))
+    assert blue.save(str(overlay_path))
+    window._set_tuning_overlay_image(str(overlay_path))
+    qapp.processEvents()
+
+    assert window._tuning_overlay_zoom_mode is False
+    assert "toggle fit/full size" in window._tuning_overlay_zoom_hint_label.text().lower()
+    shown = window._tuning_overlay_label.pixmap()
+    assert shown is not None and not shown.isNull()
+    img = shown.toImage()
+    px = img.pixelColor(4, 4)
+    assert px.blue() > px.red()
+
+
+def test_correction_overlay_fit_render_uses_smooth_transformation(window, monkeypatch):
+    from PySide6.QtGui import QPixmap
+
+    calls = []
+    original_scaled = QPixmap.scaled
+
+    def _spy_scaled(self, *args, **kwargs):
+        mode = None
+        if len(args) >= 3:
+            mode = args[2]
+        elif "mode" in kwargs:
+            mode = kwargs["mode"]
+        calls.append(mode)
+        return original_scaled(self, *args, **kwargs)
+
+    monkeypatch.setattr(QPixmap, "scaled", _spy_scaled)
+
+    pix = QPixmap(800, 400)
+    pix.fill()
+    window._correction_tuning_active_inspection_pixmap = pix
+    window._render_correction_tuning_overlay()
+
+    assert calls
+    assert calls[-1] == Qt.SmoothTransformation
+
+
+def test_correction_preview_container_prefers_larger_inspection_view(window):
+    assert window._correction_tuning_inspection_scroll.minimumHeight() >= 220
+    assert window._correction_tuning_inspection_scroll.maximumHeight() >= 680
+    assert (
+        window._correction_tuning_inspection_scroll.sizePolicy().verticalPolicy()
+        == QSizePolicy.Expanding
+    )
+    layout = window._correction_tuning_scroll_content.layout()
+    idx = layout.indexOf(window._correction_tuning_inspection_scroll)
+    assert idx >= 0
+    assert layout.stretch(idx) == 1
+
+
+def test_correction_preview_click_toggles_fit_and_full_size(window, qapp, tmp_path):
+    image_path = tmp_path / "correction_zoom_toggle.png"
+    _write_png(image_path, width=2000, height=1200)
+
+    window._set_correction_tuning_overlay_image(str(image_path))
+    qapp.processEvents()
+
+    assert window._correction_tuning_zoom_mode is False
+    assert "toggle fit/full size" in window._correction_tuning_zoom_hint_label.text().lower()
+    fit_pix = window._correction_tuning_inspection_label.pixmap()
+    assert fit_pix is not None and not fit_pix.isNull()
+    viewport = window._correction_tuning_inspection_scroll.viewport().size()
+    assert fit_pix.width() <= viewport.width()
+    assert fit_pix.height() <= viewport.height()
+
+    window._correction_tuning_inspection_label.clicked.emit()
+    qapp.processEvents()
+    assert window._correction_tuning_zoom_mode is True
+    assert "return to fit mode" in window._correction_tuning_zoom_hint_label.text().lower()
+    full_pix = window._correction_tuning_inspection_label.pixmap()
+    assert full_pix is not None and not full_pix.isNull()
+    assert full_pix.size() == window._correction_tuning_active_inspection_pixmap.size()
+
+    window._correction_tuning_inspection_label.clicked.emit()
+    qapp.processEvents()
+    assert window._correction_tuning_zoom_mode is False
+    assert "toggle fit/full size" in window._correction_tuning_zoom_hint_label.text().lower()
+    fit_pix_2 = window._correction_tuning_inspection_label.pixmap()
+    assert fit_pix_2 is not None and not fit_pix_2.isNull()
+    assert fit_pix_2.width() <= viewport.width()
+    assert fit_pix_2.height() <= viewport.height()
+    assert fit_pix_2.size() != full_pix.size()
+
+
+def test_correction_preview_new_image_resets_zoom_to_fit(window, qapp, tmp_path):
+    img_a = tmp_path / "correction_zoom_reset_a.png"
+    img_b = tmp_path / "correction_zoom_reset_b.png"
+    _write_png(img_a, width=1800, height=900)
+    _write_png(img_b, width=1600, height=800)
+
+    window._set_correction_tuning_overlay_image(str(img_a))
+    qapp.processEvents()
+    window._correction_tuning_inspection_label.clicked.emit()
+    qapp.processEvents()
+    assert window._correction_tuning_zoom_mode is True
+
+    window._set_correction_tuning_overlay_image(str(img_b))
+    qapp.processEvents()
+    assert window._correction_tuning_zoom_mode is False
+    assert "toggle fit/full size" in window._correction_tuning_zoom_hint_label.text().lower()
 
 
 def test_tuning_apply_back_copies_only_downstream_fields(window, tmp_path):
