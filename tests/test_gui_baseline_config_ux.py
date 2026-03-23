@@ -48,11 +48,15 @@ def _write_vendor_style_rwd_dataset(
     timestamp_unit: str = "seconds",
     chunk_names: list[str] | None = None,
     include_metadata_fps: bool = True,
+    metadata_fps: float | None = None,
+    led410_enable: bool | None = None,
+    led470_enable: bool | None = None,
+    led560_enable: bool | None = None,
+    sample_count_by_chunk: dict[str, int] | None = None,
 ):
     root_dir.mkdir(parents=True, exist_ok=True)
     if chunk_names is None:
         chunk_names = ["2025_01_01-00_00_00"]
-    n_samples = int(round(fs_hz * chunk_duration_sec))
     header = [time_col, "Events"]
     for i in range(1, n_rois + 1):
         header.extend([f"CH{i}{uv_suffix}", f"CH{i}{sig_suffix}"])
@@ -61,11 +65,23 @@ def _write_vendor_style_rwd_dataset(
         chunk_dir = root_dir / chunk_name
         chunk_dir.mkdir(parents=True, exist_ok=True)
         csv_path = chunk_dir / "fluorescence.csv"
+        n_samples = int(round(fs_hz * chunk_duration_sec))
+        if sample_count_by_chunk is not None and chunk_name in sample_count_by_chunk:
+            n_samples = int(sample_count_by_chunk[chunk_name])
 
         with open(csv_path, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
             if include_metadata_fps:
-                metadata = '{"Fps": %.6f, "Generator": "pytest"}' % float(fs_hz)
+                fps_value = float(fs_hz) if metadata_fps is None else float(metadata_fps)
+                meta_parts = [f'"Fps": {fps_value:.6f}']
+                if led410_enable is not None:
+                    meta_parts.append(f'"Led410Enable": {"true" if led410_enable else "false"}')
+                if led470_enable is not None:
+                    meta_parts.append(f'"Led470Enable": {"true" if led470_enable else "false"}')
+                if led560_enable is not None:
+                    meta_parts.append(f'"Led560Enable": {"true" if led560_enable else "false"}')
+                meta_parts.append('"Generator": "pytest"')
+                metadata = "{" + ", ".join(meta_parts) + "}"
             else:
                 metadata = '{"Generator": "pytest"}'
             writer.writerow([metadata] + [""] * (len(header) - 1))
@@ -278,6 +294,198 @@ def test_vendor_style_rwd_selection_overrides_stale_acquisition_contract(window,
     assert effective["rwd_time_col"] == "TimeStamp"
     assert effective["uv_suffix"] == "-410"
     assert effective["sig_suffix"] == "-470"
+
+
+def test_rwd_contract_inference_accepts_multiplexed_vendor_fps_semantics(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_multiplexed_fps"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=60.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        metadata_fps=40.0,
+        led410_enable=True,
+        led470_enable=True,
+        led560_enable=False,
+    )
+
+    stale_cfg = tmp_path / "stale_baseline_multiplexed.yaml"
+    _write_stale_baseline_config(stale_cfg)
+
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    spec = window._build_run_spec(validate_only=True)
+    assert spec.data_contract_overrides["target_fs_hz"] == pytest.approx(20.0, abs=1e-6)
+    assert spec.data_contract_overrides["chunk_duration_sec"] == pytest.approx(60.0, abs=1e-6)
+    assert spec.data_contract_overrides["rwd_time_col"] == "TimeStamp"
+
+
+def test_rwd_contract_inference_keeps_existing_metadata_fps_equal_row_cadence_case(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_existing_semantics"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=60.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        metadata_fps=20.0,
+    )
+
+    stale_cfg = tmp_path / "stale_baseline_existing_semantics.yaml"
+    _write_stale_baseline_config(stale_cfg)
+
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    spec = window._build_run_spec(validate_only=True)
+    assert spec.data_contract_overrides["target_fs_hz"] == pytest.approx(20.0, abs=1e-6)
+    assert spec.data_contract_overrides["chunk_duration_sec"] == pytest.approx(60.0, abs=1e-6)
+
+
+def test_rwd_contract_inference_rejects_unreconcilable_metadata_fps(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_bad_fps_contract"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=60.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        metadata_fps=55.0,
+        led410_enable=True,
+        led470_enable=True,
+        led560_enable=False,
+    )
+
+    stale_cfg = tmp_path / "stale_baseline_bad_fps_contract.yaml"
+    _write_stale_baseline_config(stale_cfg)
+
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    with pytest.raises(ValueError, match="RWD timestamps are incompatible with metadata FPS"):
+        window._build_run_spec(validate_only=True)
+
+
+def test_rwd_contract_inference_allows_one_sample_endpoint_delta_across_chunks(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_endpoint_tolerance"
+    chunk_names = ["2026_03_10-16_00_00", "2026_03_10-16_33_05"]
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        metadata_fps=40.0,
+        led410_enable=True,
+        led470_enable=True,
+        led560_enable=False,
+        chunk_names=chunk_names,
+        sample_count_by_chunk={
+            "2026_03_10-16_00_00": 12001,
+            "2026_03_10-16_33_05": 12000,
+        },
+    )
+
+    stale_cfg = tmp_path / "stale_baseline_endpoint_tolerance.yaml"
+    _write_stale_baseline_config(stale_cfg)
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    spec = window._build_run_spec(validate_only=True)
+    assert spec.data_contract_overrides["target_fs_hz"] == pytest.approx(20.0, abs=1e-6)
+    assert spec.data_contract_overrides["chunk_duration_sec"] == pytest.approx(600.05, abs=1e-6)
+    assert spec.data_contract_overrides["rwd_time_col"] == "TimeStamp"
+
+
+def test_rwd_contract_inference_rejects_large_sample_count_mismatch_across_chunks(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_large_sample_mismatch"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        metadata_fps=40.0,
+        led410_enable=True,
+        led470_enable=True,
+        led560_enable=False,
+        chunk_names=["2026_03_10-16_00_00", "2026_03_10-16_33_05"],
+        sample_count_by_chunk={
+            "2026_03_10-16_00_00": 12001,
+            "2026_03_10-16_33_05": 11995,
+        },
+    )
+
+    stale_cfg = tmp_path / "stale_baseline_large_sample_mismatch.yaml"
+    _write_stale_baseline_config(stale_cfg)
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    with pytest.raises(ValueError, match="sample_count mismatch exceeds endpoint tolerance"):
+        window._build_run_spec(validate_only=True)
+
+
+def test_rwd_contract_inference_accepts_matching_multichunk_vendor_case(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_matching_multichunk"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        metadata_fps=40.0,
+        led410_enable=True,
+        led470_enable=True,
+        led560_enable=False,
+        chunk_names=["2026_03_10-16_00_00", "2026_03_10-16_33_05"],
+    )
+
+    stale_cfg = tmp_path / "stale_baseline_matching_multichunk.yaml"
+    _write_stale_baseline_config(stale_cfg)
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    spec = window._build_run_spec(validate_only=True)
+    assert spec.data_contract_overrides["target_fs_hz"] == pytest.approx(20.0, abs=1e-6)
+    assert spec.data_contract_overrides["chunk_duration_sec"] == pytest.approx(600.0, abs=1e-6)
 
 
 def test_dataset_switch_recomputes_contract_without_stale_values(window, tmp_path):

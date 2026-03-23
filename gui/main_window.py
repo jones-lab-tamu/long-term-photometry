@@ -3398,10 +3398,10 @@ class MainWindow(QMainWindow):
     def _extract_metadata_fps_from_row(row: list[str]) -> float | None:
         if not row:
             return None
-        first_cell = str(row[0]).strip()
-        if not first_cell:
+        meta_text = ",".join(str(cell).strip() for cell in row if str(cell).strip())
+        if not meta_text:
             return None
-        m = re.search(r'"Fps"\s*:\s*([0-9]+(?:\.[0-9]+)?)', first_cell)
+        m = re.search(r'"?Fps"?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)', meta_text, flags=re.IGNORECASE)
         if not m:
             return None
         try:
@@ -3413,7 +3413,38 @@ class MainWindow(QMainWindow):
         return fps
 
     @staticmethod
-    def _resolve_timestamp_unit_and_fs(median_dt: float, metadata_fps: float | None) -> tuple[str, float]:
+    def _extract_enabled_excitation_count_from_row(row: list[str]) -> int | None:
+        if not row:
+            return None
+        meta_text = ",".join(str(cell).strip() for cell in row if str(cell).strip())
+        if not meta_text:
+            return None
+
+        enabled_count = 0
+        seen_any = False
+        for led_key in ("Led410Enable", "Led470Enable", "Led560Enable"):
+            m = re.search(
+                rf'"?{re.escape(led_key)}"?\s*[:=]\s*(true|false|1|0)',
+                meta_text,
+                flags=re.IGNORECASE,
+            )
+            if not m:
+                continue
+            seen_any = True
+            token = str(m.group(1)).strip().lower()
+            if token in {"true", "1"}:
+                enabled_count += 1
+
+        if not seen_any:
+            return None
+        return enabled_count
+
+    @staticmethod
+    def _resolve_timestamp_unit_and_fs(
+        median_dt: float,
+        metadata_fps: float | None,
+        enabled_excitation_count: int | None = None,
+    ) -> tuple[str, float]:
         """
         Determine timestamp units deterministically.
 
@@ -3435,8 +3466,24 @@ class MainWindow(QMainWindow):
 
         if metadata_fps is not None and metadata_fps > 0:
             rel_tol = 0.03
-            sec_match = abs(fs_seconds - metadata_fps) / metadata_fps <= rel_tol
-            ms_match = abs(fs_milliseconds - metadata_fps) / metadata_fps <= rel_tol
+            if enabled_excitation_count is not None and enabled_excitation_count <= 0:
+                raise ValueError(
+                    "RWD metadata declares no enabled excitation LEDs, cannot reconcile metadata FPS."
+                )
+
+            multiplier = (
+                enabled_excitation_count
+                if (enabled_excitation_count is not None and enabled_excitation_count > 1)
+                else 1
+            )
+
+            def _matches_metadata(candidate_row_fs: float) -> bool:
+                direct_ok = abs(candidate_row_fs - metadata_fps) / metadata_fps <= rel_tol
+                multiplex_ok = abs((candidate_row_fs * multiplier) - metadata_fps) / metadata_fps <= rel_tol
+                return direct_ok or multiplex_ok
+
+            sec_match = _matches_metadata(fs_seconds)
+            ms_match = _matches_metadata(fs_milliseconds)
             if sec_match and not ms_match:
                 return "seconds", fs_seconds
             if ms_match and not sec_match:
@@ -3444,12 +3491,14 @@ class MainWindow(QMainWindow):
             if sec_match and ms_match:
                 raise ValueError(
                     "Ambiguous RWD timestamp units: both seconds and milliseconds "
-                    f"fit metadata FPS={metadata_fps:.6f} (dt={median_dt:.6f})."
+                    f"fit metadata FPS={metadata_fps:.6f} (dt={median_dt:.6f}, "
+                    f"enabled_excitation_count={enabled_excitation_count})."
                 )
             raise ValueError(
                 "RWD timestamps are incompatible with metadata FPS: "
                 f"dt={median_dt:.6f}, fs_seconds={fs_seconds:.6f}, "
-                f"fs_milliseconds={fs_milliseconds:.6f}, metadata_fps={metadata_fps:.6f}."
+                f"fs_milliseconds={fs_milliseconds:.6f}, metadata_fps={metadata_fps:.6f}, "
+                f"enabled_excitation_count={enabled_excitation_count}."
             )
 
         if median_dt < 0.5:
@@ -3491,10 +3540,11 @@ class MainWindow(QMainWindow):
         uv_suffix, sig_suffix = suffix_pair
 
         metadata_fps = None
+        enabled_excitation_count = None
         if header_row_idx > 0:
-            metadata_fps = self._extract_metadata_fps_from_row(
-                self._normalize_csv_cells(rows[header_row_idx - 1])
-            )
+            meta_row = self._normalize_csv_cells(rows[header_row_idx - 1])
+            metadata_fps = self._extract_metadata_fps_from_row(meta_row)
+            enabled_excitation_count = self._extract_enabled_excitation_count_from_row(meta_row)
 
         cols = self._normalize_csv_cells(rows[header_row_idx])
         if time_col not in cols:
@@ -3522,7 +3572,11 @@ class MainWindow(QMainWindow):
             raise ValueError(f"Non-monotonic or repeated timestamps in RWD file: {csv_path}")
 
         median_dt = float(median(dt_all))
-        unit, inferred_fs = self._resolve_timestamp_unit_and_fs(median_dt, metadata_fps)
+        unit, inferred_fs = self._resolve_timestamp_unit_and_fs(
+            median_dt,
+            metadata_fps,
+            enabled_excitation_count,
+        )
         if inferred_fs <= 0:
             raise ValueError(f"Inferred non-positive fs in RWD file: {csv_path}")
 
@@ -3615,6 +3669,7 @@ class MainWindow(QMainWindow):
         base = contracts[0]
         fs_tol = max(1e-6, base["fs_hz"] * 1e-4)
         dur_tol = max(1e-6, base["chunk_duration_sec"] * 1e-4)
+        endpoint_sample_tolerance = 1
         t_cross = self._timing_start("rwd_contract_cross_chunk_validation")
         for idx, contract in enumerate(contracts[1:], start=1):
             path = contract["csv_path"]
@@ -3631,19 +3686,31 @@ class MainWindow(QMainWindow):
                     f"Expected ({base['uv_suffix']}, {base['sig_suffix']}), "
                     f"got ({contract['uv_suffix']}, {contract['sig_suffix']})."
                 )
-            if contract["sample_count"] != base["sample_count"]:
-                raise ValueError(
-                    "Inconsistent RWD contract across chunks: "
-                    f"sample_count mismatch at chunk {idx} ({path}). "
-                    f"Expected {base['sample_count']}, got {contract['sample_count']}."
-                )
             if not math.isclose(contract["fs_hz"], base["fs_hz"], rel_tol=0.0, abs_tol=fs_tol):
                 raise ValueError(
                     "Inconsistent RWD contract across chunks: "
                     f"fs mismatch at chunk {idx} ({path}). "
                     f"Expected {base['fs_hz']:.9f}, got {contract['fs_hz']:.9f}."
                 )
-            if not math.isclose(contract["chunk_duration_sec"], base["chunk_duration_sec"], rel_tol=0.0, abs_tol=dur_tol):
+
+            sample_delta = abs(int(contract["sample_count"]) - int(base["sample_count"]))
+            if sample_delta > endpoint_sample_tolerance:
+                raise ValueError(
+                    "Inconsistent RWD contract across chunks: "
+                    f"sample_count mismatch exceeds endpoint tolerance at chunk {idx} ({path}). "
+                    f"Expected {base['sample_count']}, got {contract['sample_count']} "
+                    f"(allowed delta <= {endpoint_sample_tolerance})."
+                )
+
+            fs_ref = max(1e-9, 0.5 * (float(base["fs_hz"]) + float(contract["fs_hz"])))
+            endpoint_duration_tol = 1.05 / fs_ref
+            duration_abs_tol = max(dur_tol, endpoint_duration_tol)
+            if not math.isclose(
+                contract["chunk_duration_sec"],
+                base["chunk_duration_sec"],
+                rel_tol=0.0,
+                abs_tol=duration_abs_tol,
+            ):
                 raise ValueError(
                     "Inconsistent RWD contract across chunks: "
                     f"chunk_duration mismatch at chunk {idx} ({path}). "
