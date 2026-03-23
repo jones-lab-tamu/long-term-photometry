@@ -1,7 +1,13 @@
 import numpy as np
 import pandas as pd
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, savgol_filter
 from .preprocessing import lowpass_filter
+
+
+# Retain short, fs-tied smoothing defaults for peak preview/calling.
+_SAVGOL_WINDOW_SEC = 0.75
+_SAVGOL_DEFAULT_POLYORDER = 2
+_SAVGOL_MIN_WINDOW = 5
 
 def compute_auc_above_threshold(dff, baseline_value, fs_hz=None, time_s=None):
     """
@@ -114,6 +120,112 @@ def _resolve_width_samples(fs_hz: float, config) -> int | None:
     return max(1, int(round(width_sec * fs_hz)))
 
 
+def _normalize_peak_prefilter_mode(mode_raw: str) -> str:
+    mode = str(mode_raw or "none").strip().lower()
+    if mode in {"none", "lowpass", "smooth"}:
+        return mode
+    return "none"
+
+
+def _resolve_savgol_params(n_samples: int, fs_hz: float) -> tuple[int, int] | None:
+    """
+    Resolve stable Savitzky-Golay parameters for a trace length and sample rate.
+
+    Window policy:
+    - target window ~= 0.75 s worth of samples (for visible denoising at 20 Hz)
+    - enforce odd window
+    - clamp to largest odd <= n_samples
+    - require at least 3 samples
+    Polyorder policy:
+    - default 2
+    - clamp to < window_length for short segments
+    """
+    try:
+        n = int(n_samples)
+    except (TypeError, ValueError):
+        return None
+    if n < 3:
+        return None
+
+    if np.isfinite(fs_hz) and fs_hz > 0:
+        target = int(round(float(fs_hz) * _SAVGOL_WINDOW_SEC))
+    else:
+        target = _SAVGOL_MIN_WINDOW
+    target = max(_SAVGOL_MIN_WINDOW, target)
+    if target % 2 == 0:
+        target += 1
+
+    max_odd = n if (n % 2 == 1) else (n - 1)
+    if max_odd < 3:
+        return None
+    window = min(target, max_odd)
+
+    poly = min(_SAVGOL_DEFAULT_POLYORDER, window - 1)
+    if poly < 1:
+        return None
+    return int(window), int(poly)
+
+
+def _savgol_smooth_trace(trace: np.ndarray, fs_hz: float) -> tuple[np.ndarray, dict]:
+    arr = np.asarray(trace, dtype=float)
+    out = np.array(arr, copy=True, dtype=float)
+    is_finite = np.isfinite(arr)
+    meta = {
+        "mode": "smooth",
+        "prefilter_applied": False,
+        "savgol_window_length": None,
+        "savgol_polyorder": None,
+    }
+    if not np.any(is_finite):
+        return out, meta
+
+    padded = np.concatenate(([False], is_finite, [False]))
+    diffs = np.diff(padded.astype(int))
+    starts = np.where(diffs == 1)[0]
+    ends = np.where(diffs == -1)[0]
+
+    for s, e in zip(starts, ends):
+        seg = arr[s:e]
+        params = _resolve_savgol_params(len(seg), fs_hz)
+        if params is None:
+            continue
+        window, poly = params
+        out[s:e] = savgol_filter(seg, window_length=window, polyorder=poly, mode="interp")
+        if meta["savgol_window_length"] is None:
+            meta["savgol_window_length"] = int(window)
+            meta["savgol_polyorder"] = int(poly)
+        meta["prefilter_applied"] = True
+    return out, meta
+
+
+def apply_peak_prefilter(trace: np.ndarray, fs_hz: float, config) -> tuple[np.ndarray, dict]:
+    """
+    Apply configured prefilter to a single trace for peak detection/calling.
+
+    Supported modes:
+    - none: raw trace
+    - lowpass: existing zero-phase Butterworth behavior
+    - smooth: zero-lag Savitzky-Golay smoothing
+    """
+    arr = np.asarray(trace, dtype=float)
+    mode = _normalize_peak_prefilter_mode(getattr(config, "peak_pre_filter", "none"))
+    if mode == "lowpass":
+        return lowpass_filter(arr, fs_hz, config), {
+            "mode": "lowpass",
+            "prefilter_applied": True,
+            "savgol_window_length": None,
+            "savgol_polyorder": None,
+        }
+    if mode == "smooth":
+        return _savgol_smooth_trace(arr, fs_hz)
+    return arr, {
+        "mode": "none",
+        "prefilter_applied": False,
+        "savgol_window_length": None,
+        "savgol_polyorder": None,
+    }
+
+
 def get_peak_indices_for_trace(
     trace: np.ndarray,
     fs_hz: float,
@@ -130,10 +242,7 @@ def get_peak_indices_for_trace(
     """
     trace_arr = np.asarray(trace)
     if trace_use is None:
-        if getattr(config, 'peak_pre_filter', 'none') == 'lowpass':
-            trace_use_arr = lowpass_filter(trace_arr, fs_hz, config)
-        else:
-            trace_use_arr = trace_arr
+        trace_use_arr, _ = apply_peak_prefilter(trace_arr, fs_hz, config)
     else:
         trace_use_arr = np.asarray(trace_use)
 
@@ -227,12 +336,10 @@ def extract_features(chunk, config):
         total_peaks = 0
         total_auc = 0.0 
         
-        # Determine signal to use based on pre-filter setting
-        use_filter = getattr(config, 'peak_pre_filter', 'none') == 'lowpass'
-        if use_filter:
-            trace_use = lowpass_filter(trace, chunk.fs_hz, config)
-        else:
-            trace_use = trace
+        # Determine signal to use based on pre-filter setting.
+        mode = _normalize_peak_prefilter_mode(getattr(config, "peak_pre_filter", "none"))
+        trace_use, _ = apply_peak_prefilter(trace, chunk.fs_hz, config)
+        use_filter = mode != "none"
             
         is_valid_use = np.isfinite(trace_use)
         clean_trace_use = trace_use[is_valid_use]
@@ -310,7 +417,10 @@ def extract_features(chunk, config):
                         # If raw was all finite but filtered is not, it's a filter artifact
                         if np.all(seg_valid_raw):
                             qc_counts['FILTER_NAN'] = qc_counts.get('FILTER_NAN', 0) + 1
-                            f_warning = f"DEGENERATE[FILTER_NAN] lowpass_filter introduced NaNs inside segment {s}:{e} in ROI '{roi}'."
+                            f_warning = (
+                                f"DEGENERATE[FILTER_NAN] peak_pre_filter '{mode}' "
+                                f"introduced NaNs inside segment {s}:{e} in ROI '{roi}'."
+                            )
                             if f_warning not in chunk.metadata.get('qc_warnings', []):
                                 chunk.metadata.setdefault('qc_warnings', []).append(f_warning)
                 

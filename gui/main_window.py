@@ -13,6 +13,7 @@ State model:
 """
 
 import json
+import hashlib
 import sys
 import os
 import csv
@@ -22,10 +23,10 @@ import secrets
 import subprocess as _subprocess
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from statistics import median
 
-from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop
+from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice
 from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -68,6 +69,25 @@ def _env_flag_enabled(name: str) -> bool:
     """Return True if an environment flag is set to a truthy value."""
     value = os.environ.get(name, "").strip().lower()
     return value in {"1", "true", "yes", "on"}
+
+
+def _sha256_bytes(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _pixmap_sha256_png(pix: QPixmap) -> str:
+    if pix.isNull():
+        return ""
+    payload = QByteArray()
+    buffer = QBuffer(payload)
+    if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+        return ""
+    try:
+        if not pix.save(buffer, "PNG"):
+            return ""
+    finally:
+        buffer.close()
+    return _sha256_bytes(bytes(payload))
 
 
 def _open_folder(path: str) -> None:
@@ -189,6 +209,7 @@ _KNOWN_ALLOWED_VALUES = {
     "event_auc_baseline": ["zero", "median"],
     "peak_pre_filter": ["none", "lowpass"],
 }
+_RETUNE_PEAK_PRE_FILTER_OPTIONS = ["none", "smooth"]
 
 def _get_allowed_from_config_field(field_name: str) -> list[str]:
     """
@@ -244,6 +265,25 @@ def get_allowed_event_auc_baselines_from_config() -> list[str]:
 
 def get_allowed_peak_pre_filters_from_config() -> list[str]:
     return _get_allowed_from_config_field("peak_pre_filter")
+
+
+def get_retune_peak_pre_filters() -> list[str]:
+    return list(_RETUNE_PEAK_PRE_FILTER_OPTIONS)
+
+
+def normalize_retune_peak_pre_filter(mode_raw: str) -> str:
+    mode = str(mode_raw or "none").strip().lower()
+    if mode == "none":
+        return "none"
+    if mode in {"smooth", "lowpass"}:
+        return "smooth"
+    return "none"
+
+
+def map_retune_peak_pre_filter_to_run_setting(mode_raw: str) -> str:
+    # Main run settings keep legacy config semantics for full-pipeline compatibility.
+    mode = normalize_retune_peak_pre_filter(mode_raw)
+    return "lowpass" if mode == "smooth" else "none"
 
 _cached_percentile_reqs = {}
 
@@ -544,6 +584,8 @@ class MainWindow(QMainWindow):
         self._tuning_last_result = None
         self._tuning_active_overlay_path = ""
         self._tuning_active_overlay_pixmap = QPixmap()
+        self._tuning_last_loaded_overlay_sha256 = ""
+        self._tuning_last_loaded_overlay_size = 0
         self._roi_chunk_ids_cache: dict[str, list[int]] = {}
         self._correction_tuning_workspace_available = False
         self._correction_tuning_last_result = None
@@ -552,6 +594,7 @@ class MainWindow(QMainWindow):
         # Debug-only GUI preflight timing. Disabled by default.
         # Enable with PHOTOMETRY_GUI_TIMING=1.
         self._gui_timing_enabled = _env_flag_enabled("PHOTOMETRY_GUI_TIMING")
+        self._retune_preview_debug_enabled = _env_flag_enabled("PHOTOMETRY_RETUNE_DEBUG")
         self._timing_action = ""
         self._timing_click_monotonic = None
         self._elapsed_first_tick_logged = False
@@ -1082,9 +1125,10 @@ class MainWindow(QMainWindow):
 
         self._tuning_peak_pre_filter_combo = QComboBox()
         self._tuning_peak_pre_filter_combo.setMinimumWidth(220)
-        self._tuning_peak_pre_filter_combo.addItems(get_allowed_peak_pre_filters_from_config())
+        self._tuning_peak_pre_filter_combo.addItems(get_retune_peak_pre_filters())
         self._tuning_peak_pre_filter_combo.setToolTip(
-            "Optional pre-filter applied before event detection."
+            "Optional pre-filter applied before event detection. "
+            "'smooth' uses phase-preserving Savitzky-Golay smoothing."
         )
         tuning_form.addRow(_tuning_row_label("Peak Pre-Filter:"), self._tuning_peak_pre_filter_combo)
 
@@ -1737,6 +1781,8 @@ class MainWindow(QMainWindow):
     def _set_tuning_overlay_message(self, text: str) -> None:
         self._tuning_active_overlay_path = ""
         self._tuning_active_overlay_pixmap = QPixmap()
+        self._tuning_last_loaded_overlay_sha256 = ""
+        self._tuning_last_loaded_overlay_size = 0
         self._tuning_overlay_title.setText("No tuning overlay loaded.")
         self._tuning_overlay_label.setPixmap(QPixmap())
         self._tuning_overlay_label.setText(text)
@@ -1757,7 +1803,7 @@ class MainWindow(QMainWindow):
         scaled = self._tuning_active_overlay_pixmap.scaled(
             target,
             Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
+            Qt.FastTransformation,
         )
         self._tuning_overlay_label.setText("")
         self._tuning_overlay_label.setPixmap(scaled)
@@ -1767,7 +1813,18 @@ class MainWindow(QMainWindow):
         if not image_path or not os.path.isfile(image_path):
             self._set_tuning_overlay_message("Tuning overlay image is missing.")
             return
-        pix = QPixmap(image_path)
+        try:
+            with open(image_path, "rb") as f:
+                raw = f.read()
+        except OSError:
+            self._set_tuning_overlay_message("Unable to read tuning overlay image.")
+            return
+        self._tuning_last_loaded_overlay_size = int(len(raw))
+        self._tuning_last_loaded_overlay_sha256 = _sha256_bytes(raw)
+        pix = QPixmap()
+        if not pix.loadFromData(raw):
+            self._set_tuning_overlay_message("Unable to render tuning overlay image.")
+            return
         if pix.isNull():
             self._set_tuning_overlay_message("Unable to render tuning overlay image.")
             return
@@ -1775,6 +1832,59 @@ class MainWindow(QMainWindow):
         self._tuning_active_overlay_pixmap = pix
         self._tuning_overlay_title.setText(os.path.basename(image_path))
         self._render_tuning_overlay()
+
+    def _write_tuning_display_debug_record(
+        self,
+        *,
+        result: dict,
+        overrides: dict,
+        previous_overlay_path: str,
+    ) -> None:
+        if not self._retune_preview_debug_enabled:
+            return
+        retune_dir = str(result.get("retune_dir", "")).strip()
+        if not retune_dir or not os.path.isdir(retune_dir):
+            return
+        shown = self._tuning_overlay_label.pixmap()
+        shown_hash = _pixmap_sha256_png(shown) if shown is not None else ""
+        active_hash = _pixmap_sha256_png(self._tuning_active_overlay_pixmap)
+        overlay_file_hash = ""
+        if self._tuning_active_overlay_path and os.path.isfile(self._tuning_active_overlay_path):
+            try:
+                with open(self._tuning_active_overlay_path, "rb") as f:
+                    overlay_file_hash = _sha256_bytes(f.read())
+            except OSError:
+                overlay_file_hash = ""
+        record = {
+            "schema_version": 1,
+            "debug_kind": "post_run_tuning_display_overlay",
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "retune_dir": retune_dir,
+            "run_dir": str(self._current_run_dir),
+            "preview_slot_id": "post_run_tuning_overlay",
+            "roi": str(result.get("selected_roi", self._tuning_roi_combo.currentText().strip())),
+            "chunk_id": int(result.get("inspection_chunk_id", self._tuning_chunk_combo.currentData() or -1)),
+            "peak_pre_filter": str(overrides.get("peak_pre_filter", "")),
+            "overlay_loaded_path": str(self._tuning_active_overlay_path),
+            "overlay_loaded_basename": os.path.basename(str(self._tuning_active_overlay_path)),
+            "overlay_previous_path": str(previous_overlay_path),
+            "same_path_reused": bool(previous_overlay_path and previous_overlay_path == self._tuning_active_overlay_path),
+            "overlay_loaded_bytes_sha256": str(self._tuning_last_loaded_overlay_sha256),
+            "overlay_loaded_bytes_size": int(self._tuning_last_loaded_overlay_size),
+            "overlay_file_sha256": str(overlay_file_hash),
+            "active_pixmap_sha256_png": str(active_hash),
+            "displayed_pixmap_sha256_png": str(shown_hash),
+        }
+        debug_path = os.path.join(retune_dir, "retune_preview_debug_display.json")
+        with open(debug_path, "w", encoding="utf-8") as f:
+            json.dump(record, f, indent=2, sort_keys=True)
+        print(
+            "RETUNE_DEBUG DISPLAY "
+            f"chunk={record['chunk_id']} "
+            f"prefilter={record['peak_pre_filter']} "
+            f"loaded_hash={record['overlay_loaded_bytes_sha256']} "
+            f"display_hash={record['displayed_pixmap_sha256_png']}"
+        )
 
     def _load_tuning_base_config(self) -> Config:
         cfg_path = self._current_phasic_config_path()
@@ -1890,7 +2000,7 @@ class MainWindow(QMainWindow):
         self._tuning_peak_dist_spin.setValue(float(cfg.peak_min_distance_sec))
         self._tuning_peak_prominence_k_spin.setValue(float(getattr(cfg, "peak_min_prominence_k", 0.0)))
         self._tuning_peak_width_sec_spin.setValue(float(getattr(cfg, "peak_min_width_sec", 0.0)))
-        pre_filter = str(getattr(cfg, "peak_pre_filter", "none"))
+        pre_filter = normalize_retune_peak_pre_filter(str(getattr(cfg, "peak_pre_filter", "none")))
         if self._tuning_peak_pre_filter_combo.findText(pre_filter) >= 0:
             self._tuning_peak_pre_filter_combo.setCurrentText(pre_filter)
         auc_base = str(cfg.event_auc_baseline)
@@ -2067,7 +2177,9 @@ class MainWindow(QMainWindow):
             "peak_min_distance_sec": float(self._tuning_peak_dist_spin.value()),
             "peak_min_prominence_k": float(self._tuning_peak_prominence_k_spin.value()),
             "peak_min_width_sec": float(self._tuning_peak_width_sec_spin.value()),
-            "peak_pre_filter": self._tuning_peak_pre_filter_combo.currentText().strip(),
+            "peak_pre_filter": normalize_retune_peak_pre_filter(
+                self._tuning_peak_pre_filter_combo.currentText().strip()
+            ),
             "event_auc_baseline": self._tuning_event_auc_combo.currentText().strip(),
         }
         if peak_threshold_method_requires_k(method):
@@ -2119,7 +2231,13 @@ class MainWindow(QMainWindow):
         self._open_tuning_dir_btn.setEnabled(True)
         artifacts = result.get("artifacts", {}) if isinstance(result, dict) else {}
         overlay_path = str(artifacts.get("retuned_overlay_png", "")).strip()
+        previous_overlay_path = str(self._tuning_active_overlay_path)
         self._set_tuning_overlay_image(overlay_path)
+        self._write_tuning_display_debug_record(
+            result=result if isinstance(result, dict) else {},
+            overrides=overrides,
+            previous_overlay_path=previous_overlay_path,
+        )
 
         lines = [
             f"ROI: {result.get('selected_roi', roi)}",
@@ -2182,7 +2300,12 @@ class MainWindow(QMainWindow):
             _fmt(self._tuning_peak_width_sec_spin.value(), decimals=3)
         )
 
-        _set_combo_if_allowed(self._peak_pre_filter_combo, self._tuning_peak_pre_filter_combo.currentText().strip())
+        _set_combo_if_allowed(
+            self._peak_pre_filter_combo,
+            map_retune_peak_pre_filter_to_run_setting(
+                self._tuning_peak_pre_filter_combo.currentText().strip()
+            ),
+        )
         _set_combo_if_allowed(self._event_auc_combo, self._tuning_event_auc_combo.currentText().strip())
 
         self._update_adv_ev_visibility()

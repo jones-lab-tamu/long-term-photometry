@@ -1,4 +1,5 @@
 import dataclasses
+import hashlib
 import json
 import os
 import sys
@@ -7,7 +8,8 @@ import h5py
 import numpy as np
 import pytest
 import yaml
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QGroupBox
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -98,6 +100,81 @@ def _make_completed_run_with_cache(
                     if cid not in keep_set:
                         del grp[key]
     return run_dir
+
+
+def _make_completed_run_with_quantized_preview_cache(tmp_path, *, lowpass_hz: float = 1.0):
+    run_dir = tmp_path / "run_complete_quantized_preview"
+    phasic_out = run_dir / "_analysis" / "phasic_out"
+    phasic_out.mkdir(parents=True, exist_ok=True)
+
+    (run_dir / "status.json").write_text(
+        json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
+        encoding="utf-8",
+    )
+    (run_dir / "MANIFEST.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+
+    cfg = Config(
+        target_fs_hz=20.0,
+        lowpass_hz=float(lowpass_hz),
+        event_signal="dff",
+        peak_threshold_method="mean_std",
+        peak_threshold_k=2.0,
+        peak_min_distance_sec=0.5,
+    )
+    with open(phasic_out / "config_used.yaml", "w", encoding="utf-8") as f:
+        yaml.safe_dump(dataclasses.asdict(cfg), f, sort_keys=True)
+
+    cache_path = phasic_out / "phasic_trace_cache.h5"
+    with Hdf5TraceCacheWriter(str(cache_path), "phasic", cfg) as writer:
+        t_true = np.arange(0.0, 60.0, 1.0 / cfg.target_fs_hz)
+        t_quantized = np.floor(t_true)
+        signal = 0.35 * np.sin(2.0 * np.pi * 0.3 * t_true) + 0.85 * np.sin(2.0 * np.pi * 4.5 * t_true)
+        chunk = Chunk(
+            chunk_id=0,
+            source_file="session_0.csv",
+            format="cache",
+            time_sec=t_quantized,
+            uv_raw=np.zeros((len(t_quantized), 1), dtype=float),
+            sig_raw=np.zeros((len(t_quantized), 1), dtype=float),
+            fs_hz=cfg.target_fs_hz,
+            channel_names=["Region0"],
+        )
+        chunk.delta_f = signal.reshape(-1, 1)
+        chunk.dff = signal.reshape(-1, 1)
+        writer.add_chunk(chunk, chunk_id=0, source_file="session_0.csv")
+    return run_dir
+
+
+def _qimage_sha256(image) -> str:
+    payload = QByteArray()
+    buffer = QBuffer(payload)
+    assert buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    assert image.save(buffer, "PNG")
+    buffer.close()
+    return hashlib.sha256(bytes(payload)).hexdigest()
+
+
+def _qimage_diff_counts(image_a, image_b) -> tuple[int, int]:
+    """
+    Return (total_diff_pixels, diff_pixels_outside_legend_zone).
+
+    The legend occupies the lower-left corner in retune overlays; requiring
+    differences outside that zone prevents legend-only regressions.
+    """
+    a = image_a.convertToFormat(QImage.Format.Format_RGBA8888)
+    b = image_b.convertToFormat(QImage.Format.Format_RGBA8888)
+    assert a.size() == b.size()
+    h, w = a.height(), a.width()
+    ba = np.frombuffer(a.constBits(), dtype=np.uint8).reshape((h, w, 4))
+    bb = np.frombuffer(b.constBits(), dtype=np.uint8).reshape((h, w, 4))
+    diff = np.any(ba != bb, axis=2)
+    total = int(np.count_nonzero(diff))
+
+    # Approximate legend zone: lower-left area where text key is rendered.
+    legend_mask = np.zeros((h, w), dtype=bool)
+    legend_mask[int(h * 0.72):, : int(w * 0.34)] = True
+    outside = int(np.count_nonzero(diff & ~legend_mask))
+    return total, outside
 
 
 def _write_png(path, width: int = 320, height: int = 180) -> None:
@@ -274,6 +351,13 @@ def test_downstream_tuning_control_population_includes_hardening_defaults(window
     window._refresh_tuning_workspace_availability()
     QApplication.processEvents()
 
+    prefilter_options = [
+        window._tuning_peak_pre_filter_combo.itemText(i)
+        for i in range(window._tuning_peak_pre_filter_combo.count())
+    ]
+    assert "smooth" in prefilter_options
+    assert "lowpass" not in prefilter_options
+
     assert window._tuning_event_signal_combo.currentText() == "delta_f"
     assert window._tuning_peak_method_combo.currentText() == "absolute"
     assert window._tuning_peak_k_spin.value() == pytest.approx(4.2)
@@ -282,7 +366,7 @@ def test_downstream_tuning_control_population_includes_hardening_defaults(window
     assert window._tuning_peak_dist_spin.value() == pytest.approx(1.4)
     assert window._tuning_peak_prominence_k_spin.value() == pytest.approx(1.75)
     assert window._tuning_peak_width_sec_spin.value() == pytest.approx(0.28)
-    assert window._tuning_peak_pre_filter_combo.currentText() == "lowpass"
+    assert window._tuning_peak_pre_filter_combo.currentText() == "smooth"
     assert window._tuning_event_auc_combo.currentText() == "median"
 
 
@@ -568,6 +652,8 @@ def test_tuning_workspace_wiring_and_refresh(window, tmp_path, monkeypatch):
     window._tuning_peak_dist_spin.setValue(1.5)
     window._tuning_peak_prominence_k_spin.setValue(1.8)
     window._tuning_peak_width_sec_spin.setValue(0.35)
+    if window._tuning_peak_pre_filter_combo.findText("smooth") >= 0:
+        window._tuning_peak_pre_filter_combo.setCurrentText("smooth")
 
     overlay_path = tmp_path / "overlay_test.png"
     from PySide6.QtGui import QPixmap
@@ -600,6 +686,7 @@ def test_tuning_workspace_wiring_and_refresh(window, tmp_path, monkeypatch):
     assert captured["overrides"]["peak_threshold_abs"] == pytest.approx(0.15)
     assert captured["overrides"]["peak_min_prominence_k"] == pytest.approx(1.8)
     assert captured["overrides"]["peak_min_width_sec"] == pytest.approx(0.35)
+    assert captured["overrides"]["peak_pre_filter"] == "smooth"
     assert captured["out_dir"] is None
 
     assert "ROI: Region1" in window._tuning_summary_label.text()
@@ -626,6 +713,207 @@ def test_tuning_workspace_wiring_and_refresh(window, tmp_path, monkeypatch):
     assert shown_restored is not None and not shown_restored.isNull()
 
 
+def test_tuning_same_slot_reloads_overlay_when_path_reused(window, tmp_path, monkeypatch):
+    from PySide6.QtGui import QColor, QPixmap
+
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._tuning_roi_combo.setCurrentText("Region0")
+    window._tuning_chunk_combo.setCurrentText("0")
+
+    overlay_path = tmp_path / "overlay_same_slot.png"
+
+    def _write_colored_overlay(color_name: str) -> None:
+        pix = QPixmap(120, 80)
+        pix.fill(QColor(color_name))
+        assert pix.save(str(overlay_path))
+
+    def _fake_retune(**kwargs):
+        pre_filter = kwargs["overrides"].get("peak_pre_filter", "none")
+        _write_colored_overlay("red" if pre_filter == "none" else "blue")
+        out = tmp_path / "retune_out_same_slot"
+        out.mkdir(exist_ok=True)
+        return {
+            "retune_dir": str(out),
+            "selected_roi": kwargs["roi"],
+            "inspection_chunk_id": kwargs["chunk_id"],
+            "event_signal_used": kwargs["overrides"]["event_signal"],
+            "artifacts": {"retuned_overlay_png": str(overlay_path)},
+        }
+
+    monkeypatch.setattr("gui.main_window.run_cache_downstream_retune", _fake_retune)
+
+    if window._tuning_peak_pre_filter_combo.findText("none") >= 0:
+        window._tuning_peak_pre_filter_combo.setCurrentText("none")
+    window._on_run_tuning()
+    pix_none = window._tuning_active_overlay_pixmap.toImage()
+    color_none = pix_none.pixelColor(5, 5)
+    assert color_none.red() > color_none.blue()
+
+    if window._tuning_peak_pre_filter_combo.findText("smooth") >= 0:
+        window._tuning_peak_pre_filter_combo.setCurrentText("smooth")
+    window._on_run_tuning()
+    pix_low = window._tuning_active_overlay_pixmap.toImage()
+    color_low = pix_low.pixelColor(5, 5)
+    assert color_low.blue() > color_low.red()
+
+    # Same overlay path was reused, but the displayed pixmap must refresh to new content.
+    assert window._tuning_active_overlay_path == str(overlay_path)
+
+
+def test_tuning_same_slot_display_changes_for_none_vs_smooth_real_backend(window, tmp_path):
+    run_dir = _make_completed_run_with_quantized_preview_cache(tmp_path, lowpass_hz=10.0)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    assert window._tuning_workspace_available
+
+    window._tuning_roi_combo.setCurrentText("Region0")
+    window._tuning_chunk_combo.setCurrentText("0")
+    window._tuning_event_signal_combo.setCurrentText("dff")
+    window._tuning_peak_method_combo.setCurrentText("median_mad")
+    window._tuning_peak_k_spin.setValue(4.0)
+
+    if window._tuning_peak_pre_filter_combo.findText("none") >= 0:
+        window._tuning_peak_pre_filter_combo.setCurrentText("none")
+    window._on_run_tuning()
+    QApplication.processEvents()
+
+    shown_none = window._tuning_overlay_label.pixmap()
+    assert shown_none is not None and not shown_none.isNull()
+    image_none = shown_none.toImage()
+    digest_none = _qimage_sha256(image_none)
+    assert window._tuning_overlay_title.text() == "retuned_overlay_Region0_chunk_000.png"
+
+    if window._tuning_peak_pre_filter_combo.findText("smooth") >= 0:
+        window._tuning_peak_pre_filter_combo.setCurrentText("smooth")
+    window._on_run_tuning()
+    QApplication.processEvents()
+
+    shown_low = window._tuning_overlay_label.pixmap()
+    assert shown_low is not None and not shown_low.isNull()
+    image_low = shown_low.toImage()
+    digest_low = _qimage_sha256(image_low)
+    assert window._tuning_overlay_title.text() == "retuned_overlay_Region0_chunk_000.png"
+
+    # Same ROI/chunk preview slot is reused in-place; the displayed image must change.
+    assert window._tuning_roi_combo.currentText() == "Region0"
+    assert window._tuning_chunk_combo.currentText() == "0"
+    assert digest_none != digest_low
+    total_diff, trace_area_diff = _qimage_diff_counts(image_none, image_low)
+    assert total_diff > 0
+    # Guard against legend-only changes; the plotted trace region must also move.
+    assert trace_area_diff > 0
+
+
+def test_tuning_display_debug_is_off_by_default(window, tmp_path):
+    run_dir = _make_completed_run_with_quantized_preview_cache(tmp_path, lowpass_hz=10.0)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._tuning_roi_combo.setCurrentText("Region0")
+    window._tuning_chunk_combo.setCurrentText("0")
+    window._tuning_event_signal_combo.setCurrentText("dff")
+    window._tuning_peak_method_combo.setCurrentText("median_mad")
+    window._tuning_peak_k_spin.setValue(4.0)
+    if window._tuning_peak_pre_filter_combo.findText("none") >= 0:
+        window._tuning_peak_pre_filter_combo.setCurrentText("none")
+    window._on_run_tuning()
+    QApplication.processEvents()
+    retune_dir = str(window._tuning_last_result.get("retune_dir", ""))
+    assert retune_dir
+    assert not os.path.exists(os.path.join(retune_dir, "retune_preview_debug_display.json"))
+
+
+def test_tuning_display_debug_records_loaded_source_when_enabled(qapp, tmp_path, monkeypatch):
+    monkeypatch.setenv("PHOTOMETRY_RETUNE_DEBUG", "1")
+    w = MainWindow()
+    try:
+        run_dir = _make_completed_run_with_quantized_preview_cache(tmp_path, lowpass_hz=10.0)
+        w._is_complete_workspace_active = True
+        w._current_run_dir = str(run_dir)
+        w._refresh_tuning_workspace_availability()
+        assert w._tuning_workspace_available
+        w._tuning_roi_combo.setCurrentText("Region0")
+        w._tuning_chunk_combo.setCurrentText("0")
+        w._tuning_event_signal_combo.setCurrentText("dff")
+        w._tuning_peak_method_combo.setCurrentText("median_mad")
+        w._tuning_peak_k_spin.setValue(4.0)
+
+        if w._tuning_peak_pre_filter_combo.findText("none") >= 0:
+            w._tuning_peak_pre_filter_combo.setCurrentText("none")
+        w._on_run_tuning()
+        QApplication.processEvents()
+        first = dict(w._tuning_last_result)
+        first_pix = w._tuning_overlay_label.pixmap()
+        assert first_pix is not None and not first_pix.isNull()
+        first_image = first_pix.toImage()
+        first_debug_path = os.path.join(first["retune_dir"], "retune_preview_debug_display.json")
+        assert os.path.isfile(first_debug_path)
+        with open(first_debug_path, "r", encoding="utf-8") as f:
+            dbg_none = json.load(f)
+
+        if w._tuning_peak_pre_filter_combo.findText("smooth") >= 0:
+            w._tuning_peak_pre_filter_combo.setCurrentText("smooth")
+        w._on_run_tuning()
+        QApplication.processEvents()
+        second = dict(w._tuning_last_result)
+        second_pix = w._tuning_overlay_label.pixmap()
+        assert second_pix is not None and not second_pix.isNull()
+        second_image = second_pix.toImage()
+        second_debug_path = os.path.join(second["retune_dir"], "retune_preview_debug_display.json")
+        assert os.path.isfile(second_debug_path)
+        with open(second_debug_path, "r", encoding="utf-8") as f:
+            dbg_low = json.load(f)
+
+        assert dbg_none["preview_slot_id"] == "post_run_tuning_overlay"
+        assert dbg_low["preview_slot_id"] == "post_run_tuning_overlay"
+        assert dbg_none["peak_pre_filter"] == "none"
+        assert dbg_low["peak_pre_filter"] == "smooth"
+        assert dbg_none["overlay_loaded_path"] == first["artifacts"]["retuned_overlay_png"]
+        assert dbg_low["overlay_loaded_path"] == second["artifacts"]["retuned_overlay_png"]
+        assert dbg_low["overlay_previous_path"] == dbg_none["overlay_loaded_path"]
+        assert dbg_none["overlay_loaded_bytes_sha256"] == dbg_none["overlay_file_sha256"]
+        assert dbg_low["overlay_loaded_bytes_sha256"] == dbg_low["overlay_file_sha256"]
+        assert dbg_none["displayed_pixmap_sha256_png"].strip()
+        assert dbg_low["displayed_pixmap_sha256_png"].strip()
+        assert dbg_none["displayed_pixmap_sha256_png"] != dbg_low["displayed_pixmap_sha256_png"]
+        total_diff, trace_area_diff = _qimage_diff_counts(first_image, second_image)
+        assert total_diff > 0
+        assert trace_area_diff > 0
+    finally:
+        w.close()
+        w.deleteLater()
+
+
+def test_tuning_overlay_fit_render_uses_fast_transformation(window, monkeypatch):
+    from PySide6.QtGui import QPixmap
+
+    calls = []
+    original_scaled = QPixmap.scaled
+
+    def _spy_scaled(self, *args, **kwargs):
+        mode = None
+        if len(args) >= 3:
+            mode = args[2]
+        elif "mode" in kwargs:
+            mode = kwargs["mode"]
+        calls.append(mode)
+        return original_scaled(self, *args, **kwargs)
+
+    monkeypatch.setattr(QPixmap, "scaled", _spy_scaled)
+
+    pix = QPixmap(400, 200)
+    pix.fill()
+    window._tuning_active_overlay_pixmap = pix
+    window._render_tuning_overlay()
+
+    assert calls
+    assert calls[-1] == Qt.FastTransformation
+
+
 def test_tuning_apply_back_copies_only_downstream_fields(window, tmp_path):
     run_dir = _make_completed_run_with_cache(tmp_path)
     window._is_complete_workspace_active = True
@@ -645,8 +933,8 @@ def test_tuning_apply_back_copies_only_downstream_fields(window, tmp_path):
     window._tuning_peak_dist_spin.setValue(2.5)
     window._tuning_peak_prominence_k_spin.setValue(1.65)
     window._tuning_peak_width_sec_spin.setValue(0.55)
-    if window._tuning_peak_pre_filter_combo.findText("lowpass") >= 0:
-        window._tuning_peak_pre_filter_combo.setCurrentText("lowpass")
+    if window._tuning_peak_pre_filter_combo.findText("smooth") >= 0:
+        window._tuning_peak_pre_filter_combo.setCurrentText("smooth")
     if window._tuning_event_auc_combo.findText("median") >= 0:
         window._tuning_event_auc_combo.setCurrentText("median")
 
@@ -661,7 +949,8 @@ def test_tuning_apply_back_copies_only_downstream_fields(window, tmp_path):
     assert float(window._peak_dist_edit.text()) == pytest.approx(2.5, rel=1e-6)
     assert float(window._peak_min_prominence_k_edit.text()) == pytest.approx(1.65, rel=1e-6)
     assert float(window._peak_min_width_sec_edit.text()) == pytest.approx(0.55, rel=1e-6)
-    assert window._peak_pre_filter_combo.currentText() == window._tuning_peak_pre_filter_combo.currentText()
+    assert window._tuning_peak_pre_filter_combo.currentText() == "smooth"
+    assert window._peak_pre_filter_combo.currentText() == "lowpass"
     assert window._event_auc_combo.currentText() == window._tuning_event_auc_combo.currentText()
 
     # Correction-sensitive control must remain unchanged.
@@ -767,8 +1056,8 @@ def test_tuning_apply_back_next_run_serializes_applied_values(window, tmp_path):
     window._tuning_peak_dist_spin.setValue(2.25)
     window._tuning_peak_prominence_k_spin.setValue(1.2)
     window._tuning_peak_width_sec_spin.setValue(0.45)
-    if window._tuning_peak_pre_filter_combo.findText("lowpass") >= 0:
-        window._tuning_peak_pre_filter_combo.setCurrentText("lowpass")
+    if window._tuning_peak_pre_filter_combo.findText("smooth") >= 0:
+        window._tuning_peak_pre_filter_combo.setCurrentText("smooth")
     if window._tuning_event_auc_combo.findText("median") >= 0:
         window._tuning_event_auc_combo.setCurrentText("median")
 

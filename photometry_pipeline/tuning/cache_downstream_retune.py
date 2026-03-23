@@ -12,6 +12,7 @@ This module implements a bounded retune path for completed runs:
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import secrets
@@ -26,8 +27,11 @@ import pandas as pd
 import yaml
 
 from photometry_pipeline.config import Config
-from photometry_pipeline.core.feature_extraction import extract_features, get_peak_indices_for_trace
-from photometry_pipeline.core.preprocessing import lowpass_filter
+from photometry_pipeline.core.feature_extraction import (
+    apply_peak_prefilter,
+    extract_features,
+    get_peak_indices_for_trace,
+)
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.io.hdf5_cache_reader import (
     list_cache_chunk_ids,
@@ -89,6 +93,81 @@ _OVERRIDE_VALUE_CASTERS = {
     "lowpass_hz": float,
     "f0_min_value": float,
 }
+
+
+_RETUNE_DEBUG_ENV = "PHOTOMETRY_RETUNE_DEBUG"
+
+
+def _retune_debug_enabled() -> bool:
+    value = os.environ.get(_RETUNE_DEBUG_ENV, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _sha256_bytes(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _sha256_file(path: str) -> str:
+    with open(path, "rb") as f:
+        return _sha256_bytes(f.read())
+
+
+def _trace_summary(trace: np.ndarray) -> Dict[str, Any]:
+    arr = np.asarray(trace, dtype=np.float64)
+    finite = arr[np.isfinite(arr)]
+    payload: Dict[str, Any] = {
+        "n_samples": int(arr.size),
+        "trace_sha256_f64": _sha256_bytes(np.ascontiguousarray(arr).tobytes()),
+    }
+    if finite.size:
+        payload.update(
+            {
+                "trace_min": float(np.min(finite)),
+                "trace_max": float(np.max(finite)),
+                "trace_mean": float(np.mean(finite)),
+                "trace_std": float(np.std(finite)),
+            }
+        )
+    else:
+        payload.update(
+            {
+                "trace_min": float("nan"),
+                "trace_max": float("nan"),
+                "trace_mean": float("nan"),
+                "trace_std": float("nan"),
+            }
+        )
+    return payload
+
+
+def _normalize_retune_prefilter_mode(mode_raw: str) -> str:
+    """
+    Retune semantics intentionally collapse legacy `lowpass` into `smooth`.
+
+    Post-run tuning is a visual tuning surface; this canonicalization keeps
+    backward compatibility for old configs while enforcing honest UI semantics.
+    """
+    mode = str(mode_raw or "none").strip().lower()
+    if mode == "none":
+        return "none"
+    if mode in {"smooth", "lowpass"}:
+        return "smooth"
+    return "none"
+
+
+def _write_backend_debug_record(retune_dir: str, payload: Dict[str, Any]) -> None:
+    if not _retune_debug_enabled():
+        return
+    path = os.path.join(retune_dir, "retune_preview_debug_backend.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+    print(
+        "RETUNE_DEBUG BACKEND "
+        f"chunk={payload.get('chunk_id')} "
+        f"prefilter={payload.get('peak_pre_filter')} "
+        f"trace_hash={payload.get('trace_sha256_f64')} "
+        f"overlay_hash={payload.get('overlay_png_sha256')}"
+    )
 
 
 def parse_key_value_overrides(items: Iterable[str]) -> Dict[str, Any]:
@@ -187,6 +266,25 @@ def _compute_chunk_fs_hz(time_sec: np.ndarray, fallback: float) -> float:
     return float(1.0 / np.median(finite))
 
 
+def _resolve_chunk_fs_hz(grp, time_sec: np.ndarray, fallback: float) -> float:
+    """
+    Resolve chunk sampling rate for retune preview/detection.
+
+    Prefer cache metadata (`grp.attrs['fs_hz']`) when present and valid. This
+    preserves the original analyzed fs even when legacy/coarse `time_sec`
+    storage would under-estimate fs and weaken retune prefiltering effects.
+    """
+    fs_attr = grp.attrs.get("fs_hz")
+    if fs_attr is not None:
+        try:
+            fs_attr_f = float(fs_attr)
+            if np.isfinite(fs_attr_f) and fs_attr_f > 0:
+                return fs_attr_f
+        except (TypeError, ValueError):
+            pass
+    return _compute_chunk_fs_hz(time_sec, fallback)
+
+
 def _build_chunk_for_roi(
     roi: str,
     chunk_id: int,
@@ -209,7 +307,7 @@ def _build_chunk_for_roi(
     uv_raw = grp["uv_raw"][()]
     signal_arr = grp[signal_field][()]
 
-    fs_hz = _compute_chunk_fs_hz(time_sec, cfg.target_fs_hz)
+    fs_hz = _resolve_chunk_fs_hz(grp, time_sec, cfg.target_fs_hz)
     chunk = Chunk(
         chunk_id=int(chunk_id),
         source_file=source_file,
@@ -364,21 +462,42 @@ def _compute_threshold(trace_use: np.ndarray, cfg: Config) -> tuple[float, dict[
     }
 
 
+def _resolve_prefilter_config_for_chunk(
+    cfg: Config,
+    fs_hz: float,
+    n_samples: int | None = None,
+) -> Config:
+    """
+    Resolve per-chunk prefilter config for downstream tuning preview/detection.
+    """
+    _ = fs_hz
+    _ = n_samples
+    mode = _normalize_retune_prefilter_mode(getattr(cfg, "peak_pre_filter", "none"))
+    if mode == str(getattr(cfg, "peak_pre_filter", "none")).strip().lower():
+        return cfg
+    cfg_dict = dataclasses.asdict(cfg)
+    cfg_dict["peak_pre_filter"] = mode
+    return Config(**cfg_dict)
+
+
 def _detect_events_for_chunk(chunk: Chunk, cfg: Config) -> Dict[str, Any]:
+    cfg_for_chunk = _resolve_prefilter_config_for_chunk(
+        cfg,
+        chunk.fs_hz,
+        n_samples=len(chunk.time_sec),
+    )
     signal_field = "dff" if cfg.event_signal == "dff" else "delta_f"
     signal = chunk.dff[:, 0] if signal_field == "dff" else chunk.delta_f[:, 0]
 
-    if getattr(cfg, "peak_pre_filter", "none") == "lowpass":
-        trace_use = lowpass_filter(signal, chunk.fs_hz, cfg)
-    else:
-        trace_use = signal
+    trace_use, prefilter_meta = apply_peak_prefilter(signal, chunk.fs_hz, cfg_for_chunk)
+    peak_pre_filter = str(prefilter_meta.get("mode", getattr(cfg_for_chunk, "peak_pre_filter", "none")))
 
-    threshold, stats = _compute_threshold(trace_use, cfg)
-    dist_samples = max(1, int(cfg.peak_min_distance_sec * chunk.fs_hz))
+    threshold, stats = _compute_threshold(trace_use, cfg_for_chunk)
+    dist_samples = max(1, int(cfg_for_chunk.peak_min_distance_sec * chunk.fs_hz))
     event_idx = get_peak_indices_for_trace(
         signal,
         chunk.fs_hz,
-        cfg,
+        cfg_for_chunk,
         trace_use=trace_use,
         threshold=threshold,
     )
@@ -387,6 +506,7 @@ def _detect_events_for_chunk(chunk: Chunk, cfg: Config) -> Dict[str, Any]:
     return {
         "chunk_id": int(chunk.chunk_id),
         "source_file": chunk.source_file,
+        "fs_hz": float(chunk.fs_hz),
         "signal_field": signal_field,
         "trace_time_sec": chunk.time_sec,
         "trace_used_for_calling": trace_use,
@@ -396,6 +516,18 @@ def _detect_events_for_chunk(chunk: Chunk, cfg: Config) -> Dict[str, Any]:
         "threshold": float(threshold),
         "threshold_stats": stats,
         "distance_samples": int(dist_samples),
+        "peak_pre_filter": peak_pre_filter,
+        "prefilter_applied": bool(prefilter_meta.get("prefilter_applied", False)),
+        "savgol_window_length": (
+            int(prefilter_meta["savgol_window_length"])
+            if prefilter_meta.get("savgol_window_length") is not None
+            else np.nan
+        ),
+        "savgol_polyorder": (
+            int(prefilter_meta["savgol_polyorder"])
+            if prefilter_meta.get("savgol_polyorder") is not None
+            else np.nan
+        ),
     }
 
 
@@ -415,6 +547,10 @@ def _write_inspection_diagnostics(
             "source_file": str(detection["source_file"]),
             "roi": roi,
             "event_signal": detection["signal_field"],
+            "peak_pre_filter": str(detection.get("peak_pre_filter", "none")),
+            "prefilter_applied": bool(detection.get("prefilter_applied", False)),
+            "savgol_window_length": float(detection.get("savgol_window_length", np.nan)),
+            "savgol_polyorder": float(detection.get("savgol_polyorder", np.nan)),
             "event_index": detection["event_indices"],
             "event_time_sec": detection["event_times_sec"],
             "event_value": detection["event_values"],
@@ -428,33 +564,55 @@ def _write_inspection_diagnostics(
     out["retuned_events_csv"] = events_csv
 
     overlay_png = os.path.join(retune_dir, f"retuned_overlay_{suffix}.png")
-    fig, ax = plt.subplots(figsize=(12, 4.5))
-    x = detection["trace_time_sec"]
-    y = detection["trace_used_for_calling"]
-    ax.plot(x, y, linewidth=1.0, color="steelblue", label=f"{detection['signal_field']} trace")
-    if len(detection["event_indices"]):
-        ax.scatter(
-            detection["event_times_sec"],
-            detection["event_values"],
-            color="crimson",
-            marker="x",
-            s=28,
-            linewidths=1.0,
-            label="Detected events",
-            zorder=3,
+    # Keep the visible preview line faithful to the actual y-array used for detection.
+    # Path simplification can collapse distinct high-density traces into the same pixels.
+    with matplotlib.rc_context({"path.simplify": False, "path.simplify_threshold": 0.0}):
+        fig, ax = plt.subplots(figsize=(12, 4.5))
+        x = detection["trace_time_sec"]
+        y = detection["trace_used_for_calling"]
+        trace_label = f"{detection['signal_field']} trace"
+        if str(detection.get("peak_pre_filter", "none")) == "smooth":
+            win = detection.get("savgol_window_length", np.nan)
+            poly = detection.get("savgol_polyorder", np.nan)
+            if np.isfinite(win) and np.isfinite(poly):
+                trace_label = (
+                    f"{detection['signal_field']} trace (smooth SG window={int(win)}, poly={int(poly)})"
+                )
+            else:
+                trace_label = f"{detection['signal_field']} trace (smooth)"
+        ax.plot(
+            x,
+            y,
+            linewidth=1.0,
+            color="steelblue",
+            label=trace_label,
+            antialiased=False,
         )
-    ax.axhline(float(detection["threshold"]), color="darkorange", linestyle="--", linewidth=1.0, label="Threshold")
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel(detection["signal_field"])
-    ax.set_title(
-        f"Retuned Event Overlay ({roi}) | chunk={chunk_id} | source={detection['source_file']}"
-    )
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="best", fontsize=8)
-    fig.tight_layout()
-    fig.savefig(overlay_png, dpi=150)
-    plt.close(fig)
+        if len(detection["event_indices"]):
+            ax.scatter(
+                detection["event_times_sec"],
+                detection["event_values"],
+                color="crimson",
+                marker="x",
+                s=28,
+                linewidths=1.0,
+                label="Detected events",
+                zorder=3,
+            )
+        ax.axhline(float(detection["threshold"]), color="darkorange", linestyle="--", linewidth=1.0, label="Threshold")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel(detection["signal_field"])
+        ax.set_title(
+            f"Retuned Event Overlay ({roi}) | chunk={chunk_id} | source={detection['source_file']}"
+        )
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=8)
+        fig.tight_layout()
+        fig.savefig(overlay_png, dpi=150)
+        plt.close(fig)
     out["retuned_overlay_png"] = overlay_png
+    if _retune_debug_enabled():
+        out["retuned_overlay_png_sha256"] = _sha256_file(overlay_png)
     return out
 
 
@@ -561,7 +719,12 @@ def run_cache_downstream_retune(
                 inspection_chunk = chunk
             if len(chunk.time_sec) >= 2:
                 durations.append(float(chunk.time_sec[-1] - chunk.time_sec[0]))
-            feats = extract_features(chunk, effective_config)
+            chunk_cfg = _resolve_prefilter_config_for_chunk(
+                effective_config,
+                chunk.fs_hz,
+                n_samples=len(chunk.time_sec),
+            )
+            feats = extract_features(chunk, chunk_cfg)
             all_rows.append(feats)
         if inspection_chunk is None:
             raise RuntimeError(f"Internal error: inspection chunk {inspection_chunk_id} was not loaded.")
@@ -588,6 +751,32 @@ def run_cache_downstream_retune(
             cfg=effective_config,
         )
     )
+    if _retune_debug_enabled():
+        backend_debug = {
+            "schema_version": 1,
+            "debug_kind": "post_run_tuning_backend_overlay",
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "source_run_dir": run_dir,
+            "retune_dir": retune_dir,
+            "roi": resolved_roi,
+            "chunk_id": int(detection.get("chunk_id", inspection_chunk_id)),
+            "source_file": str(detection.get("source_file", inspection_chunk.source_file)),
+            "peak_pre_filter": str(detection.get("peak_pre_filter", "none")),
+            "event_signal": str(detection.get("signal_field", effective_config.event_signal)),
+            "prefilter_applied": bool(detection.get("prefilter_applied", False)),
+            "savgol_window_length": float(detection.get("savgol_window_length", np.nan)),
+            "savgol_polyorder": float(detection.get("savgol_polyorder", np.nan)),
+            "fs_hz": float(detection.get("fs_hz", inspection_chunk.fs_hz)),
+            "threshold": float(detection.get("threshold", np.nan)),
+            "threshold_method": str(effective_config.peak_threshold_method),
+            "distance_samples": int(detection.get("distance_samples", 0)),
+            "event_count": int(len(detection.get("event_indices", []))),
+            "overlay_png_path": str(artifact_paths.get("retuned_overlay_png", "")),
+            "overlay_png_sha256": str(artifact_paths.get("retuned_overlay_png_sha256", "")),
+            "overrides": dict(overrides),
+        }
+        backend_debug.update(_trace_summary(np.asarray(detection.get("trace_used_for_calling", []), dtype=np.float64)))
+        _write_backend_debug_record(retune_dir, backend_debug)
 
     result = {
         "retune_dir": retune_dir,
