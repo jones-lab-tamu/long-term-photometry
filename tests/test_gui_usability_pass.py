@@ -767,15 +767,63 @@ def test_fresh_run_reset_ignores_stale_high_water_state(window):
 
 def test_tuning_apply_back_affordance_and_scope_text(window):
     assert hasattr(window, "_apply_tuning_btn")
-    assert window._apply_tuning_btn.text() == "Apply tuning values to run settings"
+    assert window._apply_tuning_btn.text() == "Apply to Next-Run Settings"
+    assert hasattr(window, "_tuning_applyback_scope_label")
+    assert hasattr(window, "_tuning_applyback_status_label")
+    apply_scope = window._tuning_applyback_scope_label.text().lower()
+    assert "next-run setup controls" in apply_scope
+    assert "completed run outputs stay unchanged" in apply_scope
 
     scope_msg = window._tuning_scope_note.text().lower()
-    assert "downstream event-detection settings from cached phasic traces" in scope_msg
-    assert "not available in this workspace" in scope_msg
-    assert "not implemented yet" in scope_msg
+    assert "retunes downstream event detection from cached phasic traces" in scope_msg
+    assert "before deciding whether to rerun" in scope_msg
+    assert "not applied" in window._tuning_applyback_status_label.text().lower()
     assert window._tuning_scope_note.wordWrap()
     assert window._tuning_availability_label.wordWrap()
     assert window._tuning_summary_label.wordWrap()
     assert window._tuning_scope_note.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
     assert window._tuning_availability_label.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
     assert window._tuning_summary_label.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
+
+
+def test_complete_state_panel_results_mode_framing(window, qapp, tmp_path):
+    run_dir = _make_completed_results_fixture(str(tmp_path))
+    window._current_run_dir = run_dir
+    assert window._report_viewer.load_report(run_dir)
+    window._enter_complete_state_workspace()
+    qapp.processEvents()
+
+    assert window._controls_stack.currentWidget() is window._complete_state_panel
+    assert window._complete_mode_title_label.text() == "Results Mode"
+    assert "completed outputs are loaded on the right" in window._complete_mode_subtitle_label.text().lower()
+    assert "apply back to next-run settings" in window._complete_mode_next_steps_label.text().lower()
+    assert "read-only" in window._complete_summary_label.text().lower()
+    assert window._new_run_btn.text() == "Start New Run"
+
+
+def test_post_run_tuning_hierarchy_and_feedback_copy(window):
+    assert window._tuning_group.title() == "Post-Run Tuning (Optional)"
+    assert "Primary:" in window._tuning_disclosure_btn.text()
+    assert "Secondary:" in window._correction_tuning_disclosure_btn.text()
+    assert "advanced" in window._correction_tuning_disclosure_btn.text().lower()
+    assert "optional downstream tools" in window._tuning_phase_note.text().lower()
+    assert "advanced path" in window._correction_tuning_role_note.text().lower()
+
+    window._tuning_last_result = {
+        "selected_roi": "Region0",
+        "inspection_chunk_id": 2,
+        "event_signal_used": "delta_f",
+        "retune_dir": "C:/tmp/retune",
+    }
+    window._tuning_last_changed_fields = ["event signal", "threshold method"]
+    window._tuning_applyback_applied = False
+    window._tuning_applyback_timestamp = ""
+    window._refresh_tuning_feedback_summary()
+    assert "Changed vs baseline: event signal, threshold method" in window._tuning_summary_label.text()
+    assert "not applied" in window._tuning_summary_label.text().lower()
+
+    window._tuning_applyback_applied = True
+    window._tuning_applyback_timestamp = "12:00:00"
+    window._refresh_tuning_feedback_summary()
+    assert "applied (12:00:00)" in window._tuning_summary_label.text()
+    assert "completed run is unchanged" in window._tuning_applyback_status_label.text().lower()

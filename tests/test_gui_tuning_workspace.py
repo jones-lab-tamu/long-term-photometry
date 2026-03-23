@@ -888,7 +888,7 @@ def test_tuning_display_debug_records_loaded_source_when_enabled(qapp, tmp_path,
         w.deleteLater()
 
 
-def test_tuning_overlay_fit_render_uses_fast_transformation(window, monkeypatch):
+def test_tuning_overlay_fit_render_uses_smooth_transformation(window, monkeypatch):
     from PySide6.QtGui import QPixmap
 
     calls = []
@@ -911,7 +911,21 @@ def test_tuning_overlay_fit_render_uses_fast_transformation(window, monkeypatch)
     window._render_tuning_overlay()
 
     assert calls
-    assert calls[-1] == Qt.FastTransformation
+    assert calls[-1] == Qt.SmoothTransformation
+
+
+def test_tuning_overlay_fit_render_does_not_upscale_past_native_size(window):
+    from PySide6.QtGui import QPixmap
+
+    pix = QPixmap(240, 120)
+    pix.fill()
+    window._tuning_active_overlay_pixmap = pix
+    window._render_tuning_overlay()
+
+    shown = window._tuning_overlay_label.pixmap()
+    assert shown is not None and not shown.isNull()
+    assert shown.width() <= 240
+    assert shown.height() <= 120
 
 
 def test_tuning_apply_back_copies_only_downstream_fields(window, tmp_path):
@@ -1220,10 +1234,8 @@ def test_tuning_workspace_boundary_message_and_controls(window, tmp_path):
     QApplication.processEvents()
 
     scope_msg = window._tuning_scope_note.text().lower()
-    assert "downstream event-detection" in scope_msg
-    assert "not available in this workspace" in scope_msg
-    assert "not implemented yet" in scope_msg
-    assert "require a future recompute workflow" not in scope_msg
+    assert "retunes downstream event detection from cached phasic traces" in scope_msg
+    assert "before deciding whether to rerun" in scope_msg
     assert window._tuning_collapsed_status_label.text().strip() != ""
     assert window._tuning_scope_note.wordWrap()
     assert window._tuning_availability_label.wordWrap()

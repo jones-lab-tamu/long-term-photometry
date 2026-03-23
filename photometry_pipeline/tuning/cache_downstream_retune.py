@@ -96,6 +96,8 @@ _OVERRIDE_VALUE_CASTERS = {
 
 
 _RETUNE_DEBUG_ENV = "PHOTOMETRY_RETUNE_DEBUG"
+_RETUNE_OVERLAY_FIGSIZE = (14.0, 5.0)
+_RETUNE_OVERLAY_DPI = 220
 
 
 def _retune_debug_enabled() -> bool:
@@ -567,7 +569,7 @@ def _write_inspection_diagnostics(
     # Keep the visible preview line faithful to the actual y-array used for detection.
     # Path simplification can collapse distinct high-density traces into the same pixels.
     with matplotlib.rc_context({"path.simplify": False, "path.simplify_threshold": 0.0}):
-        fig, ax = plt.subplots(figsize=(12, 4.5))
+        fig, ax = plt.subplots(figsize=_RETUNE_OVERLAY_FIGSIZE)
         x = detection["trace_time_sec"]
         y = detection["trace_used_for_calling"]
         trace_label = f"{detection['signal_field']} trace"
@@ -608,7 +610,7 @@ def _write_inspection_diagnostics(
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best", fontsize=8)
         fig.tight_layout()
-        fig.savefig(overlay_png, dpi=150)
+        fig.savefig(overlay_png, dpi=_RETUNE_OVERLAY_DPI)
         plt.close(fig)
     out["retuned_overlay_png"] = overlay_png
     if _retune_debug_enabled():

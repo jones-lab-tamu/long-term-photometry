@@ -582,6 +582,9 @@ class MainWindow(QMainWindow):
         self._shell_workspace_right_min = 560
         self._tuning_workspace_available = False
         self._tuning_last_result = None
+        self._tuning_last_changed_fields: list[str] = []
+        self._tuning_applyback_applied = False
+        self._tuning_applyback_timestamp = ""
         self._tuning_active_overlay_path = ""
         self._tuning_active_overlay_pixmap = QPixmap()
         self._tuning_last_loaded_overlay_sha256 = ""
@@ -992,11 +995,25 @@ class MainWindow(QMainWindow):
     def _build_complete_state_panel(self) -> QWidget:
         """Compact completion-state summary card shown after successful full runs."""
         panel = QWidget()
+        panel.setObjectName("completeModePanel")
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
+
+        self._complete_mode_title_label = QLabel("Results Mode")
+        self._complete_mode_title_label.setObjectName("workflowColumnTitle")
+        layout.addWidget(self._complete_mode_title_label)
+
+        self._complete_mode_subtitle_label = QLabel(
+            "Completed outputs are loaded on the right. Optional post-run tuning is available below."
+        )
+        self._complete_mode_subtitle_label.setObjectName("workflowColumnSubtitle")
+        self._complete_mode_subtitle_label.setWordWrap(True)
+        layout.addWidget(self._complete_mode_subtitle_label)
 
         card = QGroupBox("Completed Run")
+        card.setProperty("workflowSection", True)
+        card.setObjectName("completeModeContextCard")
         card_layout = QVBoxLayout(card)
         self._complete_summary_label = QLabel(
             "No completed run selected. Run the pipeline or open completed results."
@@ -1006,8 +1023,18 @@ class MainWindow(QMainWindow):
         card_layout.addWidget(self._complete_summary_label)
         layout.addWidget(card)
 
+        self._complete_mode_next_steps_label = QLabel(
+            "Next: inspect outputs, optionally retune, then apply back to next-run settings if needed."
+        )
+        self._complete_mode_next_steps_label.setWordWrap(True)
+        self._complete_mode_next_steps_label.setObjectName("resultsSummaryHint")
+        layout.addWidget(self._complete_mode_next_steps_label)
+
         action_row = QHBoxLayout()
-        self._new_run_btn = QPushButton("New Run")
+        self._new_run_btn = QPushButton("Start New Run")
+        self._new_run_btn.setToolTip(
+            "Exit results mode and return to editable setup controls for a new run."
+        )
         self._new_run_btn.clicked.connect(self._on_new_run)
         action_row.addWidget(self._new_run_btn)
         action_row.addStretch()
@@ -1017,14 +1044,21 @@ class MainWindow(QMainWindow):
 
     def _build_tuning_workspace_group(self) -> QGroupBox:
         """Bounded post-run tuning surface for downstream and correction retune workflows."""
-        group = QGroupBox("Post-Run Tuning")
+        group = QGroupBox("Post-Run Tuning (Optional)")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
+        self._tuning_phase_note = QLabel(
+            "Optional downstream tools. Completed outputs remain unchanged unless you run a new analysis."
+        )
+        self._tuning_phase_note.setWordWrap(True)
+        self._tuning_phase_note.setObjectName("resultsSummaryHint")
+        layout.addWidget(self._tuning_phase_note)
+
         disclosure_row = QHBoxLayout()
         self._tuning_disclosure_btn = QToolButton()
-        self._tuning_disclosure_btn.setText("Tuning controls")
+        self._tuning_disclosure_btn.setText("Primary: Event-Detection Tuning")
         self._tuning_disclosure_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self._tuning_disclosure_btn.setArrowType(Qt.RightArrow)
         self._tuning_disclosure_btn.setCheckable(True)
@@ -1066,9 +1100,8 @@ class MainWindow(QMainWindow):
         self._tuning_content.setVisible(False)
 
         self._tuning_scope_note = QLabel(
-            "This workspace retunes downstream event-detection settings from cached phasic traces. "
-            "Correction-sensitive settings are not available in this workspace. "
-            "Recomputing correction context will require a future workflow that is not implemented yet."
+            "Retunes downstream event detection from cached phasic traces only. "
+            "Use this for quick threshold/signal iteration before deciding whether to rerun."
         )
         self._tuning_scope_note.setWordWrap(True)
         self._tuning_scope_note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -1237,14 +1270,22 @@ class MainWindow(QMainWindow):
         content_layout.addLayout(btn_row)
 
         apply_row = QHBoxLayout()
-        self._apply_tuning_btn = QPushButton("Apply tuning values to run settings")
+        self._apply_tuning_btn = QPushButton("Apply to Next-Run Settings")
         self._apply_tuning_btn.setToolTip(
-            "Copy downstream tuning values into the main run settings controls."
+            "Copy tuned downstream values into main setup controls for the next run. "
+            "This does not modify completed outputs; rerun to generate updated artifacts."
         )
         self._apply_tuning_btn.clicked.connect(self._on_apply_tuning_values_to_run_settings)
         apply_row.addWidget(self._apply_tuning_btn)
         apply_row.addStretch()
         content_layout.addLayout(apply_row)
+
+        self._tuning_applyback_scope_label = QLabel(
+            "Apply-back updates next-run setup controls only. Completed run outputs stay unchanged until rerun."
+        )
+        self._tuning_applyback_scope_label.setWordWrap(True)
+        self._tuning_applyback_scope_label.setObjectName("resultsSummaryHint")
+        content_layout.addWidget(self._tuning_applyback_scope_label)
 
         self._tuning_summary_label = QLabel("No tuning result yet.")
         self._tuning_summary_label.setWordWrap(True)
@@ -1255,6 +1296,11 @@ class MainWindow(QMainWindow):
         )
         self._tuning_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         content_layout.addWidget(self._tuning_summary_label)
+
+        self._tuning_applyback_status_label = QLabel("Apply-back status: not applied.")
+        self._tuning_applyback_status_label.setWordWrap(True)
+        self._tuning_applyback_status_label.setObjectName("resultsSummaryHint")
+        content_layout.addWidget(self._tuning_applyback_status_label)
 
         self._tuning_overlay_title = QLabel("No tuning overlay loaded.")
         self._tuning_overlay_title.setAlignment(Qt.AlignCenter)
@@ -1303,7 +1349,7 @@ class MainWindow(QMainWindow):
 
         disclosure_row = QHBoxLayout()
         self._correction_tuning_disclosure_btn = QToolButton()
-        self._correction_tuning_disclosure_btn.setText("Correction-Sensitive Retune")
+        self._correction_tuning_disclosure_btn.setText("Secondary: Correction Retune (Advanced)")
         self._correction_tuning_disclosure_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self._correction_tuning_disclosure_btn.setArrowType(Qt.RightArrow)
         self._correction_tuning_disclosure_btn.setCheckable(True)
@@ -1318,6 +1364,13 @@ class MainWindow(QMainWindow):
         disclosure_row.addWidget(self._correction_tuning_disclosure_btn)
         disclosure_row.addStretch()
         section_layout.addLayout(disclosure_row)
+
+        self._correction_tuning_role_note = QLabel(
+            "Advanced path. Use when baseline/correction assumptions need deliberate recomputation."
+        )
+        self._correction_tuning_role_note.setWordWrap(True)
+        self._correction_tuning_role_note.setObjectName("resultsSummaryHint")
+        section_layout.addWidget(self._correction_tuning_role_note)
 
         self._correction_tuning_collapsed_status_label = QLabel(
             "Correction retune is available only after a successful completed run is loaded."
@@ -1803,6 +1856,14 @@ class MainWindow(QMainWindow):
                 font-weight: 700;
                 color: #223040;
             }
+            QGroupBox#completeModeContextCard {
+                border-color: #bfd4ea;
+                background: #f7fbff;
+            }
+            QGroupBox#completeModeContextCard::title {
+                color: #1f4f78;
+                font-weight: 700;
+            }
             QLabel#resultsSummaryHeadline {
                 font-size: 13px;
                 font-weight: 700;
@@ -1903,6 +1964,8 @@ class MainWindow(QMainWindow):
         self._tuning_availability_label.setText(reason)
         self._tuning_availability_label.setStyleSheet("font-size: 11px; color: #8a6d3b;")
         self._set_tuning_collapsed_status(reason, ready=False)
+        if hasattr(self, "_tuning_applyback_status_label"):
+            self._tuning_applyback_status_label.setText("Apply-back status: not applied.")
         self._sync_tuning_status_visibility()
         self._update_results_pane_mode_for_tuning()
 
@@ -1915,6 +1978,7 @@ class MainWindow(QMainWindow):
         self._tuning_availability_label.setText(message)
         self._tuning_availability_label.setStyleSheet("font-size: 11px; color: #2d7d2d;")
         self._set_tuning_collapsed_status(message, ready=True)
+        self._refresh_tuning_feedback_summary()
         self._sync_tuning_status_visibility()
         self._update_results_pane_mode_for_tuning()
 
@@ -1949,10 +2013,12 @@ class MainWindow(QMainWindow):
         if viewport.width() < 10 or viewport.height() < 10:
             viewport = QSize(1000, 700)
         target = QSize(max(10, viewport.width() - 8), max(10, viewport.height() - 8))
+        # Avoid blowing up a smaller source image beyond native pixels.
+        target = target.boundedTo(self._tuning_active_overlay_pixmap.size())
         scaled = self._tuning_active_overlay_pixmap.scaled(
             target,
             Qt.KeepAspectRatio,
-            Qt.FastTransformation,
+            Qt.SmoothTransformation,
         )
         self._tuning_overlay_label.setText("")
         self._tuning_overlay_label.setPixmap(scaled)
@@ -2341,6 +2407,105 @@ class MainWindow(QMainWindow):
             overrides["peak_threshold_abs"] = float(self._tuning_peak_abs_spin.value())
         return overrides
 
+    @staticmethod
+    def _floats_differ(a: float, b: float, *, tol: float = 1e-9) -> bool:
+        return abs(float(a) - float(b)) > tol
+
+    def _summarize_tuning_changes_from_baseline(self, overrides: dict, baseline_cfg: Config) -> list[str]:
+        changed: list[str] = []
+        if str(overrides.get("event_signal", "")) != str(baseline_cfg.event_signal):
+            changed.append("event signal")
+        if str(overrides.get("peak_threshold_method", "")) != str(baseline_cfg.peak_threshold_method):
+            changed.append("threshold method")
+        if self._floats_differ(
+            float(overrides.get("peak_min_distance_sec", 0.0)),
+            float(baseline_cfg.peak_min_distance_sec),
+            tol=1e-6,
+        ):
+            changed.append("min distance")
+        if self._floats_differ(
+            float(overrides.get("peak_min_prominence_k", 0.0)),
+            float(getattr(baseline_cfg, "peak_min_prominence_k", 0.0)),
+            tol=1e-6,
+        ):
+            changed.append("min prominence")
+        if self._floats_differ(
+            float(overrides.get("peak_min_width_sec", 0.0)),
+            float(getattr(baseline_cfg, "peak_min_width_sec", 0.0)),
+            tol=1e-6,
+        ):
+            changed.append("min width")
+        if self._floats_differ(
+            float(overrides.get("peak_threshold_k", getattr(baseline_cfg, "peak_threshold_k", 0.0))),
+            float(getattr(baseline_cfg, "peak_threshold_k", 0.0)),
+            tol=1e-6,
+        ):
+            changed.append("threshold K")
+        if self._floats_differ(
+            float(
+                overrides.get(
+                    "peak_threshold_percentile",
+                    getattr(baseline_cfg, "peak_threshold_percentile", 0.0),
+                )
+            ),
+            float(getattr(baseline_cfg, "peak_threshold_percentile", 0.0)),
+            tol=1e-6,
+        ):
+            changed.append("threshold percentile")
+        if self._floats_differ(
+            float(
+                overrides.get("peak_threshold_abs", getattr(baseline_cfg, "peak_threshold_abs", 0.0))
+            ),
+            float(getattr(baseline_cfg, "peak_threshold_abs", 0.0)),
+            tol=1e-6,
+        ):
+            changed.append("threshold absolute")
+        base_pre = normalize_retune_peak_pre_filter(str(getattr(baseline_cfg, "peak_pre_filter", "none")))
+        if normalize_retune_peak_pre_filter(str(overrides.get("peak_pre_filter", "none"))) != base_pre:
+            changed.append("pre-filter mode")
+        if str(overrides.get("event_auc_baseline", "")) != str(baseline_cfg.event_auc_baseline):
+            changed.append("AUC baseline")
+        return changed
+
+    def _refresh_tuning_feedback_summary(self) -> None:
+        if not isinstance(self._tuning_last_result, dict):
+            self._tuning_summary_label.setText("No tuning result yet.")
+            if hasattr(self, "_tuning_applyback_status_label"):
+                self._tuning_applyback_status_label.setText("Apply-back status: not applied.")
+            return
+
+        result = self._tuning_last_result
+        roi = result.get("selected_roi", self._tuning_roi_combo.currentText().strip() or "(unknown)")
+        chunk = result.get("inspection_chunk_id", self._tuning_chunk_combo.currentData() or "(unknown)")
+        event_signal = result.get("event_signal_used", "(unknown)")
+        retune_dir = result.get("retune_dir", "(unknown)")
+        changed = self._tuning_last_changed_fields
+        changed_text = ", ".join(changed[:5]) if changed else "none detected"
+        if len(changed) > 5:
+            changed_text += f", +{len(changed) - 5} more"
+        apply_text = (
+            f"applied ({self._tuning_applyback_timestamp})"
+            if self._tuning_applyback_applied else "not applied"
+        )
+        lines = [
+            f"ROI: {roi}",
+            f"Chunk: {chunk}",
+            f"Event signal: {event_signal}",
+            f"Changed vs baseline: {changed_text}",
+            f"Apply-back to next run: {apply_text}",
+            f"Retune output: {retune_dir}",
+        ]
+        self._tuning_summary_label.setText("\n".join(lines))
+        if hasattr(self, "_tuning_applyback_status_label"):
+            if self._tuning_applyback_applied:
+                self._tuning_applyback_status_label.setText(
+                    "Apply-back status: applied to setup controls. Completed run is unchanged; rerun to regenerate outputs."
+                )
+            else:
+                self._tuning_applyback_status_label.setText(
+                    "Apply-back status: not applied yet. Completed run remains unchanged."
+                )
+
     def _on_run_tuning(self) -> None:
         if not self._tuning_workspace_available:
             QMessageBox.information(self, "Tuning Unavailable", self._tuning_availability_label.text())
@@ -2379,24 +2544,24 @@ class MainWindow(QMainWindow):
             self._run_tuning_btn.setText("Run Tuning")
 
         self._tuning_last_result = result
+        self._tuning_applyback_applied = False
+        self._tuning_applyback_timestamp = ""
         self._open_tuning_dir_btn.setEnabled(True)
         artifacts = result.get("artifacts", {}) if isinstance(result, dict) else {}
         overlay_path = str(artifacts.get("retuned_overlay_png", "")).strip()
         previous_overlay_path = str(self._tuning_active_overlay_path)
         self._set_tuning_overlay_image(overlay_path)
+        baseline_cfg = self._load_tuning_base_config()
+        self._tuning_last_changed_fields = self._summarize_tuning_changes_from_baseline(
+            overrides,
+            baseline_cfg,
+        )
         self._write_tuning_display_debug_record(
             result=result if isinstance(result, dict) else {},
             overrides=overrides,
             previous_overlay_path=previous_overlay_path,
         )
-
-        lines = [
-            f"ROI: {result.get('selected_roi', roi)}",
-            f"Chunk: {result.get('inspection_chunk_id', chunk_id)}",
-            f"Event signal: {result.get('event_signal_used', overrides.get('event_signal', '(unknown)'))}",
-            f"Retune output: {result.get('retune_dir', '(unknown)')}",
-        ]
-        self._tuning_summary_label.setText("\n".join(lines))
+        self._refresh_tuning_feedback_summary()
         self._append_run_log(
             f"Tuning completed for ROI={result.get('selected_roi', roi)} chunk={result.get('inspection_chunk_id', chunk_id)} "
             f"-> {result.get('retune_dir', '(unknown)')}"
@@ -2463,7 +2628,13 @@ class MainWindow(QMainWindow):
         # Ensure validate->run reuse state is invalidated even if any set* call
         # is a no-op for the current value.
         self._on_config_changed()
-        self._append_run_log("Applied downstream tuning values to run settings.")
+        self._tuning_applyback_applied = True
+        self._tuning_applyback_timestamp = datetime.now().strftime("%H:%M:%S")
+        self._refresh_tuning_feedback_summary()
+        self._append_run_log(
+            "Applied downstream tuning values to next-run setup controls. "
+            "Completed run outputs are unchanged until rerun."
+        )
 
     def _on_correction_tuning_disclosure_toggled(self, expanded: bool) -> None:
         if expanded and hasattr(self, "_report_viewer"):
@@ -4601,18 +4772,25 @@ class MainWindow(QMainWindow):
     def _update_complete_state_summary(self) -> None:
         """Populate compact completion-state summary card from current GUI/run context."""
         run_dir = self._current_run_dir or "(not set)"
+        run_name = os.path.basename(run_dir) if run_dir and run_dir != "(not set)" else "(not set)"
         input_dir = self._input_dir.text().strip() or "(not set)"
         mode_text = self._mode_combo.currentText().strip() or "(not set)"
         plotting_mode = self._plotting_mode_combo.currentText().strip() or "(not set)"
         roi_summary = self._compute_roi_filter_summary()
         summary_lines = [
-            f"Input: {input_dir}",
-            f"Output run directory: {run_dir}",
-            f"Mode: {mode_text}",
-            f"Plotting mode: {plotting_mode}",
-            f"ROI selection: {roi_summary}",
+            f"Run: {run_name}",
+            f"Run directory: {run_dir}",
+            f"Input source: {input_dir}",
+            f"Setup profile: mode={mode_text}, plotting={plotting_mode}",
+            f"ROI filter used: {roi_summary}",
+            "Completed outputs are read-only in this phase.",
         ]
         self._complete_summary_label.setText("\n".join(summary_lines))
+        if hasattr(self, "_complete_mode_next_steps_label"):
+            self._complete_mode_next_steps_label.setText(
+                "Next actions: inspect outputs, optionally run post-run tuning, then apply back to next-run settings. "
+                "Apply-back does not mutate the completed run; rerun to produce updated outputs."
+            )
 
     def _enter_complete_state_workspace(self) -> None:
         """Switch left pane to compact completion card after successful full runs."""
@@ -4642,8 +4820,11 @@ class MainWindow(QMainWindow):
         self._exit_complete_state_workspace()
         self._apply_results_idle_placeholder()
         self._tuning_last_result = None
+        self._tuning_last_changed_fields = []
+        self._tuning_applyback_applied = False
+        self._tuning_applyback_timestamp = ""
         self._set_tuning_overlay_message("Run tuning to generate an ROI/chunk event overlay.")
-        self._tuning_summary_label.setText("No tuning result yet.")
+        self._refresh_tuning_feedback_summary()
         self._reset_correction_tuning_state()
         self._refresh_tuning_workspace_availability()
         self.setWindowTitle(self.WINDOW_TITLE_BASE)

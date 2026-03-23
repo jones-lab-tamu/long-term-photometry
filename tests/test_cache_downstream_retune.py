@@ -1,6 +1,7 @@
 import dataclasses
 import json
 import os
+import struct
 
 import pandas as pd
 import pytest
@@ -17,6 +18,17 @@ from photometry_pipeline.tuning.cache_downstream_retune import (
     _resolve_prefilter_config_for_chunk,
     run_cache_downstream_retune,
 )
+
+
+def _read_png_size(path: str) -> tuple[int, int]:
+    with open(path, "rb") as f:
+        header = f.read(24)
+    # PNG signature (8 bytes) + IHDR length/type (8 bytes) + width/height (8 bytes)
+    if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+        raise AssertionError(f"Not a valid PNG header: {path}")
+    width = struct.unpack(">I", header[16:20])[0]
+    height = struct.unpack(">I", header[20:24])[0]
+    return int(width), int(height)
 
 
 def _make_completed_run_fixture(tmp_path):
@@ -152,6 +164,26 @@ def test_cache_retune_success_and_output_isolation(tmp_path):
     assert os.path.isfile(os.path.join(result["retune_dir"], "retuned_events_Region0_chunk_000.csv"))
     assert result["inspection_chunk_id"] == 0
     assert before == orig_features_path.read_text(encoding="utf-8")
+
+
+def test_cache_retune_overlay_png_has_high_enough_resolution_for_gui_preview(tmp_path):
+    run_dir = _make_completed_run_fixture(tmp_path)
+    result = run_cache_downstream_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={
+            "event_signal": "dff",
+            "peak_threshold_method": "absolute",
+            "peak_threshold_abs": 0.2,
+            "peak_min_distance_sec": 1.0,
+        },
+    )
+    overlay_path = os.path.join(result["retune_dir"], "retuned_overlay_Region0_chunk_000.png")
+    assert os.path.isfile(overlay_path)
+    width, height = _read_png_size(overlay_path)
+    # Keep post-run tuning overlays sharp when shown in large result panes.
+    assert width >= 2800
+    assert height >= 1000
 
 
 def test_cache_retune_rejects_correction_sensitive_override(tmp_path):
