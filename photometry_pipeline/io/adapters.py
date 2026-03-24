@@ -447,12 +447,69 @@ def _require_strict_check(t_relative: np.ndarray, time_sec: np.ndarray, target_f
     if raw_end < (grid_end - tol):
         raise ValueError(f"{context}: raw_end {raw_end:.4f}s < grid_end {grid_end:.4f}s (End Coverage Failure)")
 
+
+def _resolve_strict_target_sample_count(
+    t_rel: np.ndarray, config: Config, context: str
+) -> int:
+    """
+    Resolve strict-grid target sample count.
+
+    For real/vendor RWD with over-precise inferred contracts, the strict config
+    product can over-demand the grid by slightly more than the existing
+    one-sample end-coverage tolerance.
+
+    We permit reducing n_target by exactly one sample only when the additional
+    shortfall beyond that one-sample tolerance is tiny:
+      shortfall_samples = (end_threshold - raw_end) * fs <= 0.25
+    This keeps strict rejection for genuine truncation while rescuing the
+    real-vendor near-miss case (observed shortfall ~= 0.103 samples).
+
+    Why 0.25 samples:
+    - It is much tighter than a full extra sample; we still fail any case
+      needing more than 1.25 samples of total end slack versus grid_end.
+    - It absorbs small contract-overprecision / timestamp quantization jitter
+      without turning strict mode into partial-chunk acceptance.
+    """
+    n_target = int(np.round(config.chunk_duration_sec * config.target_fs_hz))
+
+    if n_target <= 0:
+        raise ValueError(
+            f"{context}: Non-positive strict target sample count "
+            f"({n_target}) from chunk_duration_sec={config.chunk_duration_sec} "
+            f"and target_fs_hz={config.target_fs_hz}"
+        )
+
+    if not context.lower().startswith("rwd"):
+        return n_target
+
+    finite_t = t_rel[np.isfinite(t_rel)]
+    if finite_t.size == 0:
+        return n_target
+
+    if n_target < 3:
+        return n_target
+
+    raw_end = float(np.nanmax(finite_t))
+    fs = float(config.target_fs_hz)
+    tol = 1.0 / fs
+    grid_end = (n_target - 1) / fs
+    end_threshold = grid_end - tol
+    shortfall = end_threshold - raw_end
+    shortfall_samples = shortfall * fs
+
+    # Reduce by one sample only for a tiny fractional-sample overshoot beyond
+    # the existing 1-sample strict tolerance.
+    if 0.0 < shortfall_samples <= 0.25:
+        return n_target - 1
+
+    return n_target
+
 def _resample_strict(t_rel: np.ndarray, data_in: np.ndarray, config: Config, context: str) -> Tuple[np.ndarray, np.ndarray]:
     """
     Resamples to ONE strict grid defined by chunk_duration_sec * target_fs_hz.
     """
     # Grid Construction (Strict)
-    n_target = int(np.round(config.chunk_duration_sec * config.target_fs_hz))
+    n_target = _resolve_strict_target_sample_count(t_rel, config, context)
     time_sec = np.arange(n_target) / config.target_fs_hz
     
     # Strict Checks

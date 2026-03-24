@@ -77,6 +77,31 @@ def _vendor_style_ms_lines(
     return rows
 
 
+def _vendor_style_ms_lines_from_times(*, times_ms: list[float], fps: float = 40.0) -> list[str]:
+    metadata = (
+        '"{""Light"":{'
+        '""Led410Enable"":true,'
+        '""Led470Enable"":true,'
+        '""Led560Enable"":false'
+        '},'
+        f'""Fps"":{fps:.1f}'
+        '}",,,,,'  # Preserve vendor-style metadata header row.
+    )
+    rows = [
+        metadata,
+        "TimeStamp,Events,CH1-410,CH1-470,CH2-410,CH2-470",
+    ]
+    for i, t_ms in enumerate(times_ms):
+        ch1_uv = 100.0 + (0.01 * i)
+        ch1_sig = 120.0 + (0.01 * i)
+        ch2_uv = 200.0 + (0.01 * i)
+        ch2_sig = 220.0 + (0.01 * i)
+        rows.append(
+            f"{t_ms:.6f},,{ch1_uv:.6f},{ch1_sig:.6f},{ch2_uv:.6f},{ch2_sig:.6f}"
+        )
+    return rows
+
+
 def _default_test_config() -> Config:
     # Intentionally uses mismatched RWD hints so parser fallback contract is exercised.
     return Config(
@@ -259,6 +284,55 @@ class TestRwdVendorCompat(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "incompatible with metadata FPS"):
+            load_chunk(chunk_path, "rwd", cfg, chunk_id=0)
+
+    def test_vendor_style_rwd_strict_allows_one_sample_contract_overshoot(self):
+        root = os.path.join(self.tmp_dir, "vendor_ms_overshoot_root")
+        chunk_path = os.path.join(root, "2025_01_01-00_00_00", "fluorescence.csv")
+        n_samples = 12000
+        # Match real-vendor endpoint style where strict GUI contract over-demands by one sample.
+        dt_ms = 49.99857004750396
+        times_ms = [i * dt_ms for i in range(n_samples)]
+        _write_csv(
+            chunk_path,
+            _vendor_style_ms_lines_from_times(times_ms=times_ms, fps=40.0),
+        )
+
+        cfg = Config(
+            target_fs_hz=20.000400008,
+            chunk_duration_sec=600.037998999,
+            allow_partial_final_chunk=False,
+            rwd_time_col="TimeStamp",
+            uv_suffix="-410",
+            sig_suffix="-470",
+        )
+
+        chunk = load_chunk(chunk_path, "rwd", cfg, chunk_id=0)
+        self.assertEqual(len(chunk.time_sec), 12000)
+        self.assertAlmostEqual(float(chunk.time_sec[-1]), 599.938001, places=5)
+        self.assertEqual(chunk.metadata.get("rwd_timestamp_unit"), "milliseconds")
+
+    def test_vendor_style_rwd_strict_rejects_more_than_one_sample_shortfall(self):
+        root = os.path.join(self.tmp_dir, "vendor_ms_truncated_root")
+        chunk_path = os.path.join(root, "2025_01_01-00_00_00", "fluorescence.csv")
+        n_samples = 11998
+        dt_ms = 49.99857004750396
+        times_ms = [i * dt_ms for i in range(n_samples)]
+        _write_csv(
+            chunk_path,
+            _vendor_style_ms_lines_from_times(times_ms=times_ms, fps=40.0),
+        )
+
+        cfg = Config(
+            target_fs_hz=20.000400008,
+            chunk_duration_sec=600.037998999,
+            allow_partial_final_chunk=False,
+            rwd_time_col="TimeStamp",
+            uv_suffix="-410",
+            sig_suffix="-470",
+        )
+
+        with self.assertRaisesRegex(ValueError, "End Coverage Failure"):
             load_chunk(chunk_path, "rwd", cfg, chunk_id=0)
 
     def test_simplified_synthetic_rwd_is_supported(self):
