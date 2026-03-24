@@ -707,14 +707,16 @@ def _compose_dff_day_tile_canvas_lightweight(
 def _render_stacked_day_canvas_lightweight(
     day,
     plot_roi,
-    traces,
+    slot_traces,
     smooth_window_s,
     dpi,
     timeline_anchor_label: str = "",
 ):
-    n_traces = len(traces)
+    n_slots = len(slot_traces)
+    occupied_traces = [tr for tr in slot_traces if tr is not None]
+    n_traces = len(occupied_traces)
     fig_w_in = 6.0
-    fig_h_in = max(2.0, (n_traces * 0.285) + 1.6)
+    fig_h_in = max(2.0, (n_slots * 0.285) + 1.6)
     canvas_w = max(640, int(round(fig_w_in * dpi)))
     canvas_h = max(320, int(round(fig_h_in * dpi)))
 
@@ -729,24 +731,19 @@ def _render_stacked_day_canvas_lightweight(
     plot_w = max(2, plot_x1 - plot_x0 + 1)
     plot_h = max(2, plot_y1 - plot_y0 + 1)
 
-    ranges = [np.ptp(y[np.isfinite(y)]) if np.any(np.isfinite(y)) else 0.0 for _, y in traces]
-    avg_rng = float(np.median(ranges)) if ranges else 1.0
-    if not np.isfinite(avg_rng) or avg_rng <= 0:
-        avg_rng = 1.0
-    step = max(0.1, avg_rng * 0.8)
+    step, _, _, y0, y1 = _compute_stacked_slot_layout(slot_traces)
 
-    xmins, xmaxs, ymins, ymaxs = [], [], [], []
-    for i, (t, y) in enumerate(traces):
+    xmins, xmaxs = [], []
+    for i, tr in enumerate(slot_traces):
+        if tr is None:
+            continue
+        t, y = tr
         mask = np.isfinite(t) & np.isfinite(y)
         if not np.any(mask):
             continue
-        offset = (n_traces - 1 - i) * step
         tv = t[mask]
-        yv = y[mask] + offset
         xmins.append(float(np.min(tv)))
         xmaxs.append(float(np.max(tv)))
-        ymins.append(float(np.min(yv)))
-        ymaxs.append(float(np.max(yv)))
 
     if xmins and xmaxs:
         x0 = min(xmins)
@@ -755,20 +752,6 @@ def _render_stacked_day_canvas_lightweight(
         x0, x1 = 0.0, 1.0
     if not np.isfinite(x0) or not np.isfinite(x1) or x1 <= x0:
         x0, x1 = 0.0, 1.0
-
-    if ymins and ymaxs:
-        y0 = min(ymins)
-        y1 = max(ymaxs)
-    else:
-        y0, y1 = -1.0, 1.0
-    if not np.isfinite(y0) or not np.isfinite(y1) or y1 <= y0:
-        y0, y1 = -1.0, 1.0
-    y_span = y1 - y0
-    y_pad = 0.05 * y_span
-    if not np.isfinite(y_pad) or y_pad <= 0:
-        y_pad = 0.1
-    y0 -= y_pad
-    y1 += y_pad
 
     x_span = x1 - x0
     y_span = y1 - y0
@@ -783,11 +766,14 @@ def _render_stacked_day_canvas_lightweight(
     arr[plot_y0:plot_y1 + 1, plot_x0, :] = (205, 205, 205)
     arr[plot_y0:plot_y1 + 1, plot_x1, :] = (205, 205, 205)
 
-    for i, (t, y) in enumerate(traces):
+    for i, tr in enumerate(slot_traces):
+        if tr is None:
+            continue
+        t, y = tr
         mask = np.isfinite(t) & np.isfinite(y)
         if not np.any(mask):
             continue
-        offset = (n_traces - 1 - i) * step
+        offset = (n_slots - 1 - i) * step
         tv = t[mask]
         yv = y[mask] + offset
         x_float = ((tv - x0) / x_span) * (plot_w - 1)
@@ -827,7 +813,7 @@ def _render_stacked_day_canvas_lightweight(
     draw.text((plot_x0 + (plot_w // 2), canvas_h - max(12, bottom_pad // 3)), "Time (s)", fill='black', anchor='ma', font=label_font)
 
     # Draw rotated y-axis label for closer visual alignment with full Matplotlib output.
-    y_label = f"Sessions ({n_traces})"
+    y_label = f"Slots ({n_traces}/{n_slots})"
     tmp = Image.new('RGBA', (1, 1), (0, 0, 0, 0))
     tmp_draw = ImageDraw.Draw(tmp)
     bbox = tmp_draw.textbbox((0, 0), y_label, font=label_font)
@@ -842,6 +828,74 @@ def _render_stacked_day_canvas_lightweight(
     img.paste(label_rot, (label_x, label_y), label_rot)
 
     return img
+
+
+def _build_stacked_slot_traces(slot_map, smoothed_data, sph):
+    """
+    Build fixed stacked traces list in canonical day slot order.
+
+    Length is always 24 * sph; missing slots are represented by None.
+    """
+    slot_traces = []
+    for h in range(24):
+        for c in range(sph):
+            panel = slot_map.get((h, c))
+            if panel is None:
+                slot_traces.append(None)
+                continue
+            cid = panel.get('chunk_id')
+            slot_traces.append(smoothed_data.get(cid))
+    return slot_traces
+
+
+def _compute_stacked_slot_layout(slot_traces):
+    """
+    Compute stacked plotting layout in true slot coordinates.
+
+    IMPORTANT: y-bounds are derived from the full slot template (all slots),
+    not just occupied slots. This preserves blank-slot vertical space.
+    """
+    n_slots = len(slot_traces)
+    occupied = [tr for tr in slot_traces if tr is not None]
+
+    ranges = [np.ptp(y[np.isfinite(y)]) if np.any(np.isfinite(y)) else 0.0 for _, y in occupied]
+    avg_rng = float(np.median(ranges)) if ranges else 1.0
+    if not np.isfinite(avg_rng) or avg_rng <= 0:
+        avg_rng = 1.0
+    step = max(0.1, avg_rng * 0.8)
+
+    data_mins = []
+    data_maxs = []
+    for _, y in occupied:
+        yv = y[np.isfinite(y)]
+        if yv.size == 0:
+            continue
+        data_mins.append(float(np.min(yv)))
+        data_maxs.append(float(np.max(yv)))
+    if data_mins and data_maxs:
+        data_y_min = min(data_mins)
+        data_y_max = max(data_maxs)
+    else:
+        data_y_min, data_y_max = -1.0, 1.0
+    if not np.isfinite(data_y_min) or not np.isfinite(data_y_max) or data_y_max <= data_y_min:
+        data_y_min, data_y_max = -1.0, 1.0
+
+    # Slot 0 should map to the top-most slot row; slot (n_slots - 1) to bottom.
+    # Preserve full template span even when many slots are empty.
+    offset_top = max(0.0, (n_slots - 1) * step)
+    offset_bottom = 0.0
+    y0 = data_y_min + offset_bottom
+    y1 = data_y_max + offset_top
+    if not np.isfinite(y0) or not np.isfinite(y1) or y1 <= y0:
+        y0, y1 = -1.0, 1.0
+
+    y_span = y1 - y0
+    y_pad = 0.05 * y_span
+    if not np.isfinite(y_pad) or y_pad <= 0:
+        y_pad = 0.1
+    y0 -= y_pad
+    y1 += y_pad
+    return step, data_y_min, data_y_max, y0, y1
 
 
 # ======================================================================
@@ -1312,25 +1366,31 @@ def main():
 
         if args.stacked_render_mode == 'full':
             for d in unique_days:
-                # Sort chronologically
-                day_items = sorted(cached_by_day.get(d, []), key=lambda x: x['chunk_id'])
-                traces = [smoothed_data[c['chunk_id']] for c in day_items if c['chunk_id'] in smoothed_data]
-                if not traces:
+                slot_map = day_slot_maps.get(d, {})
+                if not slot_map:
+                    continue
+                slot_traces = _build_stacked_slot_traces(slot_map, smoothed_data, sph)
+                occupied_traces = [tr for tr in slot_traces if tr is not None]
+                if not occupied_traces:
                     continue
 
-                fig, ax = plt.subplots(figsize=(6, len(traces)*0.3 + 2))
+                n_slots = len(slot_traces)
+                n_occupied = len(occupied_traces)
+                fig, ax = plt.subplots(figsize=(6, n_slots * 0.3 + 2))
 
-                ranges = [np.ptp(tr[1]) for tr in traces]
-                avg_rng = np.median(ranges) if ranges else 1.0
-                step = max(0.1, avg_rng * 0.8)
+                step, _, _, y0, y1 = _compute_stacked_slot_layout(slot_traces)
 
-                for i, (t, y) in enumerate(traces):
-                    offset = (len(traces) - 1 - i) * step
+                for i, tr in enumerate(slot_traces):
+                    if tr is None:
+                        continue
+                    t, y = tr
+                    offset = (n_slots - 1 - i) * step
                     ax.plot(t, y + offset, 'k', lw=0.5)
 
                 ax.set_yticks([])
+                ax.set_ylim(y0, y1)
                 ax.set_xlabel("Time (s)")
-                ax.set_ylabel(f"Sessions ({len(traces)})")
+                ax.set_ylabel(f"Slots ({n_occupied}/{n_slots})")
                 ax.set_title(
                     f"Day {d} Stacked (Smoothed {args.smooth_window_s}s) - "
                     f"{plot_roi} [{timeline_anchor_label}]"
@@ -1344,9 +1404,11 @@ def main():
                 plt.close(fig)
         else:
             for d in unique_days:
-                day_items = sorted(cached_by_day.get(d, []), key=lambda x: x['chunk_id'])
-                traces = [smoothed_data[c['chunk_id']] for c in day_items if c['chunk_id'] in smoothed_data]
-                if not traces:
+                slot_map = day_slot_maps.get(d, {})
+                if not slot_map:
+                    continue
+                slot_traces = _build_stacked_slot_traces(slot_map, smoothed_data, sph)
+                if not any(tr is not None for tr in slot_traces):
                     continue
 
                 out_path = os.path.join(args.output_dir, f"phasic_stacked_day_{d:03d}.png")
@@ -1354,7 +1416,7 @@ def main():
                 canvas = _render_stacked_day_canvas_lightweight(
                     day=d,
                     plot_roi=plot_roi,
-                    traces=traces,
+                    slot_traces=slot_traces,
                     smooth_window_s=args.smooth_window_s,
                     dpi=args.dpi,
                     timeline_anchor_label=timeline_anchor_label,

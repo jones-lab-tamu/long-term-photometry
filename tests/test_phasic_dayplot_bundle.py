@@ -63,6 +63,66 @@ class TestPhasicDayplotBundle(unittest.TestCase):
             bundle.build_day_slot_maps(cached_by_day, sph=2)
         self.assertIn("Raw/dFF slot collision detected", str(cm.exception))
 
+    def test_build_stacked_slot_traces_preserves_fixed_template_with_blanks(self):
+        sph = 2
+        slot_map = {
+            (0, 1): {"chunk_id": 10},
+            (1, 0): {"chunk_id": 11},
+        }
+        t = np.array([0.0, 1.0, 2.0])
+        smoothed_data = {
+            10: (t, np.array([1.0, 1.5, 2.0])),
+            11: (t, np.array([0.5, 0.4, 0.3])),
+        }
+
+        slot_traces = bundle._build_stacked_slot_traces(slot_map, smoothed_data, sph=sph)
+        self.assertEqual(len(slot_traces), 24 * sph)
+        # Slot indexing follows the same fixed template as raw/dFF: idx = hour * sph + col.
+        self.assertIsNone(slot_traces[0])      # H00 left
+        self.assertIsNotNone(slot_traces[1])   # H00 right
+        self.assertIsNotNone(slot_traces[2])   # H01 left
+        self.assertIsNone(slot_traces[3])      # H01 right
+        self.assertIsNone(slot_traces[-1])     # trailing template slot preserved
+
+    def test_stacked_lightweight_canvas_size_depends_on_total_slots_not_occupied(self):
+        t = np.linspace(0.0, 10.0, 51)
+        sparse = [None] * 48
+        sparse[9] = (t, np.sin(t))
+        sparse[10] = (t, np.cos(t))
+        dense = [(t, np.sin(t + i * 0.1)) for i in range(48)]
+
+        img_sparse = bundle._render_stacked_day_canvas_lightweight(
+            day=0,
+            plot_roi="Region0",
+            slot_traces=sparse,
+            smooth_window_s=0.6,
+            dpi=100,
+            timeline_anchor_label="fixed-daily-anchor@07:00:00",
+        )
+        img_dense = bundle._render_stacked_day_canvas_lightweight(
+            day=0,
+            plot_roi="Region0",
+            slot_traces=dense,
+            smooth_window_s=0.6,
+            dpi=100,
+            timeline_anchor_label="fixed-daily-anchor@07:00:00",
+        )
+
+        self.assertEqual(img_sparse.size, img_dense.size)
+
+    def test_stacked_slot_layout_uses_full_slot_span_for_sparse_days(self):
+        t = np.linspace(0.0, 10.0, 101)
+        sparse_top = [None] * 48
+        for i in range(9):
+            sparse_top[i] = (t, np.sin(t))
+
+        step, data_y_min, data_y_max, y0, y1 = bundle._compute_stacked_slot_layout(sparse_top)
+
+        # This is the core regression guard:
+        # sparse occupancy in early slots must still reserve full slot span.
+        self.assertLess(y0, data_y_min + step)
+        self.assertGreater(y1, data_y_max + (46.0 * step))
+
     def setUp(self):
         self.test_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.test_dir.cleanup)
