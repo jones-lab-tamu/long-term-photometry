@@ -52,6 +52,17 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         self.assertTrue(bundle.check_continuity([0, 1, 2, 3], 1.0))
         self.assertFalse(bundle.check_continuity([0, 1, 4, 5], 1.0))
 
+    def test_build_day_slot_maps_raises_on_collision(self):
+        cached_by_day = {
+            0: [
+                {"hour": 9, "col": 1, "chunk_id": 10},
+                {"hour": 9, "col": 1, "chunk_id": 11},
+            ]
+        }
+        with self.assertRaises(RuntimeError) as cm:
+            bundle.build_day_slot_maps(cached_by_day, sph=2)
+        self.assertIn("Raw/dFF slot collision detected", str(cm.exception))
+
     def setUp(self):
         self.test_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.test_dir.cleanup)

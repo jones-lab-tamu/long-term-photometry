@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from photometry_pipeline.viz.phasic_data_prep import (
     ChunkRecord, PhasicDataSet,
     discover_chunks, infer_datetime_from_string, infer_session_folder_name,
+    parse_session_folder_datetime, infer_session_datetime,
     build_feature_map, resolve_roi, compute_day_layout,
 )
 
@@ -141,6 +142,18 @@ class TestSessionFolderInference:
     def test_session_folder_fallback_to_basename_stem(self):
         label = infer_session_folder_name("chunk_0007.csv")
         assert label == "chunk_0007"
+
+    def test_parse_session_folder_datetime(self):
+        dt = parse_session_folder_datetime("2026_03_10-11_33_05")
+        assert dt == datetime(2026, 3, 10, 11, 33, 5)
+
+    def test_infer_session_datetime_prefers_session_folder_over_parent_timestamp(self):
+        src = (
+            "C:/data/2026_03_11-01_33_05/"
+            "RWD/2026_03_10-16_33_05/fluorescence.csv"
+        )
+        dt = infer_session_datetime(src)
+        assert dt == datetime(2026, 3, 10, 16, 33, 5)
 
 
 # ======================================================================
@@ -383,6 +396,52 @@ class TestComputeDayLayout:
         # 13:03 -> ZT 6:03 -> hour 6, left
         assert by_cid[3].hour_idx == 6
         assert by_cid[3].hour_rank == 0
+
+    def test_fixed_anchor_uses_session_folder_datetime_not_parent_path_timestamp(self, synth_traces_dir):
+        """
+        Mandatory regression:
+        If parent folders include an earlier timestamp token, placement must still
+        use the canonical session-folder datetime token.
+        """
+        entries = discover_chunks(synth_traces_dir)[:6]
+        roots = [
+            "2026_03_10-11_33_05",
+            "2026_03_10-12_03_05",
+            "2026_03_10-12_33_05",
+            "2026_03_10-13_03_05",
+            "2026_03_10-16_03_05",
+            "2026_03_10-16_33_05",
+        ]
+        fm = {}
+        for (cid, _), root in zip(entries, roots):
+            # Deliberately inject an earlier timestamp in a parent path component.
+            fm[(cid, "Region0")] = {
+                "source_file": f"C:/data/2026_03_11-01_33_05/RWD/{root}/fluorescence.csv"
+            }
+
+        pds = compute_day_layout(
+            entries,
+            fm,
+            "Region0",
+            sessions_per_hour=2,
+            timeline_anchor_mode="fixed_daily_anchor",
+            fixed_daily_anchor_clock="07:00",
+        )
+        by_cid = {c.chunk_id: c for c in pds.chunks}
+
+        # Required fixed-anchor placement contract.
+        assert by_cid[0].hour_idx == 4
+        assert by_cid[0].hour_rank == 1
+        assert by_cid[1].hour_idx == 5
+        assert by_cid[1].hour_rank == 0
+        assert by_cid[2].hour_idx == 5
+        assert by_cid[2].hour_rank == 1
+        assert by_cid[3].hour_idx == 6
+        assert by_cid[3].hour_rank == 0
+        assert by_cid[4].hour_idx == 9
+        assert by_cid[4].hour_rank == 0
+        assert by_cid[5].hour_idx == 9
+        assert by_cid[5].hour_rank == 1
 
     def test_fixed_daily_anchor_boundary_cases(self, synth_traces_dir):
         entries = discover_chunks(synth_traces_dir)[:3]

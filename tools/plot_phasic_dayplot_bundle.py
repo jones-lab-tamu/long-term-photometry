@@ -204,7 +204,17 @@ def build_day_slot_maps(cached_by_day, sph):
             c = p['col']
             if c >= sph:
                 continue
-            slot_map[(p['hour'], c)] = p
+            slot_key = (p['hour'], c)
+            if slot_key in slot_map:
+                prev = slot_map[slot_key]
+                raise RuntimeError(
+                    "Raw/dFF slot collision detected: "
+                    f"day={day}, hour={int(p['hour'])}, col={int(c)}, "
+                    f"existing_chunk={int(prev.get('chunk_id', -1))}, "
+                    f"new_chunk={int(p.get('chunk_id', -1))}. "
+                    "Refusing silent overwrite."
+                )
+            slot_map[slot_key] = p
         day_slots[day] = slot_map
     return day_slots
 

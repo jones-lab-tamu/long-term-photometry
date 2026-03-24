@@ -143,6 +143,39 @@ def infer_session_folder_name(source: str) -> str:
     return stem or base
 
 
+def parse_session_folder_datetime(session_folder: str) -> Optional[datetime]:
+    """
+    Parse canonical session folder datetime token (YYYY_MM_DD-HH_MM_SS).
+
+    Returns None when the provided token does not match the canonical format.
+    """
+    if not isinstance(session_folder, str):
+        return None
+    token = session_folder.strip()
+    m = _SESSION_FOLDER_PATTERN.fullmatch(token)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1).replace("-", "_"), "%Y_%m_%d_%H_%M_%S")
+    except ValueError:
+        return None
+
+
+def infer_session_datetime(source: str) -> Optional[datetime]:
+    """
+    Infer authoritative session datetime for timeline placement.
+
+    Priority:
+      1) Canonical timestamped session folder token (authoritative).
+      2) Generic fallback search over source string (legacy compatibility).
+    """
+    session_folder = infer_session_folder_name(source)
+    dt_session = parse_session_folder_datetime(session_folder)
+    if dt_session is not None:
+        return dt_session
+    return infer_datetime_from_string(source)
+
+
 def parse_fixed_daily_anchor_clock(clock_text: str) -> Tuple[int, str]:
     """
     Parse fixed daily anchor clock text.
@@ -287,7 +320,7 @@ def compute_day_layout(
             src_val = feature_map[(cid, roi)].get('source_file', tpath)
             if isinstance(src_val, str) and src_val.strip():
                 source = src_val
-        dt = infer_datetime_from_string(source)
+        dt = infer_session_datetime(source)
         session_folder = infer_session_folder_name(source)
         raw_rows.append({
             'chunk_id': cid,
