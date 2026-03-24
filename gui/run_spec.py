@@ -22,6 +22,7 @@ This module has NO PySide6 dependency so it can be unit-tested standalone.
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
@@ -30,6 +31,8 @@ import yaml
 from gui.knobs_schema import is_config_key
 
 FORMAT_CHOICES = ("auto", "rwd", "npm")
+TIMELINE_ANCHOR_CHOICES = ("civil", "elapsed", "fixed_daily_anchor")
+_ANCHOR_CLOCK_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
 
 
 def _stable_yaml_dump(data: dict) -> str:
@@ -63,6 +66,8 @@ class RunSpec:
     validate_only: bool = False     # Set by _on_validate path
     sessions_per_hour: Optional[int] = None    # _sph_edit widget
     session_duration_s: Optional[float] = None # _duration_edit widget
+    timeline_anchor_mode: str = "civil"  # _timeline_anchor_mode_combo widget
+    fixed_daily_anchor_clock: Optional[str] = None  # _fixed_daily_anchor_time_edit widget
     smooth_window_s: float = 1.0    # _smooth_spin widget
     # Render mode controls (None => rely on runner/backend default = qc)
     sig_iso_render_mode: Optional[str] = None  # _sig_iso_render_mode_combo
@@ -103,6 +108,29 @@ class RunSpec:
     def __post_init__(self):
         if self.include_roi_ids is not None and self.exclude_roi_ids is not None:
             raise ValueError("include_roi_ids and exclude_roi_ids are mutually exclusive")
+        if self.timeline_anchor_mode not in TIMELINE_ANCHOR_CHOICES:
+            raise ValueError(
+                f"timeline_anchor_mode must be one of {TIMELINE_ANCHOR_CHOICES}, "
+                f"got {self.timeline_anchor_mode!r}"
+            )
+
+        if isinstance(self.fixed_daily_anchor_clock, str):
+            self.fixed_daily_anchor_clock = self.fixed_daily_anchor_clock.strip() or None
+        elif self.fixed_daily_anchor_clock is not None:
+            self.fixed_daily_anchor_clock = str(self.fixed_daily_anchor_clock).strip() or None
+
+        if self.timeline_anchor_mode == "fixed_daily_anchor":
+            if not self.fixed_daily_anchor_clock:
+                raise ValueError(
+                    "fixed_daily_anchor_clock is required when timeline_anchor_mode="
+                    "'fixed_daily_anchor'"
+                )
+            if not _ANCHOR_CLOCK_RE.fullmatch(self.fixed_daily_anchor_clock):
+                raise ValueError(
+                    "fixed_daily_anchor_clock must be HH:MM or HH:MM:SS, "
+                    f"got {self.fixed_daily_anchor_clock!r}"
+                )
+
         for field_name in ("sig_iso_render_mode", "dff_render_mode", "stacked_render_mode"):
             value = getattr(self, field_name)
             if value is not None and value not in ("qc", "full"):
@@ -280,6 +308,11 @@ class RunSpec:
 
         if self.session_duration_s is not None:
             argv.extend(["--session-duration-s", str(self.session_duration_s)])
+
+        if self.timeline_anchor_mode != "civil":
+            argv.extend(["--timeline-anchor-mode", str(self.timeline_anchor_mode)])
+        if self.timeline_anchor_mode == "fixed_daily_anchor" and self.fixed_daily_anchor_clock:
+            argv.extend(["--fixed-daily-anchor-clock", str(self.fixed_daily_anchor_clock)])
 
         argv.extend(["--smooth-window-s", str(self.smooth_window_s)])
 

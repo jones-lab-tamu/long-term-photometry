@@ -11,14 +11,14 @@ import shutil
 import pytest
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Ensure repo root is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from photometry_pipeline.viz.phasic_data_prep import (
     ChunkRecord, PhasicDataSet,
-    discover_chunks, infer_datetime_from_string,
+    discover_chunks, infer_datetime_from_string, infer_session_folder_name,
     build_feature_map, resolve_roi, compute_day_layout,
 )
 
@@ -124,6 +124,24 @@ class TestInferDatetime:
         assert infer_datetime_from_string(12345) is None
         assert infer_datetime_from_string(None) is None
 
+    def test_parses_datetime_from_rwd_parent_folder_path(self):
+        dt = infer_datetime_from_string(
+            r"C:\data\run\2026_03_10-11_33_05\fluorescence.csv"
+        )
+        assert dt == datetime(2026, 3, 10, 11, 33, 5)
+
+
+class TestSessionFolderInference:
+    def test_session_folder_from_rwd_path(self):
+        label = infer_session_folder_name(
+            r"C:\data\run\2026_03_10-11_33_05\fluorescence.csv"
+        )
+        assert label == "2026_03_10-11_33_05"
+
+    def test_session_folder_fallback_to_basename_stem(self):
+        label = infer_session_folder_name("chunk_0007.csv")
+        assert label == "chunk_0007"
+
 
 # ======================================================================
 # Tests: build_feature_map
@@ -221,6 +239,7 @@ class TestComputeDayLayout:
         assert isinstance(cr.day_idx, int)
         assert isinstance(cr.hour_idx, int)
         assert isinstance(cr.hour_rank, int)
+        assert isinstance(cr.within_hour_offset_sec, float)
 
     def test_inferred_sph(self, synth_traces_dir):
         """When sph=None and no datetimes, SPH is inferred from chunk count."""
@@ -241,3 +260,248 @@ class TestComputeDayLayout:
         """Raises RuntimeError for empty chunk list."""
         with pytest.raises(RuntimeError, match="No chunk entries"):
             compute_day_layout([], None, "Region0", sessions_per_hour=2)
+
+    def test_datetime_layout_is_used_even_when_sessions_per_hour_is_provided(self, synth_traces_dir):
+        """Timestamped source paths should drive day/hour assignment regardless of provided SPH."""
+        entries = discover_chunks(synth_traces_dir)
+        t0 = datetime(2026, 3, 10, 0, 0, 0)
+        fm = {}
+        for cid, _ in entries:
+            dt = t0 + timedelta(minutes=30 * cid)
+            fm[(cid, "Region0")] = {
+                "source_file": f"C:/real_rwd/{dt.strftime('%Y_%m_%d-%H_%M_%S')}/fluorescence.csv"
+            }
+
+        # Deliberately mismatched SPH hint should not collapse datetime-derived day/hour mapping.
+        pds = compute_day_layout(entries, fm, "Region0", sessions_per_hour=5)
+        assert sorted(pds.chunks_by_day.keys()) == [0, 1]
+        by_cid = {c.chunk_id: c for c in pds.chunks}
+        assert by_cid[0].session_folder == "2026_03_10-00_00_00"
+        assert by_cid[0].elapsed_from_start_sec == 0.0
+        assert by_cid[0].hour_idx == 0
+        assert by_cid[1].hour_idx == 0
+        assert by_cid[95].day_idx == 1
+        assert by_cid[95].hour_idx == 23
+        assert by_cid[95].elapsed_from_start_sec == pytest.approx(95 * 1800.0)
+
+    def test_offset_civil_clock_hour_slot_mapping(self, synth_traces_dir):
+        """
+        Mandatory placement contract:
+        11:33 -> hour 11 right slot
+        12:03 -> hour 12 left slot
+        12:33 -> hour 12 right slot
+        13:03 -> hour 13 left slot
+        """
+        entries = discover_chunks(synth_traces_dir)[:4]
+        roots = [
+            "2026_03_10-11_33_05",
+            "2026_03_10-12_03_05",
+            "2026_03_10-12_33_05",
+            "2026_03_10-13_03_05",
+        ]
+        fm = {}
+        for (cid, _), root in zip(entries, roots):
+            fm[(cid, "Region0")] = {
+                "source_file": f"C:/real/{root}/fluorescence.csv"
+            }
+
+        pds = compute_day_layout(entries, fm, "Region0", sessions_per_hour=2)
+        by_cid = {c.chunk_id: c for c in pds.chunks}
+        assert by_cid[0].session_folder == roots[0]
+        assert by_cid[0].datetime_inferred == datetime(2026, 3, 10, 11, 33, 5)
+        assert by_cid[0].hour_idx == 11
+        assert by_cid[0].hour_rank == 1
+        assert by_cid[1].hour_idx == 12
+        assert by_cid[1].hour_rank == 0
+        assert by_cid[2].hour_idx == 12
+        assert by_cid[2].hour_rank == 1
+        assert by_cid[3].hour_idx == 13
+        assert by_cid[3].hour_rank == 0
+        assert by_cid[1].elapsed_from_start_sec == pytest.approx(1800.0)
+        assert by_cid[2].elapsed_from_start_sec == pytest.approx(3600.0)
+        assert by_cid[3].elapsed_from_start_sec == pytest.approx(5400.0)
+
+    def test_elapsed_anchor_hour_slot_mapping(self, synth_traces_dir):
+        entries = discover_chunks(synth_traces_dir)[:4]
+        roots = [
+            "2026_03_10-11_33_05",
+            "2026_03_10-12_03_05",
+            "2026_03_10-12_33_05",
+            "2026_03_10-13_03_05",
+        ]
+        fm = {}
+        for (cid, _), root in zip(entries, roots):
+            fm[(cid, "Region0")] = {"source_file": f"C:/real/{root}/fluorescence.csv"}
+
+        pds = compute_day_layout(
+            entries,
+            fm,
+            "Region0",
+            sessions_per_hour=2,
+            timeline_anchor_mode="elapsed",
+        )
+        by_cid = {c.chunk_id: c for c in pds.chunks}
+        assert by_cid[0].hour_idx == 0
+        assert by_cid[0].hour_rank == 0
+        assert by_cid[1].hour_idx == 0
+        assert by_cid[1].hour_rank == 1
+        assert by_cid[2].hour_idx == 1
+        assert by_cid[2].hour_rank == 0
+        assert by_cid[3].hour_idx == 1
+        assert by_cid[3].hour_rank == 1
+
+    def test_fixed_daily_anchor_hour_slot_mapping(self, synth_traces_dir):
+        entries = discover_chunks(synth_traces_dir)[:4]
+        roots = [
+            "2026_03_10-11_33_05",
+            "2026_03_10-12_03_05",
+            "2026_03_10-12_33_05",
+            "2026_03_10-13_03_05",
+        ]
+        fm = {}
+        for (cid, _), root in zip(entries, roots):
+            fm[(cid, "Region0")] = {"source_file": f"C:/real/{root}/fluorescence.csv"}
+
+        pds = compute_day_layout(
+            entries,
+            fm,
+            "Region0",
+            sessions_per_hour=2,
+            timeline_anchor_mode="fixed_daily_anchor",
+            fixed_daily_anchor_clock="07:00",
+        )
+        by_cid = {c.chunk_id: c for c in pds.chunks}
+        # 11:33 -> ZT 4:33 -> hour 4, right
+        assert by_cid[0].hour_idx == 4
+        assert by_cid[0].hour_rank == 1
+        # 12:03 -> ZT 5:03 -> hour 5, left
+        assert by_cid[1].hour_idx == 5
+        assert by_cid[1].hour_rank == 0
+        # 12:33 -> ZT 5:33 -> hour 5, right
+        assert by_cid[2].hour_idx == 5
+        assert by_cid[2].hour_rank == 1
+        # 13:03 -> ZT 6:03 -> hour 6, left
+        assert by_cid[3].hour_idx == 6
+        assert by_cid[3].hour_rank == 0
+
+    def test_fixed_daily_anchor_boundary_cases(self, synth_traces_dir):
+        entries = discover_chunks(synth_traces_dir)[:3]
+        roots = [
+            "2026_03_10-07_03_00",
+            "2026_03_10-07_33_00",
+            "2026_03_11-06_50_00",
+        ]
+        fm = {}
+        for (cid, _), root in zip(entries, roots):
+            fm[(cid, "Region0")] = {"source_file": f"C:/real/{root}/fluorescence.csv"}
+
+        pds = compute_day_layout(
+            entries,
+            fm,
+            "Region0",
+            sessions_per_hour=2,
+            timeline_anchor_mode="fixed_daily_anchor",
+            fixed_daily_anchor_clock="07:00",
+        )
+        by_cid = {c.chunk_id: c for c in pds.chunks}
+        assert by_cid[0].hour_idx == 0
+        assert by_cid[0].hour_rank == 0
+        assert by_cid[1].hour_idx == 0
+        assert by_cid[1].hour_rank == 1
+        # 06:50 belongs to previous anchored day, near hour 23 right slot.
+        assert by_cid[2].day_idx == 0
+        assert by_cid[2].hour_idx == 23
+        assert by_cid[2].hour_rank == 1
+
+    def test_two_day_offset_start_spans_full_duration_without_truncation(self, synth_traces_dir):
+        """Offset-start 96-chunk timeline preserves ~48h elapsed span and calendar day progression."""
+        entries = discover_chunks(synth_traces_dir)
+        t0 = datetime(2026, 3, 10, 11, 33, 5)
+        fm = {}
+        for cid, _ in entries:
+            dt = t0 + timedelta(minutes=30 * cid)
+            fm[(cid, "Region0")] = {
+                "source_file": f"C:/real_rwd/{dt.strftime('%Y_%m_%d-%H_%M_%S')}/fluorescence.csv"
+            }
+
+        pds = compute_day_layout(entries, fm, "Region0", sessions_per_hour=2)
+        by_cid = {c.chunk_id: c for c in pds.chunks}
+        assert by_cid[95].elapsed_from_start_sec == pytest.approx(95 * 1800.0)
+        assert by_cid[95].elapsed_from_start_sec / 3600.0 == pytest.approx(47.5)
+        # Civil-clock anchor can span three calendar dates for a 48h run starting midday.
+        assert sorted(pds.chunks_by_day.keys()) == [0, 1, 2]
+        assert by_cid[0].hour_idx == 11
+        assert by_cid[95].hour_idx == 11
+
+    def test_two_day_offset_start_under_fixed_daily_anchor(self, synth_traces_dir):
+        entries = discover_chunks(synth_traces_dir)
+        t0 = datetime(2026, 3, 10, 11, 33, 5)
+        fm = {}
+        for cid, _ in entries:
+            dt = t0 + timedelta(minutes=30 * cid)
+            fm[(cid, "Region0")] = {
+                "source_file": f"C:/real_rwd/{dt.strftime('%Y_%m_%d-%H_%M_%S')}/fluorescence.csv"
+            }
+
+        pds = compute_day_layout(
+            entries,
+            fm,
+            "Region0",
+            sessions_per_hour=2,
+            timeline_anchor_mode="fixed_daily_anchor",
+            fixed_daily_anchor_clock="07:00",
+        )
+        by_cid = {c.chunk_id: c for c in pds.chunks}
+        assert by_cid[95].elapsed_from_start_sec / 3600.0 == pytest.approx(47.5)
+        assert sorted(pds.chunks_by_day.keys()) == [0, 1, 2]
+        # First session at 11:33 should map to anchored hour 4, right slot.
+        assert by_cid[0].hour_idx == 4
+        assert by_cid[0].hour_rank == 1
+
+    def test_unparseable_sources_fall_back_to_sequential_schedule(self, synth_traces_dir):
+        entries = discover_chunks(synth_traces_dir)
+        fm = {}
+        for cid, _ in entries:
+            fm[(cid, "Region0")] = {"source_file": f"session_{cid:04d}.csv"}
+
+        pds = compute_day_layout(entries, fm, "Region0", sessions_per_hour=2)
+        by_cid = {c.chunk_id: c for c in pds.chunks}
+        assert by_cid[0].datetime_inferred is None
+        assert by_cid[95].day_idx == 1
+        assert by_cid[95].hour_idx == 23
+        assert by_cid[95].hour_rank == 1
+        assert by_cid[95].elapsed_from_start_sec == pytest.approx(95 * 1800.0)
+
+    def test_slot_placement_uses_clock_offset_not_occurrence_rank(self, synth_traces_dir):
+        """
+        Two sessions in the same hour and same half-hour bin should map to the same slot.
+        A rank-based implementation would assign 0/1 and fail this contract.
+        """
+        entries = discover_chunks(synth_traces_dir)[:2]
+        roots = [
+            "2026_03_10-12_35_00",
+            "2026_03_10-12_50_00",
+        ]
+        fm = {}
+        for (cid, _), root in zip(entries, roots):
+            fm[(cid, "Region0")] = {"source_file": f"C:/real/{root}/fluorescence.csv"}
+
+        pds = compute_day_layout(entries, fm, "Region0", sessions_per_hour=2)
+        by_cid = {c.chunk_id: c for c in pds.chunks}
+        assert by_cid[0].hour_idx == 12
+        assert by_cid[1].hour_idx == 12
+        assert by_cid[0].hour_rank == 1
+        assert by_cid[1].hour_rank == 1
+
+    def test_invalid_fixed_anchor_clock_raises(self, synth_traces_dir):
+        entries = discover_chunks(synth_traces_dir)[:1]
+        fm = {(0, "Region0"): {"source_file": "C:/real/2026_03_10-11_33_05/fluorescence.csv"}}
+        with pytest.raises(ValueError, match="Invalid fixed_daily_anchor clock"):
+            compute_day_layout(
+                entries,
+                fm,
+                "Region0",
+                sessions_per_hour=2,
+                timeline_anchor_mode="fixed_daily_anchor",
+                fixed_daily_anchor_clock="25:99",
+            )

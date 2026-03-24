@@ -20,7 +20,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -37,9 +37,12 @@ class ChunkRecord:
     trace_path: str
     datetime_inferred: Optional[datetime]
     source_file: str
+    session_folder: str
+    elapsed_from_start_sec: float
     day_idx: int
     hour_idx: int
     hour_rank: int
+    within_hour_offset_sec: float
 
 
 @dataclass
@@ -56,6 +59,8 @@ class PhasicDataSet:
     """
     roi: str
     sessions_per_hour: int
+    timeline_anchor_mode: str
+    fixed_daily_anchor_clock: Optional[str]
     chunks: List[ChunkRecord]
     chunks_by_day: Dict[int, List[ChunkRecord]]
     feature_map: Optional[Dict] = field(default=None, repr=False)
@@ -97,6 +102,8 @@ _DT_PATTERNS = [
     re.compile(r'(\d{4})(\d{2})(\d{2})[-_](\d{2})(\d{2})(\d{2})'),
     re.compile(r'(\d{4})[-_](\d{2})[-_](\d{2})\s+(\d{2})[:](\d{2})[:](\d{2})'),
 ]
+_SESSION_FOLDER_PATTERN = re.compile(r'^(\d{4}[_-]\d{2}[_-]\d{2}-\d{2}[_:]\d{2}[_:]\d{2})$')
+_ANCHOR_MODE_VALUES = {"civil", "elapsed", "fixed_daily_anchor"}
 
 
 def infer_datetime_from_string(s) -> Optional[datetime]:
@@ -115,6 +122,52 @@ def infer_datetime_from_string(s) -> Optional[datetime]:
             except ValueError:
                 continue
     return None
+
+
+def infer_session_folder_name(source: str) -> str:
+    """
+    Infer canonical session folder label from a source path.
+
+    Prefer a parent folder token matching YYYY_MM_DD-HH_MM_SS. If not found,
+    return basename stem as a stable fallback label.
+    """
+    if not isinstance(source, str):
+        return ""
+    norm = source.replace("\\", "/")
+    parts = [p for p in norm.split("/") if p]
+    for token in reversed(parts):
+        if _SESSION_FOLDER_PATTERN.match(token):
+            return token
+    base = os.path.basename(norm)
+    stem, _ = os.path.splitext(base)
+    return stem or base
+
+
+def parse_fixed_daily_anchor_clock(clock_text: str) -> Tuple[int, str]:
+    """
+    Parse fixed daily anchor clock text.
+
+    Accepts HH:MM or HH:MM:SS and returns:
+      (seconds_from_midnight, canonical_HH:MM:SS).
+    """
+    if not isinstance(clock_text, str) or not clock_text.strip():
+        raise ValueError("fixed_daily_anchor clock is required (format HH:MM or HH:MM:SS).")
+    token = clock_text.strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", token)
+    if not m:
+        raise ValueError(
+            f"Invalid fixed_daily_anchor clock '{clock_text}'. Expected HH:MM or HH:MM:SS."
+        )
+    hh = int(m.group(1))
+    mm = int(m.group(2))
+    ss = int(m.group(3)) if m.group(3) is not None else 0
+    if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59):
+        raise ValueError(
+            f"Invalid fixed_daily_anchor clock '{clock_text}'. Hours 0-23, minutes/seconds 0-59."
+        )
+    seconds = hh * 3600 + mm * 60 + ss
+    canonical = f"{hh:02d}:{mm:02d}:{ss:02d}"
+    return seconds, canonical
 
 
 # ======================================================================
@@ -185,6 +238,8 @@ def compute_day_layout(
     feature_map: Optional[Dict],
     roi: str,
     sessions_per_hour: Optional[int] = None,
+    timeline_anchor_mode: str = "civil",
+    fixed_daily_anchor_clock: Optional[str] = None,
 ) -> PhasicDataSet:
     """
     Build the canonical day/hour/rank layout for phasic plotting.
@@ -209,6 +264,20 @@ def compute_day_layout(
     if not chunk_entries:
         raise RuntimeError("No chunk entries provided to compute_day_layout")
 
+    anchor_mode = str(timeline_anchor_mode).strip().lower()
+    if anchor_mode not in _ANCHOR_MODE_VALUES:
+        raise ValueError(
+            f"Unsupported timeline_anchor_mode='{timeline_anchor_mode}'. "
+            f"Allowed: {sorted(_ANCHOR_MODE_VALUES)}"
+        )
+
+    anchor_seconds = 0
+    anchor_clock_canonical = None
+    if anchor_mode == "fixed_daily_anchor":
+        anchor_seconds, anchor_clock_canonical = parse_fixed_daily_anchor_clock(
+            fixed_daily_anchor_clock if fixed_daily_anchor_clock is not None else ""
+        )
+
     # -- 1. Build raw records with datetime inference --
     raw_rows = []
     for cid, tpath in chunk_entries:
@@ -216,14 +285,17 @@ def compute_day_layout(
         dt = None
         if feature_map and (cid, roi) in feature_map:
             src_val = feature_map[(cid, roi)].get('source_file', tpath)
-            if src_val:
+            if isinstance(src_val, str) and src_val.strip():
                 source = src_val
-            dt = infer_datetime_from_string(source)
+        dt = infer_datetime_from_string(source)
+        session_folder = infer_session_folder_name(source)
         raw_rows.append({
             'chunk_id': cid,
             'trace_path': tpath,
             'datetime': dt,
             'source_file': source,
+            'session_folder': session_folder,
+            'elapsed_from_start_sec': float('nan'),
         })
 
     # -- 2. Try datetime-based layout --
@@ -231,43 +303,107 @@ def compute_day_layout(
     pct_mapped = (n_mapped / len(raw_rows)) * 100 if raw_rows else 0
     sph = sessions_per_hour
 
-    if pct_mapped > 90 and sph is None:
-        # Datetime mode
+    if pct_mapped > 90:
+        # Datetime mode (authoritative default):
+        # - Placement semantics controlled by explicit anchor mode
+        # - Slot placement from within-hour clock offset (not occurrence rank)
         datetimes = [r['datetime'] for r in raw_rows if r['datetime'] is not None]
         t0 = min(datetimes)
-        day_start = t0.replace(hour=0, minute=0, second=0, microsecond=0)
+        base_date = t0.date()
 
-        for r in raw_rows:
-            if r['datetime'] is not None:
-                elapsed = (r['datetime'] - day_start).total_seconds()
-                r['day_idx'] = int(elapsed // 86400)
-                r['hour_idx'] = int((elapsed % 86400) // 3600)
-                r['_sort_key'] = (r['day_idx'], r['hour_idx'], r['datetime'])
-            else:
-                r['day_idx'] = 0
-                r['hour_idx'] = 0
-                r['_sort_key'] = (0, 0, datetime.min)
+        def _civil_components(dt_obj: datetime) -> Tuple[int, int, float]:
+            day_idx_val = int((dt_obj.date() - base_date).days)
+            hour_idx_val = int(dt_obj.hour)
+            within_hour_offset = (
+                float(dt_obj.minute) * 60.0
+                + float(dt_obj.second)
+                + (float(dt_obj.microsecond) / 1_000_000.0)
+            )
+            return day_idx_val, hour_idx_val, within_hour_offset
 
-        raw_rows.sort(key=lambda r: r['_sort_key'])
+        def _elapsed_components(dt_obj: datetime) -> Tuple[int, int, float]:
+            elapsed = float((dt_obj - t0).total_seconds())
+            day_idx_val = int(elapsed // 86400.0)
+            rem = elapsed % 86400.0
+            hour_idx_val = int(rem // 3600.0)
+            within_hour_offset = rem % 3600.0
+            return day_idx_val, hour_idx_val, within_hour_offset
 
-        # Infer SPH from mode of per-hour counts
+        def _fixed_anchor_day_start(dt_obj: datetime) -> datetime:
+            start = datetime(dt_obj.year, dt_obj.month, dt_obj.day) + timedelta(seconds=anchor_seconds)
+            if dt_obj < start:
+                start -= timedelta(days=1)
+            return start
+
+        if anchor_mode == "fixed_daily_anchor":
+            base_anchor_start = _fixed_anchor_day_start(t0)
+            base_anchor_date = base_anchor_start.date()
+
+            def _fixed_daily_anchor_components(dt_obj: datetime) -> Tuple[int, int, float]:
+                day_start = _fixed_anchor_day_start(dt_obj)
+                rel = float((dt_obj - day_start).total_seconds())
+                day_idx_val = int((day_start.date() - base_anchor_date).days)
+                hour_idx_val = int(rel // 3600.0)
+                within_hour_offset = rel % 3600.0
+                return day_idx_val, hour_idx_val, within_hour_offset
+        else:
+            _fixed_daily_anchor_components = None
+
         from collections import Counter
         hour_counts = Counter()
         for r in raw_rows:
-            hour_counts[(r['day_idx'], r['hour_idx'])] += 1
-        if hour_counts:
-            count_values = list(hour_counts.values())
-            sph = max(set(count_values), key=count_values.count)
-        else:
-            sph = 1
+            dt = r['datetime']
+            if dt is None:
+                continue
+            if anchor_mode == "civil":
+                day_idx, hour_idx, _ = _civil_components(dt)
+            elif anchor_mode == "elapsed":
+                day_idx, hour_idx, _ = _elapsed_components(dt)
+            else:
+                day_idx, hour_idx, _ = _fixed_daily_anchor_components(dt)
+            hour_counts[(day_idx, hour_idx)] += 1
 
-        # Assign hour_rank within each (day, hour) group
-        rank_counter: Dict[Tuple[int, int], int] = {}
+        if sessions_per_hour is not None:
+            sph = int(max(1, sessions_per_hour))
+        else:
+            if hour_counts:
+                count_values = list(hour_counts.values())
+                sph = int(max(1, max(set(count_values), key=count_values.count)))
+            else:
+                sph = 1
+
+        slot_width_sec = 3600.0 / float(max(1, sph))
+
         for r in raw_rows:
-            key = (r['day_idx'], r['hour_idx'])
-            rank = rank_counter.get(key, 0)
-            r['hour_rank'] = rank
-            rank_counter[key] = rank + 1
+            dt = r['datetime']
+            if dt is not None:
+                elapsed = (dt - t0).total_seconds()
+                r['elapsed_from_start_sec'] = float(elapsed)
+                if anchor_mode == "civil":
+                    day_idx, hour_idx, offset_sec = _civil_components(dt)
+                elif anchor_mode == "elapsed":
+                    day_idx, hour_idx, offset_sec = _elapsed_components(dt)
+                else:
+                    day_idx, hour_idx, offset_sec = _fixed_daily_anchor_components(dt)
+                r['day_idx'] = int(day_idx)
+                r['hour_idx'] = int(hour_idx)
+                r['within_hour_offset_sec'] = float(offset_sec)
+                slot = int(offset_sec // slot_width_sec)
+                if slot < 0:
+                    slot = 0
+                if slot >= sph:
+                    slot = sph - 1
+                r['hour_rank'] = int(slot)
+                r['_sort_key'] = (dt, r['chunk_id'])
+            else:
+                r['day_idx'] = 0
+                r['hour_idx'] = 0
+                r['hour_rank'] = 0
+                r['within_hour_offset_sec'] = 0.0
+                r['elapsed_from_start_sec'] = float('nan')
+                r['_sort_key'] = (datetime.min, r['chunk_id'])
+
+        raw_rows.sort(key=lambda r: r['_sort_key'])
 
     else:
         # -- Fallback: sequential layout --
@@ -282,6 +418,8 @@ def compute_day_layout(
             r['day_idx'] = idx // chunks_per_day
             r['hour_idx'] = (idx // sph) % 24
             r['hour_rank'] = idx % sph
+            r['within_hour_offset_sec'] = float(r['hour_rank']) * (3600.0 / float(sph))
+            r['elapsed_from_start_sec'] = float(idx * (3600.0 / float(sph)))
 
     sph = int(max(1, sph))
 
@@ -293,9 +431,12 @@ def compute_day_layout(
             trace_path=r['trace_path'],
             datetime_inferred=r['datetime'],
             source_file=r['source_file'],
+            session_folder=r['session_folder'],
+            elapsed_from_start_sec=float(r['elapsed_from_start_sec']),
             day_idx=r['day_idx'],
             hour_idx=r['hour_idx'],
             hour_rank=r['hour_rank'],
+            within_hour_offset_sec=float(r.get('within_hour_offset_sec', 0.0)),
         ))
 
     chunks_by_day: Dict[int, List[ChunkRecord]] = {}
@@ -305,6 +446,8 @@ def compute_day_layout(
     return PhasicDataSet(
         roi=roi,
         sessions_per_hour=sph,
+        timeline_anchor_mode=anchor_mode,
+        fixed_daily_anchor_clock=anchor_clock_canonical,
         chunks=chunks,
         chunks_by_day=chunks_by_day,
         feature_map=feature_map,

@@ -2181,5 +2181,47 @@ class TestEventFeatureKnobs(unittest.TestCase):
         self.assertIsNone(validate_representative_index_preview_compatibility(0, 1))
         self.assertIsNotNone(validate_representative_index_preview_compatibility(1, 1))
 
+    def test_timeline_anchor_defaults_to_civil_and_omits_cli_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = os.path.join(tmp, "base.yaml")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write("target_fs_hz: 20.0\n")
+            run_dir = os.path.join(tmp, "run_anchor_default")
+            spec = RunSpec(
+                input_dir="/data/in",
+                run_dir=run_dir,
+                config_source_path=cfg_path,
+            )
+            self.assertEqual(spec.timeline_anchor_mode, "civil")
+            self.assertIsNone(spec.fixed_daily_anchor_clock)
+            argv = spec.build_runner_argv()
+            self.assertNotIn("--timeline-anchor-mode", argv)
+            self.assertNotIn("--fixed-daily-anchor-clock", argv)
+
+    def test_fixed_daily_anchor_round_trip_to_argv_and_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = os.path.join(tmp, "base.yaml")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write("target_fs_hz: 20.0\n")
+            run_dir = os.path.join(tmp, "run_anchor_fixed")
+            spec = RunSpec(
+                input_dir="/data/in",
+                run_dir=run_dir,
+                config_source_path=cfg_path,
+                timeline_anchor_mode="fixed_daily_anchor",
+                fixed_daily_anchor_clock="07:00",
+            )
+            argv = spec.build_runner_argv()
+            self.assertIn("--timeline-anchor-mode", argv)
+            self.assertEqual(argv[argv.index("--timeline-anchor-mode") + 1], "fixed_daily_anchor")
+            self.assertIn("--fixed-daily-anchor-clock", argv)
+            self.assertEqual(argv[argv.index("--fixed-daily-anchor-clock") + 1], "07:00")
+
+            spec_path = spec.write_gui_run_spec(run_dir)
+            with open(spec_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(data["timeline_anchor_mode"], "fixed_daily_anchor")
+            self.assertEqual(data["fixed_daily_anchor_clock"], "07:00")
+
 if __name__ == "__main__":
     unittest.main()

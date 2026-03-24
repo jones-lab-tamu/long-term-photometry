@@ -16,6 +16,9 @@ import pathlib
 import logging
 
 
+_RWD_METADATA_LED_KEYS: Tuple[str, ...] = ("Led410Enable", "Led470Enable", "Led560Enable")
+
+
 def _unique_ordered(values: List[str]) -> List[str]:
     seen = set()
     out = []
@@ -115,6 +118,135 @@ def _detect_rwd_header(path: str, config: Config) -> Optional[Tuple[int, str]]:
         return None
 
     return None
+
+
+def _extract_rwd_metadata_context(path: str, header_row_idx: int) -> Tuple[Optional[float], Optional[int]]:
+    """
+    Extract vendor metadata fields from the row above detected RWD header.
+
+    Returns (metadata_fps, enabled_excitation_count). Each value may be None
+    when unavailable.
+    """
+    if header_row_idx <= 0:
+        return None, None
+
+    meta_cells: Optional[List[str]] = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore", newline="") as f:
+            reader = csv.reader(f)
+            for idx, row in enumerate(reader):
+                if idx == header_row_idx - 1:
+                    meta_cells = [str(cell).strip().lstrip("\ufeff") for cell in row]
+                    break
+    except Exception:
+        return None, None
+
+    if not meta_cells:
+        return None, None
+
+    meta_text = ",".join(cell for cell in meta_cells if cell)
+    if not meta_text:
+        return None, None
+
+    fps_val: Optional[float] = None
+    m_fps = re.search(r'"?Fps"?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)', meta_text, flags=re.IGNORECASE)
+    if m_fps:
+        try:
+            parsed = float(m_fps.group(1))
+            if np.isfinite(parsed) and parsed > 0:
+                fps_val = parsed
+        except Exception:
+            fps_val = None
+
+    enabled_count: Optional[int] = None
+    seen_any_led = False
+    enabled_acc = 0
+    for led_key in _RWD_METADATA_LED_KEYS:
+        m_led = re.search(
+            rf'"?{re.escape(led_key)}"?\s*[:=]\s*(true|false|1|0)',
+            meta_text,
+            flags=re.IGNORECASE,
+        )
+        if not m_led:
+            continue
+        seen_any_led = True
+        token = str(m_led.group(1)).strip().lower()
+        if token in {"true", "1"}:
+            enabled_acc += 1
+    if seen_any_led:
+        enabled_count = int(enabled_acc)
+
+    return fps_val, enabled_count
+
+
+def _resolve_rwd_timestamp_scale(
+    t_raw: np.ndarray,
+    metadata_fps: Optional[float],
+    enabled_excitation_count: Optional[int],
+) -> Tuple[float, str]:
+    """
+    Resolve raw RWD timestamp unit scale to canonical seconds.
+
+    Returns (scale_to_seconds, unit_label), where scale_to_seconds is 1.0 for
+    second timestamps and 0.001 for millisecond timestamps.
+    """
+    if len(t_raw) < 2:
+        return 1.0, "seconds"
+
+    dt = np.diff(t_raw.astype(float))
+    if np.any(dt <= 0):
+        raise ValueError("RWD: Timestamps not strictly increasing.")
+    med_dt = float(np.median(dt))
+    if not np.isfinite(med_dt) or med_dt <= 0:
+        raise ValueError("RWD: Invalid timestamp cadence.")
+
+    fs_seconds = 1.0 / med_dt
+    fs_milliseconds = 1000.0 / med_dt
+
+    if metadata_fps is not None and np.isfinite(metadata_fps) and metadata_fps > 0:
+        if enabled_excitation_count is not None and enabled_excitation_count <= 0:
+            raise ValueError(
+                "RWD: Metadata indicates no enabled excitation LEDs; cannot reconcile FPS."
+            )
+        # Vendor multiplex semantics: metadata Fps can represent total frame
+        # cadence across enabled excitation states, while row timestamps are
+        # paired-row cadence. Accept direct match or multiplex-adjusted match.
+        multiplier = (
+            enabled_excitation_count
+            if (enabled_excitation_count is not None and enabled_excitation_count > 1)
+            else 1
+        )
+        rel_tol = 0.03
+
+        def _match(candidate_row_fs: float) -> bool:
+            direct_ok = abs(candidate_row_fs - metadata_fps) / metadata_fps <= rel_tol
+            multiplex_ok = abs((candidate_row_fs * multiplier) - metadata_fps) / metadata_fps <= rel_tol
+            return direct_ok or multiplex_ok
+
+        sec_match = _match(fs_seconds)
+        ms_match = _match(fs_milliseconds)
+
+        if sec_match and not ms_match:
+            return 1.0, "seconds"
+        if ms_match and not sec_match:
+            return 0.001, "milliseconds"
+        if sec_match and ms_match:
+            raise ValueError(
+                "RWD: Ambiguous timestamp units; both second and millisecond "
+                f"interpretations match metadata FPS={metadata_fps:.6f}."
+            )
+        raise ValueError(
+            "RWD: Timestamps incompatible with metadata FPS. "
+            f"median_dt={med_dt:.6f}, fs_seconds={fs_seconds:.6f}, "
+            f"fs_milliseconds={fs_milliseconds:.6f}, metadata_fps={metadata_fps:.6f}, "
+            f"enabled_excitation_count={enabled_excitation_count}."
+        )
+
+    # Backward-compatible fallback when metadata cannot disambiguate:
+    # keep historical assumption (seconds) unless cadence is clearly in ms.
+    if med_dt >= 5.0:
+        return 0.001, "milliseconds"
+    return 1.0, "seconds"
 
 def _interp_with_nan_policy(time_sec, xp, fp, config, roi_idx, channel_name):
     mask = np.isfinite(xp) & np.isfinite(fp)
@@ -411,6 +543,14 @@ def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
     t_raw = pd.to_numeric(df[time_col], errors='coerce').values
     if np.isnan(t_raw).any():
         raise ValueError(f"RWD: Time column '{time_col}' contains non-numeric or NaN values.")
+    metadata_fps, enabled_excitation_count = _extract_rwd_metadata_context(path, header_row)
+    scale_to_seconds, timestamp_unit = _resolve_rwd_timestamp_scale(
+        t_raw,
+        metadata_fps=metadata_fps,
+        enabled_excitation_count=enabled_excitation_count,
+    )
+    if scale_to_seconds != 1.0:
+        t_raw = t_raw * scale_to_seconds
 
     cols = [str(c) for c in df.columns]
     uv_suffixes, sig_suffixes = _rwd_suffix_candidates(config)
@@ -449,7 +589,15 @@ def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
         sig_raw=sig_grid,
         fs_hz=config.target_fs_hz,
         channel_names=names,
-        metadata={"roi_map": roi_map}
+        metadata={
+            "roi_map": roi_map,
+            "rwd_time_col_resolved": time_col,
+            "rwd_timestamp_unit": timestamp_unit,
+            "rwd_metadata_fps": (float(metadata_fps) if metadata_fps is not None else np.nan),
+            "rwd_enabled_excitation_count": (
+                int(enabled_excitation_count) if enabled_excitation_count is not None else -1
+            ),
+        }
     )
     # chunk.validate() moved to load_chunk
     return chunk

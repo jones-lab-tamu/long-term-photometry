@@ -120,8 +120,18 @@ def test_wrapper_stamps_run_report():
     
     with tempfile.TemporaryDirectory() as tmp_dir:
         report = {
-            "run_context": {"sessions_per_hour": None, "sessions_per_hour_source": None},
-            "derived_settings": {"sessions_per_hour": None, "sessions_per_hour_source": None}
+            "run_context": {
+                "sessions_per_hour": None,
+                "sessions_per_hour_source": None,
+                "timeline_anchor_mode": None,
+                "fixed_daily_anchor_clock": None,
+            },
+            "derived_settings": {
+                "sessions_per_hour": None,
+                "sessions_per_hour_source": None,
+                "timeline_anchor_mode": None,
+                "fixed_daily_anchor_clock": None,
+            }
         }
         report_path = os.path.join(tmp_dir, "run_report.json")
         with open(report_path, "w") as f:
@@ -129,10 +139,16 @@ def test_wrapper_stamps_run_report():
             
         _ensure_root_run_report(tmp_dir, None, None, None, 
                                 sessions_per_hour=2, 
-                                sessions_per_hour_source="auth-stamp")
+                                sessions_per_hour_source="auth-stamp",
+                                timeline_anchor_mode="fixed_daily_anchor",
+                                fixed_daily_anchor_clock="07:00")
         
         with open(report_path, "r") as f:
             stamped = json.load(f)
             
         assert stamped["run_context"]["sessions_per_hour"] == 2
         assert stamped["run_context"]["sessions_per_hour_source"] == "auth-stamp"
+        assert stamped["run_context"]["timeline_anchor_mode"] == "fixed_daily_anchor"
+        assert stamped["run_context"]["fixed_daily_anchor_clock"] == "07:00"
+        assert stamped["derived_settings"]["timeline_anchor_mode"] == "fixed_daily_anchor"
+        assert stamped["derived_settings"]["fixed_daily_anchor_clock"] == "07:00"

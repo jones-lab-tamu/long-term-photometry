@@ -270,7 +270,16 @@ def _cleanup_run_outputs_in_place(run_dir, emitter=None):
                 print(f"WARNING: Could not remove file {path}: {e}", flush=True)
 
 
-def _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter, sessions_per_hour=None, sessions_per_hour_source=None):
+def _ensure_root_run_report(
+    run_dir,
+    phasic_out,
+    tonic_out,
+    emitter,
+    sessions_per_hour=None,
+    sessions_per_hour_source=None,
+    timeline_anchor_mode="civil",
+    fixed_daily_anchor_clock=None,
+):
     """
     Ensure <run_dir>/run_report.json exists at root before terminal status.
     Ordered requirement for Step 8: Strict Ordering Gate.
@@ -310,10 +319,14 @@ def _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter, sessions_pe
              if 'run_context' in repo:
                  repo['run_context']['sessions_per_hour'] = sessions_per_hour
                  repo['run_context']['sessions_per_hour_source'] = sessions_per_hour_source
+                 repo['run_context']['timeline_anchor_mode'] = timeline_anchor_mode
+                 repo['run_context']['fixed_daily_anchor_clock'] = fixed_daily_anchor_clock
              
              if 'derived_settings' in repo:
                  repo['derived_settings']['sessions_per_hour'] = sessions_per_hour
                  repo['derived_settings']['sessions_per_hour_source'] = sessions_per_hour_source
+                 repo['derived_settings']['timeline_anchor_mode'] = timeline_anchor_mode
+                 repo['derived_settings']['fixed_daily_anchor_clock'] = fixed_daily_anchor_clock
                  
              with open(report_path, 'w') as f:
                  json.dump(repo, f, indent=2)
@@ -352,6 +365,17 @@ def parse_args():
     parser.add_argument('--traces-only', action='store_true', help="Run traces and QC, skip feature extraction (features.csv) and feature-dependent summaries.")
     parser.add_argument('--sessions-per-hour', type=int, help="Force sessions per hour (integer)")
     parser.add_argument('--session-duration-s', type=float, help="Recording duration in seconds (data length per chunk). If provided, validated against traces.")
+    parser.add_argument(
+        '--timeline-anchor-mode',
+        choices=['civil', 'elapsed', 'fixed_daily_anchor'],
+        default='civil',
+        help="Anchor semantics for phasic/dayplot hour/day placement."
+    )
+    parser.add_argument(
+        '--fixed-daily-anchor-clock',
+        default=None,
+        help="Anchor clock for fixed_daily_anchor mode (HH:MM or HH:MM:SS)."
+    )
     parser.add_argument('--smooth-window-s', type=float, default=1.0)
     parser.add_argument('--sig-iso-render-mode', choices=['qc', 'full'], default='qc',
                         help="Render mode for sig/iso day plots (qc or full).")
@@ -411,6 +435,12 @@ def validate_inputs(args):
     if args.session_duration_s is not None:
         if args.session_duration_s <= 0:
             raise RuntimeError(f"--session-duration-s must be > 0, got {args.session_duration_s}")
+
+    if args.timeline_anchor_mode == "fixed_daily_anchor":
+        if args.fixed_daily_anchor_clock is None or not str(args.fixed_daily_anchor_clock).strip():
+            raise RuntimeError(
+                "--fixed-daily-anchor-clock is required when --timeline-anchor-mode fixed_daily_anchor."
+            )
 
     # Impossible schedule (only when both are provided)
     if args.sessions_per_hour is not None and args.session_duration_s is not None:
@@ -573,6 +603,8 @@ def main():
         'events_path': events_path,
         'cancel_flag_path': cancel_flag_path,
         'args': vars(args),
+        'timeline_anchor_mode': args.timeline_anchor_mode,
+        'fixed_daily_anchor_clock': args.fixed_daily_anchor_clock,
         'commands': [],
         'regions': [],
         'deliverables': {}
@@ -640,6 +672,8 @@ def main():
                 "format": args.format,
                 "sessions_per_hour": resolved_sessions_per_hour,
                 "sessions_per_hour_source": sessions_per_hour_source,
+                "timeline_anchor_mode": args.timeline_anchor_mode,
+                "fixed_daily_anchor_clock": args.fixed_daily_anchor_clock,
                 "events_mode": args.events,
                 "outputs": {
                     "manifest_json": None,
@@ -695,6 +729,10 @@ def main():
             argv.extend(["--sessions-per-hour", str(resolved_sessions_per_hour)])
         if args.session_duration_s is not None:
             argv.extend(["--session-duration-s", str(args.session_duration_s)])
+        if args.timeline_anchor_mode != "civil":
+            argv.extend(["--timeline-anchor-mode", str(args.timeline_anchor_mode)])
+        if args.timeline_anchor_mode == "fixed_daily_anchor" and args.fixed_daily_anchor_clock:
+            argv.extend(["--fixed-daily-anchor-clock", str(args.fixed_daily_anchor_clock)])
         argv.extend(["--smooth-window-s", str(args.smooth_window_s)])
         argv.extend(["--sig-iso-render-mode", str(args.sig_iso_render_mode)])
         argv.extend(["--dff-render-mode", str(args.dff_render_mode)])
@@ -757,6 +795,8 @@ def main():
         "format": args.format,
         "sessions_per_hour": resolved_sessions_per_hour,
         "sessions_per_hour_source": sessions_per_hour_source,
+        "timeline_anchor_mode": args.timeline_anchor_mode,
+        "fixed_daily_anchor_clock": args.fixed_daily_anchor_clock,
         "events_mode": args.events,
         "outputs": {
             "manifest_json": manifest_path,
@@ -828,7 +868,9 @@ def main():
         "event_signal": effective_event_signal,
         "representative_session_index": effective_representative_index,
         "sessions_per_hour": resolved_sessions_per_hour,
-        "sessions_per_hour_source": sessions_per_hour_source
+        "sessions_per_hour_source": sessions_per_hour_source,
+        "timeline_anchor_mode": args.timeline_anchor_mode,
+        "fixed_daily_anchor_clock": args.fixed_daily_anchor_clock,
     })
     substantive_work_completed = False
 
@@ -1291,6 +1333,10 @@ def main():
                           '--out-auc-png', out_auc_png,
                           '--out-rate-csv', out_rate_csv,
                           '--out-auc-csv', out_auc_csv]
+                if args.timeline_anchor_mode != "civil":
+                    cmd_ts.extend(['--timeline-anchor-mode', str(args.timeline_anchor_mode)])
+                if args.timeline_anchor_mode == "fixed_daily_anchor" and args.fixed_daily_anchor_clock:
+                    cmd_ts.extend(['--fixed-daily-anchor-clock', str(args.fixed_daily_anchor_clock)])
                 cmd_result = run_cmd(cmd_ts, roi_label=roi)
                 manifest['commands'].append(cmd_result)
                 roi_child_script_elapsed += cmd_result["elapsed_sec"]
@@ -1322,6 +1368,10 @@ def main():
                               '--sig-iso-render-mode', str(args.sig_iso_render_mode),
                               '--dff-render-mode', str(args.dff_render_mode),
                               '--stacked-render-mode', str(args.stacked_render_mode)]
+                if args.timeline_anchor_mode != "civil":
+                    cmd_bundle.extend(['--timeline-anchor-mode', str(args.timeline_anchor_mode)])
+                if args.timeline_anchor_mode == "fixed_daily_anchor" and args.fixed_daily_anchor_clock:
+                    cmd_bundle.extend(['--fixed-daily-anchor-clock', str(args.fixed_daily_anchor_clock)])
 
                 if not has_features:
                     cmd_bundle.extend(['--no-write-dff-grid', '--no-write-stacked'])
@@ -1421,7 +1471,9 @@ def main():
         # ============================================================
         ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter,
                                      sessions_per_hour=resolved_sessions_per_hour,
-                                     sessions_per_hour_source=sessions_per_hour_source)
+                                     sessions_per_hour_source=sessions_per_hour_source,
+                                     timeline_anchor_mode=args.timeline_anchor_mode,
+                                     fixed_daily_anchor_clock=args.fixed_daily_anchor_clock)
         err_payload = None
         if not ok:
             msg = "STRICT ORDERING VIOLATION: root run_report.json missing at terminal finalize"
@@ -1447,7 +1499,9 @@ def main():
              # Pass explicit variables as requested (not locals())
              ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter,
                                           sessions_per_hour=resolved_sessions_per_hour,
-                                          sessions_per_hour_source=sessions_per_hour_source)
+                                          sessions_per_hour_source=sessions_per_hour_source,
+                                          timeline_anchor_mode=args.timeline_anchor_mode,
+                                          fixed_daily_anchor_clock=args.fixed_daily_anchor_clock)
         except Exception:
              pass
              
@@ -1491,7 +1545,9 @@ def main():
         try:
              ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter,
                                           sessions_per_hour=resolved_sessions_per_hour,
-                                          sessions_per_hour_source=sessions_per_hour_source)
+                                          sessions_per_hour_source=sessions_per_hour_source,
+                                          timeline_anchor_mode=args.timeline_anchor_mode,
+                                          fixed_daily_anchor_clock=args.fixed_daily_anchor_clock)
         except Exception:
              pass
 

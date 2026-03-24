@@ -37,7 +37,7 @@ if repo_root not in sys.path:
 # Core Imports
 from photometry_pipeline.config import Config
 from photometry_pipeline.viz.phasic_data_prep import (
-    discover_chunks, build_feature_map, resolve_roi, compute_day_layout
+    discover_chunks, build_feature_map, resolve_roi, compute_day_layout,
 )
 from photometry_pipeline.io.hdf5_cache_reader import (
     open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields,
@@ -55,6 +55,18 @@ PNG_SAVE_KWARGS = {
     "pil_kwargs": {"compress_level": 1},
 }
 
+
+def _timeline_anchor_label(anchor_mode: str, fixed_daily_anchor_clock: str | None) -> str:
+    mode = str(anchor_mode or "civil").strip().lower()
+    if mode == "elapsed":
+        return "elapsed-from-first-session"
+    if mode == "fixed_daily_anchor":
+        clock = str(fixed_daily_anchor_clock or "").strip() or "unset"
+        if clock.count(":") == 1:
+            clock = f"{clock}:00"
+        return f"fixed-daily-anchor@{clock}"
+    return "civil-clock"
+
 def parse_args():
     default_sig_iso_mode = os.getenv("PHOTOMETRY_SIGISO_RENDER_MODE", "qc").strip().lower()
     if default_sig_iso_mode not in {"qc", "full"}:
@@ -71,6 +83,17 @@ def parse_args():
     parser.add_argument('--roi', required=True, help="Specific ROI to plot")
     parser.add_argument('--output-dir', required=True, help="Output directory for the day plots")
     parser.add_argument('--sessions-per-hour', type=int, required=True, help="Grid columns")
+    parser.add_argument(
+        '--timeline-anchor-mode',
+        choices=['civil', 'elapsed', 'fixed_daily_anchor'],
+        default='civil',
+        help="Global timeline anchor for day/hour placement."
+    )
+    parser.add_argument(
+        '--fixed-daily-anchor-clock',
+        default=None,
+        help="Anchor clock for fixed_daily_anchor mode (HH:MM or HH:MM:SS)."
+    )
     
     # Optional / Tuning
     parser.add_argument('--session-duration-s', type=float, default=None, help="Expected session duration in seconds")
@@ -420,7 +443,15 @@ def _build_blank_sig_iso_tile(layout):
     return Image.fromarray(arr, mode='RGB')
 
 
-def _compose_sig_iso_day_tile_canvas(day, plot_roi, sph, slot_map, layout, panel_y_ranges=None):
+def _compose_sig_iso_day_tile_canvas(
+    day,
+    plot_roi,
+    sph,
+    slot_map,
+    layout,
+    panel_y_ranges=None,
+    timeline_anchor_label: str = "",
+):
     tile_w = layout["tile_w"]
     tile_h = layout["tile_h"]
     col_gap = layout["col_gap"]
@@ -440,6 +471,8 @@ def _compose_sig_iso_day_tile_canvas(day, plot_roi, sph, slot_map, layout, panel
     label_font = _get_font(max(11, int(round(0.09 * layout["dpi"]))))
     chunk_font = _get_font(max(10, int(round(0.08 * layout["dpi"]))))
     title_txt = f"Day {day} Raw/Iso - {plot_roi}"
+    if timeline_anchor_label:
+        title_txt += f" [{timeline_anchor_label}]"
     draw.text((canvas_w // 2, max(6, top_title_h // 4)), title_txt, fill='black', anchor='ma', font=title_font)
 
     for h in range(24):
@@ -595,7 +628,16 @@ def _render_dff_panel_tile_lightweight(panel, layout, title_font, global_ymin, g
     }
 
 
-def _compose_dff_day_tile_canvas_lightweight(day, plot_roi, sph, slot_map, layout, global_ymin, global_ymax):
+def _compose_dff_day_tile_canvas_lightweight(
+    day,
+    plot_roi,
+    sph,
+    slot_map,
+    layout,
+    global_ymin,
+    global_ymax,
+    timeline_anchor_label: str = "",
+):
     tile_w = layout["tile_w"]
     tile_h = layout["tile_h"]
     col_gap = layout["col_gap"]
@@ -615,6 +657,8 @@ def _compose_dff_day_tile_canvas_lightweight(day, plot_roi, sph, slot_map, layou
     label_font = _get_font(max(11, int(round(0.09 * layout["dpi"]))))
     chunk_font = _get_font(max(10, int(round(0.08 * layout["dpi"]))))
     title_txt = f"Phasic QC - Day {day} - ROI {plot_roi} - Mode: DFF"
+    if timeline_anchor_label:
+        title_txt += f" [{timeline_anchor_label}]"
     draw.text((canvas_w // 2, max(6, top_title_h // 4)), title_txt, fill='black', anchor='ma', font=title_font)
     stats = {
         "trace_sec": 0.0,
@@ -650,7 +694,14 @@ def _compose_dff_day_tile_canvas_lightweight(day, plot_roi, sph, slot_map, layou
     return day_canvas, stats
 
 
-def _render_stacked_day_canvas_lightweight(day, plot_roi, traces, smooth_window_s, dpi):
+def _render_stacked_day_canvas_lightweight(
+    day,
+    plot_roi,
+    traces,
+    smooth_window_s,
+    dpi,
+    timeline_anchor_label: str = "",
+):
     n_traces = len(traces)
     fig_w_in = 6.0
     fig_h_in = max(2.0, (n_traces * 0.285) + 1.6)
@@ -745,9 +796,12 @@ def _render_stacked_day_canvas_lightweight(day, plot_roi, traces, smooth_window_
     title_font = _get_font(max(12, int(round(0.11 * dpi))))
     label_font = _get_font(max(10, int(round(0.09 * dpi))))
     tick_font = _get_font(max(9, int(round(0.08 * dpi))))
+    title_txt = f"Day {day} Stacked (Smoothed {smooth_window_s}s) - {plot_roi}"
+    if timeline_anchor_label:
+        title_txt += f" [{timeline_anchor_label}]"
     draw.text(
         (canvas_w // 2, max(10, top_pad // 2)),
-        f"Day {day} Stacked (Smoothed {smooth_window_s}s) - {plot_roi}",
+        title_txt,
         fill='black',
         anchor='ma',
         font=title_font
@@ -842,8 +896,20 @@ def main():
     else:
         feat_map = {}
         
-    pds = compute_day_layout(chunk_entries, feat_map, plot_roi, args.sessions_per_hour)
+    pds = compute_day_layout(
+        chunk_entries,
+        feat_map,
+        plot_roi,
+        args.sessions_per_hour,
+        timeline_anchor_mode=args.timeline_anchor_mode,
+        fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
+    )
     sph = pds.sessions_per_hour
+    timeline_anchor_label = _timeline_anchor_label(
+        pds.timeline_anchor_mode,
+        pds.fixed_daily_anchor_clock,
+    )
+    print(f"Timeline anchor: {timeline_anchor_label}", flush=True)
     
     # 4. Identify signals to pull from cache
     # Explicitly enforce mode-minimal field loading contract
@@ -1036,7 +1102,10 @@ def main():
                 if not slot_map:
                     continue
 
-                fig_dff.suptitle(f"Phasic QC - Day {d} - ROI {plot_roi} - Mode: DFF", fontsize=16)
+                fig_dff.suptitle(
+                    f"Phasic QC - Day {d} - ROI {plot_roi} - Mode: DFF [{timeline_anchor_label}]",
+                    fontsize=16,
+                )
 
                 for h in range(24):
                     for c in range(sph):
@@ -1105,6 +1174,7 @@ def main():
                     layout=dff_qc_layout,
                     global_ymin=global_ymin,
                     global_ymax=global_ymax,
+                    timeline_anchor_label=timeline_anchor_label,
                 )
                 compose_sec = time.perf_counter() - compose_t0
                 out_path = os.path.join(args.output_dir, f"phasic_dFF_day_{d:03d}.png")
@@ -1143,7 +1213,10 @@ def main():
                     continue
                 panel_y_ranges = _sig_iso_panel_ranges_with_day_min_span(slot_map)
 
-                fig_sig.suptitle(f"Day {d} Raw/Iso - {plot_roi}", fontsize=16)
+                fig_sig.suptitle(
+                    f"Day {d} Raw/Iso - {plot_roi} [{timeline_anchor_label}]",
+                    fontsize=16,
+                )
 
                 for h in range(24):
                     for c in range(sph):
@@ -1194,6 +1267,7 @@ def main():
                     slot_map=slot_map,
                     layout=qc_layout,
                     panel_y_ranges=panel_y_ranges,
+                    timeline_anchor_label=timeline_anchor_label,
                 )
                 out_path = os.path.join(args.output_dir, f"phasic_sig_iso_day_{d:03d}.png")
                 print(
@@ -1247,7 +1321,10 @@ def main():
                 ax.set_yticks([])
                 ax.set_xlabel("Time (s)")
                 ax.set_ylabel(f"Sessions ({len(traces)})")
-                ax.set_title(f"Day {d} Stacked (Smoothed {args.smooth_window_s}s) - {plot_roi}")
+                ax.set_title(
+                    f"Day {d} Stacked (Smoothed {args.smooth_window_s}s) - "
+                    f"{plot_roi} [{timeline_anchor_label}]"
+                )
 
                 plt.tight_layout()
                 out_path = os.path.join(args.output_dir, f"phasic_stacked_day_{d:03d}.png")
@@ -1270,6 +1347,7 @@ def main():
                     traces=traces,
                     smooth_window_s=args.smooth_window_s,
                     dpi=args.dpi,
+                    timeline_anchor_label=timeline_anchor_label,
                 )
                 canvas.save(out_path, compress_level=1)
                 print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=figure_save family=stacked_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)

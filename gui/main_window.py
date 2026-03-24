@@ -57,6 +57,7 @@ from typing import get_args
 
 
 _SETTINGS_GROUP = "run_config"
+_ANCHOR_CLOCK_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
 
 
 def _generate_run_id():
@@ -3073,6 +3074,32 @@ class MainWindow(QMainWindow):
         if value != default:
             out.append(field_name)
 
+    def _timeline_anchor_mode_value(self) -> str:
+        """Return normalized timeline anchor mode from plotting controls."""
+        combo = getattr(self, "_timeline_anchor_mode_combo", None)
+        if combo is None:
+            return "civil"
+        data = combo.currentData()
+        if isinstance(data, str) and data.strip():
+            return data.strip()
+        text = combo.currentText().strip().lower()
+        if text.startswith("elapsed"):
+            return "elapsed"
+        if text.startswith("fixed"):
+            return "fixed_daily_anchor"
+        return "civil"
+
+    def _timeline_anchor_summary(self) -> str:
+        """Human-readable timeline anchor summary for UI text."""
+        mode = self._timeline_anchor_mode_value()
+        if mode == "elapsed":
+            return "Elapsed from first session"
+        if mode == "fixed_daily_anchor":
+            clock_edit = getattr(self, "_fixed_daily_anchor_time_edit", None)
+            clock = clock_edit.text().strip() if clock_edit is not None else ""
+            return f"Fixed daily anchor ({clock or 'unset'})"
+        return "Civil clock"
+
     def _is_custom_config_enabled(self) -> bool:
         """True when user explicitly opted into custom baseline YAML."""
         return bool(self._use_custom_config_cb.isChecked())
@@ -3879,6 +3906,18 @@ class MainWindow(QMainWindow):
         dur_val = float(dur_text) if dur_text else None
         self._track_if_nonempty("session_duration_s", dur_text, user_set)
 
+        timeline_anchor_mode_val = self._timeline_anchor_mode_value()
+        self._track_if_changed("timeline_anchor_mode", timeline_anchor_mode_val, "civil", user_set)
+        fixed_daily_anchor_clock_val = None
+        fixed_anchor_edit = getattr(self, "_fixed_daily_anchor_time_edit", None)
+        if timeline_anchor_mode_val == "fixed_daily_anchor" and fixed_anchor_edit is not None:
+            fixed_daily_anchor_clock_val = fixed_anchor_edit.text().strip() or None
+            self._track_if_nonempty(
+                "fixed_daily_anchor_clock",
+                fixed_daily_anchor_clock_val or "",
+                user_set,
+            )
+
         smooth = self._smooth_spin.value()
         self._track_if_changed("smooth_window_s", smooth, 1.0, user_set)
 
@@ -4030,6 +4069,8 @@ class MainWindow(QMainWindow):
             validate_only=validate_only,
             sessions_per_hour=sph_val,
             session_duration_s=dur_val,
+            timeline_anchor_mode=timeline_anchor_mode_val,
+            fixed_daily_anchor_clock=fixed_daily_anchor_clock_val,
             smooth_window_s=smooth,
             sig_iso_render_mode=sig_iso_render_mode_val,
             dff_render_mode=dff_render_mode_val,
@@ -4139,6 +4180,20 @@ class MainWindow(QMainWindow):
                     return "Session Duration must be > 0."
             except ValueError:
                 return f"Session Duration must be a number, got: '{dur}'"
+
+        anchor_mode = self._timeline_anchor_mode_value()
+        if anchor_mode == "fixed_daily_anchor":
+            clock = self._fixed_daily_anchor_time_edit.text().strip()
+            if not clock:
+                return (
+                    "Fixed Daily Anchor Time is required when timeline anchor mode is "
+                    "Fixed daily anchor."
+                )
+            if not _ANCHOR_CLOCK_RE.fullmatch(clock):
+                return (
+                    "Fixed Daily Anchor Time must be HH:MM or HH:MM:SS "
+                    f"(got '{clock}')."
+                )
 
         # ROI selection: include-only semantics (checked == included)
         if self._discovery_cache is not None:
@@ -5044,6 +5099,16 @@ class MainWindow(QMainWindow):
             self._plotting_mode_combo.setCurrentText(plotting_mode)
         self._on_plotting_mode_changed()
 
+        anchor_mode = self._settings.value("timeline_anchor_mode", "civil", str).strip()
+        idx_anchor = self._timeline_anchor_mode_combo.findData(anchor_mode)
+        if idx_anchor < 0:
+            idx_anchor = self._timeline_anchor_mode_combo.findData("civil")
+        if idx_anchor >= 0:
+            self._timeline_anchor_mode_combo.setCurrentIndex(idx_anchor)
+        anchor_clock = self._settings.value("fixed_daily_anchor_clock", "07:00", str).strip()
+        self._fixed_daily_anchor_time_edit.setText(anchor_clock or "07:00")
+        self._on_timeline_anchor_mode_changed()
+
         sig_iso_render_mode = self._settings.value("sig_iso_render_mode", "qc", str)
         if self._sig_iso_render_mode_combo.findText(sig_iso_render_mode) >= 0:
             self._sig_iso_render_mode_combo.setCurrentText(sig_iso_render_mode)
@@ -5081,6 +5146,8 @@ class MainWindow(QMainWindow):
         self._settings.setValue("session_duration_s", self._duration_edit.text().strip())
         self._settings.setValue("smooth_window_s", self._smooth_spin.value())
         self._settings.setValue("plotting_mode", self._plotting_mode_combo.currentText())
+        self._settings.setValue("timeline_anchor_mode", self._timeline_anchor_mode_value())
+        self._settings.setValue("fixed_daily_anchor_clock", self._fixed_daily_anchor_time_edit.text().strip())
         self._settings.setValue("sig_iso_render_mode", self._sig_iso_render_mode_combo.currentText())
         self._settings.setValue("dff_render_mode", self._dff_render_mode_combo.currentText())
         self._settings.setValue("stacked_render_mode", self._stacked_render_mode_combo.currentText())
@@ -5213,6 +5280,7 @@ class MainWindow(QMainWindow):
             f"Baseline Config Source: {self._active_config_source_summary()}",
             f"Preview: {preview_text}",
             f"Plotting Mode: {render_text}",
+            f"Timeline Anchor: {self._timeline_anchor_summary()}",
             f"ROI Filter: {roi_text}",
             f"Representative Session: {rep_text}",
             f"Output Destination: {out_text}",
@@ -5226,6 +5294,8 @@ class MainWindow(QMainWindow):
 
         # Phasic-only controls: render family selectors + event/features group.
         self._plotting_mode_combo.setEnabled(phasic_active)
+        if hasattr(self, "_timeline_anchor_mode_combo"):
+            self._timeline_anchor_mode_combo.setEnabled(phasic_active)
         for combo in (
             self._sig_iso_render_mode_combo,
             self._dff_render_mode_combo,
@@ -5233,6 +5303,8 @@ class MainWindow(QMainWindow):
         ):
             combo.setEnabled(phasic_active)
         self._adv_ev_group.setEnabled(phasic_active)
+        if hasattr(self, "_fixed_daily_anchor_time_edit"):
+            self._on_timeline_anchor_mode_changed()
         if phasic_active:
             self._mode_context_label.setText("Phasic controls are active for this mode.")
             self._mode_context_label.setStyleSheet("font-size: 11px; color: #666;")
@@ -5686,13 +5758,49 @@ class MainWindow(QMainWindow):
         )
         self._smooth_spin.valueChanged.connect(self._on_config_changed)
         layout.addRow("Smooth Window (s):", self._smooth_spin)
+
+        self._timeline_anchor_mode_combo = QComboBox()
+        self._timeline_anchor_mode_combo.addItem("Civil clock", "civil")
+        self._timeline_anchor_mode_combo.addItem("Elapsed from first session", "elapsed")
+        self._timeline_anchor_mode_combo.addItem("Fixed daily anchor", "fixed_daily_anchor")
+        self._timeline_anchor_mode_combo.setCurrentIndex(0)
+        self._timeline_anchor_mode_combo.setToolTip(
+            "Global phasic timeline anchor used for day/hour placement."
+        )
+        self._timeline_anchor_mode_combo.currentIndexChanged.connect(self._on_timeline_anchor_mode_changed)
+        self._timeline_anchor_mode_combo.currentIndexChanged.connect(self._on_config_changed)
+        layout.addRow("Timeline Anchor:", self._timeline_anchor_mode_combo)
+
+        self._fixed_daily_anchor_time_edit = QLineEdit("07:00")
+        self._fixed_daily_anchor_time_edit.setMaximumWidth(200)
+        self._fixed_daily_anchor_time_edit.setPlaceholderText("HH:MM or HH:MM:SS")
+        self._fixed_daily_anchor_time_edit.setToolTip(
+            "Clock anchor used when Timeline Anchor is Fixed daily anchor."
+        )
+        self._fixed_daily_anchor_time_edit.textChanged.connect(self._on_config_changed)
+        layout.addRow("Fixed Anchor Time:", self._fixed_daily_anchor_time_edit)
         self._apply_form_row_tooltips(layout)
+        self._on_timeline_anchor_mode_changed()
 
         self._mode_context_label = QLabel("")
         self._mode_context_label.setWordWrap(True)
         self._mode_context_label.setStyleSheet("font-size: 11px; color: #666;")
         layout.addRow("", self._mode_context_label)
         return group
+
+    def _on_timeline_anchor_mode_changed(self) -> None:
+        """Toggle fixed-anchor time input visibility/enabled state."""
+        if not hasattr(self, "_fixed_daily_anchor_time_edit"):
+            return
+        fixed_mode = self._timeline_anchor_mode_value() == "fixed_daily_anchor"
+        phasic_active = is_isosbestic_active(self._mode_combo.currentText())
+        plotting_layout = self._plotting_group.layout() if hasattr(self, "_plotting_group") else None
+        if isinstance(plotting_layout, QFormLayout):
+            fixed_label = plotting_layout.labelForField(self._fixed_daily_anchor_time_edit)
+            if fixed_label is not None:
+                fixed_label.setVisible(fixed_mode)
+        self._fixed_daily_anchor_time_edit.setVisible(fixed_mode)
+        self._fixed_daily_anchor_time_edit.setEnabled(bool(fixed_mode and phasic_active))
 
     def _on_plotting_mode_changed(self) -> None:
         """Map single plotting mode control to legacy per-family render settings."""

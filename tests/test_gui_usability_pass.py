@@ -75,15 +75,21 @@ def test_effective_run_summary_updates(window):
     assert "Analysis: Full analysis" in text0
     assert "Preview: off" in text0
     assert "Plotting Mode: Standard" in text0
+    assert "Timeline Anchor: Civil clock" in text0
 
     window._traces_only_cb.setChecked(True)
     window._preview_enabled_cb.setChecked(True)
     window._preview_n_spin.setValue(7)
     window._plotting_mode_combo.setCurrentText("Full")
+    window._timeline_anchor_mode_combo.setCurrentIndex(
+        window._timeline_anchor_mode_combo.findData("fixed_daily_anchor")
+    )
+    window._fixed_daily_anchor_time_edit.setText("07:00")
     text1 = window._effective_summary_label.text()
     assert "Analysis: Traces-only" in text1
     assert "Preview: first N = 7" in text1
     assert "Plotting Mode: Full" in text1
+    assert "Timeline Anchor: Fixed daily anchor (07:00)" in text1
 
     discovered = {
         "n_total_discovered": 3,
@@ -157,6 +163,8 @@ def test_advanced_tooltips_present(window):
         ("Mode:", window._mode_combo),
         ("Plotting Mode:", window._plotting_mode_combo),
         ("Smooth Window (s):", window._smooth_spin),
+        ("Timeline Anchor:", window._timeline_anchor_mode_combo),
+        ("Fixed Anchor Time:", window._fixed_daily_anchor_time_edit),
     ]
     for label_text, control in run_plot_pairs:
         label = _label(label_text)
@@ -201,6 +209,44 @@ def test_advanced_tooltips_present(window):
     assert window._roi_list.toolTip().strip()
     assert window._roi_checked_label.toolTip().strip()
     assert window._config_browse_btn.toolTip().strip()
+
+
+def test_gui_timeline_anchor_controls_propagate_to_run_spec(window):
+    _set_minimally_valid_paths(window)
+
+    # Default is explicit civil anchor.
+    spec_default = window._build_run_spec(validate_only=True)
+    assert spec_default.timeline_anchor_mode == "civil"
+    assert spec_default.fixed_daily_anchor_clock is None
+    argv_default = spec_default.build_runner_argv()
+    assert "--timeline-anchor-mode" not in argv_default
+    assert "--fixed-daily-anchor-clock" not in argv_default
+
+    # Fixed daily anchor: carry mode + clock through run spec/argv.
+    window._timeline_anchor_mode_combo.setCurrentIndex(
+        window._timeline_anchor_mode_combo.findData("fixed_daily_anchor")
+    )
+    window._fixed_daily_anchor_time_edit.setText("07:00")
+    spec_fixed = window._build_run_spec(validate_only=True)
+    assert spec_fixed.timeline_anchor_mode == "fixed_daily_anchor"
+    assert spec_fixed.fixed_daily_anchor_clock == "07:00"
+    argv_fixed = spec_fixed.build_runner_argv()
+    assert "--timeline-anchor-mode" in argv_fixed
+    assert argv_fixed[argv_fixed.index("--timeline-anchor-mode") + 1] == "fixed_daily_anchor"
+    assert "--fixed-daily-anchor-clock" in argv_fixed
+    assert argv_fixed[argv_fixed.index("--fixed-daily-anchor-clock") + 1] == "07:00"
+
+    # Elapsed anchor: mode flag only.
+    window._timeline_anchor_mode_combo.setCurrentIndex(
+        window._timeline_anchor_mode_combo.findData("elapsed")
+    )
+    spec_elapsed = window._build_run_spec(validate_only=True)
+    assert spec_elapsed.timeline_anchor_mode == "elapsed"
+    assert spec_elapsed.fixed_daily_anchor_clock is None
+    argv_elapsed = spec_elapsed.build_runner_argv()
+    assert "--timeline-anchor-mode" in argv_elapsed
+    assert argv_elapsed[argv_elapsed.index("--timeline-anchor-mode") + 1] == "elapsed"
+    assert "--fixed-daily-anchor-clock" not in argv_elapsed
 
 
 def test_window_title_progress_bar_and_progress_cap(window, tmp_path):

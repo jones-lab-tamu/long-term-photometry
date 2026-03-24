@@ -7,6 +7,7 @@ import sys
 import glob
 import csv
 
+import numpy as np
 import pandas as pd
 
 from photometry_pipeline.config import Config
@@ -40,6 +41,40 @@ def _synthetic_style_lines(offset: float = 0.0) -> list[str]:
         f"1.0,{122.0 + offset},{102.0 + offset},{222.0 + offset},{202.0 + offset}",
         f"1.5,{123.0 + offset},{103.0 + offset},{223.0 + offset},{203.0 + offset}",
     ]
+
+
+def _vendor_style_ms_lines(
+    *,
+    n_samples: int = 12003,
+    dt_ms: float = 50.0,
+    fps: float = 40.0,
+    led410: bool = True,
+    led470: bool = True,
+    led560: bool = False,
+) -> list[str]:
+    metadata = (
+        '"{""Light"":{'
+        f'""Led410Enable"":{str(led410).lower()},'
+        f'""Led470Enable"":{str(led470).lower()},'
+        f'""Led560Enable"":{str(led560).lower()}'
+        '},'
+        f'""Fps"":{fps:.1f}'
+        '}",,,,,'
+    )
+    rows = [
+        metadata,
+        "TimeStamp,Events,CH1-410,CH1-470,CH2-410,CH2-470",
+    ]
+    for i in range(n_samples):
+        t_ms = i * dt_ms
+        ch1_uv = 100.0 + (0.01 * i)
+        ch1_sig = 120.0 + (0.01 * i)
+        ch2_uv = 200.0 + (0.01 * i)
+        ch2_sig = 220.0 + (0.01 * i)
+        rows.append(
+            f"{t_ms:.3f},,{ch1_uv:.6f},{ch1_sig:.6f},{ch2_uv:.6f},{ch2_sig:.6f}"
+        )
+    return rows
 
 
 def _default_test_config() -> Config:
@@ -118,6 +153,113 @@ class TestRwdVendorCompat(unittest.TestCase):
         discovery_payload = discover_inputs(root, cfg, force_format="auto")
         self.assertEqual(discovery_payload["resolved_format"], "RWD")
         self.assertEqual([r["roi_id"] for r in discovery_payload["rois"]], ["CH1", "CH2"])
+
+    def test_vendor_style_rwd_millisecond_timestamps_are_normalized_for_loader(self):
+        root = os.path.join(self.tmp_dir, "vendor_ms_root")
+        chunk_path = os.path.join(root, "2025_01_01-00_00_00", "fluorescence.csv")
+        n_samples = 12003
+        _write_csv(
+            chunk_path,
+            _vendor_style_ms_lines(
+                n_samples=n_samples,
+                dt_ms=50.0,
+                fps=40.0,
+                led410=True,
+                led470=True,
+                led560=False,
+            ),
+        )
+
+        cfg = Config(
+            target_fs_hz=20.0,
+            chunk_duration_sec=n_samples / 20.0,
+            allow_partial_final_chunk=False,
+            rwd_time_col="Time(s)",
+            uv_suffix="-415",
+            sig_suffix="-470",
+        )
+
+        chunk = load_chunk(chunk_path, "rwd", cfg, chunk_id=0)
+        self.assertEqual(len(chunk.time_sec), n_samples)
+        self.assertEqual(chunk.sig_raw.shape[0], n_samples)
+        self.assertEqual(chunk.uv_raw.shape[0], n_samples)
+        self.assertAlmostEqual(float(np.median(np.diff(chunk.time_sec))), 0.05, places=6)
+        self.assertAlmostEqual(float(chunk.fs_hz), 20.0, places=6)
+        self.assertEqual(chunk.metadata.get("rwd_timestamp_unit"), "milliseconds")
+        # Old bad behavior (treating ms as seconds) would flatten near the start.
+        # Correct behavior preserves the full 600s trend.
+        expected_end = 120.0 + (0.01 * (n_samples - 1))
+        self.assertAlmostEqual(float(chunk.sig_raw[-1, 0]), expected_end, places=3)
+        self.assertGreater(float(chunk.sig_raw[1000, 0]), 129.0)
+
+    def test_vendor_style_rwd_pipeline_cache_receives_dense_canonical_timebase(self):
+        root = os.path.join(self.tmp_dir, "vendor_ms_pipeline_root")
+        chunk_path = os.path.join(root, "2025_01_01-00_00_00", "fluorescence.csv")
+        n_samples = 1201
+        _write_csv(
+            chunk_path,
+            _vendor_style_ms_lines(
+                n_samples=n_samples,
+                dt_ms=50.0,
+                fps=40.0,
+                led410=True,
+                led470=True,
+                led560=False,
+            ),
+        )
+
+        cfg = Config(
+            target_fs_hz=20.0,
+            chunk_duration_sec=n_samples / 20.0,
+            allow_partial_final_chunk=False,
+            rwd_time_col="Time(s)",
+            uv_suffix="-415",
+            sig_suffix="-470",
+        )
+
+        out_dir = os.path.join(self.tmp_dir, "vendor_ms_pipeline_out")
+        pipe = Pipeline(cfg)
+        pipe.run(root, out_dir, force_format="rwd", recursive=False)
+
+        import h5py
+
+        cache_path = os.path.join(out_dir, "phasic_trace_cache.h5")
+        self.assertTrue(os.path.isfile(cache_path))
+        with h5py.File(cache_path, "r") as cache:
+            t = cache["roi/CH1/chunk_0/time_sec"][()]
+            sig = cache["roi/CH1/chunk_0/sig_raw"][()]
+            self.assertEqual(len(t), n_samples)
+            self.assertEqual(len(sig), n_samples)
+            self.assertAlmostEqual(float(np.median(np.diff(t))), 0.05, places=6)
+            self.assertAlmostEqual(float(t[-1]), (n_samples - 1) / 20.0, places=6)
+            self.assertGreater(float(sig[1000]), 129.0)
+
+    def test_vendor_style_rwd_millisecond_metadata_mismatch_fails_strictly(self):
+        root = os.path.join(self.tmp_dir, "vendor_ms_bad_meta_root")
+        chunk_path = os.path.join(root, "2025_01_01-00_00_00", "fluorescence.csv")
+        _write_csv(
+            chunk_path,
+            _vendor_style_ms_lines(
+                n_samples=12003,
+                dt_ms=50.0,
+                fps=55.0,
+                led410=True,
+                led470=True,
+                led560=False,
+            ),
+        )
+
+        cfg = Config(
+            target_fs_hz=20.0,
+            chunk_duration_sec=12003 / 20.0,
+            allow_partial_final_chunk=False,
+            rwd_time_col="Time(s)",
+            uv_suffix="-415",
+            sig_suffix="-470",
+        )
+
+        with self.assertRaisesRegex(ValueError, "incompatible with metadata FPS"):
+            load_chunk(chunk_path, "rwd", cfg, chunk_id=0)
 
     def test_simplified_synthetic_rwd_is_supported(self):
         root = os.path.join(self.tmp_dir, "simple_root")

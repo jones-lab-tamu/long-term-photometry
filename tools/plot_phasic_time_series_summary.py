@@ -6,7 +6,6 @@ import glob
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-from datetime import datetime
 
 # Self-contained repo root bootstrap
 from pathlib import Path
@@ -18,15 +17,51 @@ try:
     from photometry_pipeline.io.hdf5_cache_reader import (
         open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields, list_cache_chunk_ids
     )
+    from photometry_pipeline.viz.phasic_data_prep import compute_day_layout
 except ImportError:
     print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.")
     sys.exit(1)
+
+
+def _timeline_anchor_label(anchor_mode: str, fixed_daily_anchor_clock: str | None) -> str:
+    mode = str(anchor_mode or "civil").strip().lower()
+    if mode == "elapsed":
+        return "elapsed-from-first-session"
+    if mode == "fixed_daily_anchor":
+        clock = str(fixed_daily_anchor_clock or "").strip() or "unset"
+        if clock.count(":") == 1:
+            clock = f"{clock}:00"
+        return f"fixed-daily-anchor@{clock}"
+    return "civil-clock"
+
+
+def _summary_x_axis_label(anchor_mode: str, fixed_daily_anchor_clock: str | None) -> str:
+    mode = str(anchor_mode or "civil").strip().lower()
+    if mode == "elapsed":
+        return "Elapsed time (hours from first session)"
+    if mode == "fixed_daily_anchor":
+        clock = str(fixed_daily_anchor_clock or "").strip() or "unset"
+        if clock.count(":") == 1:
+            clock = f"{clock}:00"
+        return f"Anchored time (hours from daily anchor {clock})"
+    return "Civil-clock time (hours from day-0 midnight)"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Plot phasic event frequency and AUC over time.")
     parser.add_argument('--analysis-out', required=True, help="Path to analysis output directory (containing features/features.csv)")
     parser.add_argument('--roi', help="ROI to plot. Defaults to first ROI alphabetically.")
     parser.add_argument('--sessions-per-hour', type=int, default=2, help="Expected sessions per hour for fallback timing.")
+    parser.add_argument(
+        '--timeline-anchor-mode',
+        choices=['civil', 'elapsed', 'fixed_daily_anchor'],
+        default='civil',
+        help="Global timeline anchor for day/hour/session placement."
+    )
+    parser.add_argument(
+        '--fixed-daily-anchor-clock',
+        default=None,
+        help="Anchor clock for fixed_daily_anchor mode (HH:MM or HH:MM:SS)."
+    )
     parser.add_argument('--session-duration-s', type=float, default=None, help="Explicit session duration (window seconds).")
     parser.add_argument('--out-rate-png', help="Output path for peak rate timeseries PNG")
     parser.add_argument('--out-auc-png', help="Output path for AUC timeseries PNG")
@@ -92,36 +127,47 @@ def main():
         if roi_df.empty:
             raise RuntimeError(f"No data found for ROI: {selected_roi}")
             
-        # 6. Determine File Order and Time Axis
-        # Priority 1: Datetime parsing
-        def parse_dt_str(val):
-            # Attempt to parse basename if it matches strictly %Y_%m_%d-%H_%M_%S
-            if pd.isna(val): return None
-            s_val = str(val)
-            try:
-                base = os.path.basename(s_val)
-                root, _ = os.path.splitext(base)
-                return datetime.strptime(root, "%Y_%m_%d-%H_%M_%S")
-            except:
-                return None
+        # 6. Determine canonical session timeline (authoritative for phasic/dayplot).
+        roi_df['chunk_id'] = roi_df['chunk_id'].astype(int)
+        chunk_rows = (
+            roi_df[['chunk_id', 'source_file']]
+            .drop_duplicates(subset=['chunk_id'], keep='first')
+            .sort_values('chunk_id')
+        )
+        chunk_entries = []
+        for row in chunk_rows.itertuples(index=False):
+            source_val = row.source_file
+            if isinstance(source_val, str) and source_val.strip():
+                source = source_val
+            else:
+                source = f"chunk_{int(row.chunk_id)}.csv"
+            chunk_entries.append((int(row.chunk_id), source))
 
-        # Two-stage parsing:
-        # 1. Try strict format on basename (fast, matches pipeline output)
-        dt_series_1 = roi_df['source_file'].apply(parse_dt_str)
-        
-        # Make the fallback explicit without emitting the generic inference warning.
-        if dt_series_1.isna().all():
-            dt_final = pd.Series(pd.NaT, index=roi_df.index)
-        else:
-            dt_final = pd.to_datetime(dt_series_1, errors='coerce')
-            
-        roi_df['dt'] = dt_final
-        
-        valid_count = roi_df['dt'].notna().sum()
-        total_count = len(roi_df)
-        parse_rate = valid_count / total_count if total_count > 0 else 0
-        
-        use_datetime = (parse_rate >= 0.90)
+        timeline = compute_day_layout(
+            chunk_entries=chunk_entries,
+            feature_map=None,
+            roi=selected_roi,
+            sessions_per_hour=args.sessions_per_hour,
+            timeline_anchor_mode=args.timeline_anchor_mode,
+            fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
+        )
+        timeline_by_cid = {int(c.chunk_id): c for c in timeline.chunks}
+        anchor_label = _timeline_anchor_label(
+            timeline.timeline_anchor_mode,
+            timeline.fixed_daily_anchor_clock,
+        )
+        x_axis_label = _summary_x_axis_label(
+            timeline.timeline_anchor_mode,
+            timeline.fixed_daily_anchor_clock,
+        )
+        missing_ids = sorted(set(roi_df['chunk_id']) - set(timeline_by_cid.keys()))
+        if missing_ids:
+            raise RuntimeError(
+                "Canonical timeline mapping missing chunk IDs: "
+                f"{missing_ids[:10]}"
+            )
+
+        use_datetime = sum(1 for c in timeline.chunks if c.datetime_inferred is not None) / max(1, len(timeline.chunks)) >= 0.90
         
         # Verify consistency if session_duration_s is provided
         if args.session_duration_s is not None:
@@ -160,36 +206,35 @@ def main():
             # If not provided, we warn.
             session_duration_s = 3600.0 / float(args.sessions_per_hour)
             print(f"Warning: --session-duration-s not provided. inferred {session_duration_s}s from rate.")
-        
-        if use_datetime:
-            roi_df = roi_df.sort_values('dt')
-            dt0 = roi_df['dt'].min()
-            if pd.isna(dt0):
-                 raise RuntimeError("Datetime mode selected but no valid datetimes found.")
-            roi_df['elapsed_hours'] = (roi_df['dt'] - dt0).dt.total_seconds() / 3600.0
-            
-            # Compute Grid coords from dt
-            elapsed_s = (roi_df['dt'] - dt0.replace(hour=0, minute=0, second=0, microsecond=0)).dt.total_seconds()
-            roi_df['day'] = (elapsed_s // 86400).astype(int)
-            roi_df['hour'] = ((elapsed_s % 86400) // 3600).astype(int)
-            # Use rank within hour for session_in_hour
-            roi_df['session_in_hour'] = roi_df.groupby(['day', 'hour']).cumcount()
-            
-            time_mode = "Datetime-derived"
+
+        roi_df['elapsed_hours'] = roi_df['chunk_id'].map(
+            lambda cid: float(timeline_by_cid[int(cid)].elapsed_from_start_sec) / 3600.0
+        )
+        if timeline.timeline_anchor_mode == "elapsed":
+            roi_df['time_hours'] = roi_df['elapsed_hours']
         else:
-            roi_df = roi_df.sort_values('chunk_id')
-            # Elapsed hours still fundamentally relies on STRIDE (rate), not duration.
-            # 1 chunk = 1 interval = 1/rate hours.
-            roi_df['elapsed_hours'] = roi_df['chunk_id'] / float(args.sessions_per_hour)
-            
-            roi_df['session_idx'] = np.arange(len(roi_df))
-            roi_df['day'] = (roi_df['session_idx'] // (24 * args.sessions_per_hour)).astype(int)
-            roi_df['hour'] = ((roi_df['session_idx'] // args.sessions_per_hour) % 24).astype(int)
-            roi_df['session_in_hour'] = (roi_df['session_idx'] % args.sessions_per_hour).astype(int)
-            
-            time_mode = f"Chunk ID fallback (rate={args.sessions_per_hour}/hr)"
+            roi_df['time_hours'] = roi_df['chunk_id'].map(
+                lambda cid: (
+                    float(timeline_by_cid[int(cid)].day_idx) * 24.0
+                    + float(timeline_by_cid[int(cid)].hour_idx)
+                    + float(timeline_by_cid[int(cid)].within_hour_offset_sec) / 3600.0
+                )
+            )
+        roi_df['day'] = roi_df['chunk_id'].map(lambda cid: int(timeline_by_cid[int(cid)].day_idx))
+        roi_df['hour'] = roi_df['chunk_id'].map(lambda cid: int(timeline_by_cid[int(cid)].hour_idx))
+        roi_df['session_in_hour'] = roi_df['chunk_id'].map(
+            lambda cid: int(timeline_by_cid[int(cid)].hour_rank)
+        )
+        roi_df = roi_df.sort_values(['time_hours', 'chunk_id'])
+
+        if use_datetime:
+            time_mode = "Datetime-derived session timeline"
+        else:
+            time_mode = f"Chunk ID fallback timeline (rate={args.sessions_per_hour}/hr)"
 
         print(f"Time axis mode: {time_mode}")
+        print(f"Timeline anchor: {anchor_label}")
+        print(f"Summary x-axis: {x_axis_label}")
         print(f"Number of sessions: {len(roi_df)}")
 
         # 7. Compute Metrics
@@ -197,7 +242,7 @@ def main():
         roi_df['peak_rate_per_min'] = roi_df['peak_count'] / (session_duration_s / 60.0)
         
         # 8. Plot 1: Event Frequency
-        x = roi_df['elapsed_hours'].astype(float)
+        x = roi_df['time_hours'].astype(float)
         y_rate = roi_df['peak_rate_per_min'].astype(float)
         
         if y_rate.isna().all():
@@ -205,9 +250,11 @@ def main():
 
         fig1, ax1 = plt.subplots(figsize=(10, 6), dpi=args.dpi)
         ax1.plot(x, y_rate, marker='o', linestyle='-', label=f'Peak Rate (ROI: {selected_roi})')
-        ax1.set_xlabel("Elapsed time (hours)")
+        ax1.set_xlabel(x_axis_label)
         ax1.set_ylabel("Peaks per minute")
-        ax1.set_title(f"Phasic event frequency over time (ROI {selected_roi})")
+        ax1.set_title(
+            f"Phasic event frequency over time (ROI {selected_roi}) [{anchor_label}]"
+        )
         ax1.grid(True, alpha=0.3)
         
         out_path1 = args.out_rate_png if args.out_rate_png else os.path.join(out_dir, "fig_phasic_peak_rate_timeseries.png")
@@ -230,9 +277,11 @@ def main():
         else:
              ax2.plot(x, y_auc, marker='o', linestyle='-', label=f'AUC (ROI: {selected_roi})')
 
-        ax2.set_xlabel("Elapsed time (hours)")
+        ax2.set_xlabel(x_axis_label)
         ax2.set_ylabel("AUC above threshold (dFF·s)")
-        ax2.set_title(f"Phasic AUC over time (ROI {selected_roi})")
+        ax2.set_title(
+            f"Phasic AUC over time (ROI {selected_roi}) [{anchor_label}]"
+        )
         ax2.grid(True, alpha=0.3)
         
         out_path2 = args.out_auc_png if args.out_auc_png else os.path.join(out_dir, "fig_phasic_auc_timeseries.png")
@@ -254,6 +303,10 @@ def main():
             csv_df['hour'] = roi_df['hour']
             csv_df['session_in_hour'] = roi_df['session_in_hour']
             csv_df['window_seconds'] = session_duration_s
+            csv_df['time_axis_semantics'] = x_axis_label
+            csv_df['timeline_anchor_mode'] = timeline.timeline_anchor_mode
+            csv_df['timeline_anchor_label'] = anchor_label
+            csv_df['fixed_daily_anchor_clock'] = timeline.fixed_daily_anchor_clock
             
             # Peak Rate CSV
             df_peak = csv_df.copy()

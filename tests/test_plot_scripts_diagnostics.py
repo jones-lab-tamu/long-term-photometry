@@ -3,6 +3,8 @@ import subprocess
 import tempfile
 import pandas as pd
 import numpy as np
+from datetime import datetime, timedelta
+import pytest
 
 def test_plot_phasic_time_series_summary_no_datetime_warning(tmp_path):
     """
@@ -177,3 +179,268 @@ def test_plot_phasic_dayplot_bundle_timing_output(tmp_path):
     assert "step=plotting" in out
     assert "step=figure_save" in out
     assert "PLOT_TIMING DONE script=plot_phasic_dayplot_bundle.py total_sec=" in out
+
+
+def test_plot_phasic_time_series_summary_prefers_datetime_from_full_source_path(tmp_path):
+    """
+    Real RWD features often store source_file ending in fluorescence.csv, with the
+    timestamp carried by the parent folder. Ensure datetime-mode is still used.
+    """
+    analysis_out = tmp_path / "analysis_out"
+    feat_dir = analysis_out / "features"
+    feat_dir.mkdir(parents=True)
+
+    rows = []
+    t0 = datetime(2026, 3, 10, 0, 0, 0)
+    for cid in range(96):
+        dt = t0 + timedelta(minutes=30 * cid)
+        rows.append(
+            {
+                "chunk_id": cid,
+                "roi": "ROI1",
+                "peak_count": 3,
+                "auc": 1.25,
+                "source_file": f"C:/vendor_rwd/{dt.strftime('%Y_%m_%d-%H_%M_%S')}/fluorescence.csv",
+            }
+        )
+    pd.DataFrame(rows).to_csv(feat_dir / "features.csv", index=False)
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_rate_csv = out_dir / "rate.csv"
+    out_auc_csv = out_dir / "auc.csv"
+    out_rate_png = out_dir / "rate.png"
+    out_auc_png = out_dir / "auc.png"
+
+    script_path = os.path.join(os.path.dirname(__file__), "..", "tools", "plot_phasic_time_series_summary.py")
+    cmd = [
+        "python",
+        os.path.abspath(script_path),
+        "--analysis-out",
+        str(analysis_out),
+        "--sessions-per-hour",
+        "5",
+        "--out-rate-png",
+        str(out_rate_png),
+        "--out-auc-png",
+        str(out_auc_png),
+        "--out-rate-csv",
+        str(out_rate_csv),
+        "--out-auc-csv",
+        str(out_auc_csv),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, f"Script failed: {result.stderr}\n\n{result.stdout}"
+    assert "Datetime-derived session timeline" in result.stdout
+    assert "Timeline anchor: civil-clock" in result.stdout
+
+    df_rate = pd.read_csv(out_rate_csv)
+    assert float(df_rate["time_hours"].max()) > 47.0
+    assert float(df_rate["time_hours"].max()) == pytest.approx(47.5, rel=0.0, abs=1e-6)
+    assert int(df_rate["day"].max()) == 1
+    assert (df_rate["timeline_anchor_mode"] == "civil").all()
+    assert (df_rate["timeline_anchor_label"] == "civil-clock").all()
+    assert df_rate["fixed_daily_anchor_clock"].isna().all()
+
+
+def test_plot_phasic_time_series_summary_fixed_daily_anchor_mode(tmp_path):
+    analysis_out = tmp_path / "analysis_out"
+    feat_dir = analysis_out / "features"
+    feat_dir.mkdir(parents=True)
+    rows = [
+        {
+            "chunk_id": 0,
+            "roi": "ROI1",
+            "peak_count": 1,
+            "auc": 0.1,
+            "source_file": "C:/vendor/2026_03_10-11_33_05/fluorescence.csv",
+        },
+        {
+            "chunk_id": 1,
+            "roi": "ROI1",
+            "peak_count": 1,
+            "auc": 0.2,
+            "source_file": "C:/vendor/2026_03_10-12_03_05/fluorescence.csv",
+        },
+    ]
+    pd.DataFrame(rows).to_csv(feat_dir / "features.csv", index=False)
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_rate_csv = out_dir / "rate.csv"
+    out_auc_csv = out_dir / "auc.csv"
+    out_rate_png = out_dir / "rate.png"
+    out_auc_png = out_dir / "auc.png"
+    script_path = os.path.join(os.path.dirname(__file__), "..", "tools", "plot_phasic_time_series_summary.py")
+    cmd = [
+        "python",
+        os.path.abspath(script_path),
+        "--analysis-out",
+        str(analysis_out),
+        "--sessions-per-hour",
+        "2",
+        "--timeline-anchor-mode",
+        "fixed_daily_anchor",
+        "--fixed-daily-anchor-clock",
+        "07:00",
+        "--out-rate-png",
+        str(out_rate_png),
+        "--out-auc-png",
+        str(out_auc_png),
+        "--out-rate-csv",
+        str(out_rate_csv),
+        "--out-auc-csv",
+        str(out_auc_csv),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, f"Script failed: {result.stderr}\n\n{result.stdout}"
+    assert "Datetime-derived session timeline" in result.stdout
+    assert "Timeline anchor: fixed-daily-anchor@07:00:00" in result.stdout
+
+    df_rate = pd.read_csv(out_rate_csv).sort_values("time_hours").reset_index(drop=True)
+    # 11:33 with anchor 07:00 => hour 4, right slot.
+    assert int(df_rate.loc[0, "hour"]) == 4
+    assert int(df_rate.loc[0, "session_in_hour"]) == 1
+    assert float(df_rate.loc[0, "time_hours"]) == pytest.approx(4 + (33 * 60 + 5) / 3600.0, rel=0.0, abs=1e-6)
+    # 12:03 with anchor 07:00 => hour 5, left slot.
+    assert int(df_rate.loc[1, "hour"]) == 5
+    assert int(df_rate.loc[1, "session_in_hour"]) == 0
+    assert float(df_rate.loc[1, "time_hours"]) == pytest.approx(5 + (3 * 60 + 5) / 3600.0, rel=0.0, abs=1e-6)
+    assert (df_rate["timeline_anchor_mode"] == "fixed_daily_anchor").all()
+    assert (df_rate["timeline_anchor_label"] == "fixed-daily-anchor@07:00:00").all()
+    assert (df_rate["fixed_daily_anchor_clock"] == "07:00:00").all()
+    assert (df_rate["time_axis_semantics"] == "Anchored time (hours from daily anchor 07:00:00)").all()
+
+
+def test_plot_phasic_time_series_summary_elapsed_mode_uses_elapsed_hours(tmp_path):
+    analysis_out = tmp_path / "analysis_out"
+    feat_dir = analysis_out / "features"
+    feat_dir.mkdir(parents=True)
+    rows = [
+        {
+            "chunk_id": 0,
+            "roi": "ROI1",
+            "peak_count": 1,
+            "auc": 0.1,
+            "source_file": "C:/vendor/2026_03_10-11_33_05/fluorescence.csv",
+        },
+        {
+            "chunk_id": 1,
+            "roi": "ROI1",
+            "peak_count": 1,
+            "auc": 0.2,
+            "source_file": "C:/vendor/2026_03_10-12_03_05/fluorescence.csv",
+        },
+        {
+            "chunk_id": 2,
+            "roi": "ROI1",
+            "peak_count": 1,
+            "auc": 0.3,
+            "source_file": "C:/vendor/2026_03_10-12_33_05/fluorescence.csv",
+        },
+    ]
+    pd.DataFrame(rows).to_csv(feat_dir / "features.csv", index=False)
+
+    out_dir = tmp_path / "out_elapsed"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_rate_csv = out_dir / "rate.csv"
+    out_auc_csv = out_dir / "auc.csv"
+    out_rate_png = out_dir / "rate.png"
+    out_auc_png = out_dir / "auc.png"
+    script_path = os.path.join(os.path.dirname(__file__), "..", "tools", "plot_phasic_time_series_summary.py")
+    cmd = [
+        "python",
+        os.path.abspath(script_path),
+        "--analysis-out",
+        str(analysis_out),
+        "--sessions-per-hour",
+        "2",
+        "--timeline-anchor-mode",
+        "elapsed",
+        "--out-rate-png",
+        str(out_rate_png),
+        "--out-auc-png",
+        str(out_auc_png),
+        "--out-rate-csv",
+        str(out_rate_csv),
+        "--out-auc-csv",
+        str(out_auc_csv),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, f"Script failed: {result.stderr}\n\n{result.stdout}"
+    assert "Timeline anchor: elapsed-from-first-session" in result.stdout
+    assert "Summary x-axis: Elapsed time (hours from first session)" in result.stdout
+
+    df_rate = pd.read_csv(out_rate_csv).sort_values("time_hours").reset_index(drop=True)
+    assert float(df_rate.loc[0, "time_hours"]) == pytest.approx(0.0, rel=0.0, abs=1e-6)
+    assert float(df_rate.loc[1, "time_hours"]) == pytest.approx(0.5, rel=0.0, abs=1e-6)
+    assert float(df_rate.loc[2, "time_hours"]) == pytest.approx(1.0, rel=0.0, abs=1e-6)
+    assert (df_rate["time_axis_semantics"] == "Elapsed time (hours from first session)").all()
+
+
+def test_plot_phasic_time_series_summary_civil_mode_uses_civil_hour_axis(tmp_path):
+    analysis_out = tmp_path / "analysis_out"
+    feat_dir = analysis_out / "features"
+    feat_dir.mkdir(parents=True)
+    rows = [
+        {
+            "chunk_id": 0,
+            "roi": "ROI1",
+            "peak_count": 1,
+            "auc": 0.1,
+            "source_file": "C:/vendor/2026_03_10-11_33_05/fluorescence.csv",
+        },
+        {
+            "chunk_id": 1,
+            "roi": "ROI1",
+            "peak_count": 1,
+            "auc": 0.2,
+            "source_file": "C:/vendor/2026_03_10-12_03_05/fluorescence.csv",
+        },
+        {
+            "chunk_id": 2,
+            "roi": "ROI1",
+            "peak_count": 1,
+            "auc": 0.3,
+            "source_file": "C:/vendor/2026_03_10-12_33_05/fluorescence.csv",
+        },
+    ]
+    pd.DataFrame(rows).to_csv(feat_dir / "features.csv", index=False)
+
+    out_dir = tmp_path / "out_civil"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_rate_csv = out_dir / "rate.csv"
+    out_auc_csv = out_dir / "auc.csv"
+    out_rate_png = out_dir / "rate.png"
+    out_auc_png = out_dir / "auc.png"
+    script_path = os.path.join(os.path.dirname(__file__), "..", "tools", "plot_phasic_time_series_summary.py")
+    cmd = [
+        "python",
+        os.path.abspath(script_path),
+        "--analysis-out",
+        str(analysis_out),
+        "--sessions-per-hour",
+        "2",
+        "--timeline-anchor-mode",
+        "civil",
+        "--out-rate-png",
+        str(out_rate_png),
+        "--out-auc-png",
+        str(out_auc_png),
+        "--out-rate-csv",
+        str(out_rate_csv),
+        "--out-auc-csv",
+        str(out_auc_csv),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, f"Script failed: {result.stderr}\n\n{result.stdout}"
+    assert "Timeline anchor: civil-clock" in result.stdout
+    assert "Summary x-axis: Civil-clock time (hours from day-0 midnight)" in result.stdout
+
+    df_rate = pd.read_csv(out_rate_csv).sort_values("time_hours").reset_index(drop=True)
+    assert float(df_rate.loc[0, "time_hours"]) == pytest.approx(11 + (33 * 60 + 5) / 3600.0, rel=0.0, abs=1e-6)
+    assert float(df_rate.loc[1, "time_hours"]) == pytest.approx(12 + (3 * 60 + 5) / 3600.0, rel=0.0, abs=1e-6)
+    assert float(df_rate.loc[2, "time_hours"]) == pytest.approx(12 + (33 * 60 + 5) / 3600.0, rel=0.0, abs=1e-6)
+    # Guard against silently keeping elapsed-only semantics for civil mode.
+    assert not np.allclose(df_rate["time_hours"].to_numpy(dtype=float), np.array([0.0, 0.5, 1.0]))
+    assert (df_rate["time_axis_semantics"] == "Civil-clock time (hours from day-0 midnight)").all()

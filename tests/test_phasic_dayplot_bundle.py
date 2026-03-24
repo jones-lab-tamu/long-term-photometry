@@ -31,6 +31,8 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         self.assertEqual(args.roi, 'Region0')
         self.assertEqual(args.output_dir, '/fake_out')
         self.assertEqual(args.sessions_per_hour, 2)
+        self.assertEqual(args.timeline_anchor_mode, "civil")
+        self.assertIsNone(args.fixed_daily_anchor_clock)
         self.assertTrue(args.write_dff_grid)
         self.assertTrue(args.write_sig_iso_grid)
         self.assertTrue(args.write_stacked)
