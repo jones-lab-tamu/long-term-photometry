@@ -10,6 +10,7 @@ from unittest.mock import patch
 from photometry_pipeline.config import Config
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.core.feature_extraction import extract_features
+from photometry_pipeline.viz.display_prep import prepare_centered_common_gain
 
 # Add project root to path
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -122,6 +123,46 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         # sparse occupancy in early slots must still reserve full slot span.
         self.assertLess(y0, data_y_min + step)
         self.assertGreater(y1, data_y_max + (46.0 * step))
+
+    def test_prepare_sig_iso_centered_panel_matches_shared_helper_semantics(self):
+        sig_raw = np.array([57.0, 60.0, 63.0, 60.0], dtype=float)
+        uv_raw = np.array([84.5, 85.0, 85.5, 85.0], dtype=float)
+
+        sig_expected, uv_expected = prepare_centered_common_gain(sig_raw, uv_raw)
+        sig_centered, uv_centered = bundle._prepare_sig_iso_centered_panel(sig_raw, uv_raw)
+
+        self.assertTrue(np.allclose(sig_centered, sig_expected))
+        self.assertTrue(np.allclose(uv_centered, uv_expected))
+        self.assertAlmostEqual(float(np.nanmedian(sig_centered)), 0.0)
+        self.assertAlmostEqual(float(np.nanmedian(uv_centered)), 0.0)
+        self.assertGreater(float(np.nanmax(np.abs(sig_centered))), float(np.nanmax(np.abs(uv_centered))))
+
+    def test_prepare_sig_iso_centered_panel_falls_back_for_no_finite_trace(self):
+        sig_raw = np.array([np.nan, np.nan, np.nan], dtype=float)
+        uv_raw = np.array([1.0, 2.0, 3.0], dtype=float)
+
+        sig_centered, uv_centered = bundle._prepare_sig_iso_centered_panel(sig_raw, uv_raw)
+
+        self.assertTrue(np.all(np.isnan(sig_centered)))
+        self.assertTrue(np.allclose(uv_centered, np.array([-1.0, 0.0, 1.0], dtype=float)))
+
+    def test_prepare_sig_iso_centered_panel_falls_back_for_no_finite_trace_inverse(self):
+        sig_raw = np.array([57.0, 60.0, 63.0], dtype=float)
+        uv_raw = np.array([np.nan, np.nan, np.nan], dtype=float)
+
+        sig_centered, uv_centered = bundle._prepare_sig_iso_centered_panel(sig_raw, uv_raw)
+
+        self.assertTrue(np.allclose(sig_centered, np.array([-3.0, 0.0, 3.0], dtype=float)))
+        self.assertTrue(np.all(np.isnan(uv_centered)))
+
+    def test_prepare_sig_iso_centered_panel_both_unusable_is_stable(self):
+        sig_raw = np.array([np.nan, np.nan], dtype=float)
+        uv_raw = np.array([np.nan, np.nan], dtype=float)
+
+        sig_centered, uv_centered = bundle._prepare_sig_iso_centered_panel(sig_raw, uv_raw)
+
+        self.assertTrue(np.all(np.isnan(sig_centered)))
+        self.assertTrue(np.all(np.isnan(uv_centered)))
 
     def setUp(self):
         self.test_dir = tempfile.TemporaryDirectory()

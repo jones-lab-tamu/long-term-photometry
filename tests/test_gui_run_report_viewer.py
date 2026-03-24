@@ -159,9 +159,10 @@ def test_run_report_viewer_tab_discovery_is_explicit(qapp):
             "phasic_auc_timeseries.png",
             "phasic_peak_rate_timeseries.png",
         ]
-        assert [os.path.basename(p) for p in tab_map["Phasic Raw"]] == ["phasic_sig_iso_day_000.png"]
+        assert [os.path.basename(p) for p in tab_map["Phasic Sig/Iso"]] == ["phasic_sig_iso_day_000.png"]
         assert [os.path.basename(p) for p in tab_map["Phasic dFF"]] == ["phasic_dFF_day_000.png"]
         assert [os.path.basename(p) for p in tab_map["Phasic Stacked"]] == ["phasic_stacked_day_000.png"]
+        assert "Phasic Raw" not in tab_map
 
 
 def test_run_report_viewer_click_to_zoom_toggle(qapp):

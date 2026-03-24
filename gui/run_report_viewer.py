@@ -28,7 +28,7 @@ from gui.run_report_parser import parse_run_report, get_preview_mode, resolve_re
 
 TAB_VERIFICATION = "Verification"
 TAB_TONIC = "Tonic"
-TAB_PHASIC_RAW = "Phasic Raw"
+TAB_PHASIC_RAW = "Phasic Sig/Iso"
 TAB_PHASIC_DFF = "Phasic dFF"
 TAB_PHASIC_STACKED = "Phasic Stacked"
 TAB_PHASIC_SUMMARY = "Phasic Summary"

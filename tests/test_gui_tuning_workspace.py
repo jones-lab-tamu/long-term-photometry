@@ -470,7 +470,7 @@ def test_tuning_mode_switch_preserves_results_region_tab_and_image(window, tmp_p
     window._report_viewer._region_combo.setCurrentText("Region1")
     phasic_raw_idx = -1
     for i in range(window._report_viewer._tabs.count()):
-        if window._report_viewer._tabs.tabText(i) == "Phasic Raw":
+        if window._report_viewer._tabs.tabText(i) == "Phasic Sig/Iso":
             phasic_raw_idx = i
             break
     assert phasic_raw_idx >= 0
@@ -608,7 +608,7 @@ def test_correction_mode_switch_preserves_results_region_tab_and_image(window, t
     window._report_viewer._region_combo.setCurrentText("Region1")
     phasic_raw_idx = -1
     for i in range(window._report_viewer._tabs.count()):
-        if window._report_viewer._tabs.tabText(i) == "Phasic Raw":
+        if window._report_viewer._tabs.tabText(i) == "Phasic Sig/Iso":
             phasic_raw_idx = i
             break
     assert phasic_raw_idx >= 0

@@ -39,6 +39,7 @@ from photometry_pipeline.config import Config
 from photometry_pipeline.viz.phasic_data_prep import (
     discover_chunks, build_feature_map, resolve_roi, compute_day_layout,
 )
+from photometry_pipeline.viz.display_prep import prepare_centered_common_gain
 from photometry_pipeline.io.hdf5_cache_reader import (
     open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields,
     list_cache_chunk_ids, list_cache_source_files
@@ -480,7 +481,7 @@ def _compose_sig_iso_day_tile_canvas(
     title_font = _get_font(max(13, int(round(0.11 * layout["dpi"]))))
     label_font = _get_font(max(11, int(round(0.09 * layout["dpi"]))))
     chunk_font = _get_font(max(10, int(round(0.08 * layout["dpi"]))))
-    title_txt = f"Day {day} Raw/Iso - {plot_roi}"
+    title_txt = f"Day {day} Sig/Iso (Centered, Common Gain) - {plot_roi}"
     if timeline_anchor_label:
         title_txt += f" [{timeline_anchor_label}]"
     draw.text((canvas_w // 2, max(6, top_title_h // 4)), title_txt, fill='black', anchor='ma', font=title_font)
@@ -504,6 +505,31 @@ def _compose_sig_iso_day_tile_canvas(
                 )
 
     return day_canvas
+
+
+def _prepare_sig_iso_centered_panel(sig_raw, uv_raw):
+    """
+    Apply centered common-gain display transform for sig/iso dayplots.
+
+    If paired centering is undefined (e.g. one trace has no finite values),
+    falls back to per-trace centering so any valid trace still honors centered
+    display semantics. Unusable traces are left unchanged.
+    """
+    sig_arr = np.asarray(sig_raw, dtype=np.float64)
+    uv_arr = np.asarray(uv_raw, dtype=np.float64)
+    try:
+        sig_centered, uv_centered = prepare_centered_common_gain(sig_arr, uv_arr)
+    except ValueError:
+        sig_centered = sig_arr.copy()
+        uv_centered = uv_arr.copy()
+        sig_finite = np.isfinite(sig_arr)
+        uv_finite = np.isfinite(uv_arr)
+        if np.any(sig_finite):
+            sig_centered = sig_arr - float(np.median(sig_arr[sig_finite]))
+        if np.any(uv_finite):
+            uv_centered = uv_arr - float(np.median(uv_arr[uv_finite]))
+        return sig_centered, uv_centered
+    return sig_centered, uv_centered
 
 
 def _dff_tile_layout(sph: int, dpi: int):
@@ -1112,8 +1138,11 @@ def main():
             't': t_norm
         }
         if args.write_sig_iso_grid:
-            c_rec['sig'] = rec['y_sig']
-            c_rec['uv'] = rec['y_uv']
+            sig_centered, uv_centered = _prepare_sig_iso_centered_panel(
+                rec['y_sig'], rec['y_uv']
+            )
+            c_rec['sig'] = sig_centered
+            c_rec['uv'] = uv_centered
             c_rec['xlim_600'] = bool(np.max(t_norm) > 550)
         if needs_dff_trace:
             c_rec['dff'] = rec['y_dff']
@@ -1278,7 +1307,7 @@ def main():
                 panel_y_ranges = _sig_iso_panel_ranges_with_day_min_span(slot_map)
 
                 fig_sig.suptitle(
-                    f"Day {d} Raw/Iso - {plot_roi} [{timeline_anchor_label}]",
+                    f"Day {d} Sig/Iso (Centered, Common Gain) - {plot_roi} [{timeline_anchor_label}]",
                     fontsize=16,
                 )
 
