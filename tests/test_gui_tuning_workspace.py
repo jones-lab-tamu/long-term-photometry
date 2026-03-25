@@ -1874,10 +1874,79 @@ def test_correction_tuning_backend_wiring_and_result_refresh(window, tmp_path, m
     assert "Preview session: 2" in window._correction_tuning_summary_label.text()
     assert "Inspection chunk:" not in window._correction_tuning_summary_label.text()
     assert "correction_retune_out" in window._correction_tuning_summary_label.text()
-    assert window._correction_tuning_inspection_title.text() == "correction_inspect.png"
+    title = window._correction_tuning_inspection_title.text()
+    assert "[1/1]" in title
+    assert title.endswith("correction_inspect.png")
     shown = window._correction_tuning_inspection_label.pixmap()
     assert shown is not None and not shown.isNull()
     assert window._open_correction_tuning_dir_btn.isEnabled()
+
+
+def test_correction_tuning_backend_loads_four_panel_carousel(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    raw_path = tmp_path / "retuned_correction_inspection_Region0_chunk_002_raw.png"
+    centered_path = tmp_path / "retuned_correction_inspection_Region0_chunk_002_centered.png"
+    fit_path = tmp_path / "retuned_correction_inspection_Region0_chunk_002_fit.png"
+    dff_path = tmp_path / "retuned_correction_inspection_Region0_chunk_002_dff.png"
+    for p in (raw_path, centered_path, fit_path, dff_path):
+        _write_png(p, width=960, height=480)
+
+    def _fake_correction_retune(**kwargs):
+        out = tmp_path / "correction_retune_out_carousel"
+        out.mkdir(exist_ok=True)
+        return {
+            "retune_dir": str(out),
+            "selected_roi": kwargs["roi"],
+            "inspection_chunk_id": kwargs["chunk_id"],
+            "artifacts": {
+                "retuned_correction_inspection_pngs": [
+                    str(raw_path),
+                    str(centered_path),
+                    str(fit_path),
+                    str(dff_path),
+                ],
+                "retuned_correction_inspection_panel_labels": [
+                    "Raw absolute sig/iso",
+                    "Centered common-gain sig/iso",
+                    "Dynamic fit",
+                    "Final corrected dF/F",
+                ],
+            },
+        }
+
+    monkeypatch.setattr("gui.main_window.run_cache_correction_retune", _fake_correction_retune)
+    window._on_run_correction_tuning()
+    QApplication.processEvents()
+
+    assert window._correction_tuning_inspection_counter_label.text() == "1/4"
+    assert window._correction_tuning_prev_btn.isEnabled()
+    assert window._correction_tuning_next_btn.isEnabled()
+    assert "Raw absolute sig/iso" in window._correction_tuning_inspection_title.text()
+    assert window._correction_tuning_inspection_title.text().endswith(raw_path.name)
+
+    window._on_correction_tuning_next_image()
+    QApplication.processEvents()
+    assert window._correction_tuning_inspection_counter_label.text() == "2/4"
+    assert "Centered common-gain sig/iso" in window._correction_tuning_inspection_title.text()
+    assert window._correction_tuning_inspection_title.text().endswith(centered_path.name)
+
+    window._on_correction_tuning_prev_image()
+    QApplication.processEvents()
+    assert window._correction_tuning_inspection_counter_label.text() == "1/4"
+    assert "Raw absolute sig/iso" in window._correction_tuning_inspection_title.text()
+
+    window._on_correction_tuning_prev_image()
+    QApplication.processEvents()
+    assert window._correction_tuning_inspection_counter_label.text() == "4/4"
+    assert "Final corrected dF/F" in window._correction_tuning_inspection_title.text()
+    assert window._correction_tuning_inspection_title.text().endswith(dff_path.name)
 
 
 def test_correction_tuning_scope_integrity_and_no_downstream_controls(window, tmp_path):

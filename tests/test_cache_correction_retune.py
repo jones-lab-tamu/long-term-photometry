@@ -179,8 +179,18 @@ def test_correction_retune_success_and_output_isolation(tmp_path):
     assert os.path.isfile(artifacts["retuned_correction_cache_h5"])
     assert os.path.isfile(artifacts["retuned_features_csv"])
     assert os.path.isfile(artifacts["retuned_summary_csv"])
-    assert os.path.isfile(artifacts["retuned_correction_inspection_png"])
     assert os.path.isfile(artifacts["retuned_correction_session_csv"])
+    inspection_pngs = artifacts["retuned_correction_inspection_pngs"]
+    assert isinstance(inspection_pngs, list)
+    assert len(inspection_pngs) == 4
+    for p in inspection_pngs:
+        assert os.path.isfile(p)
+    assert artifacts["retuned_correction_inspection_panel_labels"] == [
+        "Raw absolute sig/iso",
+        "Centered common-gain sig/iso",
+        "Dynamic fit",
+        "Final corrected dF/F",
+    ]
 
     # Production features remain untouched.
     assert before == source_features.read_text(encoding="utf-8")
@@ -278,7 +288,12 @@ def test_correction_retune_chunk_targeting_and_roi_wide_recompute(tmp_path):
     assert req["inspection_chunk_id_requested"] == 2
     assert req["inspection_chunk_id_used"] == 2
 
-    assert result["artifacts"]["retuned_correction_inspection_png"].endswith("chunk_002.png")
+    assert result["artifacts"]["retuned_correction_inspection_png"].endswith("chunk_002_raw.png")
+    assert len(result["artifacts"]["retuned_correction_inspection_pngs"]) == 4
+    assert result["artifacts"]["retuned_correction_inspection_pngs"][0].endswith("chunk_002_raw.png")
+    assert result["artifacts"]["retuned_correction_inspection_pngs"][1].endswith("chunk_002_centered.png")
+    assert result["artifacts"]["retuned_correction_inspection_pngs"][2].endswith("chunk_002_fit.png")
+    assert result["artifacts"]["retuned_correction_inspection_pngs"][3].endswith("chunk_002_dff.png")
     assert result["artifacts"]["retuned_correction_session_csv"].endswith("chunk_002.csv")
 
 
@@ -311,9 +326,11 @@ def test_correction_retune_required_correction_diagnostic_exists(tmp_path):
         overrides={"g_min": 0.1},
     )
 
-    png = result["artifacts"]["retuned_correction_inspection_png"]
+    pngs = result["artifacts"]["retuned_correction_inspection_pngs"]
     csv = result["artifacts"]["retuned_correction_session_csv"]
-    assert os.path.isfile(png)
+    assert len(pngs) == 4
+    for png in pngs:
+        assert os.path.isfile(png)
     assert os.path.isfile(csv)
 
 
@@ -324,11 +341,13 @@ def test_correction_retune_inspection_png_has_useful_preview_resolution(tmp_path
         roi="Region0",
         overrides={"window_sec": 45.0, "step_sec": 8.0},
     )
-    png = result["artifacts"]["retuned_correction_inspection_png"]
-    assert os.path.isfile(png)
-    width, height = _read_png_size(png)
-    assert width >= 2800
-    assert height >= 1100
+    pngs = result["artifacts"]["retuned_correction_inspection_pngs"]
+    assert len(pngs) == 4
+    for png in pngs:
+        assert os.path.isfile(png)
+        width, height = _read_png_size(png)
+        assert width >= 2800
+        assert height >= 1100
 
 
 def test_correction_retune_hdf5_internal_contract(tmp_path):

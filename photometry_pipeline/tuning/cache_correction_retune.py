@@ -34,6 +34,7 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     open_phasic_cache,
     resolve_cache_roi,
 )
+from photometry_pipeline.viz.display_prep import prepare_centered_common_gain
 
 
 CORRECTION_RETUNABLE_KEYS = {
@@ -373,8 +374,8 @@ def _write_correction_inspection(
     retune_dir: str,
     roi: str,
     chunk: Chunk,
-) -> Dict[str, str]:
-    artifacts: Dict[str, str] = {}
+) -> Dict[str, Any]:
+    artifacts: Dict[str, Any] = {}
     cid = int(chunk.chunk_id)
     suffix = f"{roi}_chunk_{cid:03d}"
 
@@ -400,39 +401,89 @@ def _write_correction_inspection(
     ).to_csv(csv_path, index=False)
     artifacts["retuned_correction_session_csv"] = csv_path
 
-    png_path = os.path.join(retune_dir, f"retuned_correction_inspection_{suffix}.png")
-    fig, axes = plt.subplots(4, 1, figsize=_CORRECTION_INSPECTION_FIGSIZE, sharex=True)
+    try:
+        sig_centered, uv_centered = prepare_centered_common_gain(sig, uv)
+    except ValueError:
+        sig_centered = np.asarray(sig, dtype=np.float64).copy()
+        uv_centered = np.asarray(uv, dtype=np.float64).copy()
+        sig_finite = np.isfinite(sig_centered)
+        uv_finite = np.isfinite(uv_centered)
+        if np.any(sig_finite):
+            sig_centered = sig_centered - float(np.median(sig_centered[sig_finite]))
+        if np.any(uv_finite):
+            uv_centered = uv_centered - float(np.median(uv_centered[uv_finite]))
 
-    axes[0].plot(t, sig, color="forestgreen", linewidth=0.9, label="sig_raw")
-    axes[0].plot(t, uv, color="purple", linewidth=0.8, alpha=0.8, label="uv_raw")
-    axes[0].set_ylabel("raw")
-    axes[0].set_title(f"Correction Retune Inspection ({roi}) | chunk={cid} | source={chunk.source_file}")
-    axes[0].grid(True, alpha=0.25)
-    axes[0].legend(loc="best", fontsize=8)
+    panel_specs: list[tuple[str, str]] = [
+        ("raw", "Raw absolute sig/iso"),
+        ("centered", "Centered common-gain sig/iso"),
+        ("fit", "Dynamic fit"),
+        ("dff", "Final corrected dF/F"),
+    ]
+    panel_paths: list[str] = []
+    panel_labels: list[str] = []
 
-    axes[1].plot(t, sig, color="forestgreen", linewidth=0.9, label="sig_raw")
-    axes[1].plot(t, fit, color="black", linewidth=0.9, linestyle="--", label="fit_ref")
-    axes[1].set_ylabel("fit")
-    axes[1].grid(True, alpha=0.25)
-    axes[1].legend(loc="best", fontsize=8)
+    for panel_key, panel_label in panel_specs:
+        panel_path = os.path.join(
+            retune_dir, f"retuned_correction_inspection_{suffix}_{panel_key}.png"
+        )
+        fig, ax = plt.subplots(1, 1, figsize=_CORRECTION_INSPECTION_FIGSIZE)
+        ax.set_title(
+            f"Correction Retune Inspection ({roi}) | chunk={cid} | {panel_label} | source={chunk.source_file}"
+        )
+        ax.set_xlabel("Time (s)")
+        ax.grid(True, alpha=0.25)
 
-    axes[2].plot(t, delta_f, color="royalblue", linewidth=0.9, label="delta_f")
-    axes[2].axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
-    axes[2].set_ylabel("delta_f")
-    axes[2].grid(True, alpha=0.25)
-    axes[2].legend(loc="best", fontsize=8)
+        if panel_key == "raw":
+            ax.plot(t, sig, color="forestgreen", linewidth=0.9, label="sig_raw")
+            ax.plot(t, uv, color="purple", linewidth=0.8, alpha=0.8, label="uv_raw")
+            ax.set_ylabel("Raw output (V)")
+        elif panel_key == "centered":
+            ax.plot(
+                t,
+                sig_centered,
+                color="forestgreen",
+                linewidth=0.9,
+                label="sig_raw (centered)",
+            )
+            ax.plot(
+                t,
+                uv_centered,
+                color="purple",
+                linewidth=0.8,
+                alpha=0.8,
+                label="uv_raw (centered)",
+            )
+            ax.set_ylabel("Centered (V)")
+        elif panel_key == "fit":
+            ax.plot(t, sig, color="forestgreen", linewidth=0.9, label="sig_raw")
+            ax.plot(
+                t,
+                fit,
+                color="black",
+                linewidth=0.9,
+                linestyle="--",
+                label="fit_ref",
+            )
+            ax.set_ylabel("Fit view (V)")
+        else:
+            ax.plot(t, dff, color="darkorange", linewidth=0.9, label="dff")
+            ax.axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
+            ax.set_ylabel("dF/F")
+        ax.legend(loc="best", fontsize=8)
+        fig.tight_layout()
+        fig.savefig(panel_path, dpi=_CORRECTION_INSPECTION_DPI)
+        plt.close(fig)
+        panel_paths.append(panel_path)
+        panel_labels.append(panel_label)
 
-    axes[3].plot(t, dff, color="darkorange", linewidth=0.9, label="dff")
-    axes[3].axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
-    axes[3].set_ylabel("dff")
-    axes[3].set_xlabel("Time (s)")
-    axes[3].grid(True, alpha=0.25)
-    axes[3].legend(loc="best", fontsize=8)
-
-    fig.tight_layout()
-    fig.savefig(png_path, dpi=_CORRECTION_INSPECTION_DPI)
-    plt.close(fig)
-    artifacts["retuned_correction_inspection_png"] = png_path
+    artifacts["retuned_correction_inspection_pngs"] = panel_paths
+    artifacts["retuned_correction_inspection_panel_labels"] = panel_labels
+    # Backward-compatibility key for existing consumers expecting a single image path.
+    artifacts["retuned_correction_inspection_png"] = panel_paths[0]
+    artifacts["retuned_correction_inspection_raw_png"] = panel_paths[0]
+    artifacts["retuned_correction_inspection_centered_png"] = panel_paths[1]
+    artifacts["retuned_correction_inspection_fit_png"] = panel_paths[2]
+    artifacts["retuned_correction_inspection_dff_png"] = panel_paths[3]
 
     return artifacts
 

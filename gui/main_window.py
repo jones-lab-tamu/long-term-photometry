@@ -604,6 +604,9 @@ class MainWindow(QMainWindow):
         self._roi_chunk_ids_cache: dict[str, list[int]] = {}
         self._correction_tuning_workspace_available = False
         self._correction_tuning_last_result = None
+        self._correction_tuning_inspection_paths: list[str] = []
+        self._correction_tuning_inspection_panel_labels: list[str] = []
+        self._correction_tuning_inspection_index = 0
         self._correction_tuning_active_inspection_path = ""
         self._correction_tuning_active_inspection_pixmap = QPixmap()
         self._correction_tuning_zoom_mode = False
@@ -1639,7 +1642,7 @@ class MainWindow(QMainWindow):
         )
         self._correction_tuning_inspection_title.setAlignment(Qt.AlignCenter)
         self._correction_tuning_inspection_title.setToolTip(
-            "Filename of the current correction inspection figure."
+            "Current correction inspection panel and file."
         )
         content_layout.addWidget(self._correction_tuning_inspection_title)
 
@@ -1648,7 +1651,8 @@ class MainWindow(QMainWindow):
         )
         self._correction_tuning_inspection_label.setAlignment(Qt.AlignCenter)
         self._correction_tuning_inspection_label.setToolTip(
-            "Inspection figure for the selected preview session after correction retune. "
+            "Inspection panel for the selected preview session after correction retune. "
+            "Use previous/next to switch Raw/Centered/Fit/dF/F views. "
             "Click image to toggle fit/full-size inspection."
         )
         self._correction_tuning_inspection_label.setStyleSheet(
@@ -1671,6 +1675,29 @@ class MainWindow(QMainWindow):
             self._correction_tuning_inspection_label
         )
         content_layout.addWidget(self._correction_tuning_inspection_scroll, 1)
+        nav_row = QHBoxLayout()
+        self._correction_tuning_prev_btn = QPushButton("<")
+        self._correction_tuning_prev_btn.setToolTip(
+            "Previous correction inspection panel image."
+        )
+        self._correction_tuning_prev_btn.clicked.connect(
+            self._on_correction_tuning_prev_image
+        )
+        nav_row.addWidget(self._correction_tuning_prev_btn)
+        self._correction_tuning_inspection_counter_label = QLabel("")
+        self._correction_tuning_inspection_counter_label.setAlignment(Qt.AlignCenter)
+        nav_row.addWidget(self._correction_tuning_inspection_counter_label, 1)
+        self._correction_tuning_next_btn = QPushButton(">")
+        self._correction_tuning_next_btn.setToolTip(
+            "Next correction inspection panel image."
+        )
+        self._correction_tuning_next_btn.clicked.connect(
+            self._on_correction_tuning_next_image
+        )
+        nav_row.addWidget(self._correction_tuning_next_btn)
+        content_layout.addLayout(nav_row)
+        self._correction_tuning_prev_btn.setEnabled(False)
+        self._correction_tuning_next_btn.setEnabled(False)
         self._correction_tuning_zoom_hint_label = QLabel(
             "Click image to toggle fit/full size."
         )
@@ -2753,12 +2780,16 @@ class MainWindow(QMainWindow):
         self._update_results_pane_mode_for_tuning()
 
     def _set_correction_tuning_overlay_message(self, text: str) -> None:
+        self._correction_tuning_inspection_paths = []
+        self._correction_tuning_inspection_panel_labels = []
+        self._correction_tuning_inspection_index = 0
         self._correction_tuning_active_inspection_path = ""
         self._correction_tuning_active_inspection_pixmap = QPixmap()
         self._set_correction_tuning_zoom_mode(False)
         self._correction_tuning_inspection_title.setText(
             "No correction inspection artifact loaded."
         )
+        self._refresh_correction_tuning_inspection_nav()
         self._correction_tuning_inspection_label.setPixmap(QPixmap())
         self._correction_tuning_inspection_label.setText(text)
         viewport = self._correction_tuning_inspection_scroll.viewport().size()
@@ -2792,23 +2823,95 @@ class MainWindow(QMainWindow):
         self._correction_tuning_inspection_label.setPixmap(scaled)
         self._correction_tuning_inspection_label.resize(scaled.size())
 
-    def _set_correction_tuning_overlay_image(self, image_path: str) -> None:
-        if not image_path or not os.path.isfile(image_path):
+    def _refresh_correction_tuning_inspection_nav(self) -> None:
+        count = len(self._correction_tuning_inspection_paths)
+        idx = int(self._correction_tuning_inspection_index)
+        if hasattr(self, "_correction_tuning_prev_btn"):
+            self._correction_tuning_prev_btn.setEnabled(count > 1)
+        if hasattr(self, "_correction_tuning_next_btn"):
+            self._correction_tuning_next_btn.setEnabled(count > 1)
+        if hasattr(self, "_correction_tuning_inspection_counter_label"):
+            if count <= 0:
+                self._correction_tuning_inspection_counter_label.setText("")
+            else:
+                self._correction_tuning_inspection_counter_label.setText(
+                    f"{idx + 1}/{count}"
+                )
+
+    def _panel_label_from_inspection_path(self, image_path: str) -> str:
+        base = os.path.basename(str(image_path)).lower()
+        if base.endswith("_raw.png"):
+            return "Raw absolute sig/iso"
+        if base.endswith("_centered.png"):
+            return "Centered common-gain sig/iso"
+        if base.endswith("_fit.png"):
+            return "Dynamic fit"
+        if base.endswith("_dff.png"):
+            return "Final corrected dF/F"
+        return "Correction inspection"
+
+    def _set_correction_tuning_overlay_images(
+        self,
+        image_paths: list[str],
+        panel_labels: list[str] | None = None,
+    ) -> None:
+        valid_paths = [str(p).strip() for p in image_paths if str(p).strip()]
+        valid_paths = [p for p in valid_paths if os.path.isfile(p)]
+        if not valid_paths:
             self._set_correction_tuning_overlay_message(
                 "Correction inspection artifact is missing."
             )
             return
+        self._correction_tuning_inspection_paths = valid_paths
+        labels = list(panel_labels or [])
+        if len(labels) != len(valid_paths):
+            labels = [self._panel_label_from_inspection_path(p) for p in valid_paths]
+        self._correction_tuning_inspection_panel_labels = labels
+        self._correction_tuning_inspection_index = 0
+        self._show_correction_tuning_overlay_index(0)
+
+    def _show_correction_tuning_overlay_index(self, index: int) -> None:
+        if not self._correction_tuning_inspection_paths:
+            self._set_correction_tuning_overlay_message(
+                "Correction inspection artifact is missing."
+            )
+            return
+        count = len(self._correction_tuning_inspection_paths)
+        idx = int(index) % count
+        image_path = self._correction_tuning_inspection_paths[idx]
         pix = QPixmap(image_path)
         if pix.isNull():
             self._set_correction_tuning_overlay_message(
                 "Unable to render correction inspection artifact."
             )
             return
+        self._correction_tuning_inspection_index = idx
         self._correction_tuning_active_inspection_path = image_path
         self._correction_tuning_active_inspection_pixmap = pix
-        self._correction_tuning_inspection_title.setText(os.path.basename(image_path))
+        label = self._correction_tuning_inspection_panel_labels[idx]
+        self._correction_tuning_inspection_title.setText(
+            f"[{idx + 1}/{count}] {label} - {os.path.basename(image_path)}"
+        )
+        self._refresh_correction_tuning_inspection_nav()
         self._set_correction_tuning_zoom_mode(False)
         self._render_correction_tuning_overlay()
+
+    def _set_correction_tuning_overlay_image(self, image_path: str) -> None:
+        self._set_correction_tuning_overlay_images([image_path], panel_labels=None)
+
+    def _on_correction_tuning_prev_image(self) -> None:
+        if len(self._correction_tuning_inspection_paths) <= 1:
+            return
+        self._show_correction_tuning_overlay_index(
+            self._correction_tuning_inspection_index - 1
+        )
+
+    def _on_correction_tuning_next_image(self) -> None:
+        if len(self._correction_tuning_inspection_paths) <= 1:
+            return
+        self._show_correction_tuning_overlay_index(
+            self._correction_tuning_inspection_index + 1
+        )
 
     def _on_correction_tuning_inspection_clicked(self) -> None:
         if self._correction_tuning_active_inspection_pixmap.isNull():
@@ -2952,10 +3055,18 @@ class MainWindow(QMainWindow):
         self._correction_tuning_last_result = result
         self._open_correction_tuning_dir_btn.setEnabled(True)
         artifacts = result.get("artifacts", {}) if isinstance(result, dict) else {}
-        inspect_path = str(
-            artifacts.get("retuned_correction_inspection_png", "")
-        ).strip()
-        self._set_correction_tuning_overlay_image(inspect_path)
+        inspect_paths = artifacts.get("retuned_correction_inspection_pngs", [])
+        panel_labels = artifacts.get("retuned_correction_inspection_panel_labels", [])
+        if isinstance(inspect_paths, list) and inspect_paths:
+            self._set_correction_tuning_overlay_images(
+                [str(p) for p in inspect_paths],
+                [str(x) for x in panel_labels] if isinstance(panel_labels, list) else None,
+            )
+        else:
+            inspect_path = str(
+                artifacts.get("retuned_correction_inspection_png", "")
+            ).strip()
+            self._set_correction_tuning_overlay_image(inspect_path)
 
         lines = [
             f"ROI: {result.get('selected_roi', roi)}",
