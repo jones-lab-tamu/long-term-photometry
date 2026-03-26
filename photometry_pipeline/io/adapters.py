@@ -960,4 +960,5 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
         }
     )
     # chunk.validate() moved to load_chunk
+    # chunk.validate() moved to load_chunk
     return chunk

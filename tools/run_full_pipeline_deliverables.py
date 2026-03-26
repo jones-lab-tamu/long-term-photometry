@@ -1203,6 +1203,12 @@ def main():
                 cmd_tonic_roi = [sys.executable, 'tools/plot_tonic_48h.py',
                                  '--analysis-out', tonic_out, '--roi', roi,
                                  '--out', out_tonic]
+                if args.input:
+                    cmd_tonic_roi.extend(['--input', args.input])
+                if args.format:
+                    cmd_tonic_roi.extend(['--format', args.format])
+                if resolved_sessions_per_hour is not None:
+                    cmd_tonic_roi.extend(['--sessions-per-hour', str(resolved_sessions_per_hour)])
                 cmd_result = run_cmd(cmd_tonic_roi, roi_label=roi)
                 roi_child_script_elapsed += cmd_result["elapsed_sec"]
 
@@ -1248,35 +1254,20 @@ def main():
                         t_sub = time.perf_counter()
                         cids = list_cache_chunk_ids(cache)
                         
-                        # Re-discover full file list to determine actual schedule position 
-                        # natively without polluting other pipeline outputs
-                        from photometry_pipeline.io.adapters import discover_csv_or_rwd_chunks, sort_npm_files, sniff_format, natural_sort_key
-                        file_list = discover_csv_or_rwd_chunks(args.input)
-                        if file_list:
-                            fmt = args.format if args.format != 'auto' else sniff_format(file_list[0], None)
-                            if fmt == 'npm':
-                                file_list = sort_npm_files(file_list)
-                            else:
-                                file_list.sort(key=natural_sort_key)
-                        # Build normalized lookup for robust schedule position matching
-                        def _normalize_path(p):
-                            return os.path.normcase(os.path.normpath(str(p))) if p else ""
-                            
-                        normalized_file_list = [_normalize_path(f) for f in file_list]
+                        from photometry_pipeline.utils.timeline import map_cached_sources_to_schedule_positions
                                 
                         source_files = []
                         if "meta" in cache and "source_files" in cache["meta"]:
                             source_files = [f.decode('utf-8') if isinstance(f, bytes) else f for f in cache["meta"]["source_files"][:]]
 
+                        # Rescale timeline offsets using exactly matched position
+                        actual_positions = map_cached_sources_to_schedule_positions(
+                            args.input, args.format, source_files, cids
+                        )
+
                         tonic_subbucket_totals["chunk_enumeration"] += time.perf_counter() - t_sub
                         for i, cid in enumerate(cids):
-                            fpath_cached = source_files[i] if i < len(source_files) else ""
-                            norm_fpath_cached = _normalize_path(fpath_cached)
-                            
-                            try:
-                                actual_schedule_idx = normalized_file_list.index(norm_fpath_cached)
-                            except ValueError:
-                                actual_schedule_idx = cid
+                            actual_schedule_idx = actual_positions[i]
                             
                             chunks_processed += 1
                             t_sub = time.perf_counter()

@@ -36,6 +36,9 @@ def parse_args():
     parser.add_argument('--analysis-out', required=True, help="Path to _analysis directory")
     parser.add_argument('--roi', help="Specific ROI to plot (e.g., Region0). Auto-selected if omitted.")
     parser.add_argument('--out', help="Explicit output file path. Overrides default.")
+    parser.add_argument('--input', help="Original input directory for rigorous 48h schedule recovery")
+    parser.add_argument('--format', help="Format string for robust file recovery", default='auto')
+    parser.add_argument('--sessions-per-hour', type=float, help="Duty cycle parameter to compute offline gap strides")
     return parser.parse_args()
 
 
@@ -43,17 +46,29 @@ def parse_args():
 # Stage 1: Assembly
 # ======================================================================
 
-def assemble_arrays(cache, roi):
-    """Iterate chunks from the cache and build continuous time axis."""
+def assemble_arrays(cache, roi, args):
+    """Iterate chunks from the cache and build a discontinuous, accurate absolute time axis."""
+    list_time = []
     list_sig = []
     list_uv = []
     list_deltaF = []
     
     dt = None
+    stride_s = (3600.0 / args.sessions_per_hour) if args.sessions_per_hour else None
     
+    cids = list(cache['meta']['chunk_ids'][:]) if 'meta' in cache and 'chunk_ids' in cache['meta'] else []
+    source_files = []
+    if "meta" in cache and "source_files" in cache["meta"]:
+        source_files = [f.decode('utf-8') if isinstance(f, bytes) else f for f in cache['meta']['source_files'][:]]
+
+    from photometry_pipeline.utils.timeline import map_cached_sources_to_schedule_positions
+    actual_positions = map_cached_sources_to_schedule_positions(
+        args.input, args.format, source_files, cids
+    ) if args.input else cids
+
     required_fields = ['time_sec', 'sig_raw', 'uv_raw', 'deltaF']
 
-    for t, s, u, d in iter_cache_chunks_for_roi(cache, roi, required_fields):
+    for i, (t, s, u, d) in enumerate(iter_cache_chunks_for_roi(cache, roi, required_fields)):
         if dt is None:
             if len(t) < 2:
                 print("CRITICAL: First chunk has fewer than 2 samples, cannot infer dt.")
@@ -62,21 +77,40 @@ def assemble_arrays(cache, roi):
             if not np.isfinite(dt) or dt <= 0:
                 print(f"CRITICAL: Inferred dt ({dt}) is invalid or non-positive.")
                 sys.exit(1)
-                
+
+        # Reconstruct exactly matching positional chronology
+        t_abs = None
+        cid = cids[i] if i < len(cids) else i
+        
+        if args.input and stride_s:
+            actual_schedule_idx = actual_positions[i]
+            t_abs = (actual_schedule_idx * stride_s) + t
+        elif stride_s:
+            # Fallback if no input file but stride is known
+            t_abs = (cid * stride_s) + t
+        else:
+            # Complete legacy fallback: pure concatenation if no timing info exists
+            t_abs = t if not list_time else list_time[-1][-1] + dt + t
+            
+        list_time.append(t_abs)
         list_sig.append(s)
         list_uv.append(u)
         list_deltaF.append(d)
+
+        # Inject visual trace separator gap for discontinuous timeline plotting rendering
+        list_time.append(np.array([t_abs[-1] + dt]))
+        list_sig.append(np.array([np.nan]))
+        list_uv.append(np.array([np.nan]))
+        list_deltaF.append(np.array([np.nan]))
 
     if not list_sig:
         print("CRITICAL: No valid chunks found for ROI.")
         sys.exit(1)
 
-    sig_raw = np.concatenate(list_sig)
-    uv_raw = np.concatenate(list_uv)
-    deltaf_val = np.concatenate(list_deltaF)
-    
-    total_pts = len(sig_raw)
-    continuous_time = np.arange(total_pts) * dt
+    continuous_time = np.concatenate(list_time)[:-1] # drop trailing separator
+    sig_raw = np.concatenate(list_sig)[:-1]
+    uv_raw = np.concatenate(list_uv)[:-1]
+    deltaf_val = np.concatenate(list_deltaF)[:-1]
 
     return continuous_time, sig_raw, uv_raw, deltaf_val
 
@@ -133,7 +167,7 @@ def main():
     print(f"PLOT_TIMING STEP script=plot_tonic_48h.py step=discovery elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
 
     # --- Stage 2a: Cache Reading & Assembly ---
-    continuous_time, sig_raw, uv_raw, deltaf_val = assemble_arrays(cache, roi)
+    continuous_time, sig_raw, uv_raw, deltaf_val = assemble_arrays(cache, roi, args)
     cache.close()
     
     print(f"PLOT_TIMING STEP script=plot_tonic_48h.py step=cache_read elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
