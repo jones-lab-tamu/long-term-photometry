@@ -3437,9 +3437,15 @@ class MainWindow(QMainWindow):
         for path in csv_paths[1:]:
             contracts.append(self._infer_npm_chunk_contract(path, cfg))
 
-        fs_tol = max(1e-6, base["fs_hz"] * 1e-4)
-        dur_tol = max(1e-6, base["chunk_duration_sec"] * 1e-4)
-        for idx, contract in enumerate(contracts[1:], start=1):
+        fs_vals = [float(c["fs_hz"]) for c in contracts]
+        dur_vals = [float(c["chunk_duration_sec"]) for c in contracts]
+        rep_fs = float(median(fs_vals))
+        rep_duration = float(median(dur_vals))
+        fs_tol = max(1e-6, rep_fs * 5e-3)
+        # NPM long runs are known to show per-file duration drift; enforce a
+        # bounded spread guard instead of exact equality.
+        dur_tol = max(1.0 / max(rep_fs, 1e-9), rep_duration * 0.10)
+        for idx, contract in enumerate(contracts):
             if contract["time_col"] != base["time_col"] or contract["time_axis"] != base["time_axis"]:
                 raise ValueError(
                     "Inconsistent NPM contract across files: "
@@ -3456,28 +3462,24 @@ class MainWindow(QMainWindow):
                     "Inconsistent NPM contract across files: "
                     f"header semantics mismatch at file {idx} ({contract['csv_path']})."
                 )
-            if not math.isclose(contract["fs_hz"], base["fs_hz"], rel_tol=0.0, abs_tol=fs_tol):
+            if not math.isclose(contract["fs_hz"], rep_fs, rel_tol=0.0, abs_tol=fs_tol):
                 raise ValueError(
                     "Inconsistent NPM contract across files: "
                     f"timing mismatch at file {idx} ({contract['csv_path']}). "
-                    f"Expected fs {base['fs_hz']:.9f}, got {contract['fs_hz']:.9f}."
+                    f"Representative fs {rep_fs:.9f}, got {contract['fs_hz']:.9f}. "
+                    f"Observed fs range [{min(fs_vals):.9f}, {max(fs_vals):.9f}]."
                 )
             if not math.isclose(
                 contract["chunk_duration_sec"],
-                base["chunk_duration_sec"],
+                rep_duration,
                 rel_tol=0.0,
                 abs_tol=dur_tol,
             ):
                 raise ValueError(
                     "Inconsistent NPM contract across files: "
                     f"chunk duration mismatch at file {idx} ({contract['csv_path']}). "
-                    f"Expected {base['chunk_duration_sec']:.9f}, got {contract['chunk_duration_sec']:.9f}."
-                )
-            if contract["sample_count"] != base["sample_count"]:
-                raise ValueError(
-                    "Inconsistent NPM contract across files: "
-                    f"sample_count mismatch at file {idx} ({contract['csv_path']}). "
-                    f"Expected {base['sample_count']}, got {contract['sample_count']}."
+                    f"Representative {rep_duration:.9f}, got {contract['chunk_duration_sec']:.9f}. "
+                    f"Observed duration range [{min(dur_vals):.9f}, {max(dur_vals):.9f}]."
                 )
 
         out = {
@@ -3485,8 +3487,8 @@ class MainWindow(QMainWindow):
             "npm_led_col": str(base["led_col"]),
             "npm_region_prefix": str(base["region_prefix"]),
             "npm_region_suffix": str(base["region_suffix"]),
-            "target_fs_hz": float(round(base["fs_hz"], 9)),
-            "chunk_duration_sec": float(round(base["chunk_duration_sec"], 9)),
+            "target_fs_hz": float(round(rep_fs, 9)),
+            "chunk_duration_sec": float(round(rep_duration, 9)),
         }
         if base["time_axis"] == "system_timestamp":
             out["npm_system_ts_col"] = str(base["time_col"])

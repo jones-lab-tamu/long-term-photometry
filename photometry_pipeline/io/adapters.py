@@ -420,7 +420,13 @@ def sort_npm_files(paths: List[str]) -> List[str]:
 def _create_canonical_names(n_rois: int) -> List[str]:
     return [f"Region{i}" for i in range(n_rois)]
 
-def _require_strict_check(t_relative: np.ndarray, time_sec: np.ndarray, target_fs_hz: float, context: str):
+def _require_strict_check(
+    t_relative: np.ndarray,
+    time_sec: np.ndarray,
+    target_fs_hz: float,
+    context: str,
+    coverage_tol_sec: Optional[float] = None,
+):
     """
     Strict Mode Checks:
     1. Monotonicity (Hard Fail)
@@ -440,12 +446,117 @@ def _require_strict_check(t_relative: np.ndarray, time_sec: np.ndarray, target_f
     raw_end = float(np.nanmax(t_relative))
     
     tol = 1.0 / target_fs_hz
+    if coverage_tol_sec is not None and np.isfinite(coverage_tol_sec) and coverage_tol_sec > 0.0:
+        tol = max(tol, float(coverage_tol_sec))
     
     if raw_start > (0.0 + tol):
         raise ValueError(f"{context}: raw_start {raw_start:.4f}s > 0.0s (Start Coverage Failure)")
         
     if raw_end < (grid_end - tol):
         raise ValueError(f"{context}: raw_end {raw_end:.4f}s < grid_end {grid_end:.4f}s (End Coverage Failure)")
+
+
+def _median_positive_dt_sec(t_relative: np.ndarray) -> Optional[float]:
+    """Return median positive timestep from a strictly increasing time vector."""
+    if t_relative.size < 2:
+        return None
+    diffs = np.diff(t_relative)
+    diffs = diffs[np.isfinite(diffs) & (diffs > 0.0)]
+    if diffs.size == 0:
+        return None
+    return float(np.median(diffs))
+
+
+def _resolve_npm_strict_grid(
+    t_uv_rel: np.ndarray, t_sig_rel: np.ndarray, config: Config
+) -> Tuple[np.ndarray, float, float]:
+    """
+    Build strict NPM target grid from actual common UV/SIG support.
+
+    Rationale:
+    - Vendor NPM chunks can be shorter than GUI nominal chunk_duration_sec.
+    - Strict admission should enforce full coverage over the usable overlap
+      window, not over an idealized endpoint outside channel support.
+    - We still reject malformed/truncated per-channel support by enforcing that
+      UV/SIG start and end supports do not diverge by more than one channel
+      cadence (or one target sample, whichever is larger).
+    """
+    t_uv_f = t_uv_rel[np.isfinite(t_uv_rel)]
+    t_sig_f = t_sig_rel[np.isfinite(t_sig_rel)]
+
+    if t_uv_f.size < 2 or t_sig_f.size < 2:
+        raise ValueError("NPM strict: Insufficient finite UV/SIG timestamps")
+
+    uv_start = float(np.nanmin(t_uv_f))
+    sig_start = float(np.nanmin(t_sig_f))
+    uv_end = float(np.nanmax(t_uv_f))
+    sig_end = float(np.nanmax(t_sig_f))
+
+    uv_dt = _median_positive_dt_sec(t_uv_f) or 0.0
+    sig_dt = _median_positive_dt_sec(t_sig_f) or 0.0
+    target_dt = 1.0 / float(config.target_fs_hz)
+    support_tol = max(target_dt, uv_dt, sig_dt)
+
+    start_gap = abs(uv_start - sig_start)
+    end_gap = abs(uv_end - sig_end)
+    if start_gap > support_tol:
+        raise ValueError(
+            "NPM strict: UV/SIG start support mismatch "
+            f"({start_gap:.4f}s > {support_tol:.4f}s)"
+        )
+    if end_gap > support_tol:
+        raise ValueError(
+            "NPM strict: UV/SIG end support mismatch "
+            f"({end_gap:.4f}s > {support_tol:.4f}s)"
+        )
+
+    overlap_start = max(uv_start, sig_start)
+    overlap_end = min(uv_end, sig_end)
+    overlap_duration = overlap_end - overlap_start
+    if overlap_duration <= 0.0:
+        raise ValueError(
+            "NPM strict: Empty UV/SIG overlap window "
+            f"(start={overlap_start:.4f}, end={overlap_end:.4f})"
+        )
+
+    # Per-channel inner support: interleaved NPM channels (UV/SIG) may
+    # not both cover the full overlap window at exact grid edges.  Clamp
+    # the grid to the *inner* support where BOTH channels have actual
+    # timestamps so np.interp never manufactures edge NaN.
+    # Filter to [overlap_start, overlap_end] to match the caller's mask.
+    fs = float(config.target_fs_hz)
+    uv_in_overlap = (t_uv_f >= overlap_start) & (t_uv_f <= overlap_end)
+    sig_in_overlap = (t_sig_f >= overlap_start) & (t_sig_f <= overlap_end)
+    t_uv_inner = t_uv_f[uv_in_overlap] - overlap_start
+    t_sig_inner = t_sig_f[sig_in_overlap] - overlap_start
+
+    if t_uv_inner.size < 2 or t_sig_inner.size < 2:
+        raise ValueError(
+            "NPM strict: Insufficient per-channel data within overlap window"
+        )
+
+    inner_start = max(float(t_uv_inner[0]), float(t_sig_inner[0]))
+    inner_end = min(float(t_uv_inner[-1]), float(t_sig_inner[-1]))
+
+    if inner_end <= inner_start:
+        raise ValueError(
+            f"NPM strict: Empty inner support "
+            f"(start={inner_start:.4f}, end={inner_end:.4f})"
+        )
+
+    first_sample = int(np.ceil(inner_start * fs))
+    last_sample = int(np.floor(inner_end * fs))
+    n_target = last_sample - first_sample + 1
+
+    if n_target < 2:
+        raise ValueError(
+            "NPM strict: Inner support too short for strict interpolation "
+            f"(inner_start={inner_start:.4f}s, inner_end={inner_end:.4f}s, "
+            f"fs={config.target_fs_hz})"
+        )
+
+    time_sec = np.arange(first_sample, last_sample + 1, dtype=float) / fs
+    return time_sec, overlap_start, support_tol
 
 
 def _resolve_strict_target_sample_count(
@@ -721,26 +832,32 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
         t_uv_rel = t_uv - t0
         t_sig_rel = t_sig - t0
         
-        # Grid Construction
-        n_target = int(np.round(config.chunk_duration_sec * config.target_fs_hz))
-        time_sec = np.arange(n_target) / config.target_fs_hz
+        # Build strict grid from actual common UV/SIG support window.
+        time_sec, overlap_start, support_tol = _resolve_npm_strict_grid(t_uv_rel, t_sig_rel, config)
+        n_target = time_sec.size
         grid_end = time_sec[-1]
+        t_uv_rel_use = t_uv_rel - overlap_start
+        t_sig_rel_use = t_sig_rel - overlap_start
         
         # Filter -> Check -> Interp
         # 1. Create strict-valid masks (No negative times, no far-future times)
-        tol = 1.0 / config.target_fs_hz
-        mask_uv_ok = np.isfinite(t_uv_rel) & (t_uv_rel >= 0.0) & (t_uv_rel <= grid_end + tol)
-        mask_sig_ok = np.isfinite(t_sig_rel) & (t_sig_rel >= 0.0) & (t_sig_rel <= grid_end + tol)
+        tol = support_tol * 2.0  # Allow enough bounding points for interpolation
+        mask_uv_ok = np.isfinite(t_uv_rel_use) & (t_uv_rel_use >= 0.0) & (t_uv_rel_use <= grid_end + tol)
+        mask_sig_ok = np.isfinite(t_sig_rel_use) & (t_sig_rel_use >= 0.0) & (t_sig_rel_use <= grid_end + tol)
         
-        t_uv_use = t_uv_rel[mask_uv_ok]
+        t_uv_use = t_uv_rel_use[mask_uv_ok]
         uv_use = uv_vals[mask_uv_ok, :]
         
-        t_sig_use = t_sig_rel[mask_sig_ok]
+        t_sig_use = t_sig_rel_use[mask_sig_ok]
         sig_use = sig_vals[mask_sig_ok, :]
         
         # 2. Strict Check on USED arrays
-        _require_strict_check(t_uv_use, time_sec, config.target_fs_hz, "NPM UV strict")
-        _require_strict_check(t_sig_use, time_sec, config.target_fs_hz, "NPM SIG strict")
+        _require_strict_check(
+            t_uv_use, time_sec, config.target_fs_hz, "NPM UV strict", coverage_tol_sec=support_tol
+        )
+        _require_strict_check(
+            t_sig_use, time_sec, config.target_fs_hz, "NPM SIG strict", coverage_tol_sec=support_tol
+        )
         
         # 3. Interpolate ONLY using filtered arrays
         uv_out = np.zeros((n_target, n_rois))
@@ -776,14 +893,29 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
         # Overlap uses validated finite starts
         t0 = max(t_uv_f[0], t_sig_f[0])
         
-        # Grid Construction
-        n_target = int(np.round(config.chunk_duration_sec * config.target_fs_hz))
+        # Grid Construction - clamp to actual usable support
+        # The idealized grid length is chunk_duration_sec * target_fs_hz, but the
+        # actual raw data may end earlier.  Using the idealized length produces
+        # trailing NaN via np.interp(right=np.nan) for any grid point past the
+        # last raw timestamp.  Clamp to the shared UV/SIG support so the
+        # resampled chunk contains only interpolatable samples.
+        n_target_ideal = int(np.round(config.chunk_duration_sec * config.target_fs_hz))
+        uv_max_rel = t_uv_f[-1] - t0
+        sig_max_rel = t_sig_f[-1] - t0
+        support_end = min(uv_max_rel, sig_max_rel)
+        if support_end <= 0.0:
+            raise ValueError(
+                f"NPM Permissive: No usable support after t0 alignment "
+                f"(uv_end={uv_max_rel:.4f}s, sig_end={sig_max_rel:.4f}s)"
+            )
+        n_target_support = int(np.floor(support_end * config.target_fs_hz)) + 1
+        n_target = min(n_target_ideal, n_target_support)
+        if n_target < 1:
+            raise ValueError(
+                f"NPM Permissive: Usable support too short for interpolation "
+                f"(support_end={support_end:.4f}s, n_target={n_target})"
+            )
         time_sec = np.arange(n_target) / config.target_fs_hz
-        
-        # Bounds logic (using finite support)
-        # Note: relative to t0
-        uv_min_t, uv_max_t = t_uv_f[0] - t0, t_uv_f[-1] - t0
-        sig_min_t, sig_max_t = t_sig_f[0] - t0, t_sig_f[-1] - t0
         
         # Interpolate
         uv_out = np.zeros((n_target, n_rois))

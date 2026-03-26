@@ -53,6 +53,18 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         self.assertTrue(bundle.check_continuity([0, 1, 2, 3], 1.0))
         self.assertFalse(bundle.check_continuity([0, 1, 4, 5], 1.0))
 
+    def test_duration_contract_accepts_vendor_like_shorter_admitted_chunks(self):
+        # Matches real NPM pattern: admitted durations below nominal 600s.
+        durations = [599.20, 594.54, 589.96, 585.17, 580.19]
+        median_s, tol_s = bundle._resolve_duration_contract(durations, nominal_duration_s=600.0)
+        self.assertAlmostEqual(median_s, float(np.median(durations)), places=6)
+        self.assertGreaterEqual(tol_s, 2.0)
+
+    def test_duration_contract_rejects_gross_profile_mismatch(self):
+        with self.assertRaises(RuntimeError) as cm:
+            bundle._resolve_duration_contract([120.0, 121.0, 122.0], nominal_duration_s=600.0)
+        self.assertIn("Duration profile mismatch", str(cm.exception))
+
     def test_build_day_slot_maps_raises_on_collision(self):
         cached_by_day = {
             0: [
@@ -293,6 +305,47 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
             bundle.main() # Should not raise
         self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_stacked_day_000.png')))
+
+    def test_stacked_emits_same_day_family_when_one_day_has_zero_occupied_traces(self):
+        t = np.arange(0, 600, 0.1)
+        zero_dff = np.zeros_like(t)
+        nan_dff = np.full_like(t, np.nan)
+
+        # Use fallback chunk-index timeline with sessions-per-hour=1:
+        # chunk ids 0..23 => day 0, chunk id 24 => day 1.
+        for cid in range(24):
+            self.create_synthetic_phasic_cache(cid=cid, include_dff=True, dff_data=zero_dff, time_data=t)
+        self.create_synthetic_phasic_cache(cid=24, include_dff=True, dff_data=nan_dff, time_data=t)
+
+        os.makedirs(self.features_dir, exist_ok=True)
+        pd.DataFrame(
+            [{'chunk_id': cid, 'roi': 'Region0', 'peak_count': 0, 'auc': 0.0} for cid in range(25)]
+        ).to_csv(os.path.join(self.features_dir, 'features.csv'), index=False)
+
+        test_args = [
+            'plot_phasic_dayplot_bundle.py',
+            '--analysis-out', self.analysis_out,
+            '--roi', 'Region0',
+            '--output-dir', self.output_dir,
+            '--sessions-per-hour', '1',
+        ]
+        with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
+            bundle.main()
+
+        def _days(prefix):
+            days = []
+            for name in os.listdir(self.output_dir):
+                if name.startswith(prefix) and name.endswith('.png'):
+                    days.append(int(name.rsplit('_', 1)[1].split('.')[0]))
+            return sorted(days)
+
+        dff_days = _days('phasic_dFF_day_')
+        sig_days = _days('phasic_sig_iso_day_')
+        stacked_days = _days('phasic_stacked_day_')
+
+        self.assertEqual(dff_days, sig_days)
+        self.assertEqual(sig_days, stacked_days)
+        self.assertIn(1, stacked_days)
 
     def test_dff_grid_mode_requires_features(self):
         # C. dFF-grid mode requires features.csv

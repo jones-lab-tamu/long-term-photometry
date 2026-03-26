@@ -92,8 +92,7 @@ class TestStrictCompliance(unittest.TestCase):
 
         with self.assertRaises(ValueError) as cm:
             load_chunk(path, 'npm', self.config, 0)
-        # Should be End Coverage Failure specifically (short overlap at end)
-        self.assertIn("End Coverage Failure", str(cm.exception))
+        self.assertIn("support mismatch", str(cm.exception))
 
     def test_npm_start_coverage_failure(self):
         # NPM data starts late
@@ -156,7 +155,65 @@ class TestStrictCompliance(unittest.TestCase):
         
         with self.assertRaises(ValueError) as cm:
             load_chunk(path, 'npm', self.config, 0)
-        self.assertIn("Start Coverage Failure", str(cm.exception))
+        self.assertIn("start support mismatch", str(cm.exception))
+
+    def test_npm_vendor_like_short_overlap_admitted_in_strict(self):
+        # Vendor-like interleaved acquisition with real support < nominal duration.
+        self.config.chunk_duration_sec = 10.0
+        self.config.target_fs_hz = 50.0
+        self.config.npm_system_ts_col = "Timestamp"
+        self.config.npm_led_col = "LedState"
+        self.config.npm_region_prefix = "Region"
+        self.config.npm_region_suffix = "G"
+        self.config.npm_time_axis = "system_timestamp"
+
+        t = np.arange(0.0, 9.30, 1.0 / 60.0)
+        led_cycle = np.array([7, 2, 1, 4], dtype=int)
+        led = np.resize(led_cycle, t.size)
+
+        df = pd.DataFrame({
+            "FrameCounter": np.arange(t.size),
+            "Timestamp": t,
+            "LedState": led,
+            "Region0G": np.random.randn(t.size),
+        })
+        path = os.path.join(self.test_dir, "npm_vendor_like_short_overlap.csv")
+        df.to_csv(path, index=False)
+
+        chunk = load_chunk(path, "npm", self.config, 0)
+        nominal_n = int(round(self.config.chunk_duration_sec * self.config.target_fs_hz))
+        self.assertGreater(chunk.time_sec.shape[0], 10)
+        self.assertLess(chunk.time_sec.shape[0], nominal_n)
+
+    def test_npm_strict_rejects_large_channel_end_mismatch(self):
+        self.config.chunk_duration_sec = 10.0
+        self.config.target_fs_hz = 50.0
+        self.config.npm_system_ts_col = "Timestamp"
+        self.config.npm_led_col = "LedState"
+        self.config.npm_region_prefix = "Region"
+        self.config.npm_region_suffix = "G"
+        self.config.npm_time_axis = "system_timestamp"
+
+        t = np.arange(0.0, 9.30, 1.0 / 60.0)
+        led_cycle = np.array([7, 2, 1, 4], dtype=int)
+        led = np.resize(led_cycle, t.size)
+
+        df = pd.DataFrame({
+            "FrameCounter": np.arange(t.size),
+            "Timestamp": t,
+            "LedState": led,
+            "Region0G": np.random.randn(t.size),
+        })
+
+        # Truncate UV tail only to force a malformed end-support mismatch.
+        keep = ~((df["LedState"] == 1) & (df["Timestamp"] > 8.0))
+        df = df.loc[keep].copy()
+        path = os.path.join(self.test_dir, "npm_uv_tail_truncated.csv")
+        df.to_csv(path, index=False)
+
+        with self.assertRaises(ValueError) as cm:
+            load_chunk(path, "npm", self.config, 0)
+        self.assertIn("end support mismatch", str(cm.exception))
 
     def test_regression_contract_and_robustness(self):
         self.config.chunk_duration_sec = 10.0

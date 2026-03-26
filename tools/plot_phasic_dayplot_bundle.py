@@ -168,6 +168,39 @@ def check_continuity(time_arr, expected_dt):
     diffs = np.diff(time_arr)
     return np.all(diffs < (2.0 * expected_dt))
 
+
+def _resolve_duration_contract(
+    durations_s: list[float], nominal_duration_s: float | None
+) -> tuple[float, float]:
+    """
+    Resolve duration validation contract from admitted cache traces.
+
+    Contract:
+    - primary reference is run-level median admitted chunk duration
+    - optional nominal duration is a broad sanity anchor (not a per-chunk hard endpoint)
+    - per-chunk outliers around the run median still fail
+    """
+    arr = np.asarray(durations_s, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        raise RuntimeError("CRITICAL: No finite chunk durations available for validation")
+    if np.any(arr <= 0):
+        raise RuntimeError("CRITICAL: Non-positive chunk duration detected")
+
+    median_duration_s = float(np.median(arr))
+    per_chunk_tol_s = max(2.0, 0.05 * median_duration_s)
+
+    if nominal_duration_s is not None and np.isfinite(nominal_duration_s) and nominal_duration_s > 0:
+        nominal_tol_s = max(2.0, 0.10 * float(nominal_duration_s))
+        if abs(median_duration_s - float(nominal_duration_s)) > nominal_tol_s:
+            raise RuntimeError(
+                "CRITICAL: Duration profile mismatch. "
+                f"Expected median ~{float(nominal_duration_s):.2f}s, got {median_duration_s:.2f}s "
+                f"(tol {nominal_tol_s:.2f}s)"
+            )
+
+    return median_duration_s, per_chunk_tol_s
+
 def verify_peak_count_strict(detection_trace, time_arr, fs, config, expected_count, roi, cid, src_file):
     if pd.isna(expected_count):
         print(f"CRITICAL: Expected count is NaN for Chunk {cid}.")
@@ -1063,6 +1096,7 @@ def main():
     # ------------------------------------------------------------------
     # 2. Verification
     # ------------------------------------------------------------------
+    chunk_durations_s = []
     for rec in raw_chunks:
         cr = rec['cr']
         x = rec['x']
@@ -1088,23 +1122,40 @@ def main():
             print(f"CRITICAL: Non-monotonic time in {cr.trace_path}")
             sys.exit(1)
         
-        duration = x[-1] - x[0]
-        if args.session_duration_s is not None:
-            expected = args.session_duration_s
-            tol = max(2.0, 0.005 * expected)
-            if abs(duration - expected) > tol:
-                print(f"CRITICAL: Duration mismatch. Expected ~{expected:.2f}s, got {duration:.2f}s")
-                sys.exit(1)
-        else:
-            if not (590 <= duration <= 610): # Strict fallback
-                print(f"CRITICAL: Invalid duration {duration:.2f}s (Expected ~600s)")
-                sys.exit(1)
+        duration = float(x[-1] - x[0])
+        rec['duration_s'] = duration
+        chunk_durations_s.append(duration)
 
         dt_median = np.median(np.diff(x))
         if not check_continuity(x, dt_median):
             print(f"CRITICAL: Discontinuity detected in {cr.trace_path}")
             sys.exit(1)
-            
+
+    nominal_duration_s = args.session_duration_s
+    if nominal_duration_s is None:
+        cfg_nominal = float(getattr(config, 'chunk_duration_sec', np.nan))
+        if np.isfinite(cfg_nominal) and cfg_nominal > 0:
+            nominal_duration_s = cfg_nominal
+    try:
+        duration_ref_s, duration_tol_s = _resolve_duration_contract(chunk_durations_s, nominal_duration_s)
+    except RuntimeError as e:
+        print(str(e))
+        sys.exit(1)
+
+    for rec in raw_chunks:
+        cr = rec['cr']
+        duration = float(rec.get('duration_s', np.nan))
+        if not np.isfinite(duration):
+            print(f"CRITICAL: Non-finite duration in chunk {cr.chunk_id}")
+            sys.exit(1)
+        if abs(duration - duration_ref_s) > duration_tol_s:
+            print(
+                "CRITICAL: Duration outlier. "
+                f"Chunk {cr.chunk_id} duration {duration:.2f}s vs run median {duration_ref_s:.2f}s "
+                f"(tol {duration_tol_s:.2f}s)"
+            )
+            sys.exit(1)
+             
         # Verify peaks
         if needs_peak_verification:
             feat_row = feat_map.get((cr.chunk_id, plot_roi))
@@ -1399,12 +1450,9 @@ def main():
                 if not slot_map:
                     continue
                 slot_traces = _build_stacked_slot_traces(slot_map, smoothed_data, sph)
-                occupied_traces = [tr for tr in slot_traces if tr is not None]
-                if not occupied_traces:
-                    continue
 
                 n_slots = len(slot_traces)
-                n_occupied = len(occupied_traces)
+                n_occupied = sum(1 for tr in slot_traces if tr is not None)
                 fig, ax = plt.subplots(figsize=(6, n_slots * 0.3 + 2))
 
                 step, _, _, y0, y1 = _compute_stacked_slot_layout(slot_traces)
@@ -1437,8 +1485,6 @@ def main():
                 if not slot_map:
                     continue
                 slot_traces = _build_stacked_slot_traces(slot_map, smoothed_data, sph)
-                if not any(tr is not None for tr in slot_traces):
-                    continue
 
                 out_path = os.path.join(args.output_dir, f"phasic_stacked_day_{d:03d}.png")
                 print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=plotting family=stacked_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)

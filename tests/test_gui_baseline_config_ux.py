@@ -4,6 +4,7 @@ import shutil
 import sys
 import csv
 from contextlib import contextmanager
+from statistics import median
 
 import pytest
 import yaml
@@ -715,6 +716,125 @@ def test_npm_contract_inference_rejects_inconsistent_multifile_timing(window, tm
     window._format_combo.setCurrentText("npm")
 
     with pytest.raises(ValueError, match="Inconsistent NPM contract across files: timing mismatch"):
+        window._build_run_spec(validate_only=True)
+
+
+def test_npm_contract_inference_accepts_duration_drift_with_representative_median(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_npm_duration_drift"
+    _write_vendor_style_npm_dataset(
+        dataset_root,
+        n_rois=2,
+        time_col="Timestamp",
+        filenames=["photometryData2025-03-05T15_37_44.csv"],
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+    )
+    _write_vendor_style_npm_dataset(
+        dataset_root,
+        n_rois=2,
+        time_col="Timestamp",
+        filenames=["photometryData2025-03-05T16_07_44.csv"],
+        fs_hz=20.0,
+        chunk_duration_sec=590.0,
+    )
+    _write_vendor_style_npm_dataset(
+        dataset_root,
+        n_rois=2,
+        time_col="Timestamp",
+        filenames=["photometryData2025-03-05T16_37_44.csv"],
+        fs_hz=20.0,
+        chunk_duration_sec=580.0,
+    )
+
+    stale_cfg = tmp_path / "stale_npm_duration_drift.yaml"
+    stale_cfg.write_text(
+        yaml.safe_dump(
+            {
+                "target_fs_hz": 50.0,
+                "chunk_duration_sec": 600.0,
+                "npm_time_axis": "system_timestamp",
+                "npm_system_ts_col": "SystemTimestamp",
+                "npm_computer_ts_col": "ComputerTimestamp",
+                "npm_led_col": "LedState",
+                "npm_region_prefix": "Region",
+                "npm_region_suffix": "G",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("npm")
+
+    spec = window._build_run_spec(validate_only=True)
+    cfg = window._active_baseline_config()
+    contracts = [
+        window._infer_npm_chunk_contract(path, cfg)
+        for path in window._discover_npm_csv_files(str(dataset_root))
+    ]
+    expected_fs = float(median([c["fs_hz"] for c in contracts]))
+    expected_duration = float(median([c["chunk_duration_sec"] for c in contracts]))
+
+    assert spec.data_contract_overrides["target_fs_hz"] == pytest.approx(expected_fs, abs=1e-6)
+    assert spec.data_contract_overrides["chunk_duration_sec"] == pytest.approx(
+        expected_duration,
+        abs=1e-6,
+    )
+
+    argv = window._build_argv(validate_only=True)
+    assert "--config" in argv
+
+
+def test_npm_contract_inference_rejects_incompatible_duration_spread(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_npm_incompatible_duration"
+    _write_vendor_style_npm_dataset(
+        dataset_root,
+        n_rois=2,
+        time_col="Timestamp",
+        filenames=["photometryData2025-03-05T15_37_44.csv"],
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+    )
+    _write_vendor_style_npm_dataset(
+        dataset_root,
+        n_rois=2,
+        time_col="Timestamp",
+        filenames=["photometryData2025-03-05T16_07_44.csv"],
+        fs_hz=20.0,
+        chunk_duration_sec=300.0,
+    )
+
+    stale_cfg = tmp_path / "stale_npm_incompatible_duration.yaml"
+    stale_cfg.write_text(
+        yaml.safe_dump(
+            {
+                "target_fs_hz": 50.0,
+                "chunk_duration_sec": 600.0,
+                "npm_time_axis": "system_timestamp",
+                "npm_system_ts_col": "SystemTimestamp",
+                "npm_computer_ts_col": "ComputerTimestamp",
+                "npm_led_col": "LedState",
+                "npm_region_prefix": "Region",
+                "npm_region_suffix": "G",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(stale_cfg))
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("npm")
+
+    with pytest.raises(ValueError, match="Inconsistent NPM contract across files: chunk duration mismatch"):
         window._build_run_spec(validate_only=True)
 
 
