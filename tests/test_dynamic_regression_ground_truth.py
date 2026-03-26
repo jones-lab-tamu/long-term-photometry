@@ -73,6 +73,12 @@ def test_dynamic_regression_recovers_ground_truth_strict():
     
     # 3. Run Dynamic Regression
     uv_fit, delta_f = regression.fit_chunk_dynamic(chunk, cfg, mode='phasic')
+    np.testing.assert_allclose(
+        delta_f[:, 0],
+        sig_raw - uv_fit[:, 0],
+        rtol=0.0,
+        atol=1e-12,
+    )
     
     # 4. Assertions
     

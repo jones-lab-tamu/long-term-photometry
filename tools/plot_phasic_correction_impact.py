@@ -6,7 +6,7 @@ Phasic Correction Impact Plotter
 Generates a 4-panel figure showing the impact of artifact correction for a specific diagnostic chunk.
 Panel 1: Raw Signal vs Raw Isosbestic (absolute)
 Panel 2: Baseline-centered Raw Signal vs Raw Isosbestic (common gain)
-Panel 3: Raw Signal vs Dynamic Iso Fit
+Panel 3: Raw Signal vs Rolling Dynamic Iso Fit
 Panel 4: Final dFF
 
 Usage:
@@ -16,7 +16,6 @@ Usage:
 import os
 import sys
 import argparse
-import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -61,7 +60,7 @@ def build_correction_impact_figure(t, sig, iso, fit, dff, roi, chunk_id):
     ax3.plot(t, fit, 'k', label='Iso Fit (Scaled)', lw=0.8, linestyle='--')
     ax3.legend(loc='upper right')
     ax3.set_ylabel("Raw Output (V)")
-    ax3.set_title("Dynamic Reference Fitting (Lasso/ElasticNet)")
+    ax3.set_title("Dynamic Reference Fitting (Rolling Local Regression)")
     ax3.grid(True, alpha=0.3)
 
     # 4. Final dFF (unchanged semantics)

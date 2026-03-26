@@ -1686,6 +1686,19 @@ def test_correction_tuning_control_population_and_defaults(window, tmp_path):
     assert window._correction_tuning_r_low_spin.value() == pytest.approx(0.11)
     assert window._correction_tuning_r_high_spin.value() == pytest.approx(0.91)
     assert window._correction_tuning_g_min_spin.value() == pytest.approx(0.22)
+    assert window._correction_tuning_lowpass_spin.isEnabled()
+    assert window._correction_tuning_window_spin.isEnabled()
+    assert window._correction_tuning_min_samples_spin.isEnabled()
+    for legacy_control in (
+        window._correction_tuning_step_spin,
+        window._correction_tuning_min_valid_windows_spin,
+        window._correction_tuning_r_low_spin,
+        window._correction_tuning_r_high_spin,
+        window._correction_tuning_g_min_spin,
+    ):
+        assert not legacy_control.isEnabled()
+        tip = legacy_control.toolTip().lower()
+        assert "legacy" in tip and "inactive" in tip
     labels = [
         lbl.text()
         for lbl in window._correction_tuning_controls_container.findChildren(
@@ -1823,12 +1836,7 @@ def test_correction_tuning_backend_wiring_and_result_refresh(window, tmp_path, m
     window._correction_tuning_baseline_pct_spin.setValue(13.5)
     window._correction_tuning_lowpass_spin.setValue(1.4)
     window._correction_tuning_window_spin.setValue(45.0)
-    window._correction_tuning_step_spin.setValue(8.0)
-    window._correction_tuning_min_valid_windows_spin.setValue(6)
     window._correction_tuning_min_samples_spin.setValue(21)
-    window._correction_tuning_r_low_spin.setValue(0.15)
-    window._correction_tuning_r_high_spin.setValue(0.85)
-    window._correction_tuning_g_min_spin.setValue(0.25)
 
     inspection_path = tmp_path / "correction_inspect.png"
     _write_png(inspection_path, width=900, height=420)

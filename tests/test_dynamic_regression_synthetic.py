@@ -64,6 +64,12 @@ def test_dynamic_regression_synthetic_recovery():
     
     # 7. Run Regression
     uv_fit, delta_f = regression.fit_chunk_dynamic(chunk, config, mode="phasic")
+    np.testing.assert_allclose(
+        delta_f[:, 0],
+        sig - uv_fit[:, 0],
+        rtol=0.0,
+        atol=1e-12,
+    )
     
     # 8. Assertions
     # 1) RMSE of artifact reconstruction

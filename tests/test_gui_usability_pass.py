@@ -204,6 +204,18 @@ def test_advanced_tooltips_present(window):
         assert label.toolTip().strip(), f"Missing tooltip on label {label_text}"
         assert control.toolTip().strip(), f"Missing tooltip on control for {label_text}"
 
+    legacy_controls = [
+        window._step_sec_edit,
+        window._min_valid_windows_spin,
+        window._r_low_edit,
+        window._r_high_edit,
+        window._g_min_edit,
+    ]
+    for control in legacy_controls:
+        assert not control.isEnabled()
+        tip = control.toolTip().lower()
+        assert "legacy" in tip and "inactive" in tip
+
     # ROI row-level affordances that are not form rows still need usable tooltips.
     assert window._discover_btn.toolTip().strip()
     assert window._roi_list.toolTip().strip()

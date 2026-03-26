@@ -71,6 +71,12 @@ def test_t3_regression_window_chunk_fallback(fake_chunk):
     assert np.all(np.isfinite(uv_fit))
     assert np.all(np.isfinite(delta_f))
     assert fake_chunk.metadata.get('window_fallback_global') is True
+    np.testing.assert_allclose(
+        delta_f[:, 0],
+        fake_chunk.sig_raw[:, 0] - uv_fit[:, 0],
+        rtol=0.0,
+        atol=1e-12,
+    )
 
 def test_t4_auc_baseline_behavior():
     time_s = np.arange(10) / 10.0

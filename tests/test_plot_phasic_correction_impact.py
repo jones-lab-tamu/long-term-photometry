@@ -40,7 +40,7 @@ def test_build_correction_impact_figure_has_four_panels_and_expected_semantics()
         # Panel 3/4: lower-panel semantics unchanged apart from vertical placement
         assert np.allclose(ax3.lines[0].get_ydata(), sig)
         assert np.allclose(ax3.lines[1].get_ydata(), fit)
-        assert ax3.get_title() == "Dynamic Reference Fitting (Lasso/ElasticNet)"
+        assert ax3.get_title() == "Dynamic Reference Fitting (Rolling Local Regression)"
         assert np.allclose(ax4.lines[0].get_ydata(), dff)
         assert ax4.get_title() == "Final Corrected Signal"
     finally:

@@ -1090,17 +1090,17 @@ class TestIsosbesticKnobs(unittest.TestCase):
             "min_valid_windows": 5, "r_low": 0.2, "r_high": 0.8,
             "g_min": 0.2, "min_samples_per_window": 1
         }
-        # Update valid arguments: 1 instead of 0
+        # Legacy knobs are preserved from defaults (inactive in rolling mode).
         overrides, err = parse_and_validate_isosbestic_knobs(
-            "60.0", "10.0", 5, "0.2", "0.8", "0.2", 1, defaults=defaults
+            "60.0", "999.0", 999, "0.99", "0.99", "999.0", 1, defaults=defaults
         )
         self.assertIsNone(err)
         self.assertEqual(overrides["window_sec"], 60.0)
-        self.assertEqual(overrides["step_sec"], 10.0)
-        self.assertEqual(overrides["min_valid_windows"], 5)
-        self.assertEqual(overrides["r_low"], 0.2)
-        self.assertEqual(overrides["r_high"], 0.8)
-        self.assertEqual(overrides["g_min"], 0.2)
+        self.assertEqual(overrides["step_sec"], defaults["step_sec"])
+        self.assertEqual(overrides["min_valid_windows"], defaults["min_valid_windows"])
+        self.assertEqual(overrides["r_low"], defaults["r_low"])
+        self.assertEqual(overrides["r_high"], defaults["r_high"])
+        self.assertEqual(overrides["g_min"], defaults["g_min"])
         self.assertEqual(overrides["min_samples_per_window"], 1)
 
     def test_validation_rules(self):
@@ -1114,34 +1114,28 @@ class TestIsosbesticKnobs(unittest.TestCase):
         # window_sec <= 0
         _, err = parse_and_validate_isosbestic_knobs("0", "10.0", 5, "0.2", "0.8", "0.2", 1, defaults=defaults)
         self.assertIn("Regression Window must be > 0", err)
-        
-        # step_sec <= 0
-        _, err = parse_and_validate_isosbestic_knobs("60.0", "0", 5, "0.2", "0.8", "0.2", 1, defaults=defaults)
-        self.assertIn("Regression Step must be > 0", err)
-
-        # step > window
-        _, err = parse_and_validate_isosbestic_knobs("10.0", "20.0", 5, "0.2", "0.8", "0.2", 1, defaults=defaults)
-        self.assertIn("cannot be greater than Regression Window", err)
-
-        # r_low > r_high
-        _, err = parse_and_validate_isosbestic_knobs("60.0", "10.0", 5, "0.8", "0.2", "0.2", 1, defaults=defaults)
-        self.assertIn("R-Low <= R-High", err)
-
-        # r_low outside [0,1]
-        _, err = parse_and_validate_isosbestic_knobs("60.0", "10.0", 5, "-0.1", "0.8", "0.2", 1, defaults=defaults)
-        self.assertIn("between 0 and 1", err)
-
-        # g_min < 0
-        _, err = parse_and_validate_isosbestic_knobs("60.0", "10.0", 5, "0.2", "0.8", "-0.1", 1, defaults=defaults)
-        self.assertIn("G-Min must be >= 0", err)
-
-        # min_valid_windows < 1
-        _, err = parse_and_validate_isosbestic_knobs("60.0", "10.0", 0, "0.2", "0.8", "0.2", 1, defaults=defaults)
-        self.assertIn("Min Valid Windows must be >= 1", err)
 
         # min_samples < 1
         _, err = parse_and_validate_isosbestic_knobs("60.0", "10.0", 5, "0.2", "0.8", "0.2", 0, defaults=defaults)
         self.assertIn("Min Samples per Window must be >= 1", err)
+
+        # Legacy knobs are ignored for active rolling-fit validation.
+        parsed, err = parse_and_validate_isosbestic_knobs(
+            "60.0",
+            "not-a-number",
+            0,
+            "not-a-number",
+            "not-a-number",
+            "not-a-number",
+            1,
+            defaults=defaults,
+        )
+        self.assertIsNone(err)
+        self.assertEqual(parsed["step_sec"], defaults["step_sec"])
+        self.assertEqual(parsed["min_valid_windows"], defaults["min_valid_windows"])
+        self.assertEqual(parsed["r_low"], defaults["r_low"])
+        self.assertEqual(parsed["r_high"], defaults["r_high"])
+        self.assertEqual(parsed["g_min"], defaults["g_min"])
 
     def test_isosbestic_gating_by_mode(self):
         from gui.main_window import is_isosbestic_active

@@ -122,9 +122,12 @@ def parse_and_validate_isosbestic_knobs(
     defaults: dict,
 ) -> tuple[dict | None, str | None]:
     """
-    Parses and validates the isosbestic advanced knobs.
+    Parses and validates isosbestic correction knobs for the active rolling-fit engine.
     Returns (dict_of_overrides, None) if valid.
     Returns (None, error_message) if invalid.
+
+    Legacy dynamic-fit knobs are retained in emitted overrides for compatibility
+    but are sourced from defaults and treated as inactive in the active engine.
     """
     ws_text = window_sec_str.strip()
     try:
@@ -133,45 +136,28 @@ def parse_and_validate_isosbestic_knobs(
             return None, "Regression Window must be > 0."
     except ValueError:
         return None, "Regression Window must be a number."
-
-    ss_text = step_sec_str.strip()
-    try:
-        ss = float(ss_text if ss_text else defaults["step_sec"])
-        if ss <= 0:
-            return None, "Regression Step must be > 0."
-    except ValueError:
-        return None, "Regression Step must be a number."
-
-    if ss > ws:
-        return None, "Regression Step cannot be greater than Regression Window."
-
-    try:
-        r_low_val = r_low_str.strip()
-        r_high_val = r_high_str.strip()
-        r_low = float(r_low_val if r_low_val else defaults["r_low"])
-        r_high = float(r_high_val if r_high_val else defaults["r_high"])
-        if not (0 <= r_low <= r_high <= 1):
-            return None, "R-Low and R-High must be between 0 and 1, and R-Low <= R-High."
-    except ValueError:
-        return None, "R-Low and R-High must be numbers."
-
-    try:
-        g_min_val = g_min_str.strip()
-        g_min = float(g_min_val if g_min_val else defaults["g_min"])
-        if g_min < 0:
-            return None, "G-Min must be >= 0."
-    except ValueError:
-        return None, "G-Min must be a number."
-
-    if min_valid_windows_val < 1:
-        return None, "Min Valid Windows must be >= 1."
     if min_samples_val < 1:
         return None, "Min Samples per Window must be >= 1."
+
+    # Legacy/inactive under rolling fit; preserve defaults for backward compatibility.
+    try:
+        ss = float(defaults["step_sec"])
+        r_low = float(defaults["r_low"])
+        r_high = float(defaults["r_high"])
+        g_min = float(defaults["g_min"])
+        min_valid_windows = int(defaults["min_valid_windows"])
+    except (KeyError, TypeError, ValueError):
+        cfg0 = Config()
+        ss = float(cfg0.step_sec)
+        r_low = float(cfg0.r_low)
+        r_high = float(cfg0.r_high)
+        g_min = float(cfg0.g_min)
+        min_valid_windows = int(cfg0.min_valid_windows)
 
     overrides = {
         "window_sec": ws,
         "step_sec": ss,
-        "min_valid_windows": min_valid_windows_val,
+        "min_valid_windows": min_valid_windows,
         "r_low": r_low,
         "r_high": r_high,
         "g_min": g_min,
@@ -1540,26 +1526,35 @@ class MainWindow(QMainWindow):
         self._correction_tuning_window_spin.setDecimals(6)
         self._correction_tuning_window_spin.setSingleStep(1.0)
         self._correction_tuning_window_spin.setToolTip(
-            "Length of each regression window used for isosbestic fitting."
+            "Active control: rolling local-regression window length used for isosbestic fitting."
         )
         form.addRow(_corr_row_label("Regression Window (s):"), self._correction_tuning_window_spin)
 
+        legacy_fit_note = QLabel(
+            "Legacy controls below are inactive under the rolling local-regression fit engine and are shown for compatibility only."
+        )
+        legacy_fit_note.setWordWrap(True)
+        legacy_fit_note.setStyleSheet("font-size: 11px; color: #666;")
+        form.addRow(legacy_fit_note)
+
+        legacy_fit_tip = (
+            "Legacy control from the previous step/gated dynamic-fit engine. "
+            "Inactive under the active rolling local-regression engine."
+        )
         self._correction_tuning_step_spin = QDoubleSpinBox()
         self._correction_tuning_step_spin.setMinimumWidth(140)
         self._correction_tuning_step_spin.setRange(0.000001, 1_000_000.0)
         self._correction_tuning_step_spin.setDecimals(6)
         self._correction_tuning_step_spin.setSingleStep(0.5)
-        self._correction_tuning_step_spin.setToolTip(
-            "Step between consecutive regression windows."
-        )
+        self._correction_tuning_step_spin.setToolTip(legacy_fit_tip)
+        self._correction_tuning_step_spin.setEnabled(False)
         form.addRow(_corr_row_label("Regression Step (s):"), self._correction_tuning_step_spin)
 
         self._correction_tuning_min_valid_windows_spin = QSpinBox()
         self._correction_tuning_min_valid_windows_spin.setMinimumWidth(120)
         self._correction_tuning_min_valid_windows_spin.setRange(1, 1_000_000)
-        self._correction_tuning_min_valid_windows_spin.setToolTip(
-            "Minimum accepted windows required before a session-level fit is trusted."
-        )
+        self._correction_tuning_min_valid_windows_spin.setToolTip(legacy_fit_tip)
+        self._correction_tuning_min_valid_windows_spin.setEnabled(False)
         form.addRow(
             _corr_row_label("Min Valid Windows:"),
             self._correction_tuning_min_valid_windows_spin,
@@ -1581,9 +1576,8 @@ class MainWindow(QMainWindow):
         self._correction_tuning_r_low_spin.setRange(0.0, 1.0)
         self._correction_tuning_r_low_spin.setDecimals(6)
         self._correction_tuning_r_low_spin.setSingleStep(0.01)
-        self._correction_tuning_r_low_spin.setToolTip(
-            "Lower correlation threshold used in slope trust weighting."
-        )
+        self._correction_tuning_r_low_spin.setToolTip(legacy_fit_tip)
+        self._correction_tuning_r_low_spin.setEnabled(False)
         form.addRow(_corr_row_label("R-Low Threshold:"), self._correction_tuning_r_low_spin)
 
         self._correction_tuning_r_high_spin = QDoubleSpinBox()
@@ -1591,9 +1585,8 @@ class MainWindow(QMainWindow):
         self._correction_tuning_r_high_spin.setRange(0.0, 1.0)
         self._correction_tuning_r_high_spin.setDecimals(6)
         self._correction_tuning_r_high_spin.setSingleStep(0.01)
-        self._correction_tuning_r_high_spin.setToolTip(
-            "Upper correlation threshold used in slope trust weighting."
-        )
+        self._correction_tuning_r_high_spin.setToolTip(legacy_fit_tip)
+        self._correction_tuning_r_high_spin.setEnabled(False)
         form.addRow(_corr_row_label("R-High Threshold:"), self._correction_tuning_r_high_spin)
 
         self._correction_tuning_g_min_spin = QDoubleSpinBox()
@@ -1601,9 +1594,8 @@ class MainWindow(QMainWindow):
         self._correction_tuning_g_min_spin.setRange(0.0, 1_000_000.0)
         self._correction_tuning_g_min_spin.setDecimals(6)
         self._correction_tuning_g_min_spin.setSingleStep(0.01)
-        self._correction_tuning_g_min_spin.setToolTip(
-            "Minimum gain floor used when aggregating trusted window slopes."
-        )
+        self._correction_tuning_g_min_spin.setToolTip(legacy_fit_tip)
+        self._correction_tuning_g_min_spin.setEnabled(False)
         form.addRow(_corr_row_label("G-Min Threshold:"), self._correction_tuning_g_min_spin)
         self._apply_form_row_tooltips(form)
 
@@ -5958,59 +5950,64 @@ class MainWindow(QMainWindow):
         iso_sampling_form = QFormLayout(iso_sampling)
         self._window_sec_edit = QLineEdit(str(self._default_cfg.window_sec))
         self._window_sec_edit.setToolTip(
-            "Length of each regression window (seconds) used for isosbestic fit estimation."
+            "Active control: rolling local-regression window length (seconds) used for isosbestic fit estimation."
         )
         self._window_sec_edit.textChanged.connect(self._on_config_changed)
         iso_sampling_form.addRow("Regression Window:", self._window_sec_edit)
-        self._step_sec_edit = QLineEdit(str(self._default_cfg.step_sec))
-        self._step_sec_edit.setToolTip(
-            "Step size between regression windows (seconds). Smaller values increase overlap."
+        legacy_fit_tip = (
+            "Legacy control from the previous step/gated dynamic-fit engine. "
+            "Inactive under the active rolling local-regression engine."
         )
+        self._step_sec_edit = QLineEdit(str(self._default_cfg.step_sec))
+        self._step_sec_edit.setToolTip(legacy_fit_tip)
         self._step_sec_edit.textChanged.connect(self._on_config_changed)
+        self._step_sec_edit.setEnabled(False)
         iso_sampling_form.addRow("Regression Step:", self._step_sec_edit)
         self._apply_form_row_tooltips(iso_sampling_form)
         iso_layout.addWidget(iso_sampling)
 
-        iso_accept = QGroupBox("Window Acceptance")
+        iso_accept = QGroupBox("Window Constraints (Rolling + Legacy)")
         iso_accept_form = QFormLayout(iso_accept)
+        legacy_fit_note = QLabel(
+            "Legacy controls below are inactive under the rolling local-regression fit engine and are shown for compatibility only."
+        )
+        legacy_fit_note.setWordWrap(True)
+        legacy_fit_note.setStyleSheet("font-size: 11px; color: #666;")
+        iso_accept_form.addRow(legacy_fit_note)
         self._min_valid_windows_spin = QSpinBox()
         self._min_valid_windows_spin.setRange(1, 1000)
         self._min_valid_windows_spin.setValue(self._default_cfg.min_valid_windows)
-        self._min_valid_windows_spin.setToolTip(
-            "Minimum accepted windows required before a session-level isosbestic fit is trusted."
-        )
+        self._min_valid_windows_spin.setToolTip(legacy_fit_tip)
         self._min_valid_windows_spin.valueChanged.connect(self._on_config_changed)
+        self._min_valid_windows_spin.setEnabled(False)
         iso_accept_form.addRow("Min Valid Windows:", self._min_valid_windows_spin)
         self._min_samples_per_window_spin = QSpinBox()
         self._min_samples_per_window_spin.setRange(1, 100000)
         self._min_samples_per_window_spin.setValue(max(1, self._default_cfg.min_samples_per_window))
         self._min_samples_per_window_spin.setToolTip(
-            "Minimum samples needed inside a window for that window to be considered valid."
+            "Active control: minimum samples required inside each rolling window."
         )
         self._min_samples_per_window_spin.valueChanged.connect(self._on_config_changed)
         iso_accept_form.addRow("Min Samples per Window:", self._min_samples_per_window_spin)
         self._apply_form_row_tooltips(iso_accept_form)
         iso_layout.addWidget(iso_accept)
 
-        iso_trust = QGroupBox("Correlation-Based Trust of Slope")
+        iso_trust = QGroupBox("Legacy Correlation Trust (Inactive)")
         iso_trust_form = QFormLayout(iso_trust)
         self._r_low_edit = QLineEdit(str(self._default_cfg.r_low))
-        self._r_low_edit.setToolTip(
-            "Lower correlation threshold for window-level slope trust."
-        )
+        self._r_low_edit.setToolTip(legacy_fit_tip)
         self._r_low_edit.textChanged.connect(self._on_config_changed)
+        self._r_low_edit.setEnabled(False)
         iso_trust_form.addRow("R-Low Threshold:", self._r_low_edit)
         self._r_high_edit = QLineEdit(str(self._default_cfg.r_high))
-        self._r_high_edit.setToolTip(
-            "Upper correlation threshold used in slope trust weighting."
-        )
+        self._r_high_edit.setToolTip(legacy_fit_tip)
         self._r_high_edit.textChanged.connect(self._on_config_changed)
+        self._r_high_edit.setEnabled(False)
         iso_trust_form.addRow("R-High Threshold:", self._r_high_edit)
         self._g_min_edit = QLineEdit(str(self._default_cfg.g_min))
-        self._g_min_edit.setToolTip(
-            "Minimum gain floor for trusted-slope aggregation across windows."
-        )
+        self._g_min_edit.setToolTip(legacy_fit_tip)
         self._g_min_edit.textChanged.connect(self._on_config_changed)
+        self._g_min_edit.setEnabled(False)
         iso_trust_form.addRow("G-Min Threshold:", self._g_min_edit)
         self._apply_form_row_tooltips(iso_trust_form)
         iso_layout.addWidget(iso_trust)

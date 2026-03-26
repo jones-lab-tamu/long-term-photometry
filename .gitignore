@@ -34,8 +34,9 @@ project_digest.txt
 .gemini/
 *.diff
 
-# Task C artifacts
+# Artifacts
 smoke_run_log*.txt
+artifacts/
 
 # Scratch
 scratch/

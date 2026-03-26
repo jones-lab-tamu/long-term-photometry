@@ -6,6 +6,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
+
+# Repo root bootstrap for direct script execution from tools/.
+_repo_root = str(Path(__file__).resolve().parents[1])
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 from photometry_pipeline.tuning.cache_correction_retune import (
     parse_key_value_overrides,
