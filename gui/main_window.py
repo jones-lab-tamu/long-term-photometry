@@ -1568,36 +1568,6 @@ class MainWindow(QMainWindow):
         )
         form.addRow(_corr_row_label("Regression Window (s):"), self._correction_tuning_window_spin)
 
-        legacy_fit_note = QLabel(
-            "Legacy controls below are inactive for all active dynamic-fit modes and are shown for compatibility only."
-        )
-        legacy_fit_note.setWordWrap(True)
-        legacy_fit_note.setStyleSheet("font-size: 11px; color: #666;")
-        form.addRow(legacy_fit_note)
-
-        legacy_fit_tip = (
-            "Legacy control from the previous step/gated dynamic-fit engine. "
-            "Inactive under the active rolling local-regression engine."
-        )
-        self._correction_tuning_step_spin = QDoubleSpinBox()
-        self._correction_tuning_step_spin.setMinimumWidth(140)
-        self._correction_tuning_step_spin.setRange(0.000001, 1_000_000.0)
-        self._correction_tuning_step_spin.setDecimals(6)
-        self._correction_tuning_step_spin.setSingleStep(0.5)
-        self._correction_tuning_step_spin.setToolTip(legacy_fit_tip)
-        self._correction_tuning_step_spin.setEnabled(False)
-        form.addRow(_corr_row_label("Regression Step (s):"), self._correction_tuning_step_spin)
-
-        self._correction_tuning_min_valid_windows_spin = QSpinBox()
-        self._correction_tuning_min_valid_windows_spin.setMinimumWidth(120)
-        self._correction_tuning_min_valid_windows_spin.setRange(1, 1_000_000)
-        self._correction_tuning_min_valid_windows_spin.setToolTip(legacy_fit_tip)
-        self._correction_tuning_min_valid_windows_spin.setEnabled(False)
-        form.addRow(
-            _corr_row_label("Min Valid Windows:"),
-            self._correction_tuning_min_valid_windows_spin,
-        )
-
         self._correction_tuning_min_samples_spin = QSpinBox()
         self._correction_tuning_min_samples_spin.setMinimumWidth(120)
         self._correction_tuning_min_samples_spin.setRange(1, 1_000_000)
@@ -1609,33 +1579,6 @@ class MainWindow(QMainWindow):
             _corr_row_label("Min Samples/Window:"),
             self._correction_tuning_min_samples_spin,
         )
-
-        self._correction_tuning_r_low_spin = QDoubleSpinBox()
-        self._correction_tuning_r_low_spin.setMinimumWidth(140)
-        self._correction_tuning_r_low_spin.setRange(0.0, 1.0)
-        self._correction_tuning_r_low_spin.setDecimals(6)
-        self._correction_tuning_r_low_spin.setSingleStep(0.01)
-        self._correction_tuning_r_low_spin.setToolTip(legacy_fit_tip)
-        self._correction_tuning_r_low_spin.setEnabled(False)
-        form.addRow(_corr_row_label("R-Low Threshold:"), self._correction_tuning_r_low_spin)
-
-        self._correction_tuning_r_high_spin = QDoubleSpinBox()
-        self._correction_tuning_r_high_spin.setMinimumWidth(140)
-        self._correction_tuning_r_high_spin.setRange(0.0, 1.0)
-        self._correction_tuning_r_high_spin.setDecimals(6)
-        self._correction_tuning_r_high_spin.setSingleStep(0.01)
-        self._correction_tuning_r_high_spin.setToolTip(legacy_fit_tip)
-        self._correction_tuning_r_high_spin.setEnabled(False)
-        form.addRow(_corr_row_label("R-High Threshold:"), self._correction_tuning_r_high_spin)
-
-        self._correction_tuning_g_min_spin = QDoubleSpinBox()
-        self._correction_tuning_g_min_spin.setMinimumWidth(140)
-        self._correction_tuning_g_min_spin.setRange(0.0, 1_000_000.0)
-        self._correction_tuning_g_min_spin.setDecimals(6)
-        self._correction_tuning_g_min_spin.setSingleStep(0.01)
-        self._correction_tuning_g_min_spin.setToolTip(legacy_fit_tip)
-        self._correction_tuning_g_min_spin.setEnabled(False)
-        form.addRow(_corr_row_label("G-Min Threshold:"), self._correction_tuning_g_min_spin)
         self._apply_form_row_tooltips(form)
         self._apply_correction_tuning_fit_mode_ui_state()
 
@@ -3011,12 +2954,7 @@ class MainWindow(QMainWindow):
         self._correction_tuning_baseline_pct_spin.setValue(float(cfg.baseline_percentile))
         self._correction_tuning_lowpass_spin.setValue(float(cfg.lowpass_hz))
         self._correction_tuning_window_spin.setValue(float(cfg.window_sec))
-        self._correction_tuning_step_spin.setValue(float(cfg.step_sec))
-        self._correction_tuning_min_valid_windows_spin.setValue(int(cfg.min_valid_windows))
         self._correction_tuning_min_samples_spin.setValue(int(cfg.min_samples_per_window))
-        self._correction_tuning_r_low_spin.setValue(float(cfg.r_low))
-        self._correction_tuning_r_high_spin.setValue(float(cfg.r_high))
-        self._correction_tuning_g_min_spin.setValue(float(cfg.g_min))
         self._apply_correction_tuning_fit_mode_ui_state()
 
     def _on_correction_tuning_roi_changed(self, _index: int) -> None:
@@ -4156,11 +4094,11 @@ class MainWindow(QMainWindow):
             if fit_mode == "rolling_local_regression":
                 overrides, _ = parse_and_validate_isosbestic_knobs(
                     self._window_sec_edit.text(),
-                    self._step_sec_edit.text(),
-                    self._min_valid_windows_spin.value(),
-                    self._r_low_edit.text(),
-                    self._r_high_edit.text(),
-                    self._g_min_edit.text(),
+                    "",
+                    int(self._default_cfg.min_valid_windows),
+                    "",
+                    "",
+                    "",
                     self._min_samples_per_window_spin.value(),
                     defaults=default_dict,
                 )
@@ -4387,11 +4325,11 @@ class MainWindow(QMainWindow):
                 }
                 _, err = parse_and_validate_isosbestic_knobs(
                     self._window_sec_edit.text(),
-                    self._step_sec_edit.text(),
-                    self._min_valid_windows_spin.value(),
-                    self._r_low_edit.text(),
-                    self._r_high_edit.text(),
-                    self._g_min_edit.text(),
+                    "",
+                    int(self._default_cfg.min_valid_windows),
+                    "",
+                    "",
+                    "",
                     self._min_samples_per_window_spin.value(),
                     defaults=default_dict,
                 )
@@ -6106,33 +6044,11 @@ class MainWindow(QMainWindow):
         )
         self._window_sec_edit.textChanged.connect(self._on_config_changed)
         iso_sampling_form.addRow("Regression Window:", self._window_sec_edit)
-        legacy_fit_tip = (
-            "Legacy control from the previous step/gated dynamic-fit engine. "
-            "Inactive for all active dynamic-fit modes."
-        )
-        self._step_sec_edit = QLineEdit(str(self._default_cfg.step_sec))
-        self._step_sec_edit.setToolTip(legacy_fit_tip)
-        self._step_sec_edit.textChanged.connect(self._on_config_changed)
-        self._step_sec_edit.setEnabled(False)
-        iso_sampling_form.addRow("Regression Step:", self._step_sec_edit)
         self._apply_form_row_tooltips(iso_sampling_form)
         iso_layout.addWidget(iso_sampling)
 
-        iso_accept = QGroupBox("Window Constraints (Rolling + Legacy)")
+        iso_accept = QGroupBox("Window Constraints")
         iso_accept_form = QFormLayout(iso_accept)
-        legacy_fit_note = QLabel(
-            "Legacy controls below are inactive under the rolling local-regression fit engine and are shown for compatibility only."
-        )
-        legacy_fit_note.setWordWrap(True)
-        legacy_fit_note.setStyleSheet("font-size: 11px; color: #666;")
-        iso_accept_form.addRow(legacy_fit_note)
-        self._min_valid_windows_spin = QSpinBox()
-        self._min_valid_windows_spin.setRange(1, 1000)
-        self._min_valid_windows_spin.setValue(self._default_cfg.min_valid_windows)
-        self._min_valid_windows_spin.setToolTip(legacy_fit_tip)
-        self._min_valid_windows_spin.valueChanged.connect(self._on_config_changed)
-        self._min_valid_windows_spin.setEnabled(False)
-        iso_accept_form.addRow("Min Valid Windows:", self._min_valid_windows_spin)
         self._min_samples_per_window_spin = QSpinBox()
         self._min_samples_per_window_spin.setRange(1, 100000)
         self._min_samples_per_window_spin.setValue(max(1, self._default_cfg.min_samples_per_window))
@@ -6144,26 +6060,6 @@ class MainWindow(QMainWindow):
         iso_accept_form.addRow("Min Samples per Window:", self._min_samples_per_window_spin)
         self._apply_form_row_tooltips(iso_accept_form)
         iso_layout.addWidget(iso_accept)
-
-        iso_trust = QGroupBox("Legacy Correlation Trust (Inactive)")
-        iso_trust_form = QFormLayout(iso_trust)
-        self._r_low_edit = QLineEdit(str(self._default_cfg.r_low))
-        self._r_low_edit.setToolTip(legacy_fit_tip)
-        self._r_low_edit.textChanged.connect(self._on_config_changed)
-        self._r_low_edit.setEnabled(False)
-        iso_trust_form.addRow("R-Low Threshold:", self._r_low_edit)
-        self._r_high_edit = QLineEdit(str(self._default_cfg.r_high))
-        self._r_high_edit.setToolTip(legacy_fit_tip)
-        self._r_high_edit.textChanged.connect(self._on_config_changed)
-        self._r_high_edit.setEnabled(False)
-        iso_trust_form.addRow("R-High Threshold:", self._r_high_edit)
-        self._g_min_edit = QLineEdit(str(self._default_cfg.g_min))
-        self._g_min_edit.setToolTip(legacy_fit_tip)
-        self._g_min_edit.textChanged.connect(self._on_config_changed)
-        self._g_min_edit.setEnabled(False)
-        iso_trust_form.addRow("G-Min Threshold:", self._g_min_edit)
-        self._apply_form_row_tooltips(iso_trust_form)
-        iso_layout.addWidget(iso_trust)
         content_layout.addWidget(self._adv_group)
 
         self._adv_prep_group = QGroupBox("Preprocessing")

@@ -15,7 +15,14 @@ def test_build_correction_impact_figure_has_four_panels_and_expected_semantics()
     dff = np.array([-0.02, 0.01, 0.03, 0.00], dtype=float)
 
     fig, axes = impact.build_correction_impact_figure(
-        t=t, sig=sig, iso=iso, fit=fit, dff=dff, roi="Region0", chunk_id=7
+        t=t,
+        sig=sig,
+        iso=iso,
+        fit=fit,
+        dff=dff,
+        roi="Region0",
+        chunk_id=7,
+        dynamic_fit_mode="rolling_local_regression",
     )
     try:
         assert len(axes) == 4
@@ -49,9 +56,38 @@ def test_build_correction_impact_figure_has_four_panels_and_expected_semantics()
         plt.close(fig)
 
 
+def test_build_correction_impact_figure_global_mode_title():
+    t = np.array([0.0, 1.0, 2.0], dtype=float)
+    sig = np.array([1.0, 2.0, 3.0], dtype=float)
+    iso = np.array([2.0, 2.5, 3.0], dtype=float)
+    fit = np.array([1.1, 1.9, 3.1], dtype=float)
+    dff = np.array([0.0, 0.1, -0.1], dtype=float)
+
+    fig, axes = impact.build_correction_impact_figure(
+        t=t,
+        sig=sig,
+        iso=iso,
+        fit=fit,
+        dff=dff,
+        roi="Region0",
+        chunk_id=1,
+        dynamic_fit_mode="global_linear_regression",
+    )
+    try:
+        assert axes[2].get_title() == "Dynamic Reference Fitting (Global Linear Regression)"
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
 def test_main_generates_png_with_four_panel_layout(tmp_path, monkeypatch):
     analysis_out = tmp_path / "analysis"
     analysis_out.mkdir(parents=True, exist_ok=True)
+    (analysis_out / "config_used.yaml").write_text(
+        "dynamic_fit_mode: global_linear_regression\n",
+        encoding="utf-8",
+    )
     # main() validates this file path before reader import/use.
     (analysis_out / "phasic_trace_cache.h5").write_bytes(b"placeholder")
     out_png = tmp_path / "phasic_correction_impact.png"
@@ -73,6 +109,14 @@ def test_main_generates_png_with_four_panel_layout(tmp_path, monkeypatch):
 
     monkeypatch.setattr(reader, "open_phasic_cache", _fake_open)
     monkeypatch.setattr(reader, "load_cache_chunk_fields", _fake_load)
+    captured = {}
+    orig_build = impact.build_correction_impact_figure
+
+    def _spy_build(*args, **kwargs):
+        captured["dynamic_fit_mode"] = kwargs.get("dynamic_fit_mode")
+        return orig_build(*args, **kwargs)
+
+    monkeypatch.setattr(impact, "build_correction_impact_figure", _spy_build)
     monkeypatch.setattr(
         impact.sys,
         "argv",
@@ -95,3 +139,59 @@ def test_main_generates_png_with_four_panel_layout(tmp_path, monkeypatch):
 
     assert out_png.exists()
     assert os.path.getsize(out_png) > 0
+    assert captured.get("dynamic_fit_mode") == "global_linear_regression"
+
+
+def test_main_defaults_to_rolling_mode_when_config_missing(tmp_path, monkeypatch):
+    analysis_out = tmp_path / "analysis_missing_cfg"
+    analysis_out.mkdir(parents=True, exist_ok=True)
+    (analysis_out / "phasic_trace_cache.h5").write_bytes(b"placeholder")
+    out_png = tmp_path / "phasic_correction_impact_fallback.png"
+
+    t = np.linspace(0.0, 1.0, 5, dtype=float)
+    sig = np.linspace(1.0, 2.0, 5, dtype=float)
+    iso = np.linspace(2.0, 3.0, 5, dtype=float)
+    fit = np.linspace(1.2, 2.2, 5, dtype=float)
+    dff = np.zeros(5, dtype=float)
+
+    @contextmanager
+    def _fake_open(_cache_path):
+        yield object()
+
+    def _fake_load(_cache, _roi, _chunk_id, _fields):
+        return t, sig, iso, fit, dff
+
+    import photometry_pipeline.io.hdf5_cache_reader as reader
+
+    monkeypatch.setattr(reader, "open_phasic_cache", _fake_open)
+    monkeypatch.setattr(reader, "load_cache_chunk_fields", _fake_load)
+
+    captured = {}
+    orig_build = impact.build_correction_impact_figure
+
+    def _spy_build(*args, **kwargs):
+        captured["dynamic_fit_mode"] = kwargs.get("dynamic_fit_mode")
+        return orig_build(*args, **kwargs)
+
+    monkeypatch.setattr(impact, "build_correction_impact_figure", _spy_build)
+    monkeypatch.setattr(
+        impact.sys,
+        "argv",
+        [
+            "plot_phasic_correction_impact.py",
+            "--analysis-out",
+            str(analysis_out),
+            "--roi",
+            "Region0",
+            "--chunk-id",
+            "0",
+            "--out",
+            str(out_png),
+            "--dpi",
+            "120",
+        ],
+    )
+
+    impact.main()
+    assert out_png.exists()
+    assert captured.get("dynamic_fit_mode") == "rolling_local_regression"

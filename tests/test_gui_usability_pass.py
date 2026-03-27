@@ -177,12 +177,7 @@ def test_advanced_tooltips_present(window):
     advanced_pairs = [
         ("Dynamic Fit Mode:", window._dynamic_fit_mode_combo),
         ("Regression Window:", window._window_sec_edit),
-        ("Regression Step:", window._step_sec_edit),
-        ("Min Valid Windows:", window._min_valid_windows_spin),
         ("Min Samples per Window:", window._min_samples_per_window_spin),
-        ("R-Low Threshold:", window._r_low_edit),
-        ("R-High Threshold:", window._r_high_edit),
-        ("G-Min Threshold:", window._g_min_edit),
         ("Lowpass Filter:", window._lowpass_hz_edit),
         ("Baseline Method:", window._baseline_method_combo),
         ("Baseline Percentile:", window._baseline_percentile_edit),
@@ -206,17 +201,15 @@ def test_advanced_tooltips_present(window):
         assert label.toolTip().strip(), f"Missing tooltip on label {label_text}"
         assert control.toolTip().strip(), f"Missing tooltip on control for {label_text}"
 
-    legacy_controls = [
-        window._step_sec_edit,
-        window._min_valid_windows_spin,
-        window._r_low_edit,
-        window._r_high_edit,
-        window._g_min_edit,
+    removed_legacy_labels = [
+        "Regression Step:",
+        "Min Valid Windows:",
+        "R-Low Threshold:",
+        "R-High Threshold:",
+        "G-Min Threshold:",
     ]
-    for control in legacy_controls:
-        assert not control.isEnabled()
-        tip = control.toolTip().lower()
-        assert "legacy" in tip and "inactive" in tip
+    for label_text in removed_legacy_labels:
+        assert _label(label_text) is None, f"Legacy label should be removed: {label_text}"
 
     # ROI row-level affordances that are not form rows still need usable tooltips.
     assert window._discover_btn.toolTip().strip()

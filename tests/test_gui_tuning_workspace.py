@@ -1681,25 +1681,18 @@ def test_correction_tuning_control_population_and_defaults(window, tmp_path):
     assert window._correction_tuning_baseline_pct_spin.value() == pytest.approx(17.5)
     assert window._correction_tuning_lowpass_spin.value() == pytest.approx(1.7)
     assert window._correction_tuning_window_spin.value() == pytest.approx(44.0)
-    assert window._correction_tuning_step_spin.value() == pytest.approx(7.0)
-    assert window._correction_tuning_min_valid_windows_spin.value() == 9
     assert window._correction_tuning_min_samples_spin.value() == 51
-    assert window._correction_tuning_r_low_spin.value() == pytest.approx(0.11)
-    assert window._correction_tuning_r_high_spin.value() == pytest.approx(0.91)
-    assert window._correction_tuning_g_min_spin.value() == pytest.approx(0.22)
     assert window._correction_tuning_lowpass_spin.isEnabled()
     assert window._correction_tuning_window_spin.isEnabled()
     assert window._correction_tuning_min_samples_spin.isEnabled()
-    for legacy_control in (
-        window._correction_tuning_step_spin,
-        window._correction_tuning_min_valid_windows_spin,
-        window._correction_tuning_r_low_spin,
-        window._correction_tuning_r_high_spin,
-        window._correction_tuning_g_min_spin,
+    for legacy_attr in (
+        "_correction_tuning_step_spin",
+        "_correction_tuning_min_valid_windows_spin",
+        "_correction_tuning_r_low_spin",
+        "_correction_tuning_r_high_spin",
+        "_correction_tuning_g_min_spin",
     ):
-        assert not legacy_control.isEnabled()
-        tip = legacy_control.toolTip().lower()
-        assert "legacy" in tip and "inactive" in tip
+        assert not hasattr(window, legacy_attr)
     labels = [
         lbl.text()
         for lbl in window._correction_tuning_controls_container.findChildren(
@@ -1708,6 +1701,11 @@ def test_correction_tuning_control_population_and_defaults(window, tmp_path):
     ]
     assert "Preview session:" in labels
     assert "Chunk (inspection):" not in labels
+    assert "Regression Step (s):" not in labels
+    assert "Min Valid Windows:" not in labels
+    assert "R-Low Threshold:" not in labels
+    assert "R-High Threshold:" not in labels
+    assert "G-Min Threshold:" not in labels
 
 
 def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(window, tmp_path):
@@ -1753,18 +1751,23 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
         ("Lowpass Filter (Hz):", window._correction_tuning_lowpass_spin),
         ("Dynamic Fit Mode:", window._correction_tuning_fit_mode_combo),
         ("Regression Window (s):", window._correction_tuning_window_spin),
-        ("Regression Step (s):", window._correction_tuning_step_spin),
-        ("Min Valid Windows:", window._correction_tuning_min_valid_windows_spin),
         ("Min Samples/Window:", window._correction_tuning_min_samples_spin),
-        ("R-Low Threshold:", window._correction_tuning_r_low_spin),
-        ("R-High Threshold:", window._correction_tuning_r_high_spin),
-        ("G-Min Threshold:", window._correction_tuning_g_min_spin),
     ]
     for label_text, control in correction_pairs:
         label = _label(window._correction_tuning_controls_container, label_text)
         assert label is not None, f"Missing correction label {label_text}"
         assert label.toolTip().strip(), f"Missing correction label tooltip {label_text}"
         assert control.toolTip().strip(), f"Missing correction control tooltip {label_text}"
+
+    removed_legacy_labels = [
+        "Regression Step (s):",
+        "Min Valid Windows:",
+        "R-Low Threshold:",
+        "R-High Threshold:",
+        "G-Min Threshold:",
+    ]
+    for label_text in removed_legacy_labels:
+        assert _label(window._correction_tuning_controls_container, label_text) is None
 
     assert window._tuning_disclosure_btn.toolTip().strip()
     assert window._correction_tuning_disclosure_btn.toolTip().strip()

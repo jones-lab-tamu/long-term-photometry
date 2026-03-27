@@ -6,7 +6,7 @@ Phasic Correction Impact Plotter
 Generates a 4-panel figure showing the impact of artifact correction for a specific diagnostic chunk.
 Panel 1: Raw Signal vs Raw Isosbestic (absolute)
 Panel 2: Baseline-centered Raw Signal vs Raw Isosbestic (common gain)
-Panel 3: Raw Signal vs Rolling Dynamic Iso Fit
+Panel 3: Raw Signal vs Selected Dynamic Iso Fit
 Panel 4: Final dFF
 
 Usage:
@@ -18,6 +18,7 @@ import sys
 import argparse
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 
 
 def parse_args():
@@ -30,7 +31,42 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_correction_impact_figure(t, sig, iso, fit, dff, roi, chunk_id):
+def _resolve_dynamic_fit_mode(analysis_out: str) -> str:
+    """
+    Resolve fit mode from the run config snapshot in analysis_out.
+    Fallback is rolling_local_regression when unavailable.
+    """
+    cfg_path = os.path.join(analysis_out, "config_used.yaml")
+    if not os.path.exists(cfg_path):
+        return "rolling_local_regression"
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        mode = str(data.get("dynamic_fit_mode", "rolling_local_regression")).strip()
+        if mode in {"rolling_local_regression", "global_linear_regression"}:
+            return mode
+    except Exception:
+        pass
+    return "rolling_local_regression"
+
+
+def _dynamic_fit_mode_label(mode_raw: str) -> str:
+    mode = str(mode_raw or "").strip()
+    if mode == "global_linear_regression":
+        return "Global Linear Regression"
+    return "Rolling Local Regression"
+
+
+def build_correction_impact_figure(
+    t,
+    sig,
+    iso,
+    fit,
+    dff,
+    roi,
+    chunk_id,
+    dynamic_fit_mode: str = "rolling_local_regression",
+):
     from photometry_pipeline.viz.display_prep import prepare_centered_common_gain
 
     sig_centered, iso_centered = prepare_centered_common_gain(sig, iso)
@@ -60,7 +96,9 @@ def build_correction_impact_figure(t, sig, iso, fit, dff, roi, chunk_id):
     ax3.plot(t, fit, 'k', label='Iso Fit (Scaled)', lw=0.8, linestyle='--')
     ax3.legend(loc='upper right')
     ax3.set_ylabel("Raw Output (V)")
-    ax3.set_title("Dynamic Reference Fitting (Rolling Local Regression)")
+    ax3.set_title(
+        f"Dynamic Reference Fitting ({_dynamic_fit_mode_label(dynamic_fit_mode)})"
+    )
     ax3.grid(True, alpha=0.3)
 
     # 4. Final dFF (unchanged semantics)
@@ -100,8 +138,17 @@ def main():
     # Normalize time
     t = t - t[0]
     
+    dynamic_fit_mode = _resolve_dynamic_fit_mode(args.analysis_out)
+
     fig, _axes = build_correction_impact_figure(
-        t=t, sig=sig, iso=iso, fit=fit, dff=dff, roi=args.roi, chunk_id=args.chunk_id
+        t=t,
+        sig=sig,
+        iso=iso,
+        fit=fit,
+        dff=dff,
+        roi=args.roi,
+        chunk_id=args.chunk_id,
+        dynamic_fit_mode=dynamic_fit_mode,
     )
     plt.tight_layout()
     fig.savefig(args.out, dpi=args.dpi)
