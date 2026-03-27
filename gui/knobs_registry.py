@@ -26,6 +26,7 @@ GUI_KNOBS_ADVANCED: Set[str] = {
     "baseline_percentile",
     "f0_min_value",
     # Dynammic Correction
+    "dynamic_fit_mode",
     "window_sec",
     "step_sec",
     "min_valid_windows",
@@ -131,6 +132,10 @@ KNOB_META: Dict[str, dict] = {
     "window_sec": {
         "label": "Regression Window (sec)",
         "help": "Sliding window size for regression analysis.",
+    },
+    "dynamic_fit_mode": {
+        "label": "Dynamic Fit Mode",
+        "help": "Isosbestic fit engine selector: rolling local regression (recommended) or global linear baseline.",
     },
     "step_sec": {
         "label": "Regression Step (sec)",

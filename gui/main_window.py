@@ -195,8 +195,13 @@ _KNOWN_ALLOWED_VALUES = {
     "peak_threshold_method": ["mean_std", "percentile", "median_mad", "absolute"],
     "event_auc_baseline": ["zero", "median"],
     "peak_pre_filter": ["none", "lowpass"],
+    "dynamic_fit_mode": ["rolling_local_regression", "global_linear_regression"],
 }
 _RETUNE_PEAK_PRE_FILTER_OPTIONS = ["none", "smooth"]
+_DYNAMIC_FIT_MODE_LABELS = {
+    "rolling_local_regression": "Rolling local regression (Recommended)",
+    "global_linear_regression": "Global linear regression (Baseline)",
+}
 
 def _get_allowed_from_config_field(field_name: str) -> list[str]:
     """
@@ -252,6 +257,15 @@ def get_allowed_event_auc_baselines_from_config() -> list[str]:
 
 def get_allowed_peak_pre_filters_from_config() -> list[str]:
     return _get_allowed_from_config_field("peak_pre_filter")
+
+
+def get_allowed_dynamic_fit_modes_from_config() -> list[str]:
+    return _get_allowed_from_config_field("dynamic_fit_mode")
+
+
+def dynamic_fit_mode_label(mode_raw: str) -> str:
+    mode = str(mode_raw or "").strip()
+    return _DYNAMIC_FIT_MODE_LABELS.get(mode, mode or "rolling_local_regression")
 
 
 def get_retune_peak_pre_filters() -> list[str]:
@@ -1520,18 +1534,42 @@ class MainWindow(QMainWindow):
         )
         form.addRow(_corr_row_label("Lowpass Filter (Hz):"), self._correction_tuning_lowpass_spin)
 
+        self._correction_tuning_fit_mode_combo = QComboBox()
+        self._correction_tuning_fit_mode_combo.setMinimumWidth(260)
+        self._correction_tuning_fit_mode_combo.setToolTip(
+            "Select correction fit engine. Rolling local regression is the recommended production mode. "
+            "Global linear regression is a baseline/comparison mode."
+        )
+        corr_allowed_fit_modes = get_allowed_dynamic_fit_modes_from_config()
+        corr_ordered_fit_modes = [
+            m for m in ("rolling_local_regression", "global_linear_regression") if m in corr_allowed_fit_modes
+        ]
+        corr_ordered_fit_modes.extend([m for m in corr_allowed_fit_modes if m not in corr_ordered_fit_modes])
+        for mode_name in corr_ordered_fit_modes:
+            self._correction_tuning_fit_mode_combo.addItem(dynamic_fit_mode_label(mode_name), mode_name)
+        self._correction_tuning_fit_mode_combo.currentIndexChanged.connect(
+            self._on_correction_tuning_fit_mode_changed
+        )
+        form.addRow(_corr_row_label("Dynamic Fit Mode:"), self._correction_tuning_fit_mode_combo)
+
+        self._correction_tuning_fit_mode_note = QLabel("")
+        self._correction_tuning_fit_mode_note.setWordWrap(True)
+        self._correction_tuning_fit_mode_note.setStyleSheet("font-size: 11px; color: #666;")
+        form.addRow(self._correction_tuning_fit_mode_note)
+
         self._correction_tuning_window_spin = QDoubleSpinBox()
         self._correction_tuning_window_spin.setMinimumWidth(140)
         self._correction_tuning_window_spin.setRange(0.000001, 1_000_000.0)
         self._correction_tuning_window_spin.setDecimals(6)
         self._correction_tuning_window_spin.setSingleStep(1.0)
         self._correction_tuning_window_spin.setToolTip(
-            "Active control: rolling local-regression window length used for isosbestic fitting."
+            "Active only in rolling local regression mode. "
+            "Inactive in global linear regression mode."
         )
         form.addRow(_corr_row_label("Regression Window (s):"), self._correction_tuning_window_spin)
 
         legacy_fit_note = QLabel(
-            "Legacy controls below are inactive under the rolling local-regression fit engine and are shown for compatibility only."
+            "Legacy controls below are inactive for all active dynamic-fit modes and are shown for compatibility only."
         )
         legacy_fit_note.setWordWrap(True)
         legacy_fit_note.setStyleSheet("font-size: 11px; color: #666;")
@@ -1564,7 +1602,8 @@ class MainWindow(QMainWindow):
         self._correction_tuning_min_samples_spin.setMinimumWidth(120)
         self._correction_tuning_min_samples_spin.setRange(1, 1_000_000)
         self._correction_tuning_min_samples_spin.setToolTip(
-            "Minimum number of samples required inside a regression window."
+            "Active only in rolling local regression mode. "
+            "Inactive in global linear regression mode."
         )
         form.addRow(
             _corr_row_label("Min Samples/Window:"),
@@ -1598,6 +1637,7 @@ class MainWindow(QMainWindow):
         self._correction_tuning_g_min_spin.setEnabled(False)
         form.addRow(_corr_row_label("G-Min Threshold:"), self._correction_tuning_g_min_spin)
         self._apply_form_row_tooltips(form)
+        self._apply_correction_tuning_fit_mode_ui_state()
 
         btn_row = QHBoxLayout()
         self._run_correction_tuning_btn = QPushButton("Run Correction Retune")
@@ -2964,6 +3004,10 @@ class MainWindow(QMainWindow):
         method = str(cfg.baseline_method)
         if self._correction_tuning_baseline_method_combo.findText(method) >= 0:
             self._correction_tuning_baseline_method_combo.setCurrentText(method)
+        fit_mode = str(getattr(cfg, "dynamic_fit_mode", "rolling_local_regression"))
+        idx_fit = self._correction_tuning_fit_mode_combo.findData(fit_mode)
+        if idx_fit >= 0:
+            self._correction_tuning_fit_mode_combo.setCurrentIndex(idx_fit)
         self._correction_tuning_baseline_pct_spin.setValue(float(cfg.baseline_percentile))
         self._correction_tuning_lowpass_spin.setValue(float(cfg.lowpass_hz))
         self._correction_tuning_window_spin.setValue(float(cfg.window_sec))
@@ -2973,24 +3017,24 @@ class MainWindow(QMainWindow):
         self._correction_tuning_r_low_spin.setValue(float(cfg.r_low))
         self._correction_tuning_r_high_spin.setValue(float(cfg.r_high))
         self._correction_tuning_g_min_spin.setValue(float(cfg.g_min))
+        self._apply_correction_tuning_fit_mode_ui_state()
 
     def _on_correction_tuning_roi_changed(self, _index: int) -> None:
         roi = self._correction_tuning_roi_combo.currentText().strip()
         self._populate_correction_tuning_chunk_choices(roi)
 
     def _collect_correction_tuning_overrides(self) -> dict:
-        return {
+        fit_mode = self._selected_correction_tuning_fit_mode()
+        overrides = {
+            "dynamic_fit_mode": fit_mode,
             "baseline_method": self._correction_tuning_baseline_method_combo.currentText().strip(),
             "baseline_percentile": float(self._correction_tuning_baseline_pct_spin.value()),
             "lowpass_hz": float(self._correction_tuning_lowpass_spin.value()),
-            "window_sec": float(self._correction_tuning_window_spin.value()),
-            "step_sec": float(self._correction_tuning_step_spin.value()),
-            "min_valid_windows": int(self._correction_tuning_min_valid_windows_spin.value()),
-            "min_samples_per_window": int(self._correction_tuning_min_samples_spin.value()),
-            "r_low": float(self._correction_tuning_r_low_spin.value()),
-            "r_high": float(self._correction_tuning_r_high_spin.value()),
-            "g_min": float(self._correction_tuning_g_min_spin.value()),
         }
+        if fit_mode == "rolling_local_regression":
+            overrides["window_sec"] = float(self._correction_tuning_window_spin.value())
+            overrides["min_samples_per_window"] = int(self._correction_tuning_min_samples_spin.value())
+        return overrides
 
     def _on_run_correction_tuning(self) -> None:
         if not self._correction_tuning_workspace_available:
@@ -3062,6 +3106,7 @@ class MainWindow(QMainWindow):
 
         lines = [
             f"ROI: {result.get('selected_roi', roi)}",
+            f"Dynamic fit mode: {dynamic_fit_mode_label(overrides.get('dynamic_fit_mode', 'rolling_local_regression'))}",
             "Recomputed across: all available sessions for this ROI",
             f"Preview session: {result.get('inspection_chunk_id', chunk_id)}",
             f"Retune output: {result.get('retune_dir', '(unknown)')}",
@@ -4094,6 +4139,10 @@ class MainWindow(QMainWindow):
         # --- Config Overrides ---
         config_overrides = {}
         if is_isosbestic_active(mode_text):
+            fit_mode = self._selected_dynamic_fit_mode()
+            if fit_mode != str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression")):
+                config_overrides["dynamic_fit_mode"] = fit_mode
+
             default_dict = {
                 "window_sec": self._default_cfg.window_sec,
                 "step_sec": self._default_cfg.step_sec,
@@ -4104,19 +4153,20 @@ class MainWindow(QMainWindow):
                 # Enforce dynamic minimum mapping matching GUI constraint default
                 "min_samples_per_window": max(1, self._default_cfg.min_samples_per_window),
             }
-            overrides, _ = parse_and_validate_isosbestic_knobs(
-                self._window_sec_edit.text(),
-                self._step_sec_edit.text(),
-                self._min_valid_windows_spin.value(),
-                self._r_low_edit.text(),
-                self._r_high_edit.text(),
-                self._g_min_edit.text(),
-                self._min_samples_per_window_spin.value(),
-                defaults=default_dict,
-            )
-            if overrides is not None:
-                changed_overrides = compute_isosbestic_overrides_user_changed(overrides, default_dict)
-                config_overrides.update(changed_overrides)
+            if fit_mode == "rolling_local_regression":
+                overrides, _ = parse_and_validate_isosbestic_knobs(
+                    self._window_sec_edit.text(),
+                    self._step_sec_edit.text(),
+                    self._min_valid_windows_spin.value(),
+                    self._r_low_edit.text(),
+                    self._r_high_edit.text(),
+                    self._g_min_edit.text(),
+                    self._min_samples_per_window_spin.value(),
+                    defaults=default_dict,
+                )
+                if overrides is not None:
+                    changed_overrides = compute_isosbestic_overrides_user_changed(overrides, default_dict)
+                    config_overrides.update(changed_overrides)
 
         # Preprocessing + Baseline overrides
         default_prep_dict = {
@@ -4324,28 +4374,29 @@ class MainWindow(QMainWindow):
             return f"Invalid Format: '{fmt}'. Must be one of {FORMAT_CHOICES}."
 
         if is_isosbestic_active(self._mode_combo.currentText()):
-            default_dict = {
-                "window_sec": self._default_cfg.window_sec,
-                "step_sec": self._default_cfg.step_sec,
-                "min_valid_windows": self._default_cfg.min_valid_windows,
-                "r_low": self._default_cfg.r_low,
-                "r_high": self._default_cfg.r_high,
-                "g_min": self._default_cfg.g_min,
-                # Enforce dynamic minimum mapping matching GUI constraint default
-                "min_samples_per_window": max(1, self._default_cfg.min_samples_per_window),
-            }
-            _, err = parse_and_validate_isosbestic_knobs(
-                self._window_sec_edit.text(),
-                self._step_sec_edit.text(),
-                self._min_valid_windows_spin.value(),
-                self._r_low_edit.text(),
-                self._r_high_edit.text(),
-                self._g_min_edit.text(),
-                self._min_samples_per_window_spin.value(),
-                defaults=default_dict,
-            )
-            if err:
-                return err
+            if self._selected_dynamic_fit_mode() == "rolling_local_regression":
+                default_dict = {
+                    "window_sec": self._default_cfg.window_sec,
+                    "step_sec": self._default_cfg.step_sec,
+                    "min_valid_windows": self._default_cfg.min_valid_windows,
+                    "r_low": self._default_cfg.r_low,
+                    "r_high": self._default_cfg.r_high,
+                    "g_min": self._default_cfg.g_min,
+                    # Enforce dynamic minimum mapping matching GUI constraint default
+                    "min_samples_per_window": max(1, self._default_cfg.min_samples_per_window),
+                }
+                _, err = parse_and_validate_isosbestic_knobs(
+                    self._window_sec_edit.text(),
+                    self._step_sec_edit.text(),
+                    self._min_valid_windows_spin.value(),
+                    self._r_low_edit.text(),
+                    self._r_high_edit.text(),
+                    self._g_min_edit.text(),
+                    self._min_samples_per_window_spin.value(),
+                    defaults=default_dict,
+                )
+                if err:
+                    return err
 
         # Preprocessing + Baseline validation
         default_prep_dict = {
@@ -5213,6 +5264,15 @@ class MainWindow(QMainWindow):
         anchor_clock = self._settings.value("fixed_daily_anchor_clock", "07:00", str).strip()
         self._fixed_daily_anchor_time_edit.setText(anchor_clock or "07:00")
         self._on_timeline_anchor_mode_changed()
+        fit_mode = self._settings.value(
+            "dynamic_fit_mode",
+            str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression")),
+            str,
+        ).strip()
+        idx_fit = self._dynamic_fit_mode_combo.findData(fit_mode)
+        if idx_fit >= 0:
+            self._dynamic_fit_mode_combo.setCurrentIndex(idx_fit)
+        self._on_dynamic_fit_mode_changed()
 
         sig_iso_render_mode = self._settings.value("sig_iso_render_mode", "qc", str)
         if self._sig_iso_render_mode_combo.findText(sig_iso_render_mode) >= 0:
@@ -5253,6 +5313,7 @@ class MainWindow(QMainWindow):
         self._settings.setValue("plotting_mode", self._plotting_mode_combo.currentText())
         self._settings.setValue("timeline_anchor_mode", self._timeline_anchor_mode_value())
         self._settings.setValue("fixed_daily_anchor_clock", self._fixed_daily_anchor_time_edit.text().strip())
+        self._settings.setValue("dynamic_fit_mode", self._selected_dynamic_fit_mode())
         self._settings.setValue("sig_iso_render_mode", self._sig_iso_render_mode_combo.currentText())
         self._settings.setValue("dff_render_mode", self._dff_render_mode_combo.currentText())
         self._settings.setValue("stacked_render_mode", self._stacked_render_mode_combo.currentText())
@@ -5350,6 +5411,62 @@ class MainWindow(QMainWindow):
         session_label = self._rep_session_combo.currentText().strip() or "?"
         return f"Session index {session_idx} ({session_label})"
 
+    def _selected_dynamic_fit_mode(self) -> str:
+        combo = getattr(self, "_dynamic_fit_mode_combo", None)
+        if combo is not None:
+            data = combo.currentData()
+            if data:
+                return str(data)
+        return str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+
+    def _selected_correction_tuning_fit_mode(self) -> str:
+        combo = getattr(self, "_correction_tuning_fit_mode_combo", None)
+        if combo is not None:
+            data = combo.currentData()
+            if data:
+                return str(data)
+        return str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+
+    def _on_dynamic_fit_mode_changed(self) -> None:
+        self._apply_dynamic_fit_mode_ui_state()
+
+    def _apply_dynamic_fit_mode_ui_state(self) -> None:
+        fit_mode = self._selected_dynamic_fit_mode()
+        rolling = fit_mode == "rolling_local_regression"
+        self._window_sec_edit.setEnabled(rolling)
+        self._min_samples_per_window_spin.setEnabled(rolling)
+        if rolling:
+            msg = (
+                "Rolling local regression is active (recommended). "
+                "Regression window and min samples per window are active."
+            )
+        else:
+            msg = (
+                "Global linear regression is active (baseline/comparison). "
+                "Regression window and min samples per window are inactive."
+            )
+        self._dynamic_fit_mode_note.setText(msg)
+
+    def _on_correction_tuning_fit_mode_changed(self) -> None:
+        self._apply_correction_tuning_fit_mode_ui_state()
+
+    def _apply_correction_tuning_fit_mode_ui_state(self) -> None:
+        fit_mode = self._selected_correction_tuning_fit_mode()
+        rolling = fit_mode == "rolling_local_regression"
+        self._correction_tuning_window_spin.setEnabled(rolling)
+        self._correction_tuning_min_samples_spin.setEnabled(rolling)
+        if rolling:
+            msg = (
+                "Rolling local regression is active (recommended). "
+                "Regression window and min samples per window are active."
+            )
+        else:
+            msg = (
+                "Global linear regression is active (baseline/comparison). "
+                "Regression window and min samples per window are inactive."
+            )
+        self._correction_tuning_fit_mode_note.setText(msg)
+
     def _refresh_effective_run_summary(self) -> None:
         """Refresh compact pre-run intent summary from current GUI state."""
         mode_text = self._mode_combo.currentText()
@@ -5382,6 +5499,11 @@ class MainWindow(QMainWindow):
         summary_lines = [
             f"Mode: {mode_text}",
             f"Analysis: {analysis_scope}",
+            (
+                f"Dynamic Fit Mode: {dynamic_fit_mode_label(self._selected_dynamic_fit_mode())}"
+                if phasic_active
+                else "Dynamic Fit Mode: (inactive in tonic mode)"
+            ),
             f"Baseline Config Source: {self._active_config_source_summary()}",
             f"Preview: {preview_text}",
             f"Plotting Mode: {render_text}",
@@ -5396,6 +5518,9 @@ class MainWindow(QMainWindow):
         """Enable/disable controls that are irrelevant in current mode/context."""
         mode_text = self._mode_combo.currentText()
         phasic_active = is_isosbestic_active(mode_text)
+        self._apply_dynamic_fit_mode_ui_state()
+        if hasattr(self, "_dynamic_fit_mode_combo"):
+            self._dynamic_fit_mode_combo.setEnabled(phasic_active)
 
         # Phasic-only controls: render family selectors + event/features group.
         self._plotting_mode_combo.setEnabled(phasic_active)
@@ -5948,15 +6073,42 @@ class MainWindow(QMainWindow):
 
         iso_sampling = QGroupBox("Sampling Geometry")
         iso_sampling_form = QFormLayout(iso_sampling)
+        self._dynamic_fit_mode_combo = QComboBox()
+        self._dynamic_fit_mode_combo.setMinimumWidth(260)
+        self._dynamic_fit_mode_combo.setToolTip(
+            "Select isosbestic fit engine. Rolling local regression is the recommended production mode. "
+            "Global linear regression is a baseline/comparison mode."
+        )
+        allowed_fit_modes = get_allowed_dynamic_fit_modes_from_config()
+        ordered_fit_modes = [m for m in ("rolling_local_regression", "global_linear_regression") if m in allowed_fit_modes]
+        ordered_fit_modes.extend([m for m in allowed_fit_modes if m not in ordered_fit_modes])
+        for mode_name in ordered_fit_modes:
+            self._dynamic_fit_mode_combo.addItem(dynamic_fit_mode_label(mode_name), mode_name)
+        default_fit_mode = str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+        idx_mode = self._dynamic_fit_mode_combo.findData(default_fit_mode)
+        if idx_mode < 0 and self._dynamic_fit_mode_combo.count() > 0:
+            idx_mode = 0
+        if idx_mode >= 0:
+            self._dynamic_fit_mode_combo.setCurrentIndex(idx_mode)
+        self._dynamic_fit_mode_combo.currentIndexChanged.connect(self._on_dynamic_fit_mode_changed)
+        self._dynamic_fit_mode_combo.currentIndexChanged.connect(self._on_config_changed)
+        iso_sampling_form.addRow("Dynamic Fit Mode:", self._dynamic_fit_mode_combo)
+
+        self._dynamic_fit_mode_note = QLabel("")
+        self._dynamic_fit_mode_note.setWordWrap(True)
+        self._dynamic_fit_mode_note.setStyleSheet("font-size: 11px; color: #666;")
+        iso_sampling_form.addRow(self._dynamic_fit_mode_note)
+
         self._window_sec_edit = QLineEdit(str(self._default_cfg.window_sec))
         self._window_sec_edit.setToolTip(
-            "Active control: rolling local-regression window length (seconds) used for isosbestic fit estimation."
+            "Active only in rolling local regression mode. "
+            "Inactive in global linear regression mode."
         )
         self._window_sec_edit.textChanged.connect(self._on_config_changed)
         iso_sampling_form.addRow("Regression Window:", self._window_sec_edit)
         legacy_fit_tip = (
             "Legacy control from the previous step/gated dynamic-fit engine. "
-            "Inactive under the active rolling local-regression engine."
+            "Inactive for all active dynamic-fit modes."
         )
         self._step_sec_edit = QLineEdit(str(self._default_cfg.step_sec))
         self._step_sec_edit.setToolTip(legacy_fit_tip)
@@ -5985,7 +6137,8 @@ class MainWindow(QMainWindow):
         self._min_samples_per_window_spin.setRange(1, 100000)
         self._min_samples_per_window_spin.setValue(max(1, self._default_cfg.min_samples_per_window))
         self._min_samples_per_window_spin.setToolTip(
-            "Active control: minimum samples required inside each rolling window."
+            "Active only in rolling local regression mode. "
+            "Inactive in global linear regression mode."
         )
         self._min_samples_per_window_spin.valueChanged.connect(self._on_config_changed)
         iso_accept_form.addRow("Min Samples per Window:", self._min_samples_per_window_spin)
@@ -6200,6 +6353,7 @@ class MainWindow(QMainWindow):
         self._baseline_method_combo.currentIndexChanged.connect(self._update_adv_prep_visibility)
         self._peak_method_combo.currentIndexChanged.connect(self._update_adv_ev_visibility)
         self._mode_combo.currentIndexChanged.connect(self._update_adv_group_visibility)
+        self._on_dynamic_fit_mode_changed()
         self._update_adv_prep_visibility()
         self._update_adv_ev_visibility()
         self._update_adv_group_visibility()

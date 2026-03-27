@@ -73,6 +73,7 @@ def test_effective_run_summary_updates(window):
     text0 = window._effective_summary_label.text()
     assert "Mode: both" in text0
     assert "Analysis: Full analysis" in text0
+    assert "Dynamic Fit Mode: Rolling local regression (Recommended)" in text0
     assert "Preview: off" in text0
     assert "Plotting Mode: Standard" in text0
     assert "Timeline Anchor: Civil clock" in text0
@@ -174,6 +175,7 @@ def test_advanced_tooltips_present(window):
 
     # Advanced rows: guard against control-only tooltips by asserting both label and control.
     advanced_pairs = [
+        ("Dynamic Fit Mode:", window._dynamic_fit_mode_combo),
         ("Regression Window:", window._window_sec_edit),
         ("Regression Step:", window._step_sec_edit),
         ("Min Valid Windows:", window._min_valid_windows_spin),
@@ -221,6 +223,31 @@ def test_advanced_tooltips_present(window):
     assert window._roi_list.toolTip().strip()
     assert window._roi_checked_label.toolTip().strip()
     assert window._config_browse_btn.toolTip().strip()
+
+
+def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
+    _set_minimally_valid_paths(window)
+    spec_default = window._build_run_spec(validate_only=True)
+    assert spec_default.config_overrides.get("dynamic_fit_mode") is None
+    assert "window_sec" not in spec_default.config_overrides
+
+    idx = window._dynamic_fit_mode_combo.findData("global_linear_regression")
+    assert idx >= 0
+    window._dynamic_fit_mode_combo.setCurrentIndex(idx)
+
+    spec_global = window._build_run_spec(validate_only=True)
+    overrides = dict(spec_global.config_overrides)
+    assert overrides.get("dynamic_fit_mode") == "global_linear_regression"
+    assert "window_sec" not in overrides
+    assert "min_samples_per_window" not in overrides
+    assert not window._window_sec_edit.isEnabled()
+    assert not window._min_samples_per_window_spin.isEnabled()
+
+    run_dir = tempfile.mkdtemp(prefix="gui_dynamic_fit_mode_")
+    cfg_path = spec_global.generate_derived_config(run_dir)
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    assert cfg.get("dynamic_fit_mode") == "global_linear_regression"
 
 
 def test_gui_timeline_anchor_controls_propagate_to_run_spec(window):

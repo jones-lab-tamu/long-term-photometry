@@ -96,6 +96,82 @@ def _global_fit_params(u_f: np.ndarray, s_f: np.ndarray) -> Tuple[Optional[Tuple
     return (float(slope), intercept), None, var_u
 
 
+_DYNAMIC_FIT_MODES = {
+    "rolling_local_regression",
+    "global_linear_regression",
+}
+
+
+def _ensure_chunk_metadata(chunk: Chunk) -> None:
+    if not hasattr(chunk, "metadata") or chunk.metadata is None:
+        chunk.metadata = {}
+
+
+def _resolve_dynamic_fit_mode(config: Config) -> str:
+    requested = getattr(config, "dynamic_fit_mode", "rolling_local_regression")
+    mode = str(requested).strip().lower() if requested is not None else "rolling_local_regression"
+    if not mode:
+        mode = "rolling_local_regression"
+    if mode not in _DYNAMIC_FIT_MODES:
+        allowed = ", ".join(sorted(_DYNAMIC_FIT_MODES))
+        raise ValueError(f"Invalid dynamic_fit_mode: {requested}. Allowed: {allowed}")
+    return mode
+
+
+def _legacy_knobs_not_used_in_engine() -> list[str]:
+    return [
+        "step_sec",
+        "min_valid_windows",
+        "r_low",
+        "r_high",
+        "g_min",
+    ]
+
+
+def _compute_dynamic_fit_ref_global_linear(chunk: Chunk, config: Config, mode: str) -> Optional[np.ndarray]:
+    """
+    Global OLS dynamic-fit mode:
+      - fit filtered traces once per ROI: sig_filt ~ a*uv_filt + b
+      - reconstruct fitted reference on raw UV: uv_fit = a*uv_raw + b
+    """
+    if mode == "tonic":
+        raise RuntimeError("Invariant violated: tonic mode must not run dynamic isosbestic fitting.")
+
+    if chunk.uv_filt is None or chunk.sig_filt is None:
+        raise RuntimeError("Filtered traces are required for dynamic fit mode 'global_linear_regression'.")
+
+    n_rois = int(chunk.uv_filt.shape[1])
+    uv_fit_all = np.full_like(chunk.uv_raw, np.nan, dtype=float)
+    _ensure_chunk_metadata(chunk)
+    chunk.metadata["dynamic_fit_engine"] = "global_linear_ols_v1"
+    chunk.metadata["dynamic_fit_engine_info"] = {
+        "fit_inputs": "sig_filt ~ a*uv_filt + b",
+        "reconstruction_signal": "uv_raw",
+        "n_rois": n_rois,
+        "legacy_knobs_not_used_in_engine": _legacy_knobs_not_used_in_engine(),
+    }
+
+    for r_idx in range(n_rois):
+        u_f = chunk.uv_filt[:, r_idx]
+        s_f = chunk.sig_filt[:, r_idx]
+        params, fail_code, var_u = _global_fit_params(u_f, s_f)
+        if params is None:
+            if fail_code == "DD1":
+                msg = f"DEGENERATE[DD1] <2 finite filtered samples in ROI {r_idx} global fit"
+            else:
+                msg = (
+                    "DEGENERATE[DD2] var_u non-finite or too small in ROI "
+                    f"{r_idx} global fit (var_u={var_u})"
+                )
+            chunk.metadata.setdefault("qc_warnings", []).append(msg)
+            continue
+
+        slope, intercept = params
+        uv_fit_all[:, r_idx] = intercept + slope * chunk.uv_raw[:, r_idx]
+
+    return uv_fit_all
+
+
 def _compute_dynamic_fit_ref(chunk: Chunk, config: Config, mode: str) -> Optional[np.ndarray]:
     """
     Student-style rolling local linear regression:
@@ -178,13 +254,7 @@ def _compute_dynamic_fit_ref(chunk: Chunk, config: Config, mode: str) -> Optiona
     chunk.metadata['dynamic_fit_engine_info'] = {
         'window_samples': int(window_samples),
         'window_sec': float(config.window_sec),
-        'legacy_knobs_not_used_in_engine': [
-            'step_sec',
-            'min_valid_windows',
-            'r_low',
-            'r_high',
-            'g_min',
-        ],
+        'legacy_knobs_not_used_in_engine': _legacy_knobs_not_used_in_engine(),
     }
 
     min_samples = int(config.min_samples_per_window)
@@ -331,8 +401,21 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
     Orchestrates dynamic fit generation and canonical numerator assembly.
     Returns: (uv_fit, delta_f)
     """
-    uv_fit = _compute_dynamic_fit_ref(chunk, config, mode)
+    fit_mode_requested = getattr(config, "dynamic_fit_mode", "rolling_local_regression")
+    fit_mode = _resolve_dynamic_fit_mode(config)
+    if fit_mode == "global_linear_regression":
+        uv_fit = _compute_dynamic_fit_ref_global_linear(chunk, config, mode)
+    else:
+        uv_fit = _compute_dynamic_fit_ref(chunk, config, mode)
+
     if uv_fit is None:
         return None, None
+
+    _ensure_chunk_metadata(chunk)
+    chunk.metadata["dynamic_fit_mode_requested"] = (
+        "rolling_local_regression" if fit_mode_requested is None else str(fit_mode_requested)
+    )
+    chunk.metadata["dynamic_fit_mode_resolved"] = str(fit_mode)
+
     delta_f = _assemble_delta_f_from_fit(chunk.sig_raw, uv_fit)
     return uv_fit, delta_f

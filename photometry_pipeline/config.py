@@ -32,6 +32,7 @@ class Config:
     g_min: float = 0.2
     min_samples_per_window: int = 0  # 0 implies dynamic 80%
     min_valid_windows: int = 5
+    dynamic_fit_mode: Literal['rolling_local_regression', 'global_linear_regression'] = 'rolling_local_regression'
     
     # baseline
     baseline_method: Literal['uv_raw_percentile_session', 'uv_globalfit_percentile_session'] = 'uv_raw_percentile_session'
@@ -120,6 +121,13 @@ class Config:
         if 'event_signal' in data:
              if data['event_signal'] not in {'dff', 'delta_f'}:
                 raise ValueError(f"Invalid event_signal: {data['event_signal']}. Allowed: {{'dff', 'delta_f'}}")
+
+        if 'dynamic_fit_mode' in data:
+            if data['dynamic_fit_mode'] not in {'rolling_local_regression', 'global_linear_regression'}:
+                raise ValueError(
+                    f"Invalid dynamic_fit_mode: {data['dynamic_fit_mode']}. "
+                    "Allowed: {'rolling_local_regression', 'global_linear_regression'}"
+                )
                 
         if 'adapter_value_nan_policy' in data:
              if data['adapter_value_nan_policy'] not in {'strict', 'mask'}:

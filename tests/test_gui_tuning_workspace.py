@@ -1677,6 +1677,7 @@ def test_correction_tuning_control_population_and_defaults(window, tmp_path):
     assert chunks_r1 == ["1"]
 
     assert window._correction_tuning_baseline_method_combo.currentText() == "uv_globalfit_percentile_session"
+    assert window._correction_tuning_fit_mode_combo.currentData() == "rolling_local_regression"
     assert window._correction_tuning_baseline_pct_spin.value() == pytest.approx(17.5)
     assert window._correction_tuning_lowpass_spin.value() == pytest.approx(1.7)
     assert window._correction_tuning_window_spin.value() == pytest.approx(44.0)
@@ -1750,6 +1751,7 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
         ("Baseline Method:", window._correction_tuning_baseline_method_combo),
         ("Baseline Percentile:", window._correction_tuning_baseline_pct_spin),
         ("Lowpass Filter (Hz):", window._correction_tuning_lowpass_spin),
+        ("Dynamic Fit Mode:", window._correction_tuning_fit_mode_combo),
         ("Regression Window (s):", window._correction_tuning_window_spin),
         ("Regression Step (s):", window._correction_tuning_step_spin),
         ("Min Valid Windows:", window._correction_tuning_min_valid_windows_spin),
@@ -1865,20 +1867,18 @@ def test_correction_tuning_backend_wiring_and_result_refresh(window, tmp_path, m
     assert captured["out_dir"] is None
     overrides = captured["overrides"]
     assert set(overrides.keys()) == {
+        "dynamic_fit_mode",
         "baseline_method",
         "baseline_percentile",
         "lowpass_hz",
         "window_sec",
-        "step_sec",
-        "min_valid_windows",
         "min_samples_per_window",
-        "r_low",
-        "r_high",
-        "g_min",
     }
+    assert overrides["dynamic_fit_mode"] == "rolling_local_regression"
 
     assert "ROI: Region0" in window._correction_tuning_summary_label.text()
     assert "Recomputed across: all available sessions for this ROI" in window._correction_tuning_summary_label.text()
+    assert "Dynamic fit mode: Rolling local regression (Recommended)" in window._correction_tuning_summary_label.text()
     assert "Preview session: 2" in window._correction_tuning_summary_label.text()
     assert "Inspection chunk:" not in window._correction_tuning_summary_label.text()
     assert "correction_retune_out" in window._correction_tuning_summary_label.text()
@@ -1888,6 +1888,51 @@ def test_correction_tuning_backend_wiring_and_result_refresh(window, tmp_path, m
     shown = window._correction_tuning_inspection_label.pixmap()
     assert shown is not None and not shown.isNull()
     assert window._open_correction_tuning_dir_btn.isEnabled()
+
+
+def test_correction_tuning_global_fit_mode_disables_rolling_knobs_and_plumbs_override(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    idx = window._correction_tuning_fit_mode_combo.findData("global_linear_regression")
+    assert idx >= 0
+    window._correction_tuning_fit_mode_combo.setCurrentIndex(idx)
+    QApplication.processEvents()
+
+    assert not window._correction_tuning_window_spin.isEnabled()
+    assert not window._correction_tuning_min_samples_spin.isEnabled()
+
+    inspection_path = tmp_path / "correction_inspect_global.png"
+    _write_png(inspection_path, width=900, height=420)
+    captured = {}
+
+    def _fake_correction_retune(**kwargs):
+        captured.update(kwargs)
+        out = tmp_path / "correction_retune_out_global"
+        out.mkdir(exist_ok=True)
+        return {
+            "retune_dir": str(out),
+            "selected_roi": kwargs["roi"],
+            "inspection_chunk_id": kwargs["chunk_id"],
+            "artifacts": {
+                "retuned_correction_inspection_png": str(inspection_path),
+            },
+        }
+
+    monkeypatch.setattr("gui.main_window.run_cache_correction_retune", _fake_correction_retune)
+    window._on_run_correction_tuning()
+    QApplication.processEvents()
+
+    overrides = captured["overrides"]
+    assert overrides["dynamic_fit_mode"] == "global_linear_regression"
+    assert "window_sec" not in overrides
+    assert "min_samples_per_window" not in overrides
+    assert "Dynamic fit mode: Global linear regression (Baseline)" in window._correction_tuning_summary_label.text()
 
 
 def test_correction_tuning_backend_loads_four_panel_carousel(window, tmp_path, monkeypatch):
