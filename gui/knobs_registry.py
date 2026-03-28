@@ -27,6 +27,7 @@ GUI_KNOBS_ADVANCED: Set[str] = {
     "f0_min_value",
     # Dynammic Correction
     "dynamic_fit_mode",
+    "baseline_subtract_before_fit",
     "window_sec",
     "step_sec",
     "min_valid_windows",
@@ -136,6 +137,10 @@ KNOB_META: Dict[str, dict] = {
     "dynamic_fit_mode": {
         "label": "Dynamic Fit Mode",
         "help": "Isosbestic fit engine selector: rolling local regression (recommended) or global linear baseline.",
+    },
+    "baseline_subtract_before_fit": {
+        "label": "Baseline Subtract Before Fit",
+        "help": "If enabled, subtract a moving baseline from fit-input traces before dynamic-fit estimation in rolling modes.",
     },
     "step_sec": {
         "label": "Regression Step (sec)",

@@ -73,7 +73,8 @@ def test_effective_run_summary_updates(window):
     text0 = window._effective_summary_label.text()
     assert "Mode: both" in text0
     assert "Analysis: Full analysis" in text0
-    assert "Dynamic Fit Mode: Rolling local regression (Recommended)" in text0
+    assert "Dynamic Fit Mode: Rolling regression (filtered→raw)" in text0
+    assert "Baseline subtract before fit: off" in text0
     assert "Preview: off" in text0
     assert "Plotting Mode: Standard" in text0
     assert "Timeline Anchor: Civil clock" in text0
@@ -176,6 +177,7 @@ def test_advanced_tooltips_present(window):
     # Advanced rows: guard against control-only tooltips by asserting both label and control.
     advanced_pairs = [
         ("Dynamic Fit Mode:", window._dynamic_fit_mode_combo),
+        ("Baseline subtract before fit:", window._baseline_subtract_before_fit_cb),
         ("Regression Window:", window._window_sec_edit),
         ("Min Samples per Window:", window._min_samples_per_window_spin),
         ("Lowpass Filter:", window._lowpass_hz_edit),
@@ -220,9 +222,37 @@ def test_advanced_tooltips_present(window):
 
 def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
     _set_minimally_valid_paths(window)
+    assert window._dynamic_fit_mode_combo.currentData() == "rolling_filtered_to_raw"
+    assert not window._baseline_subtract_before_fit_cb.isChecked()
+
+    visible_modes = [
+        window._dynamic_fit_mode_combo.itemData(i)
+        for i in range(window._dynamic_fit_mode_combo.count())
+    ]
+    assert visible_modes[:3] == [
+        "rolling_filtered_to_raw",
+        "rolling_filtered_to_filtered",
+        "global_linear_regression",
+    ]
+
     spec_default = window._build_run_spec(validate_only=True)
     assert spec_default.config_overrides.get("dynamic_fit_mode") is None
     assert "window_sec" not in spec_default.config_overrides
+
+    window._baseline_subtract_before_fit_cb.setChecked(True)
+    spec_roll_baseline = window._build_run_spec(validate_only=True)
+    assert spec_roll_baseline.config_overrides.get("baseline_subtract_before_fit") is True
+
+    idx = window._dynamic_fit_mode_combo.findData("rolling_filtered_to_filtered")
+    assert idx >= 0
+    window._dynamic_fit_mode_combo.setCurrentIndex(idx)
+    spec_filtered = window._build_run_spec(validate_only=True)
+    overrides_filtered = dict(spec_filtered.config_overrides)
+    assert overrides_filtered.get("dynamic_fit_mode") == "rolling_filtered_to_filtered"
+    assert overrides_filtered.get("baseline_subtract_before_fit") is True
+    assert window._window_sec_edit.isEnabled()
+    assert window._min_samples_per_window_spin.isEnabled()
+    assert window._baseline_subtract_before_fit_cb.isEnabled()
 
     idx = window._dynamic_fit_mode_combo.findData("global_linear_regression")
     assert idx >= 0
@@ -233,14 +263,54 @@ def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
     assert overrides.get("dynamic_fit_mode") == "global_linear_regression"
     assert "window_sec" not in overrides
     assert "min_samples_per_window" not in overrides
+    assert "baseline_subtract_before_fit" not in overrides
     assert not window._window_sec_edit.isEnabled()
     assert not window._min_samples_per_window_spin.isEnabled()
+    assert not window._baseline_subtract_before_fit_cb.isEnabled()
 
     run_dir = tempfile.mkdtemp(prefix="gui_dynamic_fit_mode_")
     cfg_path = spec_global.generate_derived_config(run_dir)
     with open(cfg_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     assert cfg.get("dynamic_fit_mode") == "global_linear_regression"
+
+
+def test_gui_dynamic_fit_mode_legacy_alias_in_settings_normalizes_to_filtered_to_raw(window):
+    window._settings.beginGroup("run_config")
+    window._settings.setValue("dynamic_fit_mode", "rolling_local_regression")
+    window._settings.endGroup()
+    window._settings.sync()
+    window._load_settings_into_widgets()
+    assert window._dynamic_fit_mode_combo.currentData() == "rolling_filtered_to_raw"
+
+
+def test_gui_build_argv_accepts_baseline_subtract_before_fit_override(window, tmp_path, monkeypatch):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "out"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    window._input_dir.setText(str(input_dir))
+    window._output_dir.setText(str(output_dir))
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText("tests/qc_universal_config.yaml")
+
+    idx_mode = window._dynamic_fit_mode_combo.findData("rolling_filtered_to_raw")
+    assert idx_mode >= 0
+    window._dynamic_fit_mode_combo.setCurrentIndex(idx_mode)
+    window._baseline_subtract_before_fit_cb.setChecked(True)
+
+    # Keep this test focused on override allowlisting instead of dataset inference.
+    monkeypatch.setattr(window, "_infer_dataset_contract_overrides", lambda _fmt: {})
+
+    assert window._validate_gui_inputs() is None
+    argv = window._build_argv(validate_only=True)
+    assert "--validate-only" in argv
+
+    cfg_path = os.path.join(window._current_run_dir, "config_effective.yaml")
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    assert cfg.get("baseline_subtract_before_fit") is True
 
 
 def test_gui_timeline_anchor_controls_propagate_to_run_spec(window):

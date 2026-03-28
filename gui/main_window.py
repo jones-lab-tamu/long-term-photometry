@@ -195,12 +195,26 @@ _KNOWN_ALLOWED_VALUES = {
     "peak_threshold_method": ["mean_std", "percentile", "median_mad", "absolute"],
     "event_auc_baseline": ["zero", "median"],
     "peak_pre_filter": ["none", "lowpass"],
-    "dynamic_fit_mode": ["rolling_local_regression", "global_linear_regression"],
+    "dynamic_fit_mode": [
+        "rolling_filtered_to_raw",
+        "rolling_filtered_to_filtered",
+        "global_linear_regression",
+        "rolling_local_regression",
+    ],
 }
 _RETUNE_PEAK_PRE_FILTER_OPTIONS = ["none", "smooth"]
+_DYNAMIC_FIT_MODE_ALIAS_TO_CANONICAL = {
+    "rolling_local_regression": "rolling_filtered_to_raw",
+}
+_DYNAMIC_FIT_MODE_CANONICAL_ORDER = [
+    "rolling_filtered_to_raw",
+    "rolling_filtered_to_filtered",
+    "global_linear_regression",
+]
 _DYNAMIC_FIT_MODE_LABELS = {
-    "rolling_local_regression": "Rolling local regression (Recommended)",
-    "global_linear_regression": "Global linear regression (Baseline)",
+    "rolling_filtered_to_raw": "Rolling regression (filtered→raw)",
+    "rolling_filtered_to_filtered": "Rolling regression (filtered→filtered)",
+    "global_linear_regression": "Global linear regression",
 }
 
 def _get_allowed_from_config_field(field_name: str) -> list[str]:
@@ -260,12 +274,38 @@ def get_allowed_peak_pre_filters_from_config() -> list[str]:
 
 
 def get_allowed_dynamic_fit_modes_from_config() -> list[str]:
-    return _get_allowed_from_config_field("dynamic_fit_mode")
+    raw_modes = _get_allowed_from_config_field("dynamic_fit_mode")
+    normalized_from_config: list[str] = []
+    for mode_raw in raw_modes:
+        mode = normalize_dynamic_fit_mode(mode_raw)
+        if mode and mode not in normalized_from_config:
+            normalized_from_config.append(mode)
+
+    ordered: list[str] = []
+    for mode in _DYNAMIC_FIT_MODE_CANONICAL_ORDER:
+        if mode not in ordered:
+            ordered.append(mode)
+    for mode in normalized_from_config:
+        if mode not in ordered:
+            ordered.append(mode)
+    return ordered
+
+
+def normalize_dynamic_fit_mode(mode_raw: str) -> str:
+    mode = str(mode_raw or "").strip()
+    if not mode:
+        return "rolling_filtered_to_raw"
+    return _DYNAMIC_FIT_MODE_ALIAS_TO_CANONICAL.get(mode, mode)
+
+
+def is_rolling_dynamic_fit_mode(mode_raw: str) -> bool:
+    mode = normalize_dynamic_fit_mode(mode_raw)
+    return mode in {"rolling_filtered_to_raw", "rolling_filtered_to_filtered"}
 
 
 def dynamic_fit_mode_label(mode_raw: str) -> str:
-    mode = str(mode_raw or "").strip()
-    return _DYNAMIC_FIT_MODE_LABELS.get(mode, mode or "rolling_local_regression")
+    mode = normalize_dynamic_fit_mode(mode_raw)
+    return _DYNAMIC_FIT_MODE_LABELS.get(mode, mode or "rolling_filtered_to_raw")
 
 
 def get_retune_peak_pre_filters() -> list[str]:
@@ -1537,15 +1577,9 @@ class MainWindow(QMainWindow):
         self._correction_tuning_fit_mode_combo = QComboBox()
         self._correction_tuning_fit_mode_combo.setMinimumWidth(260)
         self._correction_tuning_fit_mode_combo.setToolTip(
-            "Select correction fit engine. Rolling local regression is the recommended production mode. "
-            "Global linear regression is a baseline/comparison mode."
+            "Select correction fit engine."
         )
-        corr_allowed_fit_modes = get_allowed_dynamic_fit_modes_from_config()
-        corr_ordered_fit_modes = [
-            m for m in ("rolling_local_regression", "global_linear_regression") if m in corr_allowed_fit_modes
-        ]
-        corr_ordered_fit_modes.extend([m for m in corr_allowed_fit_modes if m not in corr_ordered_fit_modes])
-        for mode_name in corr_ordered_fit_modes:
+        for mode_name in get_allowed_dynamic_fit_modes_from_config():
             self._correction_tuning_fit_mode_combo.addItem(dynamic_fit_mode_label(mode_name), mode_name)
         self._correction_tuning_fit_mode_combo.currentIndexChanged.connect(
             self._on_correction_tuning_fit_mode_changed
@@ -1557,13 +1591,26 @@ class MainWindow(QMainWindow):
         self._correction_tuning_fit_mode_note.setStyleSheet("font-size: 11px; color: #666;")
         form.addRow(self._correction_tuning_fit_mode_note)
 
+        self._correction_tuning_baseline_subtract_cb = QCheckBox("")
+        self._correction_tuning_baseline_subtract_cb.setChecked(
+            bool(getattr(self._default_cfg, "baseline_subtract_before_fit", False))
+        )
+        self._correction_tuning_baseline_subtract_cb.setToolTip(
+            "Active only in rolling regression modes. Inactive in global linear regression mode."
+        )
+        self._correction_tuning_baseline_subtract_cb.stateChanged.connect(self._on_config_changed)
+        form.addRow(
+            _corr_row_label("Baseline subtract before fit:"),
+            self._correction_tuning_baseline_subtract_cb,
+        )
+
         self._correction_tuning_window_spin = QDoubleSpinBox()
         self._correction_tuning_window_spin.setMinimumWidth(140)
         self._correction_tuning_window_spin.setRange(0.000001, 1_000_000.0)
         self._correction_tuning_window_spin.setDecimals(6)
         self._correction_tuning_window_spin.setSingleStep(1.0)
         self._correction_tuning_window_spin.setToolTip(
-            "Active only in rolling local regression mode. "
+            "Active only in rolling regression modes. "
             "Inactive in global linear regression mode."
         )
         form.addRow(_corr_row_label("Regression Window (s):"), self._correction_tuning_window_spin)
@@ -1572,7 +1619,7 @@ class MainWindow(QMainWindow):
         self._correction_tuning_min_samples_spin.setMinimumWidth(120)
         self._correction_tuning_min_samples_spin.setRange(1, 1_000_000)
         self._correction_tuning_min_samples_spin.setToolTip(
-            "Active only in rolling local regression mode. "
+            "Active only in rolling regression modes. "
             "Inactive in global linear regression mode."
         )
         form.addRow(
@@ -2971,12 +3018,17 @@ class MainWindow(QMainWindow):
         method = str(cfg.baseline_method)
         if self._correction_tuning_baseline_method_combo.findText(method) >= 0:
             self._correction_tuning_baseline_method_combo.setCurrentText(method)
-        fit_mode = str(getattr(cfg, "dynamic_fit_mode", "rolling_local_regression"))
+        fit_mode = normalize_dynamic_fit_mode(
+            str(getattr(cfg, "dynamic_fit_mode", "rolling_local_regression"))
+        )
         idx_fit = self._correction_tuning_fit_mode_combo.findData(fit_mode)
         if idx_fit >= 0:
             self._correction_tuning_fit_mode_combo.setCurrentIndex(idx_fit)
         self._correction_tuning_baseline_pct_spin.setValue(float(cfg.baseline_percentile))
         self._correction_tuning_lowpass_spin.setValue(float(cfg.lowpass_hz))
+        self._correction_tuning_baseline_subtract_cb.setChecked(
+            bool(getattr(cfg, "baseline_subtract_before_fit", False))
+        )
         self._correction_tuning_window_spin.setValue(float(cfg.window_sec))
         self._correction_tuning_min_samples_spin.setValue(int(cfg.min_samples_per_window))
         self._apply_correction_tuning_fit_mode_ui_state()
@@ -2993,7 +3045,10 @@ class MainWindow(QMainWindow):
             "baseline_percentile": float(self._correction_tuning_baseline_pct_spin.value()),
             "lowpass_hz": float(self._correction_tuning_lowpass_spin.value()),
         }
-        if fit_mode == "rolling_local_regression":
+        if is_rolling_dynamic_fit_mode(fit_mode):
+            overrides["baseline_subtract_before_fit"] = bool(
+                self._correction_tuning_baseline_subtract_cb.isChecked()
+            )
             overrides["window_sec"] = float(self._correction_tuning_window_spin.value())
             overrides["min_samples_per_window"] = int(self._correction_tuning_min_samples_spin.value())
         return overrides
@@ -3067,6 +3122,16 @@ class MainWindow(QMainWindow):
             lines = [
                 f"ROI: {result.get('selected_roi', roi)}",
                 f"Dynamic fit mode: {dynamic_fit_mode_label(overrides.get('dynamic_fit_mode', 'rolling_local_regression'))}",
+                (
+                    "Baseline subtract before fit: "
+                    + (
+                        "enabled"
+                        if bool(overrides.get("baseline_subtract_before_fit", False))
+                        else "disabled"
+                    )
+                    if is_rolling_dynamic_fit_mode(overrides.get("dynamic_fit_mode", ""))
+                    else "Baseline subtract before fit: inactive in global linear regression mode"
+                ),
                 "Recomputed across: all available sessions for this ROI",
                 f"Preview session: {result.get('inspection_chunk_id', chunk_id)}",
                 f"Retune output: {result.get('retune_dir', '(unknown)')}",
@@ -4106,7 +4171,10 @@ class MainWindow(QMainWindow):
         config_overrides = {}
         if is_isosbestic_active(mode_text):
             fit_mode = self._selected_dynamic_fit_mode()
-            if fit_mode != str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression")):
+            default_fit_mode = normalize_dynamic_fit_mode(
+                str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+            )
+            if fit_mode != default_fit_mode:
                 config_overrides["dynamic_fit_mode"] = fit_mode
 
             default_dict = {
@@ -4119,7 +4187,7 @@ class MainWindow(QMainWindow):
                 # Enforce dynamic minimum mapping matching GUI constraint default
                 "min_samples_per_window": max(1, self._default_cfg.min_samples_per_window),
             }
-            if fit_mode == "rolling_local_regression":
+            if is_rolling_dynamic_fit_mode(fit_mode):
                 overrides, _ = parse_and_validate_isosbestic_knobs(
                     self._window_sec_edit.text(),
                     "",
@@ -4133,6 +4201,15 @@ class MainWindow(QMainWindow):
                 if overrides is not None:
                     changed_overrides = compute_isosbestic_overrides_user_changed(overrides, default_dict)
                     config_overrides.update(changed_overrides)
+                baseline_subtract = bool(
+                    getattr(self, "_baseline_subtract_before_fit_cb", None)
+                    and self._baseline_subtract_before_fit_cb.isChecked()
+                )
+                default_baseline_subtract = bool(
+                    getattr(self._default_cfg, "baseline_subtract_before_fit", False)
+                )
+                if baseline_subtract != default_baseline_subtract:
+                    config_overrides["baseline_subtract_before_fit"] = baseline_subtract
 
         # Preprocessing + Baseline overrides
         default_prep_dict = {
@@ -4340,7 +4417,7 @@ class MainWindow(QMainWindow):
             return f"Invalid Format: '{fmt}'. Must be one of {FORMAT_CHOICES}."
 
         if is_isosbestic_active(self._mode_combo.currentText()):
-            if self._selected_dynamic_fit_mode() == "rolling_local_regression":
+            if is_rolling_dynamic_fit_mode(self._selected_dynamic_fit_mode()):
                 default_dict = {
                     "window_sec": self._default_cfg.window_sec,
                     "step_sec": self._default_cfg.step_sec,
@@ -5235,9 +5312,17 @@ class MainWindow(QMainWindow):
             str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression")),
             str,
         ).strip()
+        fit_mode = normalize_dynamic_fit_mode(fit_mode)
         idx_fit = self._dynamic_fit_mode_combo.findData(fit_mode)
         if idx_fit >= 0:
             self._dynamic_fit_mode_combo.setCurrentIndex(idx_fit)
+        self._baseline_subtract_before_fit_cb.setChecked(
+            self._settings.value(
+                "baseline_subtract_before_fit",
+                bool(getattr(self._default_cfg, "baseline_subtract_before_fit", False)),
+                bool,
+            )
+        )
         self._on_dynamic_fit_mode_changed()
 
         sig_iso_render_mode = self._settings.value("sig_iso_render_mode", "qc", str)
@@ -5280,6 +5365,10 @@ class MainWindow(QMainWindow):
         self._settings.setValue("timeline_anchor_mode", self._timeline_anchor_mode_value())
         self._settings.setValue("fixed_daily_anchor_clock", self._fixed_daily_anchor_time_edit.text().strip())
         self._settings.setValue("dynamic_fit_mode", self._selected_dynamic_fit_mode())
+        self._settings.setValue(
+            "baseline_subtract_before_fit",
+            bool(getattr(self, "_baseline_subtract_before_fit_cb", None) and self._baseline_subtract_before_fit_cb.isChecked()),
+        )
         self._settings.setValue("sig_iso_render_mode", self._sig_iso_render_mode_combo.currentText())
         self._settings.setValue("dff_render_mode", self._dff_render_mode_combo.currentText())
         self._settings.setValue("stacked_render_mode", self._stacked_render_mode_combo.currentText())
@@ -5382,34 +5471,40 @@ class MainWindow(QMainWindow):
         if combo is not None:
             data = combo.currentData()
             if data:
-                return str(data)
-        return str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+                return normalize_dynamic_fit_mode(str(data))
+        return normalize_dynamic_fit_mode(
+            str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+        )
 
     def _selected_correction_tuning_fit_mode(self) -> str:
         combo = getattr(self, "_correction_tuning_fit_mode_combo", None)
         if combo is not None:
             data = combo.currentData()
             if data:
-                return str(data)
-        return str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+                return normalize_dynamic_fit_mode(str(data))
+        return normalize_dynamic_fit_mode(
+            str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+        )
 
     def _on_dynamic_fit_mode_changed(self) -> None:
         self._apply_dynamic_fit_mode_ui_state()
 
     def _apply_dynamic_fit_mode_ui_state(self) -> None:
         fit_mode = self._selected_dynamic_fit_mode()
-        rolling = fit_mode == "rolling_local_regression"
+        rolling = is_rolling_dynamic_fit_mode(fit_mode)
         self._window_sec_edit.setEnabled(rolling)
         self._min_samples_per_window_spin.setEnabled(rolling)
+        if hasattr(self, "_baseline_subtract_before_fit_cb"):
+            self._baseline_subtract_before_fit_cb.setEnabled(rolling)
         if rolling:
             msg = (
-                "Rolling local regression is active (recommended). "
-                "Regression window and min samples per window are active."
+                f"{dynamic_fit_mode_label(fit_mode)} is active. "
+                "Regression window, min samples per window, and baseline-subtract toggle are active."
             )
         else:
             msg = (
-                "Global linear regression is active (baseline/comparison). "
-                "Regression window and min samples per window are inactive."
+                "Global linear regression is active. "
+                "Regression window, min samples per window, and baseline-subtract toggle are inactive."
             )
         self._dynamic_fit_mode_note.setText(msg)
 
@@ -5418,18 +5513,20 @@ class MainWindow(QMainWindow):
 
     def _apply_correction_tuning_fit_mode_ui_state(self) -> None:
         fit_mode = self._selected_correction_tuning_fit_mode()
-        rolling = fit_mode == "rolling_local_regression"
+        rolling = is_rolling_dynamic_fit_mode(fit_mode)
         self._correction_tuning_window_spin.setEnabled(rolling)
         self._correction_tuning_min_samples_spin.setEnabled(rolling)
+        if hasattr(self, "_correction_tuning_baseline_subtract_cb"):
+            self._correction_tuning_baseline_subtract_cb.setEnabled(rolling)
         if rolling:
             msg = (
-                "Rolling local regression is active (recommended). "
-                "Regression window and min samples per window are active."
+                f"{dynamic_fit_mode_label(fit_mode)} is active. "
+                "Regression window, min samples per window, and baseline-subtract toggle are active."
             )
         else:
             msg = (
-                "Global linear regression is active (baseline/comparison). "
-                "Regression window and min samples per window are inactive."
+                "Global linear regression is active. "
+                "Regression window, min samples per window, and baseline-subtract toggle are inactive."
             )
         self._correction_tuning_fit_mode_note.setText(msg)
 
@@ -5469,6 +5566,22 @@ class MainWindow(QMainWindow):
                 f"Dynamic Fit Mode: {dynamic_fit_mode_label(self._selected_dynamic_fit_mode())}"
                 if phasic_active
                 else "Dynamic Fit Mode: (inactive in tonic mode)"
+            ),
+            (
+                (
+                    "Baseline subtract before fit: "
+                    + (
+                        "on"
+                        if bool(getattr(self, "_baseline_subtract_before_fit_cb", None) and self._baseline_subtract_before_fit_cb.isChecked())
+                        else "off"
+                    )
+                )
+                if phasic_active and is_rolling_dynamic_fit_mode(self._selected_dynamic_fit_mode())
+                else (
+                    "Baseline subtract before fit: inactive in global linear mode"
+                    if phasic_active
+                    else "Baseline subtract before fit: (inactive in tonic mode)"
+                )
             ),
             f"Baseline Config Source: {self._active_config_source_summary()}",
             f"Preview: {preview_text}",
@@ -6042,15 +6155,13 @@ class MainWindow(QMainWindow):
         self._dynamic_fit_mode_combo = QComboBox()
         self._dynamic_fit_mode_combo.setMinimumWidth(260)
         self._dynamic_fit_mode_combo.setToolTip(
-            "Select isosbestic fit engine. Rolling local regression is the recommended production mode. "
-            "Global linear regression is a baseline/comparison mode."
+            "Select isosbestic fit engine."
         )
-        allowed_fit_modes = get_allowed_dynamic_fit_modes_from_config()
-        ordered_fit_modes = [m for m in ("rolling_local_regression", "global_linear_regression") if m in allowed_fit_modes]
-        ordered_fit_modes.extend([m for m in allowed_fit_modes if m not in ordered_fit_modes])
-        for mode_name in ordered_fit_modes:
+        for mode_name in get_allowed_dynamic_fit_modes_from_config():
             self._dynamic_fit_mode_combo.addItem(dynamic_fit_mode_label(mode_name), mode_name)
-        default_fit_mode = str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+        default_fit_mode = normalize_dynamic_fit_mode(
+            str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+        )
         idx_mode = self._dynamic_fit_mode_combo.findData(default_fit_mode)
         if idx_mode < 0 and self._dynamic_fit_mode_combo.count() > 0:
             idx_mode = 0
@@ -6065,9 +6176,22 @@ class MainWindow(QMainWindow):
         self._dynamic_fit_mode_note.setStyleSheet("font-size: 11px; color: #666;")
         iso_sampling_form.addRow(self._dynamic_fit_mode_note)
 
+        self._baseline_subtract_before_fit_cb = QCheckBox("")
+        self._baseline_subtract_before_fit_cb.setChecked(
+            bool(getattr(self._default_cfg, "baseline_subtract_before_fit", False))
+        )
+        self._baseline_subtract_before_fit_cb.setToolTip(
+            "Active only in rolling regression modes. Inactive in global linear regression mode."
+        )
+        self._baseline_subtract_before_fit_cb.stateChanged.connect(self._on_config_changed)
+        iso_sampling_form.addRow(
+            "Baseline subtract before fit:",
+            self._baseline_subtract_before_fit_cb,
+        )
+
         self._window_sec_edit = QLineEdit(str(self._default_cfg.window_sec))
         self._window_sec_edit.setToolTip(
-            "Active only in rolling local regression mode. "
+            "Active only in rolling regression modes. "
             "Inactive in global linear regression mode."
         )
         self._window_sec_edit.textChanged.connect(self._on_config_changed)
@@ -6081,7 +6205,7 @@ class MainWindow(QMainWindow):
         self._min_samples_per_window_spin.setRange(1, 100000)
         self._min_samples_per_window_spin.setValue(max(1, self._default_cfg.min_samples_per_window))
         self._min_samples_per_window_spin.setToolTip(
-            "Active only in rolling local regression mode. "
+            "Active only in rolling regression modes. "
             "Inactive in global linear regression mode."
         )
         self._min_samples_per_window_spin.valueChanged.connect(self._on_config_changed)

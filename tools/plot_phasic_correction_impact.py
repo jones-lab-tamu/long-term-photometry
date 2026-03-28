@@ -21,6 +21,11 @@ import numpy as np
 import yaml
 
 
+_DYNAMIC_FIT_MODE_ALIAS = {
+    "rolling_local_regression": "rolling_filtered_to_raw",
+}
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--analysis-out', required=True)
@@ -31,30 +36,57 @@ def parse_args():
     return parser.parse_args()
 
 
-def _resolve_dynamic_fit_mode(analysis_out: str) -> str:
+def _normalize_dynamic_fit_mode(mode_raw: str) -> str:
+    mode = str(mode_raw or "").strip()
+    if not mode:
+        return "rolling_filtered_to_raw"
+    return _DYNAMIC_FIT_MODE_ALIAS.get(mode, mode)
+
+
+def _is_rolling_mode(mode_raw: str) -> bool:
+    mode = _normalize_dynamic_fit_mode(mode_raw)
+    return mode in {"rolling_filtered_to_raw", "rolling_filtered_to_filtered"}
+
+
+def _resolve_dynamic_fit_settings(analysis_out: str) -> tuple[str, bool]:
     """
-    Resolve fit mode from the run config snapshot in analysis_out.
-    Fallback is rolling_local_regression when unavailable.
+    Resolve fit settings from config_used.yaml in analysis_out.
+    Fallback is rolling_filtered_to_raw with baseline-subtract disabled.
     """
     cfg_path = os.path.join(analysis_out, "config_used.yaml")
     if not os.path.exists(cfg_path):
-        return "rolling_local_regression"
+        return "rolling_filtered_to_raw", False
     try:
         with open(cfg_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-        mode = str(data.get("dynamic_fit_mode", "rolling_local_regression")).strip()
-        if mode in {"rolling_local_regression", "global_linear_regression"}:
-            return mode
+        mode = _normalize_dynamic_fit_mode(data.get("dynamic_fit_mode", "rolling_filtered_to_raw"))
+        if mode not in {"rolling_filtered_to_raw", "rolling_filtered_to_filtered", "global_linear_regression"}:
+            mode = "rolling_filtered_to_raw"
+        baseline_subtract = bool(data.get("baseline_subtract_before_fit", False))
+        return mode, baseline_subtract
     except Exception:
         pass
-    return "rolling_local_regression"
+    return "rolling_filtered_to_raw", False
 
 
 def _dynamic_fit_mode_label(mode_raw: str) -> str:
-    mode = str(mode_raw or "").strip()
+    mode = _normalize_dynamic_fit_mode(mode_raw)
     if mode == "global_linear_regression":
-        return "Global Linear Regression"
-    return "Rolling Local Regression"
+        return "Global linear regression"
+    if mode == "rolling_filtered_to_filtered":
+        return "Rolling regression (filtered→filtered)"
+    return "Rolling regression (filtered→raw)"
+
+
+def _dynamic_fit_honesty_suffix(mode_raw: str, baseline_subtract_before_fit: bool) -> str:
+    mode = _normalize_dynamic_fit_mode(mode_raw)
+    if _is_rolling_mode(mode):
+        return (
+            "baseline subtract before fit: on"
+            if bool(baseline_subtract_before_fit)
+            else "baseline subtract before fit: off"
+        )
+    return "baseline subtract before fit: inactive"
 
 
 def build_correction_impact_figure(
@@ -65,7 +97,8 @@ def build_correction_impact_figure(
     dff,
     roi,
     chunk_id,
-    dynamic_fit_mode: str = "rolling_local_regression",
+    dynamic_fit_mode: str = "rolling_filtered_to_raw",
+    baseline_subtract_before_fit: bool = False,
 ):
     from photometry_pipeline.viz.display_prep import prepare_centered_common_gain
 
@@ -97,7 +130,9 @@ def build_correction_impact_figure(
     ax3.legend(loc='upper right')
     ax3.set_ylabel("Raw Output (V)")
     ax3.set_title(
-        f"Dynamic Reference Fitting ({_dynamic_fit_mode_label(dynamic_fit_mode)})"
+        "Dynamic Reference Fitting "
+        f"({_dynamic_fit_mode_label(dynamic_fit_mode)}; "
+        f"{_dynamic_fit_honesty_suffix(dynamic_fit_mode, baseline_subtract_before_fit)})"
     )
     ax3.grid(True, alpha=0.3)
 
@@ -138,7 +173,7 @@ def main():
     # Normalize time
     t = t - t[0]
     
-    dynamic_fit_mode = _resolve_dynamic_fit_mode(args.analysis_out)
+    dynamic_fit_mode, baseline_subtract_before_fit = _resolve_dynamic_fit_settings(args.analysis_out)
 
     fig, _axes = build_correction_impact_figure(
         t=t,
@@ -149,6 +184,7 @@ def main():
         roi=args.roi,
         chunk_id=args.chunk_id,
         dynamic_fit_mode=dynamic_fit_mode,
+        baseline_subtract_before_fit=baseline_subtract_before_fit,
     )
     plt.tight_layout()
     fig.savefig(args.out, dpi=args.dpi)

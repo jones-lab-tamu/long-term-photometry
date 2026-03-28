@@ -22,7 +22,8 @@ def test_build_correction_impact_figure_has_four_panels_and_expected_semantics()
         dff=dff,
         roi="Region0",
         chunk_id=7,
-        dynamic_fit_mode="rolling_local_regression",
+        dynamic_fit_mode="rolling_filtered_to_raw",
+        baseline_subtract_before_fit=False,
     )
     try:
         assert len(axes) == 4
@@ -47,7 +48,10 @@ def test_build_correction_impact_figure_has_four_panels_and_expected_semantics()
         # Panel 3/4: lower-panel semantics unchanged apart from vertical placement
         assert np.allclose(ax3.lines[0].get_ydata(), sig)
         assert np.allclose(ax3.lines[1].get_ydata(), fit)
-        assert ax3.get_title() == "Dynamic Reference Fitting (Rolling Local Regression)"
+        assert (
+            ax3.get_title()
+            == "Dynamic Reference Fitting (Rolling regression (filtered→raw); baseline subtract before fit: off)"
+        )
         assert np.allclose(ax4.lines[0].get_ydata(), dff)
         assert ax4.get_title() == "Final Corrected Signal"
     finally:
@@ -72,9 +76,42 @@ def test_build_correction_impact_figure_global_mode_title():
         roi="Region0",
         chunk_id=1,
         dynamic_fit_mode="global_linear_regression",
+        baseline_subtract_before_fit=True,
     )
     try:
-        assert axes[2].get_title() == "Dynamic Reference Fitting (Global Linear Regression)"
+        assert (
+            axes[2].get_title()
+            == "Dynamic Reference Fitting (Global linear regression; baseline subtract before fit: inactive)"
+        )
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+def test_build_correction_impact_figure_rolling_filtered_to_filtered_with_baseline_on_title():
+    t = np.array([0.0, 1.0, 2.0], dtype=float)
+    sig = np.array([1.0, 2.0, 3.0], dtype=float)
+    iso = np.array([2.0, 2.5, 3.0], dtype=float)
+    fit = np.array([1.1, 1.9, 3.1], dtype=float)
+    dff = np.array([0.0, 0.1, -0.1], dtype=float)
+
+    fig, axes = impact.build_correction_impact_figure(
+        t=t,
+        sig=sig,
+        iso=iso,
+        fit=fit,
+        dff=dff,
+        roi="Region0",
+        chunk_id=1,
+        dynamic_fit_mode="rolling_filtered_to_filtered",
+        baseline_subtract_before_fit=True,
+    )
+    try:
+        assert (
+            axes[2].get_title()
+            == "Dynamic Reference Fitting (Rolling regression (filtered→filtered); baseline subtract before fit: on)"
+        )
     finally:
         import matplotlib.pyplot as plt
 
@@ -85,7 +122,7 @@ def test_main_generates_png_with_four_panel_layout(tmp_path, monkeypatch):
     analysis_out = tmp_path / "analysis"
     analysis_out.mkdir(parents=True, exist_ok=True)
     (analysis_out / "config_used.yaml").write_text(
-        "dynamic_fit_mode: global_linear_regression\n",
+        "dynamic_fit_mode: global_linear_regression\nbaseline_subtract_before_fit: true\n",
         encoding="utf-8",
     )
     # main() validates this file path before reader import/use.
@@ -114,6 +151,7 @@ def test_main_generates_png_with_four_panel_layout(tmp_path, monkeypatch):
 
     def _spy_build(*args, **kwargs):
         captured["dynamic_fit_mode"] = kwargs.get("dynamic_fit_mode")
+        captured["baseline_subtract_before_fit"] = kwargs.get("baseline_subtract_before_fit")
         return orig_build(*args, **kwargs)
 
     monkeypatch.setattr(impact, "build_correction_impact_figure", _spy_build)
@@ -140,6 +178,7 @@ def test_main_generates_png_with_four_panel_layout(tmp_path, monkeypatch):
     assert out_png.exists()
     assert os.path.getsize(out_png) > 0
     assert captured.get("dynamic_fit_mode") == "global_linear_regression"
+    assert captured.get("baseline_subtract_before_fit") is True
 
 
 def test_main_defaults_to_rolling_mode_when_config_missing(tmp_path, monkeypatch):
@@ -171,6 +210,7 @@ def test_main_defaults_to_rolling_mode_when_config_missing(tmp_path, monkeypatch
 
     def _spy_build(*args, **kwargs):
         captured["dynamic_fit_mode"] = kwargs.get("dynamic_fit_mode")
+        captured["baseline_subtract_before_fit"] = kwargs.get("baseline_subtract_before_fit")
         return orig_build(*args, **kwargs)
 
     monkeypatch.setattr(impact, "build_correction_impact_figure", _spy_build)
@@ -194,4 +234,5 @@ def test_main_defaults_to_rolling_mode_when_config_missing(tmp_path, monkeypatch
 
     impact.main()
     assert out_png.exists()
-    assert captured.get("dynamic_fit_mode") == "rolling_local_regression"
+    assert captured.get("dynamic_fit_mode") == "rolling_filtered_to_raw"
+    assert captured.get("baseline_subtract_before_fit") is False

@@ -97,8 +97,14 @@ def _global_fit_params(u_f: np.ndarray, s_f: np.ndarray) -> Tuple[Optional[Tuple
 
 
 _DYNAMIC_FIT_MODES = {
-    "rolling_local_regression",
+    "rolling_filtered_to_raw",
+    "rolling_filtered_to_filtered",
     "global_linear_regression",
+}
+
+_DYNAMIC_FIT_MODE_ALIASES = {
+    # Backward-compatible alias retained to avoid breaking older configs/artifacts.
+    "rolling_local_regression": "rolling_filtered_to_raw",
 }
 
 
@@ -112,6 +118,7 @@ def _resolve_dynamic_fit_mode(config: Config) -> str:
     mode = str(requested).strip().lower() if requested is not None else "rolling_local_regression"
     if not mode:
         mode = "rolling_local_regression"
+    mode = _DYNAMIC_FIT_MODE_ALIASES.get(mode, mode)
     if mode not in _DYNAMIC_FIT_MODES:
         allowed = ", ".join(sorted(_DYNAMIC_FIT_MODES))
         raise ValueError(f"Invalid dynamic_fit_mode: {requested}. Allowed: {allowed}")
@@ -126,6 +133,68 @@ def _legacy_knobs_not_used_in_engine() -> list[str]:
         "r_high",
         "g_min",
     ]
+
+
+def _centered_rolling_mean(values: np.ndarray, window_samples: int) -> np.ndarray:
+    """
+    Finite-aware centered rolling mean for 1D arrays.
+    """
+    arr = np.asarray(values, dtype=float)
+    mask = np.isfinite(arr)
+    count = _rolling_sum_centered(mask.astype(float), window_samples)
+    total = _rolling_sum_centered(np.where(mask, arr, 0.0), window_samples)
+    out = np.full(arr.shape, np.nan, dtype=float)
+    valid = count > 0.0
+    out[valid] = total[valid] / count[valid]
+    return out
+
+
+def _subtract_fit_input_baseline(arr2d: np.ndarray, window_samples: int) -> np.ndarray:
+    """
+    Subtract a centered moving baseline from each ROI column for fit-input preparation.
+    """
+    arr = np.asarray(arr2d, dtype=float)
+    out = np.full_like(arr, np.nan, dtype=float)
+    for idx in range(arr.shape[1]):
+        baseline = _centered_rolling_mean(arr[:, idx], window_samples)
+        out[:, idx] = arr[:, idx] - baseline
+    return out
+
+
+def _prepare_rolling_fit_inputs(
+    chunk: Chunk,
+    config: Config,
+    window_samples: int,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """
+    Prepare fit-input traces for rolling modes.
+    """
+    if chunk.uv_filt is None or chunk.sig_filt is None:
+        raise RuntimeError("Filtered traces are required for rolling dynamic fit modes.")
+
+    uv_fit_input = np.asarray(chunk.uv_filt, dtype=float)
+    sig_fit_input = np.asarray(chunk.sig_filt, dtype=float)
+    apply_baseline = bool(getattr(config, "baseline_subtract_before_fit", False))
+
+    prep_info = {
+        "fit_input_domain": "filtered",
+        "baseline_subtract_before_fit": apply_baseline,
+        "baseline_subtract_applied": False,
+        "baseline_subtract_method": "none",
+        "baseline_subtract_window_samples": 0,
+    }
+    if apply_baseline:
+        sig_fit_input = _subtract_fit_input_baseline(sig_fit_input, window_samples)
+        uv_fit_input = _subtract_fit_input_baseline(uv_fit_input, window_samples)
+        prep_info.update(
+            {
+                "baseline_subtract_applied": True,
+                "baseline_subtract_method": "centered_rolling_mean",
+                "baseline_subtract_window_samples": int(window_samples),
+            }
+        )
+
+    return uv_fit_input, sig_fit_input, prep_info
 
 
 def _compute_dynamic_fit_ref_global_linear(chunk: Chunk, config: Config, mode: str) -> Optional[np.ndarray]:
@@ -147,6 +216,10 @@ def _compute_dynamic_fit_ref_global_linear(chunk: Chunk, config: Config, mode: s
     chunk.metadata["dynamic_fit_engine_info"] = {
         "fit_inputs": "sig_filt ~ a*uv_filt + b",
         "reconstruction_signal": "uv_raw",
+        "fit_mode_resolved": "global_linear_regression",
+        "fit_input_domain": "filtered",
+        "baseline_subtract_before_fit": bool(getattr(config, "baseline_subtract_before_fit", False)),
+        "baseline_subtract_applied": False,
         "n_rois": n_rois,
         "legacy_knobs_not_used_in_engine": _legacy_knobs_not_used_in_engine(),
     }
@@ -172,7 +245,12 @@ def _compute_dynamic_fit_ref_global_linear(chunk: Chunk, config: Config, mode: s
     return uv_fit_all
 
 
-def _compute_dynamic_fit_ref(chunk: Chunk, config: Config, mode: str) -> Optional[np.ndarray]:
+def _compute_dynamic_fit_ref(
+    chunk: Chunk,
+    config: Config,
+    mode: str,
+    fit_mode: str,
+) -> Optional[np.ndarray]:
     """
     Student-style rolling local linear regression:
       - fit on lowpass-filtered traces (chunk.uv_filt, chunk.sig_filt)
@@ -233,12 +311,12 @@ def _compute_dynamic_fit_ref(chunk: Chunk, config: Config, mode: str) -> Optiona
             'metrics': timing_metrics
         }
         
+    if fit_mode not in {"rolling_filtered_to_raw", "rolling_filtered_to_filtered"}:
+        raise ValueError(f"Unsupported rolling fit mode: {fit_mode}")
+
     t_setup = time.perf_counter()
     n_samples = len(chunk.time_sec)
-    n_rois = chunk.uv_filt.shape[1]
     fs = chunk.fs_hz
-
-    uv_fit_all = np.zeros_like(chunk.uv_filt) * np.nan
 
     window_samples = int(round(config.window_sec * fs))
     if window_samples < 3:
@@ -247,6 +325,15 @@ def _compute_dynamic_fit_ref(chunk: Chunk, config: Config, mode: str) -> Optiona
     if (window_samples % 2) == 0:
         window_samples += 1
 
+    uv_fit_input, sig_fit_input, fit_prep_info = _prepare_rolling_fit_inputs(
+        chunk,
+        config,
+        window_samples,
+    )
+    n_rois = int(uv_fit_input.shape[1])
+    uv_fit_all = np.zeros_like(chunk.uv_raw) * np.nan
+    reconstruction_signal = "uv_raw" if fit_mode == "rolling_filtered_to_raw" else "uv_filt"
+
     timing_metrics['roi_count'] = int(n_rois)
 
     _ensure_metadata()
@@ -254,6 +341,13 @@ def _compute_dynamic_fit_ref(chunk: Chunk, config: Config, mode: str) -> Optiona
     chunk.metadata['dynamic_fit_engine_info'] = {
         'window_samples': int(window_samples),
         'window_sec': float(config.window_sec),
+        'fit_mode_resolved': str(fit_mode),
+        'fit_input_domain': fit_prep_info.get('fit_input_domain', 'filtered'),
+        'reconstruction_signal': reconstruction_signal,
+        'baseline_subtract_before_fit': bool(fit_prep_info.get('baseline_subtract_before_fit', False)),
+        'baseline_subtract_applied': bool(fit_prep_info.get('baseline_subtract_applied', False)),
+        'baseline_subtract_method': str(fit_prep_info.get('baseline_subtract_method', 'none')),
+        'baseline_subtract_window_samples': int(fit_prep_info.get('baseline_subtract_window_samples', 0)),
         'legacy_knobs_not_used_in_engine': _legacy_knobs_not_used_in_engine(),
     }
 
@@ -268,8 +362,9 @@ def _compute_dynamic_fit_ref(chunk: Chunk, config: Config, mode: str) -> Optiona
     if window_samples >= n_samples:
         # Fallback: perform exactly one regression on the entire chunk
         for i in range(n_rois):
-            u_f = chunk.uv_filt[:, i]
-            s_f = chunk.sig_filt[:, i]
+            u_f = uv_fit_input[:, i]
+            s_f = sig_fit_input[:, i]
+            u_recon = chunk.uv_raw[:, i] if fit_mode == "rolling_filtered_to_raw" else chunk.uv_filt[:, i]
 
             t_fallback_mask = time.perf_counter()
             m = np.isfinite(u_f) & np.isfinite(s_f)
@@ -294,7 +389,7 @@ def _compute_dynamic_fit_ref(chunk: Chunk, config: Config, mode: str) -> Optiona
 
             slope, intercept = params
             t_fallback_apply = time.perf_counter()
-            uv_fit_all[:, i] = intercept + slope * chunk.uv_raw[:, i]
+            uv_fit_all[:, i] = intercept + slope * u_recon
             timing_buckets['fallback_apply_fit'] += (time.perf_counter() - t_fallback_apply)
             timing_metrics['fallback_roi_count'] += 1
 
@@ -304,9 +399,9 @@ def _compute_dynamic_fit_ref(chunk: Chunk, config: Config, mode: str) -> Optiona
         return uv_fit_all
 
     for r_idx in range(n_rois):
-        u_f = chunk.uv_filt[:, r_idx]
-        s_f = chunk.sig_filt[:, r_idx]
-        u_r = chunk.uv_raw[:, r_idx]
+        u_f = uv_fit_input[:, r_idx]
+        s_f = sig_fit_input[:, r_idx]
+        u_recon = chunk.uv_raw[:, r_idx] if fit_mode == "rolling_filtered_to_raw" else chunk.uv_filt[:, r_idx]
 
         # Calculate variance floor from finite filtered UV.
         t_roi_prep = time.perf_counter()
@@ -389,7 +484,7 @@ def _compute_dynamic_fit_ref(chunk: Chunk, config: Config, mode: str) -> Optiona
             timing_buckets['rolling_param_interpolation'] += (time.perf_counter() - t_interp)
 
         t_apply = time.perf_counter()
-        uv_fit_all[:, r_idx] = slope * u_r + intercept
+        uv_fit_all[:, r_idx] = slope * u_recon + intercept
         timing_buckets['rolling_apply_fit'] += (time.perf_counter() - t_apply)
 
     _finalize_and_attach()
@@ -403,10 +498,11 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
     """
     fit_mode_requested = getattr(config, "dynamic_fit_mode", "rolling_local_regression")
     fit_mode = _resolve_dynamic_fit_mode(config)
+    baseline_toggle = bool(getattr(config, "baseline_subtract_before_fit", False))
     if fit_mode == "global_linear_regression":
         uv_fit = _compute_dynamic_fit_ref_global_linear(chunk, config, mode)
     else:
-        uv_fit = _compute_dynamic_fit_ref(chunk, config, mode)
+        uv_fit = _compute_dynamic_fit_ref(chunk, config, mode, fit_mode=fit_mode)
 
     if uv_fit is None:
         return None, None
@@ -416,6 +512,15 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
         "rolling_local_regression" if fit_mode_requested is None else str(fit_mode_requested)
     )
     chunk.metadata["dynamic_fit_mode_resolved"] = str(fit_mode)
+    chunk.metadata["dynamic_fit_mode_alias_applied"] = (
+        str(fit_mode_requested).strip().lower() in _DYNAMIC_FIT_MODE_ALIASES
+        if fit_mode_requested is not None
+        else True
+    )
+    chunk.metadata["baseline_subtract_before_fit_requested"] = baseline_toggle
+    chunk.metadata["baseline_subtract_before_fit_applied"] = (
+        baseline_toggle and fit_mode in {"rolling_filtered_to_raw", "rolling_filtered_to_filtered"}
+    )
 
     delta_f = _assemble_delta_f_from_fit(chunk.sig_raw, uv_fit)
     return uv_fit, delta_f

@@ -152,6 +152,11 @@ class TestGuiKnobRegistry(unittest.TestCase):
         self.assertEqual(filtered, overrides)
         self.assertIsNot(filtered, overrides)
 
+    def test_filter_config_overrides_accepts_baseline_subtract_before_fit(self):
+        """baseline_subtract_before_fit is allowlisted and must pass filtering."""
+        filtered = filter_config_overrides({"baseline_subtract_before_fit": True})
+        self.assertEqual(filtered, {"baseline_subtract_before_fit": True})
+
     def test_run_spec_generate_derived_config_uses_filtered_overrides(self):
         """generate_derived_config filters overrides and raises on unknown."""
         import os

@@ -28,7 +28,7 @@ def _prepare_filtered(chunk: Chunk, cfg: Config) -> None:
     chunk.sig_filt, _ = preprocessing.lowpass_filter_with_meta(chunk.sig_raw, chunk.fs_hz, cfg)
 
 
-def test_dynamic_fit_mode_default_matches_explicit_rolling():
+def test_dynamic_fit_mode_default_matches_explicit_rolling_filtered_to_raw():
     rng = np.random.default_rng(123)
     n = 3200
     fs = 40.0
@@ -42,7 +42,7 @@ def test_dynamic_fit_mode_default_matches_explicit_rolling():
         min_samples_per_window=20,
         lowpass_hz=3.5,
         filter_order=2,
-        dynamic_fit_mode="rolling_local_regression",
+        dynamic_fit_mode="rolling_filtered_to_raw",
     )
 
     c_default = _make_chunk(uv, sig, fs)
@@ -55,8 +55,102 @@ def test_dynamic_fit_mode_default_matches_explicit_rolling():
 
     np.testing.assert_allclose(uv_fit_default, uv_fit_explicit, rtol=0.0, atol=1e-12)
     np.testing.assert_allclose(delta_default, delta_explicit, rtol=0.0, atol=1e-12)
-    assert c_default.metadata["dynamic_fit_mode_resolved"] == "rolling_local_regression"
+    assert c_default.metadata["dynamic_fit_mode_resolved"] == "rolling_filtered_to_raw"
+    assert c_default.metadata["dynamic_fit_mode_alias_applied"] is True
     assert c_default.metadata["dynamic_fit_engine"] == "rolling_local_ols_v1"
+
+
+def test_rolling_filtered_to_filtered_changes_reconstruction_domain_only():
+    rng = np.random.default_rng(321)
+    n = 2600
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    uv = 5.0 + 0.8 * np.sin(2.0 * np.pi * 0.22 * t) + 0.25 * rng.standard_normal(n)
+    sig = 1.3 * uv + 0.7 + 0.1 * np.sin(2.0 * np.pi * 0.9 * t + 0.2)
+
+    cfg_raw = Config(
+        dynamic_fit_mode="rolling_filtered_to_raw",
+        window_sec=50.0,
+        min_samples_per_window=40,
+        lowpass_hz=2.5,
+        filter_order=2,
+    )
+    cfg_filt = Config(
+        dynamic_fit_mode="rolling_filtered_to_filtered",
+        window_sec=50.0,
+        min_samples_per_window=40,
+        lowpass_hz=2.5,
+        filter_order=2,
+    )
+
+    c_raw = _make_chunk(uv, sig, fs)
+    c_filt = _make_chunk(uv, sig, fs)
+    _prepare_filtered(c_raw, cfg_raw)
+    _prepare_filtered(c_filt, cfg_filt)
+
+    uv_fit_raw, delta_raw = fit_chunk_dynamic(c_raw, cfg_raw, mode="phasic")
+    uv_fit_filt, delta_filt = fit_chunk_dynamic(c_filt, cfg_filt, mode="phasic")
+
+    assert uv_fit_raw.shape == uv_fit_filt.shape == c_raw.sig_raw.shape
+    assert not np.allclose(uv_fit_raw, uv_fit_filt, atol=1e-9, rtol=0.0)
+    np.testing.assert_allclose(delta_raw, c_raw.sig_raw - uv_fit_raw, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(delta_filt, c_filt.sig_raw - uv_fit_filt, rtol=0.0, atol=1e-12)
+
+    stats = SessionStats(f0_values={"Region0": float(np.nanpercentile(c_raw.uv_raw[:, 0], 10.0))})
+    c_filt.delta_f = delta_filt
+    dff = compute_dff(c_filt, stats, cfg_filt)
+    assert dff is not None
+    assert dff.shape == c_filt.sig_raw.shape
+
+    info = c_filt.metadata.get("dynamic_fit_engine_info", {})
+    assert c_filt.metadata["dynamic_fit_mode_resolved"] == "rolling_filtered_to_filtered"
+    assert info.get("reconstruction_signal") == "uv_filt"
+
+
+def test_baseline_subtract_before_fit_toggle_changes_fit_inputs_but_not_dff_contract():
+    n = 3000
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    slow = 0.8 * np.sin(2.0 * np.pi * 0.01 * t)
+    uv = 4.0 + slow + 0.15 * np.sin(2.0 * np.pi * 0.25 * t)
+    sig = 1.6 * uv + 0.4 + 0.2 * np.sin(2.0 * np.pi * 0.18 * t + 0.4)
+
+    cfg_off = Config(
+        dynamic_fit_mode="rolling_filtered_to_filtered",
+        baseline_subtract_before_fit=False,
+        window_sec=60.0,
+        min_samples_per_window=30,
+        lowpass_hz=2.0,
+        filter_order=2,
+    )
+    cfg_on = Config(
+        dynamic_fit_mode="rolling_filtered_to_filtered",
+        baseline_subtract_before_fit=True,
+        window_sec=60.0,
+        min_samples_per_window=30,
+        lowpass_hz=2.0,
+        filter_order=2,
+    )
+
+    c_off = _make_chunk(uv, sig, fs)
+    c_on = _make_chunk(uv, sig, fs)
+    _prepare_filtered(c_off, cfg_off)
+    _prepare_filtered(c_on, cfg_on)
+
+    uv_fit_off, delta_off = fit_chunk_dynamic(c_off, cfg_off, mode="phasic")
+    uv_fit_on, delta_on = fit_chunk_dynamic(c_on, cfg_on, mode="phasic")
+
+    assert not np.allclose(uv_fit_off, uv_fit_on, atol=1e-9, rtol=0.0)
+    np.testing.assert_allclose(delta_off, c_off.sig_raw - uv_fit_off, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(delta_on, c_on.sig_raw - uv_fit_on, rtol=0.0, atol=1e-12)
+
+    f0 = float(np.nanpercentile(c_on.uv_raw[:, 0], 10.0))
+    stats = SessionStats(f0_values={"Region0": f0})
+    c_on.delta_f = delta_on
+    dff_on = compute_dff(c_on, stats, cfg_on)
+    np.testing.assert_allclose(dff_on[:, 0], 100.0 * delta_on[:, 0] / f0, rtol=0.0, atol=1e-12)
+    assert c_on.metadata["baseline_subtract_before_fit_requested"] is True
+    assert c_on.metadata["baseline_subtract_before_fit_applied"] is True
 
 
 def test_global_linear_mode_recovers_expected_reference_and_preserves_dff_path():
@@ -90,6 +184,32 @@ def test_global_linear_mode_recovers_expected_reference_and_preserves_dff_path()
     np.testing.assert_allclose(dff[:, 0], 0.0, rtol=0.0, atol=1e-12)
     assert chunk.metadata["dynamic_fit_mode_resolved"] == "global_linear_regression"
     assert chunk.metadata["dynamic_fit_engine"] == "global_linear_ols_v1"
+
+
+def test_global_linear_mode_ignores_baseline_subtract_toggle_for_non_regression():
+    n = 500
+    fs = 30.0
+    t = np.arange(n, dtype=float) / fs
+    uv = 3.0 + 0.4 * np.sin(2.0 * np.pi * 0.2 * t)
+    sig = 1.9 * uv + 0.6
+
+    cfg_base = Config(dynamic_fit_mode="global_linear_regression", baseline_subtract_before_fit=False)
+    cfg_toggle = Config(dynamic_fit_mode="global_linear_regression", baseline_subtract_before_fit=True)
+
+    c0 = _make_chunk(uv, sig, fs)
+    c1 = _make_chunk(uv, sig, fs)
+    c0.uv_filt = c0.uv_raw.copy()
+    c0.sig_filt = c0.sig_raw.copy()
+    c1.uv_filt = c1.uv_raw.copy()
+    c1.sig_filt = c1.sig_raw.copy()
+
+    uv0, df0 = fit_chunk_dynamic(c0, cfg_base, mode="phasic")
+    uv1, df1 = fit_chunk_dynamic(c1, cfg_toggle, mode="phasic")
+
+    np.testing.assert_allclose(uv0, uv1, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(df0, df1, rtol=0.0, atol=1e-12)
+    assert c1.metadata["baseline_subtract_before_fit_requested"] is True
+    assert c1.metadata["baseline_subtract_before_fit_applied"] is False
 
 
 def test_global_linear_mode_degenerate_constant_uv_yields_nan_fit_and_dd2_warning():
@@ -129,3 +249,14 @@ def test_config_rejects_invalid_dynamic_fit_mode(tmp_path):
     cfg_path.write_text("dynamic_fit_mode: not_a_mode\n", encoding="utf-8")
     with pytest.raises(ValueError, match="Invalid dynamic_fit_mode"):
         Config.from_yaml(str(cfg_path))
+
+
+def test_config_accepts_new_rolling_modes_and_baseline_toggle(tmp_path):
+    cfg_path = tmp_path / "new_dynamic_modes.yaml"
+    cfg_path.write_text(
+        "dynamic_fit_mode: rolling_filtered_to_filtered\nbaseline_subtract_before_fit: true\n",
+        encoding="utf-8",
+    )
+    cfg = Config.from_yaml(str(cfg_path))
+    assert cfg.dynamic_fit_mode == "rolling_filtered_to_filtered"
+    assert cfg.baseline_subtract_before_fit is True
