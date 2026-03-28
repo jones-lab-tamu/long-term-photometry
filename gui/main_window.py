@@ -2825,6 +2825,20 @@ class MainWindow(QMainWindow):
             return "Final corrected dF/F"
         return "Correction inspection"
 
+    def _correction_tuning_panel_priority(self, image_path: str, panel_label: str) -> int:
+        """Preferred correction-retune carousel order: fit, dF/F, centered, raw."""
+        base = os.path.basename(str(image_path)).lower()
+        label = str(panel_label or "").strip().lower()
+        if base.endswith("_fit.png") or "dynamic fit" in label:
+            return 0
+        if base.endswith("_dff.png") or "final corrected" in label:
+            return 1
+        if base.endswith("_centered.png") or "centered" in label:
+            return 2
+        if base.endswith("_raw.png") or "raw absolute" in label:
+            return 3
+        return 99
+
     def _set_correction_tuning_overlay_images(
         self,
         image_paths: list[str],
@@ -2841,6 +2855,16 @@ class MainWindow(QMainWindow):
         labels = list(panel_labels or [])
         if len(labels) != len(valid_paths):
             labels = [self._panel_label_from_inspection_path(p) for p in valid_paths]
+        ordered = sorted(
+            enumerate(zip(valid_paths, labels)),
+            key=lambda item: (
+                self._correction_tuning_panel_priority(item[1][0], item[1][1]),
+                item[0],
+            ),
+        )
+        valid_paths = [entry[1][0] for entry in ordered]
+        labels = [entry[1][1] for entry in ordered]
+        self._correction_tuning_inspection_paths = valid_paths
         self._correction_tuning_inspection_panel_labels = labels
         self._correction_tuning_inspection_index = 0
         self._show_correction_tuning_overlay_index(0)
@@ -2975,87 +2999,91 @@ class MainWindow(QMainWindow):
         return overrides
 
     def _on_run_correction_tuning(self) -> None:
-        if not self._correction_tuning_workspace_available:
-            QMessageBox.information(
-                self,
-                "Correction Retune Unavailable",
-                self._correction_tuning_availability_label.text(),
-            )
-            return
-
-        roi = self._correction_tuning_roi_combo.currentText().strip()
-        if not roi:
-            QMessageBox.warning(
-                self,
-                "Correction Retune Error",
-                "Select an ROI before running correction retune.",
-            )
-            return
-        if self._correction_tuning_chunk_combo.currentIndex() < 0:
-            QMessageBox.warning(
-                self,
-                "Correction Retune Error",
-                "Select a preview session before running correction retune.",
-            )
-            return
-
-        chunk_id = int(self._correction_tuning_chunk_combo.currentData())
-        overrides = self._collect_correction_tuning_overrides()
-
         self._run_correction_tuning_btn.setEnabled(False)
         self._run_correction_tuning_btn.setText("Running...")
+        self._push_busy_cursor()
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
         try:
-            result = run_cache_correction_retune(
-                run_dir=self._current_run_dir,
-                roi=roi,
-                chunk_id=chunk_id,
-                overrides=overrides,
-                out_dir=None,
+            if not self._correction_tuning_workspace_available:
+                QMessageBox.information(
+                    self,
+                    "Correction Retune Unavailable",
+                    self._correction_tuning_availability_label.text(),
+                )
+                return
+
+            roi = self._correction_tuning_roi_combo.currentText().strip()
+            if not roi:
+                QMessageBox.warning(
+                    self,
+                    "Correction Retune Error",
+                    "Select an ROI before running correction retune.",
+                )
+                return
+            if self._correction_tuning_chunk_combo.currentIndex() < 0:
+                QMessageBox.warning(
+                    self,
+                    "Correction Retune Error",
+                    "Select a preview session before running correction retune.",
+                )
+                return
+
+            chunk_id = int(self._correction_tuning_chunk_combo.currentData())
+            overrides = self._collect_correction_tuning_overrides()
+
+            try:
+                result = run_cache_correction_retune(
+                    run_dir=self._current_run_dir,
+                    roi=roi,
+                    chunk_id=chunk_id,
+                    overrides=overrides,
+                    out_dir=None,
+                )
+            except Exception as exc:
+                self._append_run_log(f"Correction retune failed: {exc}")
+                QMessageBox.critical(
+                    self,
+                    "Correction Retune Failed",
+                    f"Correction-sensitive cache retune failed.\n\n{exc}",
+                )
+                return
+
+            self._correction_tuning_last_result = result
+            self._open_correction_tuning_dir_btn.setEnabled(True)
+            artifacts = result.get("artifacts", {}) if isinstance(result, dict) else {}
+            inspect_paths = artifacts.get("retuned_correction_inspection_pngs", [])
+            panel_labels = artifacts.get("retuned_correction_inspection_panel_labels", [])
+            if isinstance(inspect_paths, list) and inspect_paths:
+                self._set_correction_tuning_overlay_images(
+                    [str(p) for p in inspect_paths],
+                    [str(x) for x in panel_labels] if isinstance(panel_labels, list) else None,
+                )
+            else:
+                inspect_path = str(
+                    artifacts.get("retuned_correction_inspection_png", "")
+                ).strip()
+                self._set_correction_tuning_overlay_image(inspect_path)
+
+            lines = [
+                f"ROI: {result.get('selected_roi', roi)}",
+                f"Dynamic fit mode: {dynamic_fit_mode_label(overrides.get('dynamic_fit_mode', 'rolling_local_regression'))}",
+                "Recomputed across: all available sessions for this ROI",
+                f"Preview session: {result.get('inspection_chunk_id', chunk_id)}",
+                f"Retune output: {result.get('retune_dir', '(unknown)')}",
+            ]
+            self._correction_tuning_summary_label.setText("\n".join(lines))
+            self._append_run_log(
+                f"Correction retune completed for ROI={result.get('selected_roi', roi)} "
+                f"preview_session={result.get('inspection_chunk_id', chunk_id)} "
+                f"-> {result.get('retune_dir', '(unknown)')}"
             )
-        except Exception as exc:
-            self._append_run_log(f"Correction retune failed: {exc}")
-            QMessageBox.critical(
-                self,
-                "Correction Retune Failed",
-                f"Correction-sensitive cache retune failed.\n\n{exc}",
-            )
-            return
+            QTimer.singleShot(0, self._finalize_correction_tuning_result_layout)
         finally:
+            self._pop_busy_cursor()
             self._run_correction_tuning_btn.setEnabled(
                 self._correction_tuning_workspace_available
             )
             self._run_correction_tuning_btn.setText("Run Correction Retune")
-
-        self._correction_tuning_last_result = result
-        self._open_correction_tuning_dir_btn.setEnabled(True)
-        artifacts = result.get("artifacts", {}) if isinstance(result, dict) else {}
-        inspect_paths = artifacts.get("retuned_correction_inspection_pngs", [])
-        panel_labels = artifacts.get("retuned_correction_inspection_panel_labels", [])
-        if isinstance(inspect_paths, list) and inspect_paths:
-            self._set_correction_tuning_overlay_images(
-                [str(p) for p in inspect_paths],
-                [str(x) for x in panel_labels] if isinstance(panel_labels, list) else None,
-            )
-        else:
-            inspect_path = str(
-                artifacts.get("retuned_correction_inspection_png", "")
-            ).strip()
-            self._set_correction_tuning_overlay_image(inspect_path)
-
-        lines = [
-            f"ROI: {result.get('selected_roi', roi)}",
-            f"Dynamic fit mode: {dynamic_fit_mode_label(overrides.get('dynamic_fit_mode', 'rolling_local_regression'))}",
-            "Recomputed across: all available sessions for this ROI",
-            f"Preview session: {result.get('inspection_chunk_id', chunk_id)}",
-            f"Retune output: {result.get('retune_dir', '(unknown)')}",
-        ]
-        self._correction_tuning_summary_label.setText("\n".join(lines))
-        self._append_run_log(
-            f"Correction retune completed for ROI={result.get('selected_roi', roi)} "
-            f"preview_session={result.get('inspection_chunk_id', chunk_id)} "
-            f"-> {result.get('retune_dir', '(unknown)')}"
-        )
-        QTimer.singleShot(0, self._finalize_correction_tuning_result_layout)
 
     def _on_open_correction_tuning_output(self) -> None:
         if not isinstance(self._correction_tuning_last_result, dict):

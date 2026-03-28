@@ -1893,6 +1893,84 @@ def test_correction_tuning_backend_wiring_and_result_refresh(window, tmp_path, m
     assert window._open_correction_tuning_dir_btn.isEnabled()
 
 
+def test_correction_tuning_busy_state_feedback_and_cleanup_on_success(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    inspection_path = tmp_path / "busy_state_success.png"
+    _write_png(inspection_path, width=900, height=420)
+    seen = {"busy": False, "disabled": False, "running_text": False}
+
+    def _fake_correction_retune(**kwargs):
+        cursor = QApplication.overrideCursor()
+        seen["busy"] = cursor is not None and cursor.shape() == Qt.WaitCursor
+        seen["disabled"] = not window._run_correction_tuning_btn.isEnabled()
+        seen["running_text"] = window._run_correction_tuning_btn.text() == "Running..."
+        out = tmp_path / "correction_retune_busy_success"
+        out.mkdir(exist_ok=True)
+        return {
+            "retune_dir": str(out),
+            "selected_roi": kwargs["roi"],
+            "inspection_chunk_id": kwargs["chunk_id"],
+            "artifacts": {
+                "retuned_correction_inspection_png": str(inspection_path),
+            },
+        }
+
+    monkeypatch.setattr("gui.main_window.run_cache_correction_retune", _fake_correction_retune)
+    assert window._run_correction_tuning_btn.isEnabled()
+    window._on_run_correction_tuning()
+    QApplication.processEvents()
+
+    assert seen["busy"]
+    assert seen["disabled"]
+    assert seen["running_text"]
+    assert QApplication.overrideCursor() is None
+    assert window._run_correction_tuning_btn.isEnabled()
+    assert window._run_correction_tuning_btn.text() == "Run Correction Retune"
+
+
+def test_correction_tuning_busy_state_cleanup_on_failure_and_early_exit(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    monkeypatch.setattr("gui.main_window.QMessageBox.warning", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("gui.main_window.QMessageBox.critical", lambda *args, **kwargs: 0)
+
+    # Early-exit path (no preview session selected) must still restore busy state.
+    window._correction_tuning_chunk_combo.clear()
+    window._on_run_correction_tuning()
+    QApplication.processEvents()
+    assert QApplication.overrideCursor() is None
+    assert window._run_correction_tuning_btn.isEnabled()
+    assert window._run_correction_tuning_btn.text() == "Run Correction Retune"
+
+    # Exception path must also restore busy state and button state.
+    window._populate_correction_tuning_chunk_choices(
+        window._correction_tuning_roi_combo.currentText().strip()
+    )
+
+    def _raising_retune(**_kwargs):
+        raise RuntimeError("forced retune failure")
+
+    monkeypatch.setattr("gui.main_window.run_cache_correction_retune", _raising_retune)
+    window._on_run_correction_tuning()
+    QApplication.processEvents()
+    assert QApplication.overrideCursor() is None
+    assert window._run_correction_tuning_btn.isEnabled()
+    assert window._run_correction_tuning_btn.text() == "Run Correction Retune"
+
+
 def test_correction_tuning_global_fit_mode_disables_rolling_knobs_and_plumbs_override(window, tmp_path, monkeypatch):
     run_dir = _make_completed_run_with_cache(tmp_path)
     window._is_complete_workspace_active = True
@@ -1984,25 +2062,25 @@ def test_correction_tuning_backend_loads_four_panel_carousel(window, tmp_path, m
     assert window._correction_tuning_inspection_counter_label.text() == "1/4"
     assert window._correction_tuning_prev_btn.isEnabled()
     assert window._correction_tuning_next_btn.isEnabled()
-    assert "Raw absolute sig/iso" in window._correction_tuning_inspection_title.text()
-    assert window._correction_tuning_inspection_title.text().endswith(raw_path.name)
+    assert "Dynamic fit" in window._correction_tuning_inspection_title.text()
+    assert window._correction_tuning_inspection_title.text().endswith(fit_path.name)
 
     window._on_correction_tuning_next_image()
     QApplication.processEvents()
     assert window._correction_tuning_inspection_counter_label.text() == "2/4"
-    assert "Centered common-gain sig/iso" in window._correction_tuning_inspection_title.text()
-    assert window._correction_tuning_inspection_title.text().endswith(centered_path.name)
+    assert "Final corrected dF/F" in window._correction_tuning_inspection_title.text()
+    assert window._correction_tuning_inspection_title.text().endswith(dff_path.name)
 
     window._on_correction_tuning_prev_image()
     QApplication.processEvents()
     assert window._correction_tuning_inspection_counter_label.text() == "1/4"
-    assert "Raw absolute sig/iso" in window._correction_tuning_inspection_title.text()
+    assert "Dynamic fit" in window._correction_tuning_inspection_title.text()
 
     window._on_correction_tuning_prev_image()
     QApplication.processEvents()
     assert window._correction_tuning_inspection_counter_label.text() == "4/4"
-    assert "Final corrected dF/F" in window._correction_tuning_inspection_title.text()
-    assert window._correction_tuning_inspection_title.text().endswith(dff_path.name)
+    assert "Raw absolute sig/iso" in window._correction_tuning_inspection_title.text()
+    assert window._correction_tuning_inspection_title.text().endswith(raw_path.name)
 
 
 def test_correction_tuning_scope_integrity_and_no_downstream_controls(window, tmp_path):
