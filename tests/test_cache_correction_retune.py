@@ -216,6 +216,33 @@ def test_correction_retune_accepts_dynamic_fit_mode_override_and_records_it(tmp_
     assert req["correction_overrides_applied"]["dynamic_fit_mode"] == "global_linear_regression"
 
 
+def test_correction_retune_accepts_baseline_subtract_override_and_records_it(tmp_path):
+    run_dir = _make_completed_run_fixture(tmp_path)
+    result = run_cache_correction_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={
+            "dynamic_fit_mode": "rolling_filtered_to_filtered",
+            "baseline_subtract_before_fit": True,
+        },
+    )
+
+    assert os.path.isdir(result["retune_dir"])
+    assert os.path.isfile(result["artifacts"]["retuned_correction_cache_h5"])
+
+    with open(os.path.join(result["retune_dir"], "retune_config_effective.yaml"), "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["dynamic_fit_mode"] == "rolling_filtered_to_filtered"
+    assert cfg["baseline_subtract_before_fit"] is True
+
+    with open(os.path.join(result["retune_dir"], "retune_request.json"), "r", encoding="utf-8") as f:
+        req = json.load(f)
+    assert req["correction_overrides_applied"]["baseline_subtract_before_fit"] is True
+    assert "baseline_subtract_before_fit" in req["override_classification"]["correction_supported"]
+
+    assert result["correction_overrides_applied"]["baseline_subtract_before_fit"] is True
+
+
 def test_correction_retune_rejects_downstream_only_override(tmp_path):
     run_dir = _make_completed_run_fixture(tmp_path)
     with pytest.raises(ValueError, match="Downstream-only"):

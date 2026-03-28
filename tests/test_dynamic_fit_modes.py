@@ -153,6 +153,99 @@ def test_baseline_subtract_before_fit_toggle_changes_fit_inputs_but_not_dff_cont
     assert c_on.metadata["baseline_subtract_before_fit_applied"] is True
 
 
+def test_rolling_filtered_to_filtered_reconstruction_is_domain_consistent_with_baseline_toggle():
+    n = 2400
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    uv = 120.0 + 1.5 * np.sin(2.0 * np.pi * 0.2 * t)
+    sig = 1.8 * uv + 25.0
+
+    cfg_off = Config(
+        dynamic_fit_mode="rolling_filtered_to_filtered",
+        baseline_subtract_before_fit=False,
+        window_sec=45.0,
+        min_samples_per_window=30,
+    )
+    cfg_on = Config(
+        dynamic_fit_mode="rolling_filtered_to_filtered",
+        baseline_subtract_before_fit=True,
+        window_sec=45.0,
+        min_samples_per_window=30,
+    )
+
+    c_off = _make_chunk(uv, sig, fs)
+    c_on = _make_chunk(uv, sig, fs)
+
+    # Use identical filtered/raw traces to isolate reconstruction-domain math.
+    c_off.uv_filt = c_off.uv_raw.copy()
+    c_off.sig_filt = c_off.sig_raw.copy()
+    c_on.uv_filt = c_on.uv_raw.copy()
+    c_on.sig_filt = c_on.sig_raw.copy()
+
+    uv_fit_off, delta_off = fit_chunk_dynamic(c_off, cfg_off, mode="phasic")
+    uv_fit_on, delta_on = fit_chunk_dynamic(c_on, cfg_on, mode="phasic")
+
+    err_off = float(np.nanmax(np.abs(uv_fit_off[:, 0] - sig)))
+    err_on = float(np.nanmax(np.abs(uv_fit_on[:, 0] - sig)))
+    assert err_off < 1e-9
+    assert err_on < 1e-9
+
+    np.testing.assert_allclose(delta_off[:, 0], c_off.sig_raw[:, 0] - uv_fit_off[:, 0], rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(delta_on[:, 0], c_on.sig_raw[:, 0] - uv_fit_on[:, 0], rtol=0.0, atol=1e-12)
+
+    p_sig = float(np.nanpercentile(np.abs(sig), 99.0))
+    p_fit = float(np.nanpercentile(np.abs(uv_fit_on[:, 0]), 99.0))
+    scale_ratio = p_fit / max(p_sig, 1e-12)
+    assert 0.9 <= scale_ratio <= 1.1
+
+    info_on = c_on.metadata.get("dynamic_fit_engine_info", {})
+    assert info_on.get("reconstruction_signal") == "uv_filt"
+    assert info_on.get("reconstruction_domain_consistency") == "baseline_mapped"
+
+
+def test_rolling_filtered_to_raw_baseline_subtract_reconstruction_uses_consistent_mapping():
+    n = 2200
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    uv = 90.0 + 1.2 * np.sin(2.0 * np.pi * 0.18 * t)
+    sig = 1.5 * uv + 18.0
+
+    cfg_off = Config(
+        dynamic_fit_mode="rolling_filtered_to_raw",
+        baseline_subtract_before_fit=False,
+        window_sec=40.0,
+        min_samples_per_window=30,
+    )
+    cfg_on = Config(
+        dynamic_fit_mode="rolling_filtered_to_raw",
+        baseline_subtract_before_fit=True,
+        window_sec=40.0,
+        min_samples_per_window=30,
+    )
+
+    c_off = _make_chunk(uv, sig, fs)
+    c_on = _make_chunk(uv, sig, fs)
+    c_off.uv_filt = c_off.uv_raw.copy()
+    c_off.sig_filt = c_off.sig_raw.copy()
+    c_on.uv_filt = c_on.uv_raw.copy()
+    c_on.sig_filt = c_on.sig_raw.copy()
+
+    uv_fit_off, delta_off = fit_chunk_dynamic(c_off, cfg_off, mode="phasic")
+    uv_fit_on, delta_on = fit_chunk_dynamic(c_on, cfg_on, mode="phasic")
+
+    err_off = float(np.nanmax(np.abs(uv_fit_off[:, 0] - sig)))
+    err_on = float(np.nanmax(np.abs(uv_fit_on[:, 0] - sig)))
+    assert err_off < 1e-9
+    assert err_on < 1e-9
+
+    np.testing.assert_allclose(delta_off[:, 0], c_off.sig_raw[:, 0] - uv_fit_off[:, 0], rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(delta_on[:, 0], c_on.sig_raw[:, 0] - uv_fit_on[:, 0], rtol=0.0, atol=1e-12)
+
+    info_on = c_on.metadata.get("dynamic_fit_engine_info", {})
+    assert info_on.get("reconstruction_signal") == "uv_raw"
+    assert info_on.get("reconstruction_domain_consistency") == "baseline_mapped"
+
+
 def test_global_linear_mode_recovers_expected_reference_and_preserves_dff_path():
     n = 600
     fs = 30.0

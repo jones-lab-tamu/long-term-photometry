@@ -149,16 +149,25 @@ def _centered_rolling_mean(values: np.ndarray, window_samples: int) -> np.ndarra
     return out
 
 
-def _subtract_fit_input_baseline(arr2d: np.ndarray, window_samples: int) -> np.ndarray:
+def _compute_fit_input_baseline(arr2d: np.ndarray, window_samples: int) -> np.ndarray:
     """
-    Subtract a centered moving baseline from each ROI column for fit-input preparation.
+    Compute centered moving baseline for each ROI column.
     """
     arr = np.asarray(arr2d, dtype=float)
-    out = np.full_like(arr, np.nan, dtype=float)
+    baseline = np.full_like(arr, np.nan, dtype=float)
     for idx in range(arr.shape[1]):
-        baseline = _centered_rolling_mean(arr[:, idx], window_samples)
-        out[:, idx] = arr[:, idx] - baseline
-    return out
+        baseline[:, idx] = _centered_rolling_mean(arr[:, idx], window_samples)
+    return baseline
+
+
+def _subtract_fit_input_baseline(arr2d: np.ndarray, window_samples: int) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Subtract centered moving baseline from each ROI column for fit-input preparation.
+    Returns (centered_values, baseline_values).
+    """
+    arr = np.asarray(arr2d, dtype=float)
+    baseline = _compute_fit_input_baseline(arr, window_samples)
+    return arr - baseline, baseline
 
 
 def _prepare_rolling_fit_inputs(
@@ -182,15 +191,19 @@ def _prepare_rolling_fit_inputs(
         "baseline_subtract_applied": False,
         "baseline_subtract_method": "none",
         "baseline_subtract_window_samples": 0,
+        "_uv_fit_input_baseline": None,
+        "_sig_fit_input_baseline": None,
     }
     if apply_baseline:
-        sig_fit_input = _subtract_fit_input_baseline(sig_fit_input, window_samples)
-        uv_fit_input = _subtract_fit_input_baseline(uv_fit_input, window_samples)
+        sig_fit_input, sig_fit_baseline = _subtract_fit_input_baseline(sig_fit_input, window_samples)
+        uv_fit_input, uv_fit_baseline = _subtract_fit_input_baseline(uv_fit_input, window_samples)
         prep_info.update(
             {
                 "baseline_subtract_applied": True,
                 "baseline_subtract_method": "centered_rolling_mean",
                 "baseline_subtract_window_samples": int(window_samples),
+                "_uv_fit_input_baseline": uv_fit_baseline,
+                "_sig_fit_input_baseline": sig_fit_baseline,
             }
         )
 
@@ -330,6 +343,9 @@ def _compute_dynamic_fit_ref(
         config,
         window_samples,
     )
+    uv_fit_input_baseline = fit_prep_info.get("_uv_fit_input_baseline")
+    sig_fit_input_baseline = fit_prep_info.get("_sig_fit_input_baseline")
+    baseline_applied = bool(fit_prep_info.get("baseline_subtract_applied", False))
     n_rois = int(uv_fit_input.shape[1])
     uv_fit_all = np.zeros_like(chunk.uv_raw) * np.nan
     reconstruction_signal = "uv_raw" if fit_mode == "rolling_filtered_to_raw" else "uv_filt"
@@ -344,6 +360,16 @@ def _compute_dynamic_fit_ref(
         'fit_mode_resolved': str(fit_mode),
         'fit_input_domain': fit_prep_info.get('fit_input_domain', 'filtered'),
         'reconstruction_signal': reconstruction_signal,
+        'reconstruction_domain_consistency': (
+            "baseline_mapped"
+            if baseline_applied
+            else "direct"
+        ),
+        'reconstruction_formula': (
+            "uv_fit = a*(u_recon - uv_fit_input_baseline) + b + sig_fit_input_baseline"
+            if baseline_applied
+            else "uv_fit = a*u_recon + b"
+        ),
         'baseline_subtract_before_fit': bool(fit_prep_info.get('baseline_subtract_before_fit', False)),
         'baseline_subtract_applied': bool(fit_prep_info.get('baseline_subtract_applied', False)),
         'baseline_subtract_method': str(fit_prep_info.get('baseline_subtract_method', 'none')),
@@ -365,6 +391,16 @@ def _compute_dynamic_fit_ref(
             u_f = uv_fit_input[:, i]
             s_f = sig_fit_input[:, i]
             u_recon = chunk.uv_raw[:, i] if fit_mode == "rolling_filtered_to_raw" else chunk.uv_filt[:, i]
+            u_fit_baseline = (
+                uv_fit_input_baseline[:, i]
+                if baseline_applied and uv_fit_input_baseline is not None
+                else None
+            )
+            s_fit_baseline = (
+                sig_fit_input_baseline[:, i]
+                if baseline_applied and sig_fit_input_baseline is not None
+                else None
+            )
 
             t_fallback_mask = time.perf_counter()
             m = np.isfinite(u_f) & np.isfinite(s_f)
@@ -389,7 +425,10 @@ def _compute_dynamic_fit_ref(
 
             slope, intercept = params
             t_fallback_apply = time.perf_counter()
-            uv_fit_all[:, i] = intercept + slope * u_recon
+            if baseline_applied and u_fit_baseline is not None and s_fit_baseline is not None:
+                uv_fit_all[:, i] = slope * (u_recon - u_fit_baseline) + intercept + s_fit_baseline
+            else:
+                uv_fit_all[:, i] = intercept + slope * u_recon
             timing_buckets['fallback_apply_fit'] += (time.perf_counter() - t_fallback_apply)
             timing_metrics['fallback_roi_count'] += 1
 
@@ -402,6 +441,16 @@ def _compute_dynamic_fit_ref(
         u_f = uv_fit_input[:, r_idx]
         s_f = sig_fit_input[:, r_idx]
         u_recon = chunk.uv_raw[:, r_idx] if fit_mode == "rolling_filtered_to_raw" else chunk.uv_filt[:, r_idx]
+        u_fit_baseline = (
+            uv_fit_input_baseline[:, r_idx]
+            if baseline_applied and uv_fit_input_baseline is not None
+            else None
+        )
+        s_fit_baseline = (
+            sig_fit_input_baseline[:, r_idx]
+            if baseline_applied and sig_fit_input_baseline is not None
+            else None
+        )
 
         # Calculate variance floor from finite filtered UV.
         t_roi_prep = time.perf_counter()
@@ -484,7 +533,10 @@ def _compute_dynamic_fit_ref(
             timing_buckets['rolling_param_interpolation'] += (time.perf_counter() - t_interp)
 
         t_apply = time.perf_counter()
-        uv_fit_all[:, r_idx] = slope * u_recon + intercept
+        if baseline_applied and u_fit_baseline is not None and s_fit_baseline is not None:
+            uv_fit_all[:, r_idx] = slope * (u_recon - u_fit_baseline) + intercept + s_fit_baseline
+        else:
+            uv_fit_all[:, r_idx] = slope * u_recon + intercept
         timing_buckets['rolling_apply_fit'] += (time.perf_counter() - t_apply)
 
     _finalize_and_attach()
