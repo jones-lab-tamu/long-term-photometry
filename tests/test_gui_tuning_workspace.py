@@ -1726,6 +1726,7 @@ def test_correction_tuning_fit_mode_selector_exposes_expanded_modes(window, tmp_
         "rolling_filtered_to_filtered",
         "global_linear_regression",
     ]
+    assert "robust_global_event_reject" in modes
     labels = [
         window._correction_tuning_fit_mode_combo.itemText(i)
         for i in range(window._correction_tuning_fit_mode_combo.count())
@@ -1735,6 +1736,7 @@ def test_correction_tuning_fit_mode_selector_exposes_expanded_modes(window, tmp_
         "Rolling regression (filtered→filtered)",
         "Global linear regression",
     ]
+    assert "Robust global fit + event rejection" in labels
 
 
 def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(window, tmp_path):
@@ -2103,6 +2105,129 @@ def test_correction_tuning_filtered_to_filtered_mode_plumbs_baseline_toggle(wind
     assert "min_samples_per_window" in overrides
     assert "Dynamic fit mode: Rolling regression (filtered→filtered)" in window._correction_tuning_summary_label.text()
     assert "Baseline subtract before fit: enabled" in window._correction_tuning_summary_label.text()
+
+
+def test_correction_tuning_robust_event_reject_mode_plumbs_overrides(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    idx = window._correction_tuning_fit_mode_combo.findData("robust_global_event_reject")
+    assert idx >= 0
+    window._correction_tuning_fit_mode_combo.setCurrentIndex(idx)
+    window._correction_tuning_robust_max_iters_spin.setValue(4)
+    window._correction_tuning_robust_residual_z_spin.setValue(3.1)
+    window._correction_tuning_robust_local_var_window_spin.setValue(9.0)
+    window._correction_tuning_robust_local_var_ratio_enable_cb.setChecked(True)
+    window._correction_tuning_robust_local_var_ratio_spin.setValue(4.4)
+    window._correction_tuning_robust_min_keep_fraction_spin.setValue(0.62)
+    QApplication.processEvents()
+
+    assert not window._correction_tuning_window_spin.isEnabled()
+    assert not window._correction_tuning_min_samples_spin.isEnabled()
+    assert not window._correction_tuning_baseline_subtract_cb.isEnabled()
+    assert window._correction_tuning_robust_max_iters_spin.isEnabled()
+    assert window._correction_tuning_robust_residual_z_spin.isEnabled()
+    assert window._correction_tuning_robust_local_var_window_spin.isEnabled()
+    assert window._correction_tuning_robust_local_var_ratio_enable_cb.isEnabled()
+    assert window._correction_tuning_robust_local_var_ratio_spin.isEnabled()
+    assert window._correction_tuning_robust_min_keep_fraction_spin.isEnabled()
+
+    inspection_path = tmp_path / "correction_inspect_robust.png"
+    _write_png(inspection_path, width=900, height=420)
+    captured = {}
+
+    def _fake_correction_retune(**kwargs):
+        captured.update(kwargs)
+        out = tmp_path / "correction_retune_out_robust"
+        out.mkdir(exist_ok=True)
+        return {
+            "retune_dir": str(out),
+            "selected_roi": kwargs["roi"],
+            "inspection_chunk_id": kwargs["chunk_id"],
+            "artifacts": {
+                "retuned_correction_inspection_png": str(inspection_path),
+            },
+        }
+
+    monkeypatch.setattr("gui.main_window.run_cache_correction_retune", _fake_correction_retune)
+    window._on_run_correction_tuning()
+    QApplication.processEvents()
+
+    overrides = captured["overrides"]
+    assert overrides["dynamic_fit_mode"] == "robust_global_event_reject"
+    assert overrides["robust_event_reject_max_iters"] == 4
+    assert overrides["robust_event_reject_residual_z_thresh"] == pytest.approx(3.1)
+    assert overrides["robust_event_reject_local_var_window_sec"] == pytest.approx(9.0)
+    assert overrides["robust_event_reject_local_var_ratio_thresh"] == pytest.approx(4.4)
+    assert overrides["robust_event_reject_min_keep_fraction"] == pytest.approx(0.62)
+    assert "window_sec" not in overrides
+    assert "min_samples_per_window" not in overrides
+    assert "baseline_subtract_before_fit" not in overrides
+    assert "Dynamic fit mode: Robust global fit + event rejection" in window._correction_tuning_summary_label.text()
+    assert (
+        "Baseline subtract before fit: inactive in robust global event-reject mode"
+        in window._correction_tuning_summary_label.text()
+    )
+    summary = window._correction_tuning_summary_label.text()
+    assert "Robust event-reject settings:" in summary
+    assert "max_iters=4" in summary
+    assert "residual_z=3.1" in summary
+    assert "local_var_window_s=9" in summary
+    assert "local_var_ratio=4.4" in summary
+    assert "min_keep=0.62" in summary
+
+
+def test_correction_tuning_robust_summary_shows_runtime_diagnostics(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    idx = window._correction_tuning_fit_mode_combo.findData("robust_global_event_reject")
+    assert idx >= 0
+    window._correction_tuning_fit_mode_combo.setCurrentIndex(idx)
+    QApplication.processEvents()
+
+    inspection_path = tmp_path / "correction_inspect_robust_diag.png"
+    _write_png(inspection_path, width=900, height=420)
+
+    def _fake_correction_retune(**kwargs):
+        out = tmp_path / "correction_retune_out_robust_diag"
+        out.mkdir(exist_ok=True)
+        return {
+            "retune_dir": str(out),
+            "selected_roi": kwargs["roi"],
+            "inspection_chunk_id": kwargs["chunk_id"],
+            "artifacts": {
+                "retuned_correction_inspection_png": str(inspection_path),
+                "retuned_correction_inspection_robust_diagnostics": {
+                    "fit_mode_resolved": "robust_global_event_reject",
+                    "iterations_completed": 3,
+                    "keep_fraction": 0.779,
+                    "fallback_status": "no",
+                    "fallback_to_global_linear": False,
+                    "fallback_failed": False,
+                    "excluded_count": 87,
+                    "excluded_fraction": 0.221,
+                },
+            },
+        }
+
+    monkeypatch.setattr("gui.main_window.run_cache_correction_retune", _fake_correction_retune)
+    window._on_run_correction_tuning()
+    QApplication.processEvents()
+
+    summary = window._correction_tuning_summary_label.text()
+    assert "Dynamic fit mode: Robust global fit + event rejection" in summary
+    assert "Robust diagnostics: keep fraction=0.779, iterations=3, fallback=no" in summary
 
 
 def test_correction_tuning_backend_loads_four_panel_carousel(window, tmp_path, monkeypatch):

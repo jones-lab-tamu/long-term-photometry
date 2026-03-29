@@ -50,6 +50,11 @@ CORRECTION_RETUNABLE_KEYS = {
     "baseline_method",
     "baseline_percentile",
     "lowpass_hz",
+    "robust_event_reject_max_iters",
+    "robust_event_reject_residual_z_thresh",
+    "robust_event_reject_local_var_window_sec",
+    "robust_event_reject_local_var_ratio_thresh",
+    "robust_event_reject_min_keep_fraction",
 }
 
 DOWNSTREAM_ONLY_KEYS = {
@@ -82,6 +87,11 @@ _OVERRIDE_VALUE_CASTERS = {
     "baseline_method": str,
     "baseline_percentile": float,
     "lowpass_hz": float,
+    "robust_event_reject_max_iters": int,
+    "robust_event_reject_residual_z_thresh": float,
+    "robust_event_reject_local_var_window_sec": float,
+    "robust_event_reject_local_var_ratio_thresh": float,
+    "robust_event_reject_min_keep_fraction": float,
     "event_signal": str,
     "peak_threshold_method": str,
     "peak_threshold_k": float,
@@ -175,6 +185,9 @@ def _resolve_base_config(phasic_out_dir: str) -> Tuple[Config, str]:
 def _coerce_overrides(overrides: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for key, value in overrides.items():
+        if value is None:
+            out[key] = None
+            continue
         caster = _OVERRIDE_VALUE_CASTERS.get(key, str)
         out[key] = caster(value)
     return out
@@ -389,6 +402,70 @@ def _write_correction_inspection(
     fit = np.asarray(chunk.uv_fit[:, 0]) if chunk.uv_fit is not None else np.full_like(sig, np.nan)
     delta_f = np.asarray(chunk.delta_f[:, 0]) if chunk.delta_f is not None else np.full_like(sig, np.nan)
     dff = np.asarray(chunk.dff[:, 0]) if chunk.dff is not None else np.full_like(sig, np.nan)
+    event_reject_info = {}
+    if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
+        by_roi = chunk.metadata.get("dynamic_fit_event_reject", {})
+        if isinstance(by_roi, dict):
+            event_reject_info = by_roi.get(roi, {}) or {}
+    excluded_mask = np.asarray(event_reject_info.get("excluded_mask", []), dtype=bool)
+    if excluded_mask.shape != sig.shape:
+        excluded_mask = np.zeros(sig.shape, dtype=bool)
+    final_coef = event_reject_info.get("final_coef", {}) if isinstance(event_reject_info, dict) else {}
+    iter_summaries = (
+        event_reject_info.get("iteration_summaries", [])
+        if isinstance(event_reject_info, dict)
+        else []
+    )
+    fit_mode_resolved = ""
+    if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
+        fit_mode_resolved = str(chunk.metadata.get("dynamic_fit_mode_resolved", "") or "")
+    robust_mode = (
+        fit_mode_resolved == "robust_global_event_reject"
+        or bool(event_reject_info)
+    )
+    keep_fraction = (
+        event_reject_info.get("final_keep_fraction", None)
+        if isinstance(event_reject_info, dict)
+        else None
+    )
+    if keep_fraction is None and isinstance(final_coef, dict):
+        keep_fraction = final_coef.get("keep_fraction", None)
+    try:
+        keep_fraction_value = float(keep_fraction) if keep_fraction is not None else np.nan
+    except Exception:
+        keep_fraction_value = np.nan
+    if robust_mode and not np.isfinite(keep_fraction_value):
+        keep_fraction_value = 1.0
+    n_iters = (
+        int(event_reject_info.get("n_iterations_completed", 0))
+        if isinstance(event_reject_info, dict)
+        else 0
+    )
+    if n_iters <= 0:
+        n_iters = len(iter_summaries)
+    fallback_to_global = bool(event_reject_info.get("fallback_to_global_linear", False))
+    fallback_failed = bool(event_reject_info.get("fallback_failed", False))
+    fallback_status = "yes_failed" if fallback_failed else ("yes" if fallback_to_global else "no")
+    robust_backend_used = str(event_reject_info.get("robust_fit_backend_used", "")) if isinstance(event_reject_info, dict) else ""
+    excluded_count = int(np.sum(excluded_mask))
+    finite_sig = np.isfinite(sig)
+    excluded_fraction = (
+        float(excluded_count) / float(max(1, int(np.sum(finite_sig))))
+        if robust_mode
+        else np.nan
+    )
+    if robust_mode:
+        artifacts["retuned_correction_inspection_robust_diagnostics"] = {
+            "fit_mode_resolved": fit_mode_resolved or "robust_global_event_reject",
+            "iterations_completed": int(n_iters),
+            "keep_fraction": float(keep_fraction_value),
+            "fallback_to_global_linear": bool(fallback_to_global),
+            "fallback_failed": bool(fallback_failed),
+            "fallback_status": fallback_status,
+            "robust_fit_backend_used": robust_backend_used,
+            "excluded_count": int(excluded_count),
+            "excluded_fraction": float(excluded_fraction),
+        }
 
     csv_path = os.path.join(retune_dir, f"retuned_correction_session_{suffix}.csv")
     pd.DataFrame(
@@ -468,6 +545,43 @@ def _write_correction_inspection(
                 linestyle="--",
                 label="fit_ref",
             )
+            if np.any(excluded_mask):
+                ax.scatter(
+                    t[excluded_mask],
+                    sig[excluded_mask],
+                    s=8,
+                    c="crimson",
+                    alpha=0.45,
+                    linewidths=0.0,
+                    label="excluded points",
+                )
+            keep_pct = 100.0 * keep_fraction_value if np.isfinite(keep_fraction_value) else np.nan
+            if robust_mode:
+                ax.text(
+                    0.01,
+                    0.99,
+                    (
+                        f"iters: {int(n_iters)}\n"
+                        f"keep: {keep_pct:.1f}%\n"
+                        f"fallback: {fallback_status}"
+                    ),
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=8,
+                    bbox={"facecolor": "white", "alpha": 0.7, "edgecolor": "0.7"},
+                )
+            if robust_mode and np.isfinite(keep_pct):
+                ax.set_title(
+                    f"Correction Retune Inspection ({roi}) | chunk={cid} | {panel_label} "
+                    f"| keep={keep_pct:.1f}% | iters={int(n_iters)} | fallback={fallback_status} "
+                    f"| source={chunk.source_file}"
+                )
+            elif np.isfinite(keep_pct):
+                ax.set_title(
+                    f"Correction Retune Inspection ({roi}) | chunk={cid} | {panel_label} "
+                    f"| keep={keep_pct:.1f}% | iters={len(iter_summaries)} | source={chunk.source_file}"
+                )
             ax.set_ylabel("Fit view (V)")
         else:
             ax.plot(t, dff, color="darkorange", linewidth=0.9, label="dff")

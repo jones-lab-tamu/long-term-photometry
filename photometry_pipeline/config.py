@@ -33,7 +33,18 @@ class Config:
     min_samples_per_window: int = 0  # 0 implies dynamic 80%
     min_valid_windows: int = 5
     baseline_subtract_before_fit: bool = False
-    dynamic_fit_mode: Literal['rolling_local_regression', 'global_linear_regression'] = 'rolling_local_regression'
+    dynamic_fit_mode: Literal[
+        'rolling_local_regression',
+        'rolling_filtered_to_raw',
+        'rolling_filtered_to_filtered',
+        'global_linear_regression',
+        'robust_global_event_reject',
+    ] = 'rolling_local_regression'
+    robust_event_reject_max_iters: int = 3
+    robust_event_reject_residual_z_thresh: float = 3.5
+    robust_event_reject_local_var_window_sec: Optional[float] = 10.0
+    robust_event_reject_local_var_ratio_thresh: Optional[float] = None
+    robust_event_reject_min_keep_fraction: float = 0.5
     
     # baseline
     baseline_method: Literal['uv_raw_percentile_session', 'uv_globalfit_percentile_session'] = 'uv_raw_percentile_session'
@@ -129,11 +140,13 @@ class Config:
                 'rolling_filtered_to_raw',
                 'rolling_filtered_to_filtered',
                 'global_linear_regression',
+                'robust_global_event_reject',
             }:
                 raise ValueError(
                     f"Invalid dynamic_fit_mode: {data['dynamic_fit_mode']}. "
                     "Allowed: {'rolling_local_regression', 'rolling_filtered_to_raw', "
-                    "'rolling_filtered_to_filtered', 'global_linear_regression'}"
+                    "'rolling_filtered_to_filtered', 'global_linear_regression', "
+                    "'robust_global_event_reject'}"
                 )
                 
         if 'adapter_value_nan_policy' in data:
@@ -153,5 +166,18 @@ class Config:
         if obj.preview_first_n is not None:
             if not isinstance(obj.preview_first_n, int) or obj.preview_first_n <= 0:
                 raise ValueError("preview_first_n must be an int > 0")
+
+        if obj.robust_event_reject_max_iters < 1:
+            raise ValueError("robust_event_reject_max_iters must be >= 1")
+        if obj.robust_event_reject_residual_z_thresh <= 0.0:
+            raise ValueError("robust_event_reject_residual_z_thresh must be > 0")
+        if obj.robust_event_reject_local_var_window_sec is not None:
+            if obj.robust_event_reject_local_var_window_sec <= 0.0:
+                raise ValueError("robust_event_reject_local_var_window_sec must be > 0 when provided")
+        if obj.robust_event_reject_local_var_ratio_thresh is not None:
+            if obj.robust_event_reject_local_var_ratio_thresh <= 0.0:
+                raise ValueError("robust_event_reject_local_var_ratio_thresh must be > 0 when provided")
+        if not (0.0 < obj.robust_event_reject_min_keep_fraction <= 1.0):
+            raise ValueError("robust_event_reject_min_keep_fraction must be in (0, 1]")
                 
         return obj

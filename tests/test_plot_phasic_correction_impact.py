@@ -118,6 +118,35 @@ def test_build_correction_impact_figure_rolling_filtered_to_filtered_with_baseli
         plt.close(fig)
 
 
+def test_build_correction_impact_figure_robust_mode_title():
+    t = np.array([0.0, 1.0, 2.0], dtype=float)
+    sig = np.array([1.0, 2.0, 3.0], dtype=float)
+    iso = np.array([2.0, 2.5, 3.0], dtype=float)
+    fit = np.array([1.1, 1.9, 3.1], dtype=float)
+    dff = np.array([0.0, 0.1, -0.1], dtype=float)
+
+    fig, axes = impact.build_correction_impact_figure(
+        t=t,
+        sig=sig,
+        iso=iso,
+        fit=fit,
+        dff=dff,
+        roi="Region0",
+        chunk_id=1,
+        dynamic_fit_mode="robust_global_event_reject",
+        baseline_subtract_before_fit=True,
+    )
+    try:
+        assert (
+            axes[2].get_title()
+            == "Dynamic Reference Fitting (Robust global fit + event rejection; baseline subtract before fit: inactive)"
+        )
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
 def test_main_generates_png_with_four_panel_layout(tmp_path, monkeypatch):
     analysis_out = tmp_path / "analysis"
     analysis_out.mkdir(parents=True, exist_ok=True)

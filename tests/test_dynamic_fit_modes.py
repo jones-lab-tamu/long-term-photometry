@@ -2,9 +2,9 @@ import numpy as np
 import pytest
 
 from photometry_pipeline.config import Config
-from photometry_pipeline.core import preprocessing
+from photometry_pipeline.core import preprocessing, regression as regression_module
 from photometry_pipeline.core.normalization import compute_dff
-from photometry_pipeline.core.regression import fit_chunk_dynamic
+from photometry_pipeline.core.regression import fit_chunk_dynamic, fit_robust_global_event_reject
 from photometry_pipeline.core.types import Chunk, SessionStats
 
 
@@ -337,6 +337,172 @@ def test_global_linear_mode_degenerate_nan_inputs_yield_nan_fit_and_dd1_warning(
     assert any("DEGENERATE[DD1]" in str(w) for w in warns)
 
 
+def test_robust_global_event_reject_excludes_large_event_and_preserves_background_fit():
+    n = 3200
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    rng = np.random.default_rng(42)
+
+    uv = 4.0 + 0.25 * np.sin(2.0 * np.pi * 0.03 * t) + 0.05 * rng.standard_normal(n)
+    background = 1.7 * uv + 0.8
+    event = 2.4 * np.exp(-0.5 * ((t - 35.0) / 2.0) ** 2)
+    sig = background + event + 0.04 * rng.standard_normal(n)
+
+    cfg_roll = Config(
+        dynamic_fit_mode="rolling_filtered_to_raw",
+        window_sec=30.0,
+        min_samples_per_window=60,
+        lowpass_hz=2.0,
+        filter_order=2,
+    )
+    cfg_robust = Config(
+        dynamic_fit_mode="robust_global_event_reject",
+        lowpass_hz=2.0,
+        filter_order=2,
+        robust_event_reject_max_iters=4,
+        robust_event_reject_residual_z_thresh=3.0,
+        robust_event_reject_local_var_window_sec=8.0,
+        robust_event_reject_local_var_ratio_thresh=4.0,
+        robust_event_reject_min_keep_fraction=0.55,
+    )
+
+    c_roll = _make_chunk(uv, sig, fs)
+    c_robust = _make_chunk(uv, sig, fs)
+    _prepare_filtered(c_roll, cfg_roll)
+    _prepare_filtered(c_robust, cfg_robust)
+
+    uv_fit_roll, _ = fit_chunk_dynamic(c_roll, cfg_roll, mode="phasic")
+    uv_fit_robust, delta_robust = fit_chunk_dynamic(c_robust, cfg_robust, mode="phasic")
+
+    np.testing.assert_allclose(
+        delta_robust[:, 0],
+        c_robust.sig_raw[:, 0] - uv_fit_robust[:, 0],
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert c_robust.metadata["dynamic_fit_mode_resolved"] == "robust_global_event_reject"
+    assert c_robust.metadata["dynamic_fit_engine"] == "robust_global_event_reject_v1"
+
+    event_mask = np.abs(t - 35.0) <= 2.0
+    event_mae_roll = float(np.nanmean(np.abs(uv_fit_roll[event_mask, 0] - background[event_mask])))
+    event_mae_robust = float(np.nanmean(np.abs(uv_fit_robust[event_mask, 0] - background[event_mask])))
+    assert event_mae_robust < event_mae_roll
+
+    roi_meta = c_robust.metadata.get("dynamic_fit_event_reject", {}).get("Region0", {})
+    excluded = np.asarray(roi_meta.get("excluded_mask", []), dtype=bool)
+    assert excluded.shape == (n,)
+    assert float(np.mean(excluded[event_mask])) > 0.2
+    assert roi_meta.get("n_iterations_completed", 0) >= 1
+    assert np.isfinite(float(roi_meta.get("final_keep_fraction", np.nan)))
+    assert str(roi_meta.get("robust_fit_backend_used", "")) != ""
+    engine_info = c_robust.metadata.get("dynamic_fit_engine_info", {})
+    assert "robust_backend_used_counts" in engine_info
+    assert int(engine_info.get("success_roi_count", 0)) == 1
+
+
+def test_fit_robust_global_event_reject_reports_backend_and_mad_zero_guard():
+    n = 1200
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    iso = 4.0 + 0.2 * np.sin(2.0 * np.pi * 0.05 * t)
+    sig = 1.7 * iso + 0.8
+
+    result = fit_robust_global_event_reject(
+        signal_raw=sig,
+        iso_raw=iso,
+        max_iters=3,
+        residual_z_thresh=3.5,
+        local_var_window_sec=10.0,
+        local_var_ratio_thresh=None,
+        min_keep_fraction=0.5,
+        sample_rate_hz=fs,
+        use_intercept=True,
+    )
+
+    np.testing.assert_allclose(result["iso_fit_signal_units"], sig, rtol=0.0, atol=1e-8)
+    assert result["n_iterations_completed"] >= 1
+    assert result["stop_reason"] in {"mad_zero_or_nonfinite", "converged_keep_mask"}
+    assert result["final_keep_fraction"] == pytest.approx(1.0)
+    assert result["robust_fit_backend_used"] in {"sklearn_huber", "statsmodels_rlm", "unknown"}
+
+
+def test_fit_robust_global_event_reject_min_keep_guard_stops_exclusion():
+    n = 2000
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    iso = 5.0 + 0.2 * np.sin(2.0 * np.pi * 0.04 * t)
+    sig = 1.6 * iso + 0.4
+    sig += 2.8 * np.exp(-0.5 * ((t - 24.0) / 2.5) ** 2)
+
+    result = fit_robust_global_event_reject(
+        signal_raw=sig,
+        iso_raw=iso,
+        max_iters=3,
+        residual_z_thresh=0.15,
+        local_var_window_sec=10.0,
+        local_var_ratio_thresh=None,
+        min_keep_fraction=0.95,
+        sample_rate_hz=fs,
+        use_intercept=True,
+    )
+
+    reasons = [str(x.get("stop_reason", "")) for x in result.get("iteration_summaries", [])]
+    assert "min_keep_fraction_guard" in reasons
+    assert result["final_keep_fraction"] >= 0.95
+    # Guard preserves previous mask; exclusions should not be applied in final output.
+    assert int(np.sum(result["excluded_mask"])) == 0
+
+
+def test_robust_global_event_reject_falls_back_to_global_linear_when_robust_fit_fails(monkeypatch):
+    n = 800
+    fs = 20.0
+    t = np.arange(n, dtype=float) / fs
+    uv = 2.5 + 0.3 * np.sin(2.0 * np.pi * 0.12 * t)
+    sig = 1.9 * uv + 0.4
+
+    cfg = Config(dynamic_fit_mode="robust_global_event_reject")
+    chunk = _make_chunk(uv, sig, fs)
+    chunk.uv_filt = chunk.uv_raw.copy()
+    chunk.sig_filt = chunk.sig_raw.copy()
+
+    def _forced_fail(*_args, **_kwargs):
+        return None, "forced_failure"
+
+    monkeypatch.setattr(regression_module, "_fit_robust_linear", _forced_fail)
+    uv_fit, delta_f = fit_chunk_dynamic(chunk, cfg, mode="phasic")
+
+    np.testing.assert_allclose(delta_f[:, 0], chunk.sig_raw[:, 0] - uv_fit[:, 0], rtol=0.0, atol=1e-12)
+    warns = chunk.metadata.get("qc_warnings", [])
+    assert any("ROBUST_GLOBAL_EVENT_REJECT_FALLBACK" in str(w) for w in warns)
+    roi_meta = chunk.metadata.get("dynamic_fit_event_reject", {}).get("Region0", {})
+    assert roi_meta.get("fallback_to_global_linear") is True
+    assert roi_meta.get("robust_fit_backend_used") == "global_linear_fallback"
+
+
+def test_robust_global_event_reject_constant_iso_degenerate_fallback_is_safe():
+    n = 300
+    fs = 20.0
+    t = np.arange(n, dtype=float) / fs
+    uv = np.ones(n, dtype=float) * 4.2
+    sig = 0.8 + 0.3 * np.sin(2.0 * np.pi * 0.2 * t)
+
+    cfg = Config(dynamic_fit_mode="robust_global_event_reject")
+    chunk = _make_chunk(uv, sig, fs)
+    chunk.uv_filt = chunk.uv_raw.copy()
+    chunk.sig_filt = chunk.sig_raw.copy()
+
+    uv_fit, delta_f = fit_chunk_dynamic(chunk, cfg, mode="phasic")
+    assert np.isnan(uv_fit).all()
+    assert np.isnan(delta_f).all()
+
+    warns = chunk.metadata.get("qc_warnings", [])
+    assert any("ROBUST_GLOBAL_EVENT_REJECT_FALLBACK" in str(w) for w in warns)
+    assert any("ROBUST_GLOBAL_EVENT_REJECT_FALLBACK_DEGENERATE[DD2]" in str(w) for w in warns)
+    roi_meta = chunk.metadata.get("dynamic_fit_event_reject", {}).get("Region0", {})
+    assert roi_meta.get("fallback_to_global_linear") is True
+    assert roi_meta.get("fallback_failed") is True
+
+
 def test_config_rejects_invalid_dynamic_fit_mode(tmp_path):
     cfg_path = tmp_path / "invalid_dynamic_fit_mode.yaml"
     cfg_path.write_text("dynamic_fit_mode: not_a_mode\n", encoding="utf-8")
@@ -353,3 +519,28 @@ def test_config_accepts_new_rolling_modes_and_baseline_toggle(tmp_path):
     cfg = Config.from_yaml(str(cfg_path))
     assert cfg.dynamic_fit_mode == "rolling_filtered_to_filtered"
     assert cfg.baseline_subtract_before_fit is True
+
+
+def test_config_accepts_robust_global_event_reject_mode_and_params(tmp_path):
+    cfg_path = tmp_path / "robust_mode.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "dynamic_fit_mode: robust_global_event_reject",
+                "robust_event_reject_max_iters: 5",
+                "robust_event_reject_residual_z_thresh: 3.2",
+                "robust_event_reject_local_var_window_sec: 9.0",
+                "robust_event_reject_local_var_ratio_thresh: 4.5",
+                "robust_event_reject_min_keep_fraction: 0.6",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cfg = Config.from_yaml(str(cfg_path))
+    assert cfg.dynamic_fit_mode == "robust_global_event_reject"
+    assert cfg.robust_event_reject_max_iters == 5
+    assert cfg.robust_event_reject_residual_z_thresh == pytest.approx(3.2)
+    assert cfg.robust_event_reject_local_var_window_sec == pytest.approx(9.0)
+    assert cfg.robust_event_reject_local_var_ratio_thresh == pytest.approx(4.5)
+    assert cfg.robust_event_reject_min_keep_fraction == pytest.approx(0.6)

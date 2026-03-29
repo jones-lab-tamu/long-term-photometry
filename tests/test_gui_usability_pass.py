@@ -234,6 +234,7 @@ def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
         "rolling_filtered_to_filtered",
         "global_linear_regression",
     ]
+    assert "robust_global_event_reject" in visible_modes
 
     spec_default = window._build_run_spec(validate_only=True)
     assert spec_default.config_overrides.get("dynamic_fit_mode") is None
@@ -273,6 +274,49 @@ def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
     with open(cfg_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     assert cfg.get("dynamic_fit_mode") == "global_linear_regression"
+
+
+def test_gui_dynamic_fit_mode_robust_event_reject_plumbs_mode_specific_overrides(window):
+    _set_minimally_valid_paths(window)
+
+    idx = window._dynamic_fit_mode_combo.findData("robust_global_event_reject")
+    assert idx >= 0
+    window._dynamic_fit_mode_combo.setCurrentIndex(idx)
+    window._robust_event_reject_max_iters_spin.setValue(4)
+    window._robust_event_reject_residual_z_spin.setValue(3.1)
+    window._robust_event_reject_local_var_window_spin.setValue(9.0)
+    window._robust_event_reject_local_var_ratio_enable_cb.setChecked(True)
+    window._robust_event_reject_local_var_ratio_spin.setValue(4.2)
+    window._robust_event_reject_min_keep_fraction_spin.setValue(0.6)
+
+    assert not window._window_sec_edit.isEnabled()
+    assert not window._min_samples_per_window_spin.isEnabled()
+    assert not window._baseline_subtract_before_fit_cb.isEnabled()
+    assert window._robust_event_reject_max_iters_spin.isEnabled()
+    assert window._robust_event_reject_residual_z_spin.isEnabled()
+    assert window._robust_event_reject_local_var_window_spin.isEnabled()
+    assert window._robust_event_reject_local_var_ratio_enable_cb.isEnabled()
+    assert window._robust_event_reject_local_var_ratio_spin.isEnabled()
+    assert window._robust_event_reject_min_keep_fraction_spin.isEnabled()
+
+    spec = window._build_run_spec(validate_only=True)
+    overrides = dict(spec.config_overrides)
+    assert overrides.get("dynamic_fit_mode") == "robust_global_event_reject"
+    assert overrides.get("robust_event_reject_max_iters") == 4
+    assert overrides.get("robust_event_reject_residual_z_thresh") == pytest.approx(3.1)
+    assert overrides.get("robust_event_reject_local_var_window_sec") == pytest.approx(9.0)
+    assert overrides.get("robust_event_reject_local_var_ratio_thresh") == pytest.approx(4.2)
+    assert overrides.get("robust_event_reject_min_keep_fraction") == pytest.approx(0.6)
+    assert "window_sec" not in overrides
+    assert "min_samples_per_window" not in overrides
+    assert "baseline_subtract_before_fit" not in overrides
+    summary = window._effective_summary_label.text()
+    assert "Robust event-reject settings:" in summary
+    assert "max_iters=4" in summary
+    assert "residual_z=3.1" in summary
+    assert "local_var_window_s=9" in summary
+    assert "local_var_ratio=4.2" in summary
+    assert "min_keep=0.6" in summary
 
 
 def test_gui_dynamic_fit_mode_legacy_alias_in_settings_normalizes_to_filtered_to_raw(window):

@@ -157,6 +157,21 @@ class TestGuiKnobRegistry(unittest.TestCase):
         filtered = filter_config_overrides({"baseline_subtract_before_fit": True})
         self.assertEqual(filtered, {"baseline_subtract_before_fit": True})
 
+    def test_filter_config_overrides_accepts_robust_event_reject_keys(self):
+        filtered = filter_config_overrides(
+            {
+                "robust_event_reject_max_iters": 4,
+                "robust_event_reject_residual_z_thresh": 3.1,
+            }
+        )
+        self.assertEqual(
+            filtered,
+            {
+                "robust_event_reject_max_iters": 4,
+                "robust_event_reject_residual_z_thresh": 3.1,
+            },
+        )
+
     def test_run_spec_generate_derived_config_uses_filtered_overrides(self):
         """generate_derived_config filters overrides and raises on unknown."""
         import os

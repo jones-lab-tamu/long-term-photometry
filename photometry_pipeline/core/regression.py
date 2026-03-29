@@ -1,6 +1,6 @@
 import numpy as np
 import time
-from typing import Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from ..config import Config
 from .types import Chunk
 
@@ -100,6 +100,7 @@ _DYNAMIC_FIT_MODES = {
     "rolling_filtered_to_raw",
     "rolling_filtered_to_filtered",
     "global_linear_regression",
+    "robust_global_event_reject",
 }
 
 _DYNAMIC_FIT_MODE_ALIASES = {
@@ -210,6 +211,291 @@ def _prepare_rolling_fit_inputs(
     return uv_fit_input, sig_fit_input, prep_info
 
 
+def _centered_rolling_variance(values: np.ndarray, window_samples: int) -> np.ndarray:
+    """
+    Finite-aware centered rolling population variance for 1D arrays.
+    """
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    mask = np.isfinite(arr)
+    count = _rolling_sum_centered(mask.astype(float), window_samples)
+    total = _rolling_sum_centered(np.where(mask, arr, 0.0), window_samples)
+    total_sq = _rolling_sum_centered(np.where(mask, arr * arr, 0.0), window_samples)
+
+    out = np.full(arr.shape, np.nan, dtype=float)
+    valid = count >= 2.0
+    if np.any(valid):
+        mean = total[valid] / count[valid]
+        var = (total_sq[valid] / count[valid]) - (mean * mean)
+        out[valid] = np.maximum(var, 0.0)
+    return out
+
+
+def _fit_robust_linear(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    use_intercept: bool = True,
+) -> tuple[Optional[tuple[float, float]], Optional[str], str]:
+    """
+    Fit robust global linear model y ~ a*x + b.
+
+    Preferred backend order:
+      1) sklearn HuberRegressor
+      2) statsmodels RLM (HuberT)
+    """
+    x_arr = np.asarray(x, dtype=float).reshape(-1)
+    y_arr = np.asarray(y, dtype=float).reshape(-1)
+    finite = np.isfinite(x_arr) & np.isfinite(y_arr)
+    if int(np.sum(finite)) < 3:
+        return None, "insufficient_finite_samples", "none"
+    x_fit = x_arr[finite]
+    y_fit = y_arr[finite]
+    if float(np.nanvar(x_fit)) <= 1e-12:
+        return None, "near_zero_iso_variance", "none"
+
+    try:
+        from sklearn.linear_model import HuberRegressor  # type: ignore
+
+        model = HuberRegressor(fit_intercept=bool(use_intercept), max_iter=200)
+        model.fit(x_fit.reshape(-1, 1), y_fit)
+        slope = float(model.coef_[0])
+        intercept = float(model.intercept_) if bool(use_intercept) else 0.0
+        if np.isfinite(slope) and np.isfinite(intercept):
+            return (slope, intercept), None, "sklearn_huber"
+    except Exception:
+        pass
+
+    try:
+        import statsmodels.api as sm  # type: ignore
+
+        X = x_fit.reshape(-1, 1)
+        if bool(use_intercept):
+            X = sm.add_constant(X, has_constant="add")
+        model = sm.RLM(y_fit, X, M=sm.robust.norms.HuberT())
+        res = model.fit(maxiter=100)
+        params = np.asarray(res.params, dtype=float).reshape(-1)
+        if bool(use_intercept):
+            if params.size < 2:
+                return None, "statsmodels_bad_params", "statsmodels_rlm"
+            intercept = float(params[0])
+            slope = float(params[1])
+        else:
+            if params.size < 1:
+                return None, "statsmodels_bad_params", "statsmodels_rlm"
+            slope = float(params[0])
+            intercept = 0.0
+        if np.isfinite(slope) and np.isfinite(intercept):
+            return (slope, intercept), None, "statsmodels_rlm"
+        return None, "statsmodels_nonfinite_params", "statsmodels_rlm"
+    except Exception:
+        return None, "robust_regression_backend_unavailable", "none"
+
+
+def _unpack_robust_fit_result(
+    fit_result: Any,
+) -> tuple[Optional[tuple[float, float]], Optional[str], str]:
+    """
+    Backward-compatible unpacking for robust fit results.
+    Accepts:
+      - (params, fail_reason) from legacy monkeypatch/tests
+      - (params, fail_reason, backend_used) from current implementation
+    """
+    if not isinstance(fit_result, tuple):
+        return None, "invalid_robust_fit_result", "unknown"
+    if len(fit_result) >= 3:
+        params, fail_reason, backend = fit_result[0], fit_result[1], fit_result[2]
+        return params, fail_reason, str(backend)
+    if len(fit_result) == 2:
+        params, fail_reason = fit_result
+        return params, fail_reason, "unknown"
+    return None, "invalid_robust_fit_result", "unknown"
+
+
+def fit_robust_global_event_reject(
+    signal_raw: np.ndarray,
+    iso_raw: np.ndarray,
+    *,
+    max_iters: int = 3,
+    residual_z_thresh: float = 3.5,
+    local_var_window_sec: float | None = None,
+    local_var_ratio_thresh: float | None = None,
+    min_keep_fraction: float = 0.5,
+    sample_rate_hz: float,
+    use_intercept: bool = True,
+) -> dict:
+    """
+    Robust global fit with iterative event-dominated sample rejection.
+    """
+    sig = np.asarray(signal_raw, dtype=float).reshape(-1)
+    iso = np.asarray(iso_raw, dtype=float).reshape(-1)
+    if sig.shape != iso.shape:
+        raise ValueError(
+            "robust_global_event_reject shape mismatch: "
+            f"signal={sig.shape}, iso={iso.shape}"
+        )
+    if sig.size == 0:
+        raise RuntimeError("robust_global_event_reject received empty input")
+
+    finite = np.isfinite(sig) & np.isfinite(iso)
+    n_finite = int(np.sum(finite))
+    if n_finite < 3:
+        raise RuntimeError("robust_global_event_reject requires at least 3 finite samples")
+
+    max_iters_i = max(1, int(max_iters))
+    z_thresh = float(residual_z_thresh)
+    min_keep = float(min_keep_fraction)
+    if z_thresh <= 0.0:
+        raise ValueError("residual_z_thresh must be > 0")
+    if not (0.0 < min_keep <= 1.0):
+        raise ValueError("min_keep_fraction must be in (0, 1]")
+
+    use_var_rule = (
+        local_var_window_sec is not None
+        and local_var_ratio_thresh is not None
+        and float(local_var_ratio_thresh) > 0.0
+    )
+    fs_hz = float(sample_rate_hz)
+    if (not np.isfinite(fs_hz)) or fs_hz <= 0.0:
+        fs_hz = 1.0
+    local_var_window_samples = 0
+    var_ratio = None
+    if use_var_rule:
+        local_var_window_samples = max(3, int(round(float(local_var_window_sec) * fs_hz)))
+        if (local_var_window_samples % 2) == 0:
+            local_var_window_samples += 1
+        var_sig = _centered_rolling_variance(sig, local_var_window_samples)
+        var_iso = _centered_rolling_variance(iso, local_var_window_samples)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            var_ratio = var_sig / np.maximum(var_iso, 1e-12)
+
+    keep_mask = finite.copy()
+    iteration_summaries: List[Dict[str, Any]] = []
+    final_slope = np.nan
+    final_intercept = np.nan
+    final_fit = np.full_like(sig, np.nan, dtype=float)
+    robust_backend_used = "unknown"
+    stop_reason_final = "max_iters_reached"
+
+    for iter_idx in range(max_iters_i):
+        n_keep_before = int(np.sum(keep_mask))
+        params, fail_reason, backend_used = _unpack_robust_fit_result(
+            _fit_robust_linear(
+                iso[keep_mask],
+                sig[keep_mask],
+                use_intercept=bool(use_intercept),
+            )
+        )
+        robust_backend_used = str(backend_used)
+        if params is None:
+            raise RuntimeError(
+                "robust_global_event_reject robust fit failed: "
+                f"{fail_reason or 'unknown'}"
+            )
+
+        slope, intercept = params
+        fit_all = (slope * iso) + intercept
+        residual = sig - fit_all
+
+        resid_finite = residual[finite]
+        med = float(np.median(resid_finite))
+        mad = float(np.median(np.abs(resid_finite - med)))
+        robust_scale = float(1.4826 * mad)
+
+        stop_reason = ""
+        candidate_resid = np.zeros_like(finite, dtype=bool)
+        candidate_var = np.zeros_like(finite, dtype=bool)
+        if robust_scale <= 1e-12 or not np.isfinite(robust_scale):
+            stop_reason = "mad_zero_or_nonfinite"
+            new_keep = keep_mask.copy()
+        else:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                z_pos = (residual - med) / robust_scale
+            candidate_resid = finite & (z_pos > z_thresh)
+            if use_var_rule and var_ratio is not None:
+                candidate_var = (
+                    finite
+                    & np.isfinite(var_ratio)
+                    & (var_ratio > float(local_var_ratio_thresh))
+                )
+            candidate_union = candidate_resid | candidate_var
+            new_keep = finite & (~candidate_union)
+            keep_fraction_after = float(np.sum(new_keep)) / float(n_finite)
+            if keep_fraction_after < min_keep:
+                stop_reason = "min_keep_fraction_guard"
+                new_keep = keep_mask.copy()
+            elif np.array_equal(new_keep, keep_mask):
+                stop_reason = "converged_keep_mask"
+
+        changed_count = int(np.sum(new_keep != keep_mask))
+        keep_fraction = float(np.sum(new_keep)) / float(n_finite)
+        iteration_summaries.append(
+            {
+                "iter_index": int(iter_idx + 1),
+                "n_finite": int(n_finite),
+                "n_keep_before": int(n_keep_before),
+                "n_keep_after": int(np.sum(new_keep)),
+                "keep_fraction_after": float(keep_fraction),
+                "residual_median": float(med),
+                "residual_mad": float(mad),
+                "residual_robust_scale": float(robust_scale),
+                "n_candidate_excluded_residual": int(np.sum(candidate_resid)),
+                "n_candidate_excluded_local_var": int(np.sum(candidate_var)),
+                "changed_count": int(changed_count),
+                "slope": float(slope),
+                "intercept": float(intercept),
+                "robust_backend_used": str(backend_used),
+                "stop_reason": stop_reason,
+            }
+        )
+
+        final_slope = float(slope)
+        final_intercept = float(intercept)
+        final_fit = fit_all
+        keep_mask = new_keep
+        stop_reason_final = stop_reason or "max_iters_reached"
+
+        if stop_reason in {"mad_zero_or_nonfinite", "min_keep_fraction_guard", "converged_keep_mask"}:
+            break
+
+    params, fail_reason, backend_used = _unpack_robust_fit_result(
+        _fit_robust_linear(
+            iso[keep_mask],
+            sig[keep_mask],
+            use_intercept=bool(use_intercept),
+        )
+    )
+    if params is not None:
+        final_slope, final_intercept = float(params[0]), float(params[1])
+        final_fit = (final_slope * iso) + final_intercept
+        robust_backend_used = str(backend_used)
+    elif not np.isfinite(final_slope):
+        raise RuntimeError(
+            "robust_global_event_reject final fit failed: "
+            f"{fail_reason or 'unknown'}"
+        )
+
+    return {
+        "iso_fit_signal_units": np.asarray(final_fit, dtype=float),
+        "keep_mask": np.asarray(keep_mask, dtype=bool),
+        "excluded_mask": np.asarray(finite & (~keep_mask), dtype=bool),
+        "final_coef": {
+            "slope": float(final_slope),
+            "intercept": float(final_intercept),
+            "use_intercept": bool(use_intercept),
+            "n_kept": int(np.sum(keep_mask)),
+            "n_finite": int(n_finite),
+            "keep_fraction": float(np.sum(keep_mask) / float(max(1, n_finite))),
+        },
+        "iteration_summaries": iteration_summaries,
+        "local_var_rule_enabled": bool(use_var_rule),
+        "local_var_window_samples": int(local_var_window_samples),
+        "n_iterations_completed": int(len(iteration_summaries)),
+        "final_keep_fraction": float(np.sum(keep_mask) / float(max(1, n_finite))),
+        "stop_reason": str(stop_reason_final),
+        "robust_fit_backend_used": str(robust_backend_used),
+    }
+
+
 def _compute_dynamic_fit_ref_global_linear(chunk: Chunk, config: Config, mode: str) -> Optional[np.ndarray]:
     """
     Global OLS dynamic-fit mode:
@@ -255,6 +541,162 @@ def _compute_dynamic_fit_ref_global_linear(chunk: Chunk, config: Config, mode: s
         slope, intercept = params
         uv_fit_all[:, r_idx] = intercept + slope * chunk.uv_raw[:, r_idx]
 
+    return uv_fit_all
+
+
+def _compute_dynamic_fit_ref_robust_global_event_reject(
+    chunk: Chunk,
+    config: Config,
+    mode: str,
+) -> Optional[np.ndarray]:
+    """
+    Robust global fit with iterative event-dominated sample rejection.
+    Fits on raw traces and reconstructs on raw UV.
+    """
+    if mode == "tonic":
+        raise RuntimeError("Invariant violated: tonic mode must not run dynamic isosbestic fitting.")
+
+    n_rois = int(chunk.uv_raw.shape[1])
+    uv_fit_all = np.full_like(chunk.uv_raw, np.nan, dtype=float)
+    _ensure_chunk_metadata(chunk)
+    chunk.metadata["dynamic_fit_engine"] = "robust_global_event_reject_v1"
+    chunk.metadata["dynamic_fit_engine_info"] = {
+        "fit_inputs": "sig_raw ~ a*uv_raw + b with iterative event-point rejection",
+        "reconstruction_signal": "uv_raw",
+        "fit_mode_resolved": "robust_global_event_reject",
+        "fit_input_domain": "raw",
+        "baseline_subtract_before_fit": bool(getattr(config, "baseline_subtract_before_fit", False)),
+        "baseline_subtract_applied": False,
+        "robust_event_reject_max_iters": int(getattr(config, "robust_event_reject_max_iters", 3)),
+        "robust_event_reject_residual_z_thresh": float(
+            getattr(config, "robust_event_reject_residual_z_thresh", 3.5)
+        ),
+        "robust_event_reject_local_var_window_sec": (
+            None
+            if getattr(config, "robust_event_reject_local_var_window_sec", None) is None
+            else float(getattr(config, "robust_event_reject_local_var_window_sec", 10.0))
+        ),
+        "robust_event_reject_local_var_ratio_thresh": (
+            None
+            if getattr(config, "robust_event_reject_local_var_ratio_thresh", None) is None
+            else float(getattr(config, "robust_event_reject_local_var_ratio_thresh", 0.0))
+        ),
+        "robust_event_reject_min_keep_fraction": float(
+            getattr(config, "robust_event_reject_min_keep_fraction", 0.5)
+        ),
+        "robust_fit_backend_preference": "sklearn_huber_then_statsmodels_rlm",
+        "n_rois": n_rois,
+        "legacy_knobs_not_used_in_engine": _legacy_knobs_not_used_in_engine(),
+    }
+    chunk.metadata["dynamic_fit_event_reject"] = {}
+
+    max_iters = int(getattr(config, "robust_event_reject_max_iters", 3))
+    residual_z_thresh = float(getattr(config, "robust_event_reject_residual_z_thresh", 3.5))
+    local_var_window_sec = getattr(config, "robust_event_reject_local_var_window_sec", 10.0)
+    local_var_ratio_thresh = getattr(config, "robust_event_reject_local_var_ratio_thresh", None)
+    min_keep_fraction = float(getattr(config, "robust_event_reject_min_keep_fraction", 0.5))
+
+    fallback_roi_count = 0
+    robust_backend_used_counts: Dict[str, int] = {}
+    for r_idx in range(n_rois):
+        roi_name = str(chunk.channel_names[r_idx]) if r_idx < len(chunk.channel_names) else f"roi_{r_idx}"
+        sig_raw = np.asarray(chunk.sig_raw[:, r_idx], dtype=float)
+        uv_raw = np.asarray(chunk.uv_raw[:, r_idx], dtype=float)
+        try:
+            robust_result = fit_robust_global_event_reject(
+                signal_raw=sig_raw,
+                iso_raw=uv_raw,
+                max_iters=max_iters,
+                residual_z_thresh=residual_z_thresh,
+                local_var_window_sec=local_var_window_sec,
+                local_var_ratio_thresh=local_var_ratio_thresh,
+                min_keep_fraction=min_keep_fraction,
+                sample_rate_hz=float(chunk.fs_hz),
+                use_intercept=True,
+            )
+            uv_fit_all[:, r_idx] = np.asarray(
+                robust_result["iso_fit_signal_units"], dtype=float
+            )
+            chunk.metadata["dynamic_fit_event_reject"][roi_name] = {
+                "keep_mask": np.asarray(robust_result.get("keep_mask", []), dtype=bool),
+                "excluded_mask": np.asarray(robust_result.get("excluded_mask", []), dtype=bool),
+                "final_coef": dict(robust_result.get("final_coef", {})),
+                "iteration_summaries": list(robust_result.get("iteration_summaries", [])),
+                "robust_fit_backend_used": str(robust_result.get("robust_fit_backend_used", "unknown")),
+                "n_iterations_completed": int(robust_result.get("n_iterations_completed", 0)),
+                "final_keep_fraction": float(robust_result.get("final_keep_fraction", np.nan)),
+                "stop_reason": str(robust_result.get("stop_reason", "")),
+                "fallback_to_global_linear": False,
+            }
+            backend_used = str(robust_result.get("robust_fit_backend_used", "unknown"))
+            robust_backend_used_counts[backend_used] = robust_backend_used_counts.get(backend_used, 0) + 1
+            continue
+        except Exception as exc:
+            chunk.metadata.setdefault("qc_warnings", []).append(
+                "ROBUST_GLOBAL_EVENT_REJECT_FALLBACK "
+                f"roi={roi_name} reason={exc}"
+            )
+
+        if chunk.uv_filt is None or chunk.sig_filt is None:
+            u_fit = uv_raw
+            s_fit = sig_raw
+        else:
+            u_fit = np.asarray(chunk.uv_filt[:, r_idx], dtype=float)
+            s_fit = np.asarray(chunk.sig_filt[:, r_idx], dtype=float)
+
+        params, fail_code, var_u = _global_fit_params(u_fit, s_fit)
+        if params is None:
+            fallback_roi_count += 1
+            if fail_code == "DD1":
+                msg = (
+                    "ROBUST_GLOBAL_EVENT_REJECT_FALLBACK_DEGENERATE[DD1] "
+                    f"roi={roi_name} <2 finite samples"
+                )
+            else:
+                msg = (
+                    "ROBUST_GLOBAL_EVENT_REJECT_FALLBACK_DEGENERATE[DD2] "
+                    f"roi={roi_name} var_u={var_u}"
+                )
+            chunk.metadata.setdefault("qc_warnings", []).append(msg)
+            chunk.metadata["dynamic_fit_event_reject"][roi_name] = {
+                "keep_mask": np.zeros(sig_raw.shape, dtype=bool),
+                "excluded_mask": np.zeros(sig_raw.shape, dtype=bool),
+                "final_coef": {},
+                "iteration_summaries": [],
+                "robust_fit_backend_used": "none",
+                "n_iterations_completed": 0,
+                "final_keep_fraction": 0.0,
+                "stop_reason": "fallback_degenerate",
+                "fallback_to_global_linear": True,
+                "fallback_failed": True,
+            }
+            continue
+
+        fallback_roi_count += 1
+        slope, intercept = params
+        uv_fit_all[:, r_idx] = intercept + slope * uv_raw
+        chunk.metadata["dynamic_fit_event_reject"][roi_name] = {
+            "keep_mask": np.isfinite(sig_raw) & np.isfinite(uv_raw),
+            "excluded_mask": np.zeros(sig_raw.shape, dtype=bool),
+            "final_coef": {
+                "slope": float(slope),
+                "intercept": float(intercept),
+            },
+            "iteration_summaries": [],
+            "robust_fit_backend_used": "global_linear_fallback",
+            "n_iterations_completed": 0,
+            "final_keep_fraction": 1.0,
+            "stop_reason": "fallback_global_linear",
+            "fallback_to_global_linear": True,
+            "fallback_failed": False,
+        }
+        robust_backend_used_counts["global_linear_fallback"] = robust_backend_used_counts.get(
+            "global_linear_fallback", 0
+        ) + 1
+
+    chunk.metadata["dynamic_fit_engine_info"]["fallback_roi_count"] = int(fallback_roi_count)
+    chunk.metadata["dynamic_fit_engine_info"]["success_roi_count"] = int(n_rois - fallback_roi_count)
+    chunk.metadata["dynamic_fit_engine_info"]["robust_backend_used_counts"] = dict(robust_backend_used_counts)
     return uv_fit_all
 
 
@@ -553,6 +995,8 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
     baseline_toggle = bool(getattr(config, "baseline_subtract_before_fit", False))
     if fit_mode == "global_linear_regression":
         uv_fit = _compute_dynamic_fit_ref_global_linear(chunk, config, mode)
+    elif fit_mode == "robust_global_event_reject":
+        uv_fit = _compute_dynamic_fit_ref_robust_global_event_reject(chunk, config, mode)
     else:
         uv_fit = _compute_dynamic_fit_ref(chunk, config, mode, fit_mode=fit_mode)
 

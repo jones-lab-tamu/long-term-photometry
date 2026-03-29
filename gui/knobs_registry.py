@@ -35,6 +35,11 @@ GUI_KNOBS_ADVANCED: Set[str] = {
     "r_high",
     "g_min",
     "min_samples_per_window",
+    "robust_event_reject_max_iters",
+    "robust_event_reject_residual_z_thresh",
+    "robust_event_reject_local_var_window_sec",
+    "robust_event_reject_local_var_ratio_thresh",
+    "robust_event_reject_min_keep_fraction",
     # Peak/Event
     "event_signal",
     "peak_threshold_method",
@@ -136,7 +141,7 @@ KNOB_META: Dict[str, dict] = {
     },
     "dynamic_fit_mode": {
         "label": "Dynamic Fit Mode",
-        "help": "Isosbestic fit engine selector: rolling local regression (recommended) or global linear baseline.",
+        "help": "Isosbestic fit engine selector for rolling, global linear, or robust global event-reject fitting.",
     },
     "baseline_subtract_before_fit": {
         "label": "Baseline Subtract Before Fit",
@@ -168,6 +173,31 @@ KNOB_META: Dict[str, dict] = {
     "min_samples_per_window": {
         "label": "Min Samples per Window",
         "help": "Minimum valid samples per window.",
+    },
+    "robust_event_reject_max_iters": {
+        "label": "Robust Event-Reject Max Iters",
+        "help": "Maximum rejection/refit passes for robust global event-reject mode.",
+        "range": {"min": 1.0},
+    },
+    "robust_event_reject_residual_z_thresh": {
+        "label": "Robust Event-Reject Residual Z",
+        "help": "Positive residual robust-z threshold used to exclude likely event-dominated samples.",
+        "range": {"min": 0.0},
+    },
+    "robust_event_reject_local_var_window_sec": {
+        "label": "Robust Event-Reject Local Var Window (s)",
+        "help": "Centered window used for optional local-variance asymmetry screening.",
+        "range": {"min": 0.0},
+    },
+    "robust_event_reject_local_var_ratio_thresh": {
+        "label": "Robust Event-Reject Local Var Ratio",
+        "help": "Optional local variance ratio threshold (signal/iso). Disabled when unset.",
+        "range": {"min": 0.0},
+    },
+    "robust_event_reject_min_keep_fraction": {
+        "label": "Robust Event-Reject Min Keep Fraction",
+        "help": "Lower keep-fraction guardrail for robust sample exclusion.",
+        "range": {"min": 0.0, "max": 1.0},
     },
     # --- DEVELOPER ---
     "allow_partial_final_chunk": {

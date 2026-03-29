@@ -166,6 +166,50 @@ def parse_and_validate_isosbestic_knobs(
     return overrides, None
 
 
+def parse_and_validate_robust_event_reject_knobs(
+    max_iters_val: int,
+    residual_z_thresh_val: float,
+    local_var_window_sec_val: float,
+    local_var_ratio_thresh_enabled: bool,
+    local_var_ratio_thresh_val: float,
+    min_keep_fraction_val: float,
+    defaults: dict,
+) -> tuple[dict | None, str | None]:
+    """
+    Parse and validate robust_global_event_reject controls.
+    """
+    max_iters = int(max_iters_val)
+    if max_iters < 1:
+        return None, "Max iterations must be >= 1."
+
+    residual_z = float(residual_z_thresh_val)
+    if residual_z <= 0.0:
+        return None, "Residual z-threshold must be > 0."
+
+    local_window = float(local_var_window_sec_val)
+    if local_window <= 0.0:
+        return None, "Local variance window must be > 0."
+
+    min_keep_fraction = float(min_keep_fraction_val)
+    if not (0.0 < min_keep_fraction <= 1.0):
+        return None, "Minimum keep fraction must be in (0, 1]."
+
+    ratio_thresh = None
+    if bool(local_var_ratio_thresh_enabled):
+        ratio_thresh = float(local_var_ratio_thresh_val)
+        if ratio_thresh <= 0.0:
+            return None, "Local variance ratio threshold must be > 0 when enabled."
+
+    overrides = {
+        "robust_event_reject_max_iters": max_iters,
+        "robust_event_reject_residual_z_thresh": residual_z,
+        "robust_event_reject_local_var_window_sec": local_window,
+        "robust_event_reject_local_var_ratio_thresh": ratio_thresh,
+        "robust_event_reject_min_keep_fraction": min_keep_fraction,
+    }
+    return overrides, None
+
+
 def is_isosbestic_active(mode_text: str) -> bool:
     """Return True if the mode implies phasic analysis will run."""
     return mode_text in ("both", "phasic")
@@ -199,6 +243,7 @@ _KNOWN_ALLOWED_VALUES = {
         "rolling_filtered_to_raw",
         "rolling_filtered_to_filtered",
         "global_linear_regression",
+        "robust_global_event_reject",
         "rolling_local_regression",
     ],
 }
@@ -210,11 +255,13 @@ _DYNAMIC_FIT_MODE_CANONICAL_ORDER = [
     "rolling_filtered_to_raw",
     "rolling_filtered_to_filtered",
     "global_linear_regression",
+    "robust_global_event_reject",
 ]
 _DYNAMIC_FIT_MODE_LABELS = {
     "rolling_filtered_to_raw": "Rolling regression (filtered→raw)",
     "rolling_filtered_to_filtered": "Rolling regression (filtered→filtered)",
     "global_linear_regression": "Global linear regression",
+    "robust_global_event_reject": "Robust global fit + event rejection",
 }
 
 def _get_allowed_from_config_field(field_name: str) -> list[str]:
@@ -303,9 +350,36 @@ def is_rolling_dynamic_fit_mode(mode_raw: str) -> bool:
     return mode in {"rolling_filtered_to_raw", "rolling_filtered_to_filtered"}
 
 
+def is_robust_event_reject_mode(mode_raw: str) -> bool:
+    mode = normalize_dynamic_fit_mode(mode_raw)
+    return mode == "robust_global_event_reject"
+
+
 def dynamic_fit_mode_label(mode_raw: str) -> str:
     mode = normalize_dynamic_fit_mode(mode_raw)
     return _DYNAMIC_FIT_MODE_LABELS.get(mode, mode or "rolling_filtered_to_raw")
+
+
+def format_robust_event_reject_settings_summary(
+    max_iters: int,
+    residual_z_thresh: float,
+    local_var_window_sec: float,
+    local_var_ratio_thresh: float | None,
+    min_keep_fraction: float,
+) -> str:
+    ratio_text = (
+        "disabled"
+        if local_var_ratio_thresh is None
+        else f"{float(local_var_ratio_thresh):.4g}"
+    )
+    return (
+        "Robust event-reject settings: "
+        f"max_iters={int(max_iters)}, "
+        f"residual_z={float(residual_z_thresh):.4g}, "
+        f"local_var_window_s={float(local_var_window_sec):.4g}, "
+        f"local_var_ratio={ratio_text}, "
+        f"min_keep={float(min_keep_fraction):.4g}"
+    )
 
 
 def get_retune_peak_pre_filters() -> list[str]:
@@ -1596,7 +1670,7 @@ class MainWindow(QMainWindow):
             bool(getattr(self._default_cfg, "baseline_subtract_before_fit", False))
         )
         self._correction_tuning_baseline_subtract_cb.setToolTip(
-            "Active only in rolling regression modes. Inactive in global linear regression mode."
+            "Active only in rolling regression modes. Inactive in global linear and robust event-reject modes."
         )
         self._correction_tuning_baseline_subtract_cb.stateChanged.connect(self._on_config_changed)
         form.addRow(
@@ -1611,7 +1685,7 @@ class MainWindow(QMainWindow):
         self._correction_tuning_window_spin.setSingleStep(1.0)
         self._correction_tuning_window_spin.setToolTip(
             "Active only in rolling regression modes. "
-            "Inactive in global linear regression mode."
+            "Inactive in global linear and robust event-reject modes."
         )
         form.addRow(_corr_row_label("Regression Window (s):"), self._correction_tuning_window_spin)
 
@@ -1620,12 +1694,112 @@ class MainWindow(QMainWindow):
         self._correction_tuning_min_samples_spin.setRange(1, 1_000_000)
         self._correction_tuning_min_samples_spin.setToolTip(
             "Active only in rolling regression modes. "
-            "Inactive in global linear regression mode."
+            "Inactive in global linear and robust event-reject modes."
         )
         form.addRow(
             _corr_row_label("Min Samples/Window:"),
             self._correction_tuning_min_samples_spin,
         )
+
+        self._correction_tuning_robust_max_iters_spin = QSpinBox()
+        self._correction_tuning_robust_max_iters_spin.setMinimumWidth(120)
+        self._correction_tuning_robust_max_iters_spin.setRange(1, 1000)
+        self._correction_tuning_robust_max_iters_spin.setValue(
+            int(getattr(self._default_cfg, "robust_event_reject_max_iters", 3))
+        )
+        self._correction_tuning_robust_max_iters_spin.setToolTip(
+            "Active only in robust global fit + event rejection mode."
+        )
+        form.addRow(
+            _corr_row_label("Max iterations:"),
+            self._correction_tuning_robust_max_iters_spin,
+        )
+
+        self._correction_tuning_robust_residual_z_spin = QDoubleSpinBox()
+        self._correction_tuning_robust_residual_z_spin.setMinimumWidth(140)
+        self._correction_tuning_robust_residual_z_spin.setRange(0.000001, 1_000_000.0)
+        self._correction_tuning_robust_residual_z_spin.setDecimals(4)
+        self._correction_tuning_robust_residual_z_spin.setSingleStep(0.1)
+        self._correction_tuning_robust_residual_z_spin.setValue(
+            float(getattr(self._default_cfg, "robust_event_reject_residual_z_thresh", 3.5))
+        )
+        self._correction_tuning_robust_residual_z_spin.setToolTip(
+            "Positive residual robust-z threshold for event-point exclusion."
+        )
+        form.addRow(
+            _corr_row_label("Residual z-threshold:"),
+            self._correction_tuning_robust_residual_z_spin,
+        )
+
+        self._correction_tuning_robust_local_var_window_spin = QDoubleSpinBox()
+        self._correction_tuning_robust_local_var_window_spin.setMinimumWidth(140)
+        self._correction_tuning_robust_local_var_window_spin.setRange(0.000001, 1_000_000.0)
+        self._correction_tuning_robust_local_var_window_spin.setDecimals(4)
+        self._correction_tuning_robust_local_var_window_spin.setSingleStep(0.5)
+        self._correction_tuning_robust_local_var_window_spin.setValue(
+            float(getattr(self._default_cfg, "robust_event_reject_local_var_window_sec", 10.0) or 10.0)
+        )
+        self._correction_tuning_robust_local_var_window_spin.setToolTip(
+            "Centered local variance window in seconds."
+        )
+        form.addRow(
+            _corr_row_label("Local variance window (s):"),
+            self._correction_tuning_robust_local_var_window_spin,
+        )
+
+        self._correction_tuning_robust_local_var_ratio_enable_cb = QCheckBox("Enable")
+        self._correction_tuning_robust_local_var_ratio_enable_cb.setToolTip(
+            "Enable optional local variance ratio rejection rule."
+        )
+        self._correction_tuning_robust_local_var_ratio_spin = QDoubleSpinBox()
+        self._correction_tuning_robust_local_var_ratio_spin.setMinimumWidth(140)
+        self._correction_tuning_robust_local_var_ratio_spin.setRange(0.000001, 1_000_000.0)
+        self._correction_tuning_robust_local_var_ratio_spin.setDecimals(4)
+        self._correction_tuning_robust_local_var_ratio_spin.setSingleStep(0.1)
+        ratio_default = getattr(self._default_cfg, "robust_event_reject_local_var_ratio_thresh", None)
+        self._correction_tuning_robust_local_var_ratio_enable_cb.setChecked(
+            ratio_default is not None
+        )
+        self._correction_tuning_robust_local_var_ratio_spin.setValue(
+            float(ratio_default if ratio_default is not None else 3.0)
+        )
+        self._correction_tuning_robust_local_var_ratio_spin.setEnabled(bool(ratio_default is not None))
+        ratio_row = QWidget()
+        ratio_row_layout = QHBoxLayout(ratio_row)
+        ratio_row_layout.setContentsMargins(0, 0, 0, 0)
+        ratio_row_layout.setSpacing(8)
+        ratio_row_layout.addWidget(self._correction_tuning_robust_local_var_ratio_enable_cb)
+        ratio_row_layout.addWidget(self._correction_tuning_robust_local_var_ratio_spin)
+        form.addRow(
+            _corr_row_label("Local variance ratio threshold:"),
+            ratio_row,
+        )
+
+        self._correction_tuning_robust_min_keep_fraction_spin = QDoubleSpinBox()
+        self._correction_tuning_robust_min_keep_fraction_spin.setMinimumWidth(140)
+        self._correction_tuning_robust_min_keep_fraction_spin.setRange(0.000001, 1.0)
+        self._correction_tuning_robust_min_keep_fraction_spin.setDecimals(4)
+        self._correction_tuning_robust_min_keep_fraction_spin.setSingleStep(0.05)
+        self._correction_tuning_robust_min_keep_fraction_spin.setValue(
+            float(getattr(self._default_cfg, "robust_event_reject_min_keep_fraction", 0.5))
+        )
+        self._correction_tuning_robust_min_keep_fraction_spin.setToolTip(
+            "Guardrail keep fraction for event-point rejection."
+        )
+        form.addRow(
+            _corr_row_label("Minimum keep fraction:"),
+            self._correction_tuning_robust_min_keep_fraction_spin,
+        )
+
+        self._correction_tuning_robust_max_iters_spin.valueChanged.connect(self._on_config_changed)
+        self._correction_tuning_robust_residual_z_spin.valueChanged.connect(self._on_config_changed)
+        self._correction_tuning_robust_local_var_window_spin.valueChanged.connect(self._on_config_changed)
+        self._correction_tuning_robust_local_var_ratio_enable_cb.toggled.connect(
+            self._correction_tuning_robust_local_var_ratio_spin.setEnabled
+        )
+        self._correction_tuning_robust_local_var_ratio_enable_cb.toggled.connect(self._on_config_changed)
+        self._correction_tuning_robust_local_var_ratio_spin.valueChanged.connect(self._on_config_changed)
+        self._correction_tuning_robust_min_keep_fraction_spin.valueChanged.connect(self._on_config_changed)
         self._apply_form_row_tooltips(form)
         self._apply_correction_tuning_fit_mode_ui_state()
 
@@ -3031,6 +3205,25 @@ class MainWindow(QMainWindow):
         )
         self._correction_tuning_window_spin.setValue(float(cfg.window_sec))
         self._correction_tuning_min_samples_spin.setValue(int(cfg.min_samples_per_window))
+        self._correction_tuning_robust_max_iters_spin.setValue(
+            int(getattr(cfg, "robust_event_reject_max_iters", 3))
+        )
+        self._correction_tuning_robust_residual_z_spin.setValue(
+            float(getattr(cfg, "robust_event_reject_residual_z_thresh", 3.5))
+        )
+        self._correction_tuning_robust_local_var_window_spin.setValue(
+            float(getattr(cfg, "robust_event_reject_local_var_window_sec", 10.0) or 10.0)
+        )
+        ratio_thresh = getattr(cfg, "robust_event_reject_local_var_ratio_thresh", None)
+        self._correction_tuning_robust_local_var_ratio_enable_cb.setChecked(
+            ratio_thresh is not None
+        )
+        self._correction_tuning_robust_local_var_ratio_spin.setValue(
+            float(ratio_thresh if ratio_thresh is not None else 3.0)
+        )
+        self._correction_tuning_robust_min_keep_fraction_spin.setValue(
+            float(getattr(cfg, "robust_event_reject_min_keep_fraction", 0.5))
+        )
         self._apply_correction_tuning_fit_mode_ui_state()
 
     def _on_correction_tuning_roi_changed(self, _index: int) -> None:
@@ -3051,6 +3244,25 @@ class MainWindow(QMainWindow):
             )
             overrides["window_sec"] = float(self._correction_tuning_window_spin.value())
             overrides["min_samples_per_window"] = int(self._correction_tuning_min_samples_spin.value())
+        elif is_robust_event_reject_mode(fit_mode):
+            overrides["robust_event_reject_max_iters"] = int(
+                self._correction_tuning_robust_max_iters_spin.value()
+            )
+            overrides["robust_event_reject_residual_z_thresh"] = float(
+                self._correction_tuning_robust_residual_z_spin.value()
+            )
+            overrides["robust_event_reject_local_var_window_sec"] = float(
+                self._correction_tuning_robust_local_var_window_spin.value()
+            )
+            if self._correction_tuning_robust_local_var_ratio_enable_cb.isChecked():
+                overrides["robust_event_reject_local_var_ratio_thresh"] = float(
+                    self._correction_tuning_robust_local_var_ratio_spin.value()
+                )
+            else:
+                overrides["robust_event_reject_local_var_ratio_thresh"] = None
+            overrides["robust_event_reject_min_keep_fraction"] = float(
+                self._correction_tuning_robust_min_keep_fraction_spin.value()
+            )
         return overrides
 
     def _on_run_correction_tuning(self) -> None:
@@ -3130,12 +3342,54 @@ class MainWindow(QMainWindow):
                         else "disabled"
                     )
                     if is_rolling_dynamic_fit_mode(overrides.get("dynamic_fit_mode", ""))
-                    else "Baseline subtract before fit: inactive in global linear regression mode"
+                    else (
+                        "Baseline subtract before fit: inactive in robust global event-reject mode"
+                        if is_robust_event_reject_mode(overrides.get("dynamic_fit_mode", ""))
+                        else "Baseline subtract before fit: inactive in global linear regression mode"
+                    )
                 ),
                 "Recomputed across: all available sessions for this ROI",
                 f"Preview session: {result.get('inspection_chunk_id', chunk_id)}",
                 f"Retune output: {result.get('retune_dir', '(unknown)')}",
             ]
+            if is_robust_event_reject_mode(overrides.get("dynamic_fit_mode", "")):
+                lines.insert(
+                    3,
+                    format_robust_event_reject_settings_summary(
+                        int(overrides.get("robust_event_reject_max_iters", 3)),
+                        float(overrides.get("robust_event_reject_residual_z_thresh", 3.5)),
+                        float(overrides.get("robust_event_reject_local_var_window_sec", 10.0)),
+                        (
+                            None
+                            if overrides.get("robust_event_reject_local_var_ratio_thresh", None) is None
+                            else float(overrides.get("robust_event_reject_local_var_ratio_thresh"))
+                        ),
+                        float(overrides.get("robust_event_reject_min_keep_fraction", 0.5)),
+                    ),
+                )
+                robust_diag = artifacts.get("retuned_correction_inspection_robust_diagnostics", {})
+                if isinstance(robust_diag, dict) and robust_diag:
+                    fallback_status = str(robust_diag.get("fallback_status", "")).strip()
+                    if not fallback_status:
+                        fallback_status = (
+                            "yes"
+                            if bool(robust_diag.get("fallback_to_global_linear", False))
+                            else "no"
+                        )
+                    keep_fraction_text = "n/a"
+                    try:
+                        keep_fraction = float(robust_diag.get("keep_fraction"))
+                        if math.isfinite(keep_fraction):
+                            keep_fraction_text = f"{keep_fraction:.3f}"
+                    except Exception:
+                        pass
+                    lines.insert(
+                        4,
+                        "Robust diagnostics: "
+                        f"keep fraction={keep_fraction_text}, "
+                        f"iterations={int(robust_diag.get('iterations_completed', 0))}, "
+                        f"fallback={fallback_status}",
+                    )
             self._correction_tuning_summary_label.setText("\n".join(lines))
             self._append_run_log(
                 f"Correction retune completed for ROI={result.get('selected_roi', roi)} "
@@ -4210,6 +4464,37 @@ class MainWindow(QMainWindow):
                 )
                 if baseline_subtract != default_baseline_subtract:
                     config_overrides["baseline_subtract_before_fit"] = baseline_subtract
+            elif is_robust_event_reject_mode(fit_mode):
+                robust_defaults = {
+                    "robust_event_reject_max_iters": int(
+                        getattr(self._default_cfg, "robust_event_reject_max_iters", 3)
+                    ),
+                    "robust_event_reject_residual_z_thresh": float(
+                        getattr(self._default_cfg, "robust_event_reject_residual_z_thresh", 3.5)
+                    ),
+                    "robust_event_reject_local_var_window_sec": float(
+                        getattr(self._default_cfg, "robust_event_reject_local_var_window_sec", 10.0) or 10.0
+                    ),
+                    "robust_event_reject_local_var_ratio_thresh": getattr(
+                        self._default_cfg, "robust_event_reject_local_var_ratio_thresh", None
+                    ),
+                    "robust_event_reject_min_keep_fraction": float(
+                        getattr(self._default_cfg, "robust_event_reject_min_keep_fraction", 0.5)
+                    ),
+                }
+                robust_overrides, err = parse_and_validate_robust_event_reject_knobs(
+                    self._robust_event_reject_max_iters_spin.value(),
+                    self._robust_event_reject_residual_z_spin.value(),
+                    self._robust_event_reject_local_var_window_spin.value(),
+                    self._robust_event_reject_local_var_ratio_enable_cb.isChecked(),
+                    self._robust_event_reject_local_var_ratio_spin.value(),
+                    self._robust_event_reject_min_keep_fraction_spin.value(),
+                    defaults=robust_defaults,
+                )
+                if robust_overrides is not None and err is None:
+                    for key, value in robust_overrides.items():
+                        if key in robust_defaults and value != robust_defaults[key]:
+                            config_overrides[key] = value
 
         # Preprocessing + Baseline overrides
         default_prep_dict = {
@@ -4417,7 +4702,8 @@ class MainWindow(QMainWindow):
             return f"Invalid Format: '{fmt}'. Must be one of {FORMAT_CHOICES}."
 
         if is_isosbestic_active(self._mode_combo.currentText()):
-            if is_rolling_dynamic_fit_mode(self._selected_dynamic_fit_mode()):
+            fit_mode = self._selected_dynamic_fit_mode()
+            if is_rolling_dynamic_fit_mode(fit_mode):
                 default_dict = {
                     "window_sec": self._default_cfg.window_sec,
                     "step_sec": self._default_cfg.step_sec,
@@ -4437,6 +4723,35 @@ class MainWindow(QMainWindow):
                     "",
                     self._min_samples_per_window_spin.value(),
                     defaults=default_dict,
+                )
+                if err:
+                    return err
+            elif is_robust_event_reject_mode(fit_mode):
+                robust_defaults = {
+                    "robust_event_reject_max_iters": int(
+                        getattr(self._default_cfg, "robust_event_reject_max_iters", 3)
+                    ),
+                    "robust_event_reject_residual_z_thresh": float(
+                        getattr(self._default_cfg, "robust_event_reject_residual_z_thresh", 3.5)
+                    ),
+                    "robust_event_reject_local_var_window_sec": float(
+                        getattr(self._default_cfg, "robust_event_reject_local_var_window_sec", 10.0) or 10.0
+                    ),
+                    "robust_event_reject_local_var_ratio_thresh": getattr(
+                        self._default_cfg, "robust_event_reject_local_var_ratio_thresh", None
+                    ),
+                    "robust_event_reject_min_keep_fraction": float(
+                        getattr(self._default_cfg, "robust_event_reject_min_keep_fraction", 0.5)
+                    ),
+                }
+                _, err = parse_and_validate_robust_event_reject_knobs(
+                    self._robust_event_reject_max_iters_spin.value(),
+                    self._robust_event_reject_residual_z_spin.value(),
+                    self._robust_event_reject_local_var_window_spin.value(),
+                    self._robust_event_reject_local_var_ratio_enable_cb.isChecked(),
+                    self._robust_event_reject_local_var_ratio_spin.value(),
+                    self._robust_event_reject_min_keep_fraction_spin.value(),
+                    defaults=robust_defaults,
                 )
                 if err:
                     return err
@@ -5323,6 +5638,51 @@ class MainWindow(QMainWindow):
                 bool,
             )
         )
+        self._robust_event_reject_max_iters_spin.setValue(
+            self._settings.value(
+                "robust_event_reject_max_iters",
+                int(getattr(self._default_cfg, "robust_event_reject_max_iters", 3)),
+                int,
+            )
+        )
+        self._robust_event_reject_residual_z_spin.setValue(
+            self._settings.value(
+                "robust_event_reject_residual_z_thresh",
+                float(getattr(self._default_cfg, "robust_event_reject_residual_z_thresh", 3.5)),
+                float,
+            )
+        )
+        self._robust_event_reject_local_var_window_spin.setValue(
+            self._settings.value(
+                "robust_event_reject_local_var_window_sec",
+                float(getattr(self._default_cfg, "robust_event_reject_local_var_window_sec", 10.0) or 10.0),
+                float,
+            )
+        )
+        robust_ratio_enabled = self._settings.value(
+            "robust_event_reject_local_var_ratio_enabled",
+            bool(getattr(self._default_cfg, "robust_event_reject_local_var_ratio_thresh", None) is not None),
+            bool,
+        )
+        self._robust_event_reject_local_var_ratio_enable_cb.setChecked(bool(robust_ratio_enabled))
+        self._robust_event_reject_local_var_ratio_spin.setValue(
+            self._settings.value(
+                "robust_event_reject_local_var_ratio_thresh",
+                float(
+                    getattr(self._default_cfg, "robust_event_reject_local_var_ratio_thresh", 3.0)
+                    if getattr(self._default_cfg, "robust_event_reject_local_var_ratio_thresh", None) is not None
+                    else 3.0
+                ),
+                float,
+            )
+        )
+        self._robust_event_reject_min_keep_fraction_spin.setValue(
+            self._settings.value(
+                "robust_event_reject_min_keep_fraction",
+                float(getattr(self._default_cfg, "robust_event_reject_min_keep_fraction", 0.5)),
+                float,
+            )
+        )
         self._on_dynamic_fit_mode_changed()
 
         sig_iso_render_mode = self._settings.value("sig_iso_render_mode", "qc", str)
@@ -5368,6 +5728,33 @@ class MainWindow(QMainWindow):
         self._settings.setValue(
             "baseline_subtract_before_fit",
             bool(getattr(self, "_baseline_subtract_before_fit_cb", None) and self._baseline_subtract_before_fit_cb.isChecked()),
+        )
+        self._settings.setValue(
+            "robust_event_reject_max_iters",
+            int(getattr(self, "_robust_event_reject_max_iters_spin", None).value() if hasattr(self, "_robust_event_reject_max_iters_spin") else 3),
+        )
+        self._settings.setValue(
+            "robust_event_reject_residual_z_thresh",
+            float(getattr(self, "_robust_event_reject_residual_z_spin", None).value() if hasattr(self, "_robust_event_reject_residual_z_spin") else 3.5),
+        )
+        self._settings.setValue(
+            "robust_event_reject_local_var_window_sec",
+            float(getattr(self, "_robust_event_reject_local_var_window_spin", None).value() if hasattr(self, "_robust_event_reject_local_var_window_spin") else 10.0),
+        )
+        self._settings.setValue(
+            "robust_event_reject_local_var_ratio_enabled",
+            bool(
+                getattr(self, "_robust_event_reject_local_var_ratio_enable_cb", None)
+                and self._robust_event_reject_local_var_ratio_enable_cb.isChecked()
+            ),
+        )
+        self._settings.setValue(
+            "robust_event_reject_local_var_ratio_thresh",
+            float(getattr(self, "_robust_event_reject_local_var_ratio_spin", None).value() if hasattr(self, "_robust_event_reject_local_var_ratio_spin") else 3.0),
+        )
+        self._settings.setValue(
+            "robust_event_reject_min_keep_fraction",
+            float(getattr(self, "_robust_event_reject_min_keep_fraction_spin", None).value() if hasattr(self, "_robust_event_reject_min_keep_fraction_spin") else 0.5),
         )
         self._settings.setValue("sig_iso_render_mode", self._sig_iso_render_mode_combo.currentText())
         self._settings.setValue("dff_render_mode", self._dff_render_mode_combo.currentText())
@@ -5492,19 +5879,41 @@ class MainWindow(QMainWindow):
     def _apply_dynamic_fit_mode_ui_state(self) -> None:
         fit_mode = self._selected_dynamic_fit_mode()
         rolling = is_rolling_dynamic_fit_mode(fit_mode)
+        robust = is_robust_event_reject_mode(fit_mode)
         self._window_sec_edit.setEnabled(rolling)
         self._min_samples_per_window_spin.setEnabled(rolling)
         if hasattr(self, "_baseline_subtract_before_fit_cb"):
             self._baseline_subtract_before_fit_cb.setEnabled(rolling)
+        if hasattr(self, "_robust_event_reject_max_iters_spin"):
+            self._robust_event_reject_max_iters_spin.setEnabled(robust)
+        if hasattr(self, "_robust_event_reject_residual_z_spin"):
+            self._robust_event_reject_residual_z_spin.setEnabled(robust)
+        if hasattr(self, "_robust_event_reject_local_var_window_spin"):
+            self._robust_event_reject_local_var_window_spin.setEnabled(robust)
+        if hasattr(self, "_robust_event_reject_local_var_ratio_enable_cb"):
+            self._robust_event_reject_local_var_ratio_enable_cb.setEnabled(robust)
+        if hasattr(self, "_robust_event_reject_local_var_ratio_spin"):
+            ratio_enabled = (
+                robust
+                and bool(self._robust_event_reject_local_var_ratio_enable_cb.isChecked())
+            )
+            self._robust_event_reject_local_var_ratio_spin.setEnabled(ratio_enabled)
+        if hasattr(self, "_robust_event_reject_min_keep_fraction_spin"):
+            self._robust_event_reject_min_keep_fraction_spin.setEnabled(robust)
         if rolling:
             msg = (
                 f"{dynamic_fit_mode_label(fit_mode)} is active. "
                 "Regression window, min samples per window, and baseline-subtract toggle are active."
             )
+        elif robust:
+            msg = (
+                "Robust global fit + event rejection is active. "
+                "Robust exclusion controls are active; rolling-only controls are inactive."
+            )
         else:
             msg = (
                 "Global linear regression is active. "
-                "Regression window, min samples per window, and baseline-subtract toggle are inactive."
+                "Rolling and robust event-rejection controls are inactive."
             )
         self._dynamic_fit_mode_note.setText(msg)
 
@@ -5514,19 +5923,41 @@ class MainWindow(QMainWindow):
     def _apply_correction_tuning_fit_mode_ui_state(self) -> None:
         fit_mode = self._selected_correction_tuning_fit_mode()
         rolling = is_rolling_dynamic_fit_mode(fit_mode)
+        robust = is_robust_event_reject_mode(fit_mode)
         self._correction_tuning_window_spin.setEnabled(rolling)
         self._correction_tuning_min_samples_spin.setEnabled(rolling)
         if hasattr(self, "_correction_tuning_baseline_subtract_cb"):
             self._correction_tuning_baseline_subtract_cb.setEnabled(rolling)
+        if hasattr(self, "_correction_tuning_robust_max_iters_spin"):
+            self._correction_tuning_robust_max_iters_spin.setEnabled(robust)
+        if hasattr(self, "_correction_tuning_robust_residual_z_spin"):
+            self._correction_tuning_robust_residual_z_spin.setEnabled(robust)
+        if hasattr(self, "_correction_tuning_robust_local_var_window_spin"):
+            self._correction_tuning_robust_local_var_window_spin.setEnabled(robust)
+        if hasattr(self, "_correction_tuning_robust_local_var_ratio_enable_cb"):
+            self._correction_tuning_robust_local_var_ratio_enable_cb.setEnabled(robust)
+        if hasattr(self, "_correction_tuning_robust_local_var_ratio_spin"):
+            ratio_enabled = (
+                robust
+                and bool(self._correction_tuning_robust_local_var_ratio_enable_cb.isChecked())
+            )
+            self._correction_tuning_robust_local_var_ratio_spin.setEnabled(ratio_enabled)
+        if hasattr(self, "_correction_tuning_robust_min_keep_fraction_spin"):
+            self._correction_tuning_robust_min_keep_fraction_spin.setEnabled(robust)
         if rolling:
             msg = (
                 f"{dynamic_fit_mode_label(fit_mode)} is active. "
                 "Regression window, min samples per window, and baseline-subtract toggle are active."
             )
+        elif robust:
+            msg = (
+                "Robust global fit + event rejection is active. "
+                "Robust exclusion controls are active; rolling-only controls are inactive."
+            )
         else:
             msg = (
                 "Global linear regression is active. "
-                "Regression window, min samples per window, and baseline-subtract toggle are inactive."
+                "Rolling and robust event-rejection controls are inactive."
             )
         self._correction_tuning_fit_mode_note.setText(msg)
 
@@ -5578,9 +6009,15 @@ class MainWindow(QMainWindow):
                 )
                 if phasic_active and is_rolling_dynamic_fit_mode(self._selected_dynamic_fit_mode())
                 else (
-                    "Baseline subtract before fit: inactive in global linear mode"
-                    if phasic_active
-                    else "Baseline subtract before fit: (inactive in tonic mode)"
+                    (
+                        "Baseline subtract before fit: inactive in robust global event-reject mode"
+                        if phasic_active and is_robust_event_reject_mode(self._selected_dynamic_fit_mode())
+                        else (
+                            "Baseline subtract before fit: inactive in global linear mode"
+                            if phasic_active
+                            else "Baseline subtract before fit: (inactive in tonic mode)"
+                        )
+                    )
                 )
             ),
             f"Baseline Config Source: {self._active_config_source_summary()}",
@@ -5591,6 +6028,22 @@ class MainWindow(QMainWindow):
             f"Representative Session: {rep_text}",
             f"Output Destination: {out_text}",
         ]
+        if phasic_active and is_robust_event_reject_mode(self._selected_dynamic_fit_mode()):
+            robust_ratio_thresh = (
+                float(self._robust_event_reject_local_var_ratio_spin.value())
+                if bool(self._robust_event_reject_local_var_ratio_enable_cb.isChecked())
+                else None
+            )
+            summary_lines.insert(
+                4,
+                format_robust_event_reject_settings_summary(
+                    int(self._robust_event_reject_max_iters_spin.value()),
+                    float(self._robust_event_reject_residual_z_spin.value()),
+                    float(self._robust_event_reject_local_var_window_spin.value()),
+                    robust_ratio_thresh,
+                    float(self._robust_event_reject_min_keep_fraction_spin.value()),
+                ),
+            )
         self._effective_summary_label.setText("\n".join(summary_lines))
 
     def _update_context_sensitive_controls(self) -> None:
@@ -6181,7 +6634,7 @@ class MainWindow(QMainWindow):
             bool(getattr(self._default_cfg, "baseline_subtract_before_fit", False))
         )
         self._baseline_subtract_before_fit_cb.setToolTip(
-            "Active only in rolling regression modes. Inactive in global linear regression mode."
+            "Active only in rolling regression modes. Inactive in global linear and robust event-reject modes."
         )
         self._baseline_subtract_before_fit_cb.stateChanged.connect(self._on_config_changed)
         iso_sampling_form.addRow(
@@ -6192,7 +6645,7 @@ class MainWindow(QMainWindow):
         self._window_sec_edit = QLineEdit(str(self._default_cfg.window_sec))
         self._window_sec_edit.setToolTip(
             "Active only in rolling regression modes. "
-            "Inactive in global linear regression mode."
+            "Inactive in global linear and robust event-reject modes."
         )
         self._window_sec_edit.textChanged.connect(self._on_config_changed)
         iso_sampling_form.addRow("Regression Window:", self._window_sec_edit)
@@ -6206,12 +6659,102 @@ class MainWindow(QMainWindow):
         self._min_samples_per_window_spin.setValue(max(1, self._default_cfg.min_samples_per_window))
         self._min_samples_per_window_spin.setToolTip(
             "Active only in rolling regression modes. "
-            "Inactive in global linear regression mode."
+            "Inactive in global linear and robust event-reject modes."
         )
         self._min_samples_per_window_spin.valueChanged.connect(self._on_config_changed)
         iso_accept_form.addRow("Min Samples per Window:", self._min_samples_per_window_spin)
         self._apply_form_row_tooltips(iso_accept_form)
         iso_layout.addWidget(iso_accept)
+
+        robust_group = QGroupBox("Robust Event Rejection")
+        robust_form = QFormLayout(robust_group)
+
+        self._robust_event_reject_max_iters_spin = QSpinBox()
+        self._robust_event_reject_max_iters_spin.setRange(1, 1000)
+        self._robust_event_reject_max_iters_spin.setValue(
+            int(getattr(self._default_cfg, "robust_event_reject_max_iters", 3))
+        )
+        self._robust_event_reject_max_iters_spin.setToolTip(
+            "Active only in robust global fit + event rejection mode."
+        )
+        self._robust_event_reject_max_iters_spin.valueChanged.connect(self._on_config_changed)
+        robust_form.addRow("Max iterations:", self._robust_event_reject_max_iters_spin)
+
+        self._robust_event_reject_residual_z_spin = QDoubleSpinBox()
+        self._robust_event_reject_residual_z_spin.setRange(0.000001, 1_000_000.0)
+        self._robust_event_reject_residual_z_spin.setDecimals(4)
+        self._robust_event_reject_residual_z_spin.setSingleStep(0.1)
+        self._robust_event_reject_residual_z_spin.setValue(
+            float(getattr(self._default_cfg, "robust_event_reject_residual_z_thresh", 3.5))
+        )
+        self._robust_event_reject_residual_z_spin.setToolTip(
+            "Positive residual robust-z exclusion threshold (event-dominated points)."
+        )
+        self._robust_event_reject_residual_z_spin.valueChanged.connect(self._on_config_changed)
+        robust_form.addRow("Residual z-threshold:", self._robust_event_reject_residual_z_spin)
+
+        self._robust_event_reject_local_var_window_spin = QDoubleSpinBox()
+        self._robust_event_reject_local_var_window_spin.setRange(0.000001, 1_000_000.0)
+        self._robust_event_reject_local_var_window_spin.setDecimals(4)
+        self._robust_event_reject_local_var_window_spin.setSingleStep(0.5)
+        self._robust_event_reject_local_var_window_spin.setValue(
+            float(getattr(self._default_cfg, "robust_event_reject_local_var_window_sec", 10.0) or 10.0)
+        )
+        self._robust_event_reject_local_var_window_spin.setToolTip(
+            "Centered local-variance window in seconds."
+        )
+        self._robust_event_reject_local_var_window_spin.valueChanged.connect(self._on_config_changed)
+        robust_form.addRow("Local variance window (s):", self._robust_event_reject_local_var_window_spin)
+
+        ratio_enabled = (
+            getattr(self._default_cfg, "robust_event_reject_local_var_ratio_thresh", None)
+            is not None
+        )
+        ratio_value = getattr(self._default_cfg, "robust_event_reject_local_var_ratio_thresh", None)
+        self._robust_event_reject_local_var_ratio_enable_cb = QCheckBox("Enable")
+        self._robust_event_reject_local_var_ratio_enable_cb.setChecked(bool(ratio_enabled))
+        self._robust_event_reject_local_var_ratio_enable_cb.setToolTip(
+            "Enable optional local variance ratio exclusion rule."
+        )
+        self._robust_event_reject_local_var_ratio_spin = QDoubleSpinBox()
+        self._robust_event_reject_local_var_ratio_spin.setRange(0.000001, 1_000_000.0)
+        self._robust_event_reject_local_var_ratio_spin.setDecimals(4)
+        self._robust_event_reject_local_var_ratio_spin.setSingleStep(0.1)
+        self._robust_event_reject_local_var_ratio_spin.setValue(
+            float(ratio_value if ratio_value is not None else 3.0)
+        )
+        self._robust_event_reject_local_var_ratio_spin.setEnabled(bool(ratio_enabled))
+        self._robust_event_reject_local_var_ratio_spin.setToolTip(
+            "Exclude points when local variance(signal)/variance(iso) exceeds this value."
+        )
+        self._robust_event_reject_local_var_ratio_enable_cb.toggled.connect(
+            self._robust_event_reject_local_var_ratio_spin.setEnabled
+        )
+        self._robust_event_reject_local_var_ratio_enable_cb.toggled.connect(self._on_config_changed)
+        self._robust_event_reject_local_var_ratio_spin.valueChanged.connect(self._on_config_changed)
+        ratio_row = QWidget()
+        ratio_row_layout = QHBoxLayout(ratio_row)
+        ratio_row_layout.setContentsMargins(0, 0, 0, 0)
+        ratio_row_layout.setSpacing(8)
+        ratio_row_layout.addWidget(self._robust_event_reject_local_var_ratio_enable_cb)
+        ratio_row_layout.addWidget(self._robust_event_reject_local_var_ratio_spin)
+        robust_form.addRow("Local variance ratio threshold:", ratio_row)
+
+        self._robust_event_reject_min_keep_fraction_spin = QDoubleSpinBox()
+        self._robust_event_reject_min_keep_fraction_spin.setRange(0.000001, 1.0)
+        self._robust_event_reject_min_keep_fraction_spin.setDecimals(4)
+        self._robust_event_reject_min_keep_fraction_spin.setSingleStep(0.05)
+        self._robust_event_reject_min_keep_fraction_spin.setValue(
+            float(getattr(self._default_cfg, "robust_event_reject_min_keep_fraction", 0.5))
+        )
+        self._robust_event_reject_min_keep_fraction_spin.setToolTip(
+            "Guardrail: stop excluding points if keep fraction would drop below this value."
+        )
+        self._robust_event_reject_min_keep_fraction_spin.valueChanged.connect(self._on_config_changed)
+        robust_form.addRow("Minimum keep fraction:", self._robust_event_reject_min_keep_fraction_spin)
+        self._apply_form_row_tooltips(robust_form)
+        iso_layout.addWidget(robust_group)
+
         content_layout.addWidget(self._adv_group)
 
         self._adv_prep_group = QGroupBox("Preprocessing")

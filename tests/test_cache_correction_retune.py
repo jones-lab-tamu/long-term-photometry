@@ -243,6 +243,83 @@ def test_correction_retune_accepts_baseline_subtract_override_and_records_it(tmp
     assert result["correction_overrides_applied"]["baseline_subtract_before_fit"] is True
 
 
+def test_correction_retune_accepts_robust_event_reject_overrides_and_records_them(tmp_path):
+    run_dir = _make_completed_run_fixture(tmp_path)
+    result = run_cache_correction_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={
+            "dynamic_fit_mode": "robust_global_event_reject",
+            "robust_event_reject_max_iters": 4,
+            "robust_event_reject_residual_z_thresh": 3.1,
+            "robust_event_reject_local_var_window_sec": 9.0,
+            "robust_event_reject_local_var_ratio_thresh": 4.2,
+            "robust_event_reject_min_keep_fraction": 0.6,
+        },
+    )
+
+    with open(os.path.join(result["retune_dir"], "retune_config_effective.yaml"), "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["dynamic_fit_mode"] == "robust_global_event_reject"
+    assert cfg["robust_event_reject_max_iters"] == 4
+    assert cfg["robust_event_reject_residual_z_thresh"] == pytest.approx(3.1)
+    assert cfg["robust_event_reject_local_var_window_sec"] == pytest.approx(9.0)
+    assert cfg["robust_event_reject_local_var_ratio_thresh"] == pytest.approx(4.2)
+    assert cfg["robust_event_reject_min_keep_fraction"] == pytest.approx(0.6)
+
+    with open(os.path.join(result["retune_dir"], "retune_request.json"), "r", encoding="utf-8") as f:
+        req = json.load(f)
+    assert req["correction_overrides_applied"]["dynamic_fit_mode"] == "robust_global_event_reject"
+    assert "robust_event_reject_max_iters" in req["override_classification"]["correction_supported"]
+    assert "robust_event_reject_residual_z_thresh" in req["override_classification"]["correction_supported"]
+    robust_diag = result["artifacts"].get("retuned_correction_inspection_robust_diagnostics")
+    assert isinstance(robust_diag, dict)
+    assert robust_diag["fit_mode_resolved"] == "robust_global_event_reject"
+    assert robust_diag["iterations_completed"] >= 1
+    assert 0.0 <= robust_diag["keep_fraction"] <= 1.0
+    assert robust_diag["fallback_to_global_linear"] is False
+    assert robust_diag["fallback_status"] == "no"
+    assert 0.0 <= robust_diag["excluded_fraction"] <= 1.0
+
+
+def test_correction_retune_robust_mode_emits_fallback_diagnostics_when_robust_fit_fails(
+    tmp_path,
+    monkeypatch,
+):
+    run_dir = _make_completed_run_fixture(tmp_path)
+
+    def _raise_forced_failure(*args, **kwargs):
+        raise RuntimeError("forced robust fit failure for retune diagnostics test")
+
+    monkeypatch.setattr(
+        "photometry_pipeline.core.regression.fit_robust_global_event_reject",
+        _raise_forced_failure,
+    )
+
+    result = run_cache_correction_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={"dynamic_fit_mode": "robust_global_event_reject"},
+    )
+    robust_diag = result["artifacts"].get("retuned_correction_inspection_robust_diagnostics")
+    assert isinstance(robust_diag, dict)
+    assert robust_diag["fallback_to_global_linear"] is True
+    assert robust_diag["fallback_failed"] is False
+    assert robust_diag["fallback_status"] == "yes"
+    assert robust_diag["keep_fraction"] == pytest.approx(1.0)
+    assert robust_diag["excluded_count"] == 0
+
+
+def test_correction_retune_non_robust_mode_does_not_emit_robust_diagnostics(tmp_path):
+    run_dir = _make_completed_run_fixture(tmp_path)
+    result = run_cache_correction_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={"dynamic_fit_mode": "global_linear_regression"},
+    )
+    assert "retuned_correction_inspection_robust_diagnostics" not in result["artifacts"]
+
+
 def test_correction_retune_rejects_downstream_only_override(tmp_path):
     run_dir = _make_completed_run_fixture(tmp_path)
     with pytest.raises(ValueError, match="Downstream-only"):

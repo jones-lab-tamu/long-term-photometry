@@ -60,7 +60,12 @@ def _resolve_dynamic_fit_settings(analysis_out: str) -> tuple[str, bool]:
         with open(cfg_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         mode = _normalize_dynamic_fit_mode(data.get("dynamic_fit_mode", "rolling_filtered_to_raw"))
-        if mode not in {"rolling_filtered_to_raw", "rolling_filtered_to_filtered", "global_linear_regression"}:
+        if mode not in {
+            "rolling_filtered_to_raw",
+            "rolling_filtered_to_filtered",
+            "global_linear_regression",
+            "robust_global_event_reject",
+        }:
             mode = "rolling_filtered_to_raw"
         baseline_subtract = bool(data.get("baseline_subtract_before_fit", False))
         return mode, baseline_subtract
@@ -71,6 +76,8 @@ def _resolve_dynamic_fit_settings(analysis_out: str) -> tuple[str, bool]:
 
 def _dynamic_fit_mode_label(mode_raw: str) -> str:
     mode = _normalize_dynamic_fit_mode(mode_raw)
+    if mode == "robust_global_event_reject":
+        return "Robust global fit + event rejection"
     if mode == "global_linear_regression":
         return "Global linear regression"
     if mode == "rolling_filtered_to_filtered":
