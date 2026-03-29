@@ -55,6 +55,12 @@ CORRECTION_RETUNABLE_KEYS = {
     "robust_event_reject_local_var_window_sec",
     "robust_event_reject_local_var_ratio_thresh",
     "robust_event_reject_min_keep_fraction",
+    "adaptive_event_gate_residual_z_thresh",
+    "adaptive_event_gate_local_var_window_sec",
+    "adaptive_event_gate_local_var_ratio_thresh",
+    "adaptive_event_gate_smooth_window_sec",
+    "adaptive_event_gate_min_trust_fraction",
+    "adaptive_event_gate_freeze_interp_method",
 }
 
 DOWNSTREAM_ONLY_KEYS = {
@@ -92,6 +98,12 @@ _OVERRIDE_VALUE_CASTERS = {
     "robust_event_reject_local_var_window_sec": float,
     "robust_event_reject_local_var_ratio_thresh": float,
     "robust_event_reject_min_keep_fraction": float,
+    "adaptive_event_gate_residual_z_thresh": float,
+    "adaptive_event_gate_local_var_window_sec": float,
+    "adaptive_event_gate_local_var_ratio_thresh": float,
+    "adaptive_event_gate_smooth_window_sec": float,
+    "adaptive_event_gate_min_trust_fraction": float,
+    "adaptive_event_gate_freeze_interp_method": str,
     "event_signal": str,
     "peak_threshold_method": str,
     "peak_threshold_k": float,
@@ -107,6 +119,24 @@ _OVERRIDE_VALUE_CASTERS = {
 
 _CORRECTION_INSPECTION_FIGSIZE = (14.5, 6.0)
 _CORRECTION_INSPECTION_DPI = 200
+
+
+def _true_spans(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Return inclusive index spans where mask is True."""
+    m = np.asarray(mask, dtype=bool).reshape(-1)
+    if m.size == 0:
+        return []
+    spans: list[tuple[int, int]] = []
+    start = None
+    for idx, flag in enumerate(m):
+        if flag and start is None:
+            start = idx
+        elif (not flag) and start is not None:
+            spans.append((start, idx - 1))
+            start = None
+    if start is not None:
+        spans.append((start, m.size - 1))
+    return spans
 
 
 def parse_key_value_overrides(items: Iterable[str]) -> Dict[str, Any]:
@@ -403,10 +433,14 @@ def _write_correction_inspection(
     delta_f = np.asarray(chunk.delta_f[:, 0]) if chunk.delta_f is not None else np.full_like(sig, np.nan)
     dff = np.asarray(chunk.dff[:, 0]) if chunk.dff is not None else np.full_like(sig, np.nan)
     event_reject_info = {}
+    adaptive_info = {}
     if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
         by_roi = chunk.metadata.get("dynamic_fit_event_reject", {})
         if isinstance(by_roi, dict):
             event_reject_info = by_roi.get(roi, {}) or {}
+        adaptive_by_roi = chunk.metadata.get("dynamic_fit_adaptive_event_gated", {})
+        if isinstance(adaptive_by_roi, dict):
+            adaptive_info = adaptive_by_roi.get(roi, {}) or {}
     excluded_mask = np.asarray(event_reject_info.get("excluded_mask", []), dtype=bool)
     if excluded_mask.shape != sig.shape:
         excluded_mask = np.zeros(sig.shape, dtype=bool)
@@ -422,6 +456,10 @@ def _write_correction_inspection(
     robust_mode = (
         fit_mode_resolved == "robust_global_event_reject"
         or bool(event_reject_info)
+    )
+    adaptive_mode = (
+        fit_mode_resolved == "adaptive_event_gated_regression"
+        or bool(adaptive_info)
     )
     keep_fraction = (
         event_reject_info.get("final_keep_fraction", None)
@@ -465,6 +503,45 @@ def _write_correction_inspection(
             "robust_fit_backend_used": robust_backend_used,
             "excluded_count": int(excluded_count),
             "excluded_fraction": float(excluded_fraction),
+        }
+    trusted_mask = np.asarray(adaptive_info.get("trusted_mask", []), dtype=bool)
+    if trusted_mask.shape != sig.shape:
+        trusted_mask = np.zeros(sig.shape, dtype=bool)
+    gated_mask = np.asarray(adaptive_info.get("gated_mask", []), dtype=bool)
+    if gated_mask.shape != sig.shape:
+        gated_mask = np.zeros(sig.shape, dtype=bool)
+    trust_fraction = adaptive_info.get("trust_fraction", None)
+    gated_fraction = adaptive_info.get("gated_fraction", None)
+    try:
+        trust_fraction_value = float(trust_fraction) if trust_fraction is not None else np.nan
+    except Exception:
+        trust_fraction_value = np.nan
+    try:
+        gated_fraction_value = float(gated_fraction) if gated_fraction is not None else np.nan
+    except Exception:
+        gated_fraction_value = np.nan
+    if adaptive_mode:
+        if not np.isfinite(trust_fraction_value):
+            trust_fraction_value = float(np.mean(trusted_mask)) if trusted_mask.size else np.nan
+        if not np.isfinite(gated_fraction_value):
+            gated_fraction_value = float(np.mean(gated_mask)) if gated_mask.size else np.nan
+    fallback_mode = str(adaptive_info.get("fallback_mode", "")).strip() if isinstance(adaptive_info, dict) else ""
+    fallback_failed_adaptive = bool(adaptive_info.get("fallback_failed", False))
+    fallback_status_adaptive = (
+        "yes_failed"
+        if fallback_failed_adaptive
+        else ("yes" if fallback_mode and fallback_mode != "none" else "no")
+    )
+    if adaptive_mode:
+        artifacts["retuned_correction_inspection_adaptive_diagnostics"] = {
+            "fit_mode_resolved": fit_mode_resolved or "adaptive_event_gated_regression",
+            "trust_fraction": float(trust_fraction_value) if np.isfinite(trust_fraction_value) else float("nan"),
+            "gated_fraction": float(gated_fraction_value) if np.isfinite(gated_fraction_value) else float("nan"),
+            "fallback_mode": fallback_mode or "none",
+            "fallback_failed": bool(fallback_failed_adaptive),
+            "fallback_status": fallback_status_adaptive,
+            "n_trusted": int(np.sum(trusted_mask)),
+            "n_gated": int(np.sum(gated_mask)),
         }
 
     csv_path = os.path.join(retune_dir, f"retuned_correction_session_{suffix}.csv")
@@ -571,10 +648,54 @@ def _write_correction_inspection(
                     fontsize=8,
                     bbox={"facecolor": "white", "alpha": 0.7, "edgecolor": "0.7"},
                 )
+            if adaptive_mode and np.any(gated_mask):
+                gated_spans = _true_spans(gated_mask)
+                first_label = True
+                for start_idx, end_idx in gated_spans:
+                    if start_idx >= t.size or end_idx >= t.size:
+                        continue
+                    t0 = float(t[start_idx])
+                    t1 = float(t[end_idx])
+                    if not np.isfinite(t0) or not np.isfinite(t1):
+                        continue
+                    ax.axvspan(
+                        t0,
+                        t1,
+                        facecolor="#FFD166",
+                        alpha=0.22,
+                        linewidth=0.0,
+                        label="gated/frozen region" if first_label else None,
+                    )
+                    first_label = False
+            if adaptive_mode:
+                trust_pct = 100.0 * trust_fraction_value if np.isfinite(trust_fraction_value) else np.nan
+                gated_pct = 100.0 * gated_fraction_value if np.isfinite(gated_fraction_value) else np.nan
+                ax.text(
+                    0.01,
+                    0.99,
+                    (
+                        f"trust: {trust_pct:.1f}%\n"
+                        f"gated: {gated_pct:.1f}%\n"
+                        f"fallback: {fallback_status_adaptive}"
+                    ),
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=8,
+                    bbox={"facecolor": "white", "alpha": 0.7, "edgecolor": "0.7"},
+                )
             if robust_mode and np.isfinite(keep_pct):
                 ax.set_title(
                     f"Correction Retune Inspection ({roi}) | chunk={cid} | {panel_label} "
                     f"| keep={keep_pct:.1f}% | iters={int(n_iters)} | fallback={fallback_status} "
+                    f"| source={chunk.source_file}"
+                )
+            elif adaptive_mode:
+                trust_pct = 100.0 * trust_fraction_value if np.isfinite(trust_fraction_value) else np.nan
+                gated_pct = 100.0 * gated_fraction_value if np.isfinite(gated_fraction_value) else np.nan
+                ax.set_title(
+                    f"Correction Retune Inspection ({roi}) | chunk={cid} | {panel_label} "
+                    f"| trust={trust_pct:.1f}% | gated={gated_pct:.1f}% | fallback={fallback_status_adaptive} "
                     f"| source={chunk.source_file}"
                 )
             elif np.isfinite(keep_pct):

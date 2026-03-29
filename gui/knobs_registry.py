@@ -40,6 +40,12 @@ GUI_KNOBS_ADVANCED: Set[str] = {
     "robust_event_reject_local_var_window_sec",
     "robust_event_reject_local_var_ratio_thresh",
     "robust_event_reject_min_keep_fraction",
+    "adaptive_event_gate_residual_z_thresh",
+    "adaptive_event_gate_local_var_window_sec",
+    "adaptive_event_gate_local_var_ratio_thresh",
+    "adaptive_event_gate_smooth_window_sec",
+    "adaptive_event_gate_min_trust_fraction",
+    "adaptive_event_gate_freeze_interp_method",
     # Peak/Event
     "event_signal",
     "peak_threshold_method",
@@ -198,6 +204,35 @@ KNOB_META: Dict[str, dict] = {
         "label": "Robust Event-Reject Min Keep Fraction",
         "help": "Lower keep-fraction guardrail for robust sample exclusion.",
         "range": {"min": 0.0, "max": 1.0},
+    },
+    "adaptive_event_gate_residual_z_thresh": {
+        "label": "Adaptive Event-Gate Residual Z",
+        "help": "Positive residual robust-z threshold used for adaptive trust gating.",
+        "range": {"min": 0.0},
+    },
+    "adaptive_event_gate_local_var_window_sec": {
+        "label": "Adaptive Event-Gate Local Var Window (s)",
+        "help": "Centered local-variance window used by adaptive trust gating.",
+        "range": {"min": 0.0},
+    },
+    "adaptive_event_gate_local_var_ratio_thresh": {
+        "label": "Adaptive Event-Gate Local Var Ratio",
+        "help": "Optional local variance ratio threshold (signal/iso) for adaptive gating.",
+        "range": {"min": 0.0},
+    },
+    "adaptive_event_gate_smooth_window_sec": {
+        "label": "Adaptive Event-Gate Smooth Window (s)",
+        "help": "Smoothing window for adaptive local coefficient traces.",
+        "range": {"min": 0.0},
+    },
+    "adaptive_event_gate_min_trust_fraction": {
+        "label": "Adaptive Event-Gate Min Trust Fraction",
+        "help": "Lower trusted-data fraction guardrail for adaptive mode.",
+        "range": {"min": 0.0, "max": 1.0},
+    },
+    "adaptive_event_gate_freeze_interp_method": {
+        "label": "Adaptive Event-Gate Freeze Interp Method",
+        "help": "Interpolation/freezing strategy used through gated spans.",
     },
     # --- DEVELOPER ---
     "allow_partial_final_chunk": {

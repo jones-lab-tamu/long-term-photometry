@@ -4,7 +4,11 @@ import pytest
 from photometry_pipeline.config import Config
 from photometry_pipeline.core import preprocessing, regression as regression_module
 from photometry_pipeline.core.normalization import compute_dff
-from photometry_pipeline.core.regression import fit_chunk_dynamic, fit_robust_global_event_reject
+from photometry_pipeline.core.regression import (
+    fit_adaptive_event_gated_regression,
+    fit_chunk_dynamic,
+    fit_robust_global_event_reject,
+)
 from photometry_pipeline.core.types import Chunk, SessionStats
 
 
@@ -503,6 +507,170 @@ def test_robust_global_event_reject_constant_iso_degenerate_fallback_is_safe():
     assert roi_meta.get("fallback_failed") is True
 
 
+def test_adaptive_event_gated_regression_synthetic_event_and_drift_behavior():
+    n = 3600
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    rng = np.random.default_rng(7)
+
+    uv = 4.2 + 0.35 * np.sin(2.0 * np.pi * 0.015 * t) + 0.07 * np.sin(2.0 * np.pi * 0.07 * t)
+    slope_t = 1.45 + 0.20 * np.sin(2.0 * np.pi * 0.004 * t)
+    background = slope_t * uv + 0.7
+    event = 2.8 * np.exp(-0.5 * ((t - 45.0) / 2.5) ** 2)
+    sig = background + event + 0.03 * rng.standard_normal(n)
+
+    cfg_roll = Config(
+        dynamic_fit_mode="rolling_filtered_to_raw",
+        window_sec=20.0,
+        min_samples_per_window=60,
+        lowpass_hz=2.0,
+        filter_order=2,
+    )
+    cfg_global = Config(
+        dynamic_fit_mode="global_linear_regression",
+        lowpass_hz=2.0,
+        filter_order=2,
+    )
+    cfg_adapt = Config(
+        dynamic_fit_mode="adaptive_event_gated_regression",
+        lowpass_hz=2.0,
+        filter_order=2,
+        adaptive_event_gate_residual_z_thresh=3.0,
+        adaptive_event_gate_local_var_window_sec=8.0,
+        adaptive_event_gate_local_var_ratio_thresh=4.0,
+        adaptive_event_gate_smooth_window_sec=60.0,
+        adaptive_event_gate_min_trust_fraction=0.50,
+    )
+
+    c_roll = _make_chunk(uv, sig, fs)
+    c_global = _make_chunk(uv, sig, fs)
+    c_adapt = _make_chunk(uv, sig, fs)
+    _prepare_filtered(c_roll, cfg_roll)
+    _prepare_filtered(c_global, cfg_global)
+    _prepare_filtered(c_adapt, cfg_adapt)
+
+    uv_roll, _ = fit_chunk_dynamic(c_roll, cfg_roll, mode="phasic")
+    uv_global, _ = fit_chunk_dynamic(c_global, cfg_global, mode="phasic")
+    uv_adapt, df_adapt = fit_chunk_dynamic(c_adapt, cfg_adapt, mode="phasic")
+
+    np.testing.assert_allclose(df_adapt[:, 0], c_adapt.sig_raw[:, 0] - uv_adapt[:, 0], rtol=0.0, atol=1e-12)
+    assert c_adapt.metadata["dynamic_fit_mode_resolved"] == "adaptive_event_gated_regression"
+    assert c_adapt.metadata["dynamic_fit_engine"] == "adaptive_event_gated_regression_v1"
+
+    event_mask = np.abs(t - 45.0) <= 3.0
+    quiet_mask = ~event_mask
+    event_mae_roll = float(np.nanmean(np.abs(uv_roll[event_mask, 0] - background[event_mask])))
+    event_mae_adapt = float(np.nanmean(np.abs(uv_adapt[event_mask, 0] - background[event_mask])))
+    quiet_mae_global = float(np.nanmean(np.abs(uv_global[quiet_mask, 0] - background[quiet_mask])))
+    quiet_mae_adapt = float(np.nanmean(np.abs(uv_adapt[quiet_mask, 0] - background[quiet_mask])))
+    assert event_mae_adapt < event_mae_roll
+    assert quiet_mae_adapt < quiet_mae_global
+
+    roi_meta = c_adapt.metadata.get("dynamic_fit_adaptive_event_gated", {}).get("Region0", {})
+    gated = np.asarray(roi_meta.get("gated_mask", []), dtype=bool)
+    assert gated.shape == (n,)
+    assert float(np.mean(gated[event_mask])) > 0.2
+    assert float(roi_meta.get("trust_fraction", 0.0)) > 0.5
+    assert roi_meta.get("fallback_mode") == "none"
+
+
+def test_adaptive_event_gated_regression_freezes_coefficients_through_gated_event_span():
+    n = 3200
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    uv = 3.8 + 0.3 * np.sin(2.0 * np.pi * 0.02 * t)
+    background = 1.55 * uv + 0.6
+    event = 3.0 * np.exp(-0.5 * ((t - 36.0) / 2.0) ** 2)
+    sig = background + event
+
+    cfg = Config(
+        dynamic_fit_mode="adaptive_event_gated_regression",
+        lowpass_hz=2.0,
+        filter_order=2,
+        adaptive_event_gate_residual_z_thresh=2.5,
+        adaptive_event_gate_local_var_window_sec=8.0,
+        adaptive_event_gate_local_var_ratio_thresh=3.5,
+        adaptive_event_gate_smooth_window_sec=50.0,
+        adaptive_event_gate_min_trust_fraction=0.5,
+    )
+    chunk = _make_chunk(uv, sig, fs)
+    _prepare_filtered(chunk, cfg)
+    uv_fit, _ = fit_chunk_dynamic(chunk, cfg, mode="phasic")
+    assert uv_fit is not None
+
+    roi_meta = chunk.metadata.get("dynamic_fit_adaptive_event_gated", {}).get("Region0", {})
+    gated = np.asarray(roi_meta.get("gated_mask", []), dtype=bool)
+    slope = np.asarray(roi_meta.get("coef_slope", []), dtype=float)
+    assert gated.shape == slope.shape == (n,)
+    assert roi_meta.get("freeze_interp_method") == "linear_hold"
+
+    span = np.abs(t - 36.0) <= 1.6
+    span_gated = span & gated
+    assert int(np.sum(span_gated)) >= 20
+    slope_span = slope[span_gated]
+    assert np.nanmax(slope_span) - np.nanmin(slope_span) < 1e-6
+
+
+def test_adaptive_event_gated_regression_sparse_trust_falls_back_safely():
+    n = 2500
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    uv = 4.0 + 0.2 * np.sin(2.0 * np.pi * 0.02 * t)
+    sig = 1.6 * uv + 0.5 + 2.4 * np.exp(-0.5 * ((t - 30.0) / 3.0) ** 2)
+
+    cfg = Config(
+        dynamic_fit_mode="adaptive_event_gated_regression",
+        adaptive_event_gate_residual_z_thresh=0.2,
+        adaptive_event_gate_local_var_window_sec=8.0,
+        adaptive_event_gate_local_var_ratio_thresh=1.2,
+        adaptive_event_gate_smooth_window_sec=60.0,
+        adaptive_event_gate_min_trust_fraction=0.95,
+    )
+    chunk = _make_chunk(uv, sig, fs)
+    _prepare_filtered(chunk, cfg)
+
+    uv_fit, delta_f = fit_chunk_dynamic(chunk, cfg, mode="phasic")
+    assert uv_fit is not None
+    assert delta_f is not None
+    np.testing.assert_allclose(delta_f[:, 0], chunk.sig_raw[:, 0] - uv_fit[:, 0], rtol=0.0, atol=1e-12)
+
+    warns = chunk.metadata.get("qc_warnings", [])
+    assert any("ADAPTIVE_EVENT_GATED_REGRESSION_FALLBACK" in str(w) for w in warns)
+    roi_meta = chunk.metadata.get("dynamic_fit_adaptive_event_gated", {}).get("Region0", {})
+    assert roi_meta.get("fallback_mode") in {
+        "robust_global_event_reject",
+        "global_linear_regression",
+        "global_linear_regression_failed",
+    }
+
+
+def test_fit_adaptive_event_gated_regression_direct_helper_handles_zero_mad_without_crash():
+    n = 1000
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    iso = 4.0 + 0.3 * np.sin(2.0 * np.pi * 0.02 * t)
+    sig = 1.7 * iso + 0.9
+
+    result = fit_adaptive_event_gated_regression(
+        signal_raw=sig,
+        iso_raw=iso,
+        signal_fit_input=sig,
+        iso_fit_input=iso,
+        sample_rate_hz=fs,
+        residual_z_thresh=3.5,
+        local_var_window_sec=10.0,
+        local_var_ratio_thresh=None,
+        smooth_window_sec=60.0,
+        min_trust_fraction=0.5,
+        freeze_interp_method="linear_hold",
+        use_intercept=True,
+    )
+    fit = np.asarray(result["iso_fit_signal_units"], dtype=float)
+    np.testing.assert_allclose(fit, sig, rtol=0.0, atol=1e-8)
+    assert result["n_trusted"] == result["n_finite"]
+    assert result["gated_fraction"] == pytest.approx(0.0)
+
+
 def test_config_rejects_invalid_dynamic_fit_mode(tmp_path):
     cfg_path = tmp_path / "invalid_dynamic_fit_mode.yaml"
     cfg_path.write_text("dynamic_fit_mode: not_a_mode\n", encoding="utf-8")
@@ -544,3 +712,30 @@ def test_config_accepts_robust_global_event_reject_mode_and_params(tmp_path):
     assert cfg.robust_event_reject_local_var_window_sec == pytest.approx(9.0)
     assert cfg.robust_event_reject_local_var_ratio_thresh == pytest.approx(4.5)
     assert cfg.robust_event_reject_min_keep_fraction == pytest.approx(0.6)
+
+
+def test_config_accepts_adaptive_event_gated_mode_and_params(tmp_path):
+    cfg_path = tmp_path / "adaptive_mode.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "dynamic_fit_mode: adaptive_event_gated_regression",
+                "adaptive_event_gate_residual_z_thresh: 3.2",
+                "adaptive_event_gate_local_var_window_sec: 9.0",
+                "adaptive_event_gate_local_var_ratio_thresh: 4.2",
+                "adaptive_event_gate_smooth_window_sec: 75.0",
+                "adaptive_event_gate_min_trust_fraction: 0.6",
+                "adaptive_event_gate_freeze_interp_method: linear_hold",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cfg = Config.from_yaml(str(cfg_path))
+    assert cfg.dynamic_fit_mode == "adaptive_event_gated_regression"
+    assert cfg.adaptive_event_gate_residual_z_thresh == pytest.approx(3.2)
+    assert cfg.adaptive_event_gate_local_var_window_sec == pytest.approx(9.0)
+    assert cfg.adaptive_event_gate_local_var_ratio_thresh == pytest.approx(4.2)
+    assert cfg.adaptive_event_gate_smooth_window_sec == pytest.approx(75.0)
+    assert cfg.adaptive_event_gate_min_trust_fraction == pytest.approx(0.6)
+    assert cfg.adaptive_event_gate_freeze_interp_method == "linear_hold"

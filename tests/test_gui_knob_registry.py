@@ -172,6 +172,21 @@ class TestGuiKnobRegistry(unittest.TestCase):
             },
         )
 
+    def test_filter_config_overrides_accepts_adaptive_event_gated_keys(self):
+        filtered = filter_config_overrides(
+            {
+                "adaptive_event_gate_residual_z_thresh": 3.2,
+                "adaptive_event_gate_freeze_interp_method": "linear_hold",
+            }
+        )
+        self.assertEqual(
+            filtered,
+            {
+                "adaptive_event_gate_residual_z_thresh": 3.2,
+                "adaptive_event_gate_freeze_interp_method": "linear_hold",
+            },
+        )
+
     def test_run_spec_generate_derived_config_uses_filtered_overrides(self):
         """generate_derived_config filters overrides and raises on unknown."""
         import os

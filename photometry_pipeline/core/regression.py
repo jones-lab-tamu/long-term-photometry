@@ -75,6 +75,38 @@ def _interp_fill_nearest_finite(values: np.ndarray) -> np.ndarray:
     return out
 
 
+def _freeze_values_over_gated_mask(
+    values: np.ndarray,
+    gated_mask: np.ndarray,
+    trusted_anchor_mask: np.ndarray,
+) -> np.ndarray:
+    """
+    Freeze values through gated spans using nearest trusted anchors.
+    """
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    gated = np.asarray(gated_mask, dtype=bool).reshape(-1)
+    anchors = np.asarray(trusted_anchor_mask, dtype=bool).reshape(-1) & np.isfinite(arr)
+    if arr.size == 0 or not np.any(gated) or not np.any(anchors):
+        return arr.copy()
+
+    idx = np.arange(arr.size, dtype=int)
+    prev_idx = np.where(anchors, idx, -1)
+    prev_idx = np.maximum.accumulate(prev_idx)
+    next_idx = np.where(anchors, idx, arr.size)
+    next_idx = np.minimum.accumulate(next_idx[::-1])[::-1]
+
+    out = arr.copy()
+    gated_idx = np.where(gated)[0]
+    for i in gated_idx:
+        left = int(prev_idx[i])
+        right = int(next_idx[i])
+        if left >= 0:
+            out[i] = arr[left]
+        elif right < arr.size:
+            out[i] = arr[right]
+    return out
+
+
 def _global_fit_params(u_f: np.ndarray, s_f: np.ndarray) -> Tuple[Optional[Tuple[float, float]], Optional[str], float]:
     """
     Returns (slope, intercept) from finite filtered samples, with DD code on failure.
@@ -101,6 +133,7 @@ _DYNAMIC_FIT_MODES = {
     "rolling_filtered_to_filtered",
     "global_linear_regression",
     "robust_global_event_reject",
+    "adaptive_event_gated_regression",
 }
 
 _DYNAMIC_FIT_MODE_ALIASES = {
@@ -496,6 +529,204 @@ def fit_robust_global_event_reject(
     }
 
 
+def fit_adaptive_event_gated_regression(
+    signal_raw: np.ndarray,
+    iso_raw: np.ndarray,
+    *,
+    signal_fit_input: Optional[np.ndarray] = None,
+    iso_fit_input: Optional[np.ndarray] = None,
+    sample_rate_hz: float,
+    residual_z_thresh: float = 3.5,
+    local_var_window_sec: float | None = 10.0,
+    local_var_ratio_thresh: float | None = None,
+    smooth_window_sec: float = 60.0,
+    min_trust_fraction: float = 0.5,
+    freeze_interp_method: str = "linear_hold",
+    use_intercept: bool = True,
+) -> dict:
+    """
+    Slow adaptive fit with event gating and coefficient freezing.
+    """
+    sig_raw_arr = np.asarray(signal_raw, dtype=float).reshape(-1)
+    iso_raw_arr = np.asarray(iso_raw, dtype=float).reshape(-1)
+    if sig_raw_arr.shape != iso_raw_arr.shape:
+        raise ValueError(
+            "adaptive_event_gated_regression shape mismatch: "
+            f"signal={sig_raw_arr.shape}, iso={iso_raw_arr.shape}"
+        )
+    if sig_raw_arr.size == 0:
+        raise RuntimeError("adaptive_event_gated_regression received empty input")
+    if freeze_interp_method not in {"linear_hold"}:
+        raise ValueError("adaptive_event_gate_freeze_interp_method must be 'linear_hold'")
+
+    sig_fit = (
+        np.asarray(signal_fit_input, dtype=float).reshape(-1)
+        if signal_fit_input is not None
+        else sig_raw_arr
+    )
+    iso_fit = (
+        np.asarray(iso_fit_input, dtype=float).reshape(-1)
+        if iso_fit_input is not None
+        else iso_raw_arr
+    )
+    if sig_fit.shape != sig_raw_arr.shape or iso_fit.shape != iso_raw_arr.shape:
+        raise ValueError("adaptive_event_gated_regression fit-input shapes must match raw arrays")
+
+    finite_fit = np.isfinite(sig_fit) & np.isfinite(iso_fit)
+    n_finite = int(np.sum(finite_fit))
+    if n_finite < 3:
+        raise RuntimeError("adaptive_event_gated_regression requires at least 3 finite samples")
+
+    z_thresh = float(residual_z_thresh)
+    if z_thresh <= 0.0:
+        raise ValueError("adaptive_event_gate_residual_z_thresh must be > 0")
+    smooth_sec = float(smooth_window_sec)
+    if smooth_sec <= 0.0:
+        raise ValueError("adaptive_event_gate_smooth_window_sec must be > 0")
+    min_trust = float(min_trust_fraction)
+    if not (0.0 < min_trust <= 1.0):
+        raise ValueError("adaptive_event_gate_min_trust_fraction must be in (0, 1]")
+
+    fs_hz = float(sample_rate_hz)
+    if (not np.isfinite(fs_hz)) or fs_hz <= 0.0:
+        fs_hz = 1.0
+
+    global_params, fail_reason, robust_backend_used = _unpack_robust_fit_result(
+        _fit_robust_linear(iso_fit[finite_fit], sig_fit[finite_fit], use_intercept=bool(use_intercept))
+    )
+    if global_params is None:
+        raise RuntimeError(
+            "adaptive_event_gated_regression robust initialization failed: "
+            f"{fail_reason or 'unknown'}"
+        )
+    slope_global, intercept_global = float(global_params[0]), float(global_params[1])
+    global_fit = (slope_global * iso_fit) + intercept_global
+    residual = sig_fit - global_fit
+
+    residual_candidate = np.zeros_like(finite_fit, dtype=bool)
+    residual_median = float(np.nanmedian(residual[finite_fit]))
+    mad = float(np.nanmedian(np.abs(residual[finite_fit] - residual_median)))
+    robust_scale = float(1.4826 * mad)
+    if np.isfinite(robust_scale) and robust_scale > 1e-12:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            z_pos = (residual - residual_median) / robust_scale
+        residual_candidate = finite_fit & (z_pos > z_thresh)
+
+    var_candidate = np.zeros_like(finite_fit, dtype=bool)
+    use_var_rule = (
+        local_var_window_sec is not None
+        and local_var_ratio_thresh is not None
+        and float(local_var_ratio_thresh) > 0.0
+    )
+    local_var_window_samples = 0
+    if use_var_rule:
+        local_var_window_samples = max(3, int(round(float(local_var_window_sec) * fs_hz)))
+        if (local_var_window_samples % 2) == 0:
+            local_var_window_samples += 1
+        var_sig = _centered_rolling_variance(sig_fit, local_var_window_samples)
+        var_iso = _centered_rolling_variance(iso_fit, local_var_window_samples)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            var_ratio = var_sig / np.maximum(var_iso, 1e-12)
+        var_candidate = (
+            finite_fit
+            & np.isfinite(var_ratio)
+            & (var_ratio > float(local_var_ratio_thresh))
+        )
+
+    gated_mask = finite_fit & (residual_candidate | var_candidate)
+    trusted_mask = finite_fit & (~gated_mask)
+    trust_fraction = float(np.sum(trusted_mask)) / float(max(1, n_finite))
+    if trust_fraction < min_trust:
+        raise RuntimeError(
+            f"adaptive_event_gated_regression trust_fraction_below_min: "
+            f"{trust_fraction:.4f} < {min_trust:.4f}"
+        )
+
+    smooth_window_samples = max(5, int(round(smooth_sec * fs_hz)))
+    if (smooth_window_samples % 2) == 0:
+        smooth_window_samples += 1
+    min_trusted_samples = max(3, int(round(0.2 * smooth_window_samples)))
+
+    trusted_float = trusted_mask.astype(float)
+    iso_use = np.where(trusted_mask, iso_fit, 0.0)
+    sig_use = np.where(trusted_mask, sig_fit, 0.0)
+    n_valid = _rolling_sum_centered(trusted_float, smooth_window_samples)
+    sum_u = _rolling_sum_centered(iso_use, smooth_window_samples)
+    sum_s = _rolling_sum_centered(sig_use, smooth_window_samples)
+    sum_uu = _rolling_sum_centered(iso_use * iso_use, smooth_window_samples)
+    sum_us = _rolling_sum_centered(iso_use * sig_use, smooth_window_samples)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cov_us = sum_us - (sum_u * sum_s) / np.maximum(n_valid, 1.0)
+        var_u = sum_uu - (sum_u * sum_u) / np.maximum(n_valid, 1.0)
+
+    var_floor = max(1e-12, 1e-6 * float(np.nanmedian(np.abs(iso_fit[trusted_mask])) ** 2))
+    valid_coef = (
+        (n_valid >= float(min_trusted_samples))
+        & np.isfinite(cov_us)
+        & np.isfinite(var_u)
+        & (var_u > var_floor)
+    )
+    if int(np.sum(valid_coef)) < 2:
+        raise RuntimeError("adaptive_event_gated_regression insufficient_trusted_windows_for_local_fit")
+
+    slope_local = np.full(sig_fit.shape, np.nan, dtype=float)
+    intercept_local = np.full(sig_fit.shape, np.nan, dtype=float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        slope_local[valid_coef] = cov_us[valid_coef] / var_u[valid_coef]
+        intercept_local[valid_coef] = (
+            sum_s[valid_coef] - slope_local[valid_coef] * sum_u[valid_coef]
+        ) / np.maximum(n_valid[valid_coef], 1.0)
+
+    slope_interp = _interp_fill_nearest_finite(slope_local)
+    intercept_interp = _interp_fill_nearest_finite(intercept_local)
+    if not np.any(np.isfinite(slope_interp)) or not np.any(np.isfinite(intercept_interp)):
+        raise RuntimeError("adaptive_event_gated_regression interpolation_failed")
+
+    support_frac = np.clip(n_valid / float(max(1, smooth_window_samples)), 0.0, 1.0)
+    slope_reg = slope_global + support_frac * (slope_interp - slope_global)
+    intercept_reg = intercept_global + support_frac * (intercept_interp - intercept_global)
+
+    trusted_anchor_mask = valid_coef & trusted_mask
+    if freeze_interp_method == "linear_hold":
+        slope_final = _freeze_values_over_gated_mask(slope_reg, gated_mask, trusted_anchor_mask)
+        intercept_final = _freeze_values_over_gated_mask(intercept_reg, gated_mask, trusted_anchor_mask)
+    else:
+        slope_final = slope_reg
+        intercept_final = intercept_reg
+
+    fit_raw = (slope_final * iso_raw_arr) + intercept_final
+    finite_raw = np.isfinite(sig_raw_arr) & np.isfinite(iso_raw_arr)
+    fit_raw = np.asarray(fit_raw, dtype=float)
+    fit_raw[~finite_raw] = np.nan
+
+    return {
+        "iso_fit_signal_units": fit_raw,
+        "trusted_mask": np.asarray(trusted_mask, dtype=bool),
+        "gated_mask": np.asarray(gated_mask, dtype=bool),
+        "global_init_coef": {
+            "slope": float(slope_global),
+            "intercept": float(intercept_global),
+            "robust_fit_backend_used": str(robust_backend_used),
+        },
+        "coef_slope": np.asarray(slope_final, dtype=float),
+        "coef_intercept": np.asarray(intercept_final, dtype=float),
+        "residual_median": float(residual_median),
+        "residual_mad": float(mad),
+        "residual_robust_scale": float(robust_scale),
+        "n_finite": int(n_finite),
+        "n_trusted": int(np.sum(trusted_mask)),
+        "trust_fraction": float(trust_fraction),
+        "gated_fraction": float(np.sum(gated_mask) / float(max(1, n_finite))),
+        "n_gated_residual": int(np.sum(residual_candidate)),
+        "n_gated_local_var": int(np.sum(var_candidate)),
+        "local_var_rule_enabled": bool(use_var_rule),
+        "local_var_window_samples": int(local_var_window_samples),
+        "smooth_window_samples": int(smooth_window_samples),
+        "min_trusted_samples": int(min_trusted_samples),
+        "freeze_interp_method": str(freeze_interp_method),
+    }
+
+
 def _compute_dynamic_fit_ref_global_linear(chunk: Chunk, config: Config, mode: str) -> Optional[np.ndarray]:
     """
     Global OLS dynamic-fit mode:
@@ -697,6 +928,245 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
     chunk.metadata["dynamic_fit_engine_info"]["fallback_roi_count"] = int(fallback_roi_count)
     chunk.metadata["dynamic_fit_engine_info"]["success_roi_count"] = int(n_rois - fallback_roi_count)
     chunk.metadata["dynamic_fit_engine_info"]["robust_backend_used_counts"] = dict(robust_backend_used_counts)
+    return uv_fit_all
+
+
+def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
+    chunk: Chunk,
+    config: Config,
+    mode: str,
+) -> Optional[np.ndarray]:
+    """
+    Adaptive event-gated regression:
+      - robust global initialization
+      - trust/gating from positive residual robust-z (+ optional local variance asymmetry)
+      - slow local coefficient adaptation from trusted windows
+      - coefficient freezing through gated spans
+      - reconstruction on raw UV
+    """
+    if mode == "tonic":
+        raise RuntimeError("Invariant violated: tonic mode must not run dynamic isosbestic fitting.")
+
+    n_rois = int(chunk.uv_raw.shape[1])
+    uv_fit_all = np.full_like(chunk.uv_raw, np.nan, dtype=float)
+    _ensure_chunk_metadata(chunk)
+    chunk.metadata["dynamic_fit_engine"] = "adaptive_event_gated_regression_v1"
+    chunk.metadata["dynamic_fit_engine_info"] = {
+        "fit_inputs": "robust-global init + trusted-window local coefficients + gated-span freeze",
+        "fit_mode_resolved": "adaptive_event_gated_regression",
+        "fit_input_domain": "filtered_if_available_else_raw",
+        "trust_scoring_domain": "filtered_if_available_else_raw",
+        "reconstruction_signal": "uv_raw",
+        "baseline_subtract_before_fit": bool(getattr(config, "baseline_subtract_before_fit", False)),
+        "baseline_subtract_applied": False,
+        "adaptive_event_gate_residual_z_thresh": float(
+            getattr(config, "adaptive_event_gate_residual_z_thresh", 3.5)
+        ),
+        "adaptive_event_gate_local_var_window_sec": (
+            None
+            if getattr(config, "adaptive_event_gate_local_var_window_sec", None) is None
+            else float(getattr(config, "adaptive_event_gate_local_var_window_sec", 10.0))
+        ),
+        "adaptive_event_gate_local_var_ratio_thresh": (
+            None
+            if getattr(config, "adaptive_event_gate_local_var_ratio_thresh", None) is None
+            else float(getattr(config, "adaptive_event_gate_local_var_ratio_thresh", 0.0))
+        ),
+        "adaptive_event_gate_smooth_window_sec": float(
+            getattr(config, "adaptive_event_gate_smooth_window_sec", 60.0)
+        ),
+        "adaptive_event_gate_min_trust_fraction": float(
+            getattr(config, "adaptive_event_gate_min_trust_fraction", 0.5)
+        ),
+        "adaptive_event_gate_freeze_interp_method": str(
+            getattr(config, "adaptive_event_gate_freeze_interp_method", "linear_hold")
+        ),
+        "fallback_hierarchy": [
+            "adaptive_event_gated_regression",
+            "robust_global_event_reject",
+            "global_linear_regression",
+        ],
+        "n_rois": n_rois,
+        "legacy_knobs_not_used_in_engine": _legacy_knobs_not_used_in_engine(),
+    }
+    chunk.metadata["dynamic_fit_adaptive_event_gated"] = {}
+
+    residual_z_thresh = float(getattr(config, "adaptive_event_gate_residual_z_thresh", 3.5))
+    local_var_window_sec = getattr(config, "adaptive_event_gate_local_var_window_sec", 10.0)
+    local_var_ratio_thresh = getattr(config, "adaptive_event_gate_local_var_ratio_thresh", None)
+    smooth_window_sec = float(getattr(config, "adaptive_event_gate_smooth_window_sec", 60.0))
+    min_trust_fraction = float(getattr(config, "adaptive_event_gate_min_trust_fraction", 0.5))
+    freeze_interp_method = str(getattr(config, "adaptive_event_gate_freeze_interp_method", "linear_hold"))
+
+    success_roi_count = 0
+    fallback_robust_roi_count = 0
+    fallback_global_roi_count = 0
+    backend_counts: Dict[str, int] = {}
+    for r_idx in range(n_rois):
+        roi_name = str(chunk.channel_names[r_idx]) if r_idx < len(chunk.channel_names) else f"roi_{r_idx}"
+        sig_raw = np.asarray(chunk.sig_raw[:, r_idx], dtype=float)
+        uv_raw = np.asarray(chunk.uv_raw[:, r_idx], dtype=float)
+        sig_fit_input = (
+            np.asarray(chunk.sig_filt[:, r_idx], dtype=float)
+            if chunk.sig_filt is not None
+            else sig_raw
+        )
+        uv_fit_input = (
+            np.asarray(chunk.uv_filt[:, r_idx], dtype=float)
+            if chunk.uv_filt is not None
+            else uv_raw
+        )
+
+        try:
+            adaptive_result = fit_adaptive_event_gated_regression(
+                signal_raw=sig_raw,
+                iso_raw=uv_raw,
+                signal_fit_input=sig_fit_input,
+                iso_fit_input=uv_fit_input,
+                sample_rate_hz=float(chunk.fs_hz),
+                residual_z_thresh=residual_z_thresh,
+                local_var_window_sec=local_var_window_sec,
+                local_var_ratio_thresh=local_var_ratio_thresh,
+                smooth_window_sec=smooth_window_sec,
+                min_trust_fraction=min_trust_fraction,
+                freeze_interp_method=freeze_interp_method,
+                use_intercept=True,
+            )
+            uv_fit_all[:, r_idx] = np.asarray(adaptive_result["iso_fit_signal_units"], dtype=float)
+            global_coef = dict(adaptive_result.get("global_init_coef", {}))
+            backend_used = str(global_coef.get("robust_fit_backend_used", "unknown"))
+            backend_counts[backend_used] = backend_counts.get(backend_used, 0) + 1
+            chunk.metadata["dynamic_fit_adaptive_event_gated"][roi_name] = {
+                "trusted_mask": np.asarray(adaptive_result.get("trusted_mask", []), dtype=bool),
+                "gated_mask": np.asarray(adaptive_result.get("gated_mask", []), dtype=bool),
+                "global_init_coef": global_coef,
+                "coef_slope": np.asarray(adaptive_result.get("coef_slope", []), dtype=float),
+                "coef_intercept": np.asarray(adaptive_result.get("coef_intercept", []), dtype=float),
+                "trust_fraction": float(adaptive_result.get("trust_fraction", np.nan)),
+                "gated_fraction": float(adaptive_result.get("gated_fraction", np.nan)),
+                "n_trusted": int(adaptive_result.get("n_trusted", 0)),
+                "n_finite": int(adaptive_result.get("n_finite", 0)),
+                "n_gated_residual": int(adaptive_result.get("n_gated_residual", 0)),
+                "n_gated_local_var": int(adaptive_result.get("n_gated_local_var", 0)),
+                "local_var_rule_enabled": bool(adaptive_result.get("local_var_rule_enabled", False)),
+                "smooth_window_samples": int(adaptive_result.get("smooth_window_samples", 0)),
+                "freeze_interp_method": str(adaptive_result.get("freeze_interp_method", freeze_interp_method)),
+                "fallback_mode": "none",
+            }
+            success_roi_count += 1
+            continue
+        except Exception as exc:
+            chunk.metadata.setdefault("qc_warnings", []).append(
+                "ADAPTIVE_EVENT_GATED_REGRESSION_FALLBACK "
+                f"roi={roi_name} reason={exc}"
+            )
+
+        try:
+            robust_result = fit_robust_global_event_reject(
+                signal_raw=sig_raw,
+                iso_raw=uv_raw,
+                max_iters=int(getattr(config, "robust_event_reject_max_iters", 3)),
+                residual_z_thresh=float(getattr(config, "robust_event_reject_residual_z_thresh", 3.5)),
+                local_var_window_sec=getattr(config, "robust_event_reject_local_var_window_sec", 10.0),
+                local_var_ratio_thresh=getattr(config, "robust_event_reject_local_var_ratio_thresh", None),
+                min_keep_fraction=float(getattr(config, "robust_event_reject_min_keep_fraction", 0.5)),
+                sample_rate_hz=float(chunk.fs_hz),
+                use_intercept=True,
+            )
+            uv_fit_all[:, r_idx] = np.asarray(robust_result.get("iso_fit_signal_units", np.full_like(sig_raw, np.nan)), dtype=float)
+            chunk.metadata["dynamic_fit_adaptive_event_gated"][roi_name] = {
+                "trusted_mask": np.asarray(robust_result.get("keep_mask", []), dtype=bool),
+                "gated_mask": np.asarray(robust_result.get("excluded_mask", []), dtype=bool),
+                "global_init_coef": dict(robust_result.get("final_coef", {})),
+                "coef_slope": np.full(sig_raw.shape, np.nan, dtype=float),
+                "coef_intercept": np.full(sig_raw.shape, np.nan, dtype=float),
+                "trust_fraction": float(robust_result.get("final_keep_fraction", np.nan)),
+                "gated_fraction": float(np.mean(np.asarray(robust_result.get("excluded_mask", []), dtype=bool))),
+                "n_trusted": int(np.sum(np.asarray(robust_result.get("keep_mask", []), dtype=bool))),
+                "n_finite": int(np.sum(np.isfinite(sig_raw) & np.isfinite(uv_raw))),
+                "n_gated_residual": int(np.sum(np.asarray(robust_result.get("excluded_mask", []), dtype=bool))),
+                "n_gated_local_var": 0,
+                "local_var_rule_enabled": bool(robust_result.get("local_var_rule_enabled", False)),
+                "smooth_window_samples": 0,
+                "freeze_interp_method": str(freeze_interp_method),
+                "fallback_mode": "robust_global_event_reject",
+            }
+            fallback_robust_roi_count += 1
+            backend_used = str(robust_result.get("robust_fit_backend_used", "unknown"))
+            backend_counts[backend_used] = backend_counts.get(backend_used, 0) + 1
+            continue
+        except Exception as exc:
+            chunk.metadata.setdefault("qc_warnings", []).append(
+                "ADAPTIVE_EVENT_GATED_REGRESSION_FALLBACK_ROBUST_FAILED "
+                f"roi={roi_name} reason={exc}"
+            )
+
+        if chunk.uv_filt is None or chunk.sig_filt is None:
+            u_fit = uv_raw
+            s_fit = sig_raw
+        else:
+            u_fit = np.asarray(chunk.uv_filt[:, r_idx], dtype=float)
+            s_fit = np.asarray(chunk.sig_filt[:, r_idx], dtype=float)
+        params, fail_code, var_u = _global_fit_params(u_fit, s_fit)
+        if params is None:
+            if fail_code == "DD1":
+                msg = (
+                    "ADAPTIVE_EVENT_GATED_REGRESSION_FALLBACK_DEGENERATE[DD1] "
+                    f"roi={roi_name} <2 finite samples"
+                )
+            else:
+                msg = (
+                    "ADAPTIVE_EVENT_GATED_REGRESSION_FALLBACK_DEGENERATE[DD2] "
+                    f"roi={roi_name} var_u={var_u}"
+                )
+            chunk.metadata.setdefault("qc_warnings", []).append(msg)
+            chunk.metadata["dynamic_fit_adaptive_event_gated"][roi_name] = {
+                "trusted_mask": np.zeros(sig_raw.shape, dtype=bool),
+                "gated_mask": np.zeros(sig_raw.shape, dtype=bool),
+                "global_init_coef": {},
+                "coef_slope": np.full(sig_raw.shape, np.nan, dtype=float),
+                "coef_intercept": np.full(sig_raw.shape, np.nan, dtype=float),
+                "trust_fraction": 0.0,
+                "gated_fraction": 0.0,
+                "n_trusted": 0,
+                "n_finite": int(np.sum(np.isfinite(sig_raw) & np.isfinite(uv_raw))),
+                "n_gated_residual": 0,
+                "n_gated_local_var": 0,
+                "local_var_rule_enabled": False,
+                "smooth_window_samples": 0,
+                "freeze_interp_method": str(freeze_interp_method),
+                "fallback_mode": "global_linear_regression_failed",
+                "fallback_failed": True,
+            }
+            fallback_global_roi_count += 1
+            continue
+        slope, intercept = params
+        uv_fit_all[:, r_idx] = intercept + slope * uv_raw
+        chunk.metadata["dynamic_fit_adaptive_event_gated"][roi_name] = {
+            "trusted_mask": np.isfinite(sig_raw) & np.isfinite(uv_raw),
+            "gated_mask": np.zeros(sig_raw.shape, dtype=bool),
+            "global_init_coef": {"slope": float(slope), "intercept": float(intercept)},
+            "coef_slope": np.full(sig_raw.shape, float(slope), dtype=float),
+            "coef_intercept": np.full(sig_raw.shape, float(intercept), dtype=float),
+            "trust_fraction": 1.0,
+            "gated_fraction": 0.0,
+            "n_trusted": int(np.sum(np.isfinite(sig_raw) & np.isfinite(uv_raw))),
+            "n_finite": int(np.sum(np.isfinite(sig_raw) & np.isfinite(uv_raw))),
+            "n_gated_residual": 0,
+            "n_gated_local_var": 0,
+            "local_var_rule_enabled": False,
+            "smooth_window_samples": 0,
+            "freeze_interp_method": str(freeze_interp_method),
+            "fallback_mode": "global_linear_regression",
+            "fallback_failed": False,
+        }
+        fallback_global_roi_count += 1
+        backend_counts["global_linear_fallback"] = backend_counts.get("global_linear_fallback", 0) + 1
+
+    chunk.metadata["dynamic_fit_engine_info"]["success_roi_count"] = int(success_roi_count)
+    chunk.metadata["dynamic_fit_engine_info"]["fallback_robust_roi_count"] = int(fallback_robust_roi_count)
+    chunk.metadata["dynamic_fit_engine_info"]["fallback_global_roi_count"] = int(fallback_global_roi_count)
+    chunk.metadata["dynamic_fit_engine_info"]["robust_backend_used_counts"] = dict(backend_counts)
     return uv_fit_all
 
 
@@ -997,6 +1467,8 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
         uv_fit = _compute_dynamic_fit_ref_global_linear(chunk, config, mode)
     elif fit_mode == "robust_global_event_reject":
         uv_fit = _compute_dynamic_fit_ref_robust_global_event_reject(chunk, config, mode)
+    elif fit_mode == "adaptive_event_gated_regression":
+        uv_fit = _compute_dynamic_fit_ref_adaptive_event_gated_regression(chunk, config, mode)
     else:
         uv_fit = _compute_dynamic_fit_ref(chunk, config, mode, fit_mode=fit_mode)
 

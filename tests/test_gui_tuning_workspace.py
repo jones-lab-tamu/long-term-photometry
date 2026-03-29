@@ -1727,6 +1727,7 @@ def test_correction_tuning_fit_mode_selector_exposes_expanded_modes(window, tmp_
         "global_linear_regression",
     ]
     assert "robust_global_event_reject" in modes
+    assert "adaptive_event_gated_regression" in modes
     labels = [
         window._correction_tuning_fit_mode_combo.itemText(i)
         for i in range(window._correction_tuning_fit_mode_combo.count())
@@ -1737,6 +1738,7 @@ def test_correction_tuning_fit_mode_selector_exposes_expanded_modes(window, tmp_
         "Global linear regression",
     ]
     assert "Robust global fit + event rejection" in labels
+    assert "Adaptive event-gated regression" in labels
 
 
 def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(window, tmp_path):
@@ -1784,6 +1786,12 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
         ("Baseline subtract before fit:", window._correction_tuning_baseline_subtract_cb),
         ("Regression Window (s):", window._correction_tuning_window_spin),
         ("Min Samples/Window:", window._correction_tuning_min_samples_spin),
+        ("Adaptive residual z-threshold:", window._correction_tuning_adaptive_residual_z_spin),
+        ("Adaptive local variance window (s):", window._correction_tuning_adaptive_local_var_window_spin),
+        ("Adaptive local variance ratio threshold:", window._correction_tuning_adaptive_local_var_ratio_spin),
+        ("Adaptive smooth window (s):", window._correction_tuning_adaptive_smooth_window_spin),
+        ("Adaptive minimum trust fraction:", window._correction_tuning_adaptive_min_trust_fraction_spin),
+        ("Adaptive freeze interpolation method:", window._correction_tuning_adaptive_freeze_interp_combo),
     ]
     for label_text, control in correction_pairs:
         label = _label(window._correction_tuning_controls_container, label_text)
@@ -2056,6 +2064,7 @@ def test_correction_tuning_global_fit_mode_disables_rolling_knobs_and_plumbs_ove
         "Baseline subtract before fit: inactive in global linear regression mode"
         in window._correction_tuning_summary_label.text()
     )
+    assert "Adaptive diagnostics:" not in window._correction_tuning_summary_label.text()
 
 
 def test_correction_tuning_filtered_to_filtered_mode_plumbs_baseline_toggle(window, tmp_path, monkeypatch):
@@ -2180,6 +2189,96 @@ def test_correction_tuning_robust_event_reject_mode_plumbs_overrides(window, tmp
     assert "local_var_window_s=9" in summary
     assert "local_var_ratio=4.4" in summary
     assert "min_keep=0.62" in summary
+    assert "Adaptive diagnostics:" not in summary
+
+
+def test_correction_tuning_adaptive_event_gated_mode_plumbs_overrides(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    idx = window._correction_tuning_fit_mode_combo.findData("adaptive_event_gated_regression")
+    assert idx >= 0
+    window._correction_tuning_fit_mode_combo.setCurrentIndex(idx)
+    window._correction_tuning_adaptive_residual_z_spin.setValue(3.25)
+    window._correction_tuning_adaptive_local_var_window_spin.setValue(8.5)
+    window._correction_tuning_adaptive_local_var_ratio_enable_cb.setChecked(True)
+    window._correction_tuning_adaptive_local_var_ratio_spin.setValue(4.3)
+    window._correction_tuning_adaptive_smooth_window_spin.setValue(70.0)
+    window._correction_tuning_adaptive_min_trust_fraction_spin.setValue(0.61)
+    idx_interp = window._correction_tuning_adaptive_freeze_interp_combo.findData("linear_hold")
+    assert idx_interp >= 0
+    window._correction_tuning_adaptive_freeze_interp_combo.setCurrentIndex(idx_interp)
+    QApplication.processEvents()
+
+    assert not window._correction_tuning_window_spin.isEnabled()
+    assert not window._correction_tuning_min_samples_spin.isEnabled()
+    assert not window._correction_tuning_baseline_subtract_cb.isEnabled()
+    assert not window._correction_tuning_robust_max_iters_spin.isEnabled()
+    assert window._correction_tuning_adaptive_residual_z_spin.isEnabled()
+    assert window._correction_tuning_adaptive_local_var_window_spin.isEnabled()
+    assert window._correction_tuning_adaptive_local_var_ratio_enable_cb.isEnabled()
+    assert window._correction_tuning_adaptive_local_var_ratio_spin.isEnabled()
+    assert window._correction_tuning_adaptive_smooth_window_spin.isEnabled()
+    assert window._correction_tuning_adaptive_min_trust_fraction_spin.isEnabled()
+    assert window._correction_tuning_adaptive_freeze_interp_combo.isEnabled()
+
+    inspection_path = tmp_path / "correction_inspect_adaptive.png"
+    _write_png(inspection_path, width=900, height=420)
+    captured = {}
+
+    def _fake_correction_retune(**kwargs):
+        captured.update(kwargs)
+        out = tmp_path / "correction_retune_out_adaptive"
+        out.mkdir(exist_ok=True)
+        return {
+            "retune_dir": str(out),
+            "selected_roi": kwargs["roi"],
+            "inspection_chunk_id": kwargs["chunk_id"],
+            "artifacts": {
+                "retuned_correction_inspection_png": str(inspection_path),
+                "retuned_correction_inspection_adaptive_diagnostics": {
+                    "fit_mode_resolved": "adaptive_event_gated_regression",
+                    "trust_fraction": 0.58,
+                    "gated_fraction": 0.42,
+                    "fallback_mode": "none",
+                    "fallback_failed": False,
+                    "fallback_status": "no",
+                },
+            },
+        }
+
+    monkeypatch.setattr("gui.main_window.run_cache_correction_retune", _fake_correction_retune)
+    window._on_run_correction_tuning()
+    QApplication.processEvents()
+
+    overrides = captured["overrides"]
+    assert overrides["dynamic_fit_mode"] == "adaptive_event_gated_regression"
+    assert overrides["adaptive_event_gate_residual_z_thresh"] == pytest.approx(3.25)
+    assert overrides["adaptive_event_gate_local_var_window_sec"] == pytest.approx(8.5)
+    assert overrides["adaptive_event_gate_local_var_ratio_thresh"] == pytest.approx(4.3)
+    assert overrides["adaptive_event_gate_smooth_window_sec"] == pytest.approx(70.0)
+    assert overrides["adaptive_event_gate_min_trust_fraction"] == pytest.approx(0.61)
+    assert overrides["adaptive_event_gate_freeze_interp_method"] == "linear_hold"
+    assert "window_sec" not in overrides
+    assert "min_samples_per_window" not in overrides
+    assert "baseline_subtract_before_fit" not in overrides
+    assert "robust_event_reject_max_iters" not in overrides
+    summary = window._correction_tuning_summary_label.text()
+    assert "Dynamic fit mode: Adaptive event-gated regression" in summary
+    assert "Baseline subtract before fit: inactive in adaptive event-gated mode" in summary
+    assert "Adaptive event-gated settings:" in summary
+    assert "residual_z=3.25" in summary
+    assert "local_var_window_s=8.5" in summary
+    assert "local_var_ratio=4.3" in summary
+    assert "smooth_window_s=70" in summary
+    assert "min_trust=0.61" in summary
+    assert "freeze_interp=linear_hold" in summary
+    assert "Adaptive diagnostics: trust fraction=0.580, gated fraction=0.420, fallback=no" in summary
 
 
 def test_correction_tuning_robust_summary_shows_runtime_diagnostics(window, tmp_path, monkeypatch):

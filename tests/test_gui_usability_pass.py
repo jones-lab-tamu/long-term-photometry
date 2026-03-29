@@ -235,6 +235,7 @@ def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
         "global_linear_regression",
     ]
     assert "robust_global_event_reject" in visible_modes
+    assert "adaptive_event_gated_regression" in visible_modes
 
     spec_default = window._build_run_spec(validate_only=True)
     assert spec_default.config_overrides.get("dynamic_fit_mode") is None
@@ -319,6 +320,57 @@ def test_gui_dynamic_fit_mode_robust_event_reject_plumbs_mode_specific_overrides
     assert "min_keep=0.6" in summary
 
 
+def test_gui_dynamic_fit_mode_adaptive_event_gated_plumbs_mode_specific_overrides(window):
+    _set_minimally_valid_paths(window)
+
+    idx = window._dynamic_fit_mode_combo.findData("adaptive_event_gated_regression")
+    assert idx >= 0
+    window._dynamic_fit_mode_combo.setCurrentIndex(idx)
+    window._adaptive_event_gate_residual_z_spin.setValue(3.3)
+    window._adaptive_event_gate_local_var_window_spin.setValue(9.5)
+    window._adaptive_event_gate_local_var_ratio_enable_cb.setChecked(True)
+    window._adaptive_event_gate_local_var_ratio_spin.setValue(4.1)
+    window._adaptive_event_gate_smooth_window_spin.setValue(72.0)
+    window._adaptive_event_gate_min_trust_fraction_spin.setValue(0.62)
+    idx_interp = window._adaptive_event_gate_freeze_interp_combo.findData("linear_hold")
+    assert idx_interp >= 0
+    window._adaptive_event_gate_freeze_interp_combo.setCurrentIndex(idx_interp)
+
+    assert not window._window_sec_edit.isEnabled()
+    assert not window._min_samples_per_window_spin.isEnabled()
+    assert not window._baseline_subtract_before_fit_cb.isEnabled()
+    assert not window._robust_event_reject_max_iters_spin.isEnabled()
+    assert window._adaptive_event_gate_residual_z_spin.isEnabled()
+    assert window._adaptive_event_gate_local_var_window_spin.isEnabled()
+    assert window._adaptive_event_gate_local_var_ratio_enable_cb.isEnabled()
+    assert window._adaptive_event_gate_local_var_ratio_spin.isEnabled()
+    assert window._adaptive_event_gate_smooth_window_spin.isEnabled()
+    assert window._adaptive_event_gate_min_trust_fraction_spin.isEnabled()
+    assert window._adaptive_event_gate_freeze_interp_combo.isEnabled()
+
+    spec = window._build_run_spec(validate_only=True)
+    overrides = dict(spec.config_overrides)
+    assert overrides.get("dynamic_fit_mode") == "adaptive_event_gated_regression"
+    assert overrides.get("adaptive_event_gate_residual_z_thresh") == pytest.approx(3.3)
+    assert overrides.get("adaptive_event_gate_local_var_window_sec") == pytest.approx(9.5)
+    assert overrides.get("adaptive_event_gate_local_var_ratio_thresh") == pytest.approx(4.1)
+    assert overrides.get("adaptive_event_gate_smooth_window_sec") == pytest.approx(72.0)
+    assert overrides.get("adaptive_event_gate_min_trust_fraction") == pytest.approx(0.62)
+    assert overrides.get("adaptive_event_gate_freeze_interp_method") == "linear_hold"
+    assert "window_sec" not in overrides
+    assert "min_samples_per_window" not in overrides
+    assert "baseline_subtract_before_fit" not in overrides
+    summary = window._effective_summary_label.text()
+    assert "Adaptive event-gated settings:" in summary
+    assert "residual_z=3.3" in summary
+    assert "local_var_window_s=9.5" in summary
+    assert "local_var_ratio=4.1" in summary
+    assert "smooth_window_s=72" in summary
+    assert "min_trust=0.62" in summary
+    assert "freeze_interp=linear_hold" in summary
+    assert "Baseline subtract before fit: inactive in adaptive event-gated mode" in summary
+
+
 def test_gui_dynamic_fit_mode_legacy_alias_in_settings_normalizes_to_filtered_to_raw(window):
     window._settings.beginGroup("run_config")
     window._settings.setValue("dynamic_fit_mode", "rolling_local_regression")
@@ -355,6 +407,49 @@ def test_gui_build_argv_accepts_baseline_subtract_before_fit_override(window, tm
     with open(cfg_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     assert cfg.get("baseline_subtract_before_fit") is True
+
+
+def test_gui_build_argv_accepts_adaptive_event_gated_overrides(window, tmp_path, monkeypatch):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "out"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    window._input_dir.setText(str(input_dir))
+    window._output_dir.setText(str(output_dir))
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText("tests/qc_universal_config.yaml")
+
+    idx_mode = window._dynamic_fit_mode_combo.findData("adaptive_event_gated_regression")
+    assert idx_mode >= 0
+    window._dynamic_fit_mode_combo.setCurrentIndex(idx_mode)
+    window._adaptive_event_gate_residual_z_spin.setValue(3.2)
+    window._adaptive_event_gate_local_var_window_spin.setValue(9.0)
+    window._adaptive_event_gate_local_var_ratio_enable_cb.setChecked(True)
+    window._adaptive_event_gate_local_var_ratio_spin.setValue(4.2)
+    window._adaptive_event_gate_smooth_window_spin.setValue(75.0)
+    window._adaptive_event_gate_min_trust_fraction_spin.setValue(0.6)
+    idx_interp = window._adaptive_event_gate_freeze_interp_combo.findData("linear_hold")
+    assert idx_interp >= 0
+    window._adaptive_event_gate_freeze_interp_combo.setCurrentIndex(idx_interp)
+
+    # Keep this test focused on override allowlisting instead of dataset inference.
+    monkeypatch.setattr(window, "_infer_dataset_contract_overrides", lambda _fmt: {})
+
+    assert window._validate_gui_inputs() is None
+    argv = window._build_argv(validate_only=True)
+    assert "--validate-only" in argv
+
+    cfg_path = os.path.join(window._current_run_dir, "config_effective.yaml")
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    assert cfg.get("dynamic_fit_mode") == "adaptive_event_gated_regression"
+    assert cfg.get("adaptive_event_gate_residual_z_thresh") == pytest.approx(3.2)
+    assert cfg.get("adaptive_event_gate_local_var_window_sec") == pytest.approx(9.0)
+    assert cfg.get("adaptive_event_gate_local_var_ratio_thresh") == pytest.approx(4.2)
+    assert cfg.get("adaptive_event_gate_smooth_window_sec") == pytest.approx(75.0)
+    assert cfg.get("adaptive_event_gate_min_trust_fraction") == pytest.approx(0.6)
+    assert cfg.get("adaptive_event_gate_freeze_interp_method") == "linear_hold"
 
 
 def test_gui_timeline_anchor_controls_propagate_to_run_spec(window):

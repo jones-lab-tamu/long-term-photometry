@@ -210,6 +210,56 @@ def parse_and_validate_robust_event_reject_knobs(
     return overrides, None
 
 
+def parse_and_validate_adaptive_event_gated_knobs(
+    residual_z_thresh_val: float,
+    local_var_window_sec_val: float,
+    local_var_ratio_thresh_enabled: bool,
+    local_var_ratio_thresh_val: float,
+    smooth_window_sec_val: float,
+    min_trust_fraction_val: float,
+    freeze_interp_method_text: str,
+    defaults: dict,
+) -> tuple[dict | None, str | None]:
+    """
+    Parse and validate adaptive_event_gated_regression controls.
+    """
+    residual_z = float(residual_z_thresh_val)
+    if residual_z <= 0.0:
+        return None, "Residual z-threshold must be > 0."
+
+    local_window = float(local_var_window_sec_val)
+    if local_window <= 0.0:
+        return None, "Local variance window must be > 0."
+
+    smooth_window = float(smooth_window_sec_val)
+    if smooth_window <= 0.0:
+        return None, "Smooth window must be > 0."
+
+    min_trust = float(min_trust_fraction_val)
+    if not (0.0 < min_trust <= 1.0):
+        return None, "Minimum trust fraction must be in (0, 1]."
+
+    freeze_interp_method = str(freeze_interp_method_text or "").strip() or "linear_hold"
+    if freeze_interp_method not in {"linear_hold"}:
+        return None, "Freeze interpolation method must be 'linear_hold'."
+
+    ratio_thresh = None
+    if bool(local_var_ratio_thresh_enabled):
+        ratio_thresh = float(local_var_ratio_thresh_val)
+        if ratio_thresh <= 0.0:
+            return None, "Local variance ratio threshold must be > 0 when enabled."
+
+    overrides = {
+        "adaptive_event_gate_residual_z_thresh": residual_z,
+        "adaptive_event_gate_local_var_window_sec": local_window,
+        "adaptive_event_gate_local_var_ratio_thresh": ratio_thresh,
+        "adaptive_event_gate_smooth_window_sec": smooth_window,
+        "adaptive_event_gate_min_trust_fraction": min_trust,
+        "adaptive_event_gate_freeze_interp_method": freeze_interp_method,
+    }
+    return overrides, None
+
+
 def is_isosbestic_active(mode_text: str) -> bool:
     """Return True if the mode implies phasic analysis will run."""
     return mode_text in ("both", "phasic")
@@ -244,6 +294,7 @@ _KNOWN_ALLOWED_VALUES = {
         "rolling_filtered_to_filtered",
         "global_linear_regression",
         "robust_global_event_reject",
+        "adaptive_event_gated_regression",
         "rolling_local_regression",
     ],
 }
@@ -256,12 +307,14 @@ _DYNAMIC_FIT_MODE_CANONICAL_ORDER = [
     "rolling_filtered_to_filtered",
     "global_linear_regression",
     "robust_global_event_reject",
+    "adaptive_event_gated_regression",
 ]
 _DYNAMIC_FIT_MODE_LABELS = {
     "rolling_filtered_to_raw": "Rolling regression (filtered→raw)",
     "rolling_filtered_to_filtered": "Rolling regression (filtered→filtered)",
     "global_linear_regression": "Global linear regression",
     "robust_global_event_reject": "Robust global fit + event rejection",
+    "adaptive_event_gated_regression": "Adaptive event-gated regression",
 }
 
 def _get_allowed_from_config_field(field_name: str) -> list[str]:
@@ -355,6 +408,11 @@ def is_robust_event_reject_mode(mode_raw: str) -> bool:
     return mode == "robust_global_event_reject"
 
 
+def is_adaptive_event_gated_mode(mode_raw: str) -> bool:
+    mode = normalize_dynamic_fit_mode(mode_raw)
+    return mode == "adaptive_event_gated_regression"
+
+
 def dynamic_fit_mode_label(mode_raw: str) -> str:
     mode = normalize_dynamic_fit_mode(mode_raw)
     return _DYNAMIC_FIT_MODE_LABELS.get(mode, mode or "rolling_filtered_to_raw")
@@ -379,6 +437,30 @@ def format_robust_event_reject_settings_summary(
         f"local_var_window_s={float(local_var_window_sec):.4g}, "
         f"local_var_ratio={ratio_text}, "
         f"min_keep={float(min_keep_fraction):.4g}"
+    )
+
+
+def format_adaptive_event_gated_settings_summary(
+    residual_z_thresh: float,
+    local_var_window_sec: float,
+    local_var_ratio_thresh: float | None,
+    smooth_window_sec: float,
+    min_trust_fraction: float,
+    freeze_interp_method: str,
+) -> str:
+    ratio_text = (
+        "disabled"
+        if local_var_ratio_thresh is None
+        else f"{float(local_var_ratio_thresh):.4g}"
+    )
+    return (
+        "Adaptive event-gated settings: "
+        f"residual_z={float(residual_z_thresh):.4g}, "
+        f"local_var_window_s={float(local_var_window_sec):.4g}, "
+        f"local_var_ratio={ratio_text}, "
+        f"smooth_window_s={float(smooth_window_sec):.4g}, "
+        f"min_trust={float(min_trust_fraction):.4g}, "
+        f"freeze_interp={str(freeze_interp_method or 'linear_hold')}"
     )
 
 
@@ -1670,7 +1752,7 @@ class MainWindow(QMainWindow):
             bool(getattr(self._default_cfg, "baseline_subtract_before_fit", False))
         )
         self._correction_tuning_baseline_subtract_cb.setToolTip(
-            "Active only in rolling regression modes. Inactive in global linear and robust event-reject modes."
+            "Active only in rolling regression modes. Inactive in global linear, robust event-reject, and adaptive event-gated modes."
         )
         self._correction_tuning_baseline_subtract_cb.stateChanged.connect(self._on_config_changed)
         form.addRow(
@@ -1685,7 +1767,7 @@ class MainWindow(QMainWindow):
         self._correction_tuning_window_spin.setSingleStep(1.0)
         self._correction_tuning_window_spin.setToolTip(
             "Active only in rolling regression modes. "
-            "Inactive in global linear and robust event-reject modes."
+            "Inactive in global linear, robust event-reject, and adaptive event-gated modes."
         )
         form.addRow(_corr_row_label("Regression Window (s):"), self._correction_tuning_window_spin)
 
@@ -1694,7 +1776,7 @@ class MainWindow(QMainWindow):
         self._correction_tuning_min_samples_spin.setRange(1, 1_000_000)
         self._correction_tuning_min_samples_spin.setToolTip(
             "Active only in rolling regression modes. "
-            "Inactive in global linear and robust event-reject modes."
+            "Inactive in global linear, robust event-reject, and adaptive event-gated modes."
         )
         form.addRow(
             _corr_row_label("Min Samples/Window:"),
@@ -1791,6 +1873,125 @@ class MainWindow(QMainWindow):
             self._correction_tuning_robust_min_keep_fraction_spin,
         )
 
+        self._correction_tuning_adaptive_residual_z_spin = QDoubleSpinBox()
+        self._correction_tuning_adaptive_residual_z_spin.setMinimumWidth(140)
+        self._correction_tuning_adaptive_residual_z_spin.setRange(0.000001, 1_000_000.0)
+        self._correction_tuning_adaptive_residual_z_spin.setDecimals(4)
+        self._correction_tuning_adaptive_residual_z_spin.setSingleStep(0.1)
+        self._correction_tuning_adaptive_residual_z_spin.setValue(
+            float(getattr(self._default_cfg, "adaptive_event_gate_residual_z_thresh", 3.5))
+        )
+        self._correction_tuning_adaptive_residual_z_spin.setToolTip(
+            "Active only in adaptive event-gated regression mode."
+        )
+        form.addRow(
+            _corr_row_label("Adaptive residual z-threshold:"),
+            self._correction_tuning_adaptive_residual_z_spin,
+        )
+
+        self._correction_tuning_adaptive_local_var_window_spin = QDoubleSpinBox()
+        self._correction_tuning_adaptive_local_var_window_spin.setMinimumWidth(140)
+        self._correction_tuning_adaptive_local_var_window_spin.setRange(0.000001, 1_000_000.0)
+        self._correction_tuning_adaptive_local_var_window_spin.setDecimals(4)
+        self._correction_tuning_adaptive_local_var_window_spin.setSingleStep(0.5)
+        self._correction_tuning_adaptive_local_var_window_spin.setValue(
+            float(getattr(self._default_cfg, "adaptive_event_gate_local_var_window_sec", 10.0) or 10.0)
+        )
+        self._correction_tuning_adaptive_local_var_window_spin.setToolTip(
+            "Active only in adaptive event-gated regression mode."
+        )
+        form.addRow(
+            _corr_row_label("Adaptive local variance window (s):"),
+            self._correction_tuning_adaptive_local_var_window_spin,
+        )
+
+        self._correction_tuning_adaptive_local_var_ratio_enable_cb = QCheckBox("Enable")
+        self._correction_tuning_adaptive_local_var_ratio_enable_cb.setToolTip(
+            "Enable optional adaptive local variance ratio gate."
+        )
+        self._correction_tuning_adaptive_local_var_ratio_spin = QDoubleSpinBox()
+        self._correction_tuning_adaptive_local_var_ratio_spin.setMinimumWidth(140)
+        self._correction_tuning_adaptive_local_var_ratio_spin.setRange(0.000001, 1_000_000.0)
+        self._correction_tuning_adaptive_local_var_ratio_spin.setDecimals(4)
+        self._correction_tuning_adaptive_local_var_ratio_spin.setSingleStep(0.1)
+        self._correction_tuning_adaptive_local_var_ratio_spin.setToolTip(
+            "Active only in adaptive event-gated regression mode."
+        )
+        adaptive_ratio_default = getattr(
+            self._default_cfg, "adaptive_event_gate_local_var_ratio_thresh", None
+        )
+        self._correction_tuning_adaptive_local_var_ratio_enable_cb.setChecked(
+            adaptive_ratio_default is not None
+        )
+        self._correction_tuning_adaptive_local_var_ratio_spin.setValue(
+            float(adaptive_ratio_default if adaptive_ratio_default is not None else 3.0)
+        )
+        self._correction_tuning_adaptive_local_var_ratio_spin.setEnabled(
+            bool(adaptive_ratio_default is not None)
+        )
+        adaptive_ratio_row = QWidget()
+        adaptive_ratio_row.setToolTip(
+            "Enable optional adaptive local variance ratio gate."
+        )
+        adaptive_ratio_row_layout = QHBoxLayout(adaptive_ratio_row)
+        adaptive_ratio_row_layout.setContentsMargins(0, 0, 0, 0)
+        adaptive_ratio_row_layout.setSpacing(8)
+        adaptive_ratio_row_layout.addWidget(self._correction_tuning_adaptive_local_var_ratio_enable_cb)
+        adaptive_ratio_row_layout.addWidget(self._correction_tuning_adaptive_local_var_ratio_spin)
+        form.addRow(
+            _corr_row_label("Adaptive local variance ratio threshold:"),
+            adaptive_ratio_row,
+        )
+
+        self._correction_tuning_adaptive_smooth_window_spin = QDoubleSpinBox()
+        self._correction_tuning_adaptive_smooth_window_spin.setMinimumWidth(140)
+        self._correction_tuning_adaptive_smooth_window_spin.setRange(0.000001, 1_000_000.0)
+        self._correction_tuning_adaptive_smooth_window_spin.setDecimals(4)
+        self._correction_tuning_adaptive_smooth_window_spin.setSingleStep(1.0)
+        self._correction_tuning_adaptive_smooth_window_spin.setValue(
+            float(getattr(self._default_cfg, "adaptive_event_gate_smooth_window_sec", 60.0))
+        )
+        self._correction_tuning_adaptive_smooth_window_spin.setToolTip(
+            "Active only in adaptive event-gated regression mode."
+        )
+        form.addRow(
+            _corr_row_label("Adaptive smooth window (s):"),
+            self._correction_tuning_adaptive_smooth_window_spin,
+        )
+
+        self._correction_tuning_adaptive_min_trust_fraction_spin = QDoubleSpinBox()
+        self._correction_tuning_adaptive_min_trust_fraction_spin.setMinimumWidth(140)
+        self._correction_tuning_adaptive_min_trust_fraction_spin.setRange(0.000001, 1.0)
+        self._correction_tuning_adaptive_min_trust_fraction_spin.setDecimals(4)
+        self._correction_tuning_adaptive_min_trust_fraction_spin.setSingleStep(0.05)
+        self._correction_tuning_adaptive_min_trust_fraction_spin.setValue(
+            float(getattr(self._default_cfg, "adaptive_event_gate_min_trust_fraction", 0.5))
+        )
+        self._correction_tuning_adaptive_min_trust_fraction_spin.setToolTip(
+            "Active only in adaptive event-gated regression mode."
+        )
+        form.addRow(
+            _corr_row_label("Adaptive minimum trust fraction:"),
+            self._correction_tuning_adaptive_min_trust_fraction_spin,
+        )
+
+        self._correction_tuning_adaptive_freeze_interp_combo = QComboBox()
+        self._correction_tuning_adaptive_freeze_interp_combo.setMinimumWidth(180)
+        self._correction_tuning_adaptive_freeze_interp_combo.addItem("linear_hold", "linear_hold")
+        default_freeze_interp = str(
+            getattr(self._default_cfg, "adaptive_event_gate_freeze_interp_method", "linear_hold")
+        ).strip() or "linear_hold"
+        idx_freeze_interp = self._correction_tuning_adaptive_freeze_interp_combo.findData(default_freeze_interp)
+        if idx_freeze_interp >= 0:
+            self._correction_tuning_adaptive_freeze_interp_combo.setCurrentIndex(idx_freeze_interp)
+        self._correction_tuning_adaptive_freeze_interp_combo.setToolTip(
+            "Active only in adaptive event-gated regression mode."
+        )
+        form.addRow(
+            _corr_row_label("Adaptive freeze interpolation method:"),
+            self._correction_tuning_adaptive_freeze_interp_combo,
+        )
+
         self._correction_tuning_robust_max_iters_spin.valueChanged.connect(self._on_config_changed)
         self._correction_tuning_robust_residual_z_spin.valueChanged.connect(self._on_config_changed)
         self._correction_tuning_robust_local_var_window_spin.valueChanged.connect(self._on_config_changed)
@@ -1800,6 +2001,16 @@ class MainWindow(QMainWindow):
         self._correction_tuning_robust_local_var_ratio_enable_cb.toggled.connect(self._on_config_changed)
         self._correction_tuning_robust_local_var_ratio_spin.valueChanged.connect(self._on_config_changed)
         self._correction_tuning_robust_min_keep_fraction_spin.valueChanged.connect(self._on_config_changed)
+        self._correction_tuning_adaptive_residual_z_spin.valueChanged.connect(self._on_config_changed)
+        self._correction_tuning_adaptive_local_var_window_spin.valueChanged.connect(self._on_config_changed)
+        self._correction_tuning_adaptive_local_var_ratio_enable_cb.toggled.connect(
+            self._correction_tuning_adaptive_local_var_ratio_spin.setEnabled
+        )
+        self._correction_tuning_adaptive_local_var_ratio_enable_cb.toggled.connect(self._on_config_changed)
+        self._correction_tuning_adaptive_local_var_ratio_spin.valueChanged.connect(self._on_config_changed)
+        self._correction_tuning_adaptive_smooth_window_spin.valueChanged.connect(self._on_config_changed)
+        self._correction_tuning_adaptive_min_trust_fraction_spin.valueChanged.connect(self._on_config_changed)
+        self._correction_tuning_adaptive_freeze_interp_combo.currentIndexChanged.connect(self._on_config_changed)
         self._apply_form_row_tooltips(form)
         self._apply_correction_tuning_fit_mode_ui_state()
 
@@ -3224,6 +3435,31 @@ class MainWindow(QMainWindow):
         self._correction_tuning_robust_min_keep_fraction_spin.setValue(
             float(getattr(cfg, "robust_event_reject_min_keep_fraction", 0.5))
         )
+        self._correction_tuning_adaptive_residual_z_spin.setValue(
+            float(getattr(cfg, "adaptive_event_gate_residual_z_thresh", 3.5))
+        )
+        self._correction_tuning_adaptive_local_var_window_spin.setValue(
+            float(getattr(cfg, "adaptive_event_gate_local_var_window_sec", 10.0) or 10.0)
+        )
+        adaptive_ratio_thresh = getattr(cfg, "adaptive_event_gate_local_var_ratio_thresh", None)
+        self._correction_tuning_adaptive_local_var_ratio_enable_cb.setChecked(
+            adaptive_ratio_thresh is not None
+        )
+        self._correction_tuning_adaptive_local_var_ratio_spin.setValue(
+            float(adaptive_ratio_thresh if adaptive_ratio_thresh is not None else 3.0)
+        )
+        self._correction_tuning_adaptive_smooth_window_spin.setValue(
+            float(getattr(cfg, "adaptive_event_gate_smooth_window_sec", 60.0))
+        )
+        self._correction_tuning_adaptive_min_trust_fraction_spin.setValue(
+            float(getattr(cfg, "adaptive_event_gate_min_trust_fraction", 0.5))
+        )
+        freeze_interp = str(
+            getattr(cfg, "adaptive_event_gate_freeze_interp_method", "linear_hold")
+        ).strip() or "linear_hold"
+        idx_freeze = self._correction_tuning_adaptive_freeze_interp_combo.findData(freeze_interp)
+        if idx_freeze >= 0:
+            self._correction_tuning_adaptive_freeze_interp_combo.setCurrentIndex(idx_freeze)
         self._apply_correction_tuning_fit_mode_ui_state()
 
     def _on_correction_tuning_roi_changed(self, _index: int) -> None:
@@ -3263,6 +3499,30 @@ class MainWindow(QMainWindow):
             overrides["robust_event_reject_min_keep_fraction"] = float(
                 self._correction_tuning_robust_min_keep_fraction_spin.value()
             )
+        elif is_adaptive_event_gated_mode(fit_mode):
+            overrides["adaptive_event_gate_residual_z_thresh"] = float(
+                self._correction_tuning_adaptive_residual_z_spin.value()
+            )
+            overrides["adaptive_event_gate_local_var_window_sec"] = float(
+                self._correction_tuning_adaptive_local_var_window_spin.value()
+            )
+            if self._correction_tuning_adaptive_local_var_ratio_enable_cb.isChecked():
+                overrides["adaptive_event_gate_local_var_ratio_thresh"] = float(
+                    self._correction_tuning_adaptive_local_var_ratio_spin.value()
+                )
+            else:
+                overrides["adaptive_event_gate_local_var_ratio_thresh"] = None
+            overrides["adaptive_event_gate_smooth_window_sec"] = float(
+                self._correction_tuning_adaptive_smooth_window_spin.value()
+            )
+            overrides["adaptive_event_gate_min_trust_fraction"] = float(
+                self._correction_tuning_adaptive_min_trust_fraction_spin.value()
+            )
+            overrides["adaptive_event_gate_freeze_interp_method"] = str(
+                self._correction_tuning_adaptive_freeze_interp_combo.currentData()
+                or self._correction_tuning_adaptive_freeze_interp_combo.currentText()
+                or "linear_hold"
+            ).strip() or "linear_hold"
         return overrides
 
     def _on_run_correction_tuning(self) -> None:
@@ -3345,7 +3605,11 @@ class MainWindow(QMainWindow):
                     else (
                         "Baseline subtract before fit: inactive in robust global event-reject mode"
                         if is_robust_event_reject_mode(overrides.get("dynamic_fit_mode", ""))
-                        else "Baseline subtract before fit: inactive in global linear regression mode"
+                        else (
+                            "Baseline subtract before fit: inactive in adaptive event-gated mode"
+                            if is_adaptive_event_gated_mode(overrides.get("dynamic_fit_mode", ""))
+                            else "Baseline subtract before fit: inactive in global linear regression mode"
+                        )
                     )
                 ),
                 "Recomputed across: all available sessions for this ROI",
@@ -3388,6 +3652,46 @@ class MainWindow(QMainWindow):
                         "Robust diagnostics: "
                         f"keep fraction={keep_fraction_text}, "
                         f"iterations={int(robust_diag.get('iterations_completed', 0))}, "
+                        f"fallback={fallback_status}",
+                    )
+            elif is_adaptive_event_gated_mode(overrides.get("dynamic_fit_mode", "")):
+                lines.insert(
+                    3,
+                    format_adaptive_event_gated_settings_summary(
+                        float(overrides.get("adaptive_event_gate_residual_z_thresh", 3.5)),
+                        float(overrides.get("adaptive_event_gate_local_var_window_sec", 10.0)),
+                        (
+                            None
+                            if overrides.get("adaptive_event_gate_local_var_ratio_thresh", None) is None
+                            else float(overrides.get("adaptive_event_gate_local_var_ratio_thresh"))
+                        ),
+                        float(overrides.get("adaptive_event_gate_smooth_window_sec", 60.0)),
+                        float(overrides.get("adaptive_event_gate_min_trust_fraction", 0.5)),
+                        str(overrides.get("adaptive_event_gate_freeze_interp_method", "linear_hold")),
+                    ),
+                )
+                adaptive_diag = artifacts.get("retuned_correction_inspection_adaptive_diagnostics", {})
+                if isinstance(adaptive_diag, dict) and adaptive_diag:
+                    fallback_status = str(adaptive_diag.get("fallback_status", "")).strip() or "no"
+                    trust_fraction_text = "n/a"
+                    gated_fraction_text = "n/a"
+                    try:
+                        trust_fraction = float(adaptive_diag.get("trust_fraction"))
+                        if math.isfinite(trust_fraction):
+                            trust_fraction_text = f"{trust_fraction:.3f}"
+                    except Exception:
+                        pass
+                    try:
+                        gated_fraction = float(adaptive_diag.get("gated_fraction"))
+                        if math.isfinite(gated_fraction):
+                            gated_fraction_text = f"{gated_fraction:.3f}"
+                    except Exception:
+                        pass
+                    lines.insert(
+                        4,
+                        "Adaptive diagnostics: "
+                        f"trust fraction={trust_fraction_text}, "
+                        f"gated fraction={gated_fraction_text}, "
                         f"fallback={fallback_status}",
                     )
             self._correction_tuning_summary_label.setText("\n".join(lines))
@@ -4495,6 +4799,48 @@ class MainWindow(QMainWindow):
                     for key, value in robust_overrides.items():
                         if key in robust_defaults and value != robust_defaults[key]:
                             config_overrides[key] = value
+            elif is_adaptive_event_gated_mode(fit_mode):
+                adaptive_defaults = {
+                    "adaptive_event_gate_residual_z_thresh": float(
+                        getattr(self._default_cfg, "adaptive_event_gate_residual_z_thresh", 3.5)
+                    ),
+                    "adaptive_event_gate_local_var_window_sec": float(
+                        getattr(self._default_cfg, "adaptive_event_gate_local_var_window_sec", 10.0) or 10.0
+                    ),
+                    "adaptive_event_gate_local_var_ratio_thresh": getattr(
+                        self._default_cfg, "adaptive_event_gate_local_var_ratio_thresh", None
+                    ),
+                    "adaptive_event_gate_smooth_window_sec": float(
+                        getattr(self._default_cfg, "adaptive_event_gate_smooth_window_sec", 60.0)
+                    ),
+                    "adaptive_event_gate_min_trust_fraction": float(
+                        getattr(self._default_cfg, "adaptive_event_gate_min_trust_fraction", 0.5)
+                    ),
+                    "adaptive_event_gate_freeze_interp_method": str(
+                        getattr(self._default_cfg, "adaptive_event_gate_freeze_interp_method", "linear_hold")
+                    ).strip()
+                    or "linear_hold",
+                }
+                adaptive_overrides, err = parse_and_validate_adaptive_event_gated_knobs(
+                    self._adaptive_event_gate_residual_z_spin.value(),
+                    self._adaptive_event_gate_local_var_window_spin.value(),
+                    self._adaptive_event_gate_local_var_ratio_enable_cb.isChecked(),
+                    self._adaptive_event_gate_local_var_ratio_spin.value(),
+                    self._adaptive_event_gate_smooth_window_spin.value(),
+                    self._adaptive_event_gate_min_trust_fraction_spin.value(),
+                    str(
+                        self._adaptive_event_gate_freeze_interp_combo.currentData()
+                        or self._adaptive_event_gate_freeze_interp_combo.currentText()
+                        or "linear_hold"
+                    ),
+                    defaults=adaptive_defaults,
+                )
+                if adaptive_overrides is not None and err is None:
+                    for key, value in adaptive_overrides.items():
+                        if key == "adaptive_event_gate_freeze_interp_method":
+                            config_overrides[key] = str(value)
+                        elif key in adaptive_defaults and value != adaptive_defaults[key]:
+                            config_overrides[key] = value
 
         # Preprocessing + Baseline overrides
         default_prep_dict = {
@@ -4752,6 +5098,44 @@ class MainWindow(QMainWindow):
                     self._robust_event_reject_local_var_ratio_spin.value(),
                     self._robust_event_reject_min_keep_fraction_spin.value(),
                     defaults=robust_defaults,
+                )
+                if err:
+                    return err
+            elif is_adaptive_event_gated_mode(fit_mode):
+                adaptive_defaults = {
+                    "adaptive_event_gate_residual_z_thresh": float(
+                        getattr(self._default_cfg, "adaptive_event_gate_residual_z_thresh", 3.5)
+                    ),
+                    "adaptive_event_gate_local_var_window_sec": float(
+                        getattr(self._default_cfg, "adaptive_event_gate_local_var_window_sec", 10.0) or 10.0
+                    ),
+                    "adaptive_event_gate_local_var_ratio_thresh": getattr(
+                        self._default_cfg, "adaptive_event_gate_local_var_ratio_thresh", None
+                    ),
+                    "adaptive_event_gate_smooth_window_sec": float(
+                        getattr(self._default_cfg, "adaptive_event_gate_smooth_window_sec", 60.0)
+                    ),
+                    "adaptive_event_gate_min_trust_fraction": float(
+                        getattr(self._default_cfg, "adaptive_event_gate_min_trust_fraction", 0.5)
+                    ),
+                    "adaptive_event_gate_freeze_interp_method": str(
+                        getattr(self._default_cfg, "adaptive_event_gate_freeze_interp_method", "linear_hold")
+                    ).strip()
+                    or "linear_hold",
+                }
+                _, err = parse_and_validate_adaptive_event_gated_knobs(
+                    self._adaptive_event_gate_residual_z_spin.value(),
+                    self._adaptive_event_gate_local_var_window_spin.value(),
+                    self._adaptive_event_gate_local_var_ratio_enable_cb.isChecked(),
+                    self._adaptive_event_gate_local_var_ratio_spin.value(),
+                    self._adaptive_event_gate_smooth_window_spin.value(),
+                    self._adaptive_event_gate_min_trust_fraction_spin.value(),
+                    str(
+                        self._adaptive_event_gate_freeze_interp_combo.currentData()
+                        or self._adaptive_event_gate_freeze_interp_combo.currentText()
+                        or "linear_hold"
+                    ),
+                    defaults=adaptive_defaults,
                 )
                 if err:
                     return err
@@ -5683,6 +6067,62 @@ class MainWindow(QMainWindow):
                 float,
             )
         )
+        self._adaptive_event_gate_residual_z_spin.setValue(
+            self._settings.value(
+                "adaptive_event_gate_residual_z_thresh",
+                float(getattr(self._default_cfg, "adaptive_event_gate_residual_z_thresh", 3.5)),
+                float,
+            )
+        )
+        self._adaptive_event_gate_local_var_window_spin.setValue(
+            self._settings.value(
+                "adaptive_event_gate_local_var_window_sec",
+                float(getattr(self._default_cfg, "adaptive_event_gate_local_var_window_sec", 10.0) or 10.0),
+                float,
+            )
+        )
+        adaptive_ratio_enabled = self._settings.value(
+            "adaptive_event_gate_local_var_ratio_enabled",
+            bool(getattr(self._default_cfg, "adaptive_event_gate_local_var_ratio_thresh", None) is not None),
+            bool,
+        )
+        self._adaptive_event_gate_local_var_ratio_enable_cb.setChecked(bool(adaptive_ratio_enabled))
+        self._adaptive_event_gate_local_var_ratio_spin.setValue(
+            self._settings.value(
+                "adaptive_event_gate_local_var_ratio_thresh",
+                float(
+                    getattr(self._default_cfg, "adaptive_event_gate_local_var_ratio_thresh", 3.0)
+                    if getattr(self._default_cfg, "adaptive_event_gate_local_var_ratio_thresh", None) is not None
+                    else 3.0
+                ),
+                float,
+            )
+        )
+        self._adaptive_event_gate_smooth_window_spin.setValue(
+            self._settings.value(
+                "adaptive_event_gate_smooth_window_sec",
+                float(getattr(self._default_cfg, "adaptive_event_gate_smooth_window_sec", 60.0)),
+                float,
+            )
+        )
+        self._adaptive_event_gate_min_trust_fraction_spin.setValue(
+            self._settings.value(
+                "adaptive_event_gate_min_trust_fraction",
+                float(getattr(self._default_cfg, "adaptive_event_gate_min_trust_fraction", 0.5)),
+                float,
+            )
+        )
+        adaptive_freeze_interp = str(
+            self._settings.value(
+                "adaptive_event_gate_freeze_interp_method",
+                str(getattr(self._default_cfg, "adaptive_event_gate_freeze_interp_method", "linear_hold")),
+                str,
+            )
+            or "linear_hold"
+        ).strip()
+        idx_adaptive_freeze = self._adaptive_event_gate_freeze_interp_combo.findData(adaptive_freeze_interp)
+        if idx_adaptive_freeze >= 0:
+            self._adaptive_event_gate_freeze_interp_combo.setCurrentIndex(idx_adaptive_freeze)
         self._on_dynamic_fit_mode_changed()
 
         sig_iso_render_mode = self._settings.value("sig_iso_render_mode", "qc", str)
@@ -5755,6 +6195,41 @@ class MainWindow(QMainWindow):
         self._settings.setValue(
             "robust_event_reject_min_keep_fraction",
             float(getattr(self, "_robust_event_reject_min_keep_fraction_spin", None).value() if hasattr(self, "_robust_event_reject_min_keep_fraction_spin") else 0.5),
+        )
+        self._settings.setValue(
+            "adaptive_event_gate_residual_z_thresh",
+            float(getattr(self, "_adaptive_event_gate_residual_z_spin", None).value() if hasattr(self, "_adaptive_event_gate_residual_z_spin") else 3.5),
+        )
+        self._settings.setValue(
+            "adaptive_event_gate_local_var_window_sec",
+            float(getattr(self, "_adaptive_event_gate_local_var_window_spin", None).value() if hasattr(self, "_adaptive_event_gate_local_var_window_spin") else 10.0),
+        )
+        self._settings.setValue(
+            "adaptive_event_gate_local_var_ratio_enabled",
+            bool(
+                getattr(self, "_adaptive_event_gate_local_var_ratio_enable_cb", None)
+                and self._adaptive_event_gate_local_var_ratio_enable_cb.isChecked()
+            ),
+        )
+        self._settings.setValue(
+            "adaptive_event_gate_local_var_ratio_thresh",
+            float(getattr(self, "_adaptive_event_gate_local_var_ratio_spin", None).value() if hasattr(self, "_adaptive_event_gate_local_var_ratio_spin") else 3.0),
+        )
+        self._settings.setValue(
+            "adaptive_event_gate_smooth_window_sec",
+            float(getattr(self, "_adaptive_event_gate_smooth_window_spin", None).value() if hasattr(self, "_adaptive_event_gate_smooth_window_spin") else 60.0),
+        )
+        self._settings.setValue(
+            "adaptive_event_gate_min_trust_fraction",
+            float(getattr(self, "_adaptive_event_gate_min_trust_fraction_spin", None).value() if hasattr(self, "_adaptive_event_gate_min_trust_fraction_spin") else 0.5),
+        )
+        self._settings.setValue(
+            "adaptive_event_gate_freeze_interp_method",
+            str(
+                getattr(self, "_adaptive_event_gate_freeze_interp_combo", None).currentData()
+                if hasattr(self, "_adaptive_event_gate_freeze_interp_combo")
+                else "linear_hold"
+            ),
         )
         self._settings.setValue("sig_iso_render_mode", self._sig_iso_render_mode_combo.currentText())
         self._settings.setValue("dff_render_mode", self._dff_render_mode_combo.currentText())
@@ -5880,6 +6355,7 @@ class MainWindow(QMainWindow):
         fit_mode = self._selected_dynamic_fit_mode()
         rolling = is_rolling_dynamic_fit_mode(fit_mode)
         robust = is_robust_event_reject_mode(fit_mode)
+        adaptive = is_adaptive_event_gated_mode(fit_mode)
         self._window_sec_edit.setEnabled(rolling)
         self._min_samples_per_window_spin.setEnabled(rolling)
         if hasattr(self, "_baseline_subtract_before_fit_cb"):
@@ -5900,6 +6376,24 @@ class MainWindow(QMainWindow):
             self._robust_event_reject_local_var_ratio_spin.setEnabled(ratio_enabled)
         if hasattr(self, "_robust_event_reject_min_keep_fraction_spin"):
             self._robust_event_reject_min_keep_fraction_spin.setEnabled(robust)
+        if hasattr(self, "_adaptive_event_gate_residual_z_spin"):
+            self._adaptive_event_gate_residual_z_spin.setEnabled(adaptive)
+        if hasattr(self, "_adaptive_event_gate_local_var_window_spin"):
+            self._adaptive_event_gate_local_var_window_spin.setEnabled(adaptive)
+        if hasattr(self, "_adaptive_event_gate_local_var_ratio_enable_cb"):
+            self._adaptive_event_gate_local_var_ratio_enable_cb.setEnabled(adaptive)
+        if hasattr(self, "_adaptive_event_gate_local_var_ratio_spin"):
+            adaptive_ratio_enabled = (
+                adaptive
+                and bool(self._adaptive_event_gate_local_var_ratio_enable_cb.isChecked())
+            )
+            self._adaptive_event_gate_local_var_ratio_spin.setEnabled(adaptive_ratio_enabled)
+        if hasattr(self, "_adaptive_event_gate_smooth_window_spin"):
+            self._adaptive_event_gate_smooth_window_spin.setEnabled(adaptive)
+        if hasattr(self, "_adaptive_event_gate_min_trust_fraction_spin"):
+            self._adaptive_event_gate_min_trust_fraction_spin.setEnabled(adaptive)
+        if hasattr(self, "_adaptive_event_gate_freeze_interp_combo"):
+            self._adaptive_event_gate_freeze_interp_combo.setEnabled(adaptive)
         if rolling:
             msg = (
                 f"{dynamic_fit_mode_label(fit_mode)} is active. "
@@ -5908,12 +6402,17 @@ class MainWindow(QMainWindow):
         elif robust:
             msg = (
                 "Robust global fit + event rejection is active. "
-                "Robust exclusion controls are active; rolling-only controls are inactive."
+                "Robust exclusion controls are active; rolling-only and adaptive controls are inactive."
+            )
+        elif adaptive:
+            msg = (
+                "Adaptive event-gated regression is active. "
+                "Adaptive controls are active; rolling-only, robust, and baseline-subtract controls are inactive."
             )
         else:
             msg = (
                 "Global linear regression is active. "
-                "Rolling and robust event-rejection controls are inactive."
+                "Rolling, robust event-rejection, and adaptive controls are inactive."
             )
         self._dynamic_fit_mode_note.setText(msg)
 
@@ -5924,6 +6423,7 @@ class MainWindow(QMainWindow):
         fit_mode = self._selected_correction_tuning_fit_mode()
         rolling = is_rolling_dynamic_fit_mode(fit_mode)
         robust = is_robust_event_reject_mode(fit_mode)
+        adaptive = is_adaptive_event_gated_mode(fit_mode)
         self._correction_tuning_window_spin.setEnabled(rolling)
         self._correction_tuning_min_samples_spin.setEnabled(rolling)
         if hasattr(self, "_correction_tuning_baseline_subtract_cb"):
@@ -5944,6 +6444,24 @@ class MainWindow(QMainWindow):
             self._correction_tuning_robust_local_var_ratio_spin.setEnabled(ratio_enabled)
         if hasattr(self, "_correction_tuning_robust_min_keep_fraction_spin"):
             self._correction_tuning_robust_min_keep_fraction_spin.setEnabled(robust)
+        if hasattr(self, "_correction_tuning_adaptive_residual_z_spin"):
+            self._correction_tuning_adaptive_residual_z_spin.setEnabled(adaptive)
+        if hasattr(self, "_correction_tuning_adaptive_local_var_window_spin"):
+            self._correction_tuning_adaptive_local_var_window_spin.setEnabled(adaptive)
+        if hasattr(self, "_correction_tuning_adaptive_local_var_ratio_enable_cb"):
+            self._correction_tuning_adaptive_local_var_ratio_enable_cb.setEnabled(adaptive)
+        if hasattr(self, "_correction_tuning_adaptive_local_var_ratio_spin"):
+            adaptive_ratio_enabled = (
+                adaptive
+                and bool(self._correction_tuning_adaptive_local_var_ratio_enable_cb.isChecked())
+            )
+            self._correction_tuning_adaptive_local_var_ratio_spin.setEnabled(adaptive_ratio_enabled)
+        if hasattr(self, "_correction_tuning_adaptive_smooth_window_spin"):
+            self._correction_tuning_adaptive_smooth_window_spin.setEnabled(adaptive)
+        if hasattr(self, "_correction_tuning_adaptive_min_trust_fraction_spin"):
+            self._correction_tuning_adaptive_min_trust_fraction_spin.setEnabled(adaptive)
+        if hasattr(self, "_correction_tuning_adaptive_freeze_interp_combo"):
+            self._correction_tuning_adaptive_freeze_interp_combo.setEnabled(adaptive)
         if rolling:
             msg = (
                 f"{dynamic_fit_mode_label(fit_mode)} is active. "
@@ -5952,12 +6470,17 @@ class MainWindow(QMainWindow):
         elif robust:
             msg = (
                 "Robust global fit + event rejection is active. "
-                "Robust exclusion controls are active; rolling-only controls are inactive."
+                "Robust exclusion controls are active; rolling-only and adaptive controls are inactive."
+            )
+        elif adaptive:
+            msg = (
+                "Adaptive event-gated regression is active. "
+                "Adaptive controls are active; rolling-only, robust, and baseline-subtract controls are inactive."
             )
         else:
             msg = (
                 "Global linear regression is active. "
-                "Rolling and robust event-rejection controls are inactive."
+                "Rolling, robust event-rejection, and adaptive controls are inactive."
             )
         self._correction_tuning_fit_mode_note.setText(msg)
 
@@ -6013,9 +6536,13 @@ class MainWindow(QMainWindow):
                         "Baseline subtract before fit: inactive in robust global event-reject mode"
                         if phasic_active and is_robust_event_reject_mode(self._selected_dynamic_fit_mode())
                         else (
-                            "Baseline subtract before fit: inactive in global linear mode"
-                            if phasic_active
-                            else "Baseline subtract before fit: (inactive in tonic mode)"
+                            "Baseline subtract before fit: inactive in adaptive event-gated mode"
+                            if phasic_active and is_adaptive_event_gated_mode(self._selected_dynamic_fit_mode())
+                            else (
+                                "Baseline subtract before fit: inactive in global linear mode"
+                                if phasic_active
+                                else "Baseline subtract before fit: (inactive in tonic mode)"
+                            )
                         )
                     )
                 )
@@ -6042,6 +6569,27 @@ class MainWindow(QMainWindow):
                     float(self._robust_event_reject_local_var_window_spin.value()),
                     robust_ratio_thresh,
                     float(self._robust_event_reject_min_keep_fraction_spin.value()),
+                ),
+            )
+        elif phasic_active and is_adaptive_event_gated_mode(self._selected_dynamic_fit_mode()):
+            adaptive_ratio_thresh = (
+                float(self._adaptive_event_gate_local_var_ratio_spin.value())
+                if bool(self._adaptive_event_gate_local_var_ratio_enable_cb.isChecked())
+                else None
+            )
+            summary_lines.insert(
+                4,
+                format_adaptive_event_gated_settings_summary(
+                    float(self._adaptive_event_gate_residual_z_spin.value()),
+                    float(self._adaptive_event_gate_local_var_window_spin.value()),
+                    adaptive_ratio_thresh,
+                    float(self._adaptive_event_gate_smooth_window_spin.value()),
+                    float(self._adaptive_event_gate_min_trust_fraction_spin.value()),
+                    str(
+                        self._adaptive_event_gate_freeze_interp_combo.currentData()
+                        or self._adaptive_event_gate_freeze_interp_combo.currentText()
+                        or "linear_hold"
+                    ),
                 ),
             )
         self._effective_summary_label.setText("\n".join(summary_lines))
@@ -6634,7 +7182,7 @@ class MainWindow(QMainWindow):
             bool(getattr(self._default_cfg, "baseline_subtract_before_fit", False))
         )
         self._baseline_subtract_before_fit_cb.setToolTip(
-            "Active only in rolling regression modes. Inactive in global linear and robust event-reject modes."
+            "Active only in rolling regression modes. Inactive in global linear, robust event-reject, and adaptive event-gated modes."
         )
         self._baseline_subtract_before_fit_cb.stateChanged.connect(self._on_config_changed)
         iso_sampling_form.addRow(
@@ -6645,7 +7193,7 @@ class MainWindow(QMainWindow):
         self._window_sec_edit = QLineEdit(str(self._default_cfg.window_sec))
         self._window_sec_edit.setToolTip(
             "Active only in rolling regression modes. "
-            "Inactive in global linear and robust event-reject modes."
+            "Inactive in global linear, robust event-reject, and adaptive event-gated modes."
         )
         self._window_sec_edit.textChanged.connect(self._on_config_changed)
         iso_sampling_form.addRow("Regression Window:", self._window_sec_edit)
@@ -6659,7 +7207,7 @@ class MainWindow(QMainWindow):
         self._min_samples_per_window_spin.setValue(max(1, self._default_cfg.min_samples_per_window))
         self._min_samples_per_window_spin.setToolTip(
             "Active only in rolling regression modes. "
-            "Inactive in global linear and robust event-reject modes."
+            "Inactive in global linear, robust event-reject, and adaptive event-gated modes."
         )
         self._min_samples_per_window_spin.valueChanged.connect(self._on_config_changed)
         iso_accept_form.addRow("Min Samples per Window:", self._min_samples_per_window_spin)
@@ -6754,6 +7302,116 @@ class MainWindow(QMainWindow):
         robust_form.addRow("Minimum keep fraction:", self._robust_event_reject_min_keep_fraction_spin)
         self._apply_form_row_tooltips(robust_form)
         iso_layout.addWidget(robust_group)
+
+        adaptive_group = QGroupBox("Adaptive Event-Gated Regression")
+        adaptive_form = QFormLayout(adaptive_group)
+
+        self._adaptive_event_gate_residual_z_spin = QDoubleSpinBox()
+        self._adaptive_event_gate_residual_z_spin.setRange(0.000001, 1_000_000.0)
+        self._adaptive_event_gate_residual_z_spin.setDecimals(4)
+        self._adaptive_event_gate_residual_z_spin.setSingleStep(0.1)
+        self._adaptive_event_gate_residual_z_spin.setValue(
+            float(getattr(self._default_cfg, "adaptive_event_gate_residual_z_thresh", 3.5))
+        )
+        self._adaptive_event_gate_residual_z_spin.setToolTip(
+            "Active only in adaptive event-gated regression mode."
+        )
+        self._adaptive_event_gate_residual_z_spin.valueChanged.connect(self._on_config_changed)
+        adaptive_form.addRow("Residual z-threshold:", self._adaptive_event_gate_residual_z_spin)
+
+        self._adaptive_event_gate_local_var_window_spin = QDoubleSpinBox()
+        self._adaptive_event_gate_local_var_window_spin.setRange(0.000001, 1_000_000.0)
+        self._adaptive_event_gate_local_var_window_spin.setDecimals(4)
+        self._adaptive_event_gate_local_var_window_spin.setSingleStep(0.5)
+        self._adaptive_event_gate_local_var_window_spin.setValue(
+            float(getattr(self._default_cfg, "adaptive_event_gate_local_var_window_sec", 10.0) or 10.0)
+        )
+        self._adaptive_event_gate_local_var_window_spin.setToolTip(
+            "Active only in adaptive event-gated regression mode."
+        )
+        self._adaptive_event_gate_local_var_window_spin.valueChanged.connect(self._on_config_changed)
+        adaptive_form.addRow("Local variance window (s):", self._adaptive_event_gate_local_var_window_spin)
+
+        adaptive_ratio_enabled = (
+            getattr(self._default_cfg, "adaptive_event_gate_local_var_ratio_thresh", None)
+            is not None
+        )
+        adaptive_ratio_value = getattr(
+            self._default_cfg, "adaptive_event_gate_local_var_ratio_thresh", None
+        )
+        self._adaptive_event_gate_local_var_ratio_enable_cb = QCheckBox("Enable")
+        self._adaptive_event_gate_local_var_ratio_enable_cb.setChecked(bool(adaptive_ratio_enabled))
+        self._adaptive_event_gate_local_var_ratio_enable_cb.setToolTip(
+            "Enable optional adaptive local variance ratio gate."
+        )
+        self._adaptive_event_gate_local_var_ratio_spin = QDoubleSpinBox()
+        self._adaptive_event_gate_local_var_ratio_spin.setRange(0.000001, 1_000_000.0)
+        self._adaptive_event_gate_local_var_ratio_spin.setDecimals(4)
+        self._adaptive_event_gate_local_var_ratio_spin.setSingleStep(0.1)
+        self._adaptive_event_gate_local_var_ratio_spin.setValue(
+            float(adaptive_ratio_value if adaptive_ratio_value is not None else 3.0)
+        )
+        self._adaptive_event_gate_local_var_ratio_spin.setEnabled(bool(adaptive_ratio_enabled))
+        self._adaptive_event_gate_local_var_ratio_spin.setToolTip(
+            "Gate adaptation when local variance(signal)/variance(iso) exceeds this value."
+        )
+        self._adaptive_event_gate_local_var_ratio_enable_cb.toggled.connect(
+            self._adaptive_event_gate_local_var_ratio_spin.setEnabled
+        )
+        self._adaptive_event_gate_local_var_ratio_enable_cb.toggled.connect(self._on_config_changed)
+        self._adaptive_event_gate_local_var_ratio_spin.valueChanged.connect(self._on_config_changed)
+        adaptive_ratio_row = QWidget()
+        adaptive_ratio_row.setToolTip(
+            "Enable optional adaptive local variance ratio gate."
+        )
+        adaptive_ratio_row_layout = QHBoxLayout(adaptive_ratio_row)
+        adaptive_ratio_row_layout.setContentsMargins(0, 0, 0, 0)
+        adaptive_ratio_row_layout.setSpacing(8)
+        adaptive_ratio_row_layout.addWidget(self._adaptive_event_gate_local_var_ratio_enable_cb)
+        adaptive_ratio_row_layout.addWidget(self._adaptive_event_gate_local_var_ratio_spin)
+        adaptive_form.addRow("Local variance ratio threshold:", adaptive_ratio_row)
+
+        self._adaptive_event_gate_smooth_window_spin = QDoubleSpinBox()
+        self._adaptive_event_gate_smooth_window_spin.setRange(0.000001, 1_000_000.0)
+        self._adaptive_event_gate_smooth_window_spin.setDecimals(4)
+        self._adaptive_event_gate_smooth_window_spin.setSingleStep(1.0)
+        self._adaptive_event_gate_smooth_window_spin.setValue(
+            float(getattr(self._default_cfg, "adaptive_event_gate_smooth_window_sec", 60.0))
+        )
+        self._adaptive_event_gate_smooth_window_spin.setToolTip(
+            "Active only in adaptive event-gated regression mode."
+        )
+        self._adaptive_event_gate_smooth_window_spin.valueChanged.connect(self._on_config_changed)
+        adaptive_form.addRow("Smooth window (s):", self._adaptive_event_gate_smooth_window_spin)
+
+        self._adaptive_event_gate_min_trust_fraction_spin = QDoubleSpinBox()
+        self._adaptive_event_gate_min_trust_fraction_spin.setRange(0.000001, 1.0)
+        self._adaptive_event_gate_min_trust_fraction_spin.setDecimals(4)
+        self._adaptive_event_gate_min_trust_fraction_spin.setSingleStep(0.05)
+        self._adaptive_event_gate_min_trust_fraction_spin.setValue(
+            float(getattr(self._default_cfg, "adaptive_event_gate_min_trust_fraction", 0.5))
+        )
+        self._adaptive_event_gate_min_trust_fraction_spin.setToolTip(
+            "Guardrail minimum trusted-data fraction."
+        )
+        self._adaptive_event_gate_min_trust_fraction_spin.valueChanged.connect(self._on_config_changed)
+        adaptive_form.addRow("Minimum trust fraction:", self._adaptive_event_gate_min_trust_fraction_spin)
+
+        self._adaptive_event_gate_freeze_interp_combo = QComboBox()
+        self._adaptive_event_gate_freeze_interp_combo.addItem("linear_hold", "linear_hold")
+        default_adaptive_freeze = str(
+            getattr(self._default_cfg, "adaptive_event_gate_freeze_interp_method", "linear_hold")
+        ).strip() or "linear_hold"
+        idx_adaptive_freeze = self._adaptive_event_gate_freeze_interp_combo.findData(default_adaptive_freeze)
+        if idx_adaptive_freeze >= 0:
+            self._adaptive_event_gate_freeze_interp_combo.setCurrentIndex(idx_adaptive_freeze)
+        self._adaptive_event_gate_freeze_interp_combo.setToolTip(
+            "Interpolation/freeze method for gated spans (adaptive mode only)."
+        )
+        self._adaptive_event_gate_freeze_interp_combo.currentIndexChanged.connect(self._on_config_changed)
+        adaptive_form.addRow("Freeze interpolation method:", self._adaptive_event_gate_freeze_interp_combo)
+        self._apply_form_row_tooltips(adaptive_form)
+        iso_layout.addWidget(adaptive_group)
 
         content_layout.addWidget(self._adv_group)
 

@@ -282,6 +282,102 @@ def test_correction_retune_accepts_robust_event_reject_overrides_and_records_the
     assert 0.0 <= robust_diag["excluded_fraction"] <= 1.0
 
 
+def test_correction_retune_accepts_adaptive_event_gated_overrides_and_records_them(tmp_path):
+    run_dir = _make_completed_run_fixture(tmp_path)
+    result = run_cache_correction_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={
+            "dynamic_fit_mode": "adaptive_event_gated_regression",
+            "adaptive_event_gate_residual_z_thresh": 3.2,
+            "adaptive_event_gate_local_var_window_sec": 9.0,
+            "adaptive_event_gate_local_var_ratio_thresh": 4.2,
+            "adaptive_event_gate_smooth_window_sec": 75.0,
+            "adaptive_event_gate_min_trust_fraction": 0.6,
+            "adaptive_event_gate_freeze_interp_method": "linear_hold",
+        },
+    )
+
+    with open(os.path.join(result["retune_dir"], "retune_config_effective.yaml"), "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["dynamic_fit_mode"] == "adaptive_event_gated_regression"
+    assert cfg["adaptive_event_gate_residual_z_thresh"] == pytest.approx(3.2)
+    assert cfg["adaptive_event_gate_local_var_window_sec"] == pytest.approx(9.0)
+    assert cfg["adaptive_event_gate_local_var_ratio_thresh"] == pytest.approx(4.2)
+    assert cfg["adaptive_event_gate_smooth_window_sec"] == pytest.approx(75.0)
+    assert cfg["adaptive_event_gate_min_trust_fraction"] == pytest.approx(0.6)
+    assert cfg["adaptive_event_gate_freeze_interp_method"] == "linear_hold"
+
+    with open(os.path.join(result["retune_dir"], "retune_request.json"), "r", encoding="utf-8") as f:
+        req = json.load(f)
+    assert req["correction_overrides_applied"]["dynamic_fit_mode"] == "adaptive_event_gated_regression"
+    assert "adaptive_event_gate_residual_z_thresh" in req["override_classification"]["correction_supported"]
+    assert req["correction_overrides_applied"]["adaptive_event_gate_freeze_interp_method"] == "linear_hold"
+    adaptive_diag = result["artifacts"].get("retuned_correction_inspection_adaptive_diagnostics")
+    assert isinstance(adaptive_diag, dict)
+    assert adaptive_diag["fit_mode_resolved"] == "adaptive_event_gated_regression"
+    assert 0.0 <= adaptive_diag["trust_fraction"] <= 1.0
+    assert 0.0 <= adaptive_diag["gated_fraction"] <= 1.0
+    assert adaptive_diag["fallback_status"] in {"no", "yes", "yes_failed"}
+    assert "retuned_correction_inspection_fit_png" in result["artifacts"]
+
+
+def test_correction_retune_adaptive_mode_renders_gated_spans_on_fit_panel(tmp_path, monkeypatch):
+    run_dir = _make_authoritative_completed_run_fixture(
+        tmp_path,
+        baseline_method="uv_raw_percentile_session",
+    )[0]
+    called = {"count": 0}
+
+    import matplotlib.axes._axes as mpl_axes
+
+    _orig_axvspan = mpl_axes.Axes.axvspan
+
+    def _wrapped_axvspan(self, *args, **kwargs):
+        called["count"] += 1
+        return _orig_axvspan(self, *args, **kwargs)
+
+    monkeypatch.setattr(mpl_axes.Axes, "axvspan", _wrapped_axvspan)
+
+    result = run_cache_correction_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={
+            "dynamic_fit_mode": "adaptive_event_gated_regression",
+            "adaptive_event_gate_residual_z_thresh": 2.5,
+            "adaptive_event_gate_local_var_window_sec": 8.0,
+            "adaptive_event_gate_local_var_ratio_thresh": 3.5,
+            "adaptive_event_gate_smooth_window_sec": 60.0,
+            "adaptive_event_gate_min_trust_fraction": 0.5,
+            "adaptive_event_gate_freeze_interp_method": "linear_hold",
+        },
+    )
+    assert called["count"] > 0
+    assert os.path.isfile(result["artifacts"]["retuned_correction_inspection_fit_png"])
+
+
+def test_correction_retune_adaptive_mode_reports_fallback_status_when_forced(tmp_path):
+    run_dir = _make_completed_run_fixture(tmp_path)
+    result = run_cache_correction_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={
+            "dynamic_fit_mode": "adaptive_event_gated_regression",
+            "adaptive_event_gate_residual_z_thresh": 0.2,
+            "adaptive_event_gate_local_var_window_sec": 8.0,
+            "adaptive_event_gate_local_var_ratio_thresh": 1.1,
+            "adaptive_event_gate_smooth_window_sec": 60.0,
+            "adaptive_event_gate_min_trust_fraction": 0.99,
+            "adaptive_event_gate_freeze_interp_method": "linear_hold",
+        },
+    )
+    adaptive_diag = result["artifacts"].get("retuned_correction_inspection_adaptive_diagnostics")
+    assert isinstance(adaptive_diag, dict)
+    assert adaptive_diag["fallback_status"] in {"yes", "yes_failed", "no"}
+    if adaptive_diag["fallback_status"] != "no":
+        assert adaptive_diag.get("fallback_mode", "none") != "none"
+
+
 def test_correction_retune_robust_mode_emits_fallback_diagnostics_when_robust_fit_fails(
     tmp_path,
     monkeypatch,
@@ -318,6 +414,7 @@ def test_correction_retune_non_robust_mode_does_not_emit_robust_diagnostics(tmp_
         overrides={"dynamic_fit_mode": "global_linear_regression"},
     )
     assert "retuned_correction_inspection_robust_diagnostics" not in result["artifacts"]
+    assert "retuned_correction_inspection_adaptive_diagnostics" not in result["artifacts"]
 
 
 def test_correction_retune_rejects_downstream_only_override(tmp_path):
