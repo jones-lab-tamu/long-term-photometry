@@ -1816,6 +1816,7 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
     assert window._apply_tuning_btn.toolTip().strip()
     assert window._run_correction_tuning_btn.toolTip().strip()
     assert window._open_correction_tuning_dir_btn.toolTip().strip()
+    assert window._apply_correction_tuning_btn.toolTip().strip()
     assert window._tuning_overlay_title.toolTip().strip()
     assert window._tuning_overlay_label.toolTip().strip()
     assert window._tuning_summary_label.toolTip().strip()
@@ -2375,6 +2376,168 @@ def test_correction_tuning_adaptive_event_gated_mode_plumbs_overrides(window, tm
     assert "min_trust=0.61" in summary
     assert "freeze_interp=linear_hold" in summary
     assert "Adaptive diagnostics: trust fraction=0.580, gated fraction=0.420, fallback=no" in summary
+
+
+def test_correction_tuning_copy_to_main_run_rolling_mode(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    window._dynamic_fit_mode_combo.setCurrentIndex(
+        window._dynamic_fit_mode_combo.findData("global_linear_regression")
+    )
+    window._baseline_method_combo.setCurrentText("uv_raw_percentile_session")
+    window._baseline_percentile_edit.setText("5.0")
+    window._lowpass_hz_edit.setText("1.0")
+
+    idx = window._correction_tuning_fit_mode_combo.findData("rolling_filtered_to_filtered")
+    assert idx >= 0
+    window._correction_tuning_fit_mode_combo.setCurrentIndex(idx)
+    window._correction_tuning_baseline_method_combo.setCurrentText("uv_globalfit_percentile_session")
+    window._correction_tuning_baseline_pct_spin.setValue(17.5)
+    window._correction_tuning_lowpass_spin.setValue(2.75)
+    window._correction_tuning_baseline_subtract_cb.setChecked(True)
+    window._correction_tuning_window_spin.setValue(88.5)
+    window._correction_tuning_min_samples_spin.setValue(123)
+    QApplication.processEvents()
+
+    window._on_apply_correction_tuning_values_to_run_settings()
+    QApplication.processEvents()
+
+    assert window._selected_dynamic_fit_mode() == "rolling_filtered_to_filtered"
+    assert window._baseline_method_combo.currentText() == "uv_globalfit_percentile_session"
+    assert float(window._baseline_percentile_edit.text()) == pytest.approx(17.5)
+    assert float(window._lowpass_hz_edit.text()) == pytest.approx(2.75)
+    assert window._baseline_subtract_before_fit_cb.isChecked() is True
+    assert float(window._window_sec_edit.text()) == pytest.approx(88.5)
+    assert window._min_samples_per_window_spin.value() == 123
+    assert window._window_sec_edit.isEnabled()
+    assert window._min_samples_per_window_spin.isEnabled()
+    assert window._baseline_subtract_before_fit_cb.isEnabled()
+    assert "copied to main run controls" in window._correction_tuning_applyback_status_label.text().lower()
+
+
+def test_correction_tuning_copy_to_main_run_robust_mode(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    idx = window._correction_tuning_fit_mode_combo.findData("robust_global_event_reject")
+    assert idx >= 0
+    window._correction_tuning_fit_mode_combo.setCurrentIndex(idx)
+    window._correction_tuning_robust_max_iters_spin.setValue(6)
+    window._correction_tuning_robust_residual_z_spin.setValue(2.9)
+    window._correction_tuning_robust_local_var_window_spin.setValue(11.0)
+    window._correction_tuning_robust_local_var_ratio_enable_cb.setChecked(True)
+    window._correction_tuning_robust_local_var_ratio_spin.setValue(4.6)
+    window._correction_tuning_robust_min_keep_fraction_spin.setValue(0.67)
+    QApplication.processEvents()
+
+    window._on_apply_correction_tuning_values_to_run_settings()
+    QApplication.processEvents()
+
+    assert window._selected_dynamic_fit_mode() == "robust_global_event_reject"
+    assert window._robust_event_reject_max_iters_spin.value() == 6
+    assert window._robust_event_reject_residual_z_spin.value() == pytest.approx(2.9)
+    assert window._robust_event_reject_local_var_window_spin.value() == pytest.approx(11.0)
+    assert window._robust_event_reject_local_var_ratio_enable_cb.isChecked()
+    assert window._robust_event_reject_local_var_ratio_spin.value() == pytest.approx(4.6)
+    assert window._robust_event_reject_min_keep_fraction_spin.value() == pytest.approx(0.67)
+    assert not window._window_sec_edit.isEnabled()
+    assert not window._min_samples_per_window_spin.isEnabled()
+    assert not window._baseline_subtract_before_fit_cb.isEnabled()
+    assert window._robust_event_reject_max_iters_spin.isEnabled()
+
+
+def test_correction_tuning_copy_to_main_run_adaptive_mode(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    idx = window._correction_tuning_fit_mode_combo.findData("adaptive_event_gated_regression")
+    assert idx >= 0
+    window._correction_tuning_fit_mode_combo.setCurrentIndex(idx)
+    window._correction_tuning_adaptive_residual_z_spin.setValue(3.15)
+    window._correction_tuning_adaptive_local_var_window_spin.setValue(8.75)
+    window._correction_tuning_adaptive_local_var_ratio_enable_cb.setChecked(True)
+    window._correction_tuning_adaptive_local_var_ratio_spin.setValue(4.25)
+    window._correction_tuning_adaptive_smooth_window_spin.setValue(71.0)
+    window._correction_tuning_adaptive_min_trust_fraction_spin.setValue(0.63)
+    idx_freeze = window._correction_tuning_adaptive_freeze_interp_combo.findData("linear_hold")
+    assert idx_freeze >= 0
+    window._correction_tuning_adaptive_freeze_interp_combo.setCurrentIndex(idx_freeze)
+    QApplication.processEvents()
+
+    window._on_apply_correction_tuning_values_to_run_settings()
+    QApplication.processEvents()
+
+    assert window._selected_dynamic_fit_mode() == "adaptive_event_gated_regression"
+    assert window._adaptive_event_gate_residual_z_spin.value() == pytest.approx(3.15)
+    assert window._adaptive_event_gate_local_var_window_spin.value() == pytest.approx(8.75)
+    assert window._adaptive_event_gate_local_var_ratio_enable_cb.isChecked()
+    assert window._adaptive_event_gate_local_var_ratio_spin.value() == pytest.approx(4.25)
+    assert window._adaptive_event_gate_smooth_window_spin.value() == pytest.approx(71.0)
+    assert window._adaptive_event_gate_min_trust_fraction_spin.value() == pytest.approx(0.63)
+    assert window._adaptive_event_gate_freeze_interp_combo.currentData() == "linear_hold"
+    assert not window._window_sec_edit.isEnabled()
+    assert not window._min_samples_per_window_spin.isEnabled()
+    assert not window._baseline_subtract_before_fit_cb.isEnabled()
+    assert window._adaptive_event_gate_residual_z_spin.isEnabled()
+
+
+def test_correction_tuning_copy_does_not_promote_retune_only_state(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    window._correction_tuning_roi_combo.setCurrentText("Region1")
+    if window._correction_tuning_chunk_combo.count() > 0:
+        window._correction_tuning_chunk_combo.setCurrentIndex(
+            min(1, window._correction_tuning_chunk_combo.count() - 1)
+        )
+    rep_index_before = window._rep_session_combo.currentIndex()
+
+    window._on_apply_correction_tuning_values_to_run_settings()
+    QApplication.processEvents()
+    window._refresh_effective_run_summary()
+    summary = window._effective_summary_label.text()
+
+    assert window._rep_session_combo.currentIndex() == rep_index_before
+    assert "Preview session:" not in summary
+    assert "Robust diagnostics:" not in summary
+    assert "Adaptive diagnostics:" not in summary
+
+
+def test_correction_tuning_copy_shows_confirmation(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    window._on_apply_correction_tuning_values_to_run_settings()
+    QApplication.processEvents()
+
+    assert "copied to main run controls" in window._correction_tuning_applyback_status_label.text().lower()
+    assert "Copied correction tuning settings to main run configuration." in window._log_view.toPlainText()
 
 
 def test_correction_tuning_robust_summary_shows_runtime_diagnostics(window, tmp_path, monkeypatch):

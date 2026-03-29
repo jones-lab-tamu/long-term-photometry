@@ -869,6 +869,8 @@ class MainWindow(QMainWindow):
         self._roi_chunk_ids_cache: dict[str, list[int]] = {}
         self._correction_tuning_workspace_available = False
         self._correction_tuning_last_result = None
+        self._correction_tuning_applyback_applied = False
+        self._correction_tuning_applyback_timestamp = ""
         self._correction_tuning_inspection_paths: list[str] = []
         self._correction_tuning_inspection_panel_labels: list[str] = []
         self._correction_tuning_inspection_index = 0
@@ -2101,6 +2103,34 @@ class MainWindow(QMainWindow):
         btn_row.addStretch()
         content_layout.addLayout(btn_row)
 
+        apply_row = QHBoxLayout()
+        self._apply_correction_tuning_btn = QPushButton(
+            "Use These Correction Settings for Next Run"
+        )
+        self._apply_correction_tuning_btn.setToolTip(
+            "Copy current correction-retune settings into main Advanced correction controls "
+            "for the next run. This does not auto-run analysis and does not change completed outputs."
+        )
+        self._apply_correction_tuning_btn.clicked.connect(
+            self._on_apply_correction_tuning_values_to_run_settings
+        )
+        apply_row.addWidget(self._apply_correction_tuning_btn)
+        apply_row.addStretch()
+        content_layout.addLayout(apply_row)
+
+        self._correction_tuning_applyback_scope_label = QLabel(
+            "Copy action is one-way (Correction Retune -> main run configuration) "
+            "and does not start a run."
+        )
+        self._correction_tuning_applyback_scope_label.setWordWrap(True)
+        self._correction_tuning_applyback_scope_label.setObjectName("resultsSummaryHint")
+        content_layout.addWidget(self._correction_tuning_applyback_scope_label)
+
+        self._correction_tuning_applyback_status_label = QLabel("Copy status: not copied.")
+        self._correction_tuning_applyback_status_label.setWordWrap(True)
+        self._correction_tuning_applyback_status_label.setObjectName("resultsSummaryHint")
+        content_layout.addWidget(self._correction_tuning_applyback_status_label)
+
         self._correction_tuning_summary_label = QLabel("No correction retune result yet.")
         self._correction_tuning_summary_label.setWordWrap(True)
         self._correction_tuning_summary_label.setSizePolicy(
@@ -3232,10 +3262,15 @@ class MainWindow(QMainWindow):
         self._correction_tuning_controls_container.setEnabled(False)
         self._run_correction_tuning_btn.setEnabled(False)
         self._open_correction_tuning_dir_btn.setEnabled(False)
+        if hasattr(self, "_apply_correction_tuning_btn"):
+            self._apply_correction_tuning_btn.setEnabled(False)
         self._correction_tuning_availability_label.setText(reason)
         self._correction_tuning_availability_label.setStyleSheet(
             "font-size: 11px; color: #8a6d3b;"
         )
+        self._correction_tuning_applyback_applied = False
+        self._correction_tuning_applyback_timestamp = ""
+        self._refresh_correction_tuning_applyback_status()
         self._set_correction_tuning_collapsed_status(reason, ready=False)
         self._sync_correction_tuning_status_visibility()
         self._update_results_pane_mode_for_tuning()
@@ -3247,10 +3282,13 @@ class MainWindow(QMainWindow):
         self._open_correction_tuning_dir_btn.setEnabled(
             bool(self._correction_tuning_last_result)
         )
+        if hasattr(self, "_apply_correction_tuning_btn"):
+            self._apply_correction_tuning_btn.setEnabled(True)
         self._correction_tuning_availability_label.setText(message)
         self._correction_tuning_availability_label.setStyleSheet(
             "font-size: 11px; color: #2d7d2d;"
         )
+        self._refresh_correction_tuning_applyback_status()
         self._set_correction_tuning_collapsed_status(message, ready=True)
         self._sync_correction_tuning_status_visibility()
         self._update_results_pane_mode_for_tuning()
@@ -3594,6 +3632,122 @@ class MainWindow(QMainWindow):
             ).strip() or "linear_hold"
         return overrides
 
+    def _refresh_correction_tuning_applyback_status(self) -> None:
+        if not hasattr(self, "_correction_tuning_applyback_status_label"):
+            return
+        if self._correction_tuning_applyback_applied:
+            timestamp = self._correction_tuning_applyback_timestamp or datetime.now().strftime(
+                "%H:%M:%S"
+            )
+            self._correction_tuning_applyback_status_label.setText(
+                f"Copy status: copied to main run controls ({timestamp})."
+            )
+        else:
+            self._correction_tuning_applyback_status_label.setText("Copy status: not copied.")
+
+    def _on_apply_correction_tuning_values_to_run_settings(self) -> None:
+        if not self._correction_tuning_workspace_available:
+            QMessageBox.information(
+                self,
+                "Correction Retune Unavailable",
+                self._correction_tuning_availability_label.text(),
+            )
+            return
+
+        overrides = self._collect_correction_tuning_overrides()
+
+        def _fmt(value: float, decimals: int = 6) -> str:
+            text = f"{float(value):.{decimals}f}"
+            return text.rstrip("0").rstrip(".") if "." in text else text
+
+        fit_mode = normalize_dynamic_fit_mode(
+            str(overrides.get("dynamic_fit_mode", "rolling_filtered_to_raw"))
+        )
+        idx_fit = self._dynamic_fit_mode_combo.findData(fit_mode)
+        if idx_fit >= 0:
+            self._dynamic_fit_mode_combo.setCurrentIndex(idx_fit)
+
+        method = str(overrides.get("baseline_method", "")).strip()
+        if method and self._baseline_method_combo.findText(method) >= 0:
+            self._baseline_method_combo.setCurrentText(method)
+
+        if "baseline_percentile" in overrides:
+            self._baseline_percentile_edit.setText(
+                _fmt(float(overrides["baseline_percentile"]), decimals=6)
+            )
+        if "lowpass_hz" in overrides:
+            self._lowpass_hz_edit.setText(_fmt(float(overrides["lowpass_hz"]), decimals=6))
+
+        if is_rolling_dynamic_fit_mode(fit_mode):
+            self._baseline_subtract_before_fit_cb.setChecked(
+                bool(overrides.get("baseline_subtract_before_fit", False))
+            )
+            if "window_sec" in overrides:
+                self._window_sec_edit.setText(_fmt(float(overrides["window_sec"]), decimals=6))
+            if "min_samples_per_window" in overrides:
+                self._min_samples_per_window_spin.setValue(
+                    int(overrides["min_samples_per_window"])
+                )
+        elif is_robust_event_reject_mode(fit_mode):
+            if "robust_event_reject_max_iters" in overrides:
+                self._robust_event_reject_max_iters_spin.setValue(
+                    int(overrides["robust_event_reject_max_iters"])
+                )
+            if "robust_event_reject_residual_z_thresh" in overrides:
+                self._robust_event_reject_residual_z_spin.setValue(
+                    float(overrides["robust_event_reject_residual_z_thresh"])
+                )
+            if "robust_event_reject_local_var_window_sec" in overrides:
+                self._robust_event_reject_local_var_window_spin.setValue(
+                    float(overrides["robust_event_reject_local_var_window_sec"])
+                )
+            robust_ratio = overrides.get("robust_event_reject_local_var_ratio_thresh", None)
+            self._robust_event_reject_local_var_ratio_enable_cb.setChecked(
+                robust_ratio is not None
+            )
+            if robust_ratio is not None:
+                self._robust_event_reject_local_var_ratio_spin.setValue(float(robust_ratio))
+            if "robust_event_reject_min_keep_fraction" in overrides:
+                self._robust_event_reject_min_keep_fraction_spin.setValue(
+                    float(overrides["robust_event_reject_min_keep_fraction"])
+                )
+        elif is_adaptive_event_gated_mode(fit_mode):
+            if "adaptive_event_gate_residual_z_thresh" in overrides:
+                self._adaptive_event_gate_residual_z_spin.setValue(
+                    float(overrides["adaptive_event_gate_residual_z_thresh"])
+                )
+            if "adaptive_event_gate_local_var_window_sec" in overrides:
+                self._adaptive_event_gate_local_var_window_spin.setValue(
+                    float(overrides["adaptive_event_gate_local_var_window_sec"])
+                )
+            adaptive_ratio = overrides.get("adaptive_event_gate_local_var_ratio_thresh", None)
+            self._adaptive_event_gate_local_var_ratio_enable_cb.setChecked(
+                adaptive_ratio is not None
+            )
+            if adaptive_ratio is not None:
+                self._adaptive_event_gate_local_var_ratio_spin.setValue(float(adaptive_ratio))
+            if "adaptive_event_gate_smooth_window_sec" in overrides:
+                self._adaptive_event_gate_smooth_window_spin.setValue(
+                    float(overrides["adaptive_event_gate_smooth_window_sec"])
+                )
+            if "adaptive_event_gate_min_trust_fraction" in overrides:
+                self._adaptive_event_gate_min_trust_fraction_spin.setValue(
+                    float(overrides["adaptive_event_gate_min_trust_fraction"])
+                )
+            freeze_method = str(
+                overrides.get("adaptive_event_gate_freeze_interp_method", "linear_hold")
+            ).strip() or "linear_hold"
+            idx_freeze = self._adaptive_event_gate_freeze_interp_combo.findData(freeze_method)
+            if idx_freeze >= 0:
+                self._adaptive_event_gate_freeze_interp_combo.setCurrentIndex(idx_freeze)
+
+        self._apply_dynamic_fit_mode_ui_state()
+        self._on_config_changed()
+        self._correction_tuning_applyback_applied = True
+        self._correction_tuning_applyback_timestamp = datetime.now().strftime("%H:%M:%S")
+        self._refresh_correction_tuning_applyback_status()
+        self._append_run_log("Copied correction tuning settings to main run configuration.")
+
     def _on_run_correction_tuning(self) -> None:
         self._run_correction_tuning_btn.setEnabled(False)
         self._run_correction_tuning_btn.setText("Running...")
@@ -3645,6 +3799,9 @@ class MainWindow(QMainWindow):
                 return
 
             self._correction_tuning_last_result = result
+            self._correction_tuning_applyback_applied = False
+            self._correction_tuning_applyback_timestamp = ""
+            self._refresh_correction_tuning_applyback_status()
             self._open_correction_tuning_dir_btn.setEnabled(True)
             artifacts = result.get("artifacts", {}) if isinstance(result, dict) else {}
             inspect_paths = artifacts.get("retuned_correction_inspection_pngs", [])
@@ -3804,12 +3961,19 @@ class MainWindow(QMainWindow):
 
     def _reset_correction_tuning_state(self) -> None:
         self._correction_tuning_last_result = None
+        self._correction_tuning_applyback_applied = False
+        self._correction_tuning_applyback_timestamp = ""
         if hasattr(self, "_open_correction_tuning_dir_btn"):
             self._open_correction_tuning_dir_btn.setEnabled(False)
+        if hasattr(self, "_apply_correction_tuning_btn"):
+            self._apply_correction_tuning_btn.setEnabled(
+                bool(self._correction_tuning_workspace_available)
+            )
         if hasattr(self, "_correction_tuning_summary_label"):
             self._correction_tuning_summary_label.setText(
                 "No correction retune result yet."
             )
+        self._refresh_correction_tuning_applyback_status()
         if hasattr(self, "_set_correction_tuning_overlay_message"):
             self._set_correction_tuning_overlay_message(
                 "Run correction retune to generate a correction inspection artifact."
