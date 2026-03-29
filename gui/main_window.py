@@ -317,6 +317,75 @@ _DYNAMIC_FIT_MODE_LABELS = {
     "adaptive_event_gated_regression": "Adaptive event-gated regression",
 }
 
+_DYNAMIC_FIT_TOOLTIPS = {
+    "dynamic_fit_mode": (
+        "Chooses how the isosbestic reference is fit. Rolling modes adapt over time, "
+        "global linear fits one chunk-wide line, and robust/adaptive modes resist large "
+        "event-driven distortions. Switch modes when correction is under- or over-responsive."
+    ),
+    "baseline_subtract_before_fit": (
+        "Rolling modes only. Subtracts a slow baseline from fit inputs before estimating "
+        "coefficients. Turn on if slow drift biases rolling fits; leave off for standard behavior."
+    ),
+    "regression_window_sec": (
+        "Rolling modes only. Local regression window length in seconds. Larger values make the fit "
+        "smoother and less reactive; smaller values track local changes more aggressively. Increase "
+        "if the fit still rides large events."
+    ),
+    "min_samples_per_window": (
+        "Rolling modes only. Minimum samples required in each local regression window. Higher values "
+        "stabilize estimates but can disable adaptation in sparse windows; lower values allow more "
+        "local fits but can be noisier."
+    ),
+    "robust_max_iters": (
+        "Robust event-reject mode only. Number of reject-and-refit passes. Higher values can remove "
+        "more event contamination but run longer; lower values are faster and more conservative."
+    ),
+    "robust_residual_z_thresh": (
+        "Threshold for treating large positive residuals as likely biology instead of artifact. "
+        "Lower values reject more points; higher values reject fewer. Reduce if the fit still "
+        "rides large events."
+    ),
+    "robust_local_var_window_sec": (
+        "Window used to estimate local variance for the optional variance-ratio rule. Larger values "
+        "smooth variance estimates; smaller values react to shorter bursts. Increase to avoid jittery gating."
+    ),
+    "robust_local_var_ratio_thresh": (
+        "Optional extra rejection rule based on local variance(signal)/variance(iso). Lower values "
+        "reject more aggressively; higher values reject less. Enable if residual gating alone still "
+        "lets event-heavy regions steer the fit."
+    ),
+    "robust_min_keep_fraction": (
+        "Guardrail on retained samples after rejection. Higher values are safer and trigger fallback sooner; "
+        "lower values allow more aggressive rejection. Raise if too much data is being dropped."
+    ),
+    "adaptive_residual_z_thresh": (
+        "Threshold for marking event-like positive residuals as untrusted for adaptation. Lower values gate "
+        "more regions; higher values gate fewer. Reduce if adaptation still follows event peaks."
+    ),
+    "adaptive_local_var_window_sec": (
+        "Window used to estimate local variance for optional trust gating. Larger values smooth trust scoring; "
+        "smaller values respond to brief variance bursts."
+    ),
+    "adaptive_local_var_ratio_thresh": (
+        "Optional trust gate based on local variance(signal)/variance(iso). Lower values mark more regions "
+        "as gated/frozen; higher values gate fewer. Enable when residual-only gating misses eventful spans."
+    ),
+    "adaptive_smooth_window_sec": (
+        "Long-timescale smoothing window for adaptive coefficients. Larger values make adaptation steadier and "
+        "less responsive; smaller values allow more local adaptation. Increase if coefficients still move too much."
+    ),
+    "adaptive_min_trust_fraction": (
+        "Guardrail on trusted-data coverage. Higher values require more trusted samples and fall back sooner; "
+        "lower values allow adaptation with less trusted support."
+    ),
+    "adaptive_freeze_interp_method": (
+        "How coefficients bridge gated spans. 'linear_hold' keeps coefficients stable through gated regions and "
+        "linearly reconnects across trusted boundaries to avoid event-driven jumps."
+    ),
+}
+
+
 def _get_allowed_from_config_field(field_name: str) -> list[str]:
     """
     Derives allowed strings from the Config schema dynamically for a given field.
@@ -1733,7 +1802,7 @@ class MainWindow(QMainWindow):
         self._correction_tuning_fit_mode_combo = QComboBox()
         self._correction_tuning_fit_mode_combo.setMinimumWidth(260)
         self._correction_tuning_fit_mode_combo.setToolTip(
-            "Select correction fit engine."
+            _DYNAMIC_FIT_TOOLTIPS["dynamic_fit_mode"]
         )
         for mode_name in get_allowed_dynamic_fit_modes_from_config():
             self._correction_tuning_fit_mode_combo.addItem(dynamic_fit_mode_label(mode_name), mode_name)
@@ -1752,7 +1821,7 @@ class MainWindow(QMainWindow):
             bool(getattr(self._default_cfg, "baseline_subtract_before_fit", False))
         )
         self._correction_tuning_baseline_subtract_cb.setToolTip(
-            "Active only in rolling regression modes. Inactive in global linear, robust event-reject, and adaptive event-gated modes."
+            _DYNAMIC_FIT_TOOLTIPS["baseline_subtract_before_fit"]
         )
         self._correction_tuning_baseline_subtract_cb.stateChanged.connect(self._on_config_changed)
         form.addRow(
@@ -1766,8 +1835,7 @@ class MainWindow(QMainWindow):
         self._correction_tuning_window_spin.setDecimals(6)
         self._correction_tuning_window_spin.setSingleStep(1.0)
         self._correction_tuning_window_spin.setToolTip(
-            "Active only in rolling regression modes. "
-            "Inactive in global linear, robust event-reject, and adaptive event-gated modes."
+            _DYNAMIC_FIT_TOOLTIPS["regression_window_sec"]
         )
         form.addRow(_corr_row_label("Regression Window (s):"), self._correction_tuning_window_spin)
 
@@ -1775,8 +1843,7 @@ class MainWindow(QMainWindow):
         self._correction_tuning_min_samples_spin.setMinimumWidth(120)
         self._correction_tuning_min_samples_spin.setRange(1, 1_000_000)
         self._correction_tuning_min_samples_spin.setToolTip(
-            "Active only in rolling regression modes. "
-            "Inactive in global linear, robust event-reject, and adaptive event-gated modes."
+            _DYNAMIC_FIT_TOOLTIPS["min_samples_per_window"]
         )
         form.addRow(
             _corr_row_label("Min Samples/Window:"),
@@ -1790,7 +1857,7 @@ class MainWindow(QMainWindow):
             int(getattr(self._default_cfg, "robust_event_reject_max_iters", 3))
         )
         self._correction_tuning_robust_max_iters_spin.setToolTip(
-            "Active only in robust global fit + event rejection mode."
+            _DYNAMIC_FIT_TOOLTIPS["robust_max_iters"]
         )
         form.addRow(
             _corr_row_label("Max iterations:"),
@@ -1806,7 +1873,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "robust_event_reject_residual_z_thresh", 3.5))
         )
         self._correction_tuning_robust_residual_z_spin.setToolTip(
-            "Positive residual robust-z threshold for event-point exclusion."
+            _DYNAMIC_FIT_TOOLTIPS["robust_residual_z_thresh"]
         )
         form.addRow(
             _corr_row_label("Residual z-threshold:"),
@@ -1822,7 +1889,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "robust_event_reject_local_var_window_sec", 10.0) or 10.0)
         )
         self._correction_tuning_robust_local_var_window_spin.setToolTip(
-            "Centered local variance window in seconds."
+            _DYNAMIC_FIT_TOOLTIPS["robust_local_var_window_sec"]
         )
         form.addRow(
             _corr_row_label("Local variance window (s):"),
@@ -1831,7 +1898,7 @@ class MainWindow(QMainWindow):
 
         self._correction_tuning_robust_local_var_ratio_enable_cb = QCheckBox("Enable")
         self._correction_tuning_robust_local_var_ratio_enable_cb.setToolTip(
-            "Enable optional local variance ratio rejection rule."
+            _DYNAMIC_FIT_TOOLTIPS["robust_local_var_ratio_thresh"]
         )
         self._correction_tuning_robust_local_var_ratio_spin = QDoubleSpinBox()
         self._correction_tuning_robust_local_var_ratio_spin.setMinimumWidth(140)
@@ -1846,7 +1913,11 @@ class MainWindow(QMainWindow):
             float(ratio_default if ratio_default is not None else 3.0)
         )
         self._correction_tuning_robust_local_var_ratio_spin.setEnabled(bool(ratio_default is not None))
+        self._correction_tuning_robust_local_var_ratio_spin.setToolTip(
+            _DYNAMIC_FIT_TOOLTIPS["robust_local_var_ratio_thresh"]
+        )
         ratio_row = QWidget()
+        ratio_row.setToolTip(_DYNAMIC_FIT_TOOLTIPS["robust_local_var_ratio_thresh"])
         ratio_row_layout = QHBoxLayout(ratio_row)
         ratio_row_layout.setContentsMargins(0, 0, 0, 0)
         ratio_row_layout.setSpacing(8)
@@ -1866,7 +1937,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "robust_event_reject_min_keep_fraction", 0.5))
         )
         self._correction_tuning_robust_min_keep_fraction_spin.setToolTip(
-            "Guardrail keep fraction for event-point rejection."
+            _DYNAMIC_FIT_TOOLTIPS["robust_min_keep_fraction"]
         )
         form.addRow(
             _corr_row_label("Minimum keep fraction:"),
@@ -1882,7 +1953,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "adaptive_event_gate_residual_z_thresh", 3.5))
         )
         self._correction_tuning_adaptive_residual_z_spin.setToolTip(
-            "Active only in adaptive event-gated regression mode."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_residual_z_thresh"]
         )
         form.addRow(
             _corr_row_label("Adaptive residual z-threshold:"),
@@ -1898,7 +1969,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "adaptive_event_gate_local_var_window_sec", 10.0) or 10.0)
         )
         self._correction_tuning_adaptive_local_var_window_spin.setToolTip(
-            "Active only in adaptive event-gated regression mode."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_local_var_window_sec"]
         )
         form.addRow(
             _corr_row_label("Adaptive local variance window (s):"),
@@ -1907,7 +1978,7 @@ class MainWindow(QMainWindow):
 
         self._correction_tuning_adaptive_local_var_ratio_enable_cb = QCheckBox("Enable")
         self._correction_tuning_adaptive_local_var_ratio_enable_cb.setToolTip(
-            "Enable optional adaptive local variance ratio gate."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_local_var_ratio_thresh"]
         )
         self._correction_tuning_adaptive_local_var_ratio_spin = QDoubleSpinBox()
         self._correction_tuning_adaptive_local_var_ratio_spin.setMinimumWidth(140)
@@ -1915,7 +1986,7 @@ class MainWindow(QMainWindow):
         self._correction_tuning_adaptive_local_var_ratio_spin.setDecimals(4)
         self._correction_tuning_adaptive_local_var_ratio_spin.setSingleStep(0.1)
         self._correction_tuning_adaptive_local_var_ratio_spin.setToolTip(
-            "Active only in adaptive event-gated regression mode."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_local_var_ratio_thresh"]
         )
         adaptive_ratio_default = getattr(
             self._default_cfg, "adaptive_event_gate_local_var_ratio_thresh", None
@@ -1930,9 +2001,7 @@ class MainWindow(QMainWindow):
             bool(adaptive_ratio_default is not None)
         )
         adaptive_ratio_row = QWidget()
-        adaptive_ratio_row.setToolTip(
-            "Enable optional adaptive local variance ratio gate."
-        )
+        adaptive_ratio_row.setToolTip(_DYNAMIC_FIT_TOOLTIPS["adaptive_local_var_ratio_thresh"])
         adaptive_ratio_row_layout = QHBoxLayout(adaptive_ratio_row)
         adaptive_ratio_row_layout.setContentsMargins(0, 0, 0, 0)
         adaptive_ratio_row_layout.setSpacing(8)
@@ -1952,7 +2021,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "adaptive_event_gate_smooth_window_sec", 60.0))
         )
         self._correction_tuning_adaptive_smooth_window_spin.setToolTip(
-            "Active only in adaptive event-gated regression mode."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_smooth_window_sec"]
         )
         form.addRow(
             _corr_row_label("Adaptive smooth window (s):"),
@@ -1968,7 +2037,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "adaptive_event_gate_min_trust_fraction", 0.5))
         )
         self._correction_tuning_adaptive_min_trust_fraction_spin.setToolTip(
-            "Active only in adaptive event-gated regression mode."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_min_trust_fraction"]
         )
         form.addRow(
             _corr_row_label("Adaptive minimum trust fraction:"),
@@ -1985,7 +2054,7 @@ class MainWindow(QMainWindow):
         if idx_freeze_interp >= 0:
             self._correction_tuning_adaptive_freeze_interp_combo.setCurrentIndex(idx_freeze_interp)
         self._correction_tuning_adaptive_freeze_interp_combo.setToolTip(
-            "Active only in adaptive event-gated regression mode."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_freeze_interp_method"]
         )
         form.addRow(
             _corr_row_label("Adaptive freeze interpolation method:"),
@@ -7156,7 +7225,7 @@ class MainWindow(QMainWindow):
         self._dynamic_fit_mode_combo = QComboBox()
         self._dynamic_fit_mode_combo.setMinimumWidth(260)
         self._dynamic_fit_mode_combo.setToolTip(
-            "Select isosbestic fit engine."
+            _DYNAMIC_FIT_TOOLTIPS["dynamic_fit_mode"]
         )
         for mode_name in get_allowed_dynamic_fit_modes_from_config():
             self._dynamic_fit_mode_combo.addItem(dynamic_fit_mode_label(mode_name), mode_name)
@@ -7182,7 +7251,7 @@ class MainWindow(QMainWindow):
             bool(getattr(self._default_cfg, "baseline_subtract_before_fit", False))
         )
         self._baseline_subtract_before_fit_cb.setToolTip(
-            "Active only in rolling regression modes. Inactive in global linear, robust event-reject, and adaptive event-gated modes."
+            _DYNAMIC_FIT_TOOLTIPS["baseline_subtract_before_fit"]
         )
         self._baseline_subtract_before_fit_cb.stateChanged.connect(self._on_config_changed)
         iso_sampling_form.addRow(
@@ -7192,8 +7261,7 @@ class MainWindow(QMainWindow):
 
         self._window_sec_edit = QLineEdit(str(self._default_cfg.window_sec))
         self._window_sec_edit.setToolTip(
-            "Active only in rolling regression modes. "
-            "Inactive in global linear, robust event-reject, and adaptive event-gated modes."
+            _DYNAMIC_FIT_TOOLTIPS["regression_window_sec"]
         )
         self._window_sec_edit.textChanged.connect(self._on_config_changed)
         iso_sampling_form.addRow("Regression Window:", self._window_sec_edit)
@@ -7206,8 +7274,7 @@ class MainWindow(QMainWindow):
         self._min_samples_per_window_spin.setRange(1, 100000)
         self._min_samples_per_window_spin.setValue(max(1, self._default_cfg.min_samples_per_window))
         self._min_samples_per_window_spin.setToolTip(
-            "Active only in rolling regression modes. "
-            "Inactive in global linear, robust event-reject, and adaptive event-gated modes."
+            _DYNAMIC_FIT_TOOLTIPS["min_samples_per_window"]
         )
         self._min_samples_per_window_spin.valueChanged.connect(self._on_config_changed)
         iso_accept_form.addRow("Min Samples per Window:", self._min_samples_per_window_spin)
@@ -7223,7 +7290,7 @@ class MainWindow(QMainWindow):
             int(getattr(self._default_cfg, "robust_event_reject_max_iters", 3))
         )
         self._robust_event_reject_max_iters_spin.setToolTip(
-            "Active only in robust global fit + event rejection mode."
+            _DYNAMIC_FIT_TOOLTIPS["robust_max_iters"]
         )
         self._robust_event_reject_max_iters_spin.valueChanged.connect(self._on_config_changed)
         robust_form.addRow("Max iterations:", self._robust_event_reject_max_iters_spin)
@@ -7236,7 +7303,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "robust_event_reject_residual_z_thresh", 3.5))
         )
         self._robust_event_reject_residual_z_spin.setToolTip(
-            "Positive residual robust-z exclusion threshold (event-dominated points)."
+            _DYNAMIC_FIT_TOOLTIPS["robust_residual_z_thresh"]
         )
         self._robust_event_reject_residual_z_spin.valueChanged.connect(self._on_config_changed)
         robust_form.addRow("Residual z-threshold:", self._robust_event_reject_residual_z_spin)
@@ -7249,7 +7316,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "robust_event_reject_local_var_window_sec", 10.0) or 10.0)
         )
         self._robust_event_reject_local_var_window_spin.setToolTip(
-            "Centered local-variance window in seconds."
+            _DYNAMIC_FIT_TOOLTIPS["robust_local_var_window_sec"]
         )
         self._robust_event_reject_local_var_window_spin.valueChanged.connect(self._on_config_changed)
         robust_form.addRow("Local variance window (s):", self._robust_event_reject_local_var_window_spin)
@@ -7262,7 +7329,7 @@ class MainWindow(QMainWindow):
         self._robust_event_reject_local_var_ratio_enable_cb = QCheckBox("Enable")
         self._robust_event_reject_local_var_ratio_enable_cb.setChecked(bool(ratio_enabled))
         self._robust_event_reject_local_var_ratio_enable_cb.setToolTip(
-            "Enable optional local variance ratio exclusion rule."
+            _DYNAMIC_FIT_TOOLTIPS["robust_local_var_ratio_thresh"]
         )
         self._robust_event_reject_local_var_ratio_spin = QDoubleSpinBox()
         self._robust_event_reject_local_var_ratio_spin.setRange(0.000001, 1_000_000.0)
@@ -7273,7 +7340,7 @@ class MainWindow(QMainWindow):
         )
         self._robust_event_reject_local_var_ratio_spin.setEnabled(bool(ratio_enabled))
         self._robust_event_reject_local_var_ratio_spin.setToolTip(
-            "Exclude points when local variance(signal)/variance(iso) exceeds this value."
+            _DYNAMIC_FIT_TOOLTIPS["robust_local_var_ratio_thresh"]
         )
         self._robust_event_reject_local_var_ratio_enable_cb.toggled.connect(
             self._robust_event_reject_local_var_ratio_spin.setEnabled
@@ -7284,6 +7351,7 @@ class MainWindow(QMainWindow):
         ratio_row_layout = QHBoxLayout(ratio_row)
         ratio_row_layout.setContentsMargins(0, 0, 0, 0)
         ratio_row_layout.setSpacing(8)
+        ratio_row.setToolTip(_DYNAMIC_FIT_TOOLTIPS["robust_local_var_ratio_thresh"])
         ratio_row_layout.addWidget(self._robust_event_reject_local_var_ratio_enable_cb)
         ratio_row_layout.addWidget(self._robust_event_reject_local_var_ratio_spin)
         robust_form.addRow("Local variance ratio threshold:", ratio_row)
@@ -7296,7 +7364,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "robust_event_reject_min_keep_fraction", 0.5))
         )
         self._robust_event_reject_min_keep_fraction_spin.setToolTip(
-            "Guardrail: stop excluding points if keep fraction would drop below this value."
+            _DYNAMIC_FIT_TOOLTIPS["robust_min_keep_fraction"]
         )
         self._robust_event_reject_min_keep_fraction_spin.valueChanged.connect(self._on_config_changed)
         robust_form.addRow("Minimum keep fraction:", self._robust_event_reject_min_keep_fraction_spin)
@@ -7314,7 +7382,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "adaptive_event_gate_residual_z_thresh", 3.5))
         )
         self._adaptive_event_gate_residual_z_spin.setToolTip(
-            "Active only in adaptive event-gated regression mode."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_residual_z_thresh"]
         )
         self._adaptive_event_gate_residual_z_spin.valueChanged.connect(self._on_config_changed)
         adaptive_form.addRow("Residual z-threshold:", self._adaptive_event_gate_residual_z_spin)
@@ -7327,7 +7395,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "adaptive_event_gate_local_var_window_sec", 10.0) or 10.0)
         )
         self._adaptive_event_gate_local_var_window_spin.setToolTip(
-            "Active only in adaptive event-gated regression mode."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_local_var_window_sec"]
         )
         self._adaptive_event_gate_local_var_window_spin.valueChanged.connect(self._on_config_changed)
         adaptive_form.addRow("Local variance window (s):", self._adaptive_event_gate_local_var_window_spin)
@@ -7342,7 +7410,7 @@ class MainWindow(QMainWindow):
         self._adaptive_event_gate_local_var_ratio_enable_cb = QCheckBox("Enable")
         self._adaptive_event_gate_local_var_ratio_enable_cb.setChecked(bool(adaptive_ratio_enabled))
         self._adaptive_event_gate_local_var_ratio_enable_cb.setToolTip(
-            "Enable optional adaptive local variance ratio gate."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_local_var_ratio_thresh"]
         )
         self._adaptive_event_gate_local_var_ratio_spin = QDoubleSpinBox()
         self._adaptive_event_gate_local_var_ratio_spin.setRange(0.000001, 1_000_000.0)
@@ -7353,7 +7421,7 @@ class MainWindow(QMainWindow):
         )
         self._adaptive_event_gate_local_var_ratio_spin.setEnabled(bool(adaptive_ratio_enabled))
         self._adaptive_event_gate_local_var_ratio_spin.setToolTip(
-            "Gate adaptation when local variance(signal)/variance(iso) exceeds this value."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_local_var_ratio_thresh"]
         )
         self._adaptive_event_gate_local_var_ratio_enable_cb.toggled.connect(
             self._adaptive_event_gate_local_var_ratio_spin.setEnabled
@@ -7361,9 +7429,7 @@ class MainWindow(QMainWindow):
         self._adaptive_event_gate_local_var_ratio_enable_cb.toggled.connect(self._on_config_changed)
         self._adaptive_event_gate_local_var_ratio_spin.valueChanged.connect(self._on_config_changed)
         adaptive_ratio_row = QWidget()
-        adaptive_ratio_row.setToolTip(
-            "Enable optional adaptive local variance ratio gate."
-        )
+        adaptive_ratio_row.setToolTip(_DYNAMIC_FIT_TOOLTIPS["adaptive_local_var_ratio_thresh"])
         adaptive_ratio_row_layout = QHBoxLayout(adaptive_ratio_row)
         adaptive_ratio_row_layout.setContentsMargins(0, 0, 0, 0)
         adaptive_ratio_row_layout.setSpacing(8)
@@ -7379,7 +7445,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "adaptive_event_gate_smooth_window_sec", 60.0))
         )
         self._adaptive_event_gate_smooth_window_spin.setToolTip(
-            "Active only in adaptive event-gated regression mode."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_smooth_window_sec"]
         )
         self._adaptive_event_gate_smooth_window_spin.valueChanged.connect(self._on_config_changed)
         adaptive_form.addRow("Smooth window (s):", self._adaptive_event_gate_smooth_window_spin)
@@ -7392,7 +7458,7 @@ class MainWindow(QMainWindow):
             float(getattr(self._default_cfg, "adaptive_event_gate_min_trust_fraction", 0.5))
         )
         self._adaptive_event_gate_min_trust_fraction_spin.setToolTip(
-            "Guardrail minimum trusted-data fraction."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_min_trust_fraction"]
         )
         self._adaptive_event_gate_min_trust_fraction_spin.valueChanged.connect(self._on_config_changed)
         adaptive_form.addRow("Minimum trust fraction:", self._adaptive_event_gate_min_trust_fraction_spin)
@@ -7406,7 +7472,7 @@ class MainWindow(QMainWindow):
         if idx_adaptive_freeze >= 0:
             self._adaptive_event_gate_freeze_interp_combo.setCurrentIndex(idx_adaptive_freeze)
         self._adaptive_event_gate_freeze_interp_combo.setToolTip(
-            "Interpolation/freeze method for gated spans (adaptive mode only)."
+            _DYNAMIC_FIT_TOOLTIPS["adaptive_freeze_interp_method"]
         )
         self._adaptive_event_gate_freeze_interp_combo.currentIndexChanged.connect(self._on_config_changed)
         adaptive_form.addRow("Freeze interpolation method:", self._adaptive_event_gate_freeze_interp_combo)

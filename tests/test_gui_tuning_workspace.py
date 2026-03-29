@@ -1824,6 +1824,102 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
     assert window._correction_tuning_summary_label.toolTip().strip()
 
 
+def test_dynamic_fit_tooltips_match_between_main_and_correction_retune(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path)
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    pairs = [
+        ("Dynamic Fit Mode", window._dynamic_fit_mode_combo, window._correction_tuning_fit_mode_combo),
+        (
+            "Baseline subtract before fit",
+            window._baseline_subtract_before_fit_cb,
+            window._correction_tuning_baseline_subtract_cb,
+        ),
+        ("Regression Window", window._window_sec_edit, window._correction_tuning_window_spin),
+        (
+            "Min Samples per Window",
+            window._min_samples_per_window_spin,
+            window._correction_tuning_min_samples_spin,
+        ),
+        (
+            "Robust max iterations",
+            window._robust_event_reject_max_iters_spin,
+            window._correction_tuning_robust_max_iters_spin,
+        ),
+        (
+            "Robust residual z-threshold",
+            window._robust_event_reject_residual_z_spin,
+            window._correction_tuning_robust_residual_z_spin,
+        ),
+        (
+            "Robust local variance window",
+            window._robust_event_reject_local_var_window_spin,
+            window._correction_tuning_robust_local_var_window_spin,
+        ),
+        (
+            "Robust local variance ratio enable",
+            window._robust_event_reject_local_var_ratio_enable_cb,
+            window._correction_tuning_robust_local_var_ratio_enable_cb,
+        ),
+        (
+            "Robust local variance ratio threshold",
+            window._robust_event_reject_local_var_ratio_spin,
+            window._correction_tuning_robust_local_var_ratio_spin,
+        ),
+        (
+            "Robust minimum keep fraction",
+            window._robust_event_reject_min_keep_fraction_spin,
+            window._correction_tuning_robust_min_keep_fraction_spin,
+        ),
+        (
+            "Adaptive residual z-threshold",
+            window._adaptive_event_gate_residual_z_spin,
+            window._correction_tuning_adaptive_residual_z_spin,
+        ),
+        (
+            "Adaptive local variance window",
+            window._adaptive_event_gate_local_var_window_spin,
+            window._correction_tuning_adaptive_local_var_window_spin,
+        ),
+        (
+            "Adaptive local variance ratio enable",
+            window._adaptive_event_gate_local_var_ratio_enable_cb,
+            window._correction_tuning_adaptive_local_var_ratio_enable_cb,
+        ),
+        (
+            "Adaptive local variance ratio threshold",
+            window._adaptive_event_gate_local_var_ratio_spin,
+            window._correction_tuning_adaptive_local_var_ratio_spin,
+        ),
+        (
+            "Adaptive smooth window",
+            window._adaptive_event_gate_smooth_window_spin,
+            window._correction_tuning_adaptive_smooth_window_spin,
+        ),
+        (
+            "Adaptive minimum trust fraction",
+            window._adaptive_event_gate_min_trust_fraction_spin,
+            window._correction_tuning_adaptive_min_trust_fraction_spin,
+        ),
+        (
+            "Adaptive freeze interpolation method",
+            window._adaptive_event_gate_freeze_interp_combo,
+            window._correction_tuning_adaptive_freeze_interp_combo,
+        ),
+    ]
+
+    for name, main_control, correction_control in pairs:
+        main_tip = main_control.toolTip().strip()
+        correction_tip = correction_control.toolTip().strip()
+        assert main_tip, f"Missing main tooltip: {name}"
+        assert correction_tip, f"Missing correction-retune tooltip: {name}"
+        assert main_tip == correction_tip, f"Tooltip mismatch for: {name}"
+
+
 def test_tuning_preview_session_selectors_show_all_roi_sessions(window, tmp_path):
     run_dir = _make_completed_run_with_cache(
         tmp_path / "full_sessions",
