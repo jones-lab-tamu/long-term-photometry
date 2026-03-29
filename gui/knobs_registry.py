@@ -22,6 +22,7 @@ GUI_KNOBS_NORMAL: Set[str] = set()
 GUI_KNOBS_ADVANCED: Set[str] = {
     # Preprocessing + Baseline
     "lowpass_hz",
+    "tonic_output_mode",
     "baseline_method",
     "baseline_percentile",
     "f0_min_value",
@@ -84,6 +85,10 @@ KNOB_META: Dict[str, dict] = {
         "label": "Lowpass Filter (Hz)",
         "help": "Cutoff frequency for lowpass filtering.",
         "range": {"min": 1e-9},
+    },
+    "tonic_output_mode": {
+        "label": "Tonic Output Mode",
+        "help": "Controls tonic output rendering/export mode: preserve raw session shape, or flatten within-session bleach shape while preserving session baseline placement.",
     },
     "baseline_method": {
         "label": "Baseline Method",

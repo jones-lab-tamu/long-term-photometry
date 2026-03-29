@@ -95,6 +95,18 @@ class TestPlotTonic48h(unittest.TestCase):
         self.assertTrue(os.path.exists(out_path))
         self.assertGreater(os.path.getsize(out_path), 0)
 
+    def test_flatten_tonic_output_mode_runs(self):
+        """Optional tonic output mode should run and produce an image."""
+        out_path = os.path.join(self.test_dir.name, 'flattened.png')
+        result = self._run_script([
+            '--out', out_path,
+            '--roi', 'Region0',
+            '--tonic-output-mode', 'flatten_session_bleach_preserve_session_baseline',
+        ])
+        self.assertEqual(result.returncode, 0, f"Script failed:\n{result.stderr}")
+        self.assertTrue(os.path.exists(out_path))
+        self.assertGreater(os.path.getsize(out_path), 0)
+
     def test_timing_instrumentation(self):
         """Verify that the expected timing lines are present in stdout."""
         result = self._run_script()

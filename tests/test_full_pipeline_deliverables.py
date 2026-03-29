@@ -7,6 +7,7 @@ import subprocess
 import glob
 import json
 import pandas as pd
+import numpy as np
 from unittest import mock
 import importlib.util
 
@@ -279,6 +280,129 @@ class TestFullPipelineDeliverables(unittest.TestCase):
         
         # Cleanup
         shutil.rmtree(test_run_dir)
+
+    def test_tonic_output_mode_flatten_affects_csv(self):
+        """
+        Verify tonic CSV honors tonic_output_mode by comparing raw vs flatten mode
+        on the exact same cached tonic input (analysis stage mocked).
+        """
+        import tempfile
+        import importlib.util
+        import yaml
+
+        source_tonic = os.path.join(self.output_package, "_analysis", "tonic_out")
+        source_phasic = os.path.join(self.output_package, "_analysis", "phasic_out")
+        if not os.path.exists(source_tonic):
+            seed_cmd = [
+                sys.executable, "tools/run_full_pipeline_deliverables.py",
+                "--input", self.input_dir,
+                "--out", self.output_package,
+                "--config", self.config_path,
+                "--format", "rwd",
+                "--overwrite",
+                "--sessions-per-hour", "2",
+            ]
+            subprocess.check_call(seed_cmd)
+
+        script_path = os.path.join(PROJECT_ROOT, "tools", "run_full_pipeline_deliverables.py")
+        spec = importlib.util.spec_from_file_location("runner", script_path)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+
+        def _run_mode(mode_value: str) -> pd.DataFrame:
+            run_dir = tempfile.mkdtemp(prefix=f"tonic_mode_{mode_value}_")
+            cfg_path = os.path.join(run_dir, "config_mode.yaml")
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            cfg["tonic_output_mode"] = mode_value
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(cfg, f, sort_keys=True)
+
+            test_args = [
+                script_path,
+                "--input", self.input_dir,
+                "--out", run_dir,
+                "--config", cfg_path,
+                "--format", "rwd",
+                "--mode", "tonic",
+                "--sessions-per-hour", "2",
+                "--overwrite",
+            ]
+
+            import subprocess as sp
+            real_check_call = sp.check_call
+
+            def _mock_analysis(cmd):
+                cmd_str = " ".join([str(p).replace(os.sep, "/") for p in cmd])
+                if "analyze_photometry.py" in cmd_str:
+                    if "--out" in cmd:
+                        out_path = cmd[cmd.index("--out") + 1]
+                        os.makedirs(out_path, exist_ok=True)
+                        shutil.copy2(os.path.join(source_tonic, "tonic_trace_cache.h5"), out_path)
+                        shutil.copy2(os.path.join(source_tonic, "run_report.json"), out_path)
+                        shutil.copy2(os.path.join(source_tonic, "config_used.yaml"), out_path)
+                        # keep phasic artifacts available for plotting branch expectations
+                        p_out = os.path.join(os.path.dirname(out_path), "phasic_out")
+                        os.makedirs(p_out, exist_ok=True)
+                        shutil.copy2(os.path.join(source_phasic, "phasic_trace_cache.h5"), p_out)
+                        shutil.copy2(os.path.join(source_phasic, "run_report.json"), p_out)
+                        shutil.copy2(os.path.join(source_phasic, "config_used.yaml"), p_out)
+                        traces_src = os.path.join(source_phasic, "traces")
+                        if os.path.exists(traces_src):
+                            shutil.copytree(traces_src, os.path.join(p_out, "traces"), dirs_exist_ok=True)
+                    return 0
+                return real_check_call(cmd)
+
+            with mock.patch("sys.argv", test_args):
+                with mock.patch("subprocess.check_call", side_effect=_mock_analysis):
+                    runner.main()
+
+            roi_dirs = [
+                d for d in os.listdir(run_dir)
+                if os.path.isdir(os.path.join(run_dir, d))
+                and not d.startswith("_")
+                and d not in {"phasic_output", "tonic_output"}
+            ]
+            self.assertTrue(roi_dirs, f"no ROI folders found under {run_dir}")
+            csv_path = os.path.join(run_dir, sorted(roi_dirs)[0], "tables", "tonic_df_timeseries.csv")
+            self.assertTrue(os.path.exists(csv_path), f"missing tonic csv for mode={mode_value}")
+            df = pd.read_csv(csv_path)
+            self.assertIn("time_hours", df.columns)
+            self.assertIn("tonic_df", df.columns)
+            shutil.rmtree(run_dir, ignore_errors=True)
+            return df
+
+        def _median_abs_segment_slope(df: pd.DataFrame) -> float:
+            x = df["time_hours"].to_numpy(dtype=float)
+            y = df["tonic_df"].to_numpy(dtype=float)
+            if len(x) < 5:
+                return float("nan")
+            gap = np.diff(x)
+            cut_idx = np.where(gap > 0.1)[0]
+            starts = np.concatenate(([0], cut_idx + 1))
+            ends = np.concatenate((cut_idx + 1, [len(x)]))
+            slopes = []
+            for s, e in zip(starts, ends):
+                if e - s < 5:
+                    continue
+                xx = x[s:e]
+                yy = y[s:e]
+                m = np.isfinite(xx) & np.isfinite(yy)
+                if np.sum(m) < 5:
+                    continue
+                coef = np.polyfit(xx[m], yy[m], 1)
+                slopes.append(abs(float(coef[0])))
+            if not slopes:
+                return float("nan")
+            return float(np.median(slopes))
+
+        df_raw = _run_mode("preserve_raw_session_shape")
+        df_flat = _run_mode("flatten_session_bleach_preserve_session_baseline")
+        slope_raw = _median_abs_segment_slope(df_raw)
+        slope_flat = _median_abs_segment_slope(df_flat)
+        self.assertTrue(np.isfinite(slope_raw))
+        self.assertTrue(np.isfinite(slope_flat))
+        self.assertLess(slope_flat, slope_raw)
 
     def test_phasic_csv_content_independence(self):
         """

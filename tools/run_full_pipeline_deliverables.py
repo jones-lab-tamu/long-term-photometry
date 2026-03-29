@@ -49,6 +49,11 @@ try:
     from photometry_pipeline.config import Config
     from photometry_pipeline.core.utils import natural_sort_key
     from photometry_pipeline.core.events import EventEmitter
+    from photometry_pipeline.core.tonic_output import (
+        TONIC_OUTPUT_MODE_PRESERVE_RAW,
+        apply_tonic_output_mode_to_session,
+        normalize_tonic_output_mode,
+    )
     from photometry_pipeline.io.hdf5_cache_reader import (
         open_tonic_cache, open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields, list_cache_chunk_ids
     )
@@ -576,8 +581,14 @@ def main():
     effective_event_signal = args.event_signal
     effective_representative_index = args.representative_session_index
     effective_preview_first_n = args.preview_first_n
+    effective_tonic_output_mode = TONIC_OUTPUT_MODE_PRESERVE_RAW
     
-    if effective_event_signal is None or effective_representative_index is None or effective_preview_first_n is None:
+    if (
+        effective_event_signal is None
+        or effective_representative_index is None
+        or effective_preview_first_n is None
+        or effective_tonic_output_mode == TONIC_OUTPUT_MODE_PRESERVE_RAW
+    ):
         try:
             cfg = Config.from_yaml(args.config)
             if effective_event_signal is None:
@@ -586,11 +597,20 @@ def main():
                 effective_representative_index = getattr(cfg, "representative_session_index", None)
             if effective_preview_first_n is None:
                 effective_preview_first_n = getattr(cfg, "preview_first_n", None)
+            effective_tonic_output_mode = normalize_tonic_output_mode(
+                getattr(cfg, "tonic_output_mode", TONIC_OUTPUT_MODE_PRESERVE_RAW)
+            )
         except Exception as e:
             print(f"WARNING: Failed to parse config for runner stamping: {e}", flush=True)
             if effective_event_signal is None: 
                 effective_event_signal = "dff"
             # others remain as given or None
+            effective_tonic_output_mode = TONIC_OUTPUT_MODE_PRESERVE_RAW
+
+    print(
+        f"Using tonic_output_mode={effective_tonic_output_mode}",
+        flush=True,
+    )
 
     print(f"RUN_DIR: {run_dir}", flush=True)
 
@@ -1202,7 +1222,8 @@ def main():
                 out_tonic = os.path.join(s_dir, "tonic_overview.png")
                 cmd_tonic_roi = [sys.executable, 'tools/plot_tonic_48h.py',
                                  '--analysis-out', tonic_out, '--roi', roi,
-                                 '--out', out_tonic]
+                                 '--out', out_tonic,
+                                 '--tonic-output-mode', effective_tonic_output_mode]
                 if args.input:
                     cmd_tonic_roi.extend(['--input', args.input])
                 if args.format:
@@ -1235,6 +1256,7 @@ def main():
                 chunks_processed = 0
                 rows_written = 0
                 frames_accumulated = 0
+                tonic_mode_fallback_count = 0
                 csv_file_handle = None
                 t_rows = []
                 arrow_write_header = None
@@ -1271,7 +1293,24 @@ def main():
                             
                             chunks_processed += 1
                             t_sub = time.perf_counter()
-                            t_arr, df_arr = load_cache_chunk_fields(cache, roi, cid, ['time_sec', 'deltaF'])
+                            if effective_tonic_output_mode == TONIC_OUTPUT_MODE_PRESERVE_RAW:
+                                t_arr, df_arr = load_cache_chunk_fields(
+                                    cache, roi, cid, ['time_sec', 'deltaF']
+                                )
+                            else:
+                                t_arr, sig_arr, uv_arr, df_raw_arr = load_cache_chunk_fields(
+                                    cache, roi, cid, ['time_sec', 'sig_raw', 'uv_raw', 'deltaF']
+                                )
+                                _, _, df_arr, tonic_mode_meta = apply_tonic_output_mode_to_session(
+                                    time_sec=t_arr,
+                                    sig_raw=sig_arr,
+                                    uv_raw=uv_arr,
+                                    deltaf_raw=df_raw_arr,
+                                    mode_raw=effective_tonic_output_mode,
+                                )
+                                tonic_mode_fallback_count += int(
+                                    tonic_mode_meta.get("fallback_count", 0)
+                                )
                             tonic_subbucket_totals["per_chunk_cache_read"] += time.perf_counter() - t_sub
 
                             t_sub = time.perf_counter()
@@ -1335,6 +1374,11 @@ def main():
                 _log_roi_timing_metric(roi, "tonic_table_packaging.chunks_processed", chunks_processed)
                 _log_roi_timing_metric(roi, "tonic_table_packaging.rows_written", rows_written)
                 _log_roi_timing_metric(roi, "tonic_table_packaging.frames_accumulated", frames_accumulated)
+                _log_roi_timing_metric(
+                    roi,
+                    "tonic_table_packaging.tonic_mode_fallback_count",
+                    tonic_mode_fallback_count,
+                )
                 _accumulate_roi_bucket(roi, roi_bucket_totals, "tonic_table_packaging", tonic_table_total_elapsed)
 
             if run_phasic_mode and has_features:

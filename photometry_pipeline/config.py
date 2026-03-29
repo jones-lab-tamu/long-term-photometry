@@ -84,6 +84,10 @@ class Config:
     # adapters
     adapter_value_nan_policy: str = 'strict'
     tonic_allowed_nan_frac: float = 0.0
+    tonic_output_mode: Literal[
+        'preserve_raw_session_shape',
+        'flatten_session_bleach_preserve_session_baseline',
+    ] = 'preserve_raw_session_shape'
 
     # channel identifiers - MUST be provided in config (no defaults for these essentially)
     rwd_time_col: str = "Time(s)" # Default often seen, but user should override
@@ -160,6 +164,17 @@ class Config:
         if 'adapter_value_nan_policy' in data:
              if data['adapter_value_nan_policy'] not in {'strict', 'mask'}:
                 raise ValueError(f"Invalid adapter_value_nan_policy: {data['adapter_value_nan_policy']}. Allowed: {{'strict', 'mask'}}")
+
+        if 'tonic_output_mode' in data:
+             if data['tonic_output_mode'] not in {
+                 'preserve_raw_session_shape',
+                 'flatten_session_bleach_preserve_session_baseline',
+             }:
+                raise ValueError(
+                    f"Invalid tonic_output_mode: {data['tonic_output_mode']}. "
+                    "Allowed: {'preserve_raw_session_shape', "
+                    "'flatten_session_bleach_preserve_session_baseline'}"
+                )
         
         obj = cls(**data)
         

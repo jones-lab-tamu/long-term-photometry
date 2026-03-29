@@ -47,6 +47,10 @@ from gui.validate_run_policy import (
     is_validation_current
 )
 from photometry_pipeline.config import Config
+from photometry_pipeline.core.tonic_output import (
+    TONIC_OUTPUT_MODE_FLATTEN_BLEACH,
+    TONIC_OUTPUT_MODE_PRESERVE_RAW,
+)
 from photometry_pipeline.io.hdf5_cache_reader import (
     open_phasic_cache,
 )
@@ -297,6 +301,10 @@ _KNOWN_ALLOWED_VALUES = {
         "adaptive_event_gated_regression",
         "rolling_local_regression",
     ],
+    "tonic_output_mode": [
+        "preserve_raw_session_shape",
+        "flatten_session_bleach_preserve_session_baseline",
+    ],
 }
 _RETUNE_PEAK_PRE_FILTER_OPTIONS = ["none", "smooth"]
 _DYNAMIC_FIT_MODE_ALIAS_TO_CANONICAL = {
@@ -315,6 +323,10 @@ _DYNAMIC_FIT_MODE_LABELS = {
     "global_linear_regression": "Global linear regression",
     "robust_global_event_reject": "Robust global fit + event rejection",
     "adaptive_event_gated_regression": "Adaptive event-gated regression",
+}
+_TONIC_OUTPUT_MODE_LABELS = {
+    TONIC_OUTPUT_MODE_PRESERVE_RAW: "Preserve raw session shape",
+    TONIC_OUTPUT_MODE_FLATTEN_BLEACH: "Flatten session bleach, preserve session baseline",
 }
 
 _DYNAMIC_FIT_TOOLTIPS = {
@@ -384,6 +396,12 @@ _DYNAMIC_FIT_TOOLTIPS = {
         "linearly reconnects across trusted boundaries to avoid event-driven jumps."
     ),
 }
+
+_TONIC_OUTPUT_MODE_TOOLTIP = (
+    "Controls tonic output rendering/export mode. 'Preserve raw session shape' keeps current behavior. "
+    "'Flatten session bleach, preserve session baseline' removes within-session bleach trend shape while "
+    "retaining each session's baseline placement for cross-session comparison."
+)
 
 
 def _get_allowed_from_config_field(field_name: str) -> list[str]:
@@ -458,6 +476,35 @@ def get_allowed_dynamic_fit_modes_from_config() -> list[str]:
         if mode not in ordered:
             ordered.append(mode)
     return ordered
+
+
+def get_allowed_tonic_output_modes_from_config() -> list[str]:
+    raw_modes = _get_allowed_from_config_field("tonic_output_mode")
+    ordered: list[str] = [
+        TONIC_OUTPUT_MODE_PRESERVE_RAW,
+        TONIC_OUTPUT_MODE_FLATTEN_BLEACH,
+    ]
+    for mode in raw_modes:
+        key = str(mode or "").strip()
+        if key and key not in ordered:
+            ordered.append(key)
+    return ordered
+
+
+def normalize_tonic_output_mode(mode_raw: str) -> str:
+    mode = str(mode_raw or "").strip()
+    if not mode:
+        return TONIC_OUTPUT_MODE_PRESERVE_RAW
+    if mode == "flatten_session_bleach":
+        return TONIC_OUTPUT_MODE_FLATTEN_BLEACH
+    if mode == "preserve_raw":
+        return TONIC_OUTPUT_MODE_PRESERVE_RAW
+    return mode
+
+
+def tonic_output_mode_label(mode_raw: str) -> str:
+    mode = normalize_tonic_output_mode(mode_raw)
+    return _TONIC_OUTPUT_MODE_LABELS.get(mode, mode or TONIC_OUTPUT_MODE_PRESERVE_RAW)
 
 
 def normalize_dynamic_fit_mode(mode_raw: str) -> str:
@@ -5075,6 +5122,19 @@ class MainWindow(QMainWindow):
                         elif key in adaptive_defaults and value != adaptive_defaults[key]:
                             config_overrides[key] = value
 
+        selected_tonic_output_mode = normalize_tonic_output_mode(
+            str(
+                getattr(self, "_tonic_output_mode_combo", None).currentData()
+                if hasattr(self, "_tonic_output_mode_combo")
+                else getattr(self._default_cfg, "tonic_output_mode", TONIC_OUTPUT_MODE_PRESERVE_RAW)
+            )
+        )
+        default_tonic_output_mode = normalize_tonic_output_mode(
+            str(getattr(self._default_cfg, "tonic_output_mode", TONIC_OUTPUT_MODE_PRESERVE_RAW))
+        )
+        if selected_tonic_output_mode != default_tonic_output_mode:
+            config_overrides["tonic_output_mode"] = selected_tonic_output_mode
+
         # Preprocessing + Baseline overrides
         default_prep_dict = {
             "lowpass_hz": self._default_cfg.lowpass_hz,
@@ -6248,6 +6308,16 @@ class MainWindow(QMainWindow):
         idx_fit = self._dynamic_fit_mode_combo.findData(fit_mode)
         if idx_fit >= 0:
             self._dynamic_fit_mode_combo.setCurrentIndex(idx_fit)
+        tonic_output_mode = normalize_tonic_output_mode(
+            self._settings.value(
+                "tonic_output_mode",
+                str(getattr(self._default_cfg, "tonic_output_mode", TONIC_OUTPUT_MODE_PRESERVE_RAW)),
+                str,
+            )
+        )
+        idx_tonic_mode = self._tonic_output_mode_combo.findData(tonic_output_mode)
+        if idx_tonic_mode >= 0:
+            self._tonic_output_mode_combo.setCurrentIndex(idx_tonic_mode)
         self._baseline_subtract_before_fit_cb.setChecked(
             self._settings.value(
                 "baseline_subtract_before_fit",
@@ -6464,6 +6534,14 @@ class MainWindow(QMainWindow):
                 else "linear_hold"
             ),
         )
+        self._settings.setValue(
+            "tonic_output_mode",
+            str(
+                getattr(self, "_tonic_output_mode_combo", None).currentData()
+                if hasattr(self, "_tonic_output_mode_combo")
+                else TONIC_OUTPUT_MODE_PRESERVE_RAW
+            ),
+        )
         self._settings.setValue("sig_iso_render_mode", self._sig_iso_render_mode_combo.currentText())
         self._settings.setValue("dff_render_mode", self._dff_render_mode_combo.currentText())
         self._settings.setValue("stacked_render_mode", self._stacked_render_mode_combo.currentText())
@@ -6569,6 +6647,16 @@ class MainWindow(QMainWindow):
                 return normalize_dynamic_fit_mode(str(data))
         return normalize_dynamic_fit_mode(
             str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+        )
+
+    def _selected_tonic_output_mode(self) -> str:
+        combo = getattr(self, "_tonic_output_mode_combo", None)
+        if combo is not None:
+            data = combo.currentData()
+            if data:
+                return normalize_tonic_output_mode(str(data))
+        return normalize_tonic_output_mode(
+            str(getattr(self._default_cfg, "tonic_output_mode", TONIC_OUTPUT_MODE_PRESERVE_RAW))
         )
 
     def _selected_correction_tuning_fit_mode(self) -> str:
@@ -6750,6 +6838,11 @@ class MainWindow(QMainWindow):
             f"Mode: {mode_text}",
             f"Analysis: {analysis_scope}",
             (
+                f"Tonic Output Mode: {tonic_output_mode_label(self._selected_tonic_output_mode())}"
+                if mode_text in ("both", "tonic")
+                else "Tonic Output Mode: (inactive in phasic mode)"
+            ),
+            (
                 f"Dynamic Fit Mode: {dynamic_fit_mode_label(self._selected_dynamic_fit_mode())}"
                 if phasic_active
                 else "Dynamic Fit Mode: (inactive in tonic mode)"
@@ -6831,9 +6924,12 @@ class MainWindow(QMainWindow):
         """Enable/disable controls that are irrelevant in current mode/context."""
         mode_text = self._mode_combo.currentText()
         phasic_active = is_isosbestic_active(mode_text)
+        tonic_active = mode_text in ("both", "tonic")
         self._apply_dynamic_fit_mode_ui_state()
         if hasattr(self, "_dynamic_fit_mode_combo"):
             self._dynamic_fit_mode_combo.setEnabled(phasic_active)
+        if hasattr(self, "_tonic_output_mode_combo"):
+            self._tonic_output_mode_combo.setEnabled(tonic_active)
 
         # Phasic-only controls: render family selectors + event/features group.
         self._plotting_mode_combo.setEnabled(phasic_active)
@@ -7653,6 +7749,26 @@ class MainWindow(QMainWindow):
         )
         self._lowpass_hz_edit.textChanged.connect(self._on_config_changed)
         prep_layout.addRow("Lowpass Filter:", self._lowpass_hz_edit)
+
+        self._tonic_output_mode_combo = QComboBox()
+        self._tonic_output_mode_combo.setMinimumWidth(300)
+        self._tonic_output_mode_combo.setToolTip(_TONIC_OUTPUT_MODE_TOOLTIP)
+        for mode_name in get_allowed_tonic_output_modes_from_config():
+            self._tonic_output_mode_combo.addItem(
+                tonic_output_mode_label(mode_name),
+                mode_name,
+            )
+        default_tonic_mode = normalize_tonic_output_mode(
+            str(getattr(self._default_cfg, "tonic_output_mode", TONIC_OUTPUT_MODE_PRESERVE_RAW))
+        )
+        idx_tonic_mode = self._tonic_output_mode_combo.findData(default_tonic_mode)
+        if idx_tonic_mode < 0 and self._tonic_output_mode_combo.count() > 0:
+            idx_tonic_mode = 0
+        if idx_tonic_mode >= 0:
+            self._tonic_output_mode_combo.setCurrentIndex(idx_tonic_mode)
+        self._tonic_output_mode_combo.currentIndexChanged.connect(self._on_config_changed)
+        prep_layout.addRow("Tonic Output Mode:", self._tonic_output_mode_combo)
+
         self._apply_form_row_tooltips(prep_layout)
         content_layout.addWidget(self._adv_prep_group)
 
