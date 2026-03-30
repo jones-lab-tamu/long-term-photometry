@@ -25,7 +25,7 @@ python -m venv .venv
 python -m pip install --upgrade pip
 ```
 
-GUI install (recommended for students):
+GUI install (recommended):
 
 ```bash
 pip install -r requirements_gui.txt
@@ -61,7 +61,7 @@ Single-pass CLI (advanced/legacy usage):
 python analyze_photometry.py --input <INPUT_DIR> --out <OUTPUT_DIR> --config <CONFIG_YAML> --format <auto|rwd|npm> --mode <phasic|tonic>
 ```
 
-## Student Quickstart
+## Quickstart
 
 1. Install dependencies (GUI path above).
 2. Launch `python -m gui.app` from repo root.
@@ -90,8 +90,8 @@ Each run directory (under `--out-base`) includes artifacts such as:
 - `_analysis/tonic_out/...`
 - region-level plots/tables surfaced in the results workspace
 
-## Known Beta Constraints
+## Known Constraints
 
 - Correction retune/downstream retune require a successful completed run with phasic cache artifacts.
 - If custom config source is enabled, the path must point to a valid YAML before running.
-- Verification/legacy scripts under `tools/verification` and `tools/legacy` are not the primary student workflow.
+- Verification/legacy scripts under `tools/verification` and `tools/legacy` are not the primary workflow.
