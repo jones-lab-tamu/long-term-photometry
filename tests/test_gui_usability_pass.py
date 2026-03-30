@@ -64,6 +64,7 @@ def _make_completed_results_fixture(base_dir: str) -> str:
         _write_png(os.path.join(summary, "phasic_auc_timeseries.png"))
         _write_png(os.path.join(summary, "phasic_peak_rate_timeseries.png"))
         _write_png(os.path.join(day_plots, "phasic_sig_iso_day_000.png"), 600, 1500)
+        _write_png(os.path.join(day_plots, "phasic_dynamic_fit_day_000.png"), 600, 1500)
         _write_png(os.path.join(day_plots, "phasic_dFF_day_000.png"), 600, 1500)
         _write_png(os.path.join(day_plots, "phasic_stacked_day_000.png"), 600, 1500)
     return run_dir

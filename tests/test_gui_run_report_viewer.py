@@ -141,6 +141,7 @@ def test_run_report_viewer_tab_discovery_is_explicit(qapp):
         open(os.path.join(summary, "phasic_auc_timeseries.png"), "wb").close()
         open(os.path.join(summary, "phasic_peak_rate_timeseries.png"), "wb").close()
         open(os.path.join(day_plots, "phasic_sig_iso_day_000.png"), "wb").close()
+        open(os.path.join(day_plots, "phasic_dynamic_fit_day_000.png"), "wb").close()
         open(os.path.join(day_plots, "phasic_dFF_day_000.png"), "wb").close()
         open(os.path.join(day_plots, "phasic_stacked_day_000.png"), "wb").close()
 
@@ -160,6 +161,7 @@ def test_run_report_viewer_tab_discovery_is_explicit(qapp):
             "phasic_peak_rate_timeseries.png",
         ]
         assert [os.path.basename(p) for p in tab_map["Phasic Sig/Iso"]] == ["phasic_sig_iso_day_000.png"]
+        assert [os.path.basename(p) for p in tab_map["Dynamic Fit"]] == ["phasic_dynamic_fit_day_000.png"]
         assert [os.path.basename(p) for p in tab_map["Phasic dFF"]] == ["phasic_dFF_day_000.png"]
         assert [os.path.basename(p) for p in tab_map["Phasic Stacked"]] == ["phasic_stacked_day_000.png"]
         assert "Phasic Raw" not in tab_map

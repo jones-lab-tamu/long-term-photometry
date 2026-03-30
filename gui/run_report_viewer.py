@@ -29,6 +29,7 @@ from gui.run_report_parser import parse_run_report, get_preview_mode, resolve_re
 TAB_VERIFICATION = "Verification"
 TAB_TONIC = "Tonic"
 TAB_PHASIC_RAW = "Phasic Sig/Iso"
+TAB_PHASIC_DYNAMIC_FIT = "Dynamic Fit"
 TAB_PHASIC_DFF = "Phasic dFF"
 TAB_PHASIC_STACKED = "Phasic Stacked"
 TAB_PHASIC_SUMMARY = "Phasic Summary"
@@ -37,6 +38,7 @@ TAB_ORDER = [
     TAB_VERIFICATION,
     TAB_TONIC,
     TAB_PHASIC_RAW,
+    TAB_PHASIC_DYNAMIC_FIT,
     TAB_PHASIC_DFF,
     TAB_PHASIC_STACKED,
     TAB_PHASIC_SUMMARY,
@@ -276,6 +278,11 @@ class RunReportViewer(QWidget):
             r"^phasic_sig_iso_day_\d{3,}\.png$",
             ignore_case=False,
         )
+        phasic_dynamic_fit = self._discover_day_series_images(
+            day_plots_dir,
+            r"^phasic_dynamic_fit_day_\d{3,}\.png$",
+            ignore_case=False,
+        )
         phasic_dff = self._discover_day_series_images(
             day_plots_dir,
             r"^phasic_dff_day_\d{3,}\.png$",
@@ -292,6 +299,7 @@ class RunReportViewer(QWidget):
             TAB_VERIFICATION: verification,
             TAB_TONIC: tonic,
             TAB_PHASIC_RAW: phasic_raw,
+            TAB_PHASIC_DYNAMIC_FIT: phasic_dynamic_fit,
             TAB_PHASIC_DFF: phasic_dff,
             TAB_PHASIC_STACKED: phasic_stacked,
             TAB_PHASIC_SUMMARY: phasic_summary,

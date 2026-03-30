@@ -1482,6 +1482,7 @@ def main():
 
             s_dff = []
             s_sig = []
+            s_dyn = []
             s_stk = []
             if run_phasic_mode:
                 # D. Per-Day Plots (Sig/Iso, dFF, Stacked) via Unified Bundle Driver
@@ -1527,6 +1528,14 @@ def main():
                      if m:
                          days_sig_iso.add(m.group(1))
 
+                # Verify Dynamic Fit
+                days_dynamic_fit = set()
+                for f in glob.glob(os.path.join(d_dir, "phasic_dynamic_fit_day_*.png")):
+                    files_written.append(f"day_plots/{os.path.basename(f)}")
+                    m = re.match(r'phasic_dynamic_fit_day_(\d+)\.png', os.path.basename(f))
+                    if m:
+                        days_dynamic_fit.add(m.group(1))
+
                 # Stacked are already in d_dir, just verify
                 days_stacked = set()
                 for f in glob.glob(os.path.join(d_dir, "phasic_stacked_day_*.png")):
@@ -1538,16 +1547,20 @@ def main():
 
                 s_dff = sorted(list(days_dff))
                 s_sig = sorted(list(days_sig_iso))
+                s_dyn = sorted(list(days_dynamic_fit))
                 s_stk = sorted(list(days_stacked))
 
             t_bucket = time.perf_counter()
             manifest['deliverables'][roi]['days_dff'] = s_dff
             manifest['deliverables'][roi]['days_sig_iso'] = s_sig
+            manifest['deliverables'][roi]['days_dynamic_fit'] = s_dyn
             manifest['deliverables'][roi]['days_stacked'] = s_stk
 
             # Consistency check (restored)
             if run_phasic_mode and has_features and not (s_dff == s_sig == s_stk):
                  raise RuntimeError(f"Inconsistent day sets for ROI {roi}: DFF={s_dff}, SigIso={s_sig}, Stacked={s_stk}")
+            if run_phasic_mode and s_dyn and s_sig and s_dyn != s_sig:
+                 raise RuntimeError(f"Inconsistent day sets for ROI {roi}: DynamicFit={s_dyn}, SigIso={s_sig}")
 
             manifest['deliverables'][roi]['files'] = sorted(list(set(files_written)))
             if run_phasic_mode:

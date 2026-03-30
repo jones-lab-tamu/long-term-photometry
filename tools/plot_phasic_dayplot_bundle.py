@@ -7,9 +7,10 @@ Unified driver for Region-level phasic day plots (Part 2).
 Replaces the three separate subprocess calls with a single process that:
 1. Discovers and lays out chunk files once.
 2. Loads chunk CSVs into memory EXACTLY ONCE per ROI.
-3. Generates the three daily plot families from the cached data:
+3. Generates the daily plot families from the cached data:
    - phasic_dFF_day_{d:03d}.png
    - phasic_sig_iso_day_{d:03d}.png
+   - phasic_dynamic_fit_day_{d:03d}.png
    - phasic_stacked_day_{d:03d}.png
 
 This drastically reduces I/O by preventing 3x redundant reads of the heavy trace CSVs.
@@ -313,6 +314,17 @@ def _trace_domain(panel_t, xlim_600):
     return x0, x1
 
 
+def _cache_field_present_for_all_chunks(cache, roi: str, chunk_ids: list[int], field: str) -> bool:
+    roi_group = cache.get(f"roi/{roi}")
+    if roi_group is None:
+        return False
+    for chunk_id in chunk_ids:
+        grp = roi_group.get(f"chunk_{chunk_id}")
+        if grp is None or field not in grp:
+            return False
+    return True
+
+
 def _yrange_from_panel(panel, x0, x1):
     t = panel['t']
     sig = panel['sig']
@@ -334,6 +346,27 @@ def _yrange_from_panel(panel, x0, x1):
     return y0 - pad, y1 + pad
 
 
+def _yrange_from_dynamic_panel(panel, x0, x1):
+    t = panel['t']
+    sig = panel['sig_fit']
+    fit = panel['fit_ref']
+    base_mask = np.isfinite(t) & (t >= x0) & (t <= x1)
+    sig_vals = sig[base_mask & np.isfinite(sig)]
+    fit_vals = fit[base_mask & np.isfinite(fit)]
+    if sig_vals.size == 0 and fit_vals.size == 0:
+        return -1.0, 1.0
+    vals = np.concatenate([sig_vals, fit_vals])
+    y0 = float(np.min(vals))
+    y1 = float(np.max(vals))
+    if not np.isfinite(y0) or not np.isfinite(y1):
+        return -1.0, 1.0
+    if y1 <= y0:
+        delta = 1.0 if y0 == 0.0 else max(1e-3, 0.1 * abs(y0))
+        return y0 - delta, y1 + delta
+    pad = 0.05 * (y1 - y0)
+    return y0 - pad, y1 + pad
+
+
 def _sig_iso_panel_ranges_with_day_min_span(slot_map):
     local_ranges = {}
     local_spans = []
@@ -341,6 +374,49 @@ def _sig_iso_panel_ranges_with_day_min_span(slot_map):
     for slot, panel in slot_map.items():
         x0, x1 = _trace_domain(panel['t'], panel.get('xlim_600', False))
         y0, y1 = _yrange_from_panel(panel, x0, x1)
+        if not np.isfinite(y0) or not np.isfinite(y1) or y1 <= y0:
+            y0, y1 = -1.0, 1.0
+        span = y1 - y0
+        local_ranges[slot] = (float(y0), float(y1))
+        if np.isfinite(span) and span > 0:
+            local_spans.append(float(span))
+
+    if not local_ranges:
+        return {}
+
+    if local_spans:
+        day_min_span = float(np.median(np.asarray(local_spans, dtype=np.float64)))
+    else:
+        day_min_span = 2.0
+    if not np.isfinite(day_min_span) or day_min_span <= 0:
+        day_min_span = 2.0
+
+    final_ranges = {}
+    for slot, (y0, y1) in local_ranges.items():
+        span = y1 - y0
+        if not np.isfinite(span) or span <= 0:
+            center = 0.5 * (y0 + y1) if np.isfinite(y0) and np.isfinite(y1) else 0.0
+            half = 0.5 * day_min_span
+            final_ranges[slot] = (center - half, center + half)
+            continue
+
+        if span < day_min_span:
+            center = 0.5 * (y0 + y1)
+            half = 0.5 * day_min_span
+            final_ranges[slot] = (center - half, center + half)
+        else:
+            final_ranges[slot] = (y0, y1)
+
+    return final_ranges
+
+
+def _dynamic_fit_panel_ranges_with_day_min_span(slot_map):
+    local_ranges = {}
+    local_spans = []
+
+    for slot, panel in slot_map.items():
+        x0, x1 = _trace_domain(panel['t'], panel.get('xlim_600', False))
+        y0, y1 = _yrange_from_dynamic_panel(panel, x0, x1)
         if not np.isfinite(y0) or not np.isfinite(y1) or y1 <= y0:
             y0, y1 = -1.0, 1.0
         span = y1 - y0
@@ -468,6 +544,131 @@ def _render_sig_iso_panel_tile_lightweight(panel, layout, title_font, panel_y_ra
     draw = ImageDraw.Draw(tile)
     draw.text((plot_x0, max(1, int(0.03 * tile_h))), f"Chunk {panel['chunk_id']}", fill='black', font=title_font)
     return tile
+
+
+def _dynamic_fit_tile_layout(sph: int, dpi: int):
+    return _sig_iso_tile_layout(sph, dpi)
+
+
+def _render_dynamic_fit_panel_tile_lightweight(panel, layout, title_font, panel_y_range=None):
+    tile_h = layout["tile_h"]
+    tile_w = layout["tile_w"]
+    arr = np.full((tile_h, tile_w, 3), 255, dtype=np.uint8)
+
+    pad_x = max(8, int(0.02 * tile_w))
+    title_h = max(14, int(0.18 * tile_h))
+    plot_x0 = pad_x
+    plot_x1 = tile_w - pad_x - 1
+    plot_y0 = title_h + 2
+    plot_y1 = tile_h - max(6, int(0.08 * tile_h)) - 1
+    plot_w = max(2, plot_x1 - plot_x0 + 1)
+    plot_h = max(2, plot_y1 - plot_y0 + 1)
+
+    arr[plot_y0, plot_x0:plot_x1 + 1, :] = (220, 220, 220)
+    arr[plot_y1, plot_x0:plot_x1 + 1, :] = (220, 220, 220)
+    arr[plot_y0:plot_y1 + 1, plot_x0, :] = (220, 220, 220)
+    arr[plot_y0:plot_y1 + 1, plot_x1, :] = (220, 220, 220)
+
+    t = panel['t']
+    x0, x1 = _trace_domain(t, panel.get('xlim_600', False))
+    if panel_y_range is None:
+        y0, y1 = _yrange_from_dynamic_panel(panel, x0, x1)
+    else:
+        y0, y1 = panel_y_range
+    x_span = x1 - x0
+    y_span = y1 - y0
+    if x_span <= 0 or not np.isfinite(x_span):
+        x_span = 1.0
+    if y_span <= 0 or not np.isfinite(y_span):
+        y_span = 1.0
+
+    domain_mask = np.isfinite(t) & (t >= x0) & (t <= x1)
+    x_float = ((t[domain_mask] - x0) / x_span) * (plot_w - 1)
+    x_idx = np.rint(x_float).astype(np.int32)
+    x_idx = np.clip(x_idx, 0, plot_w - 1)
+
+    sig = panel['sig_fit'][domain_mask]
+    sig_mask = np.isfinite(sig)
+    if np.any(sig_mask):
+        y_float = ((sig[sig_mask] - y0) / y_span) * (plot_h - 1)
+        y_idx = (plot_h - 1) - np.rint(y_float).astype(np.int32)
+        y_idx = np.clip(y_idx, 0, plot_h - 1)
+        _paint_trace_minmax(
+            arr, x_idx[sig_mask], y_idx, plot_x0, plot_y0, plot_w, plot_h,
+            color=(0, 140, 0), stroke=1
+        )
+
+    fit = panel['fit_ref'][domain_mask]
+    fit_mask = np.isfinite(fit)
+    if np.any(fit_mask):
+        y_float = ((fit[fit_mask] - y0) / y_span) * (plot_h - 1)
+        y_idx = (plot_h - 1) - np.rint(y_float).astype(np.int32)
+        y_idx = np.clip(y_idx, 0, plot_h - 1)
+        _paint_trace_minmax(
+            arr, x_idx[fit_mask], y_idx, plot_x0, plot_y0, plot_w, plot_h,
+            color=(0, 0, 0), stroke=1
+        )
+
+    tile = Image.fromarray(arr, mode='RGB')
+    draw = ImageDraw.Draw(tile)
+    draw.text((plot_x0, max(1, int(0.03 * tile_h))), f"Chunk {panel['chunk_id']}", fill='black', font=title_font)
+    return tile
+
+
+def _build_blank_dynamic_fit_tile(layout):
+    return _build_blank_sig_iso_tile(layout)
+
+
+def _compose_dynamic_fit_day_tile_canvas(
+    day,
+    plot_roi,
+    sph,
+    slot_map,
+    layout,
+    panel_y_ranges=None,
+    timeline_anchor_label: str = "",
+):
+    tile_w = layout["tile_w"]
+    tile_h = layout["tile_h"]
+    col_gap = layout["col_gap"]
+    row_gap = layout["row_gap"]
+    left_label_w = layout["left_label_w"]
+    top_title_h = layout["top_title_h"]
+    right_pad = layout["right_pad"]
+    bottom_pad = layout["bottom_pad"]
+
+    canvas_w = left_label_w + (sph * tile_w) + ((sph - 1) * col_gap) + right_pad
+    canvas_h = top_title_h + (24 * tile_h) + (23 * row_gap) + bottom_pad
+    day_canvas = Image.new('RGB', (canvas_w, canvas_h), color='white')
+
+    blank_tile = _build_blank_dynamic_fit_tile(layout)
+    draw = ImageDraw.Draw(day_canvas)
+    title_font = _get_font(max(13, int(round(0.11 * layout["dpi"]))))
+    label_font = _get_font(max(11, int(round(0.09 * layout["dpi"]))))
+    chunk_font = _get_font(max(10, int(round(0.08 * layout["dpi"]))))
+    title_txt = f"Day {day} Dynamic Fit (Raw Signal + Fitted Baseline) - {plot_roi}"
+    if timeline_anchor_label:
+        title_txt += f" [{timeline_anchor_label}]"
+    draw.text((canvas_w // 2, max(6, top_title_h // 4)), title_txt, fill='black', anchor='ma', font=title_font)
+
+    for h in range(24):
+        y = top_title_h + h * (tile_h + row_gap)
+        draw.text((max(4, left_label_w // 2), y + (tile_h // 2)), f"H{h:02d}", fill='black', anchor='mm', font=label_font)
+        for c in range(sph):
+            x = left_label_w + c * (tile_w + col_gap)
+            panel = slot_map.get((h, c))
+            if panel is None:
+                day_canvas.paste(blank_tile, (x, y))
+            else:
+                day_canvas.paste(
+                    _render_dynamic_fit_panel_tile_lightweight(
+                        panel, layout, chunk_font,
+                        panel_y_range=None if panel_y_ranges is None else panel_y_ranges.get((h, c))
+                    ),
+                    (x, y)
+                )
+
+    return day_canvas
 
 
 def _build_blank_sig_iso_tile(layout):
@@ -1009,6 +1210,13 @@ def main():
     # 3. Resolve ROI via cache
     plot_roi = resolve_cache_roi(cache, args.roi)
     print(f"Plots using ROI: {plot_roi}")
+    write_dynamic_fit_grid = bool(args.write_sig_iso_grid)
+    if write_dynamic_fit_grid and not _cache_field_present_for_all_chunks(cache, plot_roi, cids, 'fit_ref'):
+        write_dynamic_fit_grid = False
+        print(
+            "NOTICE: fit_ref missing in cache for one or more chunks; skipping Dynamic Fit dayplots.",
+            flush=True,
+        )
         
     # 3. Features Map (Conditional)
     if needs_peak_verification:
@@ -1049,6 +1257,9 @@ def main():
         # Fallback minimal
         fields_to_load = ['time_sec']
 
+    if write_dynamic_fit_grid and 'fit_ref' not in fields_to_load:
+        fields_to_load.append('fit_ref')
+
     detection_field = None
     if needs_peak_verification:
         signal_cfg = getattr(config, 'event_signal', 'dff')
@@ -1076,6 +1287,7 @@ def main():
                 'x': arr_map.get('time_sec'),
                 'y_sig': arr_map.get('sig_raw'),
                 'y_uv': arr_map.get('uv_raw'),
+                'y_fit': arr_map.get('fit_ref'),
                 'y_dff': arr_map.get('dff'),
                 'y_detect': arr_map.get(detection_field) if detection_field else None,
                 # N must be derived from the actual length of an array we got
@@ -1194,6 +1406,10 @@ def main():
             )
             c_rec['sig'] = sig_centered
             c_rec['uv'] = uv_centered
+            c_rec['xlim_600'] = bool(np.max(t_norm) > 550)
+        if write_dynamic_fit_grid:
+            c_rec['sig_fit'] = rec['y_sig']
+            c_rec['fit_ref'] = rec['y_fit']
             c_rec['xlim_600'] = bool(np.max(t_norm) > 550)
         if needs_dff_trace:
             c_rec['dff'] = rec['y_dff']
@@ -1427,7 +1643,89 @@ def main():
                 )
 
     # ------------------------------------------------------------------
-    # 4. Render Family 3: Stacked Smoothed
+    # ------------------------------------------------------------------
+    # 4. Render Family 3: Dynamic Fit Grid
+    # ------------------------------------------------------------------
+    if write_dynamic_fit_grid:
+        if args.sig_iso_render_mode == 'full':
+            fig_dyn, axes_dyn = init_grid_figure(sph, top=0.97)
+            for d in unique_days:
+                slot_map = day_slot_maps.get(d, {})
+                if not slot_map:
+                    continue
+                panel_y_ranges = _dynamic_fit_panel_ranges_with_day_min_span(slot_map)
+
+                fig_dyn.suptitle(
+                    f"Day {d} Dynamic Fit (Raw Signal + Fitted Baseline) - {plot_roi} [{timeline_anchor_label}]",
+                    fontsize=16,
+                )
+
+                for h in range(24):
+                    for c in range(sph):
+                        ax = axes_dyn[h, c]
+                        p = slot_map.get((h, c))
+                        ax.cla()
+                        if p is None:
+                            ax.axis('off')
+                            continue
+                        ax.axis('on')
+                        panel_y = panel_y_ranges.get((h, c))
+                        if panel_y is None:
+                            x0, x1 = _trace_domain(p['t'], p.get('xlim_600', False))
+                            panel_y = _yrange_from_dynamic_panel(p, x0, x1)
+                        ax.set_ylim(panel_y[0], panel_y[1])
+                        ax.plot(p['t'], p['sig_fit'], 'g', lw=0.5, label='Signal Raw')
+                        ax.plot(p['t'], p['fit_ref'], 'k', lw=0.5, label='Fitted Baseline')
+                        if p.get('xlim_600', False):
+                            ax.set_xlim(0, 600)
+                        if c == 0:
+                            ax.set_ylabel(f"H{h:02d}", rotation=0, labelpad=20)
+
+                out_path = os.path.join(args.output_dir, f"phasic_dynamic_fit_day_{d:03d}.png")
+                print(
+                    f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py "
+                    f"step=plotting family=dynamic_fit_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
+                    flush=True
+                )
+                save_png_fast(fig_dyn, out_path, args.dpi)
+                print(
+                    f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py "
+                    f"step=figure_save family=dynamic_fit_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
+                    flush=True
+                )
+            plt.close(fig_dyn)
+        else:
+            dyn_layout = _dynamic_fit_tile_layout(sph, args.dpi)
+            for d in unique_days:
+                slot_map = day_slot_maps.get(d, {})
+                if not slot_map:
+                    continue
+                panel_y_ranges = _dynamic_fit_panel_ranges_with_day_min_span(slot_map)
+
+                day_canvas = _compose_dynamic_fit_day_tile_canvas(
+                    day=d,
+                    plot_roi=plot_roi,
+                    sph=sph,
+                    slot_map=slot_map,
+                    layout=dyn_layout,
+                    panel_y_ranges=panel_y_ranges,
+                    timeline_anchor_label=timeline_anchor_label,
+                )
+                out_path = os.path.join(args.output_dir, f"phasic_dynamic_fit_day_{d:03d}.png")
+                print(
+                    f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py "
+                    f"step=plotting family=dynamic_fit_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
+                    flush=True
+                )
+                day_canvas.save(out_path, compress_level=1)
+                print(
+                    f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py "
+                    f"step=figure_save family=dynamic_fit_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
+                    flush=True
+                )
+
+    # ------------------------------------------------------------------
+    # 5. Render Family 4: Stacked Smoothed
     # ------------------------------------------------------------------
     if args.write_stacked:
         # Pre-smooth the dFF for all chunks

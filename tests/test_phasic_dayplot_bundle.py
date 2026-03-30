@@ -219,8 +219,10 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         cid=0,
         include_dff=False,
         include_sig=True,
+        include_fit_ref=True,
         include_delta_f=False,
         dff_data=None,
+        fit_ref_data=None,
         delta_f_data=None,
         sig_data=None,
         uv_data=None,
@@ -261,6 +263,12 @@ class TestPhasicDayplotBundle(unittest.TestCase):
                 if 'uv_raw' in c_grp: del c_grp['uv_raw']
                 c_grp.create_dataset('sig_raw', data=np.sin(t) if sig_data is None else np.asarray(sig_data))
                 c_grp.create_dataset('uv_raw', data=np.cos(t) if uv_data is None else np.asarray(uv_data))
+                if include_fit_ref:
+                    if 'fit_ref' in c_grp: del c_grp['fit_ref']
+                    c_grp.create_dataset(
+                        'fit_ref',
+                        data=(0.8 * np.sin(t) + 0.1) if fit_ref_data is None else np.asarray(fit_ref_data),
+                    )
                 
             if include_dff:
                 if 'dff' in c_grp: del c_grp['dff']
@@ -287,6 +295,7 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
             bundle.main() # Should not raise
         self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_sig_iso_day_000.png')))
+        self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_dynamic_fit_day_000.png')))
 
     def test_stacked_only_mode_no_features(self):
         # B. stacked-only mode: no features.csv, dff necessary but feature shouldn't be read 
@@ -341,9 +350,11 @@ class TestPhasicDayplotBundle(unittest.TestCase):
 
         dff_days = _days('phasic_dFF_day_')
         sig_days = _days('phasic_sig_iso_day_')
+        dyn_days = _days('phasic_dynamic_fit_day_')
         stacked_days = _days('phasic_stacked_day_')
 
         self.assertEqual(dff_days, sig_days)
+        self.assertEqual(sig_days, dyn_days)
         self.assertEqual(sig_days, stacked_days)
         self.assertIn(1, stacked_days)
 
@@ -441,7 +452,7 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         
         cases = [
             ("sig_iso_only", ['--write-sig-iso-grid', '--no-write-dff-grid', '--no-write-stacked'], 
-             ['time_sec', 'sig_raw', 'uv_raw']),
+             ['time_sec', 'sig_raw', 'uv_raw', 'fit_ref']),
              
             ("stacked_only", ['--no-write-sig-iso-grid', '--no-write-dff-grid', '--write-stacked'], 
              ['time_sec', 'dff']),
@@ -450,7 +461,7 @@ class TestPhasicDayplotBundle(unittest.TestCase):
              ['time_sec', 'dff']),
              
             ("full_mode", ['--write-sig-iso-grid', '--write-dff-grid', '--write-stacked'], 
-             ['time_sec', 'sig_raw', 'uv_raw', 'dff'])
+             ['time_sec', 'sig_raw', 'uv_raw', 'dff', 'fit_ref'])
         ]
         
         with patch('tools.plot_phasic_dayplot_bundle.resolve_roi', return_value='Region0'):

@@ -212,6 +212,7 @@ def _add_results_workspace_artifacts(run_dir) -> None:
         _write_png(os.path.join(summary_dir, "phasic_peak_rate_timeseries.png"), 900, 420)
         _write_png(os.path.join(day_dir, "phasic_sig_iso_day_001.png"), 700, 1800)
         _write_png(os.path.join(day_dir, "phasic_sig_iso_day_002.png"), 700, 1800)
+        _write_png(os.path.join(day_dir, "phasic_dynamic_fit_day_001.png"), 700, 1800)
         _write_png(os.path.join(day_dir, "phasic_dff_day_001.png"), 700, 1800)
         _write_png(os.path.join(day_dir, "phasic_stacked_day_001.png"), 700, 1800)
 
