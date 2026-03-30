@@ -17,6 +17,14 @@ Photometry Pipeline is a GUI-first wrapper and analysis stack for long-session f
 
 ## Installation
 
+Clone the repo (in e.g. Documents)
+
+```bash
+cd documents
+git clone https://github.com/jones-lab-tamu/long-term-photometry.git
+cd long-term-photometry
+```
+
 From repo root:
 
 ```bash
