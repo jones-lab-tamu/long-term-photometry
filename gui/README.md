@@ -1,17 +1,20 @@
 # GUI for Photometry Pipeline Deliverables
 
-A PySide6 thin wrapper around `tools/run_full_pipeline_deliverables.py`.
-The GUI collects run parameters, executes the pipeline via QProcess,
-streams logs live, supports cancellation, and renders results from
-`MANIFEST.json`.
+PySide6 desktop frontend for launching and reviewing full photometry runs.
+It wraps `tools/run_full_pipeline_deliverables.py`, streams logs, supports cancellation, and loads completed results workspaces.
 
 ## Install
 
+From repo root:
+
 ```bash
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
 pip install -r requirements_gui.txt
 ```
 
-This installs PySide6 (optional dependency, not required for CLI usage).
+`requirements_gui.txt` includes base runtime requirements plus PySide6.
 
 ## Run
 
@@ -19,19 +22,16 @@ This installs PySide6 (optional dependency, not required for CLI usage).
 python -m gui.app
 ```
 
-## What the GUI does
+## Core GUI Workflow
 
-1. **Collects inputs** -- input directory, output directory, config YAML, format, sessions/hour, etc.
-2. **Validate Only** -- runs `--validate-only` to check inputs without creating output.
-3. **Run Pipeline** -- starts the full deliverables pipeline, streams stdout/stderr live.
-4. **Cancel** -- terminates the running pipeline (including child processes on Windows).
-5. **Open Results...** -- loads a previously-completed output directory via MANIFEST.json.
-6. **Results Browser** -- on success, loads `MANIFEST.json` and shows:
-   - Summary tab with run metadata
-   - Per-ROI tabs with clickable image thumbnails and CSV data tables
+1. Set input directory, output base directory, and config source.
+2. Validate run settings.
+3. Launch run.
+4. Review outputs in results tabs (Verification, Tonic, Phasic Sig/Iso, Dynamic Fit, Phasic dFF, Phasic Stacked).
+5. Optionally use post-run tuning panels.
 
 ## Notes
 
-- The GUI calls **only** `tools/run_full_pipeline_deliverables.py`.
-- Results are rendered **only** from `MANIFEST.json`, no filename guessing.
-- PySide6 is an optional dependency; CLI users do not need it.
+- Primary backend command is `tools/run_full_pipeline_deliverables.py`.
+- Completed-run rendering is driven by run artifacts (`MANIFEST.json`, `run_report.json`, region folders).
+- CLI-only users can install with `requirements.txt` instead.
