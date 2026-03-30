@@ -65,6 +65,7 @@ def _resolve_dynamic_fit_settings(analysis_out: str) -> tuple[str, bool]:
             "rolling_filtered_to_filtered",
             "global_linear_regression",
             "robust_global_event_reject",
+            "adaptive_event_gated_regression",
         }:
             mode = "rolling_filtered_to_raw"
         baseline_subtract = bool(data.get("baseline_subtract_before_fit", False))
@@ -76,6 +77,8 @@ def _resolve_dynamic_fit_settings(analysis_out: str) -> tuple[str, bool]:
 
 def _dynamic_fit_mode_label(mode_raw: str) -> str:
     mode = _normalize_dynamic_fit_mode(mode_raw)
+    if mode == "adaptive_event_gated_regression":
+        return "Adaptive event-gated regression"
     if mode == "robust_global_event_reject":
         return "Robust global fit + event rejection"
     if mode == "global_linear_regression":

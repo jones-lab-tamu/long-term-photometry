@@ -82,7 +82,7 @@ EXPLICITLY_UNSUPPORTED_KEYS = {
 
 _OVERRIDE_VALUE_CASTERS = {
     "dynamic_fit_mode": str,
-    "baseline_subtract_before_fit": bool,
+    "baseline_subtract_before_fit": str,
     "window_sec": float,
     "step_sec": float,
     "min_valid_windows": int,
@@ -120,6 +120,38 @@ _OVERRIDE_VALUE_CASTERS = {
 _CORRECTION_INSPECTION_FIGSIZE = (14.5, 6.0)
 _CORRECTION_INSPECTION_DPI = 200
 
+_BOOL_TRUE_TOKENS = {"1", "true", "yes", "on"}
+_BOOL_FALSE_TOKENS = {"0", "false", "no", "off"}
+
+
+def _parse_bool_override(value: Any, *, key: str = "value") -> bool:
+    """Parse explicit bool spellings and reject ambiguous values."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+
+    text = str(value).strip().lower()
+    if text in _BOOL_TRUE_TOKENS:
+        return True
+    if text in _BOOL_FALSE_TOKENS:
+        return False
+    accepted = ", ".join(
+        sorted(_BOOL_FALSE_TOKENS | _BOOL_TRUE_TOKENS, key=lambda x: (len(x), x))
+    )
+    raise ValueError(
+        f"Invalid boolean override value for '{key}': {value!r}. "
+        f"Accepted values: {accepted}."
+    )
+
+
+_OVERRIDE_VALUE_CASTERS["baseline_subtract_before_fit"] = (
+    lambda value: _parse_bool_override(value, key="baseline_subtract_before_fit")
+)
+
 
 def _true_spans(mask: np.ndarray) -> list[tuple[int, int]]:
     """Return inclusive index spans where mask is True."""
@@ -154,7 +186,9 @@ def parse_key_value_overrides(items: Iterable[str]) -> Dict[str, Any]:
         try:
             parsed[key] = caster(value)
         except Exception as exc:
-            raise ValueError(f"Invalid value for override '{key}': {value}") from exc
+            raise ValueError(
+                f"Invalid value for override '{key}': {value}. {exc}"
+            ) from exc
     return parsed
 
 

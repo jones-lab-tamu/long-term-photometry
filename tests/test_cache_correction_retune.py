@@ -13,7 +13,10 @@ from photometry_pipeline.config import Config
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.io.hdf5_cache import Hdf5TraceCacheWriter
 from photometry_pipeline.pipeline import Pipeline
-from photometry_pipeline.tuning.cache_correction_retune import run_cache_correction_retune
+from photometry_pipeline.tuning.cache_correction_retune import (
+    parse_key_value_overrides,
+    run_cache_correction_retune,
+)
 
 
 def _read_png_size(path: str) -> tuple[int, int]:
@@ -157,6 +160,34 @@ def _make_authoritative_completed_run_fixture(tmp_path, baseline_method: str):
         encoding="utf-8",
     )
     return run_dir, cfg
+
+
+@pytest.mark.parametrize(
+    "raw_value, expected",
+    [
+        ("true", True),
+        ("false", False),
+        ("1", True),
+        ("0", False),
+        ("yes", True),
+        ("no", False),
+        ("on", True),
+        ("off", False),
+        ("TRUE", True),
+        ("False", False),
+    ],
+)
+def test_parse_key_value_overrides_bool_truth_table(raw_value, expected):
+    parsed = parse_key_value_overrides(
+        [f"baseline_subtract_before_fit={raw_value}"]
+    )
+    assert parsed["baseline_subtract_before_fit"] is expected
+
+
+@pytest.mark.parametrize("raw_value", ["maybe", "truthy", "FALSEY", "2", ""])
+def test_parse_key_value_overrides_invalid_bool_fails_cleanly(raw_value):
+    with pytest.raises(ValueError, match="Invalid boolean override value"):
+        parse_key_value_overrides([f"baseline_subtract_before_fit={raw_value}"])
 
 
 def test_correction_retune_success_and_output_isolation(tmp_path):

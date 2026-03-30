@@ -4927,6 +4927,156 @@ class MainWindow(QMainWindow):
         _sync_combo(self._event_auc_combo, defaults["event_auc_baseline"])
         self._update_adv_ev_visibility()
 
+    def _sync_main_advanced_controls_from_active_baseline(self) -> None:
+        """Sync main Advanced controls to the currently active baseline config source."""
+        base_cfg = self._active_baseline_config()
+
+        def _sync_combo_by_data_or_text(combo: QComboBox, target_value: str) -> None:
+            idx = combo.findData(target_value)
+            if idx < 0:
+                idx = combo.findText(str(target_value))
+            if idx < 0 or combo.currentIndex() == idx:
+                return
+            blocked = combo.blockSignals(True)
+            combo.setCurrentIndex(idx)
+            combo.blockSignals(blocked)
+
+        def _sync_checkbox(box: QCheckBox, target_value: bool) -> None:
+            target = bool(target_value)
+            if box.isChecked() == target:
+                return
+            blocked = box.blockSignals(True)
+            box.setChecked(target)
+            box.blockSignals(blocked)
+
+        def _sync_spin_int(spin: QSpinBox, target_value: int) -> None:
+            target = int(target_value)
+            if spin.value() == target:
+                return
+            blocked = spin.blockSignals(True)
+            spin.setValue(target)
+            spin.blockSignals(blocked)
+
+        def _sync_spin_float(spin: QDoubleSpinBox, target_value: float) -> None:
+            target = float(target_value)
+            if float(spin.value()) == target:
+                return
+            blocked = spin.blockSignals(True)
+            spin.setValue(target)
+            spin.blockSignals(blocked)
+
+        def _sync_line_float(edit: QLineEdit, target_value: float) -> None:
+            current_text = edit.text().strip()
+            try:
+                if current_text and float(current_text) == float(target_value):
+                    return
+            except ValueError:
+                pass
+            target_text = str(float(target_value))
+            if current_text == target_text:
+                return
+            blocked = edit.blockSignals(True)
+            edit.setText(target_text)
+            edit.blockSignals(blocked)
+
+        _sync_combo_by_data_or_text(
+            self._dynamic_fit_mode_combo,
+            normalize_dynamic_fit_mode(
+                str(getattr(base_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+            ),
+        )
+        _sync_checkbox(
+            self._baseline_subtract_before_fit_cb,
+            bool(getattr(base_cfg, "baseline_subtract_before_fit", False)),
+        )
+        _sync_line_float(self._window_sec_edit, float(getattr(base_cfg, "window_sec", 60.0)))
+        _sync_spin_int(
+            self._min_samples_per_window_spin,
+            max(1, int(getattr(base_cfg, "min_samples_per_window", 1))),
+        )
+        _sync_spin_int(
+            self._robust_event_reject_max_iters_spin,
+            int(getattr(base_cfg, "robust_event_reject_max_iters", 3)),
+        )
+        _sync_spin_float(
+            self._robust_event_reject_residual_z_spin,
+            float(getattr(base_cfg, "robust_event_reject_residual_z_thresh", 3.5)),
+        )
+        _sync_spin_float(
+            self._robust_event_reject_local_var_window_spin,
+            float(getattr(base_cfg, "robust_event_reject_local_var_window_sec", 10.0) or 10.0),
+        )
+        robust_ratio = getattr(base_cfg, "robust_event_reject_local_var_ratio_thresh", None)
+        _sync_checkbox(
+            self._robust_event_reject_local_var_ratio_enable_cb,
+            bool(robust_ratio is not None),
+        )
+        _sync_spin_float(
+            self._robust_event_reject_local_var_ratio_spin,
+            float(robust_ratio if robust_ratio is not None else 3.0),
+        )
+        _sync_spin_float(
+            self._robust_event_reject_min_keep_fraction_spin,
+            float(getattr(base_cfg, "robust_event_reject_min_keep_fraction", 0.5)),
+        )
+        _sync_spin_float(
+            self._adaptive_event_gate_residual_z_spin,
+            float(getattr(base_cfg, "adaptive_event_gate_residual_z_thresh", 3.5)),
+        )
+        _sync_spin_float(
+            self._adaptive_event_gate_local_var_window_spin,
+            float(getattr(base_cfg, "adaptive_event_gate_local_var_window_sec", 10.0) or 10.0),
+        )
+        adaptive_ratio = getattr(base_cfg, "adaptive_event_gate_local_var_ratio_thresh", None)
+        _sync_checkbox(
+            self._adaptive_event_gate_local_var_ratio_enable_cb,
+            bool(adaptive_ratio is not None),
+        )
+        _sync_spin_float(
+            self._adaptive_event_gate_local_var_ratio_spin,
+            float(adaptive_ratio if adaptive_ratio is not None else 3.0),
+        )
+        _sync_spin_float(
+            self._adaptive_event_gate_smooth_window_spin,
+            float(getattr(base_cfg, "adaptive_event_gate_smooth_window_sec", 60.0)),
+        )
+        _sync_spin_float(
+            self._adaptive_event_gate_min_trust_fraction_spin,
+            float(getattr(base_cfg, "adaptive_event_gate_min_trust_fraction", 0.5)),
+        )
+        _sync_combo_by_data_or_text(
+            self._adaptive_event_gate_freeze_interp_combo,
+            str(getattr(base_cfg, "adaptive_event_gate_freeze_interp_method", "linear_hold"))
+            .strip()
+            or "linear_hold",
+        )
+        _sync_line_float(self._lowpass_hz_edit, float(getattr(base_cfg, "lowpass_hz", 1.0)))
+        _sync_combo_by_data_or_text(self._baseline_method_combo, str(base_cfg.baseline_method))
+        _sync_line_float(
+            self._baseline_percentile_edit,
+            float(getattr(base_cfg, "baseline_percentile", 10.0)),
+        )
+        _sync_line_float(
+            self._f0_min_value_edit,
+            float(getattr(base_cfg, "f0_min_value", 1e-9)),
+        )
+        _sync_combo_by_data_or_text(
+            self._tonic_output_mode_combo,
+            normalize_tonic_output_mode(
+                str(getattr(base_cfg, "tonic_output_mode", TONIC_OUTPUT_MODE_PRESERVE_RAW))
+            ),
+        )
+        _sync_combo_by_data_or_text(
+            self._tonic_timeline_mode_combo,
+            normalize_tonic_timeline_mode(
+                str(getattr(base_cfg, "tonic_timeline_mode", TONIC_TIMELINE_MODE_REAL_ELAPSED))
+            ),
+        )
+
+        self._sync_event_feature_controls_from_active_baseline()
+        self._on_dynamic_fit_mode_changed()
+        self._update_adv_prep_visibility()
+
     def _update_config_source_ui(self) -> None:
         """Enable custom config widgets only when advanced custom mode is active."""
         use_custom = self._is_custom_config_enabled()
@@ -4944,7 +5094,14 @@ class MainWindow(QMainWindow):
                 f"Active baseline source: lab standard default ({self._lab_default_config_path})"
             )
             self._active_config_source_label.setStyleSheet("font-size: 11px; color: #2d7d2d;")
-        self._sync_event_feature_controls_from_active_baseline()
+        should_sync_main_advanced = True
+        if use_custom:
+            cfg = self._config_path.text().strip()
+            should_sync_main_advanced = bool(cfg and os.path.isfile(cfg))
+        if should_sync_main_advanced:
+            self._sync_main_advanced_controls_from_active_baseline()
+        if hasattr(self, "_effective_summary_label"):
+            self._refresh_effective_run_summary()
 
     def _build_run_spec(self, validate_only: bool = False) -> RunSpec:
         """Create a RunSpec from current widget values for a real run.
@@ -5053,30 +5210,31 @@ class MainWindow(QMainWindow):
                 user_set.append("include_roi_ids")
 
         # --- Config Overrides ---
+        base_cfg = self._active_baseline_config()
         config_overrides = {}
         if is_isosbestic_active(mode_text):
             fit_mode = self._selected_dynamic_fit_mode()
             default_fit_mode = normalize_dynamic_fit_mode(
-                str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+                str(getattr(base_cfg, "dynamic_fit_mode", "rolling_local_regression"))
             )
             if fit_mode != default_fit_mode:
                 config_overrides["dynamic_fit_mode"] = fit_mode
 
             default_dict = {
-                "window_sec": self._default_cfg.window_sec,
-                "step_sec": self._default_cfg.step_sec,
-                "min_valid_windows": self._default_cfg.min_valid_windows,
-                "r_low": self._default_cfg.r_low,
-                "r_high": self._default_cfg.r_high,
-                "g_min": self._default_cfg.g_min,
+                "window_sec": base_cfg.window_sec,
+                "step_sec": base_cfg.step_sec,
+                "min_valid_windows": base_cfg.min_valid_windows,
+                "r_low": base_cfg.r_low,
+                "r_high": base_cfg.r_high,
+                "g_min": base_cfg.g_min,
                 # Enforce dynamic minimum mapping matching GUI constraint default
-                "min_samples_per_window": max(1, self._default_cfg.min_samples_per_window),
+                "min_samples_per_window": max(1, base_cfg.min_samples_per_window),
             }
             if is_rolling_dynamic_fit_mode(fit_mode):
                 overrides, _ = parse_and_validate_isosbestic_knobs(
                     self._window_sec_edit.text(),
                     "",
-                    int(self._default_cfg.min_valid_windows),
+                    int(base_cfg.min_valid_windows),
                     "",
                     "",
                     "",
@@ -5091,26 +5249,26 @@ class MainWindow(QMainWindow):
                     and self._baseline_subtract_before_fit_cb.isChecked()
                 )
                 default_baseline_subtract = bool(
-                    getattr(self._default_cfg, "baseline_subtract_before_fit", False)
+                    getattr(base_cfg, "baseline_subtract_before_fit", False)
                 )
                 if baseline_subtract != default_baseline_subtract:
                     config_overrides["baseline_subtract_before_fit"] = baseline_subtract
             elif is_robust_event_reject_mode(fit_mode):
                 robust_defaults = {
                     "robust_event_reject_max_iters": int(
-                        getattr(self._default_cfg, "robust_event_reject_max_iters", 3)
+                        getattr(base_cfg, "robust_event_reject_max_iters", 3)
                     ),
                     "robust_event_reject_residual_z_thresh": float(
-                        getattr(self._default_cfg, "robust_event_reject_residual_z_thresh", 3.5)
+                        getattr(base_cfg, "robust_event_reject_residual_z_thresh", 3.5)
                     ),
                     "robust_event_reject_local_var_window_sec": float(
-                        getattr(self._default_cfg, "robust_event_reject_local_var_window_sec", 10.0) or 10.0
+                        getattr(base_cfg, "robust_event_reject_local_var_window_sec", 10.0) or 10.0
                     ),
                     "robust_event_reject_local_var_ratio_thresh": getattr(
-                        self._default_cfg, "robust_event_reject_local_var_ratio_thresh", None
+                        base_cfg, "robust_event_reject_local_var_ratio_thresh", None
                     ),
                     "robust_event_reject_min_keep_fraction": float(
-                        getattr(self._default_cfg, "robust_event_reject_min_keep_fraction", 0.5)
+                        getattr(base_cfg, "robust_event_reject_min_keep_fraction", 0.5)
                     ),
                 }
                 robust_overrides, err = parse_and_validate_robust_event_reject_knobs(
@@ -5129,22 +5287,22 @@ class MainWindow(QMainWindow):
             elif is_adaptive_event_gated_mode(fit_mode):
                 adaptive_defaults = {
                     "adaptive_event_gate_residual_z_thresh": float(
-                        getattr(self._default_cfg, "adaptive_event_gate_residual_z_thresh", 3.5)
+                        getattr(base_cfg, "adaptive_event_gate_residual_z_thresh", 3.5)
                     ),
                     "adaptive_event_gate_local_var_window_sec": float(
-                        getattr(self._default_cfg, "adaptive_event_gate_local_var_window_sec", 10.0) or 10.0
+                        getattr(base_cfg, "adaptive_event_gate_local_var_window_sec", 10.0) or 10.0
                     ),
                     "adaptive_event_gate_local_var_ratio_thresh": getattr(
-                        self._default_cfg, "adaptive_event_gate_local_var_ratio_thresh", None
+                        base_cfg, "adaptive_event_gate_local_var_ratio_thresh", None
                     ),
                     "adaptive_event_gate_smooth_window_sec": float(
-                        getattr(self._default_cfg, "adaptive_event_gate_smooth_window_sec", 60.0)
+                        getattr(base_cfg, "adaptive_event_gate_smooth_window_sec", 60.0)
                     ),
                     "adaptive_event_gate_min_trust_fraction": float(
-                        getattr(self._default_cfg, "adaptive_event_gate_min_trust_fraction", 0.5)
+                        getattr(base_cfg, "adaptive_event_gate_min_trust_fraction", 0.5)
                     ),
                     "adaptive_event_gate_freeze_interp_method": str(
-                        getattr(self._default_cfg, "adaptive_event_gate_freeze_interp_method", "linear_hold")
+                        getattr(base_cfg, "adaptive_event_gate_freeze_interp_method", "linear_hold")
                     ).strip()
                     or "linear_hold",
                 }
@@ -5173,11 +5331,11 @@ class MainWindow(QMainWindow):
             str(
                 getattr(self, "_tonic_output_mode_combo", None).currentData()
                 if hasattr(self, "_tonic_output_mode_combo")
-                else getattr(self._default_cfg, "tonic_output_mode", TONIC_OUTPUT_MODE_PRESERVE_RAW)
+                else getattr(base_cfg, "tonic_output_mode", TONIC_OUTPUT_MODE_PRESERVE_RAW)
             )
         )
         default_tonic_output_mode = normalize_tonic_output_mode(
-            str(getattr(self._default_cfg, "tonic_output_mode", TONIC_OUTPUT_MODE_PRESERVE_RAW))
+            str(getattr(base_cfg, "tonic_output_mode", TONIC_OUTPUT_MODE_PRESERVE_RAW))
         )
         if selected_tonic_output_mode != default_tonic_output_mode:
             config_overrides["tonic_output_mode"] = selected_tonic_output_mode
@@ -5186,21 +5344,21 @@ class MainWindow(QMainWindow):
             str(
                 getattr(self, "_tonic_timeline_mode_combo", None).currentData()
                 if hasattr(self, "_tonic_timeline_mode_combo")
-                else getattr(self._default_cfg, "tonic_timeline_mode", TONIC_TIMELINE_MODE_REAL_ELAPSED)
+                else getattr(base_cfg, "tonic_timeline_mode", TONIC_TIMELINE_MODE_REAL_ELAPSED)
             )
         )
         default_tonic_timeline_mode = normalize_tonic_timeline_mode(
-            str(getattr(self._default_cfg, "tonic_timeline_mode", TONIC_TIMELINE_MODE_REAL_ELAPSED))
+            str(getattr(base_cfg, "tonic_timeline_mode", TONIC_TIMELINE_MODE_REAL_ELAPSED))
         )
         if selected_tonic_timeline_mode != default_tonic_timeline_mode:
             config_overrides["tonic_timeline_mode"] = selected_tonic_timeline_mode
 
         # Preprocessing + Baseline overrides
         default_prep_dict = {
-            "lowpass_hz": self._default_cfg.lowpass_hz,
-            "baseline_method": self._default_cfg.baseline_method,
-            "baseline_percentile": self._default_cfg.baseline_percentile,
-            "f0_min_value": self._default_cfg.f0_min_value,
+            "lowpass_hz": base_cfg.lowpass_hz,
+            "baseline_method": base_cfg.baseline_method,
+            "baseline_percentile": base_cfg.baseline_percentile,
+            "f0_min_value": base_cfg.f0_min_value,
         }
         prep_overrides, _ = parse_and_validate_preproc_baseline_knobs(
             self._lowpass_hz_edit.text(),
@@ -5400,23 +5558,25 @@ class MainWindow(QMainWindow):
         if not fmt or fmt not in FORMAT_CHOICES:
             return f"Invalid Format: '{fmt}'. Must be one of {FORMAT_CHOICES}."
 
+        base_cfg = self._active_baseline_config()
+
         if is_isosbestic_active(self._mode_combo.currentText()):
             fit_mode = self._selected_dynamic_fit_mode()
             if is_rolling_dynamic_fit_mode(fit_mode):
                 default_dict = {
-                    "window_sec": self._default_cfg.window_sec,
-                    "step_sec": self._default_cfg.step_sec,
-                    "min_valid_windows": self._default_cfg.min_valid_windows,
-                    "r_low": self._default_cfg.r_low,
-                    "r_high": self._default_cfg.r_high,
-                    "g_min": self._default_cfg.g_min,
+                    "window_sec": base_cfg.window_sec,
+                    "step_sec": base_cfg.step_sec,
+                    "min_valid_windows": base_cfg.min_valid_windows,
+                    "r_low": base_cfg.r_low,
+                    "r_high": base_cfg.r_high,
+                    "g_min": base_cfg.g_min,
                     # Enforce dynamic minimum mapping matching GUI constraint default
-                    "min_samples_per_window": max(1, self._default_cfg.min_samples_per_window),
+                    "min_samples_per_window": max(1, base_cfg.min_samples_per_window),
                 }
                 _, err = parse_and_validate_isosbestic_knobs(
                     self._window_sec_edit.text(),
                     "",
-                    int(self._default_cfg.min_valid_windows),
+                    int(base_cfg.min_valid_windows),
                     "",
                     "",
                     "",
@@ -5428,19 +5588,19 @@ class MainWindow(QMainWindow):
             elif is_robust_event_reject_mode(fit_mode):
                 robust_defaults = {
                     "robust_event_reject_max_iters": int(
-                        getattr(self._default_cfg, "robust_event_reject_max_iters", 3)
+                        getattr(base_cfg, "robust_event_reject_max_iters", 3)
                     ),
                     "robust_event_reject_residual_z_thresh": float(
-                        getattr(self._default_cfg, "robust_event_reject_residual_z_thresh", 3.5)
+                        getattr(base_cfg, "robust_event_reject_residual_z_thresh", 3.5)
                     ),
                     "robust_event_reject_local_var_window_sec": float(
-                        getattr(self._default_cfg, "robust_event_reject_local_var_window_sec", 10.0) or 10.0
+                        getattr(base_cfg, "robust_event_reject_local_var_window_sec", 10.0) or 10.0
                     ),
                     "robust_event_reject_local_var_ratio_thresh": getattr(
-                        self._default_cfg, "robust_event_reject_local_var_ratio_thresh", None
+                        base_cfg, "robust_event_reject_local_var_ratio_thresh", None
                     ),
                     "robust_event_reject_min_keep_fraction": float(
-                        getattr(self._default_cfg, "robust_event_reject_min_keep_fraction", 0.5)
+                        getattr(base_cfg, "robust_event_reject_min_keep_fraction", 0.5)
                     ),
                 }
                 _, err = parse_and_validate_robust_event_reject_knobs(
@@ -5457,22 +5617,22 @@ class MainWindow(QMainWindow):
             elif is_adaptive_event_gated_mode(fit_mode):
                 adaptive_defaults = {
                     "adaptive_event_gate_residual_z_thresh": float(
-                        getattr(self._default_cfg, "adaptive_event_gate_residual_z_thresh", 3.5)
+                        getattr(base_cfg, "adaptive_event_gate_residual_z_thresh", 3.5)
                     ),
                     "adaptive_event_gate_local_var_window_sec": float(
-                        getattr(self._default_cfg, "adaptive_event_gate_local_var_window_sec", 10.0) or 10.0
+                        getattr(base_cfg, "adaptive_event_gate_local_var_window_sec", 10.0) or 10.0
                     ),
                     "adaptive_event_gate_local_var_ratio_thresh": getattr(
-                        self._default_cfg, "adaptive_event_gate_local_var_ratio_thresh", None
+                        base_cfg, "adaptive_event_gate_local_var_ratio_thresh", None
                     ),
                     "adaptive_event_gate_smooth_window_sec": float(
-                        getattr(self._default_cfg, "adaptive_event_gate_smooth_window_sec", 60.0)
+                        getattr(base_cfg, "adaptive_event_gate_smooth_window_sec", 60.0)
                     ),
                     "adaptive_event_gate_min_trust_fraction": float(
-                        getattr(self._default_cfg, "adaptive_event_gate_min_trust_fraction", 0.5)
+                        getattr(base_cfg, "adaptive_event_gate_min_trust_fraction", 0.5)
                     ),
                     "adaptive_event_gate_freeze_interp_method": str(
-                        getattr(self._default_cfg, "adaptive_event_gate_freeze_interp_method", "linear_hold")
+                        getattr(base_cfg, "adaptive_event_gate_freeze_interp_method", "linear_hold")
                     ).strip()
                     or "linear_hold",
                 }
@@ -5495,10 +5655,10 @@ class MainWindow(QMainWindow):
 
         # Preprocessing + Baseline validation
         default_prep_dict = {
-            "lowpass_hz": self._default_cfg.lowpass_hz,
-            "baseline_method": self._default_cfg.baseline_method,
-            "baseline_percentile": self._default_cfg.baseline_percentile,
-            "f0_min_value": self._default_cfg.f0_min_value,
+            "lowpass_hz": base_cfg.lowpass_hz,
+            "baseline_method": base_cfg.baseline_method,
+            "baseline_percentile": base_cfg.baseline_percentile,
+            "f0_min_value": base_cfg.f0_min_value,
         }
         _, err = parse_and_validate_preproc_baseline_knobs(
             self._lowpass_hz_edit.text(),

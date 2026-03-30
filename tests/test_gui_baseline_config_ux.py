@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from gui.main_window import MainWindow
+from gui.main_window import MainWindow, normalize_dynamic_fit_mode
 
 
 @pytest.fixture(scope="module")
@@ -170,6 +170,23 @@ def _write_stale_baseline_config(path):
     path.write_text(yaml.safe_dump(stale_cfg, sort_keys=True), encoding="utf-8")
 
 
+def _write_custom_sync_config(path):
+    custom_cfg = {
+        "dynamic_fit_mode": "rolling_filtered_to_filtered",
+        "baseline_subtract_before_fit": True,
+        "window_sec": 77.0,
+        "min_samples_per_window": 33,
+        "lowpass_hz": 0.35,
+        "baseline_method": "uv_globalfit_percentile_session",
+        "baseline_percentile": 17.5,
+        "f0_min_value": 0.12,
+        "tonic_output_mode": "flatten_session_bleach_preserve_session_baseline",
+        "tonic_timeline_mode": "gap_free_elapsed_time",
+    }
+    path.write_text(yaml.safe_dump(custom_cfg, sort_keys=True), encoding="utf-8")
+    return custom_cfg
+
+
 def test_default_baseline_path_is_used_without_custom_yaml(window, tmp_path):
     _set_valid_dirs(window, tmp_path)
     window._use_custom_config_cb.setChecked(False)
@@ -229,6 +246,121 @@ def test_summary_and_discovery_spec_show_actual_baseline_source(window, tmp_path
     assert str(custom_cfg) in summary_custom
     custom_disco_spec = window._build_discovery_spec()
     assert custom_disco_spec.config_source_path == str(custom_cfg)
+
+
+def test_custom_config_syncs_visible_advanced_controls_and_effective_config(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+    custom_cfg_path = tmp_path / "custom_sync.yaml"
+    expected = _write_custom_sync_config(custom_cfg_path)
+
+    # Seed visibly stale values to prove config-source sync updates the main controls.
+    idx_roll_raw = window._dynamic_fit_mode_combo.findData("rolling_filtered_to_raw")
+    assert idx_roll_raw >= 0
+    window._dynamic_fit_mode_combo.setCurrentIndex(idx_roll_raw)
+    window._baseline_subtract_before_fit_cb.setChecked(False)
+    window._window_sec_edit.setText("12.0")
+    window._min_samples_per_window_spin.setValue(4)
+    window._lowpass_hz_edit.setText("9.0")
+    window._baseline_method_combo.setCurrentText("uv_raw_percentile_session")
+    window._baseline_percentile_edit.setText("5.0")
+    window._f0_min_value_edit.setText("0.001")
+    window._tonic_output_mode_combo.setCurrentIndex(
+        window._tonic_output_mode_combo.findData("preserve_raw_session_shape")
+    )
+    window._tonic_timeline_mode_combo.setCurrentIndex(
+        window._tonic_timeline_mode_combo.findData("real_elapsed_time")
+    )
+
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(custom_cfg_path))
+    window._update_config_source_ui()
+
+    assert window._selected_dynamic_fit_mode() == expected["dynamic_fit_mode"]
+    assert window._baseline_subtract_before_fit_cb.isChecked() is True
+    assert float(window._window_sec_edit.text()) == pytest.approx(expected["window_sec"])
+    assert int(window._min_samples_per_window_spin.value()) == int(expected["min_samples_per_window"])
+    assert float(window._lowpass_hz_edit.text()) == pytest.approx(expected["lowpass_hz"])
+    assert window._baseline_method_combo.currentText() == expected["baseline_method"]
+    assert float(window._baseline_percentile_edit.text()) == pytest.approx(expected["baseline_percentile"])
+    assert float(window._f0_min_value_edit.text()) == pytest.approx(expected["f0_min_value"])
+    assert window._selected_tonic_output_mode() == expected["tonic_output_mode"]
+    assert window._selected_tonic_timeline_mode() == expected["tonic_timeline_mode"]
+
+    spec = window._build_run_spec(validate_only=True)
+    overrides = dict(spec.config_overrides)
+    for key in (
+        "dynamic_fit_mode",
+        "baseline_subtract_before_fit",
+        "window_sec",
+        "min_samples_per_window",
+        "lowpass_hz",
+        "baseline_method",
+        "baseline_percentile",
+        "f0_min_value",
+        "tonic_output_mode",
+        "tonic_timeline_mode",
+    ):
+        assert key not in overrides
+
+    argv = window._build_argv(validate_only=True)
+    assert "--validate-only" in argv
+    cfg_path = os.path.join(window._current_run_dir, "config_effective.yaml")
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        effective = yaml.safe_load(f) or {}
+
+    assert effective["dynamic_fit_mode"] == expected["dynamic_fit_mode"]
+    assert bool(effective["baseline_subtract_before_fit"]) is True
+    assert float(effective["window_sec"]) == pytest.approx(expected["window_sec"])
+    assert int(effective["min_samples_per_window"]) == int(expected["min_samples_per_window"])
+    assert float(effective["lowpass_hz"]) == pytest.approx(expected["lowpass_hz"])
+
+
+def test_custom_baseline_sync_preserves_user_edits_as_overrides(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+    custom_cfg_path = tmp_path / "custom_sync_user_edit.yaml"
+    expected = _write_custom_sync_config(custom_cfg_path)
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(custom_cfg_path))
+    window._update_config_source_ui()
+
+    window._window_sec_edit.setText("88.0")
+    window._lowpass_hz_edit.setText("0.9")
+
+    spec = window._build_run_spec(validate_only=True)
+    overrides = dict(spec.config_overrides)
+    assert overrides["window_sec"] == pytest.approx(88.0)
+    assert overrides["lowpass_hz"] == pytest.approx(0.9)
+    assert "dynamic_fit_mode" not in overrides
+    assert float(expected["window_sec"]) != pytest.approx(88.0)
+    assert float(expected["lowpass_hz"]) != pytest.approx(0.9)
+
+    cfg_path = spec.generate_derived_config(spec.run_dir)
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        effective = yaml.safe_load(f) or {}
+    assert float(effective["window_sec"]) == pytest.approx(88.0)
+    assert float(effective["lowpass_hz"]) == pytest.approx(0.9)
+
+
+def test_switching_config_source_refreshes_main_advanced_controls(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+    custom_cfg_path = tmp_path / "custom_sync_switch.yaml"
+    expected = _write_custom_sync_config(custom_cfg_path)
+
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(custom_cfg_path))
+    window._update_config_source_ui()
+    assert float(window._window_sec_edit.text()) == pytest.approx(expected["window_sec"])
+    assert float(window._lowpass_hz_edit.text()) == pytest.approx(expected["lowpass_hz"])
+    assert window._selected_dynamic_fit_mode() == expected["dynamic_fit_mode"]
+
+    window._use_custom_config_cb.setChecked(False)
+    window._update_config_source_ui()
+    baseline_cfg = window._active_baseline_config()
+    assert float(window._window_sec_edit.text()) == pytest.approx(float(baseline_cfg.window_sec))
+    assert float(window._lowpass_hz_edit.text()) == pytest.approx(float(baseline_cfg.lowpass_hz))
+    assert window._selected_dynamic_fit_mode() == normalize_dynamic_fit_mode(
+        str(getattr(baseline_cfg, "dynamic_fit_mode", "rolling_local_regression"))
+    )
 
 
 def test_gui_run_spec_records_active_config_source(window, tmp_path):

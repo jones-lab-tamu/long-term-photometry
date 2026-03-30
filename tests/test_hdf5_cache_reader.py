@@ -6,6 +6,7 @@ import h5py
 import numpy as np
 
 from photometry_pipeline.io.hdf5_cache_reader import (
+    CacheReadError,
     open_tonic_cache,
     open_phasic_cache,
     list_cache_rois,
@@ -75,13 +76,11 @@ class TestHDF5CacheReader(unittest.TestCase):
         
     def test_open_cache_rejects_wrong_mode(self):
         """3. test_open_cache_rejects_wrong_mode"""
-        with pytest.raises(SystemExit) as excinfo:
+        with pytest.raises(CacheReadError):
             open_tonic_cache(self.valid_phasic_path)
-        self.assertEqual(excinfo.value.code, 1)
         
-        with pytest.raises(SystemExit) as excinfo2:
+        with pytest.raises(CacheReadError):
             open_phasic_cache(self.valid_tonic_path)
-        self.assertEqual(excinfo2.value.code, 1)
         
     def test_schema_version_dataset_is_accepted(self):
         """4. test_schema_version_dataset_is_accepted"""
@@ -103,9 +102,8 @@ class TestHDF5CacheReader(unittest.TestCase):
             meta.attrs['mode'] = 'tonic'
             meta.attrs['schema_version'] = '2.0'
             
-        with pytest.raises(SystemExit) as excinfo:
+        with pytest.raises(CacheReadError):
             open_tonic_cache(bad_path)
-        self.assertEqual(excinfo.value.code, 1)
 
     def test_list_cache_rois_returns_strings(self):
         """7. test_list_cache_rois_returns_strings"""
@@ -130,9 +128,8 @@ class TestHDF5CacheReader(unittest.TestCase):
     def test_resolve_cache_roi_missing_requested_roi_fails(self):
         """10. test_resolve_cache_roi_missing_requested_roi_fails"""
         with open_tonic_cache(self.valid_tonic_path) as f:
-            with pytest.raises(SystemExit) as excinfo:
+            with pytest.raises(CacheReadError):
                 resolve_cache_roi(f, 'MissingRegion')
-            self.assertEqual(excinfo.value.code, 1)
             
     def test_load_cache_chunk_fields_returns_requested_fields_only(self):
         """11. test_load_cache_chunk_fields_returns_requested_fields_only"""
@@ -145,9 +142,13 @@ class TestHDF5CacheReader(unittest.TestCase):
     def test_load_cache_chunk_fields_missing_field_fails(self):
         """12. test_load_cache_chunk_fields_missing_field_fails"""
         with open_tonic_cache(self.valid_tonic_path) as f:
-            with pytest.raises(SystemExit) as excinfo:
+            with pytest.raises(CacheReadError):
                 load_cache_chunk_fields(f, 'Region0', 2, ['time_sec', 'missing_field'])
-            self.assertEqual(excinfo.value.code, 1)
+
+    def test_open_cache_missing_file_raises_exception_not_system_exit(self):
+        with pytest.raises(CacheReadError) as excinfo:
+            open_tonic_cache(os.path.join(self.temp_dir.name, "missing_cache.h5"))
+        assert "Cache file not found" in str(excinfo.value)
 
     def test_iter_cache_chunks_for_roi_preserves_chunk_order(self):
         """13. test_iter_cache_chunks_for_roi_preserves_chunk_order"""

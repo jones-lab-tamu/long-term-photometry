@@ -453,6 +453,22 @@ def test_gui_build_argv_accepts_adaptive_event_gated_overrides(window, tmp_path,
     assert cfg.get("adaptive_event_gate_freeze_interp_method") == "linear_hold"
 
 
+def test_gui_chunk_discovery_survives_cache_reader_runtime_error(window, tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    cache_path = run_dir / "_analysis" / "phasic_out" / "phasic_trace_cache.h5"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(b"placeholder")
+    window._current_run_dir = str(run_dir)
+    window._roi_chunk_ids_cache = {}
+
+    def _raise_runtime_error(_cache_path):
+        raise RuntimeError("malformed cache")
+
+    monkeypatch.setattr(main_window_module, "open_phasic_cache", _raise_runtime_error)
+
+    assert window._chunk_ids_for_roi("Region0") == []
+
+
 def test_gui_timeline_anchor_controls_propagate_to_run_spec(window):
     _set_minimally_valid_paths(window)
 

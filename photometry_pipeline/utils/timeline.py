@@ -44,15 +44,17 @@ def map_cached_sources_to_schedule_positions(
         return os.path.normcase(os.path.normpath(str(p))) if p else ""
         
     normalized_file_list: List[str] = [_normalize_path(f) for f in file_list]
+    normalized_path_to_index: dict[str, int] = {}
+    for idx, norm_path in enumerate(normalized_file_list):
+        # Preserve first-match semantics previously provided by list.index(...).
+        if norm_path not in normalized_path_to_index:
+            normalized_path_to_index[norm_path] = idx
     
     actual_positions: List[int] = []
     for i, cid in enumerate(cids):
         fpath_cached = cached_source_files[i] if i < len(cached_source_files) else ""
         norm_fpath_cached = _normalize_path(fpath_cached)
-        try:
-            actual_idx = normalized_file_list.index(norm_fpath_cached)
-        except ValueError:
-            actual_idx = cid
+        actual_idx = normalized_path_to_index.get(norm_fpath_cached, cid)
         actual_positions.append(actual_idx)
         
     return actual_positions

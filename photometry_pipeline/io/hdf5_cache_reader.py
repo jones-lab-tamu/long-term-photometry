@@ -4,7 +4,6 @@ Implements the operations required for both tonic and phasic consumers.
 """
 
 import os
-import sys
 import h5py
 import numpy as np
 
@@ -12,39 +11,46 @@ import numpy as np
 SUPPORTED_SCHEMA_VERSIONS = ('1', '1.0')
 
 
+class CacheReadError(RuntimeError):
+    """Raised when a cache file is malformed or cannot be read safely."""
+
+
+def _raise_cache_error(message: str, *, cause: Exception | None = None) -> None:
+    if cause is not None:
+        raise CacheReadError(message) from cause
+    raise CacheReadError(message)
+
+
 def _open_cache(cache_path: str, expected_mode: str) -> h5py.File:
     """Internal implementation for opening and validating cache."""
     if not os.path.exists(cache_path):
-        print(f"CRITICAL: Cache file not found: {cache_path}")
-        sys.exit(1)
+        _raise_cache_error(f"Cache file not found: {cache_path}")
         
     try:
         f = h5py.File(cache_path, 'r')
     except Exception as e:
-        print(f"CRITICAL: Failed to open cache file: {e}")
-        sys.exit(1)
+        _raise_cache_error(f"Failed to open cache file: {cache_path}", cause=e)
         
     if 'meta' not in f:
-        print(f"CRITICAL: Missing /meta in cache: {cache_path}")
         f.close()
-        sys.exit(1)
+        _raise_cache_error(f"Missing /meta in cache: {cache_path}")
         
     meta = f['meta']
     
     if 'mode' not in meta.attrs:
-        print(f"CRITICAL: Missing mode attribute in /meta for: {cache_path}")
         f.close()
-        sys.exit(1)
+        _raise_cache_error(f"Missing mode attribute in /meta for: {cache_path}")
         
     if meta.attrs['mode'] != expected_mode:
-        print(f"CRITICAL: Cache mode mismatch. Expected {expected_mode}, got {meta.attrs['mode']}")
+        got_mode = meta.attrs['mode']
         f.close()
-        sys.exit(1)
+        _raise_cache_error(
+            f"Cache mode mismatch. Expected {expected_mode}, got {got_mode}"
+        )
         
     if 'schema_version' not in meta.attrs and 'schema_version' not in meta:
-        print(f"CRITICAL: Missing schema_version in /meta for: {cache_path}")
         f.close()
-        sys.exit(1)
+        _raise_cache_error(f"Missing schema_version in /meta for: {cache_path}")
         
     version = meta.attrs.get('schema_version')
     if version is None and 'schema_version' in meta:
@@ -57,19 +63,16 @@ def _open_cache(cache_path: str, expected_mode: str) -> h5py.File:
         version = version_data
     
     if str(version) not in SUPPORTED_SCHEMA_VERSIONS:
-        print(f"CRITICAL: Unsupported schema_version '{version}' in cache: {cache_path}")
         f.close()
-        sys.exit(1)
+        _raise_cache_error(f"Unsupported schema_version '{version}' in cache: {cache_path}")
         
     if 'rois' not in meta:
-        print(f"CRITICAL: Missing /meta/rois in cache: {cache_path}")
         f.close()
-        sys.exit(1)
+        _raise_cache_error(f"Missing /meta/rois in cache: {cache_path}")
         
     if 'chunk_ids' not in meta:
-        print(f"CRITICAL: Missing /meta/chunk_ids in cache: {cache_path}")
         f.close()
-        sys.exit(1)
+        _raise_cache_error(f"Missing /meta/chunk_ids in cache: {cache_path}")
         
     return f
 
@@ -87,8 +90,7 @@ def list_cache_rois(cache: h5py.File) -> list[str]:
     try:
         return [roi.decode('utf-8') if isinstance(roi, bytes) else str(roi) for roi in cache['meta']['rois']]
     except Exception as e:
-        print(f"CRITICAL: Failed to read ROIs from cache: {e}")
-        sys.exit(1)
+        _raise_cache_error("Failed to read ROIs from cache.", cause=e)
 
 
 def list_cache_chunk_ids(cache: h5py.File) -> list[int]:
@@ -96,8 +98,7 @@ def list_cache_chunk_ids(cache: h5py.File) -> list[int]:
     try:
         return [int(cid) for cid in cache['meta']['chunk_ids']]
     except Exception as e:
-        print(f"CRITICAL: Failed to read chunk_ids from cache: {e}")
-        sys.exit(1)
+        _raise_cache_error("Failed to read chunk_ids from cache.", cause=e)
 
 
 def list_cache_source_files(cache: h5py.File) -> list[str]:
@@ -105,8 +106,7 @@ def list_cache_source_files(cache: h5py.File) -> list[str]:
     try:
         return [sf.decode('utf-8') if isinstance(sf, bytes) else str(sf) for sf in cache['meta']['source_files']]
     except Exception as e:
-        print(f"CRITICAL: Failed to read source_files from cache: {e}")
-        sys.exit(1)
+        _raise_cache_error("Failed to read source_files from cache.", cause=e)
 
 
 def resolve_cache_roi(cache: h5py.File, requested_roi: str | None = None) -> str:
@@ -116,13 +116,11 @@ def resolve_cache_roi(cache: h5py.File, requested_roi: str | None = None) -> str
     """
     rois = list_cache_rois(cache)
     if not rois:
-        print("CRITICAL: No ROIs available in cache.")
-        sys.exit(1)
+        _raise_cache_error("No ROIs available in cache.")
         
     if requested_roi:
         if requested_roi not in rois:
-            print(f"CRITICAL: Requested ROI '{requested_roi}' not found in cache.")
-            sys.exit(1)
+            _raise_cache_error(f"Requested ROI '{requested_roi}' not found in cache.")
         return requested_roi
     
     roi = rois[0]
@@ -136,21 +134,18 @@ def load_cache_chunk_fields(cache: h5py.File, roi: str, chunk_id: int, fields: l
     """
     roi_group = cache.get(f"roi/{roi}")
     if not roi_group:
-        print(f"CRITICAL: Missing dataset group for ROI {roi}")
-        sys.exit(1)
+        _raise_cache_error(f"Missing dataset group for ROI {roi}")
         
     chunk_group_name = f"chunk_{chunk_id}"
     if chunk_group_name not in roi_group:
-        print(f"CRITICAL: Missing {chunk_group_name} in {roi} group.")
-        sys.exit(1)
+        _raise_cache_error(f"Missing {chunk_group_name} in {roi} group.")
         
     grp = roi_group[chunk_group_name]
     
     out = []
     for f in fields:
         if f not in grp:
-            print(f"CRITICAL: Missing dataset {f} in {roi}/{chunk_group_name}.")
-            sys.exit(1)
+            _raise_cache_error(f"Missing dataset {f} in {roi}/{chunk_group_name}.")
         # copy to memory as np array
         out.append(grp[f][()])
         
@@ -163,21 +158,18 @@ def load_cache_chunk_metadata(cache: h5py.File, roi: str, chunk_id: int, keys: l
     """
     roi_group = cache.get(f"roi/{roi}")
     if not roi_group:
-        print(f"CRITICAL: Missing dataset group for ROI {roi}")
-        sys.exit(1)
+        _raise_cache_error(f"Missing dataset group for ROI {roi}")
         
     chunk_group_name = f"chunk_{chunk_id}"
     if chunk_group_name not in roi_group:
-        print(f"CRITICAL: Missing {chunk_group_name} in {roi} group.")
-        sys.exit(1)
+        _raise_cache_error(f"Missing {chunk_group_name} in {roi} group.")
         
     grp = roi_group[chunk_group_name]
     
     out = {}
     for k in keys:
         if k not in grp.attrs:
-            print(f"CRITICAL: Missing attribute {k} in {roi}/{chunk_group_name}.")
-            sys.exit(1)
+            _raise_cache_error(f"Missing attribute {k} in {roi}/{chunk_group_name}.")
         out[k] = grp.attrs[k]
         
     return out

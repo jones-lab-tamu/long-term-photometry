@@ -2,6 +2,7 @@ import os
 from contextlib import contextmanager
 
 import numpy as np
+import pytest
 
 import tools.plot_phasic_correction_impact as impact
 from photometry_pipeline.viz.display_prep import prepare_centered_common_gain
@@ -147,6 +148,48 @@ def test_build_correction_impact_figure_robust_mode_title():
         plt.close(fig)
 
 
+def test_build_correction_impact_figure_adaptive_mode_title():
+    t = np.array([0.0, 1.0, 2.0], dtype=float)
+    sig = np.array([1.0, 2.0, 3.0], dtype=float)
+    iso = np.array([2.0, 2.5, 3.0], dtype=float)
+    fit = np.array([1.1, 1.9, 3.1], dtype=float)
+    dff = np.array([0.0, 0.1, -0.1], dtype=float)
+
+    fig, axes = impact.build_correction_impact_figure(
+        t=t,
+        sig=sig,
+        iso=iso,
+        fit=fit,
+        dff=dff,
+        roi="Region0",
+        chunk_id=1,
+        dynamic_fit_mode="adaptive_event_gated_regression",
+        baseline_subtract_before_fit=True,
+    )
+    try:
+        assert (
+            axes[2].get_title()
+            == "Dynamic Reference Fitting (Adaptive event-gated regression; baseline subtract before fit: inactive)"
+        )
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+def test_resolve_dynamic_fit_settings_accepts_adaptive_mode(tmp_path):
+    analysis_out = tmp_path / "analysis"
+    analysis_out.mkdir(parents=True, exist_ok=True)
+    (analysis_out / "config_used.yaml").write_text(
+        "dynamic_fit_mode: adaptive_event_gated_regression\nbaseline_subtract_before_fit: true\n",
+        encoding="utf-8",
+    )
+
+    mode, baseline = impact._resolve_dynamic_fit_settings(str(analysis_out))
+    assert mode == "adaptive_event_gated_regression"
+    assert baseline is True
+
+
 def test_main_generates_png_with_four_panel_layout(tmp_path, monkeypatch):
     analysis_out = tmp_path / "analysis"
     analysis_out.mkdir(parents=True, exist_ok=True)
@@ -265,3 +308,36 @@ def test_main_defaults_to_rolling_mode_when_config_missing(tmp_path, monkeypatch
     assert out_png.exists()
     assert captured.get("dynamic_fit_mode") == "rolling_filtered_to_raw"
     assert captured.get("baseline_subtract_before_fit") is False
+
+
+def test_main_keeps_cli_failure_boundary_when_reader_raises_runtime_error(tmp_path, monkeypatch):
+    analysis_out = tmp_path / "analysis_cli_error"
+    analysis_out.mkdir(parents=True, exist_ok=True)
+    (analysis_out / "phasic_trace_cache.h5").write_bytes(b"placeholder")
+    out_png = tmp_path / "phasic_correction_impact_error.png"
+
+    def _raise_read_error(_cache_path):
+        raise RuntimeError("broken cache")
+
+    import photometry_pipeline.io.hdf5_cache_reader as reader
+
+    monkeypatch.setattr(reader, "open_phasic_cache", _raise_read_error)
+    monkeypatch.setattr(
+        impact.sys,
+        "argv",
+        [
+            "plot_phasic_correction_impact.py",
+            "--analysis-out",
+            str(analysis_out),
+            "--roi",
+            "Region0",
+            "--chunk-id",
+            "0",
+            "--out",
+            str(out_png),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        impact.main()
+    assert excinfo.value.code == 1
