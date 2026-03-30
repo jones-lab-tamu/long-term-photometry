@@ -27,13 +27,13 @@ from datetime import datetime, timezone
 from statistics import median
 
 from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, Signal
-from PySide6.QtGui import QFont, QPixmap
+from PySide6.QtGui import QColor, QFont, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QCheckBox, QSpinBox,
     QDoubleSpinBox, QPushButton, QPlainTextEdit, QScrollArea,
     QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem, QToolButton, QStackedWidget,
-    QProgressBar, QLayout, QSplitter,
+    QProgressBar, QLayout, QSplitter, QGridLayout,
 )
 
 from gui.process_runner import PipelineRunner, RunnerState
@@ -943,13 +943,13 @@ class MainWindow(QMainWindow):
         self._last_elapsed_sec = 0.0
         self._saw_cancel_status = False
         self._is_complete_workspace_active = False
-        self._shell_left_width_floor = 500
-        self._shell_workspace_left_floor = 480
-        self._shell_setup_left_min = 540
+        self._shell_left_width_floor = 420
+        self._shell_workspace_left_floor = 420
+        self._shell_setup_left_min = 460
         self._shell_setup_left_ratio = 0.45
         self._shell_workspace_left_ratio = 0.32
-        self._shell_setup_right_min = 420
-        self._shell_workspace_right_min = 560
+        self._shell_setup_right_min = 380
+        self._shell_workspace_right_min = 500
         self._tuning_workspace_available = False
         self._tuning_last_result = None
         self._tuning_last_changed_fields: list[str] = []
@@ -1096,7 +1096,7 @@ class MainWindow(QMainWindow):
         left_pane = self._build_left_pane()
         self._left_pane = left_pane
         left_pane.setMinimumWidth(self._shell_left_width_floor)
-        left_pane.setMaximumWidth(700)
+        left_pane.setMaximumWidth(900)
         splitter.addWidget(left_pane)
         self._results_pane = self._build_results_pane()
         splitter.addWidget(self._results_pane)
@@ -1233,11 +1233,11 @@ class MainWindow(QMainWindow):
         controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._controls_scroll = controls_scroll
         self._controls_stack = QStackedWidget()
-        self._controls_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._controls_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._controls_stack.setMinimumWidth(0)
         self._config_panel = self._build_config_panel()
         self._complete_state_panel = self._build_complete_state_panel()
-        self._complete_state_panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._complete_state_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._complete_state_panel.setMinimumWidth(0)
         self._controls_stack.addWidget(self._config_panel)
         self._controls_stack.addWidget(self._complete_state_panel)
@@ -1453,9 +1453,9 @@ class MainWindow(QMainWindow):
             "Tuning is available only after a successful completed run is loaded."
         )
         self._tuning_collapsed_status_label.setWordWrap(True)
-        self._tuning_collapsed_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._tuning_collapsed_status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._tuning_collapsed_status_label.setMinimumWidth(0)
-        self._tuning_collapsed_status_label.setStyleSheet("font-size: 11px; color: #8a6d3b;")
+        self._set_status_label_style(self._tuning_collapsed_status_label, "warn")
         layout.addWidget(self._tuning_collapsed_status_label)
 
         self._tuning_content = QWidget()
@@ -1488,9 +1488,9 @@ class MainWindow(QMainWindow):
 
         self._tuning_availability_label = QLabel("Tuning is available only after a successful completed run is loaded.")
         self._tuning_availability_label.setWordWrap(True)
-        self._tuning_availability_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._tuning_availability_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._tuning_availability_label.setMinimumWidth(0)
-        self._tuning_availability_label.setStyleSheet("font-size: 11px; color: #8a6d3b;")
+        self._set_status_label_style(self._tuning_availability_label, "warn")
         content_layout.addWidget(self._tuning_availability_label)
 
         self._tuning_controls_container = QWidget()
@@ -1760,12 +1760,10 @@ class MainWindow(QMainWindow):
         )
         self._correction_tuning_collapsed_status_label.setWordWrap(True)
         self._correction_tuning_collapsed_status_label.setSizePolicy(
-            QSizePolicy.Ignored, QSizePolicy.Preferred
+            QSizePolicy.Expanding, QSizePolicy.Preferred
         )
         self._correction_tuning_collapsed_status_label.setMinimumWidth(0)
-        self._correction_tuning_collapsed_status_label.setStyleSheet(
-            "font-size: 11px; color: #8a6d3b;"
-        )
+        self._set_status_label_style(self._correction_tuning_collapsed_status_label, "warn")
         section_layout.addWidget(self._correction_tuning_collapsed_status_label)
 
         self._correction_tuning_content = QWidget()
@@ -1806,12 +1804,10 @@ class MainWindow(QMainWindow):
         )
         self._correction_tuning_availability_label.setWordWrap(True)
         self._correction_tuning_availability_label.setSizePolicy(
-            QSizePolicy.Ignored, QSizePolicy.Preferred
+            QSizePolicy.Expanding, QSizePolicy.Preferred
         )
         self._correction_tuning_availability_label.setMinimumWidth(0)
-        self._correction_tuning_availability_label.setStyleSheet(
-            "font-size: 11px; color: #8a6d3b;"
-        )
+        self._set_status_label_style(self._correction_tuning_availability_label, "warn")
         content_layout.addWidget(self._correction_tuning_availability_label)
 
         self._correction_tuning_controls_container = QWidget()
@@ -2469,31 +2465,14 @@ class MainWindow(QMainWindow):
         """Shell-level framing and spacing styles (workflow/header modernization only)."""
         self.setStyleSheet(
             """
-            QWidget#appShellRoot {
-                background: #f4f6f9;
-            }
             QWidget#statusHeaderCard {
-                background: #ffffff;
-                border: 1px solid #d9e0e8;
+                border: 1px solid palette(mid);
                 border-radius: 10px;
-            }
-            QLabel#workflowColumnTitle {
-                font-size: 15px;
-                font-weight: 700;
-                color: #1f2937;
-            }
-            QLabel#workflowColumnSubtitle {
-                font-size: 11px;
-                color: #5f6b7a;
             }
             QScrollArea#workflowControlsScroll {
                 border: none;
-                background: transparent;
             }
             QGroupBox[workflowSection="true"] {
-                background: #ffffff;
-                border: 1px solid #d9e0e8;
-                border-radius: 8px;
                 margin-top: 12px;
                 padding-top: 8px;
             }
@@ -2501,13 +2480,8 @@ class MainWindow(QMainWindow):
                 subcontrol-origin: margin;
                 left: 10px;
                 padding: 0 4px;
-                font-weight: 600;
-                color: #2a3644;
             }
             QGroupBox#resultsPaneShell {
-                background: #ffffff;
-                border: 1px solid #d9e0e8;
-                border-radius: 10px;
                 margin-top: 12px;
                 padding-top: 8px;
             }
@@ -2515,28 +2489,44 @@ class MainWindow(QMainWindow):
                 subcontrol-origin: margin;
                 left: 10px;
                 padding: 0 4px;
-                font-weight: 700;
-                color: #223040;
-            }
-            QGroupBox#completeModeContextCard {
-                border-color: #bfd4ea;
-                background: #f7fbff;
-            }
-            QGroupBox#completeModeContextCard::title {
-                color: #1f4f78;
-                font-weight: 700;
-            }
-            QLabel#resultsSummaryHeadline {
-                font-size: 13px;
-                font-weight: 700;
-                color: #1f2937;
-            }
-            QLabel#resultsSummaryHint {
-                font-size: 11px;
-                color: #5f6b7a;
             }
             """
         )
+
+    def _configure_sidebar_form_layout(self, form: QFormLayout) -> None:
+        """Use wrapping-friendly form behavior for the fixed-width workflow pane."""
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+    def _status_color_for_severity(self, severity: str) -> QColor:
+        """Palette-aware color mapping for true status labels."""
+        pal = self.palette()
+        text = pal.color(QPalette.WindowText)
+        if severity in {"neutral", "info"}:
+            return text
+        if severity == "ready":
+            link = pal.color(QPalette.Link)
+            return link if link.isValid() else text
+        bg_is_light = pal.color(QPalette.Window).lightness() >= 128
+        if severity == "warn":
+            return QColor.fromHsv(36, 180 if bg_is_light else 140, 120 if bg_is_light else 232)
+        if severity == "error":
+            return QColor.fromHsv(0, 210 if bg_is_light else 150, 120 if bg_is_light else 240)
+        return text
+
+    def _set_status_label_style(self, label: QLabel, severity: str) -> None:
+        """Centralized severity styling for status-bearing labels."""
+        if label is None:
+            return
+        normalized = severity if severity in {"neutral", "info", "ready", "warn", "error"} else "neutral"
+        label.setProperty("statusSeverity", normalized)
+        is_emphasis = normalized in {"ready", "warn", "error"}
+        label.setStyleSheet(f"font-size: 11px; font-weight: {'600' if is_emphasis else '400'};")
+        pal = label.palette()
+        pal.setColor(QPalette.WindowText, self._status_color_for_severity(normalized))
+        label.setPalette(pal)
+        label.update()
 
     # ==================================================================
     # Post-run tuning workspace (Patch D)
@@ -2614,8 +2604,10 @@ class MainWindow(QMainWindow):
 
     def _set_tuning_collapsed_status(self, message: str, *, ready: bool) -> None:
         self._tuning_collapsed_status_label.setText(message)
-        color = "#2d7d2d" if ready else "#8a6d3b"
-        self._tuning_collapsed_status_label.setStyleSheet(f"font-size: 11px; color: {color};")
+        self._set_status_label_style(
+            self._tuning_collapsed_status_label,
+            "ready" if ready else "warn",
+        )
 
     def _set_tuning_workspace_unavailable(self, reason: str) -> None:
         self._tuning_workspace_available = False
@@ -2624,7 +2616,7 @@ class MainWindow(QMainWindow):
         self._open_tuning_dir_btn.setEnabled(False)
         self._apply_tuning_btn.setEnabled(False)
         self._tuning_availability_label.setText(reason)
-        self._tuning_availability_label.setStyleSheet("font-size: 11px; color: #8a6d3b;")
+        self._set_status_label_style(self._tuning_availability_label, "warn")
         self._set_tuning_collapsed_status(reason, ready=False)
         if hasattr(self, "_tuning_applyback_status_label"):
             self._tuning_applyback_status_label.setText("Apply-back status: not applied.")
@@ -2638,7 +2630,7 @@ class MainWindow(QMainWindow):
         self._open_tuning_dir_btn.setEnabled(bool(self._tuning_last_result))
         self._apply_tuning_btn.setEnabled(True)
         self._tuning_availability_label.setText(message)
-        self._tuning_availability_label.setStyleSheet("font-size: 11px; color: #2d7d2d;")
+        self._set_status_label_style(self._tuning_availability_label, "ready")
         self._set_tuning_collapsed_status(message, ready=True)
         self._refresh_tuning_feedback_summary()
         self._sync_tuning_status_visibility()
@@ -3346,9 +3338,9 @@ class MainWindow(QMainWindow):
 
     def _set_correction_tuning_collapsed_status(self, message: str, *, ready: bool) -> None:
         self._correction_tuning_collapsed_status_label.setText(message)
-        color = "#2d7d2d" if ready else "#8a6d3b"
-        self._correction_tuning_collapsed_status_label.setStyleSheet(
-            f"font-size: 11px; color: {color};"
+        self._set_status_label_style(
+            self._correction_tuning_collapsed_status_label,
+            "ready" if ready else "warn",
         )
 
     def _set_correction_tuning_workspace_unavailable(self, reason: str) -> None:
@@ -3359,9 +3351,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_apply_correction_tuning_btn"):
             self._apply_correction_tuning_btn.setEnabled(False)
         self._correction_tuning_availability_label.setText(reason)
-        self._correction_tuning_availability_label.setStyleSheet(
-            "font-size: 11px; color: #8a6d3b;"
-        )
+        self._set_status_label_style(self._correction_tuning_availability_label, "warn")
         self._correction_tuning_applyback_applied = False
         self._correction_tuning_applyback_timestamp = ""
         self._refresh_correction_tuning_applyback_status()
@@ -3379,9 +3369,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_apply_correction_tuning_btn"):
             self._apply_correction_tuning_btn.setEnabled(True)
         self._correction_tuning_availability_label.setText(message)
-        self._correction_tuning_availability_label.setStyleSheet(
-            "font-size: 11px; color: #2d7d2d;"
-        )
+        self._set_status_label_style(self._correction_tuning_availability_label, "ready")
         self._refresh_correction_tuning_applyback_status()
         self._set_correction_tuning_collapsed_status(message, ready=True)
         self._sync_correction_tuning_status_visibility()
@@ -5088,12 +5076,12 @@ class MainWindow(QMainWindow):
             self._active_config_source_label.setText(
                 f"Active baseline source: custom YAML ({cfg})"
             )
-            self._active_config_source_label.setStyleSheet("font-size: 11px; color: #8a6d3b;")
+            self._set_status_label_style(self._active_config_source_label, "info")
         else:
             self._active_config_source_label.setText(
                 f"Active baseline source: lab standard default ({self._lab_default_config_path})"
             )
-            self._active_config_source_label.setStyleSheet("font-size: 11px; color: #2d7d2d;")
+            self._set_status_label_style(self._active_config_source_label, "ready")
         should_sync_main_advanced = True
         if use_custom:
             cfg = self._config_path.text().strip()
@@ -7201,12 +7189,12 @@ class MainWindow(QMainWindow):
             self._on_timeline_anchor_mode_changed()
         if phasic_active:
             self._mode_context_label.setText("Phasic controls are active for this mode.")
-            self._mode_context_label.setStyleSheet("font-size: 11px; color: #666;")
+            self._set_status_label_style(self._mode_context_label, "info")
         else:
             self._mode_context_label.setText(
                 "Phasic-only controls are disabled in tonic mode."
             )
-            self._mode_context_label.setStyleSheet("font-size: 11px; color: #8a6d3b;")
+            self._set_status_label_style(self._mode_context_label, "warn")
 
         # Discovery-dependent ROI/representative controls.
         discovery_ready = self._discovery_cache is not None and self._roi_list.count() > 0
@@ -7218,21 +7206,21 @@ class MainWindow(QMainWindow):
             self._discovery_controls_hint.setText(
                 "ROI choices are unresolved. Click 'Select ROIs...' to populate ROI choices."
             )
-            self._discovery_controls_hint.setStyleSheet("color: #8a6d3b; font-size: 11px;")
+            self._set_status_label_style(self._discovery_controls_hint, "warn")
             self._rep_preview_hint.setText(
                 "Representative selection requires discovery session ordering."
             )
-            self._rep_preview_hint.setStyleSheet("color: #8a6d3b; font-size: 11px;")
+            self._set_status_label_style(self._rep_preview_hint, "warn")
             return
 
         self._discovery_controls_hint.setText("ROI choices loaded. Checked ROIs will be included.")
-        self._discovery_controls_hint.setStyleSheet("color: #2d7d2d; font-size: 11px;")
+        self._set_status_label_style(self._discovery_controls_hint, "ready")
 
         if not self._preview_enabled_cb.isChecked():
             self._rep_preview_hint.setText(
                 "Representative selection applies to the full discovered session list."
             )
-            self._rep_preview_hint.setStyleSheet("color: #666; font-size: 11px;")
+            self._set_status_label_style(self._rep_preview_hint, "info")
             return
 
         preview_n = self._preview_n_spin.value()
@@ -7240,7 +7228,7 @@ class MainWindow(QMainWindow):
         rep_preview_err = validate_representative_index_preview_compatibility(rep_idx, preview_n)
         if rep_preview_err:
             self._rep_preview_hint.setText(rep_preview_err)
-            self._rep_preview_hint.setStyleSheet("color: #a94442; font-size: 11px;")
+            self._set_status_label_style(self._rep_preview_hint, "error")
             return
 
         if rep_idx >= 0:
@@ -7251,7 +7239,7 @@ class MainWindow(QMainWindow):
             self._rep_preview_hint.setText(
                 f"Preview first N={preview_n}; representative session remains auto."
             )
-        self._rep_preview_hint.setStyleSheet("color: #666; font-size: 11px;")
+        self._set_status_label_style(self._rep_preview_hint, "info")
 
     def _update_key_artifact_buttons(self, running: bool) -> None:
         """Enable post-run key-file shortcuts when files exist."""
@@ -7303,14 +7291,7 @@ class MainWindow(QMainWindow):
     def _update_run_reason_label(self) -> None:
         """Render concise run-state reason text near the Run button."""
         reason, severity = self._compute_run_readiness_reason()
-        color_map = {
-            "ready": "#2d7d2d",
-            "info": "#555555",
-            "warn": "#8a6d3b",
-            "error": "#a94442",
-        }
-        color = color_map.get(severity, "#555555")
-        self._run_reason_label.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self._set_status_label_style(self._run_reason_label, severity)
         self._run_reason_label.setText(f"Run status: {reason}")
 
     def _update_button_states(self):
@@ -7374,14 +7355,14 @@ class MainWindow(QMainWindow):
 
     def _build_config_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         panel.setMinimumWidth(0)
         outer = QVBoxLayout(panel)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(12)
 
         intro = QLabel("Primary workflow stages")
-        intro.setStyleSheet("font-size: 11px; color: #5f6b7a; font-weight: 600;")
+        intro.setStyleSheet("font-size: 11px; font-weight: 600;")
         outer.addWidget(intro)
 
         self._run_config_group = self._build_run_configuration_group()
@@ -7446,7 +7427,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(group)
 
         form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        self._configure_sidebar_form_layout(form)
 
         self._input_dir = QLineEdit()
         self._input_dir.setToolTip("The source recording/session folder to analyze.")
@@ -7480,7 +7461,6 @@ class MainWindow(QMainWindow):
 
         self._sph_edit = QLineEdit()
         self._sph_edit.setPlaceholderText("(optional, integer >= 1)")
-        self._sph_edit.setMaximumWidth(200)
         self._sph_edit.setToolTip(
             "Sessions per hour used for duty-cycled/sessionized data when timestamps are incomplete. "
             "Required for duty-cycled data unless timestamps are available."
@@ -7491,7 +7471,7 @@ class MainWindow(QMainWindow):
         )
         self._sph_warning.setObjectName("sessionsPerHourWarning")
         self._sph_warning.setWordWrap(True)
-        self._sph_warning.setStyleSheet("color: #8a6d3b; font-size: 11px;")
+        self._sph_warning.setStyleSheet("font-size: 11px;")
         self._sph_warning.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self._sph_field_container = QWidget()
         self._sph_field_container.setObjectName("sessionsPerHourField")
@@ -7505,7 +7485,6 @@ class MainWindow(QMainWindow):
 
         self._duration_edit = QLineEdit()
         self._duration_edit.setPlaceholderText("(optional, seconds > 0)")
-        self._duration_edit.setMaximumWidth(200)
         self._duration_edit.setToolTip(
             "Session duration in seconds. Leave blank to infer from timestamps where supported."
         )
@@ -7541,7 +7520,9 @@ class MainWindow(QMainWindow):
             "Click 'Select ROIs...' to populate ROI choices from the input directory."
         )
         self._discovery_controls_hint.setWordWrap(True)
-        self._discovery_controls_hint.setStyleSheet("color: #8a6d3b; font-size: 11px;")
+        self._discovery_controls_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._discovery_controls_hint.setMinimumWidth(0)
+        self._set_status_label_style(self._discovery_controls_hint, "warn")
         roi_layout.addWidget(self._discovery_controls_hint)
 
         self._roi_selection_container = QWidget()
@@ -7594,42 +7575,58 @@ class MainWindow(QMainWindow):
         hidden_discovery_layout.addWidget(self._rep_session_combo)
         self._rep_preview_hint = QLabel("")
         self._rep_preview_hint.setWordWrap(True)
+        self._rep_preview_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._rep_preview_hint.setMinimumWidth(0)
+        self._set_status_label_style(self._rep_preview_hint, "info")
         hidden_discovery_layout.addWidget(self._rep_preview_hint)
         roi_layout.addWidget(hidden_discovery_details)
 
         inputs_layout.addWidget(roi_group)
         layout.addWidget(self._run_config_inputs_container)
 
-        actions = QHBoxLayout()
+        self._run_actions_container = QWidget()
+        self._run_actions_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        actions = QGridLayout(self._run_actions_container)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setHorizontalSpacing(8)
+        actions.setVerticalSpacing(6)
+        actions.setColumnStretch(0, 1)
+        actions.setColumnStretch(1, 1)
         self._validate_btn = QPushButton("Validate Only")
         self._validate_btn.clicked.connect(self._on_validate)
-        actions.addWidget(self._validate_btn)
+        self._validate_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        actions.addWidget(self._validate_btn, 0, 0)
         self._run_btn = QPushButton("Run Pipeline")
         self._run_btn.setStyleSheet("font-weight: bold;")
         self._run_btn.clicked.connect(self._on_run)
-        actions.addWidget(self._run_btn)
+        self._run_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        actions.addWidget(self._run_btn, 0, 1)
         self._cancel_btn = QPushButton("Cancel")
         self._cancel_btn.clicked.connect(self._on_cancel)
-        actions.addWidget(self._cancel_btn)
+        self._cancel_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        actions.addWidget(self._cancel_btn, 1, 0)
         self._open_results_btn = QPushButton("Open Results...")
         self._open_results_btn.clicked.connect(self._on_open_results)
-        actions.addWidget(self._open_results_btn)
+        self._open_results_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        actions.addWidget(self._open_results_btn, 1, 1)
         self._open_folder_btn = QPushButton("Open Run Folder")
         self._open_folder_btn.clicked.connect(self._on_open_folder)
-        actions.addWidget(self._open_folder_btn)
-        actions.addStretch()
-        layout.addLayout(actions)
+        self._open_folder_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        actions.addWidget(self._open_folder_btn, 2, 0, 1, 2)
+        layout.addWidget(self._run_actions_container)
 
         self._run_reason_label = QLabel("Run status: Validation required before first run.")
         self._run_reason_label.setWordWrap(True)
-        self._run_reason_label.setStyleSheet("color: #8a6d3b; font-size: 11px;")
+        self._run_reason_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._run_reason_label.setMinimumWidth(0)
+        self._set_status_label_style(self._run_reason_label, "warn")
         layout.addWidget(self._run_reason_label)
         return group
 
     def _build_plotting_group(self) -> QGroupBox:
         group = QGroupBox("Plotting")
         layout = QFormLayout(group)
-        layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        self._configure_sidebar_form_layout(layout)
 
         self._plotting_mode_combo = QComboBox()
         self._plotting_mode_combo.addItems(["Standard", "Full"])
@@ -7646,7 +7643,6 @@ class MainWindow(QMainWindow):
         self._smooth_spin.setValue(1.0)
         self._smooth_spin.setDecimals(2)
         self._smooth_spin.setSingleStep(0.1)
-        self._smooth_spin.setMaximumWidth(200)
         self._smooth_spin.setToolTip(
             "Smoothing window in seconds used by plotting scripts when smoothing is supported."
         )
@@ -7666,7 +7662,6 @@ class MainWindow(QMainWindow):
         layout.addRow("Timeline Anchor:", self._timeline_anchor_mode_combo)
 
         self._fixed_daily_anchor_time_edit = QLineEdit("07:00")
-        self._fixed_daily_anchor_time_edit.setMaximumWidth(200)
         self._fixed_daily_anchor_time_edit.setPlaceholderText("HH:MM or HH:MM:SS")
         self._fixed_daily_anchor_time_edit.setToolTip(
             "Clock anchor used when Timeline Anchor is Fixed daily anchor."
@@ -7678,7 +7673,9 @@ class MainWindow(QMainWindow):
 
         self._mode_context_label = QLabel("")
         self._mode_context_label.setWordWrap(True)
-        self._mode_context_label.setStyleSheet("font-size: 11px; color: #666;")
+        self._mode_context_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._mode_context_label.setMinimumWidth(0)
+        self._set_status_label_style(self._mode_context_label, "info")
         layout.addRow("", self._mode_context_label)
         return group
 
@@ -7737,8 +7734,9 @@ class MainWindow(QMainWindow):
 
         iso_sampling = QGroupBox("Sampling Geometry")
         iso_sampling_form = QFormLayout(iso_sampling)
+        self._configure_sidebar_form_layout(iso_sampling_form)
         self._dynamic_fit_mode_combo = QComboBox()
-        self._dynamic_fit_mode_combo.setMinimumWidth(260)
+        self._dynamic_fit_mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._dynamic_fit_mode_combo.setToolTip(
             _DYNAMIC_FIT_TOOLTIPS["dynamic_fit_mode"]
         )
@@ -7758,7 +7756,9 @@ class MainWindow(QMainWindow):
 
         self._dynamic_fit_mode_note = QLabel("")
         self._dynamic_fit_mode_note.setWordWrap(True)
-        self._dynamic_fit_mode_note.setStyleSheet("font-size: 11px; color: #666;")
+        self._dynamic_fit_mode_note.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._dynamic_fit_mode_note.setMinimumWidth(0)
+        self._dynamic_fit_mode_note.setStyleSheet("font-size: 11px;")
         iso_sampling_form.addRow(self._dynamic_fit_mode_note)
 
         self._baseline_subtract_before_fit_cb = QCheckBox("")
@@ -7785,6 +7785,7 @@ class MainWindow(QMainWindow):
 
         iso_accept = QGroupBox("Window Constraints")
         iso_accept_form = QFormLayout(iso_accept)
+        self._configure_sidebar_form_layout(iso_accept_form)
         self._min_samples_per_window_spin = QSpinBox()
         self._min_samples_per_window_spin.setRange(1, 100000)
         self._min_samples_per_window_spin.setValue(max(1, self._default_cfg.min_samples_per_window))
@@ -7798,6 +7799,7 @@ class MainWindow(QMainWindow):
 
         robust_group = QGroupBox("Robust Event Rejection")
         robust_form = QFormLayout(robust_group)
+        self._configure_sidebar_form_layout(robust_form)
 
         self._robust_event_reject_max_iters_spin = QSpinBox()
         self._robust_event_reject_max_iters_spin.setRange(1, 1000)
@@ -7888,6 +7890,7 @@ class MainWindow(QMainWindow):
 
         adaptive_group = QGroupBox("Adaptive Event-Gated Regression")
         adaptive_form = QFormLayout(adaptive_group)
+        self._configure_sidebar_form_layout(adaptive_form)
 
         self._adaptive_event_gate_residual_z_spin = QDoubleSpinBox()
         self._adaptive_event_gate_residual_z_spin.setRange(0.000001, 1_000_000.0)
@@ -7998,6 +8001,7 @@ class MainWindow(QMainWindow):
 
         self._adv_prep_group = QGroupBox("Preprocessing")
         prep_layout = QFormLayout(self._adv_prep_group)
+        self._configure_sidebar_form_layout(prep_layout)
         self._lowpass_hz_edit = QLineEdit(str(self._default_cfg.lowpass_hz))
         self._lowpass_hz_edit.setToolTip(
             "Lowpass cutoff (Hz) applied before feature-oriented computations."
@@ -8006,7 +8010,7 @@ class MainWindow(QMainWindow):
         prep_layout.addRow("Lowpass Filter:", self._lowpass_hz_edit)
 
         self._tonic_output_mode_combo = QComboBox()
-        self._tonic_output_mode_combo.setMinimumWidth(300)
+        self._tonic_output_mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._tonic_output_mode_combo.setToolTip(_TONIC_OUTPUT_MODE_TOOLTIP)
         for mode_name in get_allowed_tonic_output_modes_from_config():
             self._tonic_output_mode_combo.addItem(
@@ -8025,7 +8029,7 @@ class MainWindow(QMainWindow):
         prep_layout.addRow("Tonic Output Mode:", self._tonic_output_mode_combo)
 
         self._tonic_timeline_mode_combo = QComboBox()
-        self._tonic_timeline_mode_combo.setMinimumWidth(300)
+        self._tonic_timeline_mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._tonic_timeline_mode_combo.setToolTip(_TONIC_TIMELINE_MODE_TOOLTIP)
         for mode_name in get_allowed_tonic_timeline_modes_from_config():
             self._tonic_timeline_mode_combo.addItem(
@@ -8048,6 +8052,7 @@ class MainWindow(QMainWindow):
 
         baseline_group = QGroupBox("Baseline / Normalization")
         baseline_layout = QFormLayout(baseline_group)
+        self._configure_sidebar_form_layout(baseline_layout)
         self._baseline_method_combo = QComboBox()
         allowed_methods = get_allowed_baseline_methods_from_config()
         if self._default_cfg.baseline_method not in allowed_methods:
@@ -8079,6 +8084,7 @@ class MainWindow(QMainWindow):
 
         self._adv_ev_group = QGroupBox("Feature Detection")
         ev_layout = QFormLayout(self._adv_ev_group)
+        self._configure_sidebar_form_layout(ev_layout)
         self._event_signal_combo = QComboBox()
         allowed_sigs = get_allowed_event_signals_from_config()
         if self._default_cfg.event_signal not in allowed_sigs:
@@ -8188,7 +8194,7 @@ class MainWindow(QMainWindow):
 
         cfg_group = QGroupBox("Config Source (Advanced)")
         cfg_layout = QFormLayout(cfg_group)
-        cfg_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        self._configure_sidebar_form_layout(cfg_layout)
         self._use_custom_config_cb = QCheckBox("Use custom config YAML")
         self._use_custom_config_cb.setToolTip(
             "Enable only if you need a non-standard baseline YAML instead of the lab default."
@@ -8212,7 +8218,9 @@ class MainWindow(QMainWindow):
         cfg_layout.addRow("Custom Config YAML:", cfg_row)
         self._active_config_source_label = QLabel("")
         self._active_config_source_label.setWordWrap(True)
-        self._active_config_source_label.setStyleSheet("font-size: 11px; color: #666;")
+        self._active_config_source_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._active_config_source_label.setMinimumWidth(0)
+        self._set_status_label_style(self._active_config_source_label, "info")
         cfg_layout.addRow("", self._active_config_source_label)
         self._apply_form_row_tooltips(cfg_layout)
         content_layout.addWidget(cfg_group)
