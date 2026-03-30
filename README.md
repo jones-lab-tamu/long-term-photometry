@@ -11,7 +11,7 @@ Photometry Pipeline is a GUI-first wrapper and analysis stack for long-session f
 
 ## Requirements
 
-- Recommended for student beta: Python 3.10 or 3.11
+- Recommended: Python 3.10 or 3.11
 - Use a fresh virtual environment and install from the requirements files below.
 - Windows is the primary tested environment
 
