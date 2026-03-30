@@ -51,6 +51,10 @@ from photometry_pipeline.core.tonic_output import (
     TONIC_OUTPUT_MODE_FLATTEN_BLEACH,
     TONIC_OUTPUT_MODE_PRESERVE_RAW,
 )
+from photometry_pipeline.core.tonic_timeline import (
+    TONIC_TIMELINE_MODE_GAP_FREE_ELAPSED,
+    TONIC_TIMELINE_MODE_REAL_ELAPSED,
+)
 from photometry_pipeline.io.hdf5_cache_reader import (
     open_phasic_cache,
 )
@@ -305,6 +309,11 @@ _KNOWN_ALLOWED_VALUES = {
         "preserve_raw_session_shape",
         "flatten_session_bleach_preserve_session_baseline",
     ],
+    "tonic_timeline_mode": [
+        "real_elapsed_time",
+        "gap_free_elapsed_time",
+        "compressed_recording_time",
+    ],
 }
 _RETUNE_PEAK_PRE_FILTER_OPTIONS = ["none", "smooth"]
 _DYNAMIC_FIT_MODE_ALIAS_TO_CANONICAL = {
@@ -327,6 +336,10 @@ _DYNAMIC_FIT_MODE_LABELS = {
 _TONIC_OUTPUT_MODE_LABELS = {
     TONIC_OUTPUT_MODE_PRESERVE_RAW: "Preserve raw session shape",
     TONIC_OUTPUT_MODE_FLATTEN_BLEACH: "Flatten session bleach, preserve session baseline",
+}
+_TONIC_TIMELINE_MODE_LABELS = {
+    TONIC_TIMELINE_MODE_REAL_ELAPSED: "Real elapsed time",
+    TONIC_TIMELINE_MODE_GAP_FREE_ELAPSED: "Gap-free elapsed time",
 }
 
 _DYNAMIC_FIT_TOOLTIPS = {
@@ -401,6 +414,11 @@ _TONIC_OUTPUT_MODE_TOOLTIP = (
     "Controls tonic output rendering/export mode. 'Preserve raw session shape' keeps current behavior. "
     "'Flatten session bleach, preserve session baseline' removes within-session bleach trend shape while "
     "retaining each session's baseline placement for cross-session comparison."
+)
+_TONIC_TIMELINE_MODE_TOOLTIP = (
+    "Controls tonic timeline representation. 'Real elapsed time' preserves OFF gaps between sessions. "
+    "'Gap-free elapsed time' removes OFF-gap whitespace while preserving full elapsed-duration span and "
+    "session order."
 )
 
 
@@ -491,6 +509,19 @@ def get_allowed_tonic_output_modes_from_config() -> list[str]:
     return ordered
 
 
+def get_allowed_tonic_timeline_modes_from_config() -> list[str]:
+    raw_modes = _get_allowed_from_config_field("tonic_timeline_mode")
+    ordered: list[str] = [
+        TONIC_TIMELINE_MODE_REAL_ELAPSED,
+        TONIC_TIMELINE_MODE_GAP_FREE_ELAPSED,
+    ]
+    for mode in raw_modes:
+        key = normalize_tonic_timeline_mode(str(mode or "").strip())
+        if key and key not in ordered:
+            ordered.append(key)
+    return ordered
+
+
 def normalize_tonic_output_mode(mode_raw: str) -> str:
     mode = str(mode_raw or "").strip()
     if not mode:
@@ -505,6 +536,22 @@ def normalize_tonic_output_mode(mode_raw: str) -> str:
 def tonic_output_mode_label(mode_raw: str) -> str:
     mode = normalize_tonic_output_mode(mode_raw)
     return _TONIC_OUTPUT_MODE_LABELS.get(mode, mode or TONIC_OUTPUT_MODE_PRESERVE_RAW)
+
+
+def normalize_tonic_timeline_mode(mode_raw: str) -> str:
+    mode = str(mode_raw or "").strip()
+    if not mode:
+        return TONIC_TIMELINE_MODE_REAL_ELAPSED
+    if mode == "elapsed":
+        return TONIC_TIMELINE_MODE_REAL_ELAPSED
+    if mode in {"compressed", "compressed_recording_time", "gap_free", "gap_free_elapsed_time"}:
+        return TONIC_TIMELINE_MODE_GAP_FREE_ELAPSED
+    return mode
+
+
+def tonic_timeline_mode_label(mode_raw: str) -> str:
+    mode = normalize_tonic_timeline_mode(mode_raw)
+    return _TONIC_TIMELINE_MODE_LABELS.get(mode, mode or TONIC_TIMELINE_MODE_REAL_ELAPSED)
 
 
 def normalize_dynamic_fit_mode(mode_raw: str) -> str:
@@ -5135,6 +5182,19 @@ class MainWindow(QMainWindow):
         if selected_tonic_output_mode != default_tonic_output_mode:
             config_overrides["tonic_output_mode"] = selected_tonic_output_mode
 
+        selected_tonic_timeline_mode = normalize_tonic_timeline_mode(
+            str(
+                getattr(self, "_tonic_timeline_mode_combo", None).currentData()
+                if hasattr(self, "_tonic_timeline_mode_combo")
+                else getattr(self._default_cfg, "tonic_timeline_mode", TONIC_TIMELINE_MODE_REAL_ELAPSED)
+            )
+        )
+        default_tonic_timeline_mode = normalize_tonic_timeline_mode(
+            str(getattr(self._default_cfg, "tonic_timeline_mode", TONIC_TIMELINE_MODE_REAL_ELAPSED))
+        )
+        if selected_tonic_timeline_mode != default_tonic_timeline_mode:
+            config_overrides["tonic_timeline_mode"] = selected_tonic_timeline_mode
+
         # Preprocessing + Baseline overrides
         default_prep_dict = {
             "lowpass_hz": self._default_cfg.lowpass_hz,
@@ -6318,6 +6378,16 @@ class MainWindow(QMainWindow):
         idx_tonic_mode = self._tonic_output_mode_combo.findData(tonic_output_mode)
         if idx_tonic_mode >= 0:
             self._tonic_output_mode_combo.setCurrentIndex(idx_tonic_mode)
+        tonic_timeline_mode = normalize_tonic_timeline_mode(
+            self._settings.value(
+                "tonic_timeline_mode",
+                str(getattr(self._default_cfg, "tonic_timeline_mode", TONIC_TIMELINE_MODE_REAL_ELAPSED)),
+                str,
+            )
+        )
+        idx_tonic_timeline_mode = self._tonic_timeline_mode_combo.findData(tonic_timeline_mode)
+        if idx_tonic_timeline_mode >= 0:
+            self._tonic_timeline_mode_combo.setCurrentIndex(idx_tonic_timeline_mode)
         self._baseline_subtract_before_fit_cb.setChecked(
             self._settings.value(
                 "baseline_subtract_before_fit",
@@ -6542,6 +6612,14 @@ class MainWindow(QMainWindow):
                 else TONIC_OUTPUT_MODE_PRESERVE_RAW
             ),
         )
+        self._settings.setValue(
+            "tonic_timeline_mode",
+            str(
+                getattr(self, "_tonic_timeline_mode_combo", None).currentData()
+                if hasattr(self, "_tonic_timeline_mode_combo")
+                else TONIC_TIMELINE_MODE_REAL_ELAPSED
+            ),
+        )
         self._settings.setValue("sig_iso_render_mode", self._sig_iso_render_mode_combo.currentText())
         self._settings.setValue("dff_render_mode", self._dff_render_mode_combo.currentText())
         self._settings.setValue("stacked_render_mode", self._stacked_render_mode_combo.currentText())
@@ -6657,6 +6735,16 @@ class MainWindow(QMainWindow):
                 return normalize_tonic_output_mode(str(data))
         return normalize_tonic_output_mode(
             str(getattr(self._default_cfg, "tonic_output_mode", TONIC_OUTPUT_MODE_PRESERVE_RAW))
+        )
+
+    def _selected_tonic_timeline_mode(self) -> str:
+        combo = getattr(self, "_tonic_timeline_mode_combo", None)
+        if combo is not None:
+            data = combo.currentData()
+            if data:
+                return normalize_tonic_timeline_mode(str(data))
+        return normalize_tonic_timeline_mode(
+            str(getattr(self._default_cfg, "tonic_timeline_mode", TONIC_TIMELINE_MODE_REAL_ELAPSED))
         )
 
     def _selected_correction_tuning_fit_mode(self) -> str:
@@ -6843,6 +6931,11 @@ class MainWindow(QMainWindow):
                 else "Tonic Output Mode: (inactive in phasic mode)"
             ),
             (
+                f"Tonic Timeline Mode: {tonic_timeline_mode_label(self._selected_tonic_timeline_mode())}"
+                if mode_text in ("both", "tonic")
+                else "Tonic Timeline Mode: (inactive in phasic mode)"
+            ),
+            (
                 f"Dynamic Fit Mode: {dynamic_fit_mode_label(self._selected_dynamic_fit_mode())}"
                 if phasic_active
                 else "Dynamic Fit Mode: (inactive in tonic mode)"
@@ -6930,6 +7023,8 @@ class MainWindow(QMainWindow):
             self._dynamic_fit_mode_combo.setEnabled(phasic_active)
         if hasattr(self, "_tonic_output_mode_combo"):
             self._tonic_output_mode_combo.setEnabled(tonic_active)
+        if hasattr(self, "_tonic_timeline_mode_combo"):
+            self._tonic_timeline_mode_combo.setEnabled(tonic_active)
 
         # Phasic-only controls: render family selectors + event/features group.
         self._plotting_mode_combo.setEnabled(phasic_active)
@@ -7768,6 +7863,25 @@ class MainWindow(QMainWindow):
             self._tonic_output_mode_combo.setCurrentIndex(idx_tonic_mode)
         self._tonic_output_mode_combo.currentIndexChanged.connect(self._on_config_changed)
         prep_layout.addRow("Tonic Output Mode:", self._tonic_output_mode_combo)
+
+        self._tonic_timeline_mode_combo = QComboBox()
+        self._tonic_timeline_mode_combo.setMinimumWidth(300)
+        self._tonic_timeline_mode_combo.setToolTip(_TONIC_TIMELINE_MODE_TOOLTIP)
+        for mode_name in get_allowed_tonic_timeline_modes_from_config():
+            self._tonic_timeline_mode_combo.addItem(
+                tonic_timeline_mode_label(mode_name),
+                mode_name,
+            )
+        default_tonic_timeline_mode = normalize_tonic_timeline_mode(
+            str(getattr(self._default_cfg, "tonic_timeline_mode", TONIC_TIMELINE_MODE_REAL_ELAPSED))
+        )
+        idx_tonic_timeline_mode = self._tonic_timeline_mode_combo.findData(default_tonic_timeline_mode)
+        if idx_tonic_timeline_mode < 0 and self._tonic_timeline_mode_combo.count() > 0:
+            idx_tonic_timeline_mode = 0
+        if idx_tonic_timeline_mode >= 0:
+            self._tonic_timeline_mode_combo.setCurrentIndex(idx_tonic_timeline_mode)
+        self._tonic_timeline_mode_combo.currentIndexChanged.connect(self._on_config_changed)
+        prep_layout.addRow("Tonic Timeline Mode:", self._tonic_timeline_mode_combo)
 
         self._apply_form_row_tooltips(prep_layout)
         content_layout.addWidget(self._adv_prep_group)

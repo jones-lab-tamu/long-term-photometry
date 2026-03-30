@@ -404,6 +404,118 @@ class TestFullPipelineDeliverables(unittest.TestCase):
         self.assertTrue(np.isfinite(slope_flat))
         self.assertLess(slope_flat, slope_raw)
 
+    def test_tonic_timeline_mode_gap_free_elapsed_affects_time_only(self):
+        """
+        Verify tonic timeline mode changes exported time axis (OFF gaps removed)
+        while preserving tonic signal values.
+        """
+        import tempfile
+        import importlib.util
+        import yaml
+
+        source_tonic = os.path.join(self.output_package, "_analysis", "tonic_out")
+        source_phasic = os.path.join(self.output_package, "_analysis", "phasic_out")
+        if not os.path.exists(source_tonic):
+            seed_cmd = [
+                sys.executable, "tools/run_full_pipeline_deliverables.py",
+                "--input", self.input_dir,
+                "--out", self.output_package,
+                "--config", self.config_path,
+                "--format", "rwd",
+                "--overwrite",
+                "--sessions-per-hour", "2",
+            ]
+            subprocess.check_call(seed_cmd)
+
+        script_path = os.path.join(PROJECT_ROOT, "tools", "run_full_pipeline_deliverables.py")
+        spec = importlib.util.spec_from_file_location("runner", script_path)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+
+        def _run_mode(timeline_mode_value: str) -> pd.DataFrame:
+            run_dir = tempfile.mkdtemp(prefix=f"tonic_timeline_{timeline_mode_value}_")
+            cfg_path = os.path.join(run_dir, "config_mode.yaml")
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            cfg["tonic_output_mode"] = "preserve_raw_session_shape"
+            cfg["tonic_timeline_mode"] = timeline_mode_value
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(cfg, f, sort_keys=True)
+
+            test_args = [
+                script_path,
+                "--input", self.input_dir,
+                "--out", run_dir,
+                "--config", cfg_path,
+                "--format", "rwd",
+                "--mode", "tonic",
+                "--sessions-per-hour", "2",
+                "--overwrite",
+            ]
+
+            import subprocess as sp
+            real_check_call = sp.check_call
+
+            def _mock_analysis(cmd):
+                cmd_str = " ".join([str(p).replace(os.sep, "/") for p in cmd])
+                if "analyze_photometry.py" in cmd_str:
+                    if "--out" in cmd:
+                        out_path = cmd[cmd.index("--out") + 1]
+                        os.makedirs(out_path, exist_ok=True)
+                        shutil.copy2(os.path.join(source_tonic, "tonic_trace_cache.h5"), out_path)
+                        shutil.copy2(os.path.join(source_tonic, "run_report.json"), out_path)
+                        shutil.copy2(os.path.join(source_tonic, "config_used.yaml"), out_path)
+                        p_out = os.path.join(os.path.dirname(out_path), "phasic_out")
+                        os.makedirs(p_out, exist_ok=True)
+                        shutil.copy2(os.path.join(source_phasic, "phasic_trace_cache.h5"), p_out)
+                        shutil.copy2(os.path.join(source_phasic, "run_report.json"), p_out)
+                        shutil.copy2(os.path.join(source_phasic, "config_used.yaml"), p_out)
+                        traces_src = os.path.join(source_phasic, "traces")
+                        if os.path.exists(traces_src):
+                            shutil.copytree(traces_src, os.path.join(p_out, "traces"), dirs_exist_ok=True)
+                    return 0
+                return real_check_call(cmd)
+
+            with mock.patch("sys.argv", test_args):
+                with mock.patch("subprocess.check_call", side_effect=_mock_analysis):
+                    runner.main()
+
+            roi_dirs = [
+                d for d in os.listdir(run_dir)
+                if os.path.isdir(os.path.join(run_dir, d))
+                and not d.startswith("_")
+                and d not in {"phasic_output", "tonic_output"}
+            ]
+            self.assertTrue(roi_dirs, f"no ROI folders found under {run_dir}")
+            csv_path = os.path.join(run_dir, sorted(roi_dirs)[0], "tables", "tonic_df_timeseries.csv")
+            self.assertTrue(os.path.exists(csv_path), f"missing tonic csv for timeline_mode={timeline_mode_value}")
+            df = pd.read_csv(csv_path)
+            self.assertIn("time_hours", df.columns)
+            self.assertIn("tonic_df", df.columns)
+            shutil.rmtree(run_dir, ignore_errors=True)
+            return df
+
+        df_real = _run_mode("real_elapsed_time")
+        df_compressed = _run_mode("gap_free_elapsed_time")
+        self.assertEqual(len(df_real), len(df_compressed))
+        self.assertTrue(
+            np.allclose(
+                df_real["tonic_df"].to_numpy(dtype=float),
+                df_compressed["tonic_df"].to_numpy(dtype=float),
+                equal_nan=True,
+            )
+        )
+        d_real = np.diff(df_real["time_hours"].to_numpy(dtype=float))
+        d_compressed = np.diff(df_compressed["time_hours"].to_numpy(dtype=float))
+        self.assertGreater(float(np.nanmax(d_real)), 0.1)
+        self.assertLess(float(np.nanmax(d_compressed)), float(np.nanmax(d_real)))
+        self.assertAlmostEqual(
+            float(df_real["time_hours"].iloc[-1]),
+            float(df_compressed["time_hours"].iloc[-1]),
+            places=6,
+        )
+        self.assertTrue(np.all(d_compressed > 0))
+
     def test_phasic_csv_content_independence(self):
         """
         RIGOROUS PROOF: Verify that phasic wrapper timing/session-duration

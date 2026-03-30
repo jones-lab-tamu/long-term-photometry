@@ -107,6 +107,18 @@ class TestPlotTonic48h(unittest.TestCase):
         self.assertTrue(os.path.exists(out_path))
         self.assertGreater(os.path.getsize(out_path), 0)
 
+    def test_gap_free_tonic_timeline_mode_runs(self):
+        """Optional tonic timeline mode should run and produce an image."""
+        out_path = os.path.join(self.test_dir.name, 'compressed_timeline.png')
+        result = self._run_script([
+            '--out', out_path,
+            '--roi', 'Region0',
+            '--tonic-timeline-mode', 'gap_free_elapsed_time',
+        ])
+        self.assertEqual(result.returncode, 0, f"Script failed:\n{result.stderr}")
+        self.assertTrue(os.path.exists(out_path))
+        self.assertGreater(os.path.getsize(out_path), 0)
+
     def test_timing_instrumentation(self):
         """Verify that the expected timing lines are present in stdout."""
         result = self._run_script()
@@ -167,6 +179,47 @@ class TestPlotTonic48h(unittest.TestCase):
         # dt = 10.0 / (200 - 1) = ~0.05025
         dt_expected = 10.0 / 199.0
         self.assertTrue(np.allclose(diffs, dt_expected))
+
+    def test_timeline_modes_real_vs_gap_free_elapsed_behavior(self):
+        from types import SimpleNamespace
+        from tools.plot_tonic_48h import assemble_arrays
+        from photometry_pipeline.io.hdf5_cache_reader import open_tonic_cache
+
+        cache = open_tonic_cache(self.cache_path)
+        real_args = SimpleNamespace(
+            input=None,
+            format='auto',
+            sessions_per_hour=2,
+            tonic_output_mode='preserve_raw_session_shape',
+            tonic_timeline_mode='real_elapsed_time',
+            include_visual_separators=False,
+        )
+        compressed_args = SimpleNamespace(
+            input=None,
+            format='auto',
+            sessions_per_hour=2,
+            tonic_output_mode='preserve_raw_session_shape',
+            tonic_timeline_mode='gap_free_elapsed_time',
+            include_visual_separators=False,
+        )
+        t_real, *_ = assemble_arrays(cache, 'Region0', real_args)
+        t_compressed, *_ = assemble_arrays(cache, 'Region0', compressed_args)
+        cache.close()
+
+        self.assertEqual(len(t_real), len(t_compressed))
+        d_real = np.diff(t_real)
+        d_compressed = np.diff(t_compressed)
+        self.assertGreater(float(np.max(d_real)), 1000.0)
+        self.assertLess(float(np.max(d_compressed)), 100.0)
+        self.assertAlmostEqual(float(t_compressed[-1]), float(t_real[-1]), places=6)
+        self.assertTrue(np.all(d_compressed > 0))
+
+    def test_overview_title_prefix_uses_computed_duration(self):
+        from tools.plot_tonic_48h import build_overview_prefix_from_time_hours
+
+        t_h = np.array([0.0, 1.0, 2.0, 11.7])
+        self.assertEqual(build_overview_prefix_from_time_hours(t_h), "11.7 h Overview")
+        self.assertEqual(build_overview_prefix_from_time_hours(np.array([5.0])), "Overview")
 
 if __name__ == '__main__':
     unittest.main()

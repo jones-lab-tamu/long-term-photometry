@@ -54,6 +54,13 @@ try:
         apply_tonic_output_mode_to_session,
         normalize_tonic_output_mode,
     )
+    from photometry_pipeline.core.tonic_timeline import (
+        TONIC_TIMELINE_MODE_GAP_FREE_ELAPSED,
+        TONIC_TIMELINE_MODE_REAL_ELAPSED,
+        build_tonic_chunk_time_axis,
+        normalize_tonic_timeline_mode,
+        remap_gapfree_axis_to_elapsed_span,
+    )
     from photometry_pipeline.io.hdf5_cache_reader import (
         open_tonic_cache, open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields, list_cache_chunk_ids
     )
@@ -582,12 +589,14 @@ def main():
     effective_representative_index = args.representative_session_index
     effective_preview_first_n = args.preview_first_n
     effective_tonic_output_mode = TONIC_OUTPUT_MODE_PRESERVE_RAW
+    effective_tonic_timeline_mode = TONIC_TIMELINE_MODE_REAL_ELAPSED
     
     if (
         effective_event_signal is None
         or effective_representative_index is None
         or effective_preview_first_n is None
         or effective_tonic_output_mode == TONIC_OUTPUT_MODE_PRESERVE_RAW
+        or effective_tonic_timeline_mode == TONIC_TIMELINE_MODE_REAL_ELAPSED
     ):
         try:
             cfg = Config.from_yaml(args.config)
@@ -600,15 +609,23 @@ def main():
             effective_tonic_output_mode = normalize_tonic_output_mode(
                 getattr(cfg, "tonic_output_mode", TONIC_OUTPUT_MODE_PRESERVE_RAW)
             )
+            effective_tonic_timeline_mode = normalize_tonic_timeline_mode(
+                getattr(cfg, "tonic_timeline_mode", TONIC_TIMELINE_MODE_REAL_ELAPSED)
+            )
         except Exception as e:
             print(f"WARNING: Failed to parse config for runner stamping: {e}", flush=True)
             if effective_event_signal is None: 
                 effective_event_signal = "dff"
             # others remain as given or None
             effective_tonic_output_mode = TONIC_OUTPUT_MODE_PRESERVE_RAW
+            effective_tonic_timeline_mode = TONIC_TIMELINE_MODE_REAL_ELAPSED
 
     print(
         f"Using tonic_output_mode={effective_tonic_output_mode}",
+        flush=True,
+    )
+    print(
+        f"Using tonic_timeline_mode={effective_tonic_timeline_mode}",
         flush=True,
     )
 
@@ -1223,7 +1240,8 @@ def main():
                 cmd_tonic_roi = [sys.executable, 'tools/plot_tonic_48h.py',
                                  '--analysis-out', tonic_out, '--roi', roi,
                                  '--out', out_tonic,
-                                 '--tonic-output-mode', effective_tonic_output_mode]
+                                 '--tonic-output-mode', effective_tonic_output_mode,
+                                 '--tonic-timeline-mode', effective_tonic_timeline_mode]
                 if args.input:
                     cmd_tonic_roi.extend(['--input', args.input])
                 if args.format:
@@ -1258,10 +1276,16 @@ def main():
                 frames_accumulated = 0
                 tonic_mode_fallback_count = 0
                 csv_file_handle = None
-                t_rows = []
+                t_secs_mode = []
+                t_secs_real = []
+                d_vals = []
+                use_streaming_csv = (
+                    HAS_PYARROW_CSV
+                    and effective_tonic_timeline_mode == TONIC_TIMELINE_MODE_REAL_ELAPSED
+                )
                 arrow_write_header = None
                 arrow_write_no_header = None
-                if HAS_PYARROW_CSV:
+                if use_streaming_csv:
                     arrow_write_header = pa_csv.WriteOptions(include_header=True, delimiter=',')
                     arrow_write_no_header = pa_csv.WriteOptions(include_header=False, delimiter=',')
 
@@ -1286,10 +1310,14 @@ def main():
                         actual_positions = map_cached_sources_to_schedule_positions(
                             args.input, args.format, source_files, cids
                         )
+                        prev_chunk_end_sec = None
+                        prev_dt_sec = None
+                        prev_real_end_sec = None
+                        prev_real_dt_sec = None
 
                         tonic_subbucket_totals["chunk_enumeration"] += time.perf_counter() - t_sub
                         for i, cid in enumerate(cids):
-                            actual_schedule_idx = actual_positions[i]
+                            actual_schedule_idx = actual_positions[i] if i < len(actual_positions) else None
                             
                             chunks_processed += 1
                             t_sub = time.perf_counter()
@@ -1314,21 +1342,44 @@ def main():
                             tonic_subbucket_totals["per_chunk_cache_read"] += time.perf_counter() - t_sub
 
                             t_sub = time.perf_counter()
-                            t_abs = (actual_schedule_idx * stride_s) + t_arr
-                            time_hours = t_abs / 3600.0
+                            t_abs_real, timeline_state_real = build_tonic_chunk_time_axis(
+                                time_sec_local=t_arr,
+                                timeline_mode_raw=TONIC_TIMELINE_MODE_REAL_ELAPSED,
+                                chunk_sequence_index=int(cid),
+                                actual_schedule_index=actual_schedule_idx,
+                                stride_sec=stride_s,
+                                prev_chunk_end_sec=prev_real_end_sec,
+                                prev_dt_sec=prev_real_dt_sec,
+                            )
+                            prev_real_end_sec = timeline_state_real["prev_chunk_end_sec"]
+                            prev_real_dt_sec = timeline_state_real["prev_dt_sec"]
+                            if effective_tonic_timeline_mode == TONIC_TIMELINE_MODE_REAL_ELAPSED:
+                                t_abs = t_abs_real
+                            else:
+                                t_abs, timeline_state = build_tonic_chunk_time_axis(
+                                    time_sec_local=t_arr,
+                                    timeline_mode_raw=TONIC_TIMELINE_MODE_GAP_FREE_ELAPSED,
+                                    chunk_sequence_index=int(cid),
+                                    actual_schedule_index=actual_schedule_idx,
+                                    stride_sec=stride_s,
+                                    prev_chunk_end_sec=prev_chunk_end_sec,
+                                    prev_dt_sec=prev_dt_sec,
+                                )
+                                prev_chunk_end_sec = timeline_state["prev_chunk_end_sec"]
+                                prev_dt_sec = timeline_state["prev_dt_sec"]
                             tonic_subbucket_totals["per_chunk_transform"] += time.perf_counter() - t_sub
 
                             t_sub = time.perf_counter()
-                            rows_written += len(time_hours)
+                            rows_written += len(t_abs)
                             frames_accumulated += 1
                             tonic_subbucket_totals["row_accumulation"] += time.perf_counter() - t_sub
 
-                            if HAS_PYARROW_CSV:
+                            if use_streaming_csv:
                                 t_sub = time.perf_counter()
                                 if csv_file_handle is None:
                                     csv_file_handle = pa.OSFile(tonic_csv_path, 'wb')
                                 table = pa.table({
-                                    'time_hours': pa.array(time_hours),
+                                    'time_hours': pa.array(t_abs / 3600.0),
                                     'tonic_df': pa.array(df_arr)
                                 })
                                 write_opts = arrow_write_header if chunks_processed == 1 else arrow_write_no_header
@@ -1336,10 +1387,9 @@ def main():
                                 tonic_subbucket_totals["csv_write"] += time.perf_counter() - t_sub
                             else:
                                 t_sub = time.perf_counter()
-                                t_rows.append(pd.DataFrame({
-                                    'time_hours': time_hours,
-                                    'tonic_df': df_arr
-                                }))
+                                t_secs_mode.append(np.asarray(t_abs, dtype=float))
+                                t_secs_real.append(np.asarray(t_abs_real, dtype=float))
+                                d_vals.append(np.asarray(df_arr, dtype=float))
                                 tonic_subbucket_totals["row_accumulation"] += time.perf_counter() - t_sub
                     finally:
                         if csv_file_handle is not None:
@@ -1352,9 +1402,22 @@ def main():
                 else:
                     tonic_subbucket_totals["cache_path_check"] += time.perf_counter() - t_sub
 
-                if t_rows:
+                if t_secs_mode:
                     t_sub = time.perf_counter()
-                    full_tonic = pd.concat(t_rows, ignore_index=True)
+                    full_t_mode = np.concatenate(t_secs_mode)
+                    full_t_real = np.concatenate(t_secs_real)
+                    if effective_tonic_timeline_mode != TONIC_TIMELINE_MODE_REAL_ELAPSED:
+                        full_t_mode = remap_gapfree_axis_to_elapsed_span(
+                            full_t_mode,
+                            elapsed_start_sec=float(np.nanmin(full_t_real)),
+                            elapsed_end_sec=float(np.nanmax(full_t_real)),
+                        )
+                    full_tonic = pd.DataFrame(
+                        {
+                            'time_hours': full_t_mode / 3600.0,
+                            'tonic_df': np.concatenate(d_vals),
+                        }
+                    )
                     tonic_subbucket_totals["dataframe_concat"] += time.perf_counter() - t_sub
 
                     t_sub = time.perf_counter()

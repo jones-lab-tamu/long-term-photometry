@@ -88,6 +88,11 @@ class Config:
         'preserve_raw_session_shape',
         'flatten_session_bleach_preserve_session_baseline',
     ] = 'preserve_raw_session_shape'
+    tonic_timeline_mode: Literal[
+        'real_elapsed_time',
+        'gap_free_elapsed_time',
+        'compressed_recording_time',
+    ] = 'real_elapsed_time'
 
     # channel identifiers - MUST be provided in config (no defaults for these essentially)
     rwd_time_col: str = "Time(s)" # Default often seen, but user should override
@@ -174,6 +179,18 @@ class Config:
                     f"Invalid tonic_output_mode: {data['tonic_output_mode']}. "
                     "Allowed: {'preserve_raw_session_shape', "
                     "'flatten_session_bleach_preserve_session_baseline'}"
+                )
+
+        if 'tonic_timeline_mode' in data:
+            if data['tonic_timeline_mode'] not in {
+                'real_elapsed_time',
+                'gap_free_elapsed_time',
+                'compressed_recording_time',
+            }:
+                raise ValueError(
+                    f"Invalid tonic_timeline_mode: {data['tonic_timeline_mode']}. "
+                    "Allowed: {'real_elapsed_time', 'gap_free_elapsed_time'} "
+                    "(legacy alias 'compressed_recording_time' is also accepted)"
                 )
         
         obj = cls(**data)

@@ -23,6 +23,7 @@ GUI_KNOBS_ADVANCED: Set[str] = {
     # Preprocessing + Baseline
     "lowpass_hz",
     "tonic_output_mode",
+    "tonic_timeline_mode",
     "baseline_method",
     "baseline_percentile",
     "f0_min_value",
@@ -89,6 +90,10 @@ KNOB_META: Dict[str, dict] = {
     "tonic_output_mode": {
         "label": "Tonic Output Mode",
         "help": "Controls tonic output rendering/export mode: preserve raw session shape, or flatten within-session bleach shape while preserving session baseline placement.",
+    },
+    "tonic_timeline_mode": {
+        "label": "Tonic Timeline Mode",
+        "help": "Controls tonic timeline representation: real elapsed time (with OFF gaps) or gap-free elapsed time (OFF-gap whitespace removed while preserving full elapsed span).",
     },
     "baseline_method": {
         "label": "Baseline Method",

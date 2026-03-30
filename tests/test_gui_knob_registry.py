@@ -166,6 +166,15 @@ class TestGuiKnobRegistry(unittest.TestCase):
             {"tonic_output_mode": "flatten_session_bleach_preserve_session_baseline"},
         )
 
+    def test_filter_config_overrides_accepts_tonic_timeline_mode(self):
+        filtered = filter_config_overrides(
+            {"tonic_timeline_mode": "gap_free_elapsed_time"}
+        )
+        self.assertEqual(
+            filtered,
+            {"tonic_timeline_mode": "gap_free_elapsed_time"},
+        )
+
     def test_filter_config_overrides_accepts_robust_event_reject_keys(self):
         filtered = filter_config_overrides(
             {
