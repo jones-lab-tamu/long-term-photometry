@@ -9,6 +9,16 @@ _SAVGOL_WINDOW_SEC = 0.75
 _SAVGOL_DEFAULT_POLYORDER = 2
 _SAVGOL_MIN_WINDOW = 5
 
+def _trapezoid_integral(y, *, x=None, dx=1.0):
+    """NumPy compatibility shim: prefer np.trapezoid, fall back to np.trapz."""
+    trapezoid = getattr(np, "trapezoid", None)
+    if callable(trapezoid):
+        return trapezoid(y, x=x, dx=dx)
+    trapz = getattr(np, "trapz", None)
+    if callable(trapz):
+        return trapz(y, x=x, dx=dx)
+    raise AttributeError("NumPy missing both trapezoidal integration APIs: trapezoid/trapz")
+
 def compute_auc_above_threshold(dff, baseline_value, fs_hz=None, time_s=None):
     """
     Computes AUC as area above threshold (clamped to 0).
@@ -36,12 +46,12 @@ def compute_auc_above_threshold(dff, baseline_value, fs_hz=None, time_s=None):
         if np.any(np.diff(time_s) < 0):
             raise ValueError("time_s must be non-decreasing")
              
-        auc = float(np.trapz(rect, x=time_s))
+        auc = float(_trapezoid_integral(rect, x=time_s))
     else:
         if fs_hz is None or fs_hz <= 0:
             raise ValueError("fs_hz must be > 0 when time_s is None")
         dt = 1.0 / fs_hz
-        auc = float(np.trapz(rect, dx=dt))
+        auc = float(_trapezoid_integral(rect, dx=dt))
     
     # Single safeguard
     auc = max(auc, 0.0)

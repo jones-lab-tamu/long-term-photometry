@@ -90,9 +90,12 @@ def test_t4_auc_baseline_behavior():
     assert auc_zero > auc_median
     assert auc_median > 0
     
-    # trapz of (dff - 1.0) rect
+    # trapezoidal integral of rectified (dff - 1.0)
     expected_median_rect = np.array([0, 1, 2, 3, 0, 0, 0, 0, 0, 0], dtype=float)
-    expected_auc_median = np.trapz(expected_median_rect, x=time_s)
+    integrate = getattr(np, "trapezoid", None)
+    if integrate is None:
+        integrate = getattr(np, "trapz")
+    expected_auc_median = integrate(expected_median_rect, x=time_s)
     np.testing.assert_allclose(auc_median, expected_auc_median)
 
 def test_t5_npm_adapter_nan_policy():
@@ -149,3 +152,18 @@ def test_t7_feature_extraction_nan_masking_survival():
     
     auc_median = compute_auc_above_threshold(clean_trace_use, baseline_value=1.0, time_s=time_s[is_valid_use])
     assert np.isfinite(auc_median)
+
+def test_t8_auc_compat_when_np_trapz_missing(monkeypatch):
+    def _manual_trapezoid(y, x=None, dx=1.0):
+        y_arr = np.asarray(y, dtype=float)
+        if x is None:
+            return np.sum(0.5 * (y_arr[1:] + y_arr[:-1]) * float(dx))
+        x_arr = np.asarray(x, dtype=float)
+        return np.sum(0.5 * (y_arr[1:] + y_arr[:-1]) * (x_arr[1:] - x_arr[:-1]))
+
+    monkeypatch.setattr(np, "trapezoid", _manual_trapezoid, raising=False)
+    monkeypatch.delattr(np, "trapz", raising=False)
+
+    dff = np.array([0, 2, 2, 0], dtype=float)
+    auc = compute_auc_above_threshold(dff, baseline_value=1.0, fs_hz=1.0)
+    np.testing.assert_allclose(auc, 2.0)
