@@ -278,6 +278,117 @@ def test_tuning_workspace_availability_requires_prerequisites(window, tmp_path):
     assert window._tuning_chunk_combo.count() >= 1
 
 
+def test_tuning_refresh_auto_syncs_complete_state_when_results_are_loaded(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path / "sync_complete_state")
+    _add_results_workspace_artifacts(run_dir)
+
+    window._current_run_dir = str(run_dir)
+    assert window._report_viewer.load_report(str(run_dir))
+    assert not window._is_complete_workspace_active
+
+    window._refresh_tuning_workspace_availability()
+
+    assert window._is_complete_workspace_active
+    assert window._controls_stack.currentWidget() is window._complete_state_panel
+    assert window._tuning_workspace_available
+    assert window._correction_tuning_workspace_available
+    assert "only after a successful completed run is loaded" not in window._tuning_availability_label.text().lower()
+    assert "only after a successful completed run is loaded" not in window._correction_tuning_availability_label.text().lower()
+
+
+def test_open_results_load_enables_both_tuning_paths(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path / "open_results_valid")
+    _add_results_workspace_artifacts(run_dir)
+    monkeypatch.setattr(
+        "gui.main_window.QFileDialog.getExistingDirectory",
+        lambda *_args, **_kwargs: str(run_dir),
+    )
+    QApplication.processEvents()
+
+    window._on_open_results()
+
+    assert window._report_viewer.has_loaded_results()
+    assert window._is_complete_workspace_active
+    assert window._controls_stack.currentWidget() is window._complete_state_panel
+    assert window._tuning_workspace_available
+    assert window._correction_tuning_workspace_available
+    assert "only after a successful completed run is loaded" not in window._tuning_collapsed_status_label.text().lower()
+    assert "only after a successful completed run is loaded" not in window._correction_tuning_collapsed_status_label.text().lower()
+
+
+def test_open_results_missing_tuning_artifacts_reports_honest_reason(window, tmp_path, monkeypatch):
+    run_dir = tmp_path / "open_results_missing_tuning_artifacts"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "status.json").write_text(
+        json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
+        encoding="utf-8",
+    )
+    (run_dir / "MANIFEST.json").write_text(
+        json.dumps({"status": "success"}),
+        encoding="utf-8",
+    )
+    _add_results_workspace_artifacts(run_dir)
+    monkeypatch.setattr(
+        "gui.main_window.QFileDialog.getExistingDirectory",
+        lambda *_args, **_kwargs: str(run_dir),
+    )
+    QApplication.processEvents()
+
+    window._on_open_results()
+
+    assert window._report_viewer.has_loaded_results()
+    assert window._is_complete_workspace_active
+    assert not window._tuning_workspace_available
+    assert not window._correction_tuning_workspace_available
+    assert "_analysis/phasic_out" in window._tuning_availability_label.text()
+    assert "_analysis/phasic_out" in window._correction_tuning_availability_label.text()
+    assert "only after a successful completed run is loaded" not in window._tuning_availability_label.text().lower()
+    assert "only after a successful completed run is loaded" not in window._correction_tuning_availability_label.text().lower()
+
+
+def test_help_icon_rollout_preserves_tuning_peak_labels_for_visibility_updates(window, tmp_path):
+    run_dir = _make_completed_run_with_cache(tmp_path / "tuning_peak_label_lifetime")
+    _add_results_workspace_artifacts(run_dir)
+    window._current_run_dir = str(run_dir)
+    assert window._report_viewer.load_report(str(run_dir))
+    QApplication.processEvents()
+
+    window._refresh_tuning_workspace_availability()
+    QApplication.processEvents()
+
+    for method in ("mean_std", "percentile", "absolute"):
+        idx = window._tuning_peak_method_combo.findText(method)
+        if idx >= 0:
+            window._tuning_peak_method_combo.setCurrentIndex(idx)
+            window._on_tuning_peak_method_changed()
+            QApplication.processEvents()
+
+    assert window._tuning_workspace_available
+    assert window._tuning_peak_k_label.parent() is not None
+    assert window._tuning_peak_pct_label.parent() is not None
+    assert window._tuning_peak_abs_label.parent() is not None
+
+
+def test_help_icon_rollout_preserves_main_peak_labels_for_visibility_updates(window):
+    QApplication.processEvents()
+    for method in ("mean_std", "percentile", "absolute"):
+        idx = window._peak_method_combo.findText(method)
+        if idx >= 0:
+            window._peak_method_combo.setCurrentIndex(idx)
+            window._update_adv_ev_visibility()
+            QApplication.processEvents()
+
+    for idx in range(window._baseline_method_combo.count()):
+        window._baseline_method_combo.setCurrentIndex(idx)
+        window._update_adv_prep_visibility()
+        QApplication.processEvents()
+
+    assert window._peak_k_label.parent() is not None
+    assert window._peak_pct_label.parent() is not None
+    assert window._peak_abs_label.parent() is not None
+    assert window._baseline_percentile_label.parent() is not None
+
+
 def test_tuning_workspace_missing_config_snapshot_blocks(window, tmp_path):
     run_dir = _make_completed_run_with_cache(tmp_path, with_config=False)
     window._is_complete_workspace_active = True

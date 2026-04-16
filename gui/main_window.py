@@ -2993,6 +2993,18 @@ class MainWindow(QMainWindow):
             return
         self._roi_chunk_ids_cache = {}
 
+        # Keep complete-state flag synchronized with a loaded results workspace.
+        # This prevents stale "no completed run loaded" tuning gating when the
+        # report viewer has already loaded a completed run directory.
+        if (
+            not self._is_complete_workspace_active
+            and hasattr(self, "_report_viewer")
+            and self._report_viewer.has_loaded_results()
+            and bool(self._current_run_dir and os.path.isdir(self._current_run_dir))
+        ):
+            self._enter_complete_state_workspace()
+            return
+
         self._tuning_group.setVisible(bool(self._is_complete_workspace_active))
         if not self._is_complete_workspace_active:
             self._set_tuning_workspace_unavailable(
@@ -7659,18 +7671,8 @@ class MainWindow(QMainWindow):
         row_layout = QHBoxLayout(container)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(4)
-
-        text_label = QLabel(label_widget.text(), container)
-        text_label.setObjectName("formRowHelpLabelText")
-        text_label.setAlignment(label_widget.alignment())
-        text_label.setMinimumWidth(label_widget.minimumWidth())
-        text_label.setMaximumWidth(label_widget.maximumWidth())
-        text_label.setWordWrap(label_widget.wordWrap())
-        text_label.setSizePolicy(label_widget.sizePolicy())
-        text_label.setToolTip(tooltip)
-        if label_widget.styleSheet():
-            text_label.setStyleSheet(label_widget.styleSheet())
-        text_label.setProperty("formRowHelpText", True)
+        label_widget.setProperty("formRowHelpText", True)
+        label_widget.setToolTip(tooltip)
 
         help_btn = QToolButton(container)
         help_btn.setObjectName("formRowHelpIcon")
@@ -7690,18 +7692,24 @@ class MainWindow(QMainWindow):
             )
         )
 
-        row_layout.addWidget(text_label)
-        row_layout.addWidget(help_btn, 0, Qt.AlignVCenter)
-        # QFormLayout label cells are already occupied by the existing label widget.
-        # Remove that widget from the layout role first, then install the help container.
+        # Keep the original QLabel instance alive so any stored references remain
+        # valid for dynamic visibility updates (e.g., tuning peak-method handlers).
         form_layout.removeWidget(label_widget)
-        label_widget.hide()
-        label_widget.setParent(None)
+        label_widget.setParent(container)
+        row_layout.addWidget(label_widget)
+        row_layout.addWidget(help_btn, 0, Qt.AlignVCenter)
         form_layout.setWidget(row, QFormLayout.LabelRole, container)
-        label_widget.deleteLater()
+
+    @staticmethod
+    def _form_row_help_text_label(container: QWidget) -> QLabel | None:
+        labels = container.findChildren(QLabel)
+        for lbl in labels:
+            if bool(lbl.property("formRowHelpText")):
+                return lbl
+        return labels[0] if labels else None
 
     def _set_form_row_help_tooltip(self, container: QWidget, tooltip: str) -> None:
-        text_label = container.findChild(QLabel, "formRowHelpLabelText")
+        text_label = self._form_row_help_text_label(container)
         if text_label is not None:
             text_label.setToolTip(tooltip)
         help_btn = container.findChild(QToolButton, "formRowHelpIcon")
@@ -7726,7 +7734,7 @@ class MainWindow(QMainWindow):
                 continue
 
             if bool(label_widget.property("formRowHelpContainer")):
-                text_label = label_widget.findChild(QLabel, "formRowHelpLabelText")
+                text_label = self._form_row_help_text_label(label_widget)
                 if text_label is None:
                     continue
                 tooltip = self._resolve_form_row_tooltip(form_layout, row, text_label)
