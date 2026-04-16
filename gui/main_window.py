@@ -1379,7 +1379,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._complete_mode_title_label)
 
         self._complete_mode_subtitle_label = QLabel(
-            "Completed outputs are loaded on the right. Optional post-run tuning is available below."
+            "Completed outputs are loaded on the right. Post-run tuning is available below."
         )
         self._complete_mode_subtitle_label.setObjectName("workflowColumnSubtitle")
         self._complete_mode_subtitle_label.setWordWrap(True)
@@ -1398,7 +1398,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(card)
 
         self._complete_mode_next_steps_label = QLabel(
-            "Next: inspect outputs, optionally retune, then apply back to next-run settings if needed."
+            "Next: inspect outputs, retune as needed, then apply back to next-run settings if needed."
         )
         self._complete_mode_next_steps_label.setWordWrap(True)
         self._complete_mode_next_steps_label.setObjectName("resultsSummaryHint")
@@ -1418,13 +1418,13 @@ class MainWindow(QMainWindow):
 
     def _build_tuning_workspace_group(self) -> QGroupBox:
         """Bounded post-run tuning surface for downstream and correction retune workflows."""
-        group = QGroupBox("Post-Run Tuning (Optional)")
+        group = QGroupBox("Post-Run Tuning")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
         self._tuning_phase_note = QLabel(
-            "Optional downstream tools. Completed outputs remain unchanged unless you run a new analysis."
+            "Post-run tuning tools. Completed outputs remain unchanged unless you run a new analysis."
         )
         self._tuning_phase_note.setWordWrap(True)
         self._tuning_phase_note.setObjectName("resultsSummaryHint")
@@ -1525,7 +1525,7 @@ class MainWindow(QMainWindow):
         self._tuning_chunk_combo.setToolTip(
             "Used for preview/inspection in the tuning workspace."
         )
-        tuning_form.addRow(_tuning_row_label("Chunk:"), self._tuning_chunk_combo)
+        tuning_form.addRow(_tuning_row_label("Preview session:"), self._tuning_chunk_combo)
 
         self._tuning_event_signal_combo = QComboBox()
         self._tuning_event_signal_combo.setMinimumWidth(220)
@@ -1690,7 +1690,9 @@ class MainWindow(QMainWindow):
         )
         content_layout.addWidget(self._tuning_overlay_title)
 
-        self._tuning_overlay_label = _ClickableImageLabel("Run tuning to generate an ROI/chunk event overlay.")
+        self._tuning_overlay_label = _ClickableImageLabel(
+            "Run tuning to generate an ROI preview-session event overlay."
+        )
         self._tuning_overlay_label.setAlignment(Qt.AlignCenter)
         self._tuning_overlay_label.setToolTip(
             "Preview overlay for the selected downstream ROI and preview session. "
@@ -2131,7 +2133,7 @@ class MainWindow(QMainWindow):
             _DYNAMIC_FIT_TOOLTIPS["adaptive_smooth_window_sec"]
         )
         form.addRow(
-            _corr_row_label("Adaptive smooth window (s):"),
+            _corr_row_label("Adaptive smoothing window duration (s):"),
             self._correction_tuning_adaptive_smooth_window_spin,
         )
 
@@ -3044,7 +3046,7 @@ class MainWindow(QMainWindow):
             roi_chunk_map = self._roi_chunk_ids_map(cache_path)
         except Exception as exc:
             self._set_tuning_workspace_unavailable(
-                f"Tuning unavailable: unable to read ROI/chunk targets from phasic cache ({exc})."
+                f"Tuning unavailable: unable to read ROI/session targets from phasic cache ({exc})."
             )
             self._set_correction_tuning_workspace_unavailable(
                 f"Correction retune unavailable: unable to read ROI/session targets from phasic cache ({exc})."
@@ -3054,7 +3056,7 @@ class MainWindow(QMainWindow):
         valid_rois = sorted(roi_chunk_map.keys(), key=lambda s: s.lower())
         if not valid_rois:
             self._set_tuning_workspace_unavailable(
-                "Tuning unavailable: no valid ROI groups with chunk data found in phasic cache."
+                "Tuning unavailable: no valid ROI groups with session data found in phasic cache."
             )
             self._set_correction_tuning_workspace_unavailable(
                 "Correction retune unavailable: no valid ROI groups with session data found in phasic cache."
@@ -3077,7 +3079,7 @@ class MainWindow(QMainWindow):
             return
         if self._tuning_chunk_combo.count() == 0:
             self._set_tuning_workspace_unavailable(
-                f"Tuning unavailable: selected ROI '{selected_roi}' has no chunk data in phasic cache."
+                f"Tuning unavailable: selected ROI '{selected_roi}' has no available sessions in phasic cache."
             )
             self._set_correction_tuning_workspace_unavailable(
                 f"Correction retune unavailable: selected ROI '{selected_roi}' has no available sessions in phasic cache."
@@ -3214,7 +3216,7 @@ class MainWindow(QMainWindow):
         )
         lines = [
             f"ROI: {roi}",
-            f"Chunk: {chunk}",
+            f"Preview session: {chunk}",
             f"Event signal: {event_signal}",
             f"Changed vs baseline: {changed_text}",
             f"Apply-back to next run: {apply_text}",
@@ -3241,7 +3243,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Tuning Error", "Select an ROI before running tuning.")
             return
         if self._tuning_chunk_combo.currentIndex() < 0:
-            QMessageBox.warning(self, "Tuning Error", "Select a chunk before running tuning.")
+            QMessageBox.warning(
+                self,
+                "Tuning Error",
+                "Select a preview session before running tuning.",
+            )
             return
         chunk_id = int(self._tuning_chunk_combo.currentData())
         overrides = self._collect_tuning_overrides()
@@ -3288,7 +3294,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_tuning_feedback_summary()
         self._append_run_log(
-            f"Tuning completed for ROI={result.get('selected_roi', roi)} chunk={result.get('inspection_chunk_id', chunk_id)} "
+            f"Tuning completed for ROI={result.get('selected_roi', roi)} preview_session={result.get('inspection_chunk_id', chunk_id)} "
             f"-> {result.get('retune_dir', '(unknown)')}"
         )
         QTimer.singleShot(0, self._finalize_tuning_result_layout)
@@ -6600,7 +6606,7 @@ class MainWindow(QMainWindow):
         self._complete_summary_label.setText("\n".join(summary_lines))
         if hasattr(self, "_complete_mode_next_steps_label"):
             self._complete_mode_next_steps_label.setText(
-                "Next actions: inspect outputs, optionally run post-run tuning, then apply back to next-run settings. "
+                "Next actions: inspect outputs, run post-run tuning as needed, then apply back to next-run settings. "
                 "Apply-back does not mutate the completed run; rerun to produce updated outputs."
             )
 
@@ -6635,7 +6641,9 @@ class MainWindow(QMainWindow):
         self._tuning_last_changed_fields = []
         self._tuning_applyback_applied = False
         self._tuning_applyback_timestamp = ""
-        self._set_tuning_overlay_message("Run tuning to generate an ROI/chunk event overlay.")
+        self._set_tuning_overlay_message(
+            "Run tuning to generate an ROI preview-session event overlay."
+        )
         self._refresh_tuning_feedback_summary()
         self._reset_correction_tuning_state()
         self._refresh_tuning_workspace_availability()
@@ -7853,10 +7861,10 @@ class MainWindow(QMainWindow):
         self._smooth_spin.setDecimals(2)
         self._smooth_spin.setSingleStep(0.1)
         self._smooth_spin.setToolTip(
-            "Smoothing window in seconds used by plotting scripts when smoothing is supported."
+            "Duration in seconds for plot smoothing when smoothing is supported."
         )
         self._smooth_spin.valueChanged.connect(self._on_config_changed)
-        layout.addRow("Smooth Window (s):", self._smooth_spin)
+        layout.addRow("Smoothing Window Duration (s):", self._smooth_spin)
 
         self._timeline_anchor_mode_combo = QComboBox()
         self._timeline_anchor_mode_combo.addItem("Civil clock", "civil")
@@ -7864,7 +7872,10 @@ class MainWindow(QMainWindow):
         self._timeline_anchor_mode_combo.addItem("Fixed daily anchor", "fixed_daily_anchor")
         self._timeline_anchor_mode_combo.setCurrentIndex(0)
         self._timeline_anchor_mode_combo.setToolTip(
-            "Global phasic timeline anchor used for day/hour placement."
+            "Choose how timeline x-positions are anchored:\n"
+            "Civil clock: keeps real time-of-day placement (including OFF gaps).\n"
+            "Elapsed from first session: starts at t=0 from the first session.\n"
+            "Fixed daily anchor: aligns each day/session to one clock anchor."
         )
         self._timeline_anchor_mode_combo.currentIndexChanged.connect(self._on_timeline_anchor_mode_changed)
         self._timeline_anchor_mode_combo.currentIndexChanged.connect(self._on_config_changed)
@@ -7873,10 +7884,18 @@ class MainWindow(QMainWindow):
         self._fixed_daily_anchor_time_edit = QLineEdit("07:00")
         self._fixed_daily_anchor_time_edit.setPlaceholderText("HH:MM or HH:MM:SS")
         self._fixed_daily_anchor_time_edit.setToolTip(
-            "Clock anchor used when Timeline Anchor is Fixed daily anchor."
+            "Clock anchor used only when Timeline Anchor is Fixed daily anchor."
         )
         self._fixed_daily_anchor_time_edit.textChanged.connect(self._on_config_changed)
         layout.addRow("Fixed Anchor Time:", self._fixed_daily_anchor_time_edit)
+        self._timeline_anchor_help_label = QLabel(
+            "Civil clock: real time-of-day\n"
+            "Elapsed from first session: starts at 0\n"
+            "Fixed daily anchor: align each day to one clock time"
+        )
+        self._timeline_anchor_help_label.setWordWrap(True)
+        self._timeline_anchor_help_label.setObjectName("resultsSummaryHint")
+        layout.addRow("", self._timeline_anchor_help_label)
         self._apply_form_row_tooltips(layout)
         self._on_timeline_anchor_mode_changed()
 
@@ -8175,7 +8194,10 @@ class MainWindow(QMainWindow):
             _DYNAMIC_FIT_TOOLTIPS["adaptive_smooth_window_sec"]
         )
         self._adaptive_event_gate_smooth_window_spin.valueChanged.connect(self._on_config_changed)
-        adaptive_form.addRow("Smooth window (s):", self._adaptive_event_gate_smooth_window_spin)
+        adaptive_form.addRow(
+            "Smoothing window duration (s):",
+            self._adaptive_event_gate_smooth_window_spin,
+        )
 
         self._adaptive_event_gate_min_trust_fraction_spin = QDoubleSpinBox()
         self._adaptive_event_gate_min_trust_fraction_spin.setRange(0.000001, 1.0)

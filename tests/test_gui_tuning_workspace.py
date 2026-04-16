@@ -691,7 +691,7 @@ def test_tuning_workspace_wiring_and_refresh(window, tmp_path, monkeypatch):
     assert captured["out_dir"] is None
 
     assert "ROI: Region1" in window._tuning_summary_label.text()
-    assert "Chunk: 2" in window._tuning_summary_label.text()
+    assert "Preview session: 2" in window._tuning_summary_label.text()
     assert "retune_out" in window._tuning_summary_label.text()
     assert window._tuning_overlay_title.text() == "overlay_test.png"
     shown = window._tuning_overlay_label.pixmap()
@@ -1740,7 +1740,7 @@ def test_tuning_workspace_real_backend_run(window, tmp_path):
     overlay = window._tuning_last_result["artifacts"]["retuned_overlay_png"]
     assert os.path.isfile(overlay)
     assert "ROI: Region0" in window._tuning_summary_label.text()
-    assert "Chunk: 1" in window._tuning_summary_label.text()
+    assert "Preview session: 1" in window._tuning_summary_label.text()
 
 
 def test_tuning_overlay_is_fit_to_view_on_first_display(window, tmp_path, monkeypatch):
@@ -2057,7 +2057,7 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
 
     downstream_pairs = [
         ("ROI:", window._tuning_roi_combo),
-        ("Chunk:", window._tuning_chunk_combo),
+        ("Preview session:", window._tuning_chunk_combo),
         ("Event Signal:", window._tuning_event_signal_combo),
         ("Peak Threshold Method:", window._tuning_peak_method_combo),
         ("Peak Threshold K:", window._tuning_peak_k_spin),
@@ -2088,7 +2088,10 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
         ("Adaptive residual z-threshold:", window._correction_tuning_adaptive_residual_z_spin),
         ("Adaptive local variance window (s):", window._correction_tuning_adaptive_local_var_window_spin),
         ("Adaptive local variance ratio threshold:", window._correction_tuning_adaptive_local_var_ratio_spin),
-        ("Adaptive smooth window (s):", window._correction_tuning_adaptive_smooth_window_spin),
+        (
+            "Adaptive smoothing window duration (s):",
+            window._correction_tuning_adaptive_smooth_window_spin,
+        ),
         ("Adaptive minimum trust fraction:", window._correction_tuning_adaptive_min_trust_fraction_spin),
         ("Adaptive freeze interpolation method:", window._correction_tuning_adaptive_freeze_interp_combo),
     ]

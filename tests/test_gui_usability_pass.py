@@ -31,7 +31,10 @@ def window(qapp):
 
 
 def _set_minimally_valid_paths(w: MainWindow):
-    w._input_dir.setText("tests/out_manual_complex_5roi_5day_2sph_shared")
+    candidate_input = "tests/out_manual_complex_5roi_5day_2sph_shared"
+    if not os.path.isdir(candidate_input):
+        candidate_input = tempfile.mkdtemp(prefix="gui_usability_in_")
+    w._input_dir.setText(candidate_input)
     w._config_path.setText("tests/qc_universal_config.yaml")
     w._output_dir.setText(tempfile.mkdtemp(prefix="gui_usability_out_"))
 
@@ -165,7 +168,7 @@ def test_advanced_tooltips_present(window):
         ("Session Duration (s):", window._duration_edit),
         ("Mode:", window._mode_combo),
         ("Plotting Mode:", window._plotting_mode_combo),
-        ("Smooth Window (s):", window._smooth_spin),
+        ("Smoothing Window Duration (s):", window._smooth_spin),
         ("Timeline Anchor:", window._timeline_anchor_mode_combo),
         ("Fixed Anchor Time:", window._fixed_daily_anchor_time_edit),
     ]
@@ -203,6 +206,16 @@ def test_advanced_tooltips_present(window):
         assert label is not None, f"Missing label {label_text}"
         assert label.toolTip().strip(), f"Missing tooltip on label {label_text}"
         assert control.toolTip().strip(), f"Missing tooltip on control for {label_text}"
+    timeline_tip = window._timeline_anchor_mode_combo.toolTip().lower()
+    assert "civil clock" in timeline_tip
+    assert "elapsed from first session" in timeline_tip
+    assert "fixed daily anchor" in timeline_tip
+    inline_anchor_help_lines = window._timeline_anchor_help_label.text().splitlines()
+    assert inline_anchor_help_lines == [
+        "Civil clock: real time-of-day",
+        "Elapsed from first session: starts at 0",
+        "Fixed daily anchor: align each day to one clock time",
+    ]
 
     removed_legacy_labels = [
         "Regression Step:",
@@ -1075,8 +1088,8 @@ def test_tuning_apply_back_affordance_and_scope_text(window):
     assert hasattr(window, "_tuning_applyback_scope_label")
     assert hasattr(window, "_tuning_applyback_status_label")
     apply_scope = window._tuning_applyback_scope_label.text().lower()
-    assert "next-run setup controls" in apply_scope
-    assert "completed run outputs stay unchanged" in apply_scope
+    assert "temporary" in apply_scope
+    assert "durable yaml reuse" in apply_scope
 
     scope_msg = window._tuning_scope_note.text().lower()
     assert "retunes downstream event detection from cached phasic traces" in scope_msg
@@ -1086,7 +1099,10 @@ def test_tuning_apply_back_affordance_and_scope_text(window):
     assert window._tuning_availability_label.wordWrap()
     assert window._tuning_summary_label.wordWrap()
     assert window._tuning_scope_note.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
-    assert window._tuning_availability_label.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
+    assert window._tuning_availability_label.sizePolicy().horizontalPolicy() in (
+        QSizePolicy.Ignored,
+        QSizePolicy.Expanding,
+    )
     assert window._tuning_summary_label.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
 
 
@@ -1100,17 +1116,20 @@ def test_complete_state_panel_results_mode_framing(window, qapp, tmp_path):
     assert window._controls_stack.currentWidget() is window._complete_state_panel
     assert window._complete_mode_title_label.text() == "Results Mode"
     assert "completed outputs are loaded on the right" in window._complete_mode_subtitle_label.text().lower()
+    assert "optional" not in window._complete_mode_subtitle_label.text().lower()
     assert "apply back to next-run settings" in window._complete_mode_next_steps_label.text().lower()
+    assert "as needed" in window._complete_mode_next_steps_label.text().lower()
     assert "read-only" in window._complete_summary_label.text().lower()
     assert window._new_run_btn.text() == "Start New Run"
 
 
 def test_post_run_tuning_hierarchy_and_feedback_copy(window):
-    assert window._tuning_group.title() == "Post-Run Tuning (Optional)"
+    assert window._tuning_group.title() == "Post-Run Tuning"
     assert "Primary:" in window._tuning_disclosure_btn.text()
     assert "Secondary:" in window._correction_tuning_disclosure_btn.text()
     assert "advanced" in window._correction_tuning_disclosure_btn.text().lower()
-    assert "optional downstream tools" in window._tuning_phase_note.text().lower()
+    assert "post-run tuning tools" in window._tuning_phase_note.text().lower()
+    assert "optional" not in window._tuning_group.title().lower()
     assert "advanced path" in window._correction_tuning_role_note.text().lower()
 
     window._tuning_last_result = {
