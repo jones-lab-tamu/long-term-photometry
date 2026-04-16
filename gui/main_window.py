@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QLabel, QLineEdit, QComboBox, QCheckBox, QSpinBox,
     QDoubleSpinBox, QPushButton, QPlainTextEdit, QScrollArea,
     QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem, QToolButton, QStackedWidget,
-    QProgressBar, QLayout, QSplitter, QGridLayout,
+    QProgressBar, QLayout, QSplitter, QGridLayout, QStyle, QToolTip,
 )
 
 from gui.process_runner import PipelineRunner, RunnerState
@@ -2526,6 +2526,15 @@ class MainWindow(QMainWindow):
                 subcontrol-origin: margin;
                 left: 10px;
                 padding: 0 4px;
+            }
+            QToolButton#formRowHelpIcon {
+                border: none;
+                padding: 0px;
+                margin: 0px;
+            }
+            QToolButton#formRowHelpIcon:hover {
+                background: palette(alternate-base);
+                border-radius: 7px;
             }
             """
         )
@@ -7614,6 +7623,91 @@ class MainWindow(QMainWindow):
                     return tip
         return ""
 
+    def _resolve_form_row_tooltip(self, form_layout: QFormLayout, row: int, label_widget: QLabel) -> str:
+        tooltip = label_widget.toolTip().strip()
+        if tooltip:
+            return tooltip
+        field_item = form_layout.itemAt(row, QFormLayout.FieldRole)
+        if field_item is None:
+            return ""
+        field_widget = field_item.widget()
+        if field_widget is not None:
+            tooltip = field_widget.toolTip().strip()
+            if tooltip:
+                return tooltip
+        field_layout = field_item.layout()
+        if field_layout is None:
+            return ""
+        return self._first_layout_tooltip(field_layout)
+
+    def _attach_form_row_help_icon(
+        self,
+        form_layout: QFormLayout,
+        row: int,
+        label_widget: QLabel,
+        tooltip: str,
+    ) -> None:
+        if not tooltip:
+            return
+        label_text = label_widget.text().strip()
+        if not label_text:
+            return
+
+        container = QWidget(form_layout.parentWidget())
+        container.setObjectName("formRowHelpContainer")
+        container.setProperty("formRowHelpContainer", True)
+        row_layout = QHBoxLayout(container)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+
+        text_label = QLabel(label_widget.text(), container)
+        text_label.setObjectName("formRowHelpLabelText")
+        text_label.setAlignment(label_widget.alignment())
+        text_label.setMinimumWidth(label_widget.minimumWidth())
+        text_label.setMaximumWidth(label_widget.maximumWidth())
+        text_label.setWordWrap(label_widget.wordWrap())
+        text_label.setSizePolicy(label_widget.sizePolicy())
+        text_label.setToolTip(tooltip)
+        if label_widget.styleSheet():
+            text_label.setStyleSheet(label_widget.styleSheet())
+        text_label.setProperty("formRowHelpText", True)
+
+        help_btn = QToolButton(container)
+        help_btn.setObjectName("formRowHelpIcon")
+        help_btn.setAutoRaise(True)
+        help_btn.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxInformation))
+        help_btn.setIconSize(QSize(12, 12))
+        help_btn.setFixedSize(QSize(16, 16))
+        help_btn.setFocusPolicy(Qt.NoFocus)
+        help_btn.setToolTip(tooltip)
+        help_btn.setCursor(Qt.WhatsThisCursor)
+        help_btn.setProperty("formRowHelpText", label_text.rstrip(":"))
+        help_btn.clicked.connect(
+            lambda _=False, btn=help_btn, tip=tooltip: QToolTip.showText(
+                btn.mapToGlobal(btn.rect().center()),
+                tip,
+                btn,
+            )
+        )
+
+        row_layout.addWidget(text_label)
+        row_layout.addWidget(help_btn, 0, Qt.AlignVCenter)
+        # QFormLayout label cells are already occupied by the existing label widget.
+        # Remove that widget from the layout role first, then install the help container.
+        form_layout.removeWidget(label_widget)
+        label_widget.hide()
+        label_widget.setParent(None)
+        form_layout.setWidget(row, QFormLayout.LabelRole, container)
+        label_widget.deleteLater()
+
+    def _set_form_row_help_tooltip(self, container: QWidget, tooltip: str) -> None:
+        text_label = container.findChild(QLabel, "formRowHelpLabelText")
+        if text_label is not None:
+            text_label.setToolTip(tooltip)
+        help_btn = container.findChild(QToolButton, "formRowHelpIcon")
+        if help_btn is not None:
+            help_btn.setToolTip(tooltip)
+
     def _apply_form_row_tooltips(self, form_layout: QFormLayout) -> None:
         """Mirror tooltip text onto visible row labels for hover usability."""
         for row in range(form_layout.rowCount()):
@@ -7621,23 +7715,24 @@ class MainWindow(QMainWindow):
             if label_item is None:
                 continue
             label_widget = label_item.widget()
-            if not isinstance(label_widget, QLabel):
+            if label_widget is None:
                 continue
 
-            tooltip = label_widget.toolTip().strip()
-            if not tooltip:
-                field_item = form_layout.itemAt(row, QFormLayout.FieldRole)
-                if field_item is not None:
-                    field_widget = field_item.widget()
-                    if field_widget is not None:
-                        tooltip = field_widget.toolTip().strip()
-                    if not tooltip:
-                        field_layout = field_item.layout()
-                        if field_layout is not None:
-                            tooltip = self._first_layout_tooltip(field_layout)
+            if isinstance(label_widget, QLabel):
+                tooltip = self._resolve_form_row_tooltip(form_layout, row, label_widget)
+                if tooltip:
+                    label_widget.setToolTip(tooltip)
+                    self._attach_form_row_help_icon(form_layout, row, label_widget, tooltip)
+                continue
 
-            if tooltip:
-                label_widget.setToolTip(tooltip)
+            if bool(label_widget.property("formRowHelpContainer")):
+                text_label = label_widget.findChild(QLabel, "formRowHelpLabelText")
+                if text_label is None:
+                    continue
+                tooltip = self._resolve_form_row_tooltip(form_layout, row, text_label)
+                if tooltip:
+                    self._set_form_row_help_tooltip(label_widget, tooltip)
+
 
     def _build_run_configuration_group(self) -> QGroupBox:
         group = QGroupBox("Run Configuration")
@@ -7716,11 +7811,11 @@ class MainWindow(QMainWindow):
         self._mode_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Mode:", self._mode_combo)
 
-        self._apply_form_row_tooltips(form)
         self._run_config_inputs_container = QWidget()
         inputs_layout = QVBoxLayout(self._run_config_inputs_container)
         inputs_layout.setContentsMargins(0, 0, 0, 0)
         inputs_layout.addLayout(form)
+        self._apply_form_row_tooltips(form)
 
         roi_group = QGroupBox("ROI Selection")
         roi_layout = QVBoxLayout(roi_group)

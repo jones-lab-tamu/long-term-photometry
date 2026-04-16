@@ -10,7 +10,7 @@ import pytest
 import yaml
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt, QPoint
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication, QGroupBox, QSizePolicy, QMessageBox
+from PySide6.QtWidgets import QApplication, QGroupBox, QSizePolicy, QMessageBox, QToolButton
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -2055,6 +2055,12 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
                 return candidate
         return None
 
+    def _help_icon(label):
+        parent = label.parentWidget()
+        if parent is None:
+            return None
+        return parent.findChild(QToolButton, "formRowHelpIcon")
+
     downstream_pairs = [
         ("ROI:", window._tuning_roi_combo),
         ("Preview session:", window._tuning_chunk_combo),
@@ -2074,6 +2080,9 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
         assert label is not None, f"Missing downstream label {label_text}"
         assert label.toolTip().strip(), f"Missing downstream label tooltip {label_text}"
         assert control.toolTip().strip(), f"Missing downstream control tooltip {label_text}"
+        icon = _help_icon(label)
+        assert icon is not None, f"Missing downstream help icon {label_text}"
+        assert icon.toolTip().strip(), f"Missing downstream help icon tooltip {label_text}"
 
     correction_pairs = [
         ("ROI:", window._correction_tuning_roi_combo),
@@ -2100,6 +2109,9 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
         assert label is not None, f"Missing correction label {label_text}"
         assert label.toolTip().strip(), f"Missing correction label tooltip {label_text}"
         assert control.toolTip().strip(), f"Missing correction control tooltip {label_text}"
+        icon = _help_icon(label)
+        assert icon is not None, f"Missing correction help icon {label_text}"
+        assert icon.toolTip().strip(), f"Missing correction help icon tooltip {label_text}"
 
     removed_legacy_labels = [
         "Regression Step (s):",

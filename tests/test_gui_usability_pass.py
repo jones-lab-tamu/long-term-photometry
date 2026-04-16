@@ -8,7 +8,7 @@ import yaml
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QPixmap
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QSizePolicy, QGroupBox, QScrollArea, QSplitter
+from PySide6.QtWidgets import QApplication, QSizePolicy, QGroupBox, QScrollArea, QSplitter, QToolButton
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -159,6 +159,12 @@ def test_advanced_tooltips_present(window):
                 return candidate
         return None
 
+    def _help_icon(label):
+        parent = label.parentWidget()
+        if parent is None:
+            return None
+        return parent.findChild(QToolButton, "formRowHelpIcon")
+
     # Run Configuration + Plotting representative rows: label and control both must carry tooltips.
     run_plot_pairs = [
         ("Input Directory:", window._input_dir),
@@ -177,6 +183,9 @@ def test_advanced_tooltips_present(window):
         assert label is not None, f"Missing label {label_text}"
         assert label.toolTip().strip(), f"Missing tooltip on label {label_text}"
         assert control.toolTip().strip(), f"Missing tooltip on control for {label_text}"
+        icon = _help_icon(label)
+        assert icon is not None, f"Missing help icon for {label_text}"
+        assert icon.toolTip().strip(), f"Missing help icon tooltip for {label_text}"
 
     # Advanced rows: guard against control-only tooltips by asserting both label and control.
     advanced_pairs = [
@@ -206,6 +215,9 @@ def test_advanced_tooltips_present(window):
         assert label is not None, f"Missing label {label_text}"
         assert label.toolTip().strip(), f"Missing tooltip on label {label_text}"
         assert control.toolTip().strip(), f"Missing tooltip on control for {label_text}"
+        icon = _help_icon(label)
+        assert icon is not None, f"Missing help icon for {label_text}"
+        assert icon.toolTip().strip(), f"Missing help icon tooltip for {label_text}"
     timeline_tip = window._timeline_anchor_mode_combo.toolTip().lower()
     assert "civil clock" in timeline_tip
     assert "elapsed from first session" in timeline_tip
@@ -232,6 +244,7 @@ def test_advanced_tooltips_present(window):
     assert window._roi_list.toolTip().strip()
     assert window._roi_checked_label.toolTip().strip()
     assert window._config_browse_btn.toolTip().strip()
+    assert window.findChildren(QToolButton, "formRowHelpIcon")
 
 
 def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):

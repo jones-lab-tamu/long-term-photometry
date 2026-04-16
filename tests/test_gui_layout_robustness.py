@@ -3,7 +3,8 @@ import re
 import sys
 
 import pytest
-from PySide6.QtWidgets import QApplication, QSizePolicy
+from PySide6.QtCore import qInstallMessageHandler
+from PySide6.QtWidgets import QApplication, QSizePolicy, QToolButton, QLabel
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -74,6 +75,50 @@ def test_dynamic_fit_note_wraps_inside_sidebar(window, qapp):
     assert note.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
     assert note.width() <= window._left_pane.width()
     assert note.property("statusSeverity") is None
+
+
+def test_form_row_help_icons_are_compact_in_sidebar(window, qapp):
+    window.show()
+    window.resize(1240, 900)
+    window._advanced_disclosure_btn.setChecked(True)
+    qapp.processEvents()
+
+    icons = window.findChildren(QToolButton, "formRowHelpIcon")
+    assert icons, "Expected visible help icons for primary form rows."
+    for icon in icons:
+        assert icon.width() <= 16
+        assert icon.height() <= 16
+
+
+def test_help_icon_rollout_emits_no_formlayout_cell_occupied_warning(qapp):
+    messages: list[str] = []
+
+    def _handler(_msg_type, _context, message):
+        messages.append(message)
+
+    previous = qInstallMessageHandler(_handler)
+    try:
+        w = MainWindow()
+        qapp.processEvents()
+        w.close()
+        w.deleteLater()
+        qapp.processEvents()
+    finally:
+        qInstallMessageHandler(previous)
+
+    offenders = [m for m in messages if "QFormLayoutPrivate::setItem: Cell" in m]
+    assert offenders == []
+
+
+def test_help_label_rows_are_not_duplicated_after_icon_attachment(window):
+    def _count_labels(root, text: str) -> int:
+        return len([lbl for lbl in root.findChildren(QLabel) if lbl.text() == text])
+
+    assert _count_labels(window._run_config_group, "Input Directory:") == 1
+    assert _count_labels(window._plotting_group, "Timeline Anchor:") == 1
+    assert _count_labels(window._advanced_group, "Dynamic Fit Mode:") == 1
+    assert _count_labels(window._tuning_controls_container, "Peak Threshold Method:") == 1
+    assert _count_labels(window._correction_tuning_controls_container, "Dynamic Fit Mode:") == 1
 
 
 def test_status_labels_use_centralized_severity_property(window):
