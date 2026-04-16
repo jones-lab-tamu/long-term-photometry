@@ -20,6 +20,7 @@ import csv
 import re
 import math
 import secrets
+import shutil
 import subprocess as _subprocess
 import time
 from contextlib import contextmanager
@@ -903,6 +904,7 @@ class MainWindow(QMainWindow):
         self._validated_gui_run_spec_json_path = None
         self._validated_config_effective_yaml_path = None
         self._validated_run_signature = None
+        self._pending_validate_cleanup_dir = ""
         self._status_follower = None
         self._log_follower = None
         self._runner = PipelineRunner()
@@ -6127,6 +6129,7 @@ class MainWindow(QMainWindow):
             self._validated_gui_run_spec_json_path = None
             self._validated_config_effective_yaml_path = None
             self._validated_run_signature = None
+            self._pending_validate_cleanup_dir = ""
 
             # run_dir already created by _build_argv -> _build_run_spec
 
@@ -6206,6 +6209,7 @@ class MainWindow(QMainWindow):
 
             self._is_validate_only = False
             self._validation_passed = False
+            self._pending_validate_cleanup_dir = ""
             self._reset_status_flags(next_state=RunnerState.RUNNING)
 
             self._runner.set_run_dir(run_dir)
@@ -6479,6 +6483,34 @@ class MainWindow(QMainWindow):
         self._stop_status_follower()
         self._stop_log_follower()
         self._finalize_run_ui()
+        self._cleanup_successful_validate_artifacts()
+
+    def _cleanup_successful_validate_artifacts(self) -> None:
+        """Delete successful validate-only run artifacts after signature capture."""
+        run_dir = self._pending_validate_cleanup_dir
+        if not run_dir:
+            return
+
+        self._pending_validate_cleanup_dir = ""
+        if not os.path.isdir(run_dir):
+            if self._current_run_dir == run_dir:
+                self._current_run_dir = ""
+                self._update_button_states()
+            return
+
+        try:
+            shutil.rmtree(run_dir)
+            if self._current_run_dir == run_dir:
+                self._current_run_dir = ""
+            self._append_run_log(
+                f"Validation artifacts auto-cleaned after success: {run_dir}"
+            )
+            self._update_button_states()
+        except Exception as e:
+            self._append_run_log(
+                "Validation succeeded; retained validate artifacts for debugging: "
+                f"{run_dir} ({e})"
+            )
 
     def _refresh_status_from_disk_final(self):
         """Authoritative read of status.json at run completion."""
@@ -6588,16 +6620,19 @@ class MainWindow(QMainWindow):
             self._validation_passed = True
             # Store validated state for future reuse (Fix B1)
             try:
-                self._validated_run_dir = self._current_run_dir
-                self._validated_gui_run_spec_json_path = os.path.join(self._validated_run_dir, "gui_run_spec.json")
-                self._validated_config_effective_yaml_path = os.path.join(self._validated_run_dir, "config_effective.yaml")
-                self._validated_run_signature = compute_run_signature(self._validated_run_dir)
+                validate_run_dir = self._current_run_dir
+                self._validated_run_signature = compute_run_signature(validate_run_dir)
+                self._validated_run_dir = None
+                self._validated_gui_run_spec_json_path = None
+                self._validated_config_effective_yaml_path = None
+                self._pending_validate_cleanup_dir = validate_run_dir
             except Exception as e:
                 self._append_log(f"DEBUG: Failed to record validation signature: {e}")
                 self._validated_run_dir = None
                 self._validated_gui_run_spec_json_path = None
                 self._validated_config_effective_yaml_path = None
                 self._validated_run_signature = None
+                self._pending_validate_cleanup_dir = ""
 
         self._refresh_splitter_workspace_policy()
         self._render_status_label()
