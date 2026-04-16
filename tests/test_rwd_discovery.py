@@ -17,6 +17,13 @@ class TestRWDDiscovery(unittest.TestCase):
         with open(path, 'w') as f:
             f.write("header\n data")
 
+    def write_minimal_rwd_csv(self, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("TimeStamp,Region0-410,Region0-470\n")
+            f.write("0,1.0,2.0\n")
+            f.write("1,1.1,2.1\n")
+
     def test_standard_structure(self):
         """1) Standard RWD structure returns ordered fluorescence.csv paths"""
         # Create timestamps out of order to test sorting
@@ -128,6 +135,46 @@ class TestRWDDiscovery(unittest.TestCase):
         self.assertTrue(pipe.file_list[0].endswith(os.path.join(ts, "fluorescence.csv")))
         # Should NOT be the trap file
         self.assertFalse(pipe.file_list[0].endswith(os.path.join(self.test_dir, "fluorescence.csv")))
+
+    def test_pipeline_auto_recursive_ignores_session_artifact_csvs(self):
+        """7) auto+recursive should keep only aligned fluorescence.csv in RWD sessions"""
+        from photometry_pipeline.pipeline import Pipeline
+        from photometry_pipeline.config import Config
+
+        ts_a = "2025_11_11-12_55_16"
+        ts_b = "2025_11_11-13_25_17"
+        for ts in [ts_b, ts_a]:
+            sess_dir = os.path.join(self.test_dir, ts)
+            for name in ("events.csv", "fluorescence-unaligned.csv", "fluorescence.csv", "outputs.csv"):
+                self.touch(os.path.join(sess_dir, name))
+
+        pipe = Pipeline(Config())
+        pipe.discover_files(self.test_dir, recursive=True, force_format="auto")
+
+        expected = [
+            os.path.normpath(os.path.join(self.test_dir, ts_a, "fluorescence.csv")),
+            os.path.normpath(os.path.join(self.test_dir, ts_b, "fluorescence.csv")),
+        ]
+        actual = [os.path.normpath(p) for p in pipe.file_list]
+        self.assertEqual(actual, expected)
+
+    def test_pipeline_auto_recursive_single_session_folder_prefers_fluorescence(self):
+        """8) auto+recursive on one session dir should prefer fluorescence.csv only"""
+        from photometry_pipeline.pipeline import Pipeline
+        from photometry_pipeline.config import Config
+
+        for name in ("events.csv", "fluorescence-unaligned.csv", "fluorescence.csv", "outputs.csv"):
+            self.touch(os.path.join(self.test_dir, name))
+        self.write_minimal_rwd_csv(os.path.join(self.test_dir, "fluorescence.csv"))
+
+        pipe = Pipeline(Config())
+        pipe.discover_files(self.test_dir, recursive=True, force_format="auto")
+
+        self.assertEqual(len(pipe.file_list), 1)
+        self.assertEqual(
+            os.path.normpath(pipe.file_list[0]),
+            os.path.normpath(os.path.join(self.test_dir, "fluorescence.csv")),
+        )
 
 if __name__ == '__main__':
     unittest.main()

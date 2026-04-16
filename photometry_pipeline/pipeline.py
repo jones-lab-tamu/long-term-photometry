@@ -110,9 +110,30 @@ class Pipeline:
         elif os.path.isfile(input_path):
             self.file_list = [input_path]
         else:
+            if recursive and force_format == 'auto':
+                # In recursive auto mode, prefer canonical RWD targets first so
+                # session artifact CSVs (events/outputs/unaligned) are not
+                # treated as analyzable sessions.
+                from .io.adapters import discover_rwd_chunks
+                direct_fluorescence = os.path.join(input_path, "fluorescence.csv")
+                if os.path.isfile(direct_fluorescence):
+                    if sniff_format(direct_fluorescence, self.config) == 'rwd':
+                        self.file_list = [direct_fluorescence]
+                    else:
+                        self.file_list = []
+                else:
+                    self.file_list = []
+
+                if not self.file_list:
+                    try:
+                        self.file_list = discover_rwd_chunks(input_path)
+                    except Exception:
+                        self.file_list = []
+
             if recursive:
-                search_pattern = os.path.join(input_path, "**", file_glob)
-                self.file_list = glob.glob(search_pattern, recursive=True)
+                if not self.file_list:
+                    search_pattern = os.path.join(input_path, "**", file_glob)
+                    self.file_list = glob.glob(search_pattern, recursive=True)
             else:
                 search_pattern = os.path.join(input_path, file_glob)
                 self.file_list = glob.glob(search_pattern)
