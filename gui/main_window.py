@@ -1654,11 +1654,18 @@ class MainWindow(QMainWindow):
         )
         self._apply_tuning_btn.clicked.connect(self._on_apply_tuning_values_to_run_settings)
         apply_row.addWidget(self._apply_tuning_btn)
+        self._save_tuned_config_btn = QPushButton("Save Tuned Settings as Config...")
+        self._save_tuned_config_btn.setToolTip(
+            "Durable action: write the current tuned effective settings to a reusable YAML config file."
+        )
+        self._save_tuned_config_btn.clicked.connect(self._on_save_tuned_settings_as_config)
+        apply_row.addWidget(self._save_tuned_config_btn)
         apply_row.addStretch()
         content_layout.addLayout(apply_row)
 
         self._tuning_applyback_scope_label = QLabel(
-            "Apply-back updates next-run setup controls only. Completed run outputs stay unchanged until rerun."
+            "Apply-back is temporary for this session's next run. "
+            "Use 'Save Tuned Settings as Config...' for durable YAML reuse."
         )
         self._tuning_applyback_scope_label.setWordWrap(True)
         self._tuning_applyback_scope_label.setObjectName("resultsSummaryHint")
@@ -2205,12 +2212,23 @@ class MainWindow(QMainWindow):
             self._on_apply_correction_tuning_values_to_run_settings
         )
         apply_row.addWidget(self._apply_correction_tuning_btn)
+        self._save_correction_tuned_config_btn = QPushButton(
+            "Save Tuned Settings as Config..."
+        )
+        self._save_correction_tuned_config_btn.setToolTip(
+            "Durable action: write the current tuned effective settings to a reusable YAML config file."
+        )
+        self._save_correction_tuned_config_btn.clicked.connect(
+            self._on_save_tuned_settings_as_config
+        )
+        apply_row.addWidget(self._save_correction_tuned_config_btn)
         apply_row.addStretch()
         content_layout.addLayout(apply_row)
 
         self._correction_tuning_applyback_scope_label = QLabel(
             "Copy action is one-way (Correction Retune -> main run configuration) "
-            "and does not start a run."
+            "and temporary for the next run. Use 'Save Tuned Settings as Config...' "
+            "for durable YAML reuse."
         )
         self._correction_tuning_applyback_scope_label.setWordWrap(True)
         self._correction_tuning_applyback_scope_label.setObjectName("resultsSummaryHint")
@@ -2615,6 +2633,8 @@ class MainWindow(QMainWindow):
         self._run_tuning_btn.setEnabled(False)
         self._open_tuning_dir_btn.setEnabled(False)
         self._apply_tuning_btn.setEnabled(False)
+        if hasattr(self, "_save_tuned_config_btn"):
+            self._save_tuned_config_btn.setEnabled(False)
         self._tuning_availability_label.setText(reason)
         self._set_status_label_style(self._tuning_availability_label, "warn")
         self._set_tuning_collapsed_status(reason, ready=False)
@@ -2629,6 +2649,8 @@ class MainWindow(QMainWindow):
         self._run_tuning_btn.setEnabled(True)
         self._open_tuning_dir_btn.setEnabled(bool(self._tuning_last_result))
         self._apply_tuning_btn.setEnabled(True)
+        if hasattr(self, "_save_tuned_config_btn"):
+            self._save_tuned_config_btn.setEnabled(True)
         self._tuning_availability_label.setText(message)
         self._set_status_label_style(self._tuning_availability_label, "ready")
         self._set_tuning_collapsed_status(message, ready=True)
@@ -3350,6 +3372,8 @@ class MainWindow(QMainWindow):
         self._open_correction_tuning_dir_btn.setEnabled(False)
         if hasattr(self, "_apply_correction_tuning_btn"):
             self._apply_correction_tuning_btn.setEnabled(False)
+        if hasattr(self, "_save_correction_tuned_config_btn"):
+            self._save_correction_tuned_config_btn.setEnabled(False)
         self._correction_tuning_availability_label.setText(reason)
         self._set_status_label_style(self._correction_tuning_availability_label, "warn")
         self._correction_tuning_applyback_applied = False
@@ -3368,6 +3392,8 @@ class MainWindow(QMainWindow):
         )
         if hasattr(self, "_apply_correction_tuning_btn"):
             self._apply_correction_tuning_btn.setEnabled(True)
+        if hasattr(self, "_save_correction_tuned_config_btn"):
+            self._save_correction_tuned_config_btn.setEnabled(True)
         self._correction_tuning_availability_label.setText(message)
         self._set_status_label_style(self._correction_tuning_availability_label, "ready")
         self._refresh_correction_tuning_applyback_status()
@@ -4061,6 +4087,144 @@ class MainWindow(QMainWindow):
                 "Run correction retune to generate a correction inspection artifact."
             )
         self._set_correction_tuning_disclosure_expanded(False)
+
+    def _collect_tuned_export_overrides(self) -> dict:
+        """
+        Collect tuned workspace overrides for durable config export.
+
+        Uses the same typed override sources already used by retune/apply-back
+        paths, then lets RunSpec's effective-config machinery merge them with
+        the active baseline config source.
+        """
+        overrides: dict = {}
+
+        include_downstream = bool(
+            self._tuning_applyback_applied or isinstance(self._tuning_last_result, dict)
+        )
+        if include_downstream:
+            downstream = dict(self._collect_tuning_overrides())
+            if "peak_pre_filter" in downstream:
+                downstream["peak_pre_filter"] = map_retune_peak_pre_filter_to_run_setting(
+                    str(downstream["peak_pre_filter"])
+                )
+            overrides.update(downstream)
+
+        include_correction = bool(
+            self._correction_tuning_applyback_applied
+            or isinstance(self._correction_tuning_last_result, dict)
+        )
+        if include_correction:
+            overrides.update(self._collect_correction_tuning_overrides())
+
+        return overrides
+
+    def _build_tuned_config_export_spec(self) -> RunSpec:
+        """
+        Build a RunSpec-backed effective config export without mutating run state.
+        """
+        previous_run_dir = self._current_run_dir
+        try:
+            spec = self._build_run_spec(validate_only=False)
+        finally:
+            self._current_run_dir = previous_run_dir
+
+        tuned_overrides = self._collect_tuned_export_overrides()
+        if tuned_overrides:
+            spec.config_overrides.update(tuned_overrides)
+
+        # Export-only path; caller writes chosen destination file.
+        spec.run_dir = ""
+        return spec
+
+    def _on_save_tuned_settings_as_config(self) -> None:
+        if not (self._tuning_workspace_available or self._correction_tuning_workspace_available):
+            QMessageBox.information(
+                self,
+                "Tuning Unavailable",
+                "Tuned settings can be saved only when post-run tuning is available.",
+            )
+            return
+
+        try:
+            spec = self._build_tuned_config_export_spec()
+            preview_yaml = spec.get_derived_config_preview()
+        except Exception as exc:
+            self._append_run_log(f"Save tuned config failed: {exc}")
+            QMessageBox.critical(
+                self,
+                "Save Failed",
+                f"Could not build tuned effective config.\n\n{exc}",
+            )
+            return
+
+        preferred_dir = ""
+        cfg_path = self._config_path.text().strip()
+        if cfg_path:
+            preferred_dir = os.path.dirname(cfg_path)
+        if not preferred_dir and self._current_run_dir and os.path.isdir(self._current_run_dir):
+            preferred_dir = self._current_run_dir
+        out_base = self._output_dir.text().strip()
+        if not preferred_dir and out_base and os.path.isdir(out_base):
+            preferred_dir = out_base
+        if not preferred_dir:
+            preferred_dir = os.getcwd()
+
+        default_name = f"tuned_config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.yaml"
+        default_path = os.path.join(preferred_dir, default_name)
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Tuned Settings as Config",
+            default_path,
+            "YAML files (*.yaml *.yml);;All files (*)",
+        )
+        if not save_path:
+            return
+        if not save_path.lower().endswith((".yaml", ".yml")):
+            save_path = f"{save_path}.yaml"
+
+        try:
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(preview_yaml)
+            RunSpec.validate_effective_config(save_path)
+        except Exception as exc:
+            self._append_run_log(f"Save tuned config failed: {exc}")
+            QMessageBox.critical(
+                self,
+                "Save Failed",
+                f"Could not write a valid config YAML.\n\n{exc}",
+            )
+            return
+
+        self._append_run_log(f"Saved tuned config YAML: {save_path}")
+        activate = QMessageBox.question(
+            self,
+            "Activate Saved Config?",
+            "Saved tuned settings as YAML.\n\n"
+            "Use this file as the active custom config source now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if activate == QMessageBox.StandardButton.Yes:
+            self._use_custom_config_cb.setChecked(True)
+            self._config_path.setText(save_path)
+            self._update_config_source_ui()
+            self._on_config_changed()
+            self._append_run_log(
+                f"Activated custom config source: {save_path}"
+            )
+            QMessageBox.information(
+                self,
+                "Saved and Activated",
+                f"Saved tuned settings to:\n{save_path}\n\n"
+                "Custom config source is now active.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Saved",
+                f"Saved tuned settings to:\n{save_path}",
+            )
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

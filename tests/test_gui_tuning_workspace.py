@@ -10,7 +10,7 @@ import pytest
 import yaml
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication, QGroupBox, QSizePolicy
+from PySide6.QtWidgets import QApplication, QGroupBox, QSizePolicy, QMessageBox
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -1280,6 +1280,230 @@ def test_tuning_apply_back_next_run_serializes_applied_values(window, tmp_path):
     assert overrides["peak_threshold_k"] == pytest.approx(7.125, rel=1e-6)
     assert overrides["peak_min_prominence_k"] == pytest.approx(1.2, rel=1e-6)
     assert overrides["peak_min_width_sec"] == pytest.approx(0.45, rel=1e-6)
+
+
+def test_save_tuned_settings_as_config_writes_yaml_from_downstream_tuning(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path / "save_downstream")
+    input_dir = tmp_path / "input_save_downstream"
+    out_base = tmp_path / "out_save_downstream"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    out_base.mkdir(parents=True, exist_ok=True)
+
+    window._input_dir.setText(str(input_dir))
+    window._output_dir.setText(str(out_base))
+    window._use_custom_config_cb.setChecked(False)
+    window._update_config_source_ui()
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    window._tuning_last_result = {"retune_dir": str(tmp_path / "retune_downstream")}
+    if window._tuning_event_signal_combo.findText("delta_f") >= 0:
+        window._tuning_event_signal_combo.setCurrentText("delta_f")
+    window._tuning_peak_method_combo.setCurrentText("absolute")
+    window._tuning_peak_abs_spin.setValue(0.444)
+    if window._tuning_peak_pre_filter_combo.findText("smooth") >= 0:
+        window._tuning_peak_pre_filter_combo.setCurrentText("smooth")
+    if window._tuning_event_auc_combo.findText("median") >= 0:
+        window._tuning_event_auc_combo.setCurrentText("median")
+    QApplication.processEvents()
+
+    save_path = tmp_path / "saved_downstream_tuned.yaml"
+    monkeypatch.setattr(
+        "gui.main_window.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(save_path), "YAML files (*.yaml *.yml)"),
+    )
+    monkeypatch.setattr(
+        "gui.main_window.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.No,
+    )
+    monkeypatch.setattr(
+        "gui.main_window.QMessageBox.information",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Ok,
+    )
+
+    window._on_save_tuned_settings_as_config()
+
+    assert save_path.is_file()
+    cfg = yaml.safe_load(save_path.read_text(encoding="utf-8")) or {}
+    assert cfg["event_signal"] == "delta_f"
+    assert cfg["peak_threshold_method"] == "absolute"
+    assert cfg["peak_threshold_abs"] == pytest.approx(0.444, rel=1e-6)
+    assert cfg["peak_pre_filter"] == "lowpass"
+    assert cfg["event_auc_baseline"] == "median"
+    assert "baseline_method" in cfg
+    assert window._use_custom_config_cb.isChecked() is False
+
+
+def test_save_tuned_settings_as_config_includes_correction_overrides_without_applyback(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_completed_run_with_cache(tmp_path / "save_correction")
+    input_dir = tmp_path / "input_save_correction"
+    out_base = tmp_path / "out_save_correction"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    out_base.mkdir(parents=True, exist_ok=True)
+
+    window._input_dir.setText(str(input_dir))
+    window._output_dir.setText(str(out_base))
+    window._use_custom_config_cb.setChecked(False)
+    window._update_config_source_ui()
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    window._set_correction_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    window._correction_tuning_last_result = {"retune_dir": str(tmp_path / "retune_correction")}
+    idx = window._correction_tuning_fit_mode_combo.findData("robust_global_event_reject")
+    assert idx >= 0
+    window._correction_tuning_fit_mode_combo.setCurrentIndex(idx)
+    window._correction_tuning_baseline_method_combo.setCurrentText("uv_globalfit_percentile_session")
+    window._correction_tuning_baseline_pct_spin.setValue(22.25)
+    window._correction_tuning_lowpass_spin.setValue(3.5)
+    window._correction_tuning_robust_max_iters_spin.setValue(7)
+    window._correction_tuning_robust_residual_z_spin.setValue(2.7)
+    window._correction_tuning_robust_local_var_window_spin.setValue(12.5)
+    window._correction_tuning_robust_local_var_ratio_enable_cb.setChecked(True)
+    window._correction_tuning_robust_local_var_ratio_spin.setValue(4.2)
+    window._correction_tuning_robust_min_keep_fraction_spin.setValue(0.69)
+    QApplication.processEvents()
+
+    save_path = tmp_path / "saved_correction_tuned.yaml"
+    monkeypatch.setattr(
+        "gui.main_window.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(save_path), "YAML files (*.yaml *.yml)"),
+    )
+    monkeypatch.setattr(
+        "gui.main_window.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.No,
+    )
+    monkeypatch.setattr(
+        "gui.main_window.QMessageBox.information",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Ok,
+    )
+
+    window._on_save_tuned_settings_as_config()
+
+    assert save_path.is_file()
+    cfg = yaml.safe_load(save_path.read_text(encoding="utf-8")) or {}
+    assert cfg["dynamic_fit_mode"] == "robust_global_event_reject"
+    assert cfg["baseline_method"] == "uv_globalfit_percentile_session"
+    assert cfg["baseline_percentile"] == pytest.approx(22.25, rel=1e-6)
+    assert cfg["lowpass_hz"] == pytest.approx(3.5, rel=1e-6)
+    assert cfg["robust_event_reject_max_iters"] == 7
+    assert cfg["robust_event_reject_residual_z_thresh"] == pytest.approx(2.7, rel=1e-6)
+    assert cfg["robust_event_reject_local_var_window_sec"] == pytest.approx(12.5, rel=1e-6)
+    assert cfg["robust_event_reject_local_var_ratio_thresh"] == pytest.approx(4.2, rel=1e-6)
+    assert cfg["robust_event_reject_min_keep_fraction"] == pytest.approx(0.69, rel=1e-6)
+    assert window._correction_tuning_applyback_applied is False
+
+
+def test_save_tuned_settings_as_config_can_activate_custom_source_and_reload(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_completed_run_with_cache(tmp_path / "save_activate")
+    input_dir = tmp_path / "input_save_activate"
+    out_base = tmp_path / "out_save_activate"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    out_base.mkdir(parents=True, exist_ok=True)
+
+    window._input_dir.setText(str(input_dir))
+    window._output_dir.setText(str(out_base))
+    window._use_custom_config_cb.setChecked(False)
+    window._update_config_source_ui()
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    window._tuning_last_result = {"retune_dir": str(tmp_path / "retune_activate")}
+    if window._tuning_event_signal_combo.findText("delta_f") >= 0:
+        window._tuning_event_signal_combo.setCurrentText("delta_f")
+    window._tuning_peak_method_combo.setCurrentText("mean_std")
+    window._tuning_peak_k_spin.setValue(6.25)
+    QApplication.processEvents()
+
+    save_path = tmp_path / "saved_activate_tuned.yaml"
+    monkeypatch.setattr(
+        "gui.main_window.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(save_path), "YAML files (*.yaml *.yml)"),
+    )
+    monkeypatch.setattr(
+        "gui.main_window.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+    monkeypatch.setattr(
+        "gui.main_window.QMessageBox.information",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Ok,
+    )
+
+    window._on_save_tuned_settings_as_config()
+    QApplication.processEvents()
+
+    assert save_path.is_file()
+    parsed = Config.from_yaml(str(save_path))
+    assert parsed.event_signal == "delta_f"
+    assert parsed.peak_threshold_method == "mean_std"
+    assert parsed.peak_threshold_k == pytest.approx(6.25, rel=1e-6)
+    assert window._use_custom_config_cb.isChecked() is True
+    assert os.path.normpath(window._config_path.text().strip()) == os.path.normpath(str(save_path))
+    assert window._event_signal_combo.currentText() == "delta_f"
+    assert window._peak_method_combo.currentText() == "mean_std"
+    assert float(window._peak_k_edit.text()) == pytest.approx(6.25, rel=1e-6)
+
+
+def test_save_tuned_settings_as_config_does_not_replace_apply_back(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path / "save_distinct")
+    input_dir = tmp_path / "input_save_distinct"
+    out_base = tmp_path / "out_save_distinct"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    out_base.mkdir(parents=True, exist_ok=True)
+
+    window._input_dir.setText(str(input_dir))
+    window._output_dir.setText(str(out_base))
+    window._use_custom_config_cb.setChecked(False)
+    window._update_config_source_ui()
+    window._is_complete_workspace_active = True
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_workspace_availability()
+    window._set_tuning_disclosure_expanded(True)
+    QApplication.processEvents()
+
+    window._tuning_last_result = {"retune_dir": str(tmp_path / "retune_distinct")}
+    window._tuning_peak_method_combo.setCurrentText("mean_std")
+    window._tuning_peak_k_spin.setValue(5.5)
+    QApplication.processEvents()
+
+    save_path = tmp_path / "saved_distinct_tuned.yaml"
+    monkeypatch.setattr(
+        "gui.main_window.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: (str(save_path), "YAML files (*.yaml *.yml)"),
+    )
+    monkeypatch.setattr(
+        "gui.main_window.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.No,
+    )
+    monkeypatch.setattr(
+        "gui.main_window.QMessageBox.information",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Ok,
+    )
+
+    assert window._tuning_applyback_applied is False
+    window._on_save_tuned_settings_as_config()
+    QApplication.processEvents()
+
+    assert window._tuning_applyback_applied is False
+    assert "not applied" in window._tuning_applyback_status_label.text().lower()
+
+    window._on_apply_tuning_values_to_run_settings()
+    QApplication.processEvents()
+    assert window._tuning_applyback_applied is True
+    assert "applied" in window._tuning_applyback_status_label.text().lower()
 
 
 def test_tuning_apply_back_method_switch_serialization(window, tmp_path):
