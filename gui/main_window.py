@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.process_runner import PipelineRunner, RunnerState
+from gui.interactive_image import InteractiveImageLabel, InteractiveImageController
 from gui.run_spec import RunSpec, FORMAT_CHOICES
 from gui.status_follower import StatusFollower
 from gui.log_follower import LogFollower
@@ -874,13 +875,7 @@ def compute_overrides_user_changed(parsed: dict, defaults: dict) -> dict:
     return changed
 
 
-class _ClickableImageLabel(QLabel):
-    clicked = Signal()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
+_ClickableImageLabel = InteractiveImageLabel
 
 
 class MainWindow(QMainWindow):
@@ -960,6 +955,7 @@ class MainWindow(QMainWindow):
         self._tuning_last_loaded_overlay_sha256 = ""
         self._tuning_last_loaded_overlay_size = 0
         self._tuning_overlay_zoom_mode = False
+        self._tuning_overlay_interaction: InteractiveImageController | None = None
         self._roi_chunk_ids_cache: dict[str, list[int]] = {}
         self._correction_tuning_workspace_available = False
         self._correction_tuning_last_result = None
@@ -971,6 +967,7 @@ class MainWindow(QMainWindow):
         self._correction_tuning_active_inspection_path = ""
         self._correction_tuning_active_inspection_pixmap = QPixmap()
         self._correction_tuning_zoom_mode = False
+        self._correction_tuning_overlay_interaction: InteractiveImageController | None = None
         # Debug-only GUI preflight timing. Disabled by default.
         # Enable with PHOTOMETRY_GUI_TIMING=1.
         self._gui_timing_enabled = _env_flag_enabled("PHOTOMETRY_GUI_TIMING")
@@ -1711,10 +1708,21 @@ class MainWindow(QMainWindow):
         self._tuning_overlay_scroll.setMaximumHeight(520)
         self._tuning_overlay_scroll.setWidget(self._tuning_overlay_label)
         content_layout.addWidget(self._tuning_overlay_scroll)
-        self._tuning_overlay_zoom_hint_label = QLabel("Click image to toggle fit/full size.")
+        self._tuning_overlay_zoom_hint_label = QLabel(
+            "Scroll wheel to zoom. Click image to toggle fit/full size."
+        )
         self._tuning_overlay_zoom_hint_label.setAlignment(Qt.AlignCenter)
         self._tuning_overlay_zoom_hint_label.setStyleSheet("font-size: 11px; color: #666;")
         content_layout.addWidget(self._tuning_overlay_zoom_hint_label)
+        self._tuning_overlay_interaction = InteractiveImageController(
+            label=self._tuning_overlay_label,
+            scroll_area=self._tuning_overlay_scroll,
+            set_hint_text=self._tuning_overlay_zoom_hint_label.setText,
+            fit_hint="Scroll wheel to zoom. Click image to toggle fit/full size.",
+            zoom_hint="Scroll wheel to zoom in/out. Drag to pan. Click image to return to fit.",
+            allow_upscale_in_fit=False,
+            on_zoom_mode_changed=self._on_tuning_overlay_zoom_mode_changed,
+        )
 
         self._build_correction_tuning_subsection(layout)
 
@@ -2313,13 +2321,22 @@ class MainWindow(QMainWindow):
         self._correction_tuning_prev_btn.setEnabled(False)
         self._correction_tuning_next_btn.setEnabled(False)
         self._correction_tuning_zoom_hint_label = QLabel(
-            "Click image to toggle fit/full size."
+            "Scroll wheel to zoom. Click image to toggle fit/full size."
         )
         self._correction_tuning_zoom_hint_label.setAlignment(Qt.AlignCenter)
         self._correction_tuning_zoom_hint_label.setStyleSheet(
             "font-size: 11px; color: #666;"
         )
         content_layout.addWidget(self._correction_tuning_zoom_hint_label)
+        self._correction_tuning_overlay_interaction = InteractiveImageController(
+            label=self._correction_tuning_inspection_label,
+            scroll_area=self._correction_tuning_inspection_scroll,
+            set_hint_text=self._correction_tuning_zoom_hint_label.setText,
+            fit_hint="Scroll wheel to zoom. Click image to toggle fit/full size.",
+            zoom_hint="Scroll wheel to zoom in/out. Drag to pan. Click image to return to fit.",
+            allow_upscale_in_fit=True,
+            on_zoom_mode_changed=self._on_correction_tuning_zoom_mode_changed,
+        )
 
         parent_layout.addWidget(section)
 
@@ -2672,39 +2689,34 @@ class MainWindow(QMainWindow):
         self._tuning_active_overlay_pixmap = QPixmap()
         self._tuning_last_loaded_overlay_sha256 = ""
         self._tuning_last_loaded_overlay_size = 0
-        self._set_tuning_overlay_zoom_mode(False)
+        if self._tuning_overlay_interaction is not None:
+            self._tuning_overlay_interaction.clear(
+                text,
+                fallback_width=640,
+                fallback_height=300,
+            )
+            self._tuning_overlay_zoom_mode = self._tuning_overlay_interaction.zoom_mode
+        else:
+            self._set_tuning_overlay_zoom_mode(False)
+            self._tuning_overlay_label.setPixmap(QPixmap())
+            self._tuning_overlay_label.setText(text)
+            viewport = self._tuning_overlay_scroll.viewport().size()
+            if viewport.width() < 10 or viewport.height() < 10:
+                viewport = QSize(640, 300)
+            target = QSize(max(10, viewport.width() - 8), max(10, viewport.height() - 8))
+            self._tuning_overlay_label.resize(target)
         self._tuning_overlay_title.setText("No tuning overlay loaded.")
-        self._tuning_overlay_label.setPixmap(QPixmap())
-        self._tuning_overlay_label.setText(text)
-        viewport = self._tuning_overlay_scroll.viewport().size()
-        if viewport.width() < 10 or viewport.height() < 10:
-            viewport = QSize(640, 300)
-        target = QSize(max(10, viewport.width() - 8), max(10, viewport.height() - 8))
-        self._tuning_overlay_label.resize(target)
 
     def _render_tuning_overlay(self) -> None:
-        """Render tuning overlay in fit-to-view mode inside the scroll viewport."""
+        """Render tuning overlay with shared interactive zoom/pan behavior."""
         if self._tuning_active_overlay_pixmap.isNull():
             return
-        if self._tuning_overlay_zoom_mode:
-            self._tuning_overlay_label.setText("")
-            self._tuning_overlay_label.setPixmap(self._tuning_active_overlay_pixmap)
-            self._tuning_overlay_label.resize(self._tuning_active_overlay_pixmap.size())
-            return
-        viewport = self._tuning_overlay_scroll.viewport().size()
-        if viewport.width() < 10 or viewport.height() < 10:
-            viewport = QSize(1000, 700)
-        target = QSize(max(10, viewport.width() - 8), max(10, viewport.height() - 8))
-        # Avoid blowing up a smaller source image beyond native pixels.
-        target = target.boundedTo(self._tuning_active_overlay_pixmap.size())
-        scaled = self._tuning_active_overlay_pixmap.scaled(
-            target,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
-        self._tuning_overlay_label.setText("")
-        self._tuning_overlay_label.setPixmap(scaled)
-        self._tuning_overlay_label.resize(scaled.size())
+        if self._tuning_overlay_interaction is not None:
+            self._tuning_overlay_interaction.set_pixmap(
+                self._tuning_active_overlay_pixmap,
+                reset_zoom=False,
+            )
+            self._tuning_overlay_zoom_mode = self._tuning_overlay_interaction.zoom_mode
 
     def _set_tuning_overlay_image(self, image_path: str) -> None:
         if not image_path or not os.path.isfile(image_path):
@@ -2728,23 +2740,38 @@ class MainWindow(QMainWindow):
         self._tuning_active_overlay_path = image_path
         self._tuning_active_overlay_pixmap = pix
         self._tuning_overlay_title.setText(os.path.basename(image_path))
-        self._set_tuning_overlay_zoom_mode(False)
-        self._render_tuning_overlay()
+        if self._tuning_overlay_interaction is not None:
+            self._tuning_overlay_interaction.set_pixmap(pix, reset_zoom=True)
+            self._tuning_overlay_zoom_mode = self._tuning_overlay_interaction.zoom_mode
+        else:
+            self._set_tuning_overlay_zoom_mode(False)
+            self._render_tuning_overlay()
 
     def _on_tuning_overlay_clicked(self) -> None:
         if self._tuning_active_overlay_pixmap.isNull():
             return
-        self._set_tuning_overlay_zoom_mode(not self._tuning_overlay_zoom_mode)
-        self._render_tuning_overlay()
+        if self._tuning_overlay_interaction is not None:
+            self._tuning_overlay_interaction.toggle_zoom()
+            self._tuning_overlay_zoom_mode = self._tuning_overlay_interaction.zoom_mode
+        else:
+            self._set_tuning_overlay_zoom_mode(not self._tuning_overlay_zoom_mode)
+            self._render_tuning_overlay()
 
     def _set_tuning_overlay_zoom_mode(self, enabled: bool) -> None:
+        if self._tuning_overlay_interaction is not None:
+            self._tuning_overlay_interaction.set_zoom_mode(bool(enabled))
+            self._tuning_overlay_zoom_mode = self._tuning_overlay_interaction.zoom_mode
+            return
         self._tuning_overlay_zoom_mode = bool(enabled)
         if hasattr(self, "_tuning_overlay_zoom_hint_label"):
             self._tuning_overlay_zoom_hint_label.setText(
-                "Click image to return to fit mode."
+                "Scroll wheel to zoom in/out. Drag to pan. Click image to return to fit."
                 if self._tuning_overlay_zoom_mode
-                else "Click image to toggle fit/full size."
+                else "Scroll wheel to zoom. Click image to toggle fit/full size."
             )
+
+    def _on_tuning_overlay_zoom_mode_changed(self, enabled: bool) -> None:
+        self._tuning_overlay_zoom_mode = bool(enabled)
 
     def _write_tuning_display_debug_record(
         self,
@@ -3407,43 +3434,40 @@ class MainWindow(QMainWindow):
         self._correction_tuning_inspection_index = 0
         self._correction_tuning_active_inspection_path = ""
         self._correction_tuning_active_inspection_pixmap = QPixmap()
-        self._set_correction_tuning_zoom_mode(False)
+        if self._correction_tuning_overlay_interaction is not None:
+            self._correction_tuning_overlay_interaction.clear(
+                text,
+                fallback_width=640,
+                fallback_height=300,
+            )
+            self._correction_tuning_zoom_mode = (
+                self._correction_tuning_overlay_interaction.zoom_mode
+            )
+        else:
+            self._set_correction_tuning_zoom_mode(False)
+            self._correction_tuning_inspection_label.setPixmap(QPixmap())
+            self._correction_tuning_inspection_label.setText(text)
+            viewport = self._correction_tuning_inspection_scroll.viewport().size()
+            if viewport.width() < 10 or viewport.height() < 10:
+                viewport = QSize(640, 300)
+            target = QSize(max(10, viewport.width() - 8), max(10, viewport.height() - 8))
+            self._correction_tuning_inspection_label.resize(target)
         self._correction_tuning_inspection_title.setText(
             "No correction inspection artifact loaded."
         )
         self._refresh_correction_tuning_inspection_nav()
-        self._correction_tuning_inspection_label.setPixmap(QPixmap())
-        self._correction_tuning_inspection_label.setText(text)
-        viewport = self._correction_tuning_inspection_scroll.viewport().size()
-        if viewport.width() < 10 or viewport.height() < 10:
-            viewport = QSize(640, 300)
-        target = QSize(max(10, viewport.width() - 8), max(10, viewport.height() - 8))
-        self._correction_tuning_inspection_label.resize(target)
 
     def _render_correction_tuning_overlay(self) -> None:
         if self._correction_tuning_active_inspection_pixmap.isNull():
             return
-        if self._correction_tuning_zoom_mode:
-            self._correction_tuning_inspection_label.setText("")
-            self._correction_tuning_inspection_label.setPixmap(
-                self._correction_tuning_active_inspection_pixmap
+        if self._correction_tuning_overlay_interaction is not None:
+            self._correction_tuning_overlay_interaction.set_pixmap(
+                self._correction_tuning_active_inspection_pixmap,
+                reset_zoom=False,
             )
-            self._correction_tuning_inspection_label.resize(
-                self._correction_tuning_active_inspection_pixmap.size()
+            self._correction_tuning_zoom_mode = (
+                self._correction_tuning_overlay_interaction.zoom_mode
             )
-            return
-        viewport = self._correction_tuning_inspection_scroll.viewport().size()
-        if viewport.width() < 10 or viewport.height() < 10:
-            viewport = QSize(1000, 700)
-        target = QSize(max(10, viewport.width() - 8), max(10, viewport.height() - 8))
-        scaled = self._correction_tuning_active_inspection_pixmap.scaled(
-            target,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
-        self._correction_tuning_inspection_label.setText("")
-        self._correction_tuning_inspection_label.setPixmap(scaled)
-        self._correction_tuning_inspection_label.resize(scaled.size())
 
     def _refresh_correction_tuning_inspection_nav(self) -> None:
         count = len(self._correction_tuning_inspection_paths)
@@ -3539,8 +3563,14 @@ class MainWindow(QMainWindow):
             f"[{idx + 1}/{count}] {label} - {os.path.basename(image_path)}"
         )
         self._refresh_correction_tuning_inspection_nav()
-        self._set_correction_tuning_zoom_mode(False)
-        self._render_correction_tuning_overlay()
+        if self._correction_tuning_overlay_interaction is not None:
+            self._correction_tuning_overlay_interaction.set_pixmap(pix, reset_zoom=True)
+            self._correction_tuning_zoom_mode = (
+                self._correction_tuning_overlay_interaction.zoom_mode
+            )
+        else:
+            self._set_correction_tuning_zoom_mode(False)
+            self._render_correction_tuning_overlay()
 
     def _set_correction_tuning_overlay_image(self, image_path: str) -> None:
         self._set_correction_tuning_overlay_images([image_path], panel_labels=None)
@@ -3562,17 +3592,32 @@ class MainWindow(QMainWindow):
     def _on_correction_tuning_inspection_clicked(self) -> None:
         if self._correction_tuning_active_inspection_pixmap.isNull():
             return
-        self._set_correction_tuning_zoom_mode(not self._correction_tuning_zoom_mode)
-        self._render_correction_tuning_overlay()
+        if self._correction_tuning_overlay_interaction is not None:
+            self._correction_tuning_overlay_interaction.toggle_zoom()
+            self._correction_tuning_zoom_mode = (
+                self._correction_tuning_overlay_interaction.zoom_mode
+            )
+        else:
+            self._set_correction_tuning_zoom_mode(not self._correction_tuning_zoom_mode)
+            self._render_correction_tuning_overlay()
 
     def _set_correction_tuning_zoom_mode(self, enabled: bool) -> None:
+        if self._correction_tuning_overlay_interaction is not None:
+            self._correction_tuning_overlay_interaction.set_zoom_mode(bool(enabled))
+            self._correction_tuning_zoom_mode = (
+                self._correction_tuning_overlay_interaction.zoom_mode
+            )
+            return
         self._correction_tuning_zoom_mode = bool(enabled)
         if hasattr(self, "_correction_tuning_zoom_hint_label"):
             self._correction_tuning_zoom_hint_label.setText(
-                "Click image to return to fit mode."
+                "Scroll wheel to zoom in/out. Drag to pan. Click image to return to fit."
                 if self._correction_tuning_zoom_mode
-                else "Click image to toggle fit/full size."
+                else "Scroll wheel to zoom. Click image to toggle fit/full size."
             )
+
+    def _on_correction_tuning_zoom_mode_changed(self, enabled: bool) -> None:
+        self._correction_tuning_zoom_mode = bool(enabled)
 
     def _populate_correction_tuning_chunk_choices(self, roi: str) -> None:
         self._correction_tuning_chunk_combo.blockSignals(True)

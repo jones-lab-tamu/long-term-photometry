@@ -6,7 +6,7 @@ import os
 import json
 import tempfile
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QPixmap
 from gui.run_report_parser import (
     resolve_region_deliverables,
@@ -198,5 +198,51 @@ def test_run_report_viewer_click_to_zoom_toggle(qapp):
         qapp.processEvents()
         assert viewer._zoom_mode is False
         assert viewer._image_label.pixmap().height() <= viewer._image_scroll.viewport().height()
+
+        viewer.close()
+
+
+def test_run_report_viewer_wheel_zoom_is_incremental_and_pan_is_usable(qapp):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        img_path = os.path.join(tmpdir, "inspect_plot.png")
+        pix = QPixmap(2200, 1200)
+        pix.fill(Qt.blue)
+        assert pix.save(img_path)
+
+        viewer = RunReportViewer()
+        viewer.resize(1200, 800)
+        viewer.show()
+        qapp.processEvents()
+
+        viewer._active_image_path = img_path
+        viewer._set_image(img_path)
+        qapp.processEvents()
+
+        fit_pix = viewer._image_label.pixmap()
+        assert fit_pix is not None and not fit_pix.isNull()
+        fit_w = fit_pix.width()
+
+        viewer._image_label.wheel_zoom.emit(1, QPoint(100, 100))
+        qapp.processEvents()
+        zoomed_pix = viewer._image_label.pixmap()
+        assert zoomed_pix is not None and not zoomed_pix.isNull()
+        assert viewer._zoom_mode is True
+        assert fit_w < zoomed_pix.width() < 2200
+
+        assert viewer._image_label.cursor().shape() == Qt.OpenHandCursor
+        viewer._image_label.drag_started.emit(QPoint(200, 160))
+        assert viewer._image_label.cursor().shape() == Qt.ClosedHandCursor
+        viewer._image_label.drag_moved.emit(QPoint(140, 120))
+        viewer._image_label.drag_finished.emit()
+        qapp.processEvents()
+        assert viewer._image_label.cursor().shape() == Qt.OpenHandCursor
+
+        viewer._image_label.wheel_zoom.emit(-50, QPoint(100, 100))
+        qapp.processEvents()
+        assert viewer._zoom_mode is False
+        fit_again = viewer._image_label.pixmap()
+        assert fit_again is not None and not fit_again.isNull()
+        assert fit_again.width() <= viewer._image_scroll.viewport().width()
+        assert fit_again.height() <= viewer._image_scroll.viewport().height()
 
         viewer.close()

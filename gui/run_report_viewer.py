@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.run_report_parser import parse_run_report, get_preview_mode, resolve_region_deliverables
+from gui.interactive_image import InteractiveImageLabel, InteractiveImageController
 
 
 TAB_VERIFICATION = "Verification"
@@ -60,6 +61,7 @@ class RunReportViewer(QWidget):
         self._active_image_path = ""
         self._active_pixmap = QPixmap()
         self._zoom_mode = False
+        self._image_interaction: InteractiveImageController | None = None
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         root = QVBoxLayout(self)
@@ -128,7 +130,7 @@ class RunReportViewer(QWidget):
         self._image_title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         viewer_col.addWidget(self._image_title_label)
 
-        self._image_label = _ClickableImageLabel()
+        self._image_label = InteractiveImageLabel()
         self._image_label.setAlignment(Qt.AlignCenter)
         self._image_label.setStyleSheet(
             "QLabel { background: #111; color: #ddd; border: 1px solid #444; }"
@@ -147,10 +149,19 @@ class RunReportViewer(QWidget):
         self._image_scroll.setMinimumHeight(260)
         viewer_col.addWidget(self._image_scroll, 1)
 
-        self._zoom_hint_label = QLabel("Click image to toggle fit/full size.")
+        self._zoom_hint_label = QLabel("Scroll wheel to zoom. Click image to toggle fit/full size.")
         self._zoom_hint_label.setAlignment(Qt.AlignCenter)
         self._zoom_hint_label.setStyleSheet("font-size: 11px; color: #666;")
         viewer_col.addWidget(self._zoom_hint_label)
+        self._image_interaction = InteractiveImageController(
+            label=self._image_label,
+            scroll_area=self._image_scroll,
+            set_hint_text=self._zoom_hint_label.setText,
+            fit_hint="Scroll wheel to zoom. Click image to toggle fit/full size.",
+            zoom_hint="Scroll wheel to zoom in/out. Drag to pan. Click image to return to fit.",
+            allow_upscale_in_fit=True,
+            on_zoom_mode_changed=self._on_zoom_mode_changed,
+        )
 
         nav_row = QHBoxLayout()
         self._prev_btn = QPushButton("<")
@@ -491,7 +502,11 @@ class RunReportViewer(QWidget):
             return
 
         self._active_pixmap = pix
-        self._render_image()
+        if self._image_interaction is not None:
+            self._image_interaction.set_pixmap(pix, reset_zoom=True)
+            self._zoom_mode = self._image_interaction.zoom_mode
+        else:
+            self._render_image()
 
     def _on_image_clicked(self) -> None:
         """Toggle between fit-to-view and full-size inspection mode."""
@@ -501,40 +516,31 @@ class RunReportViewer(QWidget):
         self._render_image()
 
     def _set_zoom_mode(self, enabled: bool) -> None:
-        self._zoom_mode = bool(enabled)
-        self._zoom_hint_label.setText(
-            "Click image to return to fit mode." if self._zoom_mode
-            else "Click image to toggle fit/full size."
-        )
+        if self._image_interaction is not None:
+            self._image_interaction.set_zoom_mode(bool(enabled))
+        else:
+            self._zoom_mode = bool(enabled)
 
     def _render_image(self) -> None:
-        """Render active image in fit or full-size mode."""
-        if self._active_pixmap.isNull():
-            return
-        if self._zoom_mode:
-            self._image_label.setPixmap(self._active_pixmap)
-            self._image_label.resize(self._active_pixmap.size())
-            self._image_label.setText("")
-            return
-
-        viewport = self._image_scroll.viewport().size()
-        if viewport.width() < 10 or viewport.height() < 10:
-            viewport = QSize(640, 360)
-        scaled = self._active_pixmap.scaled(viewport, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self._image_label.setPixmap(scaled)
-        self._image_label.resize(scaled.size())
-        self._image_label.setText("")
+        """Render active image with shared interactive zoom/pan behavior."""
+        if self._image_interaction is not None:
+            self._image_interaction.render()
+            self._zoom_mode = self._image_interaction.zoom_mode
 
     def _show_no_image(self, message: str):
         self._active_image_path = ""
         self._active_pixmap = QPixmap()
-        self._set_zoom_mode(False)
-        self._image_label.setPixmap(QPixmap())
-        self._image_label.setText(message)
-        viewport = self._image_scroll.viewport().size()
-        if viewport.width() < 10 or viewport.height() < 10:
-            viewport = QSize(640, 320)
-        self._image_label.resize(viewport)
+        if self._image_interaction is not None:
+            self._image_interaction.clear(message, fallback_width=640, fallback_height=320)
+            self._zoom_mode = self._image_interaction.zoom_mode
+        else:
+            self._set_zoom_mode(False)
+            self._image_label.setPixmap(QPixmap())
+            self._image_label.setText(message)
+            viewport = self._image_scroll.viewport().size()
+            if viewport.width() < 10 or viewport.height() < 10:
+                viewport = QSize(640, 320)
+            self._image_label.resize(viewport)
         self._image_title_label.setText("No image selected.")
         self._prev_btn.setVisible(False)
         self._next_btn.setVisible(False)
@@ -609,11 +615,5 @@ class RunReportViewer(QWidget):
         if self._active_image_path and os.path.isfile(self._active_image_path):
             self._render_image()
 
-
-class _ClickableImageLabel(QLabel):
-    clicked = Signal()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
+    def _on_zoom_mode_changed(self, enabled: bool) -> None:
+        self._zoom_mode = bool(enabled)

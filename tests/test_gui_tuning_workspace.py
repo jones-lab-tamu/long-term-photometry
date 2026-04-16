@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 import pytest
 import yaml
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt, QPoint
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QGroupBox, QSizePolicy, QMessageBox
 
@@ -897,7 +897,9 @@ def test_tuning_overlay_fit_render_uses_smooth_transformation(window, monkeypatc
 
     def _spy_scaled(self, *args, **kwargs):
         mode = None
-        if len(args) >= 3:
+        if len(args) >= 4:
+            mode = args[3]
+        elif len(args) >= 3:
             mode = args[2]
         elif "mode" in kwargs:
             mode = kwargs["mode"]
@@ -947,7 +949,7 @@ def test_tuning_preview_click_toggles_fit_and_full_size(window, qapp, tmp_path):
     window._tuning_overlay_label.clicked.emit()
     qapp.processEvents()
     assert window._tuning_overlay_zoom_mode is True
-    assert "return to fit mode" in window._tuning_overlay_zoom_hint_label.text().lower()
+    assert "return to fit" in window._tuning_overlay_zoom_hint_label.text().lower()
     full_pix = window._tuning_overlay_label.pixmap()
     assert full_pix is not None and not full_pix.isNull()
     assert full_pix.size() == window._tuning_active_overlay_pixmap.size()
@@ -1019,7 +1021,9 @@ def test_correction_overlay_fit_render_uses_smooth_transformation(window, monkey
 
     def _spy_scaled(self, *args, **kwargs):
         mode = None
-        if len(args) >= 3:
+        if len(args) >= 4:
+            mode = args[3]
+        elif len(args) >= 3:
             mode = args[2]
         elif "mode" in kwargs:
             mode = kwargs["mode"]
@@ -1068,7 +1072,7 @@ def test_correction_preview_click_toggles_fit_and_full_size(window, qapp, tmp_pa
     window._correction_tuning_inspection_label.clicked.emit()
     qapp.processEvents()
     assert window._correction_tuning_zoom_mode is True
-    assert "return to fit mode" in window._correction_tuning_zoom_hint_label.text().lower()
+    assert "return to fit" in window._correction_tuning_zoom_hint_label.text().lower()
     full_pix = window._correction_tuning_inspection_label.pixmap()
     assert full_pix is not None and not full_pix.isNull()
     assert full_pix.size() == window._correction_tuning_active_inspection_pixmap.size()
@@ -1100,6 +1104,76 @@ def test_correction_preview_new_image_resets_zoom_to_fit(window, qapp, tmp_path)
     qapp.processEvents()
     assert window._correction_tuning_zoom_mode is False
     assert "toggle fit/full size" in window._correction_tuning_zoom_hint_label.text().lower()
+
+
+def test_tuning_preview_wheel_zoom_is_incremental_and_pan_is_usable(window, qapp, tmp_path):
+    image_path = tmp_path / "tuning_incremental_zoom.png"
+    _write_png(image_path, width=2200, height=1200)
+    window._set_tuning_overlay_image(str(image_path))
+    qapp.processEvents()
+
+    fit_pix = window._tuning_overlay_label.pixmap()
+    assert fit_pix is not None and not fit_pix.isNull()
+    fit_w = fit_pix.width()
+
+    window._tuning_overlay_label.wheel_zoom.emit(1, QPoint(100, 100))
+    qapp.processEvents()
+    z1 = window._tuning_overlay_label.pixmap()
+    assert z1 is not None and not z1.isNull()
+    assert window._tuning_overlay_zoom_mode is True
+    assert fit_w < z1.width() < 2200
+
+    assert window._tuning_overlay_label.cursor().shape() == Qt.OpenHandCursor
+    window._tuning_overlay_label.drag_started.emit(QPoint(220, 160))
+    assert window._tuning_overlay_label.cursor().shape() == Qt.ClosedHandCursor
+    window._tuning_overlay_label.drag_moved.emit(QPoint(150, 110))
+    window._tuning_overlay_label.drag_finished.emit()
+    qapp.processEvents()
+    assert window._tuning_overlay_label.cursor().shape() == Qt.OpenHandCursor
+
+    window._tuning_overlay_label.wheel_zoom.emit(-50, QPoint(100, 100))
+    qapp.processEvents()
+    assert window._tuning_overlay_zoom_mode is False
+    fit_again = window._tuning_overlay_label.pixmap()
+    assert fit_again is not None and not fit_again.isNull()
+    viewport = window._tuning_overlay_scroll.viewport().size()
+    assert fit_again.width() <= viewport.width()
+    assert fit_again.height() <= viewport.height()
+
+
+def test_correction_preview_wheel_zoom_is_incremental_and_pan_is_usable(window, qapp, tmp_path):
+    image_path = tmp_path / "correction_incremental_zoom.png"
+    _write_png(image_path, width=2200, height=1200)
+    window._set_correction_tuning_overlay_image(str(image_path))
+    qapp.processEvents()
+
+    fit_pix = window._correction_tuning_inspection_label.pixmap()
+    assert fit_pix is not None and not fit_pix.isNull()
+    fit_w = fit_pix.width()
+
+    window._correction_tuning_inspection_label.wheel_zoom.emit(1, QPoint(100, 100))
+    qapp.processEvents()
+    z1 = window._correction_tuning_inspection_label.pixmap()
+    assert z1 is not None and not z1.isNull()
+    assert window._correction_tuning_zoom_mode is True
+    assert fit_w < z1.width() < 2200
+
+    assert window._correction_tuning_inspection_label.cursor().shape() == Qt.OpenHandCursor
+    window._correction_tuning_inspection_label.drag_started.emit(QPoint(220, 160))
+    assert window._correction_tuning_inspection_label.cursor().shape() == Qt.ClosedHandCursor
+    window._correction_tuning_inspection_label.drag_moved.emit(QPoint(150, 110))
+    window._correction_tuning_inspection_label.drag_finished.emit()
+    qapp.processEvents()
+    assert window._correction_tuning_inspection_label.cursor().shape() == Qt.OpenHandCursor
+
+    window._correction_tuning_inspection_label.wheel_zoom.emit(-50, QPoint(100, 100))
+    qapp.processEvents()
+    assert window._correction_tuning_zoom_mode is False
+    fit_again = window._correction_tuning_inspection_label.pixmap()
+    assert fit_again is not None and not fit_again.isNull()
+    viewport = window._correction_tuning_inspection_scroll.viewport().size()
+    assert fit_again.width() <= viewport.width()
+    assert fit_again.height() <= viewport.height()
 
 
 def test_tuning_apply_back_copies_only_downstream_fields(window, tmp_path):
