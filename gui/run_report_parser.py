@@ -123,10 +123,21 @@ def get_preview_mode(report_data: Dict[str, Any]) -> bool:
     """
     Determine if the run was a preview run based strictly on run_report.json.
     """
+    return get_run_type(report_data) == "preview"
+
+
+def get_run_type(report_data: Dict[str, Any]) -> str:
+    """
+    Return normalized run_type from run_report context.
+    Falls back to 'full' when absent/unknown.
+    """
     ctx = report_data.get("run_context", {})
     if not isinstance(ctx, dict):
-        return False
-    return ctx.get("run_type") == "preview"
+        return "full"
+    raw = str(ctx.get("run_type", "")).strip().lower()
+    if raw in {"full", "preview", "tuning_prep"}:
+        return raw
+    return "full"
 
 
 def get_summary_fields(report_data: Dict[str, Any]) -> List[Tuple[str, str]]:

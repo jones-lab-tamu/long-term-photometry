@@ -167,6 +167,21 @@ def test_run_report_viewer_tab_discovery_is_explicit(qapp):
         assert "Phasic Raw" not in tab_map
 
 
+def test_run_report_viewer_status_labels_tuning_prep(qapp):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "run_report.json"), "w", encoding="utf-8") as f:
+            json.dump({"run_context": {"run_type": "tuning_prep"}}, f)
+        reg = os.path.join(tmpdir, "Region0")
+        os.makedirs(os.path.join(reg, "summary"))
+        os.makedirs(os.path.join(reg, "day_plots"))
+        os.makedirs(os.path.join(reg, "tables"))
+
+        viewer = RunReportViewer()
+        assert viewer.load_report(tmpdir) is True
+        assert "[TUNING PREP]" in viewer._status_label.text()
+        viewer.close()
+
+
 def test_run_report_viewer_click_to_zoom_toggle(qapp):
     """Clicking image toggles fit mode and full-size inspection mode."""
     with tempfile.TemporaryDirectory() as tmpdir:

@@ -23,7 +23,12 @@ from PySide6.QtWidgets import (
     QTabWidget,
 )
 
-from gui.run_report_parser import parse_run_report, get_preview_mode, resolve_region_deliverables
+from gui.run_report_parser import (
+    parse_run_report,
+    get_preview_mode,
+    get_run_type,
+    resolve_region_deliverables,
+)
 from gui.interactive_image import InteractiveImageLabel, InteractiveImageController
 
 
@@ -223,6 +228,7 @@ class RunReportViewer(QWidget):
 
         run_report_path = os.path.join(out_dir, "run_report.json")
         data, parse_err = parse_run_report(run_report_path)
+        run_type = get_run_type(data) if data else "full"
         is_preview = get_preview_mode(data) if data else False
 
         self._run_summary_path = ""
@@ -259,6 +265,8 @@ class RunReportViewer(QWidget):
         title = "Results workspace"
         if is_preview:
             title += " [PREVIEW]"
+        elif run_type == "tuning_prep":
+            title += " [TUNING PREP]"
         self._set_status_message(title, level="ready")
         self._workspace.show()
 

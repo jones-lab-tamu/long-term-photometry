@@ -32,6 +32,7 @@ from gui.knobs_schema import is_config_key
 
 FORMAT_CHOICES = ("auto", "rwd", "npm")
 TIMELINE_ANCHOR_CHOICES = ("civil", "elapsed", "fixed_daily_anchor")
+RUN_PROFILE_CHOICES = ("full", "tuning_prep")
 _ANCHOR_CLOCK_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
 
 
@@ -96,6 +97,7 @@ class RunSpec:
     mode: Optional[str] = None
     traces_only: bool = False
     preview_first_n: Optional[int] = None
+    run_profile: str = "full"
     
     # --- (E) Run execution control ---
     overwrite: bool = False
@@ -135,6 +137,11 @@ class RunSpec:
             value = getattr(self, field_name)
             if value is not None and value not in ("qc", "full"):
                 raise ValueError(f"{field_name} must be 'qc', 'full', or None")
+
+        if self.run_profile not in RUN_PROFILE_CHOICES:
+            raise ValueError(
+                f"run_profile must be one of {RUN_PROFILE_CHOICES}, got {self.run_profile!r}"
+            )
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-safe dictionary."""
@@ -330,6 +337,9 @@ class RunSpec:
             
         if self.preview_first_n is not None:
             argv.extend(["--preview-first-n", str(self.preview_first_n)])
+
+        if self.run_profile != "full":
+            argv.extend(["--run-type", self.run_profile])
             
         if self.representative_session_index is not None:
             argv.extend(["--representative-session-index", str(self.representative_session_index)])

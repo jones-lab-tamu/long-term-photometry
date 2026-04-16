@@ -5,6 +5,7 @@ import json
 import shutil
 import tempfile
 import yaml
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # Add root to sys.path
@@ -138,6 +139,10 @@ def test_wrapper_stamps_run_report():
             json.dump(report, f)
             
         _ensure_root_run_report(tmp_dir, None, None, None, 
+                                run_type="tuning_prep",
+                                run_profile="tuning_prep",
+                                artifact_contract={"required_for_post_run_tuning": ["phasic_trace_cache.h5", "config_used.yaml"]},
+                                intentional_skips={"skipped_outputs": ["day_plots/phasic_sig_iso_day_*.png"]},
                                 sessions_per_hour=2, 
                                 sessions_per_hour_source="auth-stamp",
                                 timeline_anchor_mode="fixed_daily_anchor",
@@ -148,7 +153,66 @@ def test_wrapper_stamps_run_report():
             
         assert stamped["run_context"]["sessions_per_hour"] == 2
         assert stamped["run_context"]["sessions_per_hour_source"] == "auth-stamp"
+        assert stamped["run_context"]["run_type"] == "tuning_prep"
+        assert stamped["run_context"]["run_profile"] == "tuning_prep"
         assert stamped["run_context"]["timeline_anchor_mode"] == "fixed_daily_anchor"
         assert stamped["run_context"]["fixed_daily_anchor_clock"] == "07:00"
+        assert stamped["run_context"]["artifact_contract"]["required_for_post_run_tuning"] == [
+            "phasic_trace_cache.h5",
+            "config_used.yaml",
+        ]
+        assert stamped["run_context"]["intentional_skips"]["skipped_outputs"] == [
+            "day_plots/phasic_sig_iso_day_*.png"
+        ]
+        assert stamped["run_mode_contract"]["run_type"] == "tuning_prep"
+        assert stamped["run_mode_contract"]["intentional_skips"]["skipped_outputs"] == [
+            "day_plots/phasic_sig_iso_day_*.png"
+        ]
         assert stamped["derived_settings"]["timeline_anchor_mode"] == "fixed_daily_anchor"
         assert stamped["derived_settings"]["fixed_daily_anchor_clock"] == "07:00"
+
+
+def test_wrapper_run_type_resolution_prefers_tuning_prep_over_preview():
+    from tools.run_full_pipeline_deliverables import _resolve_effective_run_type
+
+    assert _resolve_effective_run_type(run_profile="full", preview_first_n=None) == "full"
+    assert _resolve_effective_run_type(run_profile="full", preview_first_n=5) == "preview"
+    assert _resolve_effective_run_type(run_profile="tuning_prep", preview_first_n=None) == "tuning_prep"
+    assert _resolve_effective_run_type(run_profile="tuning_prep", preview_first_n=5) == "tuning_prep"
+
+
+def test_tuning_prep_skip_plan_reports_nonessential_outputs():
+    from tools.run_full_pipeline_deliverables import _skip_plan_for_profile
+
+    plan = _skip_plan_for_profile("tuning_prep", run_tonic_mode=True, run_phasic_mode=True)
+    assert plan is not None
+    assert plan["forced_traces_only"] is True
+    assert "analysis.tonic_analysis" in plan["skipped_phases"]
+    assert "plots.phasic_dayplot_bundle" in plan["skipped_phases"]
+    assert "plots.tonic_df_timeseries_table" in plan["skipped_phases"]
+    assert "_analysis/tonic_out/tonic_trace_cache.h5" in plan["skipped_outputs"]
+    assert "summary/tonic_overview.png" in plan["skipped_outputs"]
+    assert "day_plots/phasic_sig_iso_day_*.png" in plan["skipped_outputs"]
+    assert _skip_plan_for_profile("full", run_tonic_mode=True, run_phasic_mode=True) is None
+
+
+def test_validate_inputs_rejects_tuning_prep_tonic_only(tmp_path):
+    from tools.run_full_pipeline_deliverables import validate_inputs
+
+    input_dir = tmp_path / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text("target_fs_hz: 20.0\n", encoding="utf-8")
+    args = SimpleNamespace(
+        input=str(input_dir),
+        config=str(cfg_path),
+        format="npm",
+        mode="tonic",
+        run_type="tuning_prep",
+        sessions_per_hour=2,
+        session_duration_s=10.0,
+        timeline_anchor_mode="civil",
+        fixed_daily_anchor_clock=None,
+    )
+    with pytest.raises(RuntimeError, match="requires phasic-capable mode"):
+        validate_inputs(args)

@@ -17,6 +17,7 @@ from gui.status_follower import StatusFollower
 from gui.run_report_parser import (
     parse_run_report,
     get_preview_mode,
+    get_run_type,
     get_summary_fields,
     resolve_quick_links
 )
@@ -193,8 +194,17 @@ def test_run_report_invalid_json():
 def test_get_preview_mode():
     assert get_preview_mode({"run_context": {"run_type": "preview"}}) is True
     assert get_preview_mode({"run_context": {"run_type": "full"}}) is False
+    assert get_preview_mode({"run_context": {"run_type": "tuning_prep"}}) is False
     assert get_preview_mode({}) is False
     assert get_preview_mode({"run_context": "Not a dict"}) is False
+
+
+def test_get_run_type():
+    assert get_run_type({"run_context": {"run_type": "preview"}}) == "preview"
+    assert get_run_type({"run_context": {"run_type": "full"}}) == "full"
+    assert get_run_type({"run_context": {"run_type": "tuning_prep"}}) == "tuning_prep"
+    assert get_run_type({}) == "full"
+    assert get_run_type({"run_context": "not a dict"}) == "full"
 
 def test_get_summary_fields():
     report = {

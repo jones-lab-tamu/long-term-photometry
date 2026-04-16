@@ -21,6 +21,7 @@ import argparse
 import subprocess
 import shutil
 import json
+import copy
 import glob
 import re
 import pandas as pd
@@ -282,11 +283,116 @@ def _cleanup_run_outputs_in_place(run_dir, emitter=None):
                 print(f"WARNING: Could not remove file {path}: {e}", flush=True)
 
 
+RUN_PROFILE_CHOICES = ("full", "tuning_prep")
+TUNING_PREP_SKIPPED_PHASES = [
+    "analysis.tonic_analysis",
+    "plots.tonic_overview",
+    "plots.tonic_df_timeseries_table",
+    "plots.phasic_time_series_summary",
+    "plots.phasic_dayplot_bundle",
+]
+TUNING_PREP_SKIPPED_OUTPUT_PATTERNS = [
+    "_analysis/tonic_out/tonic_trace_cache.h5",
+    "summary/tonic_overview.png",
+    "tables/tonic_df_timeseries.csv",
+    "summary/phasic_peak_rate_timeseries.png",
+    "summary/phasic_auc_timeseries.png",
+    "tables/phasic_peak_rate_timeseries.csv",
+    "tables/phasic_auc_timeseries.csv",
+    "day_plots/phasic_sig_iso_day_*.png",
+    "day_plots/phasic_dynamic_fit_day_*.png",
+    "day_plots/phasic_dFF_day_*.png",
+    "day_plots/phasic_stacked_day_*.png",
+]
+TUNING_PREP_ARTIFACT_CONTRACT = {
+    "stage": "stage_2_selective_skip",
+    "required_for_completed_load": [
+        "status.json (schema_version=1, phase=final, status=success) or equivalent run_report/MANIFEST success evidence",
+        "run_report.json",
+    ],
+    "required_for_post_run_tuning": [
+        "_analysis/phasic_out/phasic_trace_cache.h5",
+        "_analysis/phasic_out/config_used.yaml",
+        "ROI/session entries readable from phasic cache",
+    ],
+    "workflows_guaranteed": [
+        "results workspace load",
+        "downstream event-detection tuning",
+        "correction retune",
+    ],
+    "intentionally_skipped_phases": TUNING_PREP_SKIPPED_PHASES,
+    "intentionally_skipped_outputs": TUNING_PREP_SKIPPED_OUTPUT_PATTERNS,
+    "not_promised": [
+        "full production deliverable package (day-plot families and extended per-ROI summaries)",
+    ],
+}
+
+
+def _resolve_effective_run_type(*, run_profile: str, preview_first_n) -> str:
+    """Resolve externally visible run_type from profile + preview state."""
+    if run_profile == "tuning_prep":
+        return "tuning_prep"
+    return "preview" if preview_first_n is not None else "full"
+
+
+def _artifact_contract_for_profile(run_profile: str):
+    """Return a JSON-safe artifact contract map for the selected run profile."""
+    if run_profile == "tuning_prep":
+        return copy.deepcopy(TUNING_PREP_ARTIFACT_CONTRACT)
+    return None
+
+
+def _skip_plan_for_profile(run_profile: str, *, run_tonic_mode: bool, run_phasic_mode: bool):
+    """Return metadata describing intentionally skipped outputs for a profile."""
+    if run_profile != "tuning_prep":
+        return None
+
+    skipped_phases = []
+    skipped_outputs = []
+    if run_tonic_mode:
+        skipped_phases.extend([
+            "analysis.tonic_analysis",
+            "plots.tonic_overview",
+            "plots.tonic_df_timeseries_table",
+        ])
+        skipped_outputs.extend([
+            "_analysis/tonic_out/tonic_trace_cache.h5",
+            "summary/tonic_overview.png",
+            "tables/tonic_df_timeseries.csv",
+        ])
+    if run_phasic_mode:
+        skipped_phases.extend([
+            "plots.phasic_time_series_summary",
+            "plots.phasic_dayplot_bundle",
+        ])
+        skipped_outputs.extend([
+            "summary/phasic_peak_rate_timeseries.png",
+            "summary/phasic_auc_timeseries.png",
+            "tables/phasic_peak_rate_timeseries.csv",
+            "tables/phasic_auc_timeseries.csv",
+            "day_plots/phasic_sig_iso_day_*.png",
+            "day_plots/phasic_dynamic_fit_day_*.png",
+            "day_plots/phasic_dFF_day_*.png",
+            "day_plots/phasic_stacked_day_*.png",
+        ])
+
+    return {
+        "profile": "tuning_prep",
+        "forced_traces_only": True,
+        "skipped_phases": skipped_phases,
+        "skipped_outputs": skipped_outputs,
+    }
+
+
 def _ensure_root_run_report(
     run_dir,
     phasic_out,
     tonic_out,
     emitter,
+    run_type=None,
+    run_profile=None,
+    artifact_contract=None,
+    intentional_skips=None,
     sessions_per_hour=None,
     sessions_per_hour_source=None,
     timeline_anchor_mode="civil",
@@ -328,23 +434,49 @@ def _ensure_root_run_report(
                  repo = json.load(f)
              
              # Inject authoritative metadata into run_context and derived_settings
-             if 'run_context' in repo:
-                 repo['run_context']['sessions_per_hour'] = sessions_per_hour
-                 repo['run_context']['sessions_per_hour_source'] = sessions_per_hour_source
-                 repo['run_context']['timeline_anchor_mode'] = timeline_anchor_mode
-                 repo['run_context']['fixed_daily_anchor_clock'] = fixed_daily_anchor_clock
+             run_ctx = repo.setdefault("run_context", {})
+             if isinstance(run_ctx, dict):
+                 run_ctx['sessions_per_hour'] = sessions_per_hour
+                 run_ctx['sessions_per_hour_source'] = sessions_per_hour_source
+                 run_ctx['timeline_anchor_mode'] = timeline_anchor_mode
+                 run_ctx['fixed_daily_anchor_clock'] = fixed_daily_anchor_clock
+                 if run_type:
+                     run_ctx["run_type"] = str(run_type)
+                 if run_profile:
+                     run_ctx["run_profile"] = str(run_profile)
+                 if artifact_contract is not None:
+                     run_ctx["artifact_contract"] = artifact_contract
+                 if intentional_skips is not None:
+                     run_ctx["intentional_skips"] = intentional_skips
              
-             if 'derived_settings' in repo:
-                 repo['derived_settings']['sessions_per_hour'] = sessions_per_hour
-                 repo['derived_settings']['sessions_per_hour_source'] = sessions_per_hour_source
-                 repo['derived_settings']['timeline_anchor_mode'] = timeline_anchor_mode
-                 repo['derived_settings']['fixed_daily_anchor_clock'] = fixed_daily_anchor_clock
+             derived_settings = repo.setdefault("derived_settings", {})
+             if isinstance(derived_settings, dict):
+                 derived_settings['sessions_per_hour'] = sessions_per_hour
+                 derived_settings['sessions_per_hour_source'] = sessions_per_hour_source
+                 derived_settings['timeline_anchor_mode'] = timeline_anchor_mode
+                 derived_settings['fixed_daily_anchor_clock'] = fixed_daily_anchor_clock
+
+             if artifact_contract is not None:
+                 repo["run_mode_contract"] = {
+                     "run_profile": str(run_profile or ""),
+                     "run_type": str(run_type or ""),
+                     "artifact_contract": artifact_contract,
+                 }
+             if intentional_skips is not None:
+                 repo.setdefault("run_mode_contract", {})
+                 if isinstance(repo["run_mode_contract"], dict):
+                     repo["run_mode_contract"]["intentional_skips"] = intentional_skips
                  
              with open(report_path, 'w') as f:
                  json.dump(repo, f, indent=2)
              
              if emitter and sessions_per_hour_source:
-                 emitter.emit("package", "audit", f"Stamped report with sessions_per_hour_source={sessions_per_hour_source}")
+                 emitter.emit(
+                     "package",
+                     "audit",
+                     "Stamped report with authoritative run context "
+                     f"(run_type={run_type}, run_profile={run_profile}, sessions_per_hour_source={sessions_per_hour_source})",
+                 )
         except Exception as e:
              if emitter:
                  emitter.emit("package", "error", f"Failed to stamp report: {e}")
@@ -371,6 +503,15 @@ def parse_args():
     parser.add_argument('--config', required=True)
     parser.add_argument('--format', required=True, choices=['rwd', 'npm', 'auto'])
     parser.add_argument('--mode', choices=['both', 'tonic', 'phasic'], default='both', help="Analysis mode (both, tonic, or phasic)")
+    parser.add_argument(
+        '--run-type',
+        choices=list(RUN_PROFILE_CHOICES),
+        default='full',
+        help=(
+            "Formal run profile. 'full' is standard production packaging. "
+            "'tuning_prep' guarantees artifacts required for results inspection + post-run tuning workflows."
+        ),
+    )
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--include-rois', type=str, default=None, help="Comma-separated list of ROIs to process exclusively")
     parser.add_argument('--exclude-rois', type=str, default=None, help="Comma-separated list of ROIs to ignore")
@@ -437,6 +578,13 @@ def validate_inputs(args):
     # Format (already constrained by argparse choices, but belt-and-suspenders)
     if args.format not in ('rwd', 'npm', 'auto'):
         raise RuntimeError(f"Invalid format: {args.format}")
+
+    run_profile = str(getattr(args, "run_type", "full") or "full").strip().lower()
+    if run_profile == "tuning_prep" and getattr(args, "mode", "both") == "tonic":
+        raise RuntimeError(
+            "--run-type tuning_prep requires phasic-capable mode ('both' or 'phasic') "
+            "to preserve downstream/correction tuning artifacts."
+        )
 
     # sessions_per_hour
     if args.sessions_per_hour is not None:
@@ -628,6 +776,35 @@ def main():
         f"Using tonic_timeline_mode={effective_tonic_timeline_mode}",
         flush=True,
     )
+    effective_run_type = _resolve_effective_run_type(
+        run_profile=args.run_type,
+        preview_first_n=effective_preview_first_n,
+    )
+    effective_artifact_contract = _artifact_contract_for_profile(args.run_type)
+    tune_prep_light_mode = bool(args.run_type == "tuning_prep")
+    selected_tonic_mode = args.mode in ('both', 'tonic')
+    run_tonic_mode = selected_tonic_mode and not tune_prep_light_mode
+    run_phasic_mode = args.mode in ('both', 'phasic')
+    effective_traces_only = bool(args.traces_only or args.run_type == "tuning_prep")
+    effective_skip_plan = _skip_plan_for_profile(
+        args.run_type,
+        run_tonic_mode=selected_tonic_mode,
+        run_phasic_mode=run_phasic_mode,
+    )
+    print(
+        f"Using run_profile={args.run_type} (effective run_type={effective_run_type})",
+        flush=True,
+    )
+    if effective_traces_only and not args.traces_only and args.run_type == "tuning_prep":
+        print(
+            "Tuning-prep profile: forcing traces-only analysis for lighter execution.",
+            flush=True,
+        )
+    if tune_prep_light_mode and selected_tonic_mode:
+        print(
+            "Tuning-prep profile: skipping tonic analysis/cache generation by contract.",
+            flush=True,
+        )
 
     print(f"RUN_DIR: {run_dir}", flush=True)
 
@@ -636,12 +813,15 @@ def main():
         'tool': 'run_full_pipeline_deliverables',
         'timestamp': datetime.now().isoformat(),
         'run_id': run_id,
+        'run_profile': args.run_type,
+        'run_type': effective_run_type,
         'run_dir': run_dir,
         'events_path': events_path,
         'cancel_flag_path': cancel_flag_path,
         'args': vars(args),
         'timeline_anchor_mode': args.timeline_anchor_mode,
         'fixed_daily_anchor_clock': args.fixed_daily_anchor_clock,
+        'intentional_skips': effective_skip_plan,
         'commands': [],
         'regions': [],
         'deliverables': {}
@@ -694,6 +874,7 @@ def main():
             return {
                 "schema_version": 1,
                 "run_type": "validate_only",
+                "run_profile": args.run_type,
                 "run_id": run_id,
                 "phase": "running",
                 "status": "running",
@@ -719,7 +900,10 @@ def main():
                 },
                 "errors": [],
                 "warnings": [],
-                "validation": {"result": "validate_only"}
+                "validation": {"result": "validate_only"},
+                "artifact_contract": effective_artifact_contract,
+                "intentional_skips": effective_skip_plan,
+                "traces_only": effective_traces_only,
             }
 
         def _vo_write_final_status(status, error_msg=None):
@@ -774,6 +958,10 @@ def main():
         argv.extend(["--sig-iso-render-mode", str(args.sig_iso_render_mode)])
         argv.extend(["--dff-render-mode", str(args.dff_render_mode)])
         argv.extend(["--stacked-render-mode", str(args.stacked_render_mode)])
+        if effective_traces_only:
+            argv.append("--traces-only")
+        if args.run_type != "full":
+            argv.extend(["--run-type", str(args.run_type)])
 
         print("VALIDATE-ONLY: OK", flush=True)
         print(f"VALIDATE-ONLY: run_dir={run_dir}", flush=True)
@@ -817,6 +1005,7 @@ def main():
     status_data = {
         "schema_version": 1,
         "run_type": "full",
+        "run_profile": args.run_type,
         "run_id": run_id,
         "phase": "running", 
         "status": "running",
@@ -843,8 +1032,10 @@ def main():
         "errors": [],
         "warnings": [],
         "validation": None,
-        "features_extracted": False if args.traces_only else None,
-        "traces_only": args.traces_only,
+        "artifact_contract": effective_artifact_contract,
+        "intentional_skips": effective_skip_plan,
+        "features_extracted": False if effective_traces_only else None,
+        "traces_only": effective_traces_only,
         "timing": {
             "current_phase": None,
             "phase_started_utc": None,
@@ -887,7 +1078,7 @@ def main():
         _write_status_json(status_path, status_data)
 
     # Update status_data with resolved preview info before initial write
-    status_data["run_type"] = "preview" if effective_preview_first_n is not None else "full"
+    status_data["run_type"] = effective_run_type
     status_data["preview"] = {"selector": "first_n", "first_n": effective_preview_first_n} if effective_preview_first_n is not None else None
 
     # Initial write (phase="running")
@@ -898,10 +1089,13 @@ def main():
     emitter = EventEmitter(events_path, run_id, run_dir, file_mode="w")
     emitter.emit("engine", "start", "Engine starting")
     emitter.emit("engine", "context", "Run context initialized", payload={
-        "run_type": "preview" if effective_preview_first_n is not None else "full", 
-        "features_extracted": False if args.traces_only else None, 
+        "run_type": effective_run_type,
+        "run_profile": args.run_type,
+        "artifact_contract": effective_artifact_contract,
+        "intentional_skips": effective_skip_plan,
+        "features_extracted": False if effective_traces_only else None, 
         "preview": {"selector": "first_n", "first_n": effective_preview_first_n} if effective_preview_first_n is not None else None, 
-        "traces_only": args.traces_only, 
+        "traces_only": effective_traces_only, 
         "event_signal": effective_event_signal,
         "representative_session_index": effective_representative_index,
         "sessions_per_hour": resolved_sessions_per_hour,
@@ -918,8 +1112,13 @@ def main():
         analysis_dir = os.path.join(run_dir, '_analysis')
         tonic_out = os.path.join(analysis_dir, 'tonic_out')
         phasic_out = os.path.join(analysis_dir, 'phasic_out')
-        run_tonic_mode = args.mode in ('both', 'tonic')
-        run_phasic_mode = args.mode in ('both', 'phasic')
+        if tune_prep_light_mode and selected_tonic_mode:
+            emitter.emit(
+                "tonic",
+                "audit",
+                "Tuning-prep contract: tonic analysis/cache generation intentionally skipped.",
+                payload={"skipped_output": "_analysis/tonic_out/tonic_trace_cache.h5"},
+            )
 
         # ============================================================
         # 3. Validate
@@ -956,7 +1155,7 @@ def main():
                          '--recursive', '--overwrite']
             if args.include_rois: cmd_tonic.extend(['--include-rois', args.include_rois])
             if args.exclude_rois: cmd_tonic.extend(['--exclude-rois', args.exclude_rois])
-            if args.traces_only: cmd_tonic.append('--traces-only')
+            if effective_traces_only: cmd_tonic.append('--traces-only')
             if args.event_signal: cmd_tonic.extend(['--event-signal', args.event_signal])
             if args.representative_session_index is not None: cmd_tonic.extend(['--representative-session-index', str(args.representative_session_index)])
             if args.preview_first_n is not None:
@@ -990,7 +1189,7 @@ def main():
                           '--recursive', '--overwrite']
             if args.include_rois: cmd_phasic.extend(['--include-rois', args.include_rois])
             if args.exclude_rois: cmd_phasic.extend(['--exclude-rois', args.exclude_rois])
-            if args.traces_only: cmd_phasic.append('--traces-only')
+            if effective_traces_only: cmd_phasic.append('--traces-only')
             if args.event_signal: cmd_phasic.extend(['--event-signal', args.event_signal])
             if args.representative_session_index is not None: cmd_phasic.extend(['--representative-session-index', str(args.representative_session_index)])
             if args.preview_first_n is not None: cmd_phasic.extend(['--preview-first-n', str(args.preview_first_n)])
@@ -1111,6 +1310,13 @@ def main():
         t_phase, started_utc_phase = _phase_start(status_data, "plots_total")
         _write_status_update("plots")
         emitter.emit("plots", "start", "Generating per-ROI deliverables")
+        if tune_prep_light_mode and effective_skip_plan is not None:
+            emitter.emit(
+                "plots",
+                "audit",
+                "Tuning-prep selective skipping enabled for nonessential outputs.",
+                payload=effective_skip_plan,
+            )
 
         def _regions_from_run_report(report_path):
             if not report_path or not os.path.exists(report_path):
@@ -1132,7 +1338,7 @@ def main():
         if run_phasic_mode:
             feats_csv = os.path.join(phasic_out, 'features', 'features.csv')
             has_features = os.path.exists(feats_csv)
-            if run_phasic_mode and has_features:
+            if run_phasic_mode and has_features and not tune_prep_light_mode:
                 df_feat = pd.read_csv(feats_csv)
                 regions = sorted(df_feat['roi'].unique())
             else:
@@ -1174,24 +1380,33 @@ def main():
             files_written = []
 
             manifest['deliverables'][roi] = {}
-            if run_phasic_mode and has_features:
+            if run_phasic_mode:
                 t_bucket = time.perf_counter()
-                roi_feat = df_feat[df_feat['roi'] == roi].copy()
-                roi_feat = roi_feat.sort_values('chunk_id')
-
-                # Diagnostic Selection (Day 0, H 12, S 0)
-                diag_idx = 12 * sessions_per_hour
-                candidates = roi_feat['chunk_id'].values
-
-                if len(candidates) > diag_idx:
-                    cid_diag = candidates[diag_idx]
-                else:
-                    cid_diag = candidates[0]
-
+                cid_diag = None
+                if has_features and df_feat is not None:
+                    roi_feat = df_feat[df_feat['roi'] == roi].copy()
+                    roi_feat = roi_feat.sort_values('chunk_id')
+                    if not roi_feat.empty:
+                        # Diagnostic Selection (Day 0, H 12, S 0)
+                        diag_idx = 12 * sessions_per_hour
+                        candidates = roi_feat['chunk_id'].values
+                        if len(candidates) > diag_idx:
+                            cid_diag = int(candidates[diag_idx])
+                        else:
+                            cid_diag = int(candidates[0])
+                if cid_diag is None:
+                    cache_path_diag = os.path.join(phasic_out, 'phasic_trace_cache.h5')
+                    with open_phasic_cache(cache_path_diag) as cache_diag:
+                        chunk_ids_diag = list_cache_chunk_ids(cache_diag)
+                    if not chunk_ids_diag:
+                        raise RuntimeError(
+                            f"CRITICAL: No chunks found in phasic cache for ROI={roi}."
+                        )
+                    cid_diag = int(chunk_ids_diag[0])
                 manifest['deliverables'][roi]['diagnostic_chunk_id'] = int(cid_diag)
                 _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_feature_selection", time.perf_counter() - t_bucket)
 
-                # A. Phasic Correction Impact (3-Panel)
+                # A. Phasic Correction Impact (4-panel + session CSV)
                 cmd_impact = [sys.executable, 'tools/plot_phasic_correction_impact.py',
                               '--analysis-out', phasic_out,
                               '--roi', roi,
@@ -1202,7 +1417,6 @@ def main():
                 roi_child_script_elapsed += cmd_result["elapsed_sec"]
                 files_written.append("summary/phasic_correction_impact.png")
 
-                # Correction Data CSV (Migrated to HDF5 Cache)
                 t_bucket = time.perf_counter()
                 cache_path_p = os.path.join(phasic_out, 'phasic_trace_cache.h5')
                 if not os.path.exists(cache_path_p):
@@ -1210,16 +1424,15 @@ def main():
 
                 try:
                     with open_phasic_cache(cache_path_p) as f_p:
-                        # approved B3 fields: time_sec, sig_raw, uv_raw, fit_ref, dff
                         fields = ['time_sec', 'sig_raw', 'uv_raw', 'fit_ref', 'dff']
                         t, sig, uv, fit, dff = load_cache_chunk_fields(f_p, roi, int(cid_diag), fields)
 
                         df_c = pd.DataFrame({
                             't_s': t,
                             'sig_raw': sig,
-                            'iso_raw': uv,          # Mapping uv_raw -> iso_raw
-                            'iso_fit_dynamic': fit, # Mapping fit_ref -> iso_fit_dynamic
-                            'dff_dynamic': dff,     # Mapping dff -> dff_dynamic
+                            'iso_raw': uv,
+                            'iso_fit_dynamic': fit,
+                            'dff_dynamic': dff,
                             'region': roi,
                             'chunk_id': int(cid_diag)
                         })
@@ -1230,11 +1443,8 @@ def main():
                 except Exception as e:
                     raise RuntimeError(f"CRITICAL: Failed to read phasic cache for session CSV (ROI={roi}, chunk={cid_diag}): {e}")
                 _accumulate_roi_bucket(roi, roi_bucket_totals, "phasic_session_csv_packaging", time.perf_counter() - t_bucket)
-            elif run_phasic_mode:
-                t_bucket = time.perf_counter()
-                _accumulate_roi_bucket(roi, roi_bucket_totals, "roi_feature_selection", time.perf_counter() - t_bucket)
 
-            if run_tonic_mode:
+            if run_tonic_mode and not tune_prep_light_mode:
                 # B. Tonic Overview
                 out_tonic = os.path.join(s_dir, "tonic_overview.png")
                 cmd_tonic_roi = [sys.executable, 'tools/plot_tonic_48h.py',
@@ -1443,6 +1653,12 @@ def main():
                     tonic_mode_fallback_count,
                 )
                 _accumulate_roi_bucket(roi, roi_bucket_totals, "tonic_table_packaging", tonic_table_total_elapsed)
+            elif run_tonic_mode and tune_prep_light_mode:
+                manifest['deliverables'][roi].setdefault('intentionally_skipped', [])
+                manifest['deliverables'][roi]['intentionally_skipped'].extend([
+                    "summary/tonic_overview.png",
+                    "tables/tonic_df_timeseries.csv",
+                ])
 
             if run_phasic_mode and has_features:
                 # C. Phasic Time Series (Plots & CSV) — requires features
@@ -1475,6 +1691,14 @@ def main():
                         rel_path = os.path.relpath(dst, reg_dir).replace('\\', '/')
                         files_written.append(rel_path)
                 _accumulate_roi_bucket(roi, roi_bucket_totals, "phasic_ts_packaging", time.perf_counter() - t_bucket)
+            elif run_phasic_mode and tune_prep_light_mode:
+                manifest['deliverables'][roi].setdefault('intentionally_skipped', [])
+                manifest['deliverables'][roi]['intentionally_skipped'].extend([
+                    "summary/phasic_peak_rate_timeseries.png",
+                    "summary/phasic_auc_timeseries.png",
+                    "tables/phasic_peak_rate_timeseries.csv",
+                    "tables/phasic_auc_timeseries.csv",
+                ])
 
             t_bucket = time.perf_counter()
             check_cancel(cancel_flag_path, emitter, "plots", manifest_path, manifest)
@@ -1484,7 +1708,7 @@ def main():
             s_sig = []
             s_dyn = []
             s_stk = []
-            if run_phasic_mode:
+            if run_phasic_mode and not tune_prep_light_mode:
                 # D. Per-Day Plots (Sig/Iso, dFF, Stacked) via Unified Bundle Driver
                 cmd_bundle = [sys.executable, 'tools/plot_phasic_dayplot_bundle.py',
                               '--analysis-out', phasic_out,
@@ -1549,6 +1773,14 @@ def main():
                 s_sig = sorted(list(days_sig_iso))
                 s_dyn = sorted(list(days_dynamic_fit))
                 s_stk = sorted(list(days_stacked))
+            elif run_phasic_mode and tune_prep_light_mode:
+                manifest['deliverables'][roi].setdefault('intentionally_skipped', [])
+                manifest['deliverables'][roi]['intentionally_skipped'].extend([
+                    "day_plots/phasic_sig_iso_day_*.png",
+                    "day_plots/phasic_dynamic_fit_day_*.png",
+                    "day_plots/phasic_dFF_day_*.png",
+                    "day_plots/phasic_stacked_day_*.png",
+                ])
 
             t_bucket = time.perf_counter()
             manifest['deliverables'][roi]['days_dff'] = s_dff
@@ -1610,6 +1842,10 @@ def main():
         # Finalize Status (Success)
         # ============================================================
         ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter,
+                                     run_type=effective_run_type,
+                                     run_profile=args.run_type,
+                                     artifact_contract=effective_artifact_contract,
+                                     intentional_skips=effective_skip_plan,
                                      sessions_per_hour=resolved_sessions_per_hour,
                                      sessions_per_hour_source=sessions_per_hour_source,
                                      timeline_anchor_mode=args.timeline_anchor_mode,
@@ -1638,6 +1874,10 @@ def main():
         try:
              # Pass explicit variables as requested (not locals())
              ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter,
+                                          run_type=effective_run_type,
+                                          run_profile=args.run_type,
+                                          artifact_contract=effective_artifact_contract,
+                                          intentional_skips=effective_skip_plan,
                                           sessions_per_hour=resolved_sessions_per_hour,
                                           sessions_per_hour_source=sessions_per_hour_source,
                                           timeline_anchor_mode=args.timeline_anchor_mode,
@@ -1684,6 +1924,10 @@ def main():
         ok = False
         try:
              ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter,
+                                          run_type=effective_run_type,
+                                          run_profile=args.run_type,
+                                          artifact_contract=effective_artifact_contract,
+                                          intentional_skips=effective_skip_plan,
                                           sessions_per_hour=resolved_sessions_per_hour,
                                           sessions_per_hour_source=sessions_per_hour_source,
                                           timeline_anchor_mode=args.timeline_anchor_mode,

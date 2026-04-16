@@ -42,7 +42,7 @@ from gui.run_spec import RunSpec, FORMAT_CHOICES
 from gui.status_follower import StatusFollower
 from gui.log_follower import LogFollower
 from gui.run_report_viewer import RunReportViewer
-from gui.run_report_parser import is_successful_completed_run_dir
+from gui.run_report_parser import is_successful_completed_run_dir, get_run_type
 from gui.validate_run_policy import (
     compute_run_signature,
     is_validation_current
@@ -2436,14 +2436,22 @@ class MainWindow(QMainWindow):
             hasattr(self, "_report_viewer") and self._report_viewer.has_loaded_results()
         )
         if has_loaded_results and run_dir:
+            run_type = self._loaded_results_run_type()
+            run_type_label = self._run_type_display_name(run_type)
             self._results_summary_title_label.setText("Completed results loaded.")
             state_text = "Complete-state workspace"
-            if "[PREVIEW]" in self.windowTitle():
+            if run_type == "preview":
                 state_text += " [PREVIEW]"
+            elif run_type == "tuning_prep":
+                state_text += " [TUNING PREP]"
             if self._is_any_tuning_subsection_expanded():
                 state_text += " (Post-Run Tuning focused)"
-            hint_text = "Use Analysis Outputs to inspect deliverables."
-            compact_text = f"Run: {run_display} | {state_text}"
+            hint_text = (
+                "Tuning Prep Run loaded: contract includes results inspection plus both post-run retune workflows. Some nonessential outputs were intentionally skipped."
+                if run_type == "tuning_prep"
+                else "Use Analysis Outputs to inspect deliverables."
+            )
+            compact_text = f"Run: {run_display} | {run_type_label} | {state_text}"
             show_compact = True
             show_hint = False
             show_details = False
@@ -5395,6 +5403,9 @@ class MainWindow(QMainWindow):
             mode_val = mode_text
             user_set.append("mode")
 
+        run_profile = self._selected_run_profile()
+        self._track_if_changed("run_profile", run_profile, "full", user_set)
+
         # --- Traces-only (--traces-only CLI flag) ---
         traces_only = self._traces_only_cb.isChecked()
         if traces_only:
@@ -5650,6 +5661,7 @@ class MainWindow(QMainWindow):
             gui_version="1.0.0",
             timestamp_local=datetime.now().isoformat(),
             mode=mode_val,
+            run_profile=run_profile,
             user_set_fields=user_set,
         )
         self._timing_end("build_run_spec", t_spec)
@@ -5781,6 +5793,15 @@ class MainWindow(QMainWindow):
         fmt = self._format_combo.currentText()
         if not fmt or fmt not in FORMAT_CHOICES:
             return f"Invalid Format: '{fmt}'. Must be one of {FORMAT_CHOICES}."
+
+        if (
+            self._selected_run_profile() == "tuning_prep"
+            and not is_isosbestic_active(self._mode_combo.currentText())
+        ):
+            return (
+                "Tuning Prep Run requires phasic-capable mode ('both' or 'phasic') "
+                "to preserve downstream and correction retune artifacts."
+            )
 
         base_cfg = self._active_baseline_config()
 
@@ -6254,6 +6275,7 @@ class MainWindow(QMainWindow):
             self._refresh_status_from_disk_final()
             self._enter_complete_state_workspace()
             self._refresh_tuning_workspace_availability()
+            self._apply_preview_labeling()
             self._append_run_log("Complete-state results workspace loaded.")
         else:
             self._append_run_log("Could not load complete-state workspace from selected directory.")
@@ -6584,7 +6606,7 @@ class MainWindow(QMainWindow):
         self._update_button_states()
 
     def _apply_preview_labeling(self):
-        """Source preview state from run_report.json and update window/badge."""
+        """Source run type from run_report.json and update window/badge."""
         # Preview controls are demoted from idle layout, but preview mode may still
         # be active via compatibility state; keep explicit top-strip indication.
         self.setWindowTitle(self.WINDOW_TITLE_BASE)
@@ -6600,11 +6622,13 @@ class MainWindow(QMainWindow):
         try:
             with open(report_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            
-            from gui.run_report_parser import get_preview_mode
-            if get_preview_mode(data):
+
+            run_type = get_run_type(data)
+            if run_type == "preview":
                 self.setWindowTitle(f"{self.WINDOW_TITLE_BASE} [PREVIEW]")
                 self._preview_badge.show()
+            elif run_type == "tuning_prep":
+                self.setWindowTitle(f"{self.WINDOW_TITLE_BASE} [TUNING PREP]")
         except Exception:
             pass
 
@@ -6615,15 +6639,22 @@ class MainWindow(QMainWindow):
         input_dir = self._input_dir.text().strip() or "(not set)"
         mode_text = self._mode_combo.currentText().strip() or "(not set)"
         plotting_mode = self._plotting_mode_combo.currentText().strip() or "(not set)"
+        run_type = self._loaded_results_run_type()
+        run_type_label = self._run_type_display_name(run_type)
         roi_summary = self._compute_roi_filter_summary()
         summary_lines = [
             f"Run: {run_name}",
             f"Run directory: {run_dir}",
+            f"Run type: {run_type_label}",
             f"Input source: {input_dir}",
             f"Setup profile: mode={mode_text}, plotting={plotting_mode}",
             f"ROI filter used: {roi_summary}",
             "Completed outputs are read-only in this phase.",
         ]
+        if run_type == "tuning_prep":
+            summary_lines.append(
+                "Tuning Prep contract: post-run tuning and correction retune inputs are present for this run; some nonessential production outputs were intentionally skipped."
+            )
         self._complete_summary_label.setText("\n".join(summary_lines))
         if hasattr(self, "_complete_mode_next_steps_label"):
             self._complete_mode_next_steps_label.setText(
@@ -6717,6 +6748,14 @@ class MainWindow(QMainWindow):
         idx = self._format_combo.findText(fmt)
         if idx >= 0:
             self._format_combo.setCurrentIndex(idx)
+
+        run_profile = self._settings.value("run_profile", "full", str).strip().lower()
+        idx_profile = self._run_profile_combo.findData(run_profile)
+        if idx_profile < 0:
+            idx_profile = self._run_profile_combo.findData("full")
+        if idx_profile >= 0:
+            self._run_profile_combo.setCurrentIndex(idx_profile)
+        self._on_run_profile_changed()
 
         self._sph_edit.setText(self._settings.value("sessions_per_hour", "", str))
         self._duration_edit.setText(self._settings.value("session_duration_s", "", str))
@@ -6917,6 +6956,7 @@ class MainWindow(QMainWindow):
         self._settings.setValue("use_custom_config", self._use_custom_config_cb.isChecked())
         self._settings.setValue("config_path", self._config_path.text().strip())
         self._settings.setValue("format", self._format_combo.currentText())
+        self._settings.setValue("run_profile", self._selected_run_profile())
         self._settings.setValue("sessions_per_hour", self._sph_edit.text().strip())
         self._settings.setValue("session_duration_s", self._duration_edit.text().strip())
         self._settings.setValue("smooth_window_s", self._smooth_spin.value())
@@ -7103,6 +7143,27 @@ class MainWindow(QMainWindow):
         session_label = self._rep_session_combo.currentText().strip() or "?"
         return f"Session index {session_idx} ({session_label})"
 
+    def _loaded_results_run_type(self) -> str:
+        run_dir = (self._current_run_dir or "").strip()
+        if not run_dir:
+            return "full"
+        report_path = os.path.join(run_dir, "run_report.json")
+        if not os.path.isfile(report_path):
+            return "full"
+        try:
+            with open(report_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return get_run_type(data)
+        except Exception:
+            return "full"
+
+    def _run_type_display_name(self, run_type: str) -> str:
+        if run_type == "preview":
+            return "Preview Run"
+        if run_type == "tuning_prep":
+            return "Tuning Prep Run"
+        return "Full Run"
+
     def _selected_dynamic_fit_mode(self) -> str:
         combo = getattr(self, "_dynamic_fit_mode_combo", None)
         if combo is not None:
@@ -7282,6 +7343,7 @@ class MainWindow(QMainWindow):
     def _refresh_effective_run_summary(self) -> None:
         """Refresh compact pre-run intent summary from current GUI state."""
         mode_text = self._mode_combo.currentText()
+        run_profile = self._selected_run_profile()
         phasic_active = is_isosbestic_active(mode_text)
         analysis_scope = (
             "Traces-only (feature extraction skipped)"
@@ -7309,6 +7371,7 @@ class MainWindow(QMainWindow):
             out_text = "(not set)"
 
         summary_lines = [
+            f"Run Type: {self._run_profile_display_name(run_profile)}",
             f"Mode: {mode_text}",
             f"Analysis: {analysis_scope}",
             (
@@ -7360,6 +7423,11 @@ class MainWindow(QMainWindow):
             f"Representative Session: {rep_text}",
             f"Output Destination: {out_text}",
         ]
+        if run_profile == "tuning_prep":
+            summary_lines.insert(
+                1,
+                "Artifact Contract: completed-run load + downstream tuning + correction retune inputs are guaranteed; tonic cache and nonessential summaries/day-plots are intentionally omitted.",
+            )
         if phasic_active and is_robust_event_reject_mode(self._selected_dynamic_fit_mode()):
             robust_ratio_thresh = (
                 float(self._robust_event_reject_local_var_ratio_spin.value())
@@ -7819,11 +7887,30 @@ class MainWindow(QMainWindow):
         self._mode_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Mode:", self._mode_combo)
 
+        self._run_profile_combo = QComboBox()
+        self._run_profile_combo.addItem("Full Run", "full")
+        self._run_profile_combo.addItem("Tuning Prep Run", "tuning_prep")
+        self._run_profile_combo.setToolTip(
+            "Choose run packaging intent:\n"
+            "Full Run: complete output set.\n"
+            "Tuning Prep Run: guarantees artifacts required for results inspection and both post-run retune workflows."
+        )
+        self._run_profile_combo.currentIndexChanged.connect(self._on_run_profile_changed)
+        self._run_profile_combo.currentIndexChanged.connect(self._on_config_changed)
+        form.addRow("Run Type:", self._run_profile_combo)
+
+        self._run_profile_note_label = QLabel("")
+        self._run_profile_note_label.setWordWrap(True)
+        self._run_profile_note_label.setObjectName("resultsSummaryHint")
+        self._run_profile_note_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        form.addRow("", self._run_profile_note_label)
+
         self._run_config_inputs_container = QWidget()
         inputs_layout = QVBoxLayout(self._run_config_inputs_container)
         inputs_layout.setContentsMargins(0, 0, 0, 0)
         inputs_layout.addLayout(form)
         self._apply_form_row_tooltips(form)
+        self._on_run_profile_changed()
 
         roi_group = QGroupBox("ROI Selection")
         roi_layout = QVBoxLayout(roi_group)
@@ -8037,6 +8124,37 @@ class MainWindow(QMainWindow):
                 combo.blockSignals(True)
                 combo.setCurrentText(target)
                 combo.blockSignals(False)
+
+    def _selected_run_profile(self) -> str:
+        combo = getattr(self, "_run_profile_combo", None)
+        if combo is None:
+            return "full"
+        data = combo.currentData()
+        if data in {"full", "tuning_prep"}:
+            return str(data)
+        text = combo.currentText().strip().lower()
+        return "tuning_prep" if "tuning" in text else "full"
+
+    @staticmethod
+    def _run_profile_display_name(run_profile: str) -> str:
+        return "Tuning Prep Run" if run_profile == "tuning_prep" else "Full Run"
+
+    def _on_run_profile_changed(self) -> None:
+        if not hasattr(self, "_run_profile_note_label"):
+            return
+        run_profile = self._selected_run_profile()
+        if run_profile == "tuning_prep":
+            self._run_profile_note_label.setText(
+                "Tuning Prep Run contract: guarantees completed-run metadata plus "
+                "_analysis/phasic_out/phasic_trace_cache.h5 and config_used.yaml for downstream tuning + correction retune.\n"
+                "Stage 2 behavior: intentionally omits tonic cache generation and skips nonessential summaries/day-plots for lighter execution while preserving tuning contracts."
+            )
+            self._set_status_label_style(self._run_profile_note_label, "info")
+        else:
+            self._run_profile_note_label.setText(
+                "Full Run: complete output package for routine production deliverables."
+            )
+            self._set_status_label_style(self._run_profile_note_label, "ready")
 
     def _build_advanced_group(self) -> QGroupBox:
         group = QGroupBox("Advanced")

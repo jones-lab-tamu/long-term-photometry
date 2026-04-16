@@ -45,7 +45,7 @@ def _write_png(path: str, width: int = 360, height: int = 220):
     assert pix.save(path)
 
 
-def _make_completed_results_fixture(base_dir: str) -> str:
+def _make_completed_results_fixture(base_dir: str, *, run_type: str = "full") -> str:
     run_dir = os.path.join(base_dir, "run_complete_results_m3")
     os.makedirs(run_dir, exist_ok=True)
     with open(os.path.join(run_dir, "status.json"), "w", encoding="utf-8") as f:
@@ -53,7 +53,7 @@ def _make_completed_results_fixture(base_dir: str) -> str:
     with open(os.path.join(run_dir, "MANIFEST.json"), "w", encoding="utf-8") as f:
         json.dump({"status": "success"}, f)
     with open(os.path.join(run_dir, "run_report.json"), "w", encoding="utf-8") as f:
-        json.dump({"run_context": {"run_type": "full"}}, f)
+        json.dump({"run_context": {"run_type": run_type}}, f)
 
     for region in ("Region0", "Region1"):
         summary = os.path.join(run_dir, region, "summary")
@@ -75,6 +75,7 @@ def _make_completed_results_fixture(base_dir: str) -> str:
 
 def test_effective_run_summary_updates(window):
     text0 = window._effective_summary_label.text()
+    assert "Run Type: Full Run" in text0
     assert "Mode: both" in text0
     assert "Analysis: Full analysis" in text0
     assert "Dynamic Fit Mode: Rolling regression (filtered→raw)" in text0
@@ -115,6 +116,32 @@ def test_effective_run_summary_updates(window):
     text2 = window._effective_summary_label.text()
     assert "ROI Filter: Include subset (2/3)" in text2
     assert "Representative Session: Session index 1 (S1)" in text2
+
+
+def test_run_profile_selector_plumbs_tuning_prep_into_run_spec(window):
+    _set_minimally_valid_paths(window)
+    idx = window._run_profile_combo.findData("tuning_prep")
+    assert idx >= 0
+    window._run_profile_combo.setCurrentIndex(idx)
+
+    spec = window._build_run_spec(validate_only=True)
+    assert spec.run_profile == "tuning_prep"
+
+    summary = window._effective_summary_label.text()
+    assert "Run Type: Tuning Prep Run" in summary
+    assert "Artifact Contract:" in summary
+    assert "tuning" in window._run_profile_note_label.text().lower()
+
+
+def test_run_profile_selector_rejects_tuning_prep_with_tonic_only(window):
+    _set_minimally_valid_paths(window)
+    idx_profile = window._run_profile_combo.findData("tuning_prep")
+    assert idx_profile >= 0
+    window._run_profile_combo.setCurrentIndex(idx_profile)
+    window._mode_combo.setCurrentText("tonic")
+    err = window._validate_gui_inputs()
+    assert err is not None
+    assert "phasic-capable mode" in err
 
 
 def test_run_disabled_reason_text_states(window):
@@ -173,6 +200,7 @@ def test_advanced_tooltips_present(window):
         ("Sessions/Hour:", window._sph_edit),
         ("Session Duration (s):", window._duration_edit),
         ("Mode:", window._mode_combo),
+        ("Run Type:", window._run_profile_combo),
         ("Plotting Mode:", window._plotting_mode_combo),
         ("Smoothing Window Duration (s):", window._smooth_spin),
         ("Timeline Anchor:", window._timeline_anchor_mode_combo),
@@ -634,6 +662,20 @@ def test_results_workspace_m3_loaded_summary_and_roi_context(window, qapp, tmp_p
     window._report_viewer._region_combo.setCurrentText("Region1")
     qapp.processEvents()
     assert window._report_viewer._region_combo.currentText() == "Region1"
+
+
+def test_results_workspace_m3_loaded_summary_labels_tuning_prep(window, qapp, tmp_path):
+    run_dir = _make_completed_results_fixture(str(tmp_path), run_type="tuning_prep")
+    window._current_run_dir = run_dir
+    assert window._report_viewer.load_report(run_dir)
+    window._enter_complete_state_workspace()
+    window._apply_preview_labeling()
+    qapp.processEvents()
+
+    assert "TUNING PREP" in window._results_summary_state_value.text()
+    assert "Tuning Prep Run" in window._results_summary_compact_label.text()
+    assert "Run type: Tuning Prep Run" in window._complete_summary_label.text()
+    assert window.windowTitle().endswith("[TUNING PREP]")
 
 
 def test_results_workspace_m3_fit_layout_prioritizes_outputs(window, qapp, tmp_path):

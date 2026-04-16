@@ -630,6 +630,31 @@ class TestRunSpec(unittest.TestCase):
         self.assertNotIn("--preview-first-n", spec_off.build_runner_argv())
 
     # ----------------------------------------------------------------
+    # Run profile plumbing (Stage 1 tuning_prep mode)
+    # ----------------------------------------------------------------
+    def test_argv_run_type_tuning_prep(self):
+        """--run-type tuning_prep is emitted only when explicitly selected."""
+        run_dir = os.path.join(self.tmp_dir, "run_tuning_prep")
+        spec_on = RunSpec(
+            input_dir="/data/in", run_dir=run_dir,
+            format="rwd", config_source_path=self.config_path,
+            run_profile="tuning_prep",
+        )
+        spec_on.generate_derived_config(run_dir)
+        argv_on = spec_on.build_runner_argv()
+        self.assertIn("--run-type", argv_on)
+        self.assertEqual(argv_on[argv_on.index("--run-type") + 1], "tuning_prep")
+
+        run_dir2 = os.path.join(self.tmp_dir, "run_full_profile")
+        spec_off = RunSpec(
+            input_dir="/data/in", run_dir=run_dir2,
+            format="rwd", config_source_path=self.config_path,
+            run_profile="full",
+        )
+        spec_off.generate_derived_config(run_dir2)
+        self.assertNotIn("--run-type", spec_off.build_runner_argv())
+
+    # ----------------------------------------------------------------
     # Render mode flags: only present when explicitly set away from default
     # ----------------------------------------------------------------
     def test_argv_render_modes(self):

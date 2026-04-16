@@ -42,7 +42,7 @@ def compute_run_signature(run_dir: str) -> str:
         "input_dir", "format", "sessions_per_hour", "session_duration_s",
         "smooth_window_s", "config_source_path", "config_overrides",
         "sig_iso_render_mode", "dff_render_mode", "stacked_render_mode",
-        "mode", "traces_only", "preview_first_n", "representative_session_index",
+        "mode", "run_profile", "traces_only", "preview_first_n", "representative_session_index",
         "include_roi_ids", "exclude_roi_ids"
     }
     stable_spec = {k: v for k, v in spec_data.items() if k in STABLE_FIELDS}
