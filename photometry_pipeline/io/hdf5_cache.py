@@ -74,6 +74,9 @@ class Hdf5TraceCacheWriter:
             if self.mode == 'phasic' and self.config:
                 grp.attrs['peak_threshold_method'] = str(self.config.peak_threshold_method)
                 grp.attrs['peak_threshold_k'] = float(self.config.peak_threshold_k)
+                grp.attrs['signal_excursion_polarity'] = str(
+                    getattr(self.config, 'signal_excursion_polarity', 'positive')
+                )
             
             # Required Time axis
             grp.create_dataset('time_sec', data=chunk.time_sec, **self._dataset_create_kwargs)

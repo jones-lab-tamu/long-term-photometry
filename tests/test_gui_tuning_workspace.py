@@ -803,6 +803,7 @@ def test_tuning_workspace_wiring_and_refresh(window, tmp_path, monkeypatch):
 
     assert "ROI: Region1" in window._tuning_summary_label.text()
     assert "Preview session: 2" in window._tuning_summary_label.text()
+    assert "AUC interpretation:" in window._tuning_summary_label.text()
     assert "retune_out" in window._tuning_summary_label.text()
     assert window._tuning_overlay_title.text() == "overlay_test.png"
     shown = window._tuning_overlay_label.pixmap()
@@ -1299,6 +1300,9 @@ def test_tuning_apply_back_copies_only_downstream_fields(window, tmp_path):
 
     if window._tuning_event_signal_combo.findText("delta_f") >= 0:
         window._tuning_event_signal_combo.setCurrentText("delta_f")
+    idx_both = window._tuning_signal_excursion_polarity_combo.findData("both")
+    if idx_both >= 0:
+        window._tuning_signal_excursion_polarity_combo.setCurrentIndex(idx_both)
     window._tuning_peak_method_combo.setCurrentText("absolute")
     window._tuning_peak_k_spin.setValue(2.75)
     window._tuning_peak_pct_spin.setValue(91.5)
@@ -1315,6 +1319,7 @@ def test_tuning_apply_back_copies_only_downstream_fields(window, tmp_path):
     QApplication.processEvents()
 
     assert window._event_signal_combo.currentText() == window._tuning_event_signal_combo.currentText()
+    assert window._selected_signal_excursion_polarity() == "both"
     assert window._peak_method_combo.currentText() == "absolute"
     assert float(window._peak_k_edit.text()) == pytest.approx(2.75, rel=1e-6)
     assert float(window._peak_pct_edit.text()) == pytest.approx(91.5, rel=1e-6)
@@ -1370,6 +1375,9 @@ def test_tuning_apply_back_source_of_truth_mean_std_delta_f(window, tmp_path):
 
     if window._tuning_event_signal_combo.findText("delta_f") >= 0:
         window._tuning_event_signal_combo.setCurrentText("delta_f")
+    idx_negative = window._tuning_signal_excursion_polarity_combo.findData("negative")
+    if idx_negative >= 0:
+        window._tuning_signal_excursion_polarity_combo.setCurrentIndex(idx_negative)
     window._tuning_peak_method_combo.setCurrentText("mean_std")
     window._tuning_peak_k_spin.setValue(9.875)
 
@@ -1424,6 +1432,9 @@ def test_tuning_apply_back_next_run_serializes_applied_values(window, tmp_path):
 
     if window._tuning_event_signal_combo.findText("delta_f") >= 0:
         window._tuning_event_signal_combo.setCurrentText("delta_f")
+    idx_negative = window._tuning_signal_excursion_polarity_combo.findData("negative")
+    if idx_negative >= 0:
+        window._tuning_signal_excursion_polarity_combo.setCurrentIndex(idx_negative)
     window._tuning_peak_method_combo.setCurrentText("mean_std")
     window._tuning_peak_k_spin.setValue(7.125)
     window._tuning_peak_dist_spin.setValue(2.25)
@@ -1452,6 +1463,7 @@ def test_tuning_apply_back_next_run_serializes_applied_values(window, tmp_path):
     assert effective_cfg["peak_threshold_method"] == "mean_std"
     assert effective_cfg["peak_threshold_method"] != "median_mad"
     assert effective_cfg["event_signal"] == "delta_f"
+    assert effective_cfg["signal_excursion_polarity"] == "negative"
     assert effective_cfg["peak_threshold_k"] == pytest.approx(7.125, rel=1e-6)
     assert effective_cfg["peak_min_distance_sec"] == pytest.approx(2.25, rel=1e-6)
     assert effective_cfg["peak_min_prominence_k"] == pytest.approx(1.2, rel=1e-6)
@@ -1462,6 +1474,7 @@ def test_tuning_apply_back_next_run_serializes_applied_values(window, tmp_path):
     overrides = run_spec.get("config_overrides", {})
     assert overrides["peak_threshold_method"] == "mean_std"
     assert overrides["event_signal"] == "delta_f"
+    assert overrides["signal_excursion_polarity"] == "negative"
     assert overrides["peak_threshold_k"] == pytest.approx(7.125, rel=1e-6)
     assert overrides["peak_min_prominence_k"] == pytest.approx(1.2, rel=1e-6)
     assert overrides["peak_min_width_sec"] == pytest.approx(0.45, rel=1e-6)
@@ -1487,6 +1500,9 @@ def test_save_tuned_settings_as_config_writes_yaml_from_downstream_tuning(window
     window._tuning_last_result = {"retune_dir": str(tmp_path / "retune_downstream")}
     if window._tuning_event_signal_combo.findText("delta_f") >= 0:
         window._tuning_event_signal_combo.setCurrentText("delta_f")
+    idx_both = window._tuning_signal_excursion_polarity_combo.findData("both")
+    if idx_both >= 0:
+        window._tuning_signal_excursion_polarity_combo.setCurrentIndex(idx_both)
     window._tuning_peak_method_combo.setCurrentText("absolute")
     window._tuning_peak_abs_spin.setValue(0.444)
     if window._tuning_peak_pre_filter_combo.findText("smooth") >= 0:
@@ -1514,6 +1530,7 @@ def test_save_tuned_settings_as_config_writes_yaml_from_downstream_tuning(window
     assert save_path.is_file()
     cfg = yaml.safe_load(save_path.read_text(encoding="utf-8")) or {}
     assert cfg["event_signal"] == "delta_f"
+    assert cfg["signal_excursion_polarity"] == "both"
     assert cfg["peak_threshold_method"] == "absolute"
     assert cfg["peak_threshold_abs"] == pytest.approx(0.444, rel=1e-6)
     assert cfg["peak_pre_filter"] == "lowpass"
@@ -1775,6 +1792,7 @@ def test_run_spec_event_fields_read_from_visible_main_controls(window, tmp_path,
         peak_pre_filter_text=None,
         peak_prominence_k_str=None,
         peak_width_sec_str=None,
+        signal_excursion_polarity_text=None,
     ):
         captured.update(
             {
@@ -1788,6 +1806,7 @@ def test_run_spec_event_fields_read_from_visible_main_controls(window, tmp_path,
                 "peak_pre_filter_text": peak_pre_filter_text,
                 "peak_prominence_k_str": peak_prominence_k_str,
                 "peak_width_sec_str": peak_width_sec_str,
+                "signal_excursion_polarity_text": signal_excursion_polarity_text,
             }
         )
         return {}, None
@@ -1806,6 +1825,10 @@ def test_run_spec_event_fields_read_from_visible_main_controls(window, tmp_path,
     assert captured["peak_pre_filter_text"] == window._peak_pre_filter_combo.currentText()
     assert captured["peak_prominence_k_str"] == window._peak_min_prominence_k_edit.text()
     assert captured["peak_width_sec_str"] == window._peak_min_width_sec_edit.text()
+    assert (
+        captured["signal_excursion_polarity_text"]
+        == window._selected_signal_excursion_polarity()
+    )
 
 
 def test_tuning_workspace_boundary_message_and_controls(window, tmp_path):
@@ -2176,6 +2199,7 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
         ("ROI:", window._tuning_roi_combo),
         ("Preview session:", window._tuning_chunk_combo),
         ("Event Signal:", window._tuning_event_signal_combo),
+        ("Signal Excursion Polarity:", window._tuning_signal_excursion_polarity_combo),
         ("Peak Threshold Method:", window._tuning_peak_method_combo),
         ("Peak Threshold K:", window._tuning_peak_k_spin),
         ("Peak Threshold Percentile:", window._tuning_peak_pct_spin),
@@ -2202,6 +2226,10 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
         ("Baseline Percentile:", window._correction_tuning_baseline_pct_spin),
         ("Lowpass Filter (Hz):", window._correction_tuning_lowpass_spin),
         ("Dynamic Fit Mode:", window._correction_tuning_fit_mode_combo),
+        (
+            "Signal Excursion Polarity:",
+            window._correction_tuning_signal_excursion_polarity_combo,
+        ),
         ("Baseline subtract before fit:", window._correction_tuning_baseline_subtract_cb),
         ("Regression Window (s):", window._correction_tuning_window_spin),
         ("Min Samples/Window:", window._correction_tuning_min_samples_spin),
@@ -2223,6 +2251,21 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
         icon = _help_icon(label)
         assert icon is not None, f"Missing correction help icon {label_text}"
         assert icon.toolTip().strip(), f"Missing correction help icon tooltip {label_text}"
+
+    downstream_polarity_tip = window._tuning_signal_excursion_polarity_combo.toolTip().lower()
+    assert "event detection" in downstream_polarity_tip
+    assert "dynamic-fit protection" in downstream_polarity_tip
+    assert "both polarities" in downstream_polarity_tip
+
+    correction_polarity_tip = (
+        window._correction_tuning_signal_excursion_polarity_combo.toolTip().lower()
+    )
+    assert "event detection" in correction_polarity_tip
+    assert "dynamic-fit protection" in correction_polarity_tip
+
+    tuning_auc_tip = window._tuning_event_auc_combo.toolTip().lower()
+    assert "auc sign follows signal excursion polarity" in tuning_auc_tip
+    assert "signed net area" in tuning_auc_tip
 
     removed_legacy_labels = [
         "Regression Step (s):",
@@ -2434,6 +2477,7 @@ def test_correction_tuning_backend_wiring_and_result_refresh(window, tmp_path, m
     overrides = captured["overrides"]
     assert set(overrides.keys()) == {
         "dynamic_fit_mode",
+        "signal_excursion_polarity",
         "baseline_method",
         "baseline_percentile",
         "lowpass_hz",
@@ -2442,6 +2486,7 @@ def test_correction_tuning_backend_wiring_and_result_refresh(window, tmp_path, m
         "min_samples_per_window",
     }
     assert overrides["dynamic_fit_mode"] == "rolling_filtered_to_raw"
+    assert overrides["signal_excursion_polarity"] == "positive"
     assert overrides["baseline_subtract_before_fit"] is True
 
     assert "ROI: Region0" in window._correction_tuning_summary_label.text()

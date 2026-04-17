@@ -1716,7 +1716,7 @@ class TestEventFeatureKnobs(unittest.TestCase):
                 loaded = yaml.safe_load(f)
                 
             keys_to_check = [
-                "event_signal", "peak_threshold_method", "peak_threshold_k",
+                "event_signal", "signal_excursion_polarity", "peak_threshold_method", "peak_threshold_k",
                 "peak_threshold_percentile", "peak_threshold_abs",
                 "peak_min_distance_sec", "peak_min_prominence_k",
                 "peak_min_width_sec", "event_auc_baseline"
@@ -1921,6 +1921,74 @@ class TestEventFeatureKnobs(unittest.TestCase):
 
             self.assertEqual(loaded["peak_min_prominence_k"], 1.25)
             self.assertEqual(loaded["peak_min_width_sec"], 0.35)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_t2b_signal_excursion_polarity_written_when_changed(self):
+        """Signal excursion polarity is first-class and emits when changed."""
+        from gui.main_window import (
+            parse_and_validate_event_feature_knobs,
+            compute_overrides_user_changed,
+            get_allowed_signal_excursion_polarities_from_config,
+        )
+        from photometry_pipeline.config import Config
+        from gui.run_spec import RunSpec
+        import tempfile, os, shutil, yaml
+
+        cfg0 = Config()
+        defaults = {
+            "event_signal": cfg0.event_signal,
+            "signal_excursion_polarity": cfg0.signal_excursion_polarity,
+            "peak_threshold_method": cfg0.peak_threshold_method,
+            "peak_threshold_k": cfg0.peak_threshold_k,
+            "peak_threshold_percentile": cfg0.peak_threshold_percentile,
+            "peak_threshold_abs": cfg0.peak_threshold_abs,
+            "peak_min_distance_sec": cfg0.peak_min_distance_sec,
+            "event_auc_baseline": cfg0.event_auc_baseline,
+        }
+
+        allowed = get_allowed_signal_excursion_polarities_from_config()
+        if len(allowed) > 1:
+            polarity_override = next(
+                p for p in allowed if p != defaults["signal_excursion_polarity"]
+            )
+        else:
+            polarity_override = defaults["signal_excursion_polarity"]
+
+        parsed_overrides, err = parse_and_validate_event_feature_knobs(
+            defaults["event_signal"],
+            defaults["peak_threshold_method"],
+            str(defaults["peak_threshold_k"]),
+            str(defaults["peak_threshold_percentile"]),
+            "1.0" if defaults["peak_threshold_abs"] <= 0 else str(defaults["peak_threshold_abs"]),
+            str(defaults["peak_min_distance_sec"]),
+            defaults["event_auc_baseline"],
+            defaults=defaults,
+            signal_excursion_polarity_text=polarity_override,
+        )
+        self.assertIsNone(err)
+        changed = compute_overrides_user_changed(parsed_overrides, defaults)
+        if len(allowed) > 1:
+            self.assertIn("signal_excursion_polarity", changed)
+
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            run_dir = os.path.join(tmp_dir, "run_test_polarity")
+            base_config_path = os.path.join(tmp_dir, "base_config.yaml")
+            with open(base_config_path, "w") as f:
+                yaml.safe_dump({}, f)
+
+            spec = RunSpec(
+                run_dir=run_dir,
+                config_source_path=base_config_path,
+                config_overrides=changed,
+            )
+            config_path = spec.generate_derived_config(run_dir)
+            with open(config_path, "r") as f:
+                loaded = yaml.safe_load(f) or {}
+
+            if len(allowed) > 1:
+                self.assertEqual(loaded.get("signal_excursion_polarity"), polarity_override)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 

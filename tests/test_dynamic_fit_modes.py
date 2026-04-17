@@ -430,6 +430,133 @@ def test_fit_robust_global_event_reject_reports_backend_and_mad_zero_guard():
     assert result["robust_fit_backend_used"] in {"sklearn_huber", "statsmodels_rlm", "unknown"}
 
 
+def test_fit_robust_global_event_reject_default_matches_explicit_positive_polarity():
+    n = 1400
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    iso = 4.0 + 0.2 * np.sin(2.0 * np.pi * 0.05 * t)
+    sig = 1.7 * iso + 0.8 + 2.2 * np.exp(-0.5 * ((t - 15.0) / 2.0) ** 2)
+
+    kwargs = dict(
+        signal_raw=sig,
+        iso_raw=iso,
+        max_iters=3,
+        residual_z_thresh=3.5,
+        local_var_window_sec=None,
+        local_var_ratio_thresh=None,
+        min_keep_fraction=0.5,
+        sample_rate_hz=fs,
+        use_intercept=True,
+    )
+    result_default = fit_robust_global_event_reject(**kwargs)
+    result_positive = fit_robust_global_event_reject(
+        **kwargs,
+        signal_excursion_polarity="positive",
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(result_default["iso_fit_signal_units"], dtype=float),
+        np.asarray(result_positive["iso_fit_signal_units"], dtype=float),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(result_default["excluded_mask"], dtype=bool),
+        np.asarray(result_positive["excluded_mask"], dtype=bool),
+    )
+    assert result_default["signal_excursion_polarity_applied"] == "positive"
+    assert result_positive["signal_excursion_polarity_applied"] == "positive"
+
+
+def test_fit_robust_global_event_reject_negative_and_both_protect_negative_excursions():
+    n = 3200
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    iso = 4.2 + 0.25 * np.sin(2.0 * np.pi * 0.03 * t)
+    background = 1.6 * iso + 0.7
+    neg_event = -2.8 * np.exp(-0.5 * ((t - 35.0) / 2.0) ** 2)
+    sig = background + neg_event
+
+    kwargs = dict(
+        signal_raw=sig,
+        iso_raw=iso,
+        max_iters=4,
+        residual_z_thresh=3.0,
+        local_var_window_sec=None,
+        local_var_ratio_thresh=None,
+        min_keep_fraction=0.5,
+        sample_rate_hz=fs,
+        use_intercept=True,
+    )
+    result_positive = fit_robust_global_event_reject(**kwargs, signal_excursion_polarity="positive")
+    result_negative = fit_robust_global_event_reject(**kwargs, signal_excursion_polarity="negative")
+    result_both = fit_robust_global_event_reject(**kwargs, signal_excursion_polarity="both")
+
+    event_mask = np.abs(t - 35.0) <= 2.0
+    excluded_pos = float(np.mean(np.asarray(result_positive["excluded_mask"], dtype=bool)[event_mask]))
+    excluded_neg = float(np.mean(np.asarray(result_negative["excluded_mask"], dtype=bool)[event_mask]))
+    excluded_both = float(np.mean(np.asarray(result_both["excluded_mask"], dtype=bool)[event_mask]))
+    assert excluded_pos < 0.05
+    assert excluded_neg > 0.2
+    assert excluded_both > 0.2
+
+    fit_pos = np.asarray(result_positive["iso_fit_signal_units"], dtype=float)
+    fit_neg = np.asarray(result_negative["iso_fit_signal_units"], dtype=float)
+    fit_both = np.asarray(result_both["iso_fit_signal_units"], dtype=float)
+    mae_pos = float(np.mean(np.abs(fit_pos[event_mask] - background[event_mask])))
+    mae_neg = float(np.mean(np.abs(fit_neg[event_mask] - background[event_mask])))
+    mae_both = float(np.mean(np.abs(fit_both[event_mask] - background[event_mask])))
+    assert mae_neg < mae_pos
+    assert mae_both < mae_pos
+
+    assert result_negative["signal_excursion_polarity_applied"] == "negative"
+    assert result_both["signal_excursion_polarity_applied"] == "both"
+
+
+def test_fit_robust_global_event_reject_both_polarity_covers_upper_and_lower_tails():
+    n = 3200
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    iso = 4.0 + 0.25 * np.sin(2.0 * np.pi * 0.03 * t)
+    background = 1.65 * iso + 0.75
+    pos_event = 2.6 * np.exp(-0.5 * ((t - 24.0) / 1.8) ** 2)
+    neg_event = -2.6 * np.exp(-0.5 * ((t - 50.0) / 1.8) ** 2)
+    sig = background + pos_event + neg_event
+
+    kwargs = dict(
+        signal_raw=sig,
+        iso_raw=iso,
+        max_iters=4,
+        residual_z_thresh=2.8,
+        local_var_window_sec=None,
+        local_var_ratio_thresh=None,
+        min_keep_fraction=0.5,
+        sample_rate_hz=fs,
+        use_intercept=True,
+    )
+    excluded_pos = np.asarray(
+        fit_robust_global_event_reject(**kwargs, signal_excursion_polarity="positive")["excluded_mask"],
+        dtype=bool,
+    )
+    excluded_neg = np.asarray(
+        fit_robust_global_event_reject(**kwargs, signal_excursion_polarity="negative")["excluded_mask"],
+        dtype=bool,
+    )
+    excluded_both = np.asarray(
+        fit_robust_global_event_reject(**kwargs, signal_excursion_polarity="both")["excluded_mask"],
+        dtype=bool,
+    )
+
+    pos_mask = np.abs(t - 24.0) <= 1.5
+    neg_mask = np.abs(t - 50.0) <= 1.5
+    assert float(np.mean(excluded_pos[pos_mask])) > 0.2
+    assert float(np.mean(excluded_pos[neg_mask])) < 0.05
+    assert float(np.mean(excluded_neg[pos_mask])) < 0.05
+    assert float(np.mean(excluded_neg[neg_mask])) > 0.2
+    assert float(np.mean(excluded_both[pos_mask])) > 0.2
+    assert float(np.mean(excluded_both[neg_mask])) > 0.2
+
+
 def test_fit_robust_global_event_reject_min_keep_guard_stops_exclusion():
     n = 2000
     fs = 40.0
@@ -669,6 +796,88 @@ def test_fit_adaptive_event_gated_regression_direct_helper_handles_zero_mad_with
     np.testing.assert_allclose(fit, sig, rtol=0.0, atol=1e-8)
     assert result["n_trusted"] == result["n_finite"]
     assert result["gated_fraction"] == pytest.approx(0.0)
+
+
+def test_fit_adaptive_event_gated_regression_default_matches_explicit_positive_polarity():
+    n = 1400
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    iso = 4.0 + 0.2 * np.sin(2.0 * np.pi * 0.02 * t)
+    sig = 1.7 * iso + 0.8 + 2.0 * np.exp(-0.5 * ((t - 15.0) / 2.0) ** 2)
+
+    kwargs = dict(
+        signal_raw=sig,
+        iso_raw=iso,
+        signal_fit_input=sig,
+        iso_fit_input=iso,
+        sample_rate_hz=fs,
+        residual_z_thresh=3.0,
+        local_var_window_sec=None,
+        local_var_ratio_thresh=None,
+        smooth_window_sec=60.0,
+        min_trust_fraction=0.5,
+        freeze_interp_method="linear_hold",
+        use_intercept=True,
+    )
+    result_default = fit_adaptive_event_gated_regression(**kwargs)
+    result_positive = fit_adaptive_event_gated_regression(
+        **kwargs,
+        signal_excursion_polarity="positive",
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(result_default["iso_fit_signal_units"], dtype=float),
+        np.asarray(result_positive["iso_fit_signal_units"], dtype=float),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(result_default["gated_mask"], dtype=bool),
+        np.asarray(result_positive["gated_mask"], dtype=bool),
+    )
+    assert result_default["signal_excursion_polarity_applied"] == "positive"
+    assert result_positive["signal_excursion_polarity_applied"] == "positive"
+
+
+def test_fit_adaptive_event_gated_regression_negative_and_both_gate_negative_excursions():
+    n = 3200
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    iso = 4.1 + 0.25 * np.sin(2.0 * np.pi * 0.02 * t)
+    background = 1.6 * iso + 0.6
+    neg_event = -2.9 * np.exp(-0.5 * ((t - 36.0) / 2.0) ** 2)
+    sig = background + neg_event
+
+    kwargs = dict(
+        signal_raw=sig,
+        iso_raw=iso,
+        signal_fit_input=sig,
+        iso_fit_input=iso,
+        sample_rate_hz=fs,
+        residual_z_thresh=3.0,
+        local_var_window_sec=None,
+        local_var_ratio_thresh=None,
+        smooth_window_sec=50.0,
+        min_trust_fraction=0.5,
+        freeze_interp_method="linear_hold",
+        use_intercept=True,
+    )
+    result_positive = fit_adaptive_event_gated_regression(**kwargs, signal_excursion_polarity="positive")
+    result_negative = fit_adaptive_event_gated_regression(**kwargs, signal_excursion_polarity="negative")
+    result_both = fit_adaptive_event_gated_regression(**kwargs, signal_excursion_polarity="both")
+
+    event_mask = np.abs(t - 36.0) <= 1.8
+    gated_pos = float(np.mean(np.asarray(result_positive["gated_mask"], dtype=bool)[event_mask]))
+    gated_neg = float(np.mean(np.asarray(result_negative["gated_mask"], dtype=bool)[event_mask]))
+    gated_both = float(np.mean(np.asarray(result_both["gated_mask"], dtype=bool)[event_mask]))
+    assert gated_pos < 0.05
+    assert gated_neg > 0.2
+    assert gated_both > 0.2
+
+    assert int(result_negative["n_gated_residual_lower_tail"]) > 0
+    assert int(result_both["n_gated_residual_lower_tail"]) > 0
+    assert result_negative["signal_excursion_polarity_applied"] == "negative"
+    assert result_both["signal_excursion_polarity_applied"] == "both"
 
 
 def test_config_rejects_invalid_dynamic_fit_mode(tmp_path):

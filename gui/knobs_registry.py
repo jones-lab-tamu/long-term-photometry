@@ -50,6 +50,7 @@ GUI_KNOBS_ADVANCED: Set[str] = {
     "adaptive_event_gate_freeze_interp_method",
     # Peak/Event
     "event_signal",
+    "signal_excursion_polarity",
     "peak_threshold_method",
     "peak_threshold_k",
     "peak_threshold_percentile",
@@ -81,6 +82,13 @@ KNOB_META: Dict[str, dict] = {
     "event_signal": {
         "label": "Event Signal",
         "help": "Signal type for event detection: 'dff' or 'delta_f'.",
+    },
+    "signal_excursion_polarity": {
+        "label": "Signal Excursion Polarity",
+        "help": (
+            "Signed-excursion intent for event detection and dynamic-fit protection "
+            "('positive', 'negative', or 'both')."
+        ),
     },
     "lowpass_hz": {
         "label": "Lowpass Filter (Hz)",
@@ -380,7 +388,7 @@ try:
     import dataclasses
     required_step6 = ["lowpass_hz", "baseline_method", "baseline_percentile", "f0_min_value"]
     required_step7 = [
-        "event_signal", "peak_threshold_method", "peak_threshold_k",
+        "event_signal", "signal_excursion_polarity", "peak_threshold_method", "peak_threshold_k",
         "peak_threshold_percentile", "peak_threshold_abs",
         "peak_min_distance_sec", "peak_min_prominence_k",
         "peak_min_width_sec", "event_auc_baseline"

@@ -39,6 +39,7 @@ from photometry_pipeline.viz.display_prep import prepare_centered_common_gain
 
 CORRECTION_RETUNABLE_KEYS = {
     "dynamic_fit_mode",
+    "signal_excursion_polarity",
     "baseline_subtract_before_fit",
     "window_sec",
     "step_sec",
@@ -82,6 +83,7 @@ EXPLICITLY_UNSUPPORTED_KEYS = {
 
 _OVERRIDE_VALUE_CASTERS = {
     "dynamic_fit_mode": str,
+    "signal_excursion_polarity": str,
     "baseline_subtract_before_fit": str,
     "window_sec": float,
     "step_sec": float,

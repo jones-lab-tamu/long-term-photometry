@@ -230,6 +230,86 @@ def test_cache_retune_writes_provenance(tmp_path):
     assert data["override_classification"]["correction_required"] == []
 
 
+def test_cache_retune_accepts_signal_excursion_polarity_override(tmp_path):
+    run_dir = _make_completed_run_fixture(tmp_path)
+    overrides = {
+        "event_signal": "dff",
+        "signal_excursion_polarity": "both",
+        "peak_threshold_method": "mean_std",
+        "peak_threshold_k": 1.5,
+    }
+    result = run_cache_downstream_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides=overrides,
+    )
+    assert result["signal_excursion_polarity_used"] == "both"
+
+    req_path = os.path.join(result["retune_dir"], "retune_request.json")
+    with open(req_path, "r", encoding="utf-8") as f:
+        req = json.load(f)
+    assert req["signal_excursion_polarity_used"] == "both"
+    assert "signal_excursion_polarity" in req["override_classification"]["downstream"]
+
+
+def test_cache_retune_both_polarity_writes_interpretable_event_overlay_metadata(tmp_path):
+    run_dir = _make_completed_run_fixture(tmp_path)
+    result = run_cache_downstream_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={
+            "event_signal": "dff",
+            "signal_excursion_polarity": "both",
+            "peak_threshold_method": "absolute",
+            "peak_threshold_abs": 0.6,
+            "peak_min_distance_sec": 1.0,
+        },
+        chunk_id=0,
+    )
+    events_csv = os.path.join(result["retune_dir"], "retuned_events_Region0_chunk_000.csv")
+    df = pd.read_csv(events_csv)
+    assert "event_polarity" in df.columns
+    assert "threshold_upper" in df.columns
+    assert "threshold_lower" in df.columns
+    assert "signal_excursion_polarity" in df.columns
+    assert set(df["signal_excursion_polarity"].dropna().astype(str).unique()) == {"both"}
+    assert float(df["threshold_upper"].iloc[0]) > 0.0
+    assert float(df["threshold_lower"].iloc[0]) < 0.0
+    assert set(df["event_polarity"].dropna().astype(str).unique()) <= {"positive", "negative"}
+    assert {"positive", "negative"} <= set(df["event_polarity"].dropna().astype(str).unique())
+    assert "signal_excursion_polarity_interpretation" in df.columns
+    assert "event_auc_semantics" in df.columns
+    assert all(
+        "two-tailed" in str(x).lower()
+        for x in df["signal_excursion_polarity_interpretation"].dropna().astype(str).tolist()
+    )
+    assert all(
+        "signed net area" in str(x).lower()
+        for x in df["event_auc_semantics"].dropna().astype(str).tolist()
+    )
+
+    summary_csv = os.path.join(result["retune_dir"], "retuned_summary_Region0.csv")
+    summary_df = pd.read_csv(summary_csv)
+    assert "signal_excursion_polarity" in summary_df.columns
+    assert "event_auc_semantics" in summary_df.columns
+    assert set(summary_df["signal_excursion_polarity"].astype(str).unique()) == {"both"}
+    assert "auc_signed" in summary_df.columns
+    np.testing.assert_allclose(
+        summary_df["auc_signed"].to_numpy(dtype=float),
+        summary_df["auc"].to_numpy(dtype=float),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+    result_json = os.path.join(result["retune_dir"], "retune_result.json")
+    with open(result_json, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    assert "signal_excursion_polarity_interpretation" in payload
+    assert "event_auc_semantics" in payload
+    assert "two-tailed" in str(payload["signal_excursion_polarity_interpretation"]).lower()
+    assert "signed net area" in str(payload["event_auc_semantics"]).lower()
+
+
 def test_cache_retune_selected_chunk_targeting(tmp_path):
     run_dir = _make_completed_run_fixture(tmp_path)
     result = run_cache_downstream_retune(

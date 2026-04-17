@@ -78,6 +78,7 @@ class Config:
     peak_pre_filter: str = 'none'
     event_auc_baseline: str = 'zero'
     event_signal: Literal['dff', 'delta_f'] = 'dff'
+    signal_excursion_polarity: Literal['positive', 'negative', 'both'] = 'positive'
     representative_session_index: Optional[int] = None
     preview_first_n: Optional[int] = None
     
@@ -149,6 +150,12 @@ class Config:
         if 'event_signal' in data:
              if data['event_signal'] not in {'dff', 'delta_f'}:
                 raise ValueError(f"Invalid event_signal: {data['event_signal']}. Allowed: {{'dff', 'delta_f'}}")
+        if 'signal_excursion_polarity' in data:
+             if data['signal_excursion_polarity'] not in {'positive', 'negative', 'both'}:
+                raise ValueError(
+                    f"Invalid signal_excursion_polarity: {data['signal_excursion_polarity']}. "
+                    "Allowed: {'positive', 'negative', 'both'}"
+                )
 
         if 'dynamic_fit_mode' in data:
             if data['dynamic_fit_mode'] not in {
@@ -198,6 +205,10 @@ class Config:
         if obj.peak_threshold_method == 'absolute':
             if obj.peak_threshold_abs <= 0.0:
                 raise ValueError("peak_threshold_abs must be > 0 when peak_threshold_method='absolute'")
+        if obj.signal_excursion_polarity not in {'positive', 'negative', 'both'}:
+            raise ValueError(
+                "signal_excursion_polarity must be one of {'positive', 'negative', 'both'}"
+            )
         if obj.peak_min_prominence_k < 0.0:
             raise ValueError("peak_min_prominence_k must be >= 0")
         if obj.peak_min_width_sec < 0.0:

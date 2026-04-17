@@ -142,6 +142,55 @@ _DYNAMIC_FIT_MODE_ALIASES = {
 }
 
 
+def _normalize_signal_excursion_polarity(mode_raw: str) -> str:
+    mode = str(mode_raw or "positive").strip().lower()
+    if mode not in {"positive", "negative", "both"}:
+        return "positive"
+    return mode
+
+
+def _residual_excursion_candidates(
+    residual: np.ndarray,
+    finite_mask: np.ndarray,
+    *,
+    center: float,
+    robust_scale: float,
+    z_thresh: float,
+    signal_excursion_polarity: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Build polarity-aware residual excursion candidates.
+
+    Returns (candidate_union, candidate_upper_tail, candidate_lower_tail) masks.
+    """
+    finite = np.asarray(finite_mask, dtype=bool).reshape(-1)
+    resid = np.asarray(residual, dtype=float).reshape(-1)
+    union = np.zeros_like(finite, dtype=bool)
+    upper = np.zeros_like(finite, dtype=bool)
+    lower = np.zeros_like(finite, dtype=bool)
+    if (
+        resid.shape != finite.shape
+        or (not np.isfinite(robust_scale))
+        or robust_scale <= 1e-12
+        or (not np.isfinite(z_thresh))
+        or z_thresh <= 0.0
+    ):
+        return union, upper, lower
+
+    polarity = _normalize_signal_excursion_polarity(signal_excursion_polarity)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        z_signed = (resid - float(center)) / float(robust_scale)
+    upper = finite & (z_signed > float(z_thresh))
+    lower = finite & (z_signed < -float(z_thresh))
+    if polarity == "positive":
+        union = upper
+    elif polarity == "negative":
+        union = lower
+    else:
+        union = upper | lower
+    return union, upper, lower
+
+
 def _ensure_chunk_metadata(chunk: Chunk) -> None:
     if not hasattr(chunk, "metadata") or chunk.metadata is None:
         chunk.metadata = {}
@@ -355,6 +404,7 @@ def fit_robust_global_event_reject(
     min_keep_fraction: float = 0.5,
     sample_rate_hz: float,
     use_intercept: bool = True,
+    signal_excursion_polarity: str = "positive",
 ) -> dict:
     """
     Robust global fit with iterative event-dominated sample rejection.
@@ -381,6 +431,7 @@ def fit_robust_global_event_reject(
         raise ValueError("residual_z_thresh must be > 0")
     if not (0.0 < min_keep <= 1.0):
         raise ValueError("min_keep_fraction must be in (0, 1]")
+    polarity = _normalize_signal_excursion_polarity(signal_excursion_polarity)
 
     use_var_rule = (
         local_var_window_sec is not None
@@ -436,14 +487,25 @@ def fit_robust_global_event_reject(
 
         stop_reason = ""
         candidate_resid = np.zeros_like(finite, dtype=bool)
+        candidate_resid_upper_tail = np.zeros_like(finite, dtype=bool)
+        candidate_resid_lower_tail = np.zeros_like(finite, dtype=bool)
         candidate_var = np.zeros_like(finite, dtype=bool)
         if robust_scale <= 1e-12 or not np.isfinite(robust_scale):
             stop_reason = "mad_zero_or_nonfinite"
             new_keep = keep_mask.copy()
         else:
-            with np.errstate(invalid="ignore", divide="ignore"):
-                z_pos = (residual - med) / robust_scale
-            candidate_resid = finite & (z_pos > z_thresh)
+            (
+                candidate_resid,
+                candidate_resid_upper_tail,
+                candidate_resid_lower_tail,
+            ) = _residual_excursion_candidates(
+                residual,
+                finite,
+                center=med,
+                robust_scale=robust_scale,
+                z_thresh=z_thresh,
+                signal_excursion_polarity=polarity,
+            )
             if use_var_rule and var_ratio is not None:
                 candidate_var = (
                     finite
@@ -472,10 +534,13 @@ def fit_robust_global_event_reject(
                 "residual_mad": float(mad),
                 "residual_robust_scale": float(robust_scale),
                 "n_candidate_excluded_residual": int(np.sum(candidate_resid)),
+                "n_candidate_excluded_residual_upper_tail": int(np.sum(candidate_resid_upper_tail)),
+                "n_candidate_excluded_residual_lower_tail": int(np.sum(candidate_resid_lower_tail)),
                 "n_candidate_excluded_local_var": int(np.sum(candidate_var)),
                 "changed_count": int(changed_count),
                 "slope": float(slope),
                 "intercept": float(intercept),
+                "signal_excursion_polarity_applied": str(polarity),
                 "robust_backend_used": str(backend_used),
                 "stop_reason": stop_reason,
             }
@@ -526,6 +591,7 @@ def fit_robust_global_event_reject(
         "final_keep_fraction": float(np.sum(keep_mask) / float(max(1, n_finite))),
         "stop_reason": str(stop_reason_final),
         "robust_fit_backend_used": str(robust_backend_used),
+        "signal_excursion_polarity_applied": str(polarity),
     }
 
 
@@ -543,6 +609,7 @@ def fit_adaptive_event_gated_regression(
     min_trust_fraction: float = 0.5,
     freeze_interp_method: str = "linear_hold",
     use_intercept: bool = True,
+    signal_excursion_polarity: str = "positive",
 ) -> dict:
     """
     Slow adaptive fit with event gating and coefficient freezing.
@@ -586,6 +653,7 @@ def fit_adaptive_event_gated_regression(
     min_trust = float(min_trust_fraction)
     if not (0.0 < min_trust <= 1.0):
         raise ValueError("adaptive_event_gate_min_trust_fraction must be in (0, 1]")
+    polarity = _normalize_signal_excursion_polarity(signal_excursion_polarity)
 
     fs_hz = float(sample_rate_hz)
     if (not np.isfinite(fs_hz)) or fs_hz <= 0.0:
@@ -607,10 +675,21 @@ def fit_adaptive_event_gated_regression(
     residual_median = float(np.nanmedian(residual[finite_fit]))
     mad = float(np.nanmedian(np.abs(residual[finite_fit] - residual_median)))
     robust_scale = float(1.4826 * mad)
+    residual_candidate_upper_tail = np.zeros_like(finite_fit, dtype=bool)
+    residual_candidate_lower_tail = np.zeros_like(finite_fit, dtype=bool)
     if np.isfinite(robust_scale) and robust_scale > 1e-12:
-        with np.errstate(invalid="ignore", divide="ignore"):
-            z_pos = (residual - residual_median) / robust_scale
-        residual_candidate = finite_fit & (z_pos > z_thresh)
+        (
+            residual_candidate,
+            residual_candidate_upper_tail,
+            residual_candidate_lower_tail,
+        ) = _residual_excursion_candidates(
+            residual,
+            finite_fit,
+            center=residual_median,
+            robust_scale=robust_scale,
+            z_thresh=z_thresh,
+            signal_excursion_polarity=polarity,
+        )
 
     var_candidate = np.zeros_like(finite_fit, dtype=bool)
     use_var_rule = (
@@ -718,12 +797,15 @@ def fit_adaptive_event_gated_regression(
         "trust_fraction": float(trust_fraction),
         "gated_fraction": float(np.sum(gated_mask) / float(max(1, n_finite))),
         "n_gated_residual": int(np.sum(residual_candidate)),
+        "n_gated_residual_upper_tail": int(np.sum(residual_candidate_upper_tail)),
+        "n_gated_residual_lower_tail": int(np.sum(residual_candidate_lower_tail)),
         "n_gated_local_var": int(np.sum(var_candidate)),
         "local_var_rule_enabled": bool(use_var_rule),
         "local_var_window_samples": int(local_var_window_samples),
         "smooth_window_samples": int(smooth_window_samples),
         "min_trusted_samples": int(min_trusted_samples),
         "freeze_interp_method": str(freeze_interp_method),
+        "signal_excursion_polarity_applied": str(polarity),
     }
 
 
@@ -748,6 +830,9 @@ def _compute_dynamic_fit_ref_global_linear(chunk: Chunk, config: Config, mode: s
         "reconstruction_signal": "uv_raw",
         "fit_mode_resolved": "global_linear_regression",
         "fit_input_domain": "filtered",
+        "signal_excursion_polarity": str(
+            getattr(config, "signal_excursion_polarity", "positive")
+        ),
         "baseline_subtract_before_fit": bool(getattr(config, "baseline_subtract_before_fit", False)),
         "baseline_subtract_applied": False,
         "n_rois": n_rois,
@@ -796,6 +881,9 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
         "reconstruction_signal": "uv_raw",
         "fit_mode_resolved": "robust_global_event_reject",
         "fit_input_domain": "raw",
+        "signal_excursion_polarity": str(
+            getattr(config, "signal_excursion_polarity", "positive")
+        ),
         "baseline_subtract_before_fit": bool(getattr(config, "baseline_subtract_before_fit", False)),
         "baseline_subtract_applied": False,
         "robust_event_reject_max_iters": int(getattr(config, "robust_event_reject_max_iters", 3)),
@@ -821,6 +909,9 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
     }
     chunk.metadata["dynamic_fit_event_reject"] = {}
 
+    signal_excursion_polarity = _normalize_signal_excursion_polarity(
+        str(getattr(config, "signal_excursion_polarity", "positive"))
+    )
     max_iters = int(getattr(config, "robust_event_reject_max_iters", 3))
     residual_z_thresh = float(getattr(config, "robust_event_reject_residual_z_thresh", 3.5))
     local_var_window_sec = getattr(config, "robust_event_reject_local_var_window_sec", 10.0)
@@ -844,6 +935,7 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
                 min_keep_fraction=min_keep_fraction,
                 sample_rate_hz=float(chunk.fs_hz),
                 use_intercept=True,
+                signal_excursion_polarity=signal_excursion_polarity,
             )
             uv_fit_all[:, r_idx] = np.asarray(
                 robust_result["iso_fit_signal_units"], dtype=float
@@ -857,6 +949,9 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
                 "n_iterations_completed": int(robust_result.get("n_iterations_completed", 0)),
                 "final_keep_fraction": float(robust_result.get("final_keep_fraction", np.nan)),
                 "stop_reason": str(robust_result.get("stop_reason", "")),
+                "signal_excursion_polarity_applied": str(
+                    robust_result.get("signal_excursion_polarity_applied", signal_excursion_polarity)
+                ),
                 "fallback_to_global_linear": False,
             }
             backend_used = str(robust_result.get("robust_fit_backend_used", "unknown"))
@@ -939,7 +1034,7 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
     """
     Adaptive event-gated regression:
       - robust global initialization
-      - trust/gating from positive residual robust-z (+ optional local variance asymmetry)
+      - trust/gating from polarity-aware residual robust-z (+ optional local variance asymmetry)
       - slow local coefficient adaptation from trusted windows
       - coefficient freezing through gated spans
       - reconstruction on raw UV
@@ -957,6 +1052,9 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
         "fit_input_domain": "filtered_if_available_else_raw",
         "trust_scoring_domain": "filtered_if_available_else_raw",
         "reconstruction_signal": "uv_raw",
+        "signal_excursion_polarity": str(
+            getattr(config, "signal_excursion_polarity", "positive")
+        ),
         "baseline_subtract_before_fit": bool(getattr(config, "baseline_subtract_before_fit", False)),
         "baseline_subtract_applied": False,
         "adaptive_event_gate_residual_z_thresh": float(
@@ -991,6 +1089,9 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
     }
     chunk.metadata["dynamic_fit_adaptive_event_gated"] = {}
 
+    signal_excursion_polarity = _normalize_signal_excursion_polarity(
+        str(getattr(config, "signal_excursion_polarity", "positive"))
+    )
     residual_z_thresh = float(getattr(config, "adaptive_event_gate_residual_z_thresh", 3.5))
     local_var_window_sec = getattr(config, "adaptive_event_gate_local_var_window_sec", 10.0)
     local_var_ratio_thresh = getattr(config, "adaptive_event_gate_local_var_ratio_thresh", None)
@@ -1031,6 +1132,7 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 min_trust_fraction=min_trust_fraction,
                 freeze_interp_method=freeze_interp_method,
                 use_intercept=True,
+                signal_excursion_polarity=signal_excursion_polarity,
             )
             uv_fit_all[:, r_idx] = np.asarray(adaptive_result["iso_fit_signal_units"], dtype=float)
             global_coef = dict(adaptive_result.get("global_init_coef", {}))
@@ -1047,10 +1149,15 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 "n_trusted": int(adaptive_result.get("n_trusted", 0)),
                 "n_finite": int(adaptive_result.get("n_finite", 0)),
                 "n_gated_residual": int(adaptive_result.get("n_gated_residual", 0)),
+                "n_gated_residual_upper_tail": int(adaptive_result.get("n_gated_residual_upper_tail", 0)),
+                "n_gated_residual_lower_tail": int(adaptive_result.get("n_gated_residual_lower_tail", 0)),
                 "n_gated_local_var": int(adaptive_result.get("n_gated_local_var", 0)),
                 "local_var_rule_enabled": bool(adaptive_result.get("local_var_rule_enabled", False)),
                 "smooth_window_samples": int(adaptive_result.get("smooth_window_samples", 0)),
                 "freeze_interp_method": str(adaptive_result.get("freeze_interp_method", freeze_interp_method)),
+                "signal_excursion_polarity_applied": str(
+                    adaptive_result.get("signal_excursion_polarity_applied", signal_excursion_polarity)
+                ),
                 "fallback_mode": "none",
             }
             success_roi_count += 1
@@ -1072,6 +1179,7 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 min_keep_fraction=float(getattr(config, "robust_event_reject_min_keep_fraction", 0.5)),
                 sample_rate_hz=float(chunk.fs_hz),
                 use_intercept=True,
+                signal_excursion_polarity=signal_excursion_polarity,
             )
             uv_fit_all[:, r_idx] = np.asarray(robust_result.get("iso_fit_signal_units", np.full_like(sig_raw, np.nan)), dtype=float)
             chunk.metadata["dynamic_fit_adaptive_event_gated"][roi_name] = {
@@ -1085,10 +1193,29 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 "n_trusted": int(np.sum(np.asarray(robust_result.get("keep_mask", []), dtype=bool))),
                 "n_finite": int(np.sum(np.isfinite(sig_raw) & np.isfinite(uv_raw))),
                 "n_gated_residual": int(np.sum(np.asarray(robust_result.get("excluded_mask", []), dtype=bool))),
+                "n_gated_residual_upper_tail": int(
+                    robust_result.get("iteration_summaries", [{}])[-1].get(
+                        "n_candidate_excluded_residual_upper_tail",
+                        0,
+                    )
+                    if robust_result.get("iteration_summaries")
+                    else 0
+                ),
+                "n_gated_residual_lower_tail": int(
+                    robust_result.get("iteration_summaries", [{}])[-1].get(
+                        "n_candidate_excluded_residual_lower_tail",
+                        0,
+                    )
+                    if robust_result.get("iteration_summaries")
+                    else 0
+                ),
                 "n_gated_local_var": 0,
                 "local_var_rule_enabled": bool(robust_result.get("local_var_rule_enabled", False)),
                 "smooth_window_samples": 0,
                 "freeze_interp_method": str(freeze_interp_method),
+                "signal_excursion_polarity_applied": str(
+                    robust_result.get("signal_excursion_polarity_applied", signal_excursion_polarity)
+                ),
                 "fallback_mode": "robust_global_event_reject",
             }
             fallback_robust_roi_count += 1
@@ -1271,6 +1398,9 @@ def _compute_dynamic_fit_ref(
         'window_sec': float(config.window_sec),
         'fit_mode_resolved': str(fit_mode),
         'fit_input_domain': fit_prep_info.get('fit_input_domain', 'filtered'),
+        'signal_excursion_polarity': str(
+            getattr(config, 'signal_excursion_polarity', 'positive')
+        ),
         'reconstruction_signal': reconstruction_signal,
         'reconstruction_domain_consistency': (
             "baseline_mapped"

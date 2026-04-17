@@ -141,6 +141,7 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
             "preview": preview_info,
             "traces_only": traces_only,
             "event_signal": getattr(config, 'event_signal', 'dff'),
+            "signal_excursion_polarity": getattr(config, "signal_excursion_polarity", "positive"),
             "sessions_per_hour": resolved_sph,
             "sessions_per_hour_source": resolved_sph_source,
             "representative_session_index": representative_info.get("representative_session_index") if representative_info else None,

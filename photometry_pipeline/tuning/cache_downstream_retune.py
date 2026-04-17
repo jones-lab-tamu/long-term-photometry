@@ -29,8 +29,10 @@ import yaml
 from photometry_pipeline.config import Config
 from photometry_pipeline.core.feature_extraction import (
     apply_peak_prefilter,
+    compute_detection_threshold_bounds,
     extract_features,
     get_peak_indices_for_trace,
+    normalize_signal_excursion_polarity,
 )
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.io.hdf5_cache_reader import (
@@ -42,6 +44,7 @@ from photometry_pipeline.io.hdf5_cache_reader import (
 
 DOWNSTREAM_RETUNABLE_KEYS = {
     "event_signal",
+    "signal_excursion_polarity",
     "peak_threshold_method",
     "peak_threshold_k",
     "peak_threshold_percentile",
@@ -72,6 +75,7 @@ EXPLICITLY_UNSUPPORTED_KEYS = {
 
 _OVERRIDE_VALUE_CASTERS = {
     "event_signal": str,
+    "signal_excursion_polarity": str,
     "peak_threshold_method": str,
     "peak_threshold_k": float,
     "peak_threshold_percentile": float,
@@ -155,6 +159,24 @@ def _normalize_retune_prefilter_mode(mode_raw: str) -> str:
     if mode in {"smooth", "lowpass"}:
         return "smooth"
     return "none"
+
+
+def _signal_excursion_polarity_interpretation(mode_raw: str) -> str:
+    mode = normalize_signal_excursion_polarity(mode_raw)
+    if mode == "negative":
+        return "Downward excursions only."
+    if mode == "both":
+        return "Two-tailed: upward and downward excursions."
+    return "Upward excursions only."
+
+
+def _event_auc_semantics_text(mode_raw: str) -> str:
+    mode = normalize_signal_excursion_polarity(mode_raw)
+    if mode == "negative":
+        return "Event AUC is integrated as negative area below baseline."
+    if mode == "both":
+        return "Event AUC is signed net area around baseline (two-tailed)."
+    return "Event AUC is integrated as positive area above baseline."
 
 
 def _write_backend_debug_record(retune_dir: str, payload: Dict[str, Any]) -> None:
@@ -346,6 +368,7 @@ def _write_provenance(
     inspection_chunk_id_requested: int | None,
     inspection_chunk_id_used: int,
     event_signal_used: str,
+    signal_excursion_polarity_used: str,
     completed_evidence: str,
     base_config_path: str,
     base_config: Config,
@@ -363,6 +386,11 @@ def _write_provenance(
         "inspection_chunk_id_requested": inspection_chunk_id_requested,
         "inspection_chunk_id_used": inspection_chunk_id_used,
         "event_signal_used": event_signal_used,
+        "signal_excursion_polarity_used": signal_excursion_polarity_used,
+        "signal_excursion_polarity_interpretation": _signal_excursion_polarity_interpretation(
+            signal_excursion_polarity_used
+        ),
+        "event_auc_semantics": _event_auc_semantics_text(signal_excursion_polarity_used),
         "base_config_source": os.path.abspath(base_config_path),
         "base_config_snapshot": dataclasses.asdict(base_config),
         "downstream_overrides_applied": overrides,
@@ -377,6 +405,7 @@ def _write_retuned_diagnostics(
     roi: str,
     features_df: pd.DataFrame,
     median_session_duration_s: float,
+    signal_excursion_polarity: str,
 ) -> Dict[str, str]:
     out: Dict[str, str] = {}
     feats_csv = os.path.join(retune_dir, f"retuned_features_{roi}.csv")
@@ -392,6 +421,11 @@ def _write_retuned_diagnostics(
         per_chunk["peak_rate_per_min"] = per_chunk["peak_count"] / (median_session_duration_s / 60.0)
     else:
         per_chunk["peak_rate_per_min"] = np.nan
+    per_chunk["auc_signed"] = per_chunk["auc"]
+    per_chunk["signal_excursion_polarity"] = str(
+        normalize_signal_excursion_polarity(signal_excursion_polarity)
+    )
+    per_chunk["event_auc_semantics"] = _event_auc_semantics_text(signal_excursion_polarity)
 
     summary_csv = os.path.join(retune_dir, f"retuned_summary_{roi}.csv")
     per_chunk.to_csv(summary_csv, index=False)
@@ -415,8 +449,10 @@ def _write_retuned_diagnostics(
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(per_chunk["chunk_id"], per_chunk["auc"], marker="o")
     ax.set_xlabel("Chunk ID")
-    ax.set_ylabel("AUC")
-    ax.set_title(f"Retuned AUC ({roi})")
+    ax.set_ylabel("Signed Event AUC")
+    ax.set_title(
+        f"Retuned Event AUC ({roi}) | polarity={normalize_signal_excursion_polarity(signal_excursion_polarity)}"
+    )
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(auc_png, dpi=150)
@@ -430,37 +466,28 @@ def _compute_threshold(trace_use: np.ndarray, cfg: Config) -> tuple[float, dict[
     clean = trace_use[np.isfinite(trace_use)]
     if len(clean) < 2:
         raise RuntimeError("Cannot compute threshold: fewer than 2 finite samples in selected chunk trace.")
-
-    mu = float(np.mean(clean))
-    med = float(np.median(clean))
-    sigma = float(np.std(clean))
-    mad = float(np.median(np.abs(clean - med)))
-    sigma_robust = 1.4826 * mad
-
-    method = cfg.peak_threshold_method
-    if method == "absolute":
-        threshold = float(getattr(cfg, "peak_threshold_abs", 0.0))
-    elif method == "mean_std":
-        threshold = mu + float(cfg.peak_threshold_k) * sigma
-    elif method == "percentile":
-        threshold = float(np.nanpercentile(clean, cfg.peak_threshold_percentile))
-    elif method == "median_mad":
-        if sigma_robust == 0:
-            threshold = med if float(cfg.peak_threshold_k) == 0.0 else float("inf")
-        else:
-            threshold = med + float(cfg.peak_threshold_k) * sigma_robust
+    polarity = normalize_signal_excursion_polarity(
+        str(getattr(cfg, "signal_excursion_polarity", "positive"))
+    )
+    bounds = compute_detection_threshold_bounds(clean, cfg)
+    threshold_upper = float(bounds["upper"])
+    threshold_lower = float(bounds["lower"])
+    if polarity == "positive":
+        threshold_active = threshold_upper
+    elif polarity == "negative":
+        threshold_active = threshold_lower
     else:
-        raise ValueError(
-            f"Unknown peak_threshold_method: {method}. "
-            "Supported: ['mean_std', 'percentile', 'median_mad', 'absolute']"
-        )
-
-    return threshold, {
-        "mean": mu,
-        "median": med,
-        "std": sigma,
-        "mad": mad,
-        "sigma_robust": float(sigma_robust),
+        threshold_active = threshold_upper
+    return float(threshold_active), {
+        "mean": float(bounds["mean"]),
+        "median": float(bounds["median"]),
+        "std": float(bounds["std"]),
+        "mad": float(bounds["mad"]),
+        "sigma_robust": float(bounds["sigma_robust"]),
+        "threshold_upper": float(threshold_upper),
+        "threshold_lower": float(threshold_lower),
+        "threshold_active": float(threshold_active),
+        "signal_excursion_polarity": str(polarity),
     }
 
 
@@ -494,14 +521,27 @@ def _detect_events_for_chunk(chunk: Chunk, cfg: Config) -> Dict[str, Any]:
     trace_use, prefilter_meta = apply_peak_prefilter(signal, chunk.fs_hz, cfg_for_chunk)
     peak_pre_filter = str(prefilter_meta.get("mode", getattr(cfg_for_chunk, "peak_pre_filter", "none")))
 
+    polarity = normalize_signal_excursion_polarity(
+        str(getattr(cfg_for_chunk, "signal_excursion_polarity", "positive"))
+    )
     threshold, stats = _compute_threshold(trace_use, cfg_for_chunk)
+    threshold_upper = float(stats.get("threshold_upper", threshold))
+    threshold_lower = float(stats.get("threshold_lower", np.nan))
+    threshold_active = float(stats.get("threshold_active", threshold))
     dist_samples = max(1, int(cfg_for_chunk.peak_min_distance_sec * chunk.fs_hz))
-    event_idx = get_peak_indices_for_trace(
+    event_idx, event_polarities_raw = get_peak_indices_for_trace(
         signal,
         chunk.fs_hz,
         cfg_for_chunk,
         trace_use=trace_use,
-        threshold=threshold,
+        threshold=threshold_upper,
+        threshold_lower=threshold_lower,
+        return_polarities=True,
+    )
+    event_polarities = (
+        np.where(event_polarities_raw > 0, "positive", "negative").astype(object)
+        if len(event_idx)
+        else np.array([], dtype=object)
     )
     event_times = chunk.time_sec[event_idx] if len(event_idx) else np.array([], dtype=float)
     event_values = trace_use[event_idx] if len(event_idx) else np.array([], dtype=float)
@@ -515,9 +555,17 @@ def _detect_events_for_chunk(chunk: Chunk, cfg: Config) -> Dict[str, Any]:
         "event_indices": event_idx,
         "event_times_sec": event_times,
         "event_values": event_values,
-        "threshold": float(threshold),
+        "event_polarities": event_polarities,
+        "threshold": float(threshold_active),
+        "threshold_upper": float(threshold_upper),
+        "threshold_lower": float(threshold_lower),
         "threshold_stats": stats,
         "distance_samples": int(dist_samples),
+        "signal_excursion_polarity": str(polarity),
+        "signal_excursion_polarity_interpretation": _signal_excursion_polarity_interpretation(
+            polarity
+        ),
+        "event_auc_semantics": _event_auc_semantics_text(polarity),
         "peak_pre_filter": peak_pre_filter,
         "prefilter_applied": bool(prefilter_meta.get("prefilter_applied", False)),
         "savgol_window_length": (
@@ -556,7 +604,30 @@ def _write_inspection_diagnostics(
             "event_index": detection["event_indices"],
             "event_time_sec": detection["event_times_sec"],
             "event_value": detection["event_values"],
+            "event_polarity": detection.get("event_polarities", np.array([], dtype=object)),
             "threshold": float(detection["threshold"]),
+            "threshold_upper": float(detection.get("threshold_upper", np.nan)),
+            "threshold_lower": float(detection.get("threshold_lower", np.nan)),
+            "signal_excursion_polarity": str(
+                detection.get(
+                    "signal_excursion_polarity",
+                    getattr(cfg, "signal_excursion_polarity", "positive"),
+                )
+            ),
+            "signal_excursion_polarity_interpretation": str(
+                detection.get(
+                    "signal_excursion_polarity_interpretation",
+                    _signal_excursion_polarity_interpretation(
+                        getattr(cfg, "signal_excursion_polarity", "positive")
+                    ),
+                )
+            ),
+            "event_auc_semantics": str(
+                detection.get(
+                    "event_auc_semantics",
+                    _event_auc_semantics_text(getattr(cfg, "signal_excursion_polarity", "positive")),
+                )
+            ),
             "threshold_method": cfg.peak_threshold_method,
             "peak_min_distance_sec": float(cfg.peak_min_distance_sec),
         }
@@ -590,22 +661,71 @@ def _write_inspection_diagnostics(
             label=trace_label,
             antialiased=False,
         )
+        event_polarities = np.asarray(detection.get("event_polarities", []), dtype=object)
         if len(detection["event_indices"]):
-            ax.scatter(
-                detection["event_times_sec"],
-                detection["event_values"],
-                color="crimson",
-                marker="x",
-                s=28,
-                linewidths=1.0,
-                label="Detected events",
-                zorder=3,
+            pos_mask = event_polarities == "positive"
+            neg_mask = event_polarities == "negative"
+            if np.any(pos_mask):
+                ax.scatter(
+                    np.asarray(detection["event_times_sec"])[pos_mask],
+                    np.asarray(detection["event_values"])[pos_mask],
+                    color="crimson",
+                    marker="x",
+                    s=28,
+                    linewidths=1.0,
+                    label="Detected events (+)",
+                    zorder=3,
+                )
+            if np.any(neg_mask):
+                ax.scatter(
+                    np.asarray(detection["event_times_sec"])[neg_mask],
+                    np.asarray(detection["event_values"])[neg_mask],
+                    color="teal",
+                    marker="x",
+                    s=28,
+                    linewidths=1.0,
+                    label="Detected events (-)",
+                    zorder=3,
+                )
+            if not np.any(pos_mask) and not np.any(neg_mask):
+                ax.scatter(
+                    detection["event_times_sec"],
+                    detection["event_values"],
+                    color="crimson",
+                    marker="x",
+                    s=28,
+                    linewidths=1.0,
+                    label="Detected events",
+                    zorder=3,
+                )
+        polarity = str(
+            detection.get(
+                "signal_excursion_polarity",
+                getattr(cfg, "signal_excursion_polarity", "positive"),
             )
-        ax.axhline(float(detection["threshold"]), color="darkorange", linestyle="--", linewidth=1.0, label="Threshold")
+        ).strip().lower()
+        if polarity in {"positive", "both"}:
+            ax.axhline(
+                float(detection.get("threshold_upper", detection["threshold"])),
+                color="darkorange",
+                linestyle="--",
+                linewidth=1.0,
+                label="Upper threshold",
+            )
+        if polarity in {"negative", "both"}:
+            ax.axhline(
+                float(detection.get("threshold_lower", detection["threshold"])),
+                color="slateblue",
+                linestyle="--",
+                linewidth=1.0,
+                label="Lower threshold",
+            )
         ax.set_xlabel("Time (s)")
         ax.set_ylabel(detection["signal_field"])
         ax.set_title(
-            f"Retuned Event Overlay ({roi}) | chunk={chunk_id} | source={detection['source_file']}"
+            "Retuned Event Overlay "
+            f"({roi}) | chunk={chunk_id} | source={detection['source_file']} | "
+            f"polarity={str(polarity)}"
         )
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best", fontsize=8)
@@ -692,6 +812,9 @@ def run_cache_downstream_retune(
             inspection_chunk_id_requested=chunk_id,
             inspection_chunk_id_used=inspection_chunk_id,
             event_signal_used=effective_config.event_signal,
+            signal_excursion_polarity_used=str(
+                getattr(effective_config, "signal_excursion_polarity", "positive")
+            ),
             completed_evidence=completed_evidence,
             base_config_path=base_config_path,
             base_config=base_config,
@@ -743,6 +866,9 @@ def run_cache_downstream_retune(
         roi=resolved_roi,
         features_df=features_df,
         median_session_duration_s=median_duration_s,
+        signal_excursion_polarity=str(
+            getattr(effective_config, "signal_excursion_polarity", "positive")
+        ),
     )
     detection = _detect_events_for_chunk(inspection_chunk, effective_config)
     artifact_paths.update(
@@ -765,11 +891,22 @@ def run_cache_downstream_retune(
             "source_file": str(detection.get("source_file", inspection_chunk.source_file)),
             "peak_pre_filter": str(detection.get("peak_pre_filter", "none")),
             "event_signal": str(detection.get("signal_field", effective_config.event_signal)),
+            "signal_excursion_polarity": str(
+                getattr(effective_config, "signal_excursion_polarity", "positive")
+            ),
+            "signal_excursion_polarity_interpretation": _signal_excursion_polarity_interpretation(
+                getattr(effective_config, "signal_excursion_polarity", "positive")
+            ),
+            "event_auc_semantics": _event_auc_semantics_text(
+                getattr(effective_config, "signal_excursion_polarity", "positive")
+            ),
             "prefilter_applied": bool(detection.get("prefilter_applied", False)),
             "savgol_window_length": float(detection.get("savgol_window_length", np.nan)),
             "savgol_polyorder": float(detection.get("savgol_polyorder", np.nan)),
             "fs_hz": float(detection.get("fs_hz", inspection_chunk.fs_hz)),
             "threshold": float(detection.get("threshold", np.nan)),
+            "threshold_upper": float(detection.get("threshold_upper", np.nan)),
+            "threshold_lower": float(detection.get("threshold_lower", np.nan)),
             "threshold_method": str(effective_config.peak_threshold_method),
             "distance_samples": int(detection.get("distance_samples", 0)),
             "event_count": int(len(detection.get("event_indices", []))),
@@ -786,6 +923,15 @@ def run_cache_downstream_retune(
         "inspection_chunk_id": inspection_chunk_id,
         "inspection_source_file": inspection_chunk.source_file,
         "event_signal_used": effective_config.event_signal,
+        "signal_excursion_polarity_used": str(
+            getattr(effective_config, "signal_excursion_polarity", "positive")
+        ),
+        "signal_excursion_polarity_interpretation": _signal_excursion_polarity_interpretation(
+            getattr(effective_config, "signal_excursion_polarity", "positive")
+        ),
+        "event_auc_semantics": _event_auc_semantics_text(
+            getattr(effective_config, "signal_excursion_polarity", "positive")
+        ),
         "n_chunks": int(features_df["chunk_id"].nunique()) if not features_df.empty else 0,
         "n_rows": int(len(features_df)),
         "downstream_overrides_applied": dict(overrides),

@@ -88,6 +88,22 @@ class TestEventSignalSelection(unittest.TestCase):
             self.assertIn("Invalid event_signal", str(ctx.exception))
         finally:
             os.remove(temp_path)
+
+    def test_signal_excursion_polarity_defaults_to_positive(self):
+        cfg = Config()
+        self.assertEqual(cfg.signal_excursion_polarity, "positive")
+
+    def test_invalid_signal_excursion_polarity_config(self):
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            yaml.dump({'signal_excursion_polarity': 'upward_only'}, f)
+            temp_path = f.name
+
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                Config.from_yaml(temp_path)
+            self.assertIn("Invalid signal_excursion_polarity", str(ctx.exception))
+        finally:
+            os.remove(temp_path)
             
     def test_peak_routing(self):
         fs = 10.0
@@ -224,10 +240,12 @@ class TestEventSignalSelection(unittest.TestCase):
         with open(os.path.join(out_dff, "run_report.json")) as f:
             rr_dff = json.load(f)
         self.assertEqual(rr_dff['run_context']['event_signal'], 'dff')
+        self.assertEqual(rr_dff["run_context"]["signal_excursion_polarity"], "positive")
         
         with open(os.path.join(out_delta, "run_report.json")) as f:
             rr_delta = json.load(f)
         self.assertEqual(rr_delta['run_context']['event_signal'], 'delta_f')
+        self.assertEqual(rr_delta["run_context"]["signal_excursion_polarity"], "positive")
 
 if __name__ == '__main__':
     unittest.main()

@@ -19,16 +19,35 @@ def _trapezoid_integral(y, *, x=None, dx=1.0):
         return trapz(y, x=x, dx=dx)
     raise AttributeError("NumPy missing both trapezoidal integration APIs: trapezoid/trapz")
 
-def compute_auc_above_threshold(dff, baseline_value, fs_hz=None, time_s=None):
+def normalize_signal_excursion_polarity(mode_raw: str) -> str:
+    mode = str(mode_raw or "positive").strip().lower()
+    if mode not in {"positive", "negative", "both"}:
+        return "positive"
+    return mode
+
+
+def compute_auc_above_threshold(
+    dff,
+    baseline_value,
+    fs_hz=None,
+    time_s=None,
+    *,
+    signal_excursion_polarity: str = "positive",
+):
     """
-    Computes AUC as area above threshold (clamped to 0).
+    Computes polarity-aware AUC relative to baseline.
+
+    Semantics:
+    - positive: area above baseline (>= 0)
+    - negative: area below baseline (<= 0)
+    - both: signed area around baseline (positive and negative contributions)
     Args:
         dff (np.array): Phasic dFF signal.
         baseline_value (float): Threshold/Baseline value for AUC integration.
         fs_hz (float): Sampling rate (required if time_s is None).
         time_s (np.array): Time vector (optional).
     Returns:
-        float: AUC value (>= 0).
+        float: Polarity-aware AUC.
     """
     if dff is None or len(dff) < 2:
         return 0.0
@@ -36,7 +55,14 @@ def compute_auc_above_threshold(dff, baseline_value, fs_hz=None, time_s=None):
     if baseline_value is None or not np.isfinite(baseline_value):
         raise ValueError("baseline_value must be finite")
         
-    rect = np.clip(dff - baseline_value, 0.0, None)
+    polarity = normalize_signal_excursion_polarity(signal_excursion_polarity)
+    diff = np.asarray(dff, dtype=float) - float(baseline_value)
+    if polarity == "positive":
+        auc_trace = np.clip(diff, 0.0, None)
+    elif polarity == "negative":
+        auc_trace = -np.clip(-diff, 0.0, None)
+    else:
+        auc_trace = diff
     
     if time_s is not None:
         if len(time_s) != len(dff):
@@ -46,15 +72,17 @@ def compute_auc_above_threshold(dff, baseline_value, fs_hz=None, time_s=None):
         if np.any(np.diff(time_s) < 0):
             raise ValueError("time_s must be non-decreasing")
              
-        auc = float(_trapezoid_integral(rect, x=time_s))
+        auc = float(_trapezoid_integral(auc_trace, x=time_s))
     else:
         if fs_hz is None or fs_hz <= 0:
             raise ValueError("fs_hz must be > 0 when time_s is None")
         dt = 1.0 / fs_hz
-        auc = float(_trapezoid_integral(rect, dx=dt))
+        auc = float(_trapezoid_integral(auc_trace, dx=dt))
     
-    # Single safeguard
-    auc = max(auc, 0.0)
+    if polarity == "positive":
+        auc = max(auc, 0.0)
+    elif polarity == "negative":
+        auc = min(auc, 0.0)
         
     return auc
 
@@ -72,33 +100,80 @@ def get_event_signal_array(chunk, config):
         raise ValueError(f"Unknown event_signal: {signal_type}")
 
 
-def _compute_detection_threshold(clean_finite: np.ndarray, config) -> float:
-    """Compute peak threshold from the configured method on finite detection samples."""
+def compute_detection_threshold_bounds(clean_finite: np.ndarray, config) -> dict[str, float]:
+    """
+    Compute polarity-ready detection threshold bounds on finite samples.
+
+    Returns:
+      {
+        "upper": upper-tail threshold,
+        "lower": lower-tail threshold,
+        "mean": ...,
+        "median": ...,
+        "std": ...,
+        "mad": ...,
+        "sigma_robust": ...
+      }
+    """
+    clean = np.asarray(clean_finite, dtype=float)
+    if clean.size < 2:
+        raise ValueError("Need at least 2 finite samples to compute detection threshold bounds.")
+
     method = config.peak_threshold_method
+    mu = float(np.mean(clean))
+    median = float(np.median(clean))
+    sigma = float(np.std(clean))
+    mad = float(np.median(np.abs(clean - median)))
+    sigma_robust = float(1.4826 * mad)
+
     if method == 'absolute':
-        return float(getattr(config, 'peak_threshold_abs', 0.0))
-    if method == 'mean_std':
-        mu = np.mean(clean_finite)
-        sigma = np.std(clean_finite)
-        return float(mu + config.peak_threshold_k * sigma)
-    if method == 'percentile':
-        thresh = np.nanpercentile(clean_finite, config.peak_threshold_percentile)
-        if np.isnan(thresh):
+        magnitude = float(abs(getattr(config, 'peak_threshold_abs', 0.0)))
+        upper = float(magnitude)
+        lower = float(-magnitude)
+    elif method == 'mean_std':
+        k = float(config.peak_threshold_k)
+        upper = float(mu + k * sigma)
+        lower = float(mu - k * sigma)
+    elif method == 'percentile':
+        p = float(config.peak_threshold_percentile)
+        upper = float(np.nanpercentile(clean, p))
+        lower = float(np.nanpercentile(clean, 100.0 - p))
+        if np.isnan(upper) or np.isnan(lower):
             raise ValueError("Feature Extraction Error: Percentile threshold is NaN.")
-        return float(thresh)
-    if method == 'median_mad':
-        median = np.median(clean_finite)
-        mad = np.median(np.abs(clean_finite - median))
-        sigma_robust = 1.4826 * mad
+    elif method == 'median_mad':
+        k = float(config.peak_threshold_k)
         if sigma_robust == 0:
-            if config.peak_threshold_k == 0:
-                return float(median)
-            return float('inf')
-        return float(median + config.peak_threshold_k * sigma_robust)
-    raise ValueError(
-        f"Unknown peak_threshold_method: {config.peak_threshold_method}. "
-        "Supported: ['mean_std', 'percentile', 'median_mad', 'absolute']"
-    )
+            if k == 0.0:
+                upper = float(median)
+                lower = float(median)
+            else:
+                upper = float('inf')
+                lower = float('-inf')
+        else:
+            upper = float(median + k * sigma_robust)
+            lower = float(median - k * sigma_robust)
+    else:
+        raise ValueError(
+            f"Unknown peak_threshold_method: {config.peak_threshold_method}. "
+            "Supported: ['mean_std', 'percentile', 'median_mad', 'absolute']"
+        )
+    return {
+        "upper": float(upper),
+        "lower": float(lower),
+        "mean": float(mu),
+        "median": float(median),
+        "std": float(sigma),
+        "mad": float(mad),
+        "sigma_robust": float(sigma_robust),
+    }
+
+
+def _compute_detection_threshold(clean_finite: np.ndarray, config) -> float:
+    """
+    Backward-compatible single-threshold helper.
+    Returns upper-tail threshold.
+    """
+    return float(compute_detection_threshold_bounds(clean_finite, config)["upper"])
 
 
 def _resolve_prominence_requirement(clean_finite: np.ndarray, config) -> float | None:
@@ -243,7 +318,9 @@ def get_peak_indices_for_trace(
     *,
     trace_use: np.ndarray | None = None,
     threshold: float | None = None,
-) -> np.ndarray:
+    threshold_lower: float | None = None,
+    return_polarities: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """
     Authoritative per-trace event index detection used by both analysis and plotting.
 
@@ -259,13 +336,29 @@ def get_peak_indices_for_trace(
     if threshold is None:
         finite_vals = trace_use_arr[np.isfinite(trace_use_arr)]
         if len(finite_vals) < 2:
-            return np.array([], dtype=int)
-        threshold = _compute_detection_threshold(finite_vals, config)
+            empty_idx = np.array([], dtype=int)
+            if return_polarities:
+                return empty_idx, np.array([], dtype=int)
+            return empty_idx
+        threshold_bounds = compute_detection_threshold_bounds(finite_vals, config)
+        threshold_upper = float(threshold_bounds["upper"])
+        threshold_lower_eff = float(threshold_bounds["lower"])
     else:
         finite_vals = trace_use_arr[np.isfinite(trace_use_arr)]
+        threshold_bounds = compute_detection_threshold_bounds(finite_vals, config) if len(finite_vals) >= 2 else {
+            "upper": float(threshold),
+            "lower": float("nan"),
+        }
+        threshold_upper = float(threshold)
+        threshold_lower_eff = (
+            float(threshold_lower)
+            if threshold_lower is not None
+            else float(threshold_bounds.get("lower", float("nan")))
+        )
 
     prominence_req = _resolve_prominence_requirement(finite_vals, config)
     width_samples = _resolve_width_samples(fs_hz, config)
+    polarity = normalize_signal_excursion_polarity(getattr(config, "signal_excursion_polarity", "positive"))
 
     is_valid = np.isfinite(trace_arr)
     padded = np.concatenate(([False], is_valid, [False]))
@@ -274,7 +367,8 @@ def get_peak_indices_for_trace(
     ends = np.where(diff == -1)[0]
 
     dist_samples = max(1, int(config.peak_min_distance_sec * fs_hz))
-    all_peaks = []
+    all_peaks: list[np.ndarray] = []
+    all_polarities: list[np.ndarray] = []
     for s, e in zip(starts, ends):
         seg_y = trace_use_arr[s:e]
         seg_valid = np.isfinite(seg_y)
@@ -290,21 +384,48 @@ def get_peak_indices_for_trace(
             run_y = seg_y[rs:re]
             if len(run_y) < 2:
                 continue
-            peak_kwargs = {
-                "height": threshold,
-                "distance": dist_samples,
-            }
+            peak_kwargs = {"distance": dist_samples}
             if prominence_req is not None:
                 peak_kwargs["prominence"] = prominence_req
             if width_samples is not None:
                 peak_kwargs["width"] = width_samples
-            peaks, _ = find_peaks(run_y, **peak_kwargs)
-            if len(peaks):
-                all_peaks.append((s + rs + peaks).astype(int))
+
+            if polarity in {"positive", "both"}:
+                kw_pos = dict(peak_kwargs)
+                kw_pos["height"] = float(threshold_upper)
+                peaks_pos, _ = find_peaks(run_y, **kw_pos)
+                if len(peaks_pos):
+                    idx = (s + rs + peaks_pos).astype(int)
+                    all_peaks.append(idx)
+                    all_polarities.append(np.ones(len(idx), dtype=int))
+
+            if polarity in {"negative", "both"}:
+                kw_neg = dict(peak_kwargs)
+                kw_neg["height"] = float(-threshold_lower_eff)
+                peaks_neg, _ = find_peaks(-run_y, **kw_neg)
+                if len(peaks_neg):
+                    idx = (s + rs + peaks_neg).astype(int)
+                    all_peaks.append(idx)
+                    all_polarities.append(-np.ones(len(idx), dtype=int))
 
     if not all_peaks:
-        return np.array([], dtype=int)
-    return np.concatenate(all_peaks)
+        empty_idx = np.array([], dtype=int)
+        if return_polarities:
+            return empty_idx, np.array([], dtype=int)
+        return empty_idx
+
+    peak_idx = np.concatenate(all_peaks).astype(int)
+    pol = np.concatenate(all_polarities).astype(int)
+    sort_idx = np.argsort(peak_idx)
+    peak_idx = peak_idx[sort_idx]
+    pol = pol[sort_idx]
+    if peak_idx.size:
+        unique_idx, unique_pos = np.unique(peak_idx, return_index=True)
+        peak_idx = unique_idx.astype(int)
+        pol = pol[unique_pos].astype(int)
+    if return_polarities:
+        return peak_idx, pol
+    return peak_idx
 
 def extract_features(chunk, config):
     """
@@ -355,6 +476,9 @@ def extract_features(chunk, config):
         clean_trace_use = trace_use[is_valid_use]
         clean_finite = clean_trace_use[np.isfinite(clean_trace_use)]
         
+        polarity = normalize_signal_excursion_polarity(
+            getattr(config, "signal_excursion_polarity", "positive")
+        )
         if len(clean_finite) < 2:
              if not hasattr(chunk, 'metadata') or chunk.metadata is None: chunk.metadata = {}
              chunk.metadata.setdefault('qc_warnings', []).append(f"DEGENERATE[DD3] < 2 finite samples in ROI '{roi}'")
@@ -367,11 +491,12 @@ def extract_features(chunk, config):
              rows.append(row)
              continue
         else:
-            mu = np.mean(clean_finite)
-            med = np.median(clean_finite)
-            sigma = np.std(clean_finite)
-            mad = np.median(np.abs(clean_finite - med))
-            sigma_robust = 1.4826 * mad
+            threshold_stats = compute_detection_threshold_bounds(clean_finite, config)
+            mu = float(threshold_stats["mean"])
+            med = float(threshold_stats["median"])
+            sigma = float(threshold_stats["std"])
+            mad = float(threshold_stats["mad"])
+            sigma_robust = float(threshold_stats["sigma_robust"])
             
             # Determine threshold from the same helper used by plotting verification.
             if config.peak_threshold_method == 'median_mad' and sigma_robust == 0:
@@ -380,7 +505,8 @@ def extract_features(chunk, config):
                 chunk.metadata.setdefault('qc_warnings', []).append(
                     f"DEGENERATE[DD4] Zero robust variance in ROI '{roi}'"
                 )
-            thresh = _compute_detection_threshold(clean_finite, config)
+            thresh_upper = float(threshold_stats["upper"])
+            thresh_lower = float(threshold_stats["lower"])
                 
             # AUC Baseline
             auc_baseline_method = getattr(config, 'event_auc_baseline', 'zero')
@@ -395,7 +521,8 @@ def extract_features(chunk, config):
                 chunk.fs_hz,
                 config,
                 trace_use=trace_use,
-                threshold=thresh,
+                threshold=thresh_upper,
+                threshold_lower=thresh_lower,
             )
 
             total_peaks = int(len(peak_indices))
@@ -457,7 +584,8 @@ def extract_features(chunk, config):
                     total_auc += compute_auc_above_threshold(
                         run_y, auc_baseline, 
                         fs_hz=chunk.fs_hz, 
-                        time_s=run_t
+                        time_s=run_t,
+                        signal_excursion_polarity=polarity,
                     )
             
             row = {

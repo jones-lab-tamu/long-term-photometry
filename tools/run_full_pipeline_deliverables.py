@@ -732,8 +732,9 @@ def main():
     else:
         print("Using sessions_per_hour=None (no source found)", flush=True)
 
-    # Determine effective event signal, representative index, and preview for stamping
+    # Determine effective event signal, excursion polarity, representative index, and preview for stamping
     effective_event_signal = args.event_signal
+    effective_signal_excursion_polarity = "positive"
     effective_representative_index = args.representative_session_index
     effective_preview_first_n = args.preview_first_n
     effective_tonic_output_mode = TONIC_OUTPUT_MODE_PRESERVE_RAW
@@ -750,6 +751,9 @@ def main():
             cfg = Config.from_yaml(args.config)
             if effective_event_signal is None:
                 effective_event_signal = getattr(cfg, "event_signal", "dff")
+            effective_signal_excursion_polarity = str(
+                getattr(cfg, "signal_excursion_polarity", "positive")
+            )
             if effective_representative_index is None:
                 effective_representative_index = getattr(cfg, "representative_session_index", None)
             if effective_preview_first_n is None:
@@ -764,6 +768,7 @@ def main():
             print(f"WARNING: Failed to parse config for runner stamping: {e}", flush=True)
             if effective_event_signal is None: 
                 effective_event_signal = "dff"
+            effective_signal_excursion_polarity = "positive"
             # others remain as given or None
             effective_tonic_output_mode = TONIC_OUTPUT_MODE_PRESERVE_RAW
             effective_tonic_timeline_mode = TONIC_TIMELINE_MODE_REAL_ELAPSED
@@ -1097,6 +1102,7 @@ def main():
         "preview": {"selector": "first_n", "first_n": effective_preview_first_n} if effective_preview_first_n is not None else None, 
         "traces_only": effective_traces_only, 
         "event_signal": effective_event_signal,
+        "signal_excursion_polarity": effective_signal_excursion_polarity,
         "representative_session_index": effective_representative_index,
         "sessions_per_hour": resolved_sessions_per_hour,
         "sessions_per_hour_source": sessions_per_hour_source,

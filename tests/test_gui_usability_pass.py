@@ -226,6 +226,7 @@ def test_advanced_tooltips_present(window):
         ("Baseline Percentile:", window._baseline_percentile_edit),
         ("F0 Min Value:", window._f0_min_value_edit),
         ("Event Signal:", window._event_signal_combo),
+        ("Signal Excursion Polarity:", window._signal_excursion_polarity_combo),
         ("Peak Threshold Method:", window._peak_method_combo),
         ("Peak Threshold K:", window._peak_k_edit),
         ("Peak Threshold Percentile:", window._peak_pct_edit),
@@ -250,6 +251,13 @@ def test_advanced_tooltips_present(window):
     assert "civil clock" in timeline_tip
     assert "elapsed from first session" in timeline_tip
     assert "fixed daily anchor" in timeline_tip
+    polarity_tip = window._signal_excursion_polarity_combo.toolTip().lower()
+    assert "event detection" in polarity_tip
+    assert "dynamic-fit protection" in polarity_tip
+    assert "both polarities" in polarity_tip
+    auc_tip = window._event_auc_combo.toolTip().lower()
+    assert "auc sign follows signal excursion polarity" in auc_tip
+    assert "signed net area" in auc_tip
     inline_anchor_help_lines = window._timeline_anchor_help_label.text().splitlines()
     assert inline_anchor_help_lines == [
         "Civil clock: real time-of-day",

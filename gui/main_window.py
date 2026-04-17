@@ -296,6 +296,7 @@ _cached_allowed_fields = {}
 _KNOWN_ALLOWED_VALUES = {
     "baseline_method": ["uv_raw_percentile_session", "uv_globalfit_percentile_session"],
     "event_signal": ["dff", "delta_f"],
+    "signal_excursion_polarity": ["positive", "negative", "both"],
     "peak_threshold_method": ["mean_std", "percentile", "median_mad", "absolute"],
     "event_auc_baseline": ["zero", "median"],
     "peak_pre_filter": ["none", "lowpass"],
@@ -335,6 +336,11 @@ _DYNAMIC_FIT_MODE_LABELS = {
     "robust_global_event_reject": "Robust global fit + event rejection",
     "adaptive_event_gated_regression": "Adaptive event-gated regression",
 }
+_SIGNAL_EXCURSION_POLARITY_LABELS = {
+    "positive": "Positive only",
+    "negative": "Negative only",
+    "both": "Both polarities",
+}
 _TONIC_OUTPUT_MODE_LABELS = {
     TONIC_OUTPUT_MODE_PRESERVE_RAW: "Preserve raw session shape",
     TONIC_OUTPUT_MODE_FLATTEN_BLEACH: "Flatten session bleach, preserve session baseline",
@@ -369,7 +375,8 @@ _DYNAMIC_FIT_TOOLTIPS = {
         "more event contamination but run longer; lower values are faster and more conservative."
     ),
     "robust_residual_z_thresh": (
-        "Threshold for treating large positive residuals as likely biology instead of artifact. "
+        "Threshold for treating large residual excursions (according to Signal Excursion Polarity) "
+        "as likely biology instead of artifact. "
         "Lower values reject more points; higher values reject fewer. Reduce if the fit still "
         "rides large events."
     ),
@@ -387,7 +394,8 @@ _DYNAMIC_FIT_TOOLTIPS = {
         "lower values allow more aggressive rejection. Raise if too much data is being dropped."
     ),
     "adaptive_residual_z_thresh": (
-        "Threshold for marking event-like positive residuals as untrusted for adaptation. Lower values gate "
+        "Threshold for marking event-like residual excursions (according to Signal Excursion Polarity) "
+        "as untrusted for adaptation. Lower values gate "
         "more regions; higher values gate fewer. Reduce if adaptation still follows event peaks."
     ),
     "adaptive_local_var_window_sec": (
@@ -469,6 +477,14 @@ def get_allowed_baseline_methods_from_config() -> list[str]:
 
 def get_allowed_event_signals_from_config() -> list[str]:
     return _get_allowed_from_config_field("event_signal")
+
+def get_allowed_signal_excursion_polarities_from_config() -> list[str]:
+    raw = [normalize_signal_excursion_polarity(x) for x in _get_allowed_from_config_field("signal_excursion_polarity")]
+    ordered = ["positive", "negative", "both"]
+    for mode in raw:
+        if mode not in ordered:
+            ordered.append(mode)
+    return ordered
 
 def get_allowed_peak_threshold_methods_from_config() -> list[str]:
     return _get_allowed_from_config_field("peak_threshold_method")
@@ -561,6 +577,43 @@ def normalize_dynamic_fit_mode(mode_raw: str) -> str:
     if not mode:
         return "rolling_filtered_to_raw"
     return _DYNAMIC_FIT_MODE_ALIAS_TO_CANONICAL.get(mode, mode)
+
+
+def normalize_signal_excursion_polarity(mode_raw: str) -> str:
+    mode = str(mode_raw or "").strip().lower()
+    if mode in _SIGNAL_EXCURSION_POLARITY_LABELS:
+        return mode
+    return "positive"
+
+
+def signal_excursion_polarity_label(mode_raw: str) -> str:
+    mode = normalize_signal_excursion_polarity(mode_raw)
+    return _SIGNAL_EXCURSION_POLARITY_LABELS.get(mode, _SIGNAL_EXCURSION_POLARITY_LABELS["positive"])
+
+
+def signal_excursion_polarity_tooltip_text() -> str:
+    return (
+        "Controls signed excursion handling for both event detection and dynamic-fit protection. "
+        "Positive only: upward excursions only. Negative only: downward excursions only. "
+        "Both polarities: two-tailed detection/protection in either direction."
+    )
+
+
+def event_auc_semantics_tooltip_text() -> str:
+    return (
+        "Reference baseline used for event AUC integration. "
+        "AUC sign follows Signal Excursion Polarity: positive mode reports positive area, "
+        "negative mode reports negative area, and both-polarity mode reports signed net area."
+    )
+
+
+def signal_excursion_polarity_auc_summary_text(mode_raw: str) -> str:
+    mode = normalize_signal_excursion_polarity(mode_raw)
+    if mode == "negative":
+        return "AUC interpretation: negative area below baseline."
+    if mode == "both":
+        return "AUC interpretation: signed net area around baseline (two-tailed)."
+    return "AUC interpretation: positive area above baseline."
 
 
 def is_rolling_dynamic_fit_mode(mode_raw: str) -> bool:
@@ -768,6 +821,7 @@ def parse_and_validate_event_feature_knobs(
     peak_pre_filter_text: str | None = None,
     peak_prominence_k_str: str | None = None,
     peak_width_sec_str: str | None = None,
+    signal_excursion_polarity_text: str | None = None,
 ) -> tuple[dict | None, str | None]:
     """
     Parses and validates the event + feature advanced knobs.
@@ -778,6 +832,24 @@ def parse_and_validate_event_feature_knobs(
     allowed_event_signals = get_allowed_event_signals_from_config()
     if event_sig_method not in allowed_event_signals:
         return None, "Invalid Event Signal."
+
+    include_polarity = (
+        signal_excursion_polarity_text is not None
+        or "signal_excursion_polarity" in defaults
+    )
+    signal_excursion_polarity = "positive"
+    if include_polarity:
+        if signal_excursion_polarity_text is None:
+            signal_excursion_polarity = normalize_signal_excursion_polarity(
+                str(defaults.get("signal_excursion_polarity", "positive"))
+            )
+        else:
+            signal_excursion_polarity = normalize_signal_excursion_polarity(
+                signal_excursion_polarity_text
+            )
+        allowed_polarities = get_allowed_signal_excursion_polarities_from_config()
+        if signal_excursion_polarity not in allowed_polarities:
+            return None, "Invalid Signal Excursion Polarity."
 
     peak_method = peak_method_text.strip()
     allowed_peak_methods = get_allowed_peak_threshold_methods_from_config()
@@ -830,6 +902,8 @@ def parse_and_validate_event_feature_knobs(
         "peak_pre_filter": peak_pre_filter,
         "event_auc_baseline": auc_baseline,
     }
+    if include_polarity:
+        overrides["signal_excursion_polarity"] = signal_excursion_polarity
 
     if peak_threshold_method_requires_k(peak_method):
         try:
@@ -1699,6 +1773,22 @@ class MainWindow(QMainWindow):
         )
         tuning_form.addRow(_tuning_row_label("Event Signal:"), self._tuning_event_signal_combo)
 
+        self._tuning_signal_excursion_polarity_combo = QComboBox()
+        self._tuning_signal_excursion_polarity_combo.setMinimumWidth(220)
+        for mode in get_allowed_signal_excursion_polarities_from_config():
+            normalized_mode = normalize_signal_excursion_polarity(mode)
+            self._tuning_signal_excursion_polarity_combo.addItem(
+                signal_excursion_polarity_label(normalized_mode),
+                normalized_mode,
+            )
+        self._tuning_signal_excursion_polarity_combo.setToolTip(
+            signal_excursion_polarity_tooltip_text()
+        )
+        tuning_form.addRow(
+            _tuning_row_label("Signal Excursion Polarity:"),
+            self._tuning_signal_excursion_polarity_combo,
+        )
+
         self._tuning_peak_method_combo = QComboBox()
         self._tuning_peak_method_combo.setMinimumWidth(220)
         self._tuning_peak_method_combo.addItems(get_allowed_peak_threshold_methods_from_config())
@@ -1786,7 +1876,7 @@ class MainWindow(QMainWindow):
         self._tuning_event_auc_combo.setMinimumWidth(220)
         self._tuning_event_auc_combo.addItems(get_allowed_event_auc_baselines_from_config())
         self._tuning_event_auc_combo.setToolTip(
-            "Reference baseline convention used when integrating event AUC."
+            event_auc_semantics_tooltip_text()
         )
         tuning_form.addRow(_tuning_row_label("Event AUC Baseline:"), self._tuning_event_auc_combo)
         self._apply_form_row_tooltips(tuning_form)
@@ -2084,6 +2174,32 @@ class MainWindow(QMainWindow):
         )
         form.addRow(_corr_row_label("Dynamic Fit Mode:"), self._correction_tuning_fit_mode_combo)
 
+        self._correction_tuning_signal_excursion_polarity_combo = QComboBox()
+        self._correction_tuning_signal_excursion_polarity_combo.setMinimumWidth(240)
+        for mode_name in get_allowed_signal_excursion_polarities_from_config():
+            normalized_mode = normalize_signal_excursion_polarity(mode_name)
+            self._correction_tuning_signal_excursion_polarity_combo.addItem(
+                signal_excursion_polarity_label(normalized_mode),
+                normalized_mode,
+            )
+        default_corr_polarity = normalize_signal_excursion_polarity(
+            str(getattr(self._default_cfg, "signal_excursion_polarity", "positive"))
+        )
+        idx_corr_polarity = self._correction_tuning_signal_excursion_polarity_combo.findData(
+            default_corr_polarity
+        )
+        if idx_corr_polarity >= 0:
+            self._correction_tuning_signal_excursion_polarity_combo.setCurrentIndex(
+                idx_corr_polarity
+            )
+        self._correction_tuning_signal_excursion_polarity_combo.setToolTip(
+            signal_excursion_polarity_tooltip_text()
+        )
+        form.addRow(
+            _corr_row_label("Signal Excursion Polarity:"),
+            self._correction_tuning_signal_excursion_polarity_combo,
+        )
+
         self._correction_tuning_fit_mode_note = QLabel("")
         self._correction_tuning_fit_mode_note.setWordWrap(True)
         self._correction_tuning_fit_mode_note.setStyleSheet("font-size: 11px; color: #666;")
@@ -2353,6 +2469,9 @@ class MainWindow(QMainWindow):
         self._correction_tuning_adaptive_smooth_window_spin.valueChanged.connect(self._on_config_changed)
         self._correction_tuning_adaptive_min_trust_fraction_spin.valueChanged.connect(self._on_config_changed)
         self._correction_tuning_adaptive_freeze_interp_combo.currentIndexChanged.connect(self._on_config_changed)
+        self._correction_tuning_signal_excursion_polarity_combo.currentIndexChanged.connect(
+            self._on_config_changed
+        )
         self._apply_form_row_tooltips(form)
         self._apply_correction_tuning_fit_mode_ui_state()
 
@@ -3150,6 +3269,14 @@ class MainWindow(QMainWindow):
     def _apply_tuning_defaults_from_config(self, cfg: Config) -> None:
         if self._tuning_event_signal_combo.findText(str(cfg.event_signal)) >= 0:
             self._tuning_event_signal_combo.setCurrentText(str(cfg.event_signal))
+        tuning_polarity = normalize_signal_excursion_polarity(
+            str(getattr(cfg, "signal_excursion_polarity", "positive"))
+        )
+        idx_tuning_polarity = self._tuning_signal_excursion_polarity_combo.findData(
+            tuning_polarity
+        )
+        if idx_tuning_polarity >= 0:
+            self._tuning_signal_excursion_polarity_combo.setCurrentIndex(idx_tuning_polarity)
         if self._tuning_peak_method_combo.findText(str(cfg.peak_threshold_method)) >= 0:
             self._tuning_peak_method_combo.setCurrentText(str(cfg.peak_threshold_method))
         self._tuning_peak_k_spin.setValue(float(cfg.peak_threshold_k))
@@ -3345,6 +3472,7 @@ class MainWindow(QMainWindow):
         method = self._tuning_peak_method_combo.currentText().strip()
         overrides = {
             "event_signal": self._tuning_event_signal_combo.currentText().strip(),
+            "signal_excursion_polarity": self._selected_tuning_signal_excursion_polarity(),
             "peak_threshold_method": method,
             "peak_min_distance_sec": float(self._tuning_peak_dist_spin.value()),
             "peak_min_prominence_k": float(self._tuning_peak_prominence_k_spin.value()),
@@ -3370,6 +3498,12 @@ class MainWindow(QMainWindow):
         changed: list[str] = []
         if str(overrides.get("event_signal", "")) != str(baseline_cfg.event_signal):
             changed.append("event signal")
+        if normalize_signal_excursion_polarity(
+            str(overrides.get("signal_excursion_polarity", "positive"))
+        ) != normalize_signal_excursion_polarity(
+            str(getattr(baseline_cfg, "signal_excursion_polarity", "positive"))
+        ):
+            changed.append("signal excursion polarity")
         if str(overrides.get("peak_threshold_method", "")) != str(baseline_cfg.peak_threshold_method):
             changed.append("threshold method")
         if self._floats_differ(
@@ -3433,6 +3567,14 @@ class MainWindow(QMainWindow):
         roi = result.get("selected_roi", self._tuning_roi_combo.currentText().strip() or "(unknown)")
         chunk = result.get("inspection_chunk_id", self._tuning_chunk_combo.currentData() or "(unknown)")
         event_signal = result.get("event_signal_used", "(unknown)")
+        polarity_used = normalize_signal_excursion_polarity(
+            str(
+                result.get(
+                    "signal_excursion_polarity_used",
+                    self._selected_tuning_signal_excursion_polarity(),
+                )
+            )
+        )
         retune_dir = result.get("retune_dir", "(unknown)")
         changed = self._tuning_last_changed_fields
         changed_text = ", ".join(changed[:5]) if changed else "none detected"
@@ -3446,6 +3588,8 @@ class MainWindow(QMainWindow):
             f"ROI: {roi}",
             f"Preview session: {chunk}",
             f"Event signal: {event_signal}",
+            f"Excursion polarity: {signal_excursion_polarity_label(polarity_used)}",
+            signal_excursion_polarity_auc_summary_text(polarity_used),
             f"Changed vs baseline: {changed_text}",
             f"Apply-back to next run: {apply_text}",
             f"Retune output: {retune_dir}",
@@ -3551,7 +3695,9 @@ class MainWindow(QMainWindow):
             return
 
         def _set_combo_if_allowed(combo: QComboBox, value: str) -> None:
-            idx = combo.findText(value)
+            idx = combo.findData(value)
+            if idx < 0:
+                idx = combo.findText(value)
             if idx >= 0:
                 combo.setCurrentIndex(idx)
 
@@ -3560,6 +3706,10 @@ class MainWindow(QMainWindow):
             return text.rstrip("0").rstrip(".") if "." in text else text
 
         _set_combo_if_allowed(self._event_signal_combo, self._tuning_event_signal_combo.currentText().strip())
+        _set_combo_if_allowed(
+            self._signal_excursion_polarity_combo,
+            self._selected_tuning_signal_excursion_polarity(),
+        )
 
         method = self._tuning_peak_method_combo.currentText().strip()
         _set_combo_if_allowed(self._peak_method_combo, method)
@@ -3897,6 +4047,14 @@ class MainWindow(QMainWindow):
         method = str(cfg.baseline_method)
         if self._correction_tuning_baseline_method_combo.findText(method) >= 0:
             self._correction_tuning_baseline_method_combo.setCurrentText(method)
+        correction_polarity = normalize_signal_excursion_polarity(
+            str(getattr(cfg, "signal_excursion_polarity", "positive"))
+        )
+        idx_polarity = self._correction_tuning_signal_excursion_polarity_combo.findData(
+            correction_polarity
+        )
+        if idx_polarity >= 0:
+            self._correction_tuning_signal_excursion_polarity_combo.setCurrentIndex(idx_polarity)
         fit_mode = normalize_dynamic_fit_mode(
             str(getattr(cfg, "dynamic_fit_mode", "rolling_local_regression"))
         )
@@ -3964,6 +4122,7 @@ class MainWindow(QMainWindow):
         fit_mode = self._selected_correction_tuning_fit_mode()
         overrides = {
             "dynamic_fit_mode": fit_mode,
+            "signal_excursion_polarity": self._selected_correction_tuning_signal_excursion_polarity(),
             "baseline_method": self._correction_tuning_baseline_method_combo.currentText().strip(),
             "baseline_percentile": float(self._correction_tuning_baseline_pct_spin.value()),
             "lowpass_hz": float(self._correction_tuning_lowpass_spin.value()),
@@ -4047,6 +4206,13 @@ class MainWindow(QMainWindow):
             text = f"{float(value):.{decimals}f}"
             return text.rstrip("0").rstrip(".") if "." in text else text
 
+        def _set_combo_if_allowed(combo: QComboBox, value: str) -> None:
+            idx = combo.findData(value)
+            if idx < 0:
+                idx = combo.findText(value)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+
         fit_mode = normalize_dynamic_fit_mode(
             str(overrides.get("dynamic_fit_mode", "rolling_filtered_to_raw"))
         )
@@ -4057,6 +4223,12 @@ class MainWindow(QMainWindow):
         method = str(overrides.get("baseline_method", "")).strip()
         if method and self._baseline_method_combo.findText(method) >= 0:
             self._baseline_method_combo.setCurrentText(method)
+        _set_combo_if_allowed(
+            self._signal_excursion_polarity_combo,
+            normalize_signal_excursion_polarity(
+                str(overrides.get("signal_excursion_polarity", "positive"))
+            ),
+        )
 
         if "baseline_percentile" in overrides:
             self._baseline_percentile_edit.setText(
@@ -4207,6 +4379,12 @@ class MainWindow(QMainWindow):
             lines = [
                 f"ROI: {result.get('selected_roi', roi)}",
                 f"Dynamic fit mode: {dynamic_fit_mode_label(overrides.get('dynamic_fit_mode', 'rolling_local_regression'))}",
+                (
+                    "Excursion polarity: "
+                    + signal_excursion_polarity_label(
+                        str(overrides.get("signal_excursion_polarity", "positive"))
+                    )
+                ),
                 (
                     "Baseline subtract before fit: "
                     + (
@@ -5278,6 +5456,9 @@ class MainWindow(QMainWindow):
         base_cfg = self._active_baseline_config()
         return {
             "event_signal": base_cfg.event_signal,
+            "signal_excursion_polarity": normalize_signal_excursion_polarity(
+                str(getattr(base_cfg, "signal_excursion_polarity", "positive"))
+            ),
             "peak_threshold_method": base_cfg.peak_threshold_method,
             "peak_threshold_k": base_cfg.peak_threshold_k,
             "peak_threshold_percentile": base_cfg.peak_threshold_percentile,
@@ -5293,6 +5474,7 @@ class MainWindow(QMainWindow):
         """Sync the full main-run event-feature subsection to active baseline defaults."""
         required_attrs = (
             "_event_signal_combo",
+            "_signal_excursion_polarity_combo",
             "_peak_method_combo",
             "_peak_k_edit",
             "_peak_pct_edit",
@@ -5309,6 +5491,9 @@ class MainWindow(QMainWindow):
         base_cfg = self._active_baseline_config()
         defaults = {
             "event_signal": str(base_cfg.event_signal),
+            "signal_excursion_polarity": normalize_signal_excursion_polarity(
+                str(getattr(base_cfg, "signal_excursion_polarity", "positive"))
+            ),
             "peak_threshold_method": str(base_cfg.peak_threshold_method),
             "peak_threshold_k": float(base_cfg.peak_threshold_k),
             "peak_threshold_percentile": float(base_cfg.peak_threshold_percentile),
@@ -5321,9 +5506,14 @@ class MainWindow(QMainWindow):
         }
 
         def _sync_combo(combo: QComboBox, value_text: str) -> None:
+            current_data = combo.currentData()
+            if current_data is not None and str(current_data).strip() == value_text:
+                return
             if combo.currentText().strip() == value_text:
                 return
-            idx = combo.findText(value_text)
+            idx = combo.findData(value_text)
+            if idx < 0:
+                idx = combo.findText(value_text)
             if idx < 0:
                 return
             blocked = combo.blockSignals(True)
@@ -5347,6 +5537,10 @@ class MainWindow(QMainWindow):
             edit.blockSignals(blocked)
 
         _sync_combo(self._event_signal_combo, defaults["event_signal"])
+        _sync_combo(
+            self._signal_excursion_polarity_combo,
+            defaults["signal_excursion_polarity"],
+        )
         _sync_combo(self._peak_method_combo, defaults["peak_threshold_method"])
         _sync_numeric(self._peak_k_edit, defaults["peak_threshold_k"])
         _sync_numeric(self._peak_pct_edit, defaults["peak_threshold_percentile"])
@@ -5819,6 +6013,7 @@ class MainWindow(QMainWindow):
             peak_pre_filter_text=self._peak_pre_filter_combo.currentText(),
             peak_prominence_k_str=self._peak_min_prominence_k_edit.text(),
             peak_width_sec_str=self._peak_min_width_sec_edit.text(),
+            signal_excursion_polarity_text=self._selected_signal_excursion_polarity(),
         )
         if ev_overrides is not None:
             changed_ev_overrides = compute_overrides_user_changed(ev_overrides, default_ev_dict)
@@ -6128,6 +6323,7 @@ class MainWindow(QMainWindow):
             peak_pre_filter_text=self._peak_pre_filter_combo.currentText(),
             peak_prominence_k_str=self._peak_min_prominence_k_edit.text(),
             peak_width_sec_str=self._peak_min_width_sec_edit.text(),
+            signal_excursion_polarity_text=self._selected_signal_excursion_polarity(),
         )
         if err:
             return err
@@ -7175,6 +7371,21 @@ class MainWindow(QMainWindow):
         if self._peak_pre_filter_combo.findText(peak_pre_filter) >= 0:
             self._peak_pre_filter_combo.setCurrentText(peak_pre_filter)
 
+        signal_excursion_polarity = normalize_signal_excursion_polarity(
+            str(
+                self._settings.value(
+                    "signal_excursion_polarity",
+                    str(getattr(self._default_cfg, "signal_excursion_polarity", "positive")),
+                    str,
+                )
+            )
+        )
+        idx_signal_excursion = self._signal_excursion_polarity_combo.findData(
+            signal_excursion_polarity
+        )
+        if idx_signal_excursion >= 0:
+            self._signal_excursion_polarity_combo.setCurrentIndex(idx_signal_excursion)
+
         overwrite = self._settings.value("overwrite", False, bool)
         self._overwrite_cb.setChecked(overwrite)
         self._settings.endGroup()
@@ -7282,6 +7493,10 @@ class MainWindow(QMainWindow):
         self._settings.setValue("dff_render_mode", self._dff_render_mode_combo.currentText())
         self._settings.setValue("stacked_render_mode", self._stacked_render_mode_combo.currentText())
         self._settings.setValue("peak_pre_filter", self._peak_pre_filter_combo.currentText())
+        self._settings.setValue(
+            "signal_excursion_polarity",
+            self._selected_signal_excursion_polarity(),
+        )
         self._settings.setValue("overwrite", self._overwrite_cb.isChecked())
         self._settings.endGroup()
         self._settings.sync()
@@ -7405,6 +7620,41 @@ class MainWindow(QMainWindow):
         return normalize_dynamic_fit_mode(
             str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
         )
+
+    def _selected_signal_excursion_polarity(self) -> str:
+        combo = getattr(self, "_signal_excursion_polarity_combo", None)
+        if combo is not None:
+            data = combo.currentData()
+            if data:
+                return normalize_signal_excursion_polarity(str(data))
+            text = combo.currentText().strip()
+            if text:
+                return normalize_signal_excursion_polarity(text)
+        return normalize_signal_excursion_polarity(
+            str(getattr(self._default_cfg, "signal_excursion_polarity", "positive"))
+        )
+
+    def _selected_tuning_signal_excursion_polarity(self) -> str:
+        combo = getattr(self, "_tuning_signal_excursion_polarity_combo", None)
+        if combo is not None:
+            data = combo.currentData()
+            if data:
+                return normalize_signal_excursion_polarity(str(data))
+            text = combo.currentText().strip()
+            if text:
+                return normalize_signal_excursion_polarity(text)
+        return self._selected_signal_excursion_polarity()
+
+    def _selected_correction_tuning_signal_excursion_polarity(self) -> str:
+        combo = getattr(self, "_correction_tuning_signal_excursion_polarity_combo", None)
+        if combo is not None:
+            data = combo.currentData()
+            if data:
+                return normalize_signal_excursion_polarity(str(data))
+            text = combo.currentText().strip()
+            if text:
+                return normalize_signal_excursion_polarity(text)
+        return self._selected_signal_excursion_polarity()
 
     def _selected_tonic_output_mode(self) -> str:
         combo = getattr(self, "_tonic_output_mode_combo", None)
@@ -7620,6 +7870,12 @@ class MainWindow(QMainWindow):
                 f"Dynamic Fit Mode: {dynamic_fit_mode_label(self._selected_dynamic_fit_mode())}"
                 if phasic_active
                 else "Dynamic Fit Mode: (inactive in tonic mode)"
+            ),
+            (
+                "Signal Excursion Polarity: "
+                + signal_excursion_polarity_label(self._selected_signal_excursion_polarity())
+                if phasic_active
+                else "Signal Excursion Polarity: (inactive in tonic mode)"
             ),
             (
                 (
@@ -8783,6 +9039,28 @@ class MainWindow(QMainWindow):
         self._event_signal_combo.currentIndexChanged.connect(self._on_config_changed)
         ev_layout.addRow("Event Signal:", self._event_signal_combo)
 
+        self._signal_excursion_polarity_combo = QComboBox()
+        allowed_polarities = get_allowed_signal_excursion_polarities_from_config()
+        default_polarity = normalize_signal_excursion_polarity(
+            str(getattr(self._default_cfg, "signal_excursion_polarity", "positive"))
+        )
+        if default_polarity not in allowed_polarities:
+            allowed_polarities.append(default_polarity)
+        for mode in allowed_polarities:
+            normalized_mode = normalize_signal_excursion_polarity(mode)
+            self._signal_excursion_polarity_combo.addItem(
+                signal_excursion_polarity_label(normalized_mode),
+                normalized_mode,
+            )
+        idx_polarity = self._signal_excursion_polarity_combo.findData(default_polarity)
+        if idx_polarity >= 0:
+            self._signal_excursion_polarity_combo.setCurrentIndex(idx_polarity)
+        self._signal_excursion_polarity_combo.setToolTip(
+            signal_excursion_polarity_tooltip_text()
+        )
+        self._signal_excursion_polarity_combo.currentIndexChanged.connect(self._on_config_changed)
+        ev_layout.addRow("Signal Excursion Polarity:", self._signal_excursion_polarity_combo)
+
         self._peak_method_combo = QComboBox()
         allowed_peak_methods = get_allowed_peak_threshold_methods_from_config()
         if self._default_cfg.peak_threshold_method not in allowed_peak_methods:
@@ -8869,7 +9147,7 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self._event_auc_combo.setCurrentIndex(idx)
         self._event_auc_combo.setToolTip(
-            "Reference baseline convention used when integrating event AUC."
+            event_auc_semantics_tooltip_text()
         )
         self._event_auc_combo.currentIndexChanged.connect(self._on_config_changed)
         ev_layout.addRow("Event AUC Baseline:", self._event_auc_combo)

@@ -247,6 +247,24 @@ def test_correction_retune_accepts_dynamic_fit_mode_override_and_records_it(tmp_
     assert req["correction_overrides_applied"]["dynamic_fit_mode"] == "global_linear_regression"
 
 
+def test_correction_retune_accepts_signal_excursion_polarity_override(tmp_path):
+    run_dir = _make_completed_run_fixture(tmp_path)
+    result = run_cache_correction_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={"signal_excursion_polarity": "both"},
+    )
+
+    with open(os.path.join(result["retune_dir"], "retune_config_effective.yaml"), "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["signal_excursion_polarity"] == "both"
+
+    with open(os.path.join(result["retune_dir"], "retune_request.json"), "r", encoding="utf-8") as f:
+        req = json.load(f)
+    assert req["correction_overrides_applied"]["signal_excursion_polarity"] == "both"
+    assert "signal_excursion_polarity" in req["override_classification"]["correction_supported"]
+
+
 def test_correction_retune_accepts_baseline_subtract_override_and_records_it(tmp_path):
     run_dir = _make_completed_run_fixture(tmp_path)
     result = run_cache_correction_retune(
