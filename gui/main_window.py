@@ -947,6 +947,15 @@ class MainWindow(QMainWindow):
         self._shell_workspace_left_ratio = 0.32
         self._shell_setup_right_min = 380
         self._shell_workspace_right_min = 500
+        self._left_pane_collapsed = False
+        self._right_pane_collapsed = False
+        self._left_pane_last_nonzero_width = max(
+            self._shell_left_width_floor, self._shell_setup_left_min
+        )
+        self._right_pane_last_nonzero_width = self._shell_setup_right_min
+        self._pending_left_restore_width = None
+        self._pending_right_restore_width = None
+        self._splitter_restore_reapply_passes = 0
         self._tuning_workspace_available = False
         self._tuning_last_result = None
         self._tuning_last_changed_fields: list[str] = []
@@ -1036,6 +1045,20 @@ class MainWindow(QMainWindow):
 
         top_row.addStretch(1)
 
+        self._left_pane_toggle_btn = QPushButton("Hide Workflow")
+        self._left_pane_toggle_btn.setToolTip(
+            "Collapse or expand the left workflow/setup pane."
+        )
+        self._left_pane_toggle_btn.clicked.connect(self._toggle_left_pane_collapsed)
+        top_row.addWidget(self._left_pane_toggle_btn, 0)
+
+        self._right_pane_toggle_btn = QPushButton("Hide Results")
+        self._right_pane_toggle_btn.setToolTip(
+            "Collapse or expand the right results pane."
+        )
+        self._right_pane_toggle_btn.clicked.connect(self._toggle_right_pane_collapsed)
+        top_row.addWidget(self._right_pane_toggle_btn, 0)
+
         self._preview_badge = QLabel("PREVIEW")
         self._preview_badge.setStyleSheet(
             "font-weight: bold; color: white; background: #d9534f; "
@@ -1044,6 +1067,7 @@ class MainWindow(QMainWindow):
         self._preview_badge.hide()
         top_row.addWidget(self._preview_badge, 0)
         card.addLayout(top_row)
+        self._refresh_pane_toggle_buttons()
 
         progress_row = QHBoxLayout()
         progress_row.setContentsMargins(0, 0, 0, 0)
@@ -1087,7 +1111,7 @@ class MainWindow(QMainWindow):
         row.setSpacing(0)
 
         splitter = QSplitter(Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
+        splitter.setChildrenCollapsible(True)
         splitter.setHandleWidth(2)
         splitter.setFocusPolicy(Qt.NoFocus)
         self._main_splitter = splitter
@@ -1099,6 +1123,8 @@ class MainWindow(QMainWindow):
         splitter.addWidget(left_pane)
         self._results_pane = self._build_results_pane()
         splitter.addWidget(self._results_pane)
+        splitter.setCollapsible(0, True)
+        splitter.setCollapsible(1, True)
         self._lock_main_splitter_handle()
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -1161,27 +1187,163 @@ class MainWindow(QMainWindow):
         if left_pane.minimumWidth() != floor:
             left_pane.setMinimumWidth(floor)
 
-    def _apply_splitter_setup_mode(self) -> None:
+    def _record_splitter_nonzero_sizes(self) -> None:
+        splitter = getattr(self, "_main_splitter", None)
+        if splitter is None:
+            return
+        sizes = splitter.sizes()
+        if len(sizes) < 2:
+            return
+        left = int(sizes[0])
+        right = int(sizes[1])
+        if left > 0:
+            self._left_pane_last_nonzero_width = left
+        if right > 0:
+            self._right_pane_last_nonzero_width = right
+
+    def _clamp_left_width_for_mode(self, left: int, *, setup_mode: bool, total: int) -> int:
+        left_pane = getattr(self, "_left_pane", None)
+        if left_pane is None:
+            return max(0, min(int(left), int(total)))
+        left_floor = left_pane.minimumWidth()
+        clamped = max(int(left), left_floor)
+        clamped = min(clamped, left_pane.maximumWidth())
+        right_floor = self._shell_setup_right_min if setup_mode else self._shell_workspace_right_min
+        max_left_for_right_floor = total - right_floor
+        if max_left_for_right_floor >= left_floor:
+            clamped = min(clamped, max_left_for_right_floor)
+        return max(0, min(clamped, int(total)))
+
+    def _refresh_pane_toggle_buttons(self) -> None:
+        if hasattr(self, "_left_pane_toggle_btn"):
+            self._left_pane_toggle_btn.setText(
+                "Show Workflow" if self._left_pane_collapsed else "Hide Workflow"
+            )
+        if hasattr(self, "_right_pane_toggle_btn"):
+            self._right_pane_toggle_btn.setText(
+                "Show Results" if self._right_pane_collapsed else "Hide Results"
+            )
+
+    def _apply_splitter_mode(self, *, setup_mode: bool) -> None:
         splitter = getattr(self, "_main_splitter", None)
         left_pane = getattr(self, "_left_pane", None)
         if splitter is None or left_pane is None:
             return
-        self._set_shell_left_floor(setup_mode=True)
+
+        if self._left_pane_collapsed and self._right_pane_collapsed:
+            # Keep at least one pane visible.
+            self._right_pane_collapsed = False
+
         total = self._splitter_total_width()
-        left = self._target_splitter_left_width(setup_mode=True)
-        right = max(1, total - left)
-        splitter.setSizes([left, right])
+        if total <= 0:
+            return
+
+        if self._left_pane_collapsed:
+            if left_pane.minimumWidth() != 0:
+                left_pane.setMinimumWidth(0)
+            left = 0
+            right = max(1, total)
+            self._pending_left_restore_width = None
+            self._splitter_restore_reapply_passes = 0
+        else:
+            self._set_shell_left_floor(setup_mode=setup_mode)
+            if self._right_pane_collapsed:
+                preferred_left = self._pending_left_restore_width
+                if preferred_left is None or int(preferred_left) <= 0:
+                    preferred_left = self._left_pane_last_nonzero_width
+                if int(preferred_left) <= 0:
+                    preferred_left = self._target_splitter_left_width(setup_mode=setup_mode)
+                left = max(1, min(int(preferred_left), int(total)))
+                right = 0
+                self._splitter_restore_reapply_passes = 0
+            else:
+                if (
+                    self._pending_left_restore_width is not None
+                    or self._pending_right_restore_width is not None
+                ):
+                    left = self._target_splitter_left_width(setup_mode=setup_mode)
+                    if (
+                        self._pending_left_restore_width is not None
+                        and self._pending_right_restore_width is not None
+                    ):
+                        left_pref = float(max(0, int(self._pending_left_restore_width)))
+                        right_pref = float(max(0, int(self._pending_right_restore_width)))
+                        total_pref = left_pref + right_pref
+                        if total_pref > 0:
+                            left = int(total * (left_pref / total_pref))
+                    elif self._pending_left_restore_width is not None:
+                        left = int(self._pending_left_restore_width)
+                    elif self._pending_right_restore_width is not None:
+                        left = int(total) - int(self._pending_right_restore_width)
+                    left = self._clamp_left_width_for_mode(
+                        left, setup_mode=setup_mode, total=total
+                    )
+                    # _refresh_splitter_workspace_policy applies twice; hold restored
+                    # widths for one additional pass so restore does not get overwritten.
+                    self._splitter_restore_reapply_passes = 1
+                elif self._splitter_restore_reapply_passes > 0:
+                    pref_total = (
+                        max(0, int(self._left_pane_last_nonzero_width))
+                        + max(0, int(self._right_pane_last_nonzero_width))
+                    )
+                    if pref_total > 0:
+                        left = int(
+                            total
+                            * (max(0, int(self._left_pane_last_nonzero_width)) / pref_total)
+                        )
+                        left = self._clamp_left_width_for_mode(
+                            left, setup_mode=setup_mode, total=total
+                        )
+                    else:
+                        left = self._target_splitter_left_width(setup_mode=setup_mode)
+                    self._splitter_restore_reapply_passes -= 1
+                else:
+                    left = self._target_splitter_left_width(setup_mode=setup_mode)
+                right = max(1, int(total) - int(left))
+            self._pending_left_restore_width = None
+
+        self._pending_right_restore_width = None
+        splitter.setSizes([int(left), int(right)])
+        self._record_splitter_nonzero_sizes()
+        self._refresh_pane_toggle_buttons()
+
+    def _toggle_left_pane_collapsed(self) -> None:
+        self._record_splitter_nonzero_sizes()
+        if self._left_pane_collapsed:
+            self._left_pane_collapsed = False
+            self._pending_left_restore_width = max(1, int(self._left_pane_last_nonzero_width))
+        else:
+            if self._right_pane_collapsed:
+                self._right_pane_collapsed = False
+                self._pending_right_restore_width = max(
+                    1, int(self._right_pane_last_nonzero_width)
+                )
+            self._left_pane_collapsed = True
+            self._pending_left_restore_width = None
+        self._refresh_splitter_workspace_policy()
+
+    def _toggle_right_pane_collapsed(self) -> None:
+        self._record_splitter_nonzero_sizes()
+        if self._right_pane_collapsed:
+            self._right_pane_collapsed = False
+            self._pending_right_restore_width = max(
+                1, int(self._right_pane_last_nonzero_width)
+            )
+        else:
+            if self._left_pane_collapsed:
+                self._left_pane_collapsed = False
+                self._pending_left_restore_width = max(
+                    1, int(self._left_pane_last_nonzero_width)
+                )
+            self._right_pane_collapsed = True
+            self._pending_right_restore_width = None
+        self._refresh_splitter_workspace_policy()
+
+    def _apply_splitter_setup_mode(self) -> None:
+        self._apply_splitter_mode(setup_mode=True)
 
     def _apply_splitter_workspace_mode(self) -> None:
-        splitter = getattr(self, "_main_splitter", None)
-        left_pane = getattr(self, "_left_pane", None)
-        if splitter is None or left_pane is None:
-            return
-        self._set_shell_left_floor(setup_mode=False)
-        total = self._splitter_total_width()
-        left = self._target_splitter_left_width(setup_mode=False)
-        right = max(1, total - left)
-        splitter.setSizes([left, right])
+        self._apply_splitter_mode(setup_mode=False)
 
     def _is_workspace_splitter_mode(self) -> bool:
         if self._is_complete_workspace_active:

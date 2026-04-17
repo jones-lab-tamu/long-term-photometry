@@ -896,6 +896,88 @@ def test_shell_splitter_handle_is_non_interactive(window, qapp):
     assert abs(after[1] - before[1]) <= 2
 
 
+def test_splitter_left_pane_collapse_expand_restores_prior_width(window, qapp):
+    window.show()
+    window.resize(1400, 900)
+    qapp.processEvents()
+
+    window._left_pane_collapsed = False
+    window._right_pane_collapsed = False
+    window._refresh_splitter_workspace_policy()
+    qapp.processEvents()
+    before_left, before_right = window._main_splitter.sizes()
+    assert before_left > 0
+    assert before_right > 0
+    assert window._left_pane_toggle_btn.text() == "Hide Workflow"
+
+    window._toggle_left_pane_collapsed()
+    qapp.processEvents()
+    collapsed_left, collapsed_right = window._main_splitter.sizes()
+    assert collapsed_left <= 2
+    assert collapsed_right >= before_right
+    assert window._left_pane_toggle_btn.text() == "Show Workflow"
+
+    window._refresh_splitter_workspace_policy()
+    qapp.processEvents()
+    collapsed_left_2, _ = window._main_splitter.sizes()
+    assert collapsed_left_2 <= 2
+
+    window._toggle_left_pane_collapsed()
+    qapp.processEvents()
+    restored_left, restored_right = window._main_splitter.sizes()
+    assert restored_left > 0
+    assert restored_right > 0
+    assert abs(restored_left - before_left) <= 24
+    assert window._left_pane_toggle_btn.text() == "Hide Workflow"
+
+
+def test_splitter_right_pane_collapse_expand_restores_prior_width_and_survives_policy(window, qapp):
+    window.show()
+    window.resize(1400, 900)
+    qapp.processEvents()
+
+    window._left_pane_collapsed = False
+    window._right_pane_collapsed = False
+    window._validation_passed = False
+    window._ui_state = RunnerState.IDLE
+    window._is_complete_workspace_active = False
+    window._refresh_splitter_workspace_policy()
+    qapp.processEvents()
+    before_left, before_right = window._main_splitter.sizes()
+    assert before_left > 0
+    assert before_right > 0
+    assert window._right_pane_toggle_btn.text() == "Hide Results"
+
+    window._toggle_right_pane_collapsed()
+    qapp.processEvents()
+    collapsed_left, collapsed_right = window._main_splitter.sizes()
+    assert collapsed_right <= 2
+    assert collapsed_left >= before_left
+    assert window._right_pane_toggle_btn.text() == "Show Results"
+
+    window._validation_passed = True
+    window._ui_state = RunnerState.SUCCESS
+    window._refresh_splitter_workspace_policy()
+    qapp.processEvents()
+    after_policy_left, after_policy_right = window._main_splitter.sizes()
+    assert after_policy_right <= 2
+    assert after_policy_left > 0
+
+    window.resize(1280, 880)
+    qapp.processEvents()
+    after_resize_left, after_resize_right = window._main_splitter.sizes()
+    assert after_resize_right <= 2
+    assert after_resize_left > 0
+
+    window._toggle_right_pane_collapsed()
+    qapp.processEvents()
+    restored_left, restored_right = window._main_splitter.sizes()
+    assert restored_left > 0
+    assert restored_right > 0
+    assert abs(restored_right - before_right) <= 32
+    assert window._right_pane_toggle_btn.text() == "Hide Results"
+
+
 def test_setup_vs_workspace_right_pane_width(window, qapp):
     window.show()
     window.resize(1400, 900)
