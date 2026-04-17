@@ -2717,16 +2717,51 @@ class MainWindow(QMainWindow):
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
+    @staticmethod
+    def _status_channel_linear(channel: float) -> float:
+        c = max(0.0, min(1.0, float(channel)))
+        if c <= 0.04045:
+            return c / 12.92
+        return ((c + 0.055) / 1.055) ** 2.4
+
+    @classmethod
+    def _status_relative_luminance(cls, color: QColor) -> float:
+        r = cls._status_channel_linear(color.redF())
+        g = cls._status_channel_linear(color.greenF())
+        b = cls._status_channel_linear(color.blueF())
+        return (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+
+    @classmethod
+    def _status_contrast_ratio(cls, fg: QColor, bg: QColor) -> float:
+        fg_l = cls._status_relative_luminance(fg)
+        bg_l = cls._status_relative_luminance(bg)
+        lighter = max(fg_l, bg_l)
+        darker = min(fg_l, bg_l)
+        return (lighter + 0.05) / (darker + 0.05)
+
     def _status_color_for_severity(self, severity: str) -> QColor:
         """Palette-aware color mapping for true status labels."""
         pal = self.palette()
         text = pal.color(QPalette.WindowText)
+        bg = pal.color(QPalette.Window)
         if severity in {"neutral", "info"}:
             return text
         if severity == "ready":
             link = pal.color(QPalette.Link)
-            return link if link.isValid() else text
-        bg_is_light = pal.color(QPalette.Window).lightness() >= 128
+            min_ratio = 4.5
+            if link.isValid() and self._status_contrast_ratio(link, bg) >= min_ratio:
+                return link
+            bg_is_light = bg.lightness() >= 128
+            # Palette-aware fallback tuned for readability in both themes.
+            fallback = (
+                QColor.fromRgb(27, 112, 44)
+                if bg_is_light
+                else QColor.fromRgb(143, 214, 156)
+            )
+            if self._status_contrast_ratio(fallback, bg) >= min_ratio:
+                return fallback
+            return text
+        bg_is_light = bg.lightness() >= 128
         if severity == "warn":
             return QColor.fromHsv(36, 180 if bg_is_light else 140, 120 if bg_is_light else 232)
         if severity == "error":

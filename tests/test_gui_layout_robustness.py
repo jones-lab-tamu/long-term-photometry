@@ -4,6 +4,7 @@ import sys
 
 import pytest
 from PySide6.QtCore import qInstallMessageHandler
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication, QSizePolicy, QToolButton, QLabel
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -142,3 +143,47 @@ def test_status_labels_use_centralized_severity_property(window):
     window._use_custom_config_cb.setChecked(True)
     window._update_config_source_ui()
     assert window._active_config_source_label.property("statusSeverity") == "info"
+
+
+def test_ready_color_fallback_has_contrast_in_dark_palette(window, monkeypatch):
+    pal = QPalette()
+    pal.setColor(QPalette.Window, QColor(24, 24, 24))
+    pal.setColor(QPalette.WindowText, QColor(220, 220, 220))
+    pal.setColor(QPalette.Link, QColor(34, 62, 90))  # intentionally low contrast
+
+    monkeypatch.setattr(window, "palette", lambda: pal)
+    ready = window._status_color_for_severity("ready")
+
+    contrast = window._status_contrast_ratio(ready, pal.color(QPalette.Window))
+    assert contrast >= 4.5
+    assert ready != pal.color(QPalette.Link)
+
+
+def test_ready_color_keeps_palette_link_when_contrast_is_good(window, monkeypatch):
+    pal = QPalette()
+    pal.setColor(QPalette.Window, QColor(250, 250, 250))
+    pal.setColor(QPalette.WindowText, QColor(32, 32, 32))
+    pal.setColor(QPalette.Link, QColor(20, 80, 180))
+
+    monkeypatch.setattr(window, "palette", lambda: pal)
+    ready = window._status_color_for_severity("ready")
+    assert ready == pal.color(QPalette.Link)
+
+
+def test_reported_tuning_ready_labels_still_use_central_ready_severity(window):
+    msg_downstream = (
+        "Ready: downstream-only tuning from cache. "
+        "Correction-sensitive parameters are not part of this workspace."
+    )
+    msg_correction = (
+        "Ready: correction retune recomputes the selected ROI across all available sessions. "
+        "The preview session is used only for inspection."
+    )
+
+    window._set_tuning_workspace_available(msg_downstream)
+    window._set_correction_tuning_workspace_available(msg_correction)
+
+    assert window._tuning_availability_label.text() == msg_downstream
+    assert window._correction_tuning_availability_label.text() == msg_correction
+    assert window._tuning_availability_label.property("statusSeverity") == "ready"
+    assert window._correction_tuning_availability_label.property("statusSeverity") == "ready"
