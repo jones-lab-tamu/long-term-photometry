@@ -134,6 +134,19 @@ def parse_args():
         default=default_dff_mode,
         help="dFF renderer mode: 'qc' (default fast lightweight renderer) or 'full' (higher-fidelity Matplotlib renderer)"
     )
+    parser.add_argument(
+        '--show-peak-markers',
+        dest='show_peak_markers',
+        action='store_true',
+        default=True,
+        help="Display-only toggle: draw detected peak markers on dF/F day plots (default: on).",
+    )
+    parser.add_argument(
+        '--hide-peak-markers',
+        dest='show_peak_markers',
+        action='store_false',
+        help="Display-only toggle: hide detected peak markers on dF/F day plots.",
+    )
     
     parser.add_argument('--write-sig-iso-grid', action='store_true', default=True, help="(default true)")
     parser.add_argument('--no-write-sig-iso-grid', dest='write_sig_iso_grid', action='store_false')
@@ -837,7 +850,15 @@ def _build_blank_dff_tile(layout):
     return Image.fromarray(arr, mode='RGB')
 
 
-def _render_dff_panel_tile_lightweight(panel, layout, title_font, global_ymin, global_ymax):
+def _render_dff_panel_tile_lightweight(
+    panel,
+    layout,
+    title_font,
+    global_ymin,
+    global_ymax,
+    *,
+    show_peak_markers: bool,
+):
     trace_sec = 0.0
     marker_sec = 0.0
     title_text_sec = 0.0
@@ -902,29 +923,30 @@ def _render_dff_panel_tile_lightweight(panel, layout, title_font, global_ymin, g
     p_idxs = panel.get('peak_indices', np.array([], dtype=int))
     y_eps = 0.01 * y_span if y_span > 0 else 1e-6
 
-    marker_t0 = time.perf_counter()
-    for idx in p_idxs:
-        if idx < 0 or idx >= len(t):
-            continue
-        px_t = t[idx]
-        py_true = y[idx]
-        if not np.isfinite(px_t) or not np.isfinite(py_true) or px_t < x0 or px_t > x1:
-            continue
+    if show_peak_markers:
+        marker_t0 = time.perf_counter()
+        for idx in p_idxs:
+            if idx < 0 or idx >= len(t):
+                continue
+            px_t = t[idx]
+            py_true = y[idx]
+            if not np.isfinite(px_t) or not np.isfinite(py_true) or px_t < x0 or px_t > x1:
+                continue
 
-        x_float = ((px_t - x0) / x_span) * (plot_w - 1)
-        px = int(round(plot_x0 + np.clip(x_float, 0, plot_w - 1)))
+            x_float = ((px_t - x0) / x_span) * (plot_w - 1)
+            px = int(round(plot_x0 + np.clip(x_float, 0, plot_w - 1)))
 
-        if py_true > (y1 - y_eps):
-            top_y = plot_y0 + 1
-            draw.polygon([(px, top_y), (px - 3, top_y + 6), (px + 3, top_y + 6)], fill=(220, 0, 0))
-        elif py_true < (y0 + y_eps):
-            bot_y = plot_y1 - 1
-            draw.polygon([(px, bot_y), (px - 3, bot_y - 6), (px + 3, bot_y - 6)], fill=(220, 0, 0))
-        else:
-            y_float = ((py_true - y0) / y_span) * (plot_h - 1)
-            py = int(round(plot_y0 + (plot_h - 1) - np.clip(y_float, 0, plot_h - 1)))
-            draw.ellipse((px - 2, py - 2, px + 2, py + 2), fill=(220, 0, 0))
-    marker_sec = time.perf_counter() - marker_t0
+            if py_true > (y1 - y_eps):
+                top_y = plot_y0 + 1
+                draw.polygon([(px, top_y), (px - 3, top_y + 6), (px + 3, top_y + 6)], fill=(220, 0, 0))
+            elif py_true < (y0 + y_eps):
+                bot_y = plot_y1 - 1
+                draw.polygon([(px, bot_y), (px - 3, bot_y - 6), (px + 3, bot_y - 6)], fill=(220, 0, 0))
+            else:
+                y_float = ((py_true - y0) / y_span) * (plot_h - 1)
+                py = int(round(plot_y0 + (plot_h - 1) - np.clip(y_float, 0, plot_h - 1)))
+                draw.ellipse((px - 2, py - 2, px + 2, py + 2), fill=(220, 0, 0))
+        marker_sec = time.perf_counter() - marker_t0
 
     return tile, {
         "trace_sec": trace_sec,
@@ -941,6 +963,7 @@ def _compose_dff_day_tile_canvas_lightweight(
     layout,
     global_ymin,
     global_ymax,
+    show_peak_markers: bool,
     timeline_anchor_label: str = "",
 ):
     tile_w = layout["tile_w"]
@@ -983,7 +1006,12 @@ def _compose_dff_day_tile_canvas_lightweight(
                 day_canvas.paste(blank_tile, (x, y))
             else:
                 panel_tile, panel_stats = _render_dff_panel_tile_lightweight(
-                    panel, layout, chunk_font, global_ymin, global_ymax
+                    panel,
+                    layout,
+                    chunk_font,
+                    global_ymin,
+                    global_ymax,
+                    show_peak_markers=bool(show_peak_markers),
                 )
                 paste_t0 = time.perf_counter()
                 day_canvas.paste(
@@ -1619,6 +1647,7 @@ def _export_dff_day_display_series_csv(
     dff_layout: dict,
     global_ymin: float,
     global_ymax: float,
+    show_peak_markers: bool,
 ):
     out_png = f"phasic_dFF_day_{day:03d}.png"
     csv_path = os.path.join(args.output_dir, f"phasic_dFF_day_{day:03d}_display_series.csv")
@@ -1675,35 +1704,36 @@ def _export_dff_day_display_series_csv(
                     y_vals=panel["dff"],
                 )
 
-            peak_indices = np.asarray(panel.get("peak_indices", np.array([], dtype=int)), dtype=int)
-            for idx in peak_indices.tolist():
-                if idx < 0 or idx >= len(panel["t"]):
-                    continue
-                px = float(panel["t"][idx])
-                py_true = float(panel["dff"][idx])
-                if not np.isfinite(px) or not np.isfinite(py_true):
-                    continue
-                if px < x0 or px > x1:
-                    continue
+            if show_peak_markers:
+                peak_indices = np.asarray(panel.get("peak_indices", np.array([], dtype=int)), dtype=int)
+                for idx in peak_indices.tolist():
+                    if idx < 0 or idx >= len(panel["t"]):
+                        continue
+                    px = float(panel["t"][idx])
+                    py_true = float(panel["dff"][idx])
+                    if not np.isfinite(px) or not np.isfinite(py_true):
+                        continue
+                    if px < x0 or px > x1:
+                        continue
 
-                py_disp = float(np.clip(py_true, y0 + y_eps, y1 - y_eps))
-                marker_shape = "circle"
-                if py_true > (y1 - y_eps):
-                    marker_shape = "triangle_up_clipped"
-                elif py_true < (y0 + y_eps):
-                    marker_shape = "triangle_down_clipped"
-                rows.append(
-                    _base_display_row(
-                        trace_kind="peak_marker",
-                        display_point_role="marker",
-                        x=px,
-                        y=py_disp,
-                        slot_meta=slot_meta,
-                        is_placeholder=False,
-                        display_marker_shape=marker_shape,
-                        **common,
+                    py_disp = float(np.clip(py_true, y0 + y_eps, y1 - y_eps))
+                    marker_shape = "circle"
+                    if py_true > (y1 - y_eps):
+                        marker_shape = "triangle_up_clipped"
+                    elif py_true < (y0 + y_eps):
+                        marker_shape = "triangle_down_clipped"
+                    rows.append(
+                        _base_display_row(
+                            trace_kind="peak_marker",
+                            display_point_role="marker",
+                            x=px,
+                            y=py_disp,
+                            slot_meta=slot_meta,
+                            is_placeholder=False,
+                            display_marker_shape=marker_shape,
+                            **common,
+                        )
                     )
-                )
 
     _write_display_series_csv(csv_path, rows)
 
@@ -1807,7 +1837,10 @@ def main():
     feats_path = os.path.join(args.analysis_out, 'features', 'features.csv')
     
     needs_dff_trace = args.write_dff_grid or args.write_stacked
-    needs_peak_verification = args.write_dff_grid
+    # Display-only marker toggle:
+    # - markers ON  -> verify/reconstruct peak indices (requires features.csv)
+    # - markers OFF -> dF/F day plots render from cached traces only
+    needs_peak_verification = bool(args.write_dff_grid and args.show_peak_markers)
     
     # 1. Open the HDF5 Cache (Mandatory source for discovery and data)
     cache_path = os.path.join(args.analysis_out, 'phasic_trace_cache.h5')
@@ -2054,7 +2087,7 @@ def main():
         cached_data.append(c_rec)
         cached_by_day.setdefault(cr.day_idx, []).append(c_rec)
         
-        if needs_peak_verification:
+        if args.write_dff_grid:
             y_dff = rec['y_dff']
             global_dff_values.append(y_dff[np.isfinite(y_dff)])
 
@@ -2120,7 +2153,7 @@ def main():
                         # Peak Overlays (Clipped vs unclipped)
                         p_idxs = p['peak_indices']
                         n_clipped = 0
-                        if len(p_idxs) > 0:
+                        if args.show_peak_markers and len(p_idxs) > 0:
                             px = p['t'][p_idxs]
                             py_true = p['dff'][p_idxs]
                             py_plot = np.clip(py_true, global_ymin + eps, global_ymax - eps)
@@ -2162,6 +2195,7 @@ def main():
                         dff_layout=dff_qc_layout,
                         global_ymin=global_ymin,
                         global_ymax=global_ymax,
+                        show_peak_markers=bool(args.show_peak_markers),
                     )
             plt.close(fig_dff)
         else:
@@ -2179,6 +2213,7 @@ def main():
                     layout=dff_qc_layout,
                     global_ymin=global_ymin,
                     global_ymax=global_ymax,
+                    show_peak_markers=bool(args.show_peak_markers),
                     timeline_anchor_label=timeline_anchor_label,
                 )
                 compose_sec = time.perf_counter() - compose_t0
@@ -2215,6 +2250,7 @@ def main():
                         dff_layout=dff_qc_layout,
                         global_ymin=global_ymin,
                         global_ymax=global_ymax,
+                        show_peak_markers=bool(args.show_peak_markers),
                     )
 
     # ------------------------------------------------------------------

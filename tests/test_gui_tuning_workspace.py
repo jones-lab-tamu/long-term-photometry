@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QGroupBox, QSizePolicy, QMessageBox,
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from gui.main_window import MainWindow
+import gui.main_window as main_window_module
 from photometry_pipeline.config import Config
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.io.hdf5_cache import Hdf5TraceCacheWriter
@@ -344,6 +345,219 @@ def test_open_results_missing_tuning_artifacts_reports_honest_reason(window, tmp
     assert "_analysis/phasic_out" in window._correction_tuning_availability_label.text()
     assert "only after a successful completed run is loaded" not in window._tuning_availability_label.text().lower()
     assert "only after a successful completed run is loaded" not in window._correction_tuning_availability_label.text().lower()
+
+
+def test_completed_run_dff_rerender_marker_off_uses_display_only_bundle(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path / "dff_rerender_off")
+    _add_results_workspace_artifacts(run_dir)
+    report_path = os.path.join(run_dir, "run_report.json")
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "run_context": {
+                    "run_type": "full",
+                    "run_profile": "full",
+                    "sessions_per_hour": 1,
+                    "timeline_anchor_mode": "civil",
+                }
+            },
+            f,
+        )
+
+    monkeypatch.setattr(
+        "gui.main_window.QFileDialog.getExistingDirectory",
+        lambda *_args, **_kwargs: str(run_dir),
+    )
+
+    captured = {}
+
+    def _fake_run(cmd, capture_output, text, cwd):
+        captured["cmd"] = list(cmd)
+        captured["cwd"] = cwd
+        out_dir = cmd[cmd.index("--output-dir") + 1]
+        os.makedirs(out_dir, exist_ok=True)
+        _write_png(os.path.join(out_dir, "phasic_dFF_day_000.png"), 600, 1500)
+        _write_png(os.path.join(out_dir, "phasic_dFF_day_001.png"), 600, 1500)
+        return type(
+            "ProcResult",
+            (),
+            {"returncode": 0, "stdout": "ok", "stderr": ""},
+        )()
+
+    info_calls = {"count": 0}
+    def _info(*_a, **_k):
+        info_calls["count"] += 1
+        return None
+
+    monkeypatch.setattr(main_window_module._subprocess, "run", _fake_run)
+    monkeypatch.setattr(main_window_module.QMessageBox, "information", _info)
+    monkeypatch.setattr(
+        main_window_module.QMessageBox,
+        "critical",
+        lambda *_a, **_k: pytest.fail("Rerender should not fail in this test."),
+    )
+
+    window._on_open_results()
+    assert window._is_complete_workspace_active
+    assert window._rerender_dff_dayplots_btn.isEnabled()
+
+    window._dff_rerender_show_peak_markers_cb.setChecked(False)
+    window._on_rerender_dff_day_plots()
+
+    cmd = captured.get("cmd", [])
+    assert cmd, "Expected rerender subprocess command to be invoked."
+    assert "--hide-peak-markers" in cmd
+    assert "--write-dff-grid" in cmd
+    assert "--no-write-sig-iso-grid" in cmd
+    assert "--no-write-stacked" in cmd
+    out_dir = cmd[cmd.index("--output-dir") + 1]
+    assert out_dir.endswith(os.path.join("rerendered_display_variants", "dff_peak_markers_off"))
+    assert os.path.exists(os.path.join(out_dir, "phasic_dFF_day_000.png"))
+    active = window._report_viewer.active_image_path()
+    first_basename = os.path.basename(active).lower()
+    assert "rerendered_display_variants" in active
+    assert "dff_peak_markers_off" in active
+    assert "variant sequence" in window._dff_rerender_status_label.text().lower()
+    assert "peaks hidden" in window._dff_rerender_status_label.text().lower()
+    window._report_viewer._on_next_image()
+    active_after = window._report_viewer.active_image_path()
+    assert "rerendered_display_variants" in active_after
+    assert "dff_peak_markers_off" in active_after
+    assert os.path.basename(active_after).lower() in {"phasic_dff_day_000.png", "phasic_dff_day_001.png"}
+    assert os.path.basename(active_after).lower() != first_basename
+    assert info_calls["count"] == 0, "Successful rerender should not show a modal success popup."
+
+
+def test_completed_run_dff_rerender_marker_on_copies_existing_dayplots(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path / "dff_rerender_on")
+    _add_results_workspace_artifacts(run_dir)
+    for region in ("Region0", "Region1"):
+        _write_png(
+            os.path.join(str(run_dir), region, "day_plots", "phasic_dff_day_002.png"),
+            700,
+            1800,
+        )
+    report_path = os.path.join(run_dir, "run_report.json")
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "run_context": {
+                    "run_type": "full",
+                    "run_profile": "full",
+                    "sessions_per_hour": 1,
+                    "timeline_anchor_mode": "civil",
+                }
+            },
+            f,
+        )
+
+    monkeypatch.setattr(
+        "gui.main_window.QFileDialog.getExistingDirectory",
+        lambda *_args, **_kwargs: str(run_dir),
+    )
+
+    def _unexpected_subprocess(*_args, **_kwargs):
+        pytest.fail("Marker-on rerender should copy existing figures without subprocess recompute.")
+
+    info_calls = {"count": 0}
+    def _info(*_a, **_k):
+        info_calls["count"] += 1
+        return None
+
+    monkeypatch.setattr(main_window_module._subprocess, "run", _unexpected_subprocess)
+    monkeypatch.setattr(main_window_module.QMessageBox, "information", _info)
+
+    window._on_open_results()
+    assert window._is_complete_workspace_active
+
+    window._dff_rerender_show_peak_markers_cb.setChecked(True)
+    window._on_rerender_dff_day_plots()
+
+    variant_hits = []
+    for region in ("Region0", "Region1"):
+        out_dir = os.path.join(
+            str(run_dir),
+            region,
+            "day_plots",
+            "rerendered_display_variants",
+            "dff_peak_markers_on",
+        )
+        if not os.path.isdir(out_dir):
+            continue
+        for name in os.listdir(out_dir):
+            if name.lower().startswith("phasic_dff_day_") and name.lower().endswith(".png"):
+                variant_hits.append(os.path.join(out_dir, name))
+    assert variant_hits, "Expected copied marker-on dF/F dayplot variant."
+    active = window._report_viewer.active_image_path()
+    first_basename = os.path.basename(active).lower()
+    assert "rerendered_display_variants" in active
+    assert "dff_peak_markers_on" in active
+    assert "variant sequence" in window._dff_rerender_status_label.text().lower()
+    assert "peaks shown" in window._dff_rerender_status_label.text().lower()
+    window._report_viewer._on_next_image()
+    active_after = window._report_viewer.active_image_path()
+    assert "rerendered_display_variants" in active_after
+    assert "dff_peak_markers_on" in active_after
+    assert os.path.basename(active_after).lower() in {"phasic_dff_day_001.png", "phasic_dff_day_002.png"}
+    assert os.path.basename(active_after).lower() != first_basename
+    assert info_calls["count"] == 0, "Successful rerender should not show a modal success popup."
+
+
+def test_completed_run_dff_rerender_failure_keeps_critical_popup(window, tmp_path, monkeypatch):
+    run_dir = _make_completed_run_with_cache(tmp_path / "dff_rerender_fail")
+    _add_results_workspace_artifacts(run_dir)
+    report_path = os.path.join(run_dir, "run_report.json")
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "run_context": {
+                    "run_type": "full",
+                    "run_profile": "full",
+                    "sessions_per_hour": 1,
+                    "timeline_anchor_mode": "civil",
+                }
+            },
+            f,
+        )
+
+    monkeypatch.setattr(
+        "gui.main_window.QFileDialog.getExistingDirectory",
+        lambda *_args, **_kwargs: str(run_dir),
+    )
+
+    def _failing_run(*_args, **_kwargs):
+        return type(
+            "ProcResult",
+            (),
+            {"returncode": 1, "stdout": "", "stderr": "forced rerender failure"},
+        )()
+
+    critical_calls = {"count": 0}
+    def _critical(*_a, **_k):
+        critical_calls["count"] += 1
+        return None
+
+    monkeypatch.setattr(main_window_module._subprocess, "run", _failing_run)
+    monkeypatch.setattr(main_window_module.QMessageBox, "critical", _critical)
+    monkeypatch.setattr(main_window_module.QMessageBox, "information", lambda *_a, **_k: None)
+
+    window._on_open_results()
+    window._dff_rerender_show_peak_markers_cb.setChecked(False)
+    window._on_rerender_dff_day_plots()
+
+    assert critical_calls["count"] == 1
+
+
+def test_completed_run_dff_rerender_blocked_state_keeps_info_popup(window, monkeypatch):
+    window._exit_complete_state_workspace()
+    info_calls = {"count": 0}
+    def _info(*_a, **_k):
+        info_calls["count"] += 1
+        return None
+
+    monkeypatch.setattr(main_window_module.QMessageBox, "information", _info)
+    window._on_rerender_dff_day_plots()
+    assert info_calls["count"] == 1
 
 
 def test_help_icon_rollout_preserves_tuning_peak_labels_for_visibility_updates(window, tmp_path):

@@ -1642,6 +1642,50 @@ class MainWindow(QMainWindow):
         self._complete_mode_next_steps_label.setObjectName("resultsSummaryHint")
         layout.addWidget(self._complete_mode_next_steps_label)
 
+        rerender_group = QGroupBox("dF/F Day Plot Rerender")
+        rerender_group.setProperty("workflowSection", True)
+        rerender_layout = QVBoxLayout(rerender_group)
+        rerender_layout.setContentsMargins(8, 8, 8, 8)
+        rerender_layout.setSpacing(6)
+
+        self._dff_rerender_note_label = QLabel(
+            "Display-only rerender from completed-run artifacts. "
+            "Detected-peak marker visibility changes the figure only; analytical outputs remain unchanged."
+        )
+        self._dff_rerender_note_label.setWordWrap(True)
+        self._dff_rerender_note_label.setObjectName("resultsSummaryHint")
+        rerender_layout.addWidget(self._dff_rerender_note_label)
+
+        self._dff_rerender_show_peak_markers_cb = QCheckBox(
+            "Show detected peaks on dF/F day plots"
+        )
+        self._dff_rerender_show_peak_markers_cb.setChecked(True)
+        self._dff_rerender_show_peak_markers_cb.setToolTip(
+            "Display-only option for rerendered dF/F day plots. "
+            "This does not change event detection, peak counts, summaries, or caches."
+        )
+        rerender_layout.addWidget(self._dff_rerender_show_peak_markers_cb)
+
+        rerender_btn_row = QHBoxLayout()
+        self._rerender_dff_dayplots_btn = QPushButton("Rerender dF/F Day Plots")
+        self._rerender_dff_dayplots_btn.setToolTip(
+            "Generate optional rerendered dF/F day-plot variants for the selected completed run. "
+            "Default run outputs are not overwritten."
+        )
+        self._rerender_dff_dayplots_btn.clicked.connect(self._on_rerender_dff_day_plots)
+        rerender_btn_row.addWidget(self._rerender_dff_dayplots_btn)
+        rerender_btn_row.addStretch()
+        rerender_layout.addLayout(rerender_btn_row)
+
+        self._dff_rerender_status_label = QLabel(
+            "Rerender is available after a successful completed run is loaded."
+        )
+        self._dff_rerender_status_label.setWordWrap(True)
+        self._set_status_label_style(self._dff_rerender_status_label, "warn")
+        rerender_layout.addWidget(self._dff_rerender_status_label)
+
+        layout.addWidget(rerender_group)
+
         action_row = QHBoxLayout()
         self._new_run_btn = QPushButton("Start New Run")
         self._new_run_btn.setToolTip(
@@ -1652,6 +1696,7 @@ class MainWindow(QMainWindow):
         action_row.addStretch()
         layout.addLayout(action_row)
         layout.addStretch()
+        self._refresh_dff_dayplot_rerender_availability()
         return panel
 
     def _build_tuning_workspace_group(self) -> QGroupBox:
@@ -3324,6 +3369,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_tuning_workspace_availability(self) -> None:
         if not hasattr(self, "_tuning_group"):
+            self._refresh_dff_dayplot_rerender_availability()
             return
         self._roi_chunk_ids_cache = {}
 
@@ -3337,6 +3383,7 @@ class MainWindow(QMainWindow):
             and bool(self._current_run_dir and os.path.isdir(self._current_run_dir))
         ):
             self._enter_complete_state_workspace()
+            self._refresh_dff_dayplot_rerender_availability()
             return
 
         self._tuning_group.setVisible(bool(self._is_complete_workspace_active))
@@ -3347,6 +3394,7 @@ class MainWindow(QMainWindow):
             self._set_correction_tuning_workspace_unavailable(
                 "Correction retune is available only after a successful completed run is loaded."
             )
+            self._refresh_dff_dayplot_rerender_availability()
             return
 
         run_dir = self._current_run_dir
@@ -3355,6 +3403,7 @@ class MainWindow(QMainWindow):
             self._set_correction_tuning_workspace_unavailable(
                 "No completed run directory is active."
             )
+            self._refresh_dff_dayplot_rerender_availability()
             return
         is_successful_complete, evidence = is_successful_completed_run_dir(run_dir)
         if not is_successful_complete:
@@ -3365,6 +3414,7 @@ class MainWindow(QMainWindow):
             self._set_correction_tuning_workspace_unavailable(
                 f"Correction retune unavailable: selected run directory is not confirmed as a successful completed run. ({evidence})"
             )
+            self._refresh_dff_dayplot_rerender_availability()
             return
 
         phasic_out_dir = self._current_phasic_out_dir()
@@ -3375,6 +3425,7 @@ class MainWindow(QMainWindow):
             self._set_correction_tuning_workspace_unavailable(
                 "Correction retune unavailable: missing phasic output directory at _analysis/phasic_out."
             )
+            self._refresh_dff_dayplot_rerender_availability()
             return
 
         cache_path = self._current_phasic_cache_path()
@@ -3385,6 +3436,7 @@ class MainWindow(QMainWindow):
             self._set_correction_tuning_workspace_unavailable(
                 "Correction retune unavailable: phasic cache is missing for this completed run."
             )
+            self._refresh_dff_dayplot_rerender_availability()
             return
 
         cfg_path = self._current_phasic_config_path()
@@ -3395,6 +3447,7 @@ class MainWindow(QMainWindow):
             self._set_correction_tuning_workspace_unavailable(
                 "Correction retune unavailable: missing config snapshot _analysis/phasic_out/config_used.yaml."
             )
+            self._refresh_dff_dayplot_rerender_availability()
             return
 
         try:
@@ -3467,6 +3520,7 @@ class MainWindow(QMainWindow):
             "Ready: correction retune recomputes the selected ROI across all available sessions. "
             "The preview session is used only for inspection."
         )
+        self._refresh_dff_dayplot_rerender_availability()
 
     def _collect_tuning_overrides(self) -> dict:
         method = self._tuning_peak_method_combo.currentText().strip()
@@ -7099,6 +7153,368 @@ class MainWindow(QMainWindow):
                 "Next actions: inspect outputs, run post-run tuning as needed, then apply back to next-run settings. "
                 "Apply-back does not mutate the completed run; rerun to produce updated outputs."
             )
+        self._refresh_dff_dayplot_rerender_availability()
+
+    @staticmethod
+    def _read_json_if_exists(path: str) -> dict:
+        if not path or not os.path.isfile(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _pick_first_nonempty(*values):
+        for value in values:
+            if value is None:
+                continue
+            if isinstance(value, str):
+                if value.strip():
+                    return value.strip()
+                continue
+            return value
+        return None
+
+    @staticmethod
+    def _coerce_positive_int(value) -> int | None:
+        try:
+            out = int(value)
+        except Exception:
+            return None
+        return out if out >= 1 else None
+
+    @staticmethod
+    def _coerce_positive_float(value) -> float | None:
+        try:
+            out = float(value)
+        except Exception:
+            return None
+        return out if out > 0 else None
+
+    @staticmethod
+    def _extract_cli_option_value(command_text: str, option_name: str) -> str:
+        if not command_text:
+            return ""
+        pattern = rf"(?:^|\\s){re.escape(option_name)}\\s+([^\\s]+)"
+        m = re.search(pattern, command_text)
+        if not m:
+            return ""
+        return str(m.group(1)).strip().strip("'\"")
+
+    def _infer_completed_run_dff_render_mode(self, run_dir: str) -> str:
+        default_mode = "qc"
+        combo = getattr(self, "_dff_render_mode_combo", None)
+        if combo is not None:
+            combo_text = combo.currentText().strip().lower()
+            if combo_text in {"qc", "full"}:
+                default_mode = combo_text
+
+        cmd_path = os.path.join(run_dir, "command_invoked.txt")
+        if os.path.isfile(cmd_path):
+            try:
+                with open(cmd_path, "r", encoding="utf-8") as f:
+                    cmd_text = f.read()
+                from_cmd = self._extract_cli_option_value(cmd_text, "--dff-render-mode").lower()
+                if from_cmd in {"qc", "full"}:
+                    return from_cmd
+            except Exception:
+                pass
+        return default_mode
+
+    def _completed_run_dayplot_context(self) -> dict:
+        run_dir = (self._current_run_dir or "").strip()
+        report = self._read_json_if_exists(os.path.join(run_dir, "run_report.json"))
+        status = self._read_json_if_exists(os.path.join(run_dir, "status.json"))
+        manifest = self._read_json_if_exists(os.path.join(run_dir, "MANIFEST.json"))
+
+        run_ctx = report.get("run_context", {}) if isinstance(report.get("run_context", {}), dict) else {}
+        derived = report.get("derived_settings", {}) if isinstance(report.get("derived_settings", {}), dict) else {}
+
+        sessions_per_hour = self._coerce_positive_int(
+            self._pick_first_nonempty(
+                run_ctx.get("sessions_per_hour"),
+                derived.get("sessions_per_hour"),
+                status.get("sessions_per_hour"),
+                manifest.get("sessions_per_hour"),
+            )
+        )
+        session_duration_s = self._coerce_positive_float(
+            self._pick_first_nonempty(
+                manifest.get("session_duration_s"),
+                run_ctx.get("session_duration_s"),
+                derived.get("session_duration_s"),
+            )
+        )
+        timeline_anchor_mode = str(
+            self._pick_first_nonempty(
+                run_ctx.get("timeline_anchor_mode"),
+                derived.get("timeline_anchor_mode"),
+                status.get("timeline_anchor_mode"),
+                manifest.get("timeline_anchor_mode"),
+                "civil",
+            )
+        ).strip().lower()
+        if timeline_anchor_mode not in {"civil", "elapsed", "fixed_daily_anchor"}:
+            timeline_anchor_mode = "civil"
+        fixed_daily_anchor_clock = self._pick_first_nonempty(
+            run_ctx.get("fixed_daily_anchor_clock"),
+            derived.get("fixed_daily_anchor_clock"),
+            status.get("fixed_daily_anchor_clock"),
+            manifest.get("fixed_daily_anchor_clock"),
+        )
+        run_profile = str(
+            self._pick_first_nonempty(
+                run_ctx.get("run_profile"),
+                status.get("run_profile"),
+                "full",
+            )
+        ).strip().lower() or "full"
+
+        return {
+            "sessions_per_hour": sessions_per_hour,
+            "session_duration_s": session_duration_s,
+            "timeline_anchor_mode": timeline_anchor_mode,
+            "fixed_daily_anchor_clock": (
+                str(fixed_daily_anchor_clock).strip() if fixed_daily_anchor_clock is not None else ""
+            ),
+            "run_profile": run_profile,
+            "dff_render_mode": self._infer_completed_run_dff_render_mode(run_dir),
+        }
+
+    def _selected_region_for_dff_rerender(self) -> str:
+        region = ""
+        if hasattr(self, "_report_viewer"):
+            region = self._report_viewer.selected_region().strip()
+        if region:
+            return region
+        if hasattr(self, "_tuning_roi_combo") and self._tuning_roi_combo.count() > 0:
+            region = self._tuning_roi_combo.currentText().strip()
+        return region
+
+    @staticmethod
+    def _list_dff_dayplot_pngs(directory: str) -> list[str]:
+        if not directory or not os.path.isdir(directory):
+            return []
+        names = []
+        for name in sorted(os.listdir(directory)):
+            if re.fullmatch(r"phasic_dff_day_\d+\.png", name, flags=re.IGNORECASE):
+                names.append(name)
+        return names
+
+    def _rerender_variant_sequence_paths(self, variant_dir: str) -> list[str]:
+        return [os.path.join(variant_dir, name) for name in self._list_dff_dayplot_pngs(variant_dir)]
+
+    def _pick_rerender_variant_initial_image_path(self, sequence_paths: list[str]) -> str:
+        if not sequence_paths:
+            return ""
+
+        # Prefer the currently viewed dF/F day image basename when available.
+        current_name = ""
+        if hasattr(self, "_report_viewer"):
+            current_name = os.path.basename(self._report_viewer.active_image_path()).strip()
+        if current_name:
+            current_lookup = {
+                os.path.basename(path).lower(): path
+                for path in sequence_paths
+            }
+            matched = current_lookup.get(current_name.lower())
+            if matched:
+                return matched
+
+        return sequence_paths[0]
+
+    def _show_rerender_variant_sequence_in_viewer(self, variant_dir: str) -> bool:
+        if not hasattr(self, "_report_viewer"):
+            return False
+        sequence_paths = self._rerender_variant_sequence_paths(variant_dir)
+        if not sequence_paths:
+            return False
+        initial_path = self._pick_rerender_variant_initial_image_path(sequence_paths)
+        try:
+            return bool(
+                self._report_viewer.show_external_image_sequence(
+                    sequence_paths,
+                    initial_path=initial_path,
+                )
+            )
+        except Exception:
+            return False
+
+    def _dff_dayplot_rerender_readiness(self) -> tuple[bool, str]:
+        if not self._is_complete_workspace_active:
+            return False, "Rerender is available only in completed-results mode."
+        run_dir = (self._current_run_dir or "").strip()
+        if not run_dir or not os.path.isdir(run_dir):
+            return False, "No completed run directory is active."
+        ok, evidence = is_successful_completed_run_dir(run_dir)
+        if not ok:
+            return False, (
+                "Selected run directory is not confirmed as a successful completed run "
+                f"({evidence})."
+            )
+        phasic_out = os.path.join(run_dir, "_analysis", "phasic_out")
+        cache_path = os.path.join(phasic_out, "phasic_trace_cache.h5")
+        cfg_path = os.path.join(phasic_out, "config_used.yaml")
+        if not os.path.isfile(cache_path):
+            return False, "Rerender unavailable: phasic trace cache is missing."
+        if not os.path.isfile(cfg_path):
+            return False, "Rerender unavailable: config_used.yaml is missing from phasic outputs."
+        region = self._selected_region_for_dff_rerender()
+        if not region:
+            return False, "Select a region (ROI) before rerendering dF/F day plots."
+        ctx = self._completed_run_dayplot_context()
+        if not ctx.get("sessions_per_hour"):
+            return False, (
+                "Rerender unavailable: sessions/hour metadata is missing for this run. "
+                "Use a run produced by the standard deliverables wrapper."
+            )
+        return True, (
+            "Ready: rerender dF/F day plots from completed-run artifacts "
+            "(display-only marker visibility toggle)."
+        )
+
+    def _refresh_dff_dayplot_rerender_availability(self) -> None:
+        if not hasattr(self, "_rerender_dff_dayplots_btn"):
+            return
+        ready, message = self._dff_dayplot_rerender_readiness()
+        running = bool(self._runner.is_running())
+        self._rerender_dff_dayplots_btn.setEnabled(bool(ready and not running))
+        self._dff_rerender_show_peak_markers_cb.setEnabled(bool(ready and not running))
+        self._dff_rerender_status_label.setText(message)
+        self._set_status_label_style(
+            self._dff_rerender_status_label,
+            "ready" if ready else "warn",
+        )
+
+    def _on_rerender_dff_day_plots(self) -> None:
+        ready, reason = self._dff_dayplot_rerender_readiness()
+        if not ready:
+            QMessageBox.information(self, "Rerender Unavailable", reason)
+            self._refresh_dff_dayplot_rerender_availability()
+            return
+
+        run_dir = (self._current_run_dir or "").strip()
+        phasic_out = os.path.join(run_dir, "_analysis", "phasic_out")
+        roi = self._selected_region_for_dff_rerender()
+        show_markers = bool(self._dff_rerender_show_peak_markers_cb.isChecked())
+        day_plots_dir = os.path.join(run_dir, roi, "day_plots")
+        variant_root = os.path.join(day_plots_dir, "rerendered_display_variants")
+        variant_name = "dff_peak_markers_on" if show_markers else "dff_peak_markers_off"
+        out_dir = os.path.join(variant_root, variant_name)
+        os.makedirs(out_dir, exist_ok=True)
+
+        # Marker-on rerender uses existing completed-run dayplot artifacts directly.
+        # This keeps the action display-only and avoids recomputing detection logic.
+        if show_markers:
+            src_files = self._list_dff_dayplot_pngs(day_plots_dir)
+            if not src_files:
+                QMessageBox.information(
+                    self,
+                    "Rerender Unavailable",
+                    "No existing dF/F day-plot artifacts were found for marker-on rerender.\n\n"
+                    "Marker-on variants are copied from completed-run day plots to avoid "
+                    "recomputing event markers.",
+                )
+                return
+            copied = 0
+            for name in src_files:
+                src = os.path.join(day_plots_dir, name)
+                dst = os.path.join(out_dir, name)
+                shutil.copy2(src, dst)
+                copied += 1
+            self._append_run_log(
+                f"dF/F rerender complete (markers ON, display-only copy) for ROI={roi}: "
+                f"{copied} file(s) -> {out_dir}"
+            )
+            switched = self._show_rerender_variant_sequence_in_viewer(out_dir)
+            self._dff_rerender_status_label.setText(
+                "Viewing rerendered dF/F day-plot variant sequence with detected peaks shown."
+                if switched else
+                f"Ready: created marker-on dF/F day-plot variant ({copied} file(s)); "
+                "viewer stayed on the prior image."
+            )
+            self._set_status_label_style(self._dff_rerender_status_label, "ready")
+            return
+
+        ctx = self._completed_run_dayplot_context()
+        script_path = os.path.join(
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+            "tools",
+            "plot_phasic_dayplot_bundle.py",
+        )
+        cmd = [
+            sys.executable,
+            script_path,
+            "--analysis-out", phasic_out,
+            "--roi", roi,
+            "--output-dir", out_dir,
+            "--sessions-per-hour", str(ctx["sessions_per_hour"]),
+            "--write-dff-grid",
+            "--no-write-sig-iso-grid",
+            "--no-write-stacked",
+            "--hide-peak-markers",
+            "--dff-render-mode", str(ctx["dff_render_mode"]),
+            "--source-run-profile", str(ctx["run_profile"]),
+        ]
+        session_duration_s = ctx.get("session_duration_s")
+        if session_duration_s is not None:
+            cmd.extend(["--session-duration-s", str(session_duration_s)])
+        timeline_anchor_mode = str(ctx.get("timeline_anchor_mode", "civil")).strip().lower()
+        if timeline_anchor_mode != "civil":
+            cmd.extend(["--timeline-anchor-mode", timeline_anchor_mode])
+        fixed_clock = str(ctx.get("fixed_daily_anchor_clock", "")).strip()
+        if timeline_anchor_mode == "fixed_daily_anchor" and fixed_clock:
+            cmd.extend(["--fixed-daily-anchor-clock", fixed_clock])
+
+        self._rerender_dff_dayplots_btn.setEnabled(False)
+        self._rerender_dff_dayplots_btn.setText("Rerendering...")
+        self._append_run_log(
+            "Starting dF/F day-plot display-only rerender "
+            f"(markers OFF) for ROI={roi} -> {out_dir}"
+        )
+        try:
+            with self._busy_cursor_scope():
+                proc = _subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+                )
+            if proc.returncode != 0:
+                stderr_tail = (proc.stderr or "").strip()[-1200:]
+                stdout_tail = (proc.stdout or "").strip()[-1200:]
+                detail = stderr_tail or stdout_tail or "(no subprocess output)"
+                self._append_run_log(f"dF/F rerender failed: {detail}")
+                QMessageBox.critical(
+                    self,
+                    "Rerender Failed",
+                    "Could not rerender dF/F day plots from completed-run artifacts.\n\n"
+                    f"{detail}",
+                )
+                return
+        finally:
+            self._rerender_dff_dayplots_btn.setText("Rerender dF/F Day Plots")
+            self._refresh_dff_dayplot_rerender_availability()
+
+        written = sorted(
+            f for f in os.listdir(out_dir)
+            if re.fullmatch(r"phasic_dff_day_\d+\.png", f, flags=re.IGNORECASE)
+        ) if os.path.isdir(out_dir) else []
+        self._append_run_log(
+            "dF/F rerender complete (markers OFF, display-only) for ROI="
+            f"{roi}: {len(written)} file(s) -> {out_dir}"
+        )
+        switched = self._show_rerender_variant_sequence_in_viewer(out_dir)
+        self._dff_rerender_status_label.setText(
+            "Viewing rerendered dF/F day-plot variant sequence with detected peaks hidden."
+            if switched else
+            f"Ready: created marker-off dF/F day-plot variant ({len(written)} file(s)); "
+            "viewer stayed on the prior image."
+        )
+        self._set_status_label_style(self._dff_rerender_status_label, "ready")
 
     def _enter_complete_state_workspace(self) -> None:
         """Switch left pane to compact completion card after successful full runs."""
@@ -7122,6 +7538,7 @@ class MainWindow(QMainWindow):
         self._refresh_splitter_workspace_policy()
         self._reset_correction_tuning_state()
         self._refresh_tuning_workspace_availability()
+        self._refresh_dff_dayplot_rerender_availability()
 
     def _on_new_run(self) -> None:
         """Exit complete-state workspace and restore idle editable controls."""
@@ -8150,6 +8567,7 @@ class MainWindow(QMainWindow):
         self._update_key_artifact_buttons(running)
         self._update_run_reason_label()
         self._refresh_effective_run_summary()
+        self._refresh_dff_dayplot_rerender_availability()
 
     def _browse_dir(self, line_edit: QLineEdit, title: str):
         path = QFileDialog.getExistingDirectory(self, title, line_edit.text())

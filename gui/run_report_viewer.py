@@ -63,6 +63,7 @@ class RunReportViewer(QWidget):
         self._region_paths: Dict[str, str] = {}
         self._region_tab_images: Dict[str, Dict[str, List[str]]] = {}
         self._tab_indices: Dict[Tuple[str, str], int] = {}
+        self._external_tab_image_overrides: Dict[Tuple[str, str], List[str]] = {}
         self._active_image_path = ""
         self._active_pixmap = QPixmap()
         self._zoom_mode = False
@@ -194,6 +195,7 @@ class RunReportViewer(QWidget):
         self._region_paths = {}
         self._region_tab_images = {}
         self._tab_indices = {}
+        self._external_tab_image_overrides = {}
         self._active_image_path = ""
         self._active_pixmap = QPixmap()
         self._set_zoom_mode(False)
@@ -417,6 +419,72 @@ class RunReportViewer(QWidget):
         """Public selected-region getter for parent workspace integrations."""
         return self._selected_region()
 
+    def active_image_path(self) -> str:
+        """Public getter for the currently displayed image path."""
+        return str(self._active_image_path or "")
+
+    def show_external_image(self, path: str, *, prefer_tab: str = TAB_PHASIC_DFF) -> bool:
+        """
+        Display an explicit image path in the viewer without mutating report artifacts.
+
+        Used for optional display-variant previews (e.g., rerendered dF/F figures)
+        that live outside the default tab discovery contract.
+        """
+        if not path or not os.path.isfile(path):
+            return False
+
+        return self.show_external_image_sequence(
+            [path],
+            initial_path=path,
+            prefer_tab=prefer_tab,
+        )
+
+    def show_external_image_sequence(
+        self,
+        paths: List[str],
+        *,
+        initial_path: str = "",
+        prefer_tab: str = TAB_PHASIC_DFF,
+    ) -> bool:
+        """
+        Display a temporary external image sequence inside the existing tab/region
+        navigation model.
+
+        This preserves prev/next browsing behavior while keeping the underlying
+        discovered artifact lists untouched.
+        """
+        cleaned = self._dedupe_sorted_existing(list(paths or []))
+        if not cleaned:
+            return False
+
+        # Keep tab framing coherent by preferring the dF/F tab when present.
+        if prefer_tab:
+            for idx in range(self._tabs.count()):
+                if self._tabs.tabText(idx).strip() == prefer_tab:
+                    self._tabs.setCurrentIndex(idx)
+                    break
+
+        key = self._tab_key()
+        if not key[0] or not key[1]:
+            return False
+
+        self._external_tab_image_overrides[key] = cleaned
+
+        initial_idx = 0
+        normalized = {os.path.normcase(os.path.normpath(p)): i for i, p in enumerate(cleaned)}
+        if initial_path:
+            idx = normalized.get(os.path.normcase(os.path.normpath(initial_path)))
+            if idx is not None:
+                initial_idx = int(idx)
+        if initial_idx == 0 and self._active_image_path:
+            idx = normalized.get(os.path.normcase(os.path.normpath(self._active_image_path)))
+            if idx is not None:
+                initial_idx = int(idx)
+
+        self._tab_indices[key] = initial_idx
+        self._refresh_active_image(reset_index=False)
+        return True
+
     def available_regions(self) -> List[str]:
         """Public region list for parent workspace integrations."""
         return sorted(self._region_paths.keys(), key=lambda s: s.lower())
@@ -465,10 +533,13 @@ class RunReportViewer(QWidget):
         self._refresh_active_image(reset_index=True)
 
     def _current_tab_images(self) -> List[str]:
-        region = self._selected_region()
-        tab = self._selected_tab()
+        key = self._tab_key()
+        region, tab = key
         if not region or not tab:
             return []
+        override = self._external_tab_image_overrides.get(key, [])
+        if override:
+            return list(override)
         return list(self._region_tab_images.get(region, {}).get(tab, []))
 
     def _tab_key(self) -> Tuple[str, str]:

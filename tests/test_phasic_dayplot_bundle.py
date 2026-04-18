@@ -38,6 +38,7 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         self.assertTrue(args.write_dff_grid)
         self.assertTrue(args.write_sig_iso_grid)
         self.assertTrue(args.write_stacked)
+        self.assertTrue(args.show_peak_markers)
         self.assertFalse(args.export_display_series_csv)
 
     @patch('tools.plot_phasic_dayplot_bundle.sys.argv', ['plot_phasic_dayplot_bundle.py', '--analysis-out', '/f', '--roi', 'R0', '--output-dir', '/o', '--sessions-per-hour', '1', '--no-write-stacked'])
@@ -450,6 +451,34 @@ class TestPhasicDayplotBundle(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 bundle.main()
             self.assertEqual(cm.exception.code, 1)
+
+    def test_dff_grid_without_peak_markers_does_not_require_features(self):
+        self.create_synthetic_chunk(cid=0, include_dff=True)
+        self.create_synthetic_phasic_cache(cid=0, include_dff=True)
+        test_args = [
+            'plot_phasic_dayplot_bundle.py',
+            '--analysis-out', self.analysis_out,
+            '--roi', 'Region0',
+            '--output-dir', self.output_dir,
+            '--sessions-per-hour', '1',
+            '--write-dff-grid',
+            '--no-write-sig-iso-grid',
+            '--no-write-stacked',
+            '--hide-peak-markers',
+            '--export-display-series-csv',
+            '--source-run-profile', 'full',
+        ]
+        with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
+            bundle.main()
+
+        dff_png = os.path.join(self.output_dir, 'phasic_dFF_day_000.png')
+        dff_csv = os.path.join(self.output_dir, 'phasic_dFF_day_000_display_series.csv')
+        self.assertTrue(os.path.exists(dff_png))
+        self.assertTrue(os.path.exists(dff_csv))
+
+        df = pd.read_csv(dff_csv)
+        self.assertEqual(set(df['plot_type'].dropna().astype(str).unique()), {'phasic_day_dff'})
+        self.assertNotIn('peak_marker', set(df['trace_kind'].dropna().astype(str).unique()))
 
     def test_full_dff_mode(self):
         # D. full dFF mode passes when feature and dff traces match
