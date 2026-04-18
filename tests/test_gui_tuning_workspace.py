@@ -2440,6 +2440,7 @@ def test_post_run_tuning_tooltips_cover_downstream_and_correction_controls(windo
         ("Baseline Percentile:", window._correction_tuning_baseline_pct_spin),
         ("Lowpass Filter (Hz):", window._correction_tuning_lowpass_spin),
         ("Dynamic Fit Mode:", window._correction_tuning_fit_mode_combo),
+        ("Bleach Correction:", window._correction_tuning_bleach_correction_mode_combo),
         (
             "Signal Excursion Polarity:",
             window._correction_tuning_signal_excursion_polarity_combo,
@@ -2517,6 +2518,11 @@ def test_dynamic_fit_tooltips_match_between_main_and_correction_retune(window, t
 
     pairs = [
         ("Dynamic Fit Mode", window._dynamic_fit_mode_combo, window._correction_tuning_fit_mode_combo),
+        (
+            "Bleach Correction",
+            window._bleach_correction_mode_combo,
+            window._correction_tuning_bleach_correction_mode_combo,
+        ),
         (
             "Baseline subtract before fit",
             window._baseline_subtract_before_fit_cb,
@@ -2691,6 +2697,7 @@ def test_correction_tuning_backend_wiring_and_result_refresh(window, tmp_path, m
     overrides = captured["overrides"]
     assert set(overrides.keys()) == {
         "dynamic_fit_mode",
+        "bleach_correction_mode",
         "signal_excursion_polarity",
         "baseline_method",
         "baseline_percentile",
@@ -2700,11 +2707,13 @@ def test_correction_tuning_backend_wiring_and_result_refresh(window, tmp_path, m
         "min_samples_per_window",
     }
     assert overrides["dynamic_fit_mode"] == "rolling_filtered_to_raw"
+    assert overrides["bleach_correction_mode"] == "none"
     assert overrides["signal_excursion_polarity"] == "positive"
     assert overrides["baseline_subtract_before_fit"] is True
 
     assert "ROI: Region0" in window._correction_tuning_summary_label.text()
     assert "Recomputed across: all available sessions for this ROI" in window._correction_tuning_summary_label.text()
+    assert "Bleach correction: None (disabled)" in window._correction_tuning_summary_label.text()
     assert "Dynamic fit mode: Rolling regression (filtered→raw)" in window._correction_tuning_summary_label.text()
     assert "Baseline subtract before fit: enabled" in window._correction_tuning_summary_label.text()
     assert "Preview session: 2" in window._correction_tuning_summary_label.text()
@@ -3395,3 +3404,4 @@ def test_correction_tuning_state_resets_on_new_run(window, tmp_path, monkeypatch
     assert window._correction_tuning_summary_label.text() == "No correction retune result yet."
     assert window._correction_tuning_inspection_title.text() == "No correction inspection artifact loaded."
     assert not window._open_correction_tuning_dir_btn.isEnabled()
+

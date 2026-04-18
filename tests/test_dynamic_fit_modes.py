@@ -341,6 +341,291 @@ def test_global_linear_mode_degenerate_nan_inputs_yield_nan_fit_and_dd1_warning(
     assert any("DEGENERATE[DD1]" in str(w) for w in warns)
 
 
+def test_bleach_correction_mode_default_none_matches_explicit_none():
+    n = 1200
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    uv = 3.0 + 0.4 * np.sin(2.0 * np.pi * 0.1 * t)
+    sig = 1.8 * uv + 0.5 + 0.2 * np.sin(2.0 * np.pi * 0.22 * t + 0.3)
+
+    cfg_default = Config(dynamic_fit_mode="global_linear_regression")
+    cfg_none = Config(
+        dynamic_fit_mode="global_linear_regression",
+        bleach_correction_mode="none",
+    )
+
+    c0 = _make_chunk(uv, sig, fs)
+    c1 = _make_chunk(uv, sig, fs)
+    c0.uv_filt = c0.uv_raw.copy()
+    c0.sig_filt = c0.sig_raw.copy()
+    c1.uv_filt = c1.uv_raw.copy()
+    c1.sig_filt = c1.sig_raw.copy()
+
+    uv0, df0 = fit_chunk_dynamic(c0, cfg_default, mode="phasic")
+    uv1, df1 = fit_chunk_dynamic(c1, cfg_none, mode="phasic")
+
+    np.testing.assert_allclose(uv0, uv1, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(df0, df1, rtol=0.0, atol=1e-12)
+    assert c0.metadata.get("bleach_correction_mode_resolved") == "none"
+    assert c0.metadata.get("bleach_correction_applied") is False
+
+
+def test_bleach_single_exponential_reduces_large_exponential_drift_component():
+    n = 3000
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    decay = 1.5 * np.exp(-t / 18.0)
+    uv = 4.5 + decay + 0.08 * np.sin(2.0 * np.pi * 0.09 * t)
+    sig = 1.7 * uv + 0.9 + 0.9 * np.exp(-t / 16.0) + 0.06 * np.sin(2.0 * np.pi * 0.24 * t + 0.4)
+
+    cfg_none = Config(dynamic_fit_mode="global_linear_regression", bleach_correction_mode="none")
+    cfg_bleach = Config(
+        dynamic_fit_mode="global_linear_regression",
+        bleach_correction_mode="single_exponential",
+    )
+
+    c_none = _make_chunk(uv, sig, fs)
+    c_bleach = _make_chunk(uv, sig, fs)
+    c_none.uv_filt = c_none.uv_raw.copy()
+    c_none.sig_filt = c_none.sig_raw.copy()
+    c_bleach.uv_filt = c_bleach.uv_raw.copy()
+    c_bleach.sig_filt = c_bleach.sig_raw.copy()
+
+    _, df_none = fit_chunk_dynamic(c_none, cfg_none, mode="phasic")
+    _, df_bleach = fit_chunk_dynamic(c_bleach, cfg_bleach, mode="phasic")
+
+    early_none = float(np.nanmean(df_none[:400, 0]))
+    late_none = float(np.nanmean(df_none[-400:, 0]))
+    early_bleach = float(np.nanmean(df_bleach[:400, 0]))
+    late_bleach = float(np.nanmean(df_bleach[-400:, 0]))
+    drift_none = abs(early_none - late_none)
+    drift_bleach = abs(early_bleach - late_bleach)
+
+    assert drift_bleach < drift_none
+    assert c_bleach.metadata.get("bleach_correction_mode_resolved") == "single_exponential"
+    assert c_bleach.metadata.get("bleach_correction_applied") is True
+    roi_meta = c_bleach.metadata.get("bleach_correction", {}).get("Region0", {})
+    assert isinstance(roi_meta, dict)
+    assert roi_meta.get("signal", {}).get("fit_succeeded", False) is True
+    assert roi_meta.get("isosbestic", {}).get("fit_succeeded", False) is True
+
+
+def test_bleach_single_exponential_fits_signal_and_isosbestic_independently():
+    n = 3200
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    # Deliberately different decay constants to prove independent fits.
+    uv = 5.0 + 1.8 * np.exp(-t / 45.0) + 0.03 * np.sin(2.0 * np.pi * 0.06 * t)
+    sig = 2.0 + 2.1 * np.exp(-t / 8.0) + 0.02 * np.sin(2.0 * np.pi * 0.11 * t + 0.2)
+
+    cfg_bleach = Config(
+        dynamic_fit_mode="global_linear_regression",
+        bleach_correction_mode="single_exponential",
+    )
+    chunk = _make_chunk(uv, sig, fs)
+    chunk.uv_filt = chunk.uv_raw.copy()
+    chunk.sig_filt = chunk.sig_raw.copy()
+
+    fit_chunk_dynamic(chunk, cfg_bleach, mode="phasic")
+
+    roi_meta = chunk.metadata.get("bleach_correction", {}).get("Region0", {})
+    assert roi_meta.get("target") == "signal_and_isosbestic_independent"
+    sig_meta = roi_meta.get("signal", {})
+    iso_meta = roi_meta.get("isosbestic", {})
+    assert sig_meta.get("fit_succeeded", False) is True
+    assert iso_meta.get("fit_succeeded", False) is True
+    sig_tau = float(sig_meta.get("tau_sec", np.nan))
+    iso_tau = float(iso_meta.get("tau_sec", np.nan))
+    assert np.isfinite(sig_tau) and np.isfinite(iso_tau)
+    assert abs(sig_tau - iso_tau) > 5.0
+
+
+def test_bleach_double_exponential_improves_two_timescale_fit_rmse_vs_single():
+    n = 3600
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    uv = (
+        5.0
+        + 1.6 * np.exp(-t / 5.0)
+        + 0.9 * np.exp(-t / 65.0)
+        + 0.02 * np.sin(2.0 * np.pi * 0.05 * t)
+    )
+    sig = (
+        2.1
+        + 2.2 * np.exp(-t / 4.5)
+        + 1.4 * np.exp(-t / 52.0)
+        + 0.03 * np.sin(2.0 * np.pi * 0.09 * t + 0.2)
+    )
+
+    cfg_single = Config(
+        dynamic_fit_mode="global_linear_regression",
+        bleach_correction_mode="single_exponential",
+    )
+    cfg_double = Config(
+        dynamic_fit_mode="global_linear_regression",
+        bleach_correction_mode="double_exponential",
+    )
+
+    c_single = _make_chunk(uv, sig, fs)
+    c_double = _make_chunk(uv, sig, fs)
+    c_single.uv_filt = c_single.uv_raw.copy()
+    c_single.sig_filt = c_single.sig_raw.copy()
+    c_double.uv_filt = c_double.uv_raw.copy()
+    c_double.sig_filt = c_double.sig_raw.copy()
+
+    fit_chunk_dynamic(c_single, cfg_single, mode="phasic")
+    fit_chunk_dynamic(c_double, cfg_double, mode="phasic")
+
+    single_meta = c_single.metadata.get("bleach_correction", {}).get("Region0", {}).get("signal", {})
+    double_meta = c_double.metadata.get("bleach_correction", {}).get("Region0", {}).get("signal", {})
+    assert single_meta.get("fit_succeeded", False) is True
+    assert double_meta.get("fit_succeeded", False) is True
+    rmse_single = float(single_meta.get("fit_rmse", np.nan))
+    rmse_double = float(double_meta.get("fit_rmse", np.nan))
+    assert np.isfinite(rmse_single) and np.isfinite(rmse_double)
+    assert rmse_double < rmse_single
+    assert c_double.metadata.get("bleach_correction_mode_resolved") == "double_exponential"
+
+
+def test_bleach_double_exponential_fits_signal_and_isosbestic_independently():
+    n = 3600
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    uv = (
+        4.0
+        + 1.5 * np.exp(-t / 7.0)
+        + 1.3 * np.exp(-t / 90.0)
+        + 0.02 * np.sin(2.0 * np.pi * 0.05 * t)
+    )
+    sig = (
+        3.0
+        + 1.9 * np.exp(-t / 3.5)
+        + 1.0 * np.exp(-t / 40.0)
+        + 0.03 * np.sin(2.0 * np.pi * 0.08 * t + 0.1)
+    )
+
+    cfg_double = Config(
+        dynamic_fit_mode="global_linear_regression",
+        bleach_correction_mode="double_exponential",
+    )
+    chunk = _make_chunk(uv, sig, fs)
+    chunk.uv_filt = chunk.uv_raw.copy()
+    chunk.sig_filt = chunk.sig_raw.copy()
+
+    fit_chunk_dynamic(chunk, cfg_double, mode="phasic")
+
+    roi_meta = chunk.metadata.get("bleach_correction", {}).get("Region0", {})
+    assert roi_meta.get("target") == "signal_and_isosbestic_independent"
+    sig_meta = roi_meta.get("signal", {})
+    iso_meta = roi_meta.get("isosbestic", {})
+    assert sig_meta.get("fit_model") == "double_exponential"
+    assert iso_meta.get("fit_model") == "double_exponential"
+    assert sig_meta.get("fit_succeeded", False) is True
+    assert iso_meta.get("fit_succeeded", False) is True
+
+    sig_tau_fast = float(sig_meta.get("tau_fast_sec", np.nan))
+    sig_tau_slow = float(sig_meta.get("tau_slow_sec", np.nan))
+    iso_tau_fast = float(iso_meta.get("tau_fast_sec", np.nan))
+    iso_tau_slow = float(iso_meta.get("tau_slow_sec", np.nan))
+    assert np.isfinite(sig_tau_fast) and np.isfinite(sig_tau_slow)
+    assert np.isfinite(iso_tau_fast) and np.isfinite(iso_tau_slow)
+    assert sig_tau_fast < sig_tau_slow
+    assert iso_tau_fast < iso_tau_slow
+    assert abs(sig_tau_fast - iso_tau_fast) > 1.0
+    assert abs(sig_tau_slow - iso_tau_slow) > 5.0
+
+
+def test_bleach_single_exponential_fit_failure_falls_back_honestly(monkeypatch):
+    n = 1600
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    uv = 4.0 + 0.3 * np.sin(2.0 * np.pi * 0.1 * t)
+    sig = 1.5 * uv + 0.8 + 0.1 * np.sin(2.0 * np.pi * 0.22 * t)
+
+    cfg_none = Config(dynamic_fit_mode="global_linear_regression", bleach_correction_mode="none")
+    cfg_bleach = Config(
+        dynamic_fit_mode="global_linear_regression",
+        bleach_correction_mode="single_exponential",
+    )
+
+    c_none = _make_chunk(uv, sig, fs)
+    c_fail = _make_chunk(uv, sig, fs)
+    c_none.uv_filt = c_none.uv_raw.copy()
+    c_none.sig_filt = c_none.sig_raw.copy()
+    c_fail.uv_filt = c_fail.uv_raw.copy()
+    c_fail.sig_filt = c_fail.sig_raw.copy()
+
+    def _forced_fail(_trace, _sample_rate_hz):
+        return {
+            "fit_succeeded": False,
+            "fit_failure_reason": "forced_failure",
+            "n_finite_samples": 0,
+            "amplitude": float("nan"),
+            "tau_sec": float("nan"),
+            "offset": float("nan"),
+            "fit_rmse": float("nan"),
+        }
+
+    monkeypatch.setattr(regression_module, "_fit_single_exponential_with_offset", _forced_fail)
+    uv_none, df_none = fit_chunk_dynamic(c_none, cfg_none, mode="phasic")
+    uv_fail, df_fail = fit_chunk_dynamic(c_fail, cfg_bleach, mode="phasic")
+
+    np.testing.assert_allclose(uv_none, uv_fail, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(df_none, df_fail, rtol=0.0, atol=1e-12)
+    assert c_fail.metadata.get("bleach_correction_mode_resolved") == "single_exponential"
+    assert c_fail.metadata.get("bleach_correction_applied") is False
+    roi_meta = c_fail.metadata.get("bleach_correction", {}).get("Region0", {})
+    assert roi_meta.get("signal", {}).get("fit_failure_reason") == "forced_failure"
+    assert roi_meta.get("isosbestic", {}).get("fit_failure_reason") == "forced_failure"
+
+
+def test_bleach_double_exponential_fit_failure_falls_back_honestly(monkeypatch):
+    n = 1600
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    uv = 4.0 + 0.3 * np.sin(2.0 * np.pi * 0.1 * t)
+    sig = 1.5 * uv + 0.8 + 0.1 * np.sin(2.0 * np.pi * 0.22 * t)
+
+    cfg_none = Config(dynamic_fit_mode="global_linear_regression", bleach_correction_mode="none")
+    cfg_double = Config(
+        dynamic_fit_mode="global_linear_regression",
+        bleach_correction_mode="double_exponential",
+    )
+
+    c_none = _make_chunk(uv, sig, fs)
+    c_fail = _make_chunk(uv, sig, fs)
+    c_none.uv_filt = c_none.uv_raw.copy()
+    c_none.sig_filt = c_none.sig_raw.copy()
+    c_fail.uv_filt = c_fail.uv_raw.copy()
+    c_fail.sig_filt = c_fail.sig_raw.copy()
+
+    def _forced_fail(_trace, _sample_rate_hz):
+        return {
+            "fit_model": "double_exponential",
+            "fit_succeeded": False,
+            "fit_failure_reason": "forced_double_failure",
+            "n_finite_samples": 0,
+            "amplitude_fast": float("nan"),
+            "tau_fast_sec": float("nan"),
+            "amplitude_slow": float("nan"),
+            "tau_slow_sec": float("nan"),
+            "offset": float("nan"),
+            "fit_rmse": float("nan"),
+        }
+
+    monkeypatch.setattr(regression_module, "_fit_double_exponential_with_offset", _forced_fail)
+    uv_none, df_none = fit_chunk_dynamic(c_none, cfg_none, mode="phasic")
+    uv_fail, df_fail = fit_chunk_dynamic(c_fail, cfg_double, mode="phasic")
+
+    np.testing.assert_allclose(uv_none, uv_fail, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(df_none, df_fail, rtol=0.0, atol=1e-12)
+    assert c_fail.metadata.get("bleach_correction_mode_resolved") == "double_exponential"
+    assert c_fail.metadata.get("bleach_correction_applied") is False
+    roi_meta = c_fail.metadata.get("bleach_correction", {}).get("Region0", {})
+    assert roi_meta.get("signal", {}).get("fit_failure_reason") == "forced_double_failure"
+    assert roi_meta.get("isosbestic", {}).get("fit_failure_reason") == "forced_double_failure"
+
+
 def test_robust_global_event_reject_excludes_large_event_and_preserves_background_fit():
     n = 3200
     fs = 40.0
@@ -896,6 +1181,27 @@ def test_config_accepts_new_rolling_modes_and_baseline_toggle(tmp_path):
     cfg = Config.from_yaml(str(cfg_path))
     assert cfg.dynamic_fit_mode == "rolling_filtered_to_filtered"
     assert cfg.baseline_subtract_before_fit is True
+
+
+def test_config_accepts_single_exponential_bleach_correction_mode(tmp_path):
+    cfg_path = tmp_path / "bleach_mode.yaml"
+    cfg_path.write_text("bleach_correction_mode: single_exponential\n", encoding="utf-8")
+    cfg = Config.from_yaml(str(cfg_path))
+    assert cfg.bleach_correction_mode == "single_exponential"
+
+
+def test_config_accepts_double_exponential_bleach_correction_mode(tmp_path):
+    cfg_path = tmp_path / "bleach_mode_double.yaml"
+    cfg_path.write_text("bleach_correction_mode: double_exponential\n", encoding="utf-8")
+    cfg = Config.from_yaml(str(cfg_path))
+    assert cfg.bleach_correction_mode == "double_exponential"
+
+
+def test_config_rejects_invalid_bleach_correction_mode(tmp_path):
+    cfg_path = tmp_path / "invalid_bleach_mode.yaml"
+    cfg_path.write_text("bleach_correction_mode: unsupported_mode\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid bleach_correction_mode"):
+        Config.from_yaml(str(cfg_path))
 
 
 def test_config_accepts_robust_global_event_reject_mode_and_params(tmp_path):

@@ -33,6 +33,11 @@ class Config:
     min_samples_per_window: int = 0  # 0 implies dynamic 80%
     min_valid_windows: int = 5
     baseline_subtract_before_fit: bool = False
+    bleach_correction_mode: Literal[
+        'none',
+        'single_exponential',
+        'double_exponential',
+    ] = 'none'
     dynamic_fit_mode: Literal[
         'rolling_local_regression',
         'rolling_filtered_to_raw',
@@ -173,6 +178,16 @@ class Config:
                     "'rolling_filtered_to_filtered', 'global_linear_regression', "
                     "'robust_global_event_reject', 'adaptive_event_gated_regression'}"
                 )
+        if 'bleach_correction_mode' in data:
+            if data['bleach_correction_mode'] not in {
+                'none',
+                'single_exponential',
+                'double_exponential',
+            }:
+                raise ValueError(
+                    f"Invalid bleach_correction_mode: {data['bleach_correction_mode']}. "
+                    "Allowed: {'none', 'single_exponential', 'double_exponential'}"
+                )
                 
         if 'adapter_value_nan_policy' in data:
              if data['adapter_value_nan_policy'] not in {'strict', 'mask'}:
@@ -250,5 +265,9 @@ class Config:
             raise ValueError("adaptive_event_gate_min_trust_fraction must be in (0, 1]")
         if obj.adaptive_event_gate_freeze_interp_method not in {"linear_hold"}:
             raise ValueError("adaptive_event_gate_freeze_interp_method must be 'linear_hold'")
+        if obj.bleach_correction_mode not in {"none", "single_exponential", "double_exponential"}:
+            raise ValueError(
+                "bleach_correction_mode must be one of {'none', 'single_exponential', 'double_exponential'}"
+            )
                 
         return obj

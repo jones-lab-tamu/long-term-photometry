@@ -5,7 +5,6 @@ import numpy as np
 import pytest
 
 import tools.plot_phasic_correction_impact as impact
-from photometry_pipeline.viz.display_prep import prepare_centered_common_gain
 
 
 def test_build_correction_impact_figure_has_four_panels_and_expected_semantics():
@@ -33,28 +32,22 @@ def test_build_correction_impact_figure_has_four_panels_and_expected_semantics()
         # Panel 1: raw absolute inputs unchanged
         assert np.allclose(ax1.lines[0].get_ydata(), sig)
         assert np.allclose(ax1.lines[1].get_ydata(), iso)
-        assert "Raw Inputs (Absolute)" in ax1.get_title()
+        assert "Stage 1 - Original Inputs + Bleach Fits" in ax1.get_title()
 
-        # Panel 2: centered common-gain helper semantics
-        sig_c_expected, iso_c_expected = prepare_centered_common_gain(sig, iso)
-        sig_c = ax2.lines[0].get_ydata()
-        iso_c = ax2.lines[1].get_ydata()
-        assert np.allclose(sig_c, sig_c_expected)
-        assert np.allclose(iso_c, iso_c_expected)
-        assert np.isclose(np.nanmedian(sig_c), 0.0)
-        assert np.isclose(np.nanmedian(iso_c), 0.0)
-        assert np.max(np.abs(sig_c)) > np.max(np.abs(iso_c))
-        assert "Common Gain" in ax2.get_title()
+        # Panel 2: bleach-corrected inputs (bleach off => equals originals)
+        assert np.allclose(ax2.lines[0].get_ydata(), sig)
+        assert np.allclose(ax2.lines[1].get_ydata(), iso)
+        assert "Stage 2 - Bleach-corrected Inputs" in ax2.get_title()
 
-        # Panel 3/4: lower-panel semantics unchanged apart from vertical placement
+        # Panel 3/4: dynamic-fit frame and final output
         assert np.allclose(ax3.lines[0].get_ydata(), sig)
         assert np.allclose(ax3.lines[1].get_ydata(), fit)
         assert (
             ax3.get_title()
-            == "Dynamic Reference Fitting (Rolling regression (filtered→raw); baseline subtract before fit: off)"
+            == "Stage 3 - Dynamic Reference Fitting (Rolling regression (filtered→raw); baseline subtract before fit: off; bleach correction: off)"
         )
         assert np.allclose(ax4.lines[0].get_ydata(), dff)
-        assert ax4.get_title() == "Final Corrected Signal"
+        assert ax4.get_title() == "Stage 4 - Final Corrected dF/F"
     finally:
         import matplotlib.pyplot as plt
 
@@ -82,8 +75,84 @@ def test_build_correction_impact_figure_global_mode_title():
     try:
         assert (
             axes[2].get_title()
-            == "Dynamic Reference Fitting (Global linear regression; baseline subtract before fit: inactive)"
+            == "Stage 3 - Dynamic Reference Fitting (Global linear regression; baseline subtract before fit: inactive; bleach correction: off)"
         )
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+def test_build_correction_impact_figure_uses_stage_aware_bleach_panels_and_frame_consistent_fit():
+    t = np.array([0.0, 1.0, 2.0], dtype=float)
+    sig = np.array([3.0, 2.5, 2.2], dtype=float)
+    iso = np.array([2.0, 1.8, 1.7], dtype=float)
+    fit = np.array([2.8, 2.4, 2.1], dtype=float)
+    dff = np.array([0.1, 0.0, -0.1], dtype=float)
+    sig_bleach_fit = np.array([2.9, 2.6, 2.4], dtype=float)
+    iso_bleach_fit = np.array([1.95, 1.82, 1.74], dtype=float)
+    sig_bleach_corrected = np.array([2.1, 1.9, 1.8], dtype=float)
+    iso_bleach_corrected = np.array([1.5, 1.45, 1.43], dtype=float)
+
+    fig, axes = impact.build_correction_impact_figure(
+        t=t,
+        sig=sig,
+        iso=iso,
+        fit=fit,
+        dff=dff,
+        roi="Region0",
+        chunk_id=1,
+        dynamic_fit_mode="global_linear_regression",
+        baseline_subtract_before_fit=False,
+        bleach_correction_mode="single_exponential",
+        sig_bleach_fit=sig_bleach_fit,
+        sig_bleach_corrected=sig_bleach_corrected,
+        iso_bleach_fit=iso_bleach_fit,
+        iso_bleach_corrected=iso_bleach_corrected,
+    )
+    try:
+        ax1, ax2, ax3, _ax4 = axes
+        assert len(ax1.lines) == 4
+        assert np.allclose(ax1.lines[2].get_ydata(), sig_bleach_fit)
+        assert np.allclose(ax1.lines[3].get_ydata(), iso_bleach_fit)
+
+        assert len(ax2.lines) == 2
+        assert np.allclose(ax2.lines[0].get_ydata(), sig_bleach_corrected)
+        assert np.allclose(ax2.lines[1].get_ydata(), iso_bleach_corrected)
+
+        fit_engine_expected = fit - (sig - sig_bleach_corrected)
+        assert len(ax3.lines) == 2
+        assert np.allclose(ax3.lines[0].get_ydata(), sig_bleach_corrected)
+        assert np.allclose(ax3.lines[1].get_ydata(), fit_engine_expected)
+        ax3 = axes[2]
+        assert "stage 3 - dynamic reference fitting" in ax3.get_title().lower()
+        assert "bleach correction: single exponential" in ax3.get_title().lower()
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+def test_build_correction_impact_figure_double_exponential_labeling():
+    t = np.array([0.0, 1.0, 2.0], dtype=float)
+    sig = np.array([3.0, 2.6, 2.3], dtype=float)
+    iso = np.array([2.2, 2.0, 1.9], dtype=float)
+    fit = np.array([2.7, 2.45, 2.2], dtype=float)
+    dff = np.array([0.1, 0.02, -0.03], dtype=float)
+
+    fig, axes = impact.build_correction_impact_figure(
+        t=t,
+        sig=sig,
+        iso=iso,
+        fit=fit,
+        dff=dff,
+        roi="Region0",
+        chunk_id=4,
+        dynamic_fit_mode="global_linear_regression",
+        bleach_correction_mode="double_exponential",
+    )
+    try:
+        assert "bleach correction: double exponential" in axes[2].get_title().lower()
     finally:
         import matplotlib.pyplot as plt
 
@@ -111,7 +180,7 @@ def test_build_correction_impact_figure_rolling_filtered_to_filtered_with_baseli
     try:
         assert (
             axes[2].get_title()
-            == "Dynamic Reference Fitting (Rolling regression (filtered→filtered); baseline subtract before fit: on)"
+            == "Stage 3 - Dynamic Reference Fitting (Rolling regression (filtered→filtered); baseline subtract before fit: on; bleach correction: off)"
         )
     finally:
         import matplotlib.pyplot as plt
@@ -140,7 +209,7 @@ def test_build_correction_impact_figure_robust_mode_title():
     try:
         assert (
             axes[2].get_title()
-            == "Dynamic Reference Fitting (Robust global fit + event rejection; baseline subtract before fit: inactive)"
+            == "Stage 3 - Dynamic Reference Fitting (Robust global fit + event rejection; baseline subtract before fit: inactive; bleach correction: off)"
         )
     finally:
         import matplotlib.pyplot as plt
@@ -169,7 +238,7 @@ def test_build_correction_impact_figure_adaptive_mode_title():
     try:
         assert (
             axes[2].get_title()
-            == "Dynamic Reference Fitting (Adaptive event-gated regression; baseline subtract before fit: inactive)"
+            == "Stage 3 - Dynamic Reference Fitting (Adaptive event-gated regression; baseline subtract before fit: inactive; bleach correction: off)"
         )
     finally:
         import matplotlib.pyplot as plt
@@ -185,9 +254,26 @@ def test_resolve_dynamic_fit_settings_accepts_adaptive_mode(tmp_path):
         encoding="utf-8",
     )
 
-    mode, baseline = impact._resolve_dynamic_fit_settings(str(analysis_out))
+    mode, baseline, bleach = impact._resolve_dynamic_fit_settings(str(analysis_out))
     assert mode == "adaptive_event_gated_regression"
     assert baseline is True
+    assert bleach == "none"
+
+
+def test_resolve_dynamic_fit_settings_accepts_double_exponential_mode(tmp_path):
+    analysis_out = tmp_path / "analysis_bleach_double"
+    analysis_out.mkdir(parents=True, exist_ok=True)
+    (analysis_out / "config_used.yaml").write_text(
+        "dynamic_fit_mode: global_linear_regression\n"
+        "baseline_subtract_before_fit: false\n"
+        "bleach_correction_mode: double_exponential\n",
+        encoding="utf-8",
+    )
+
+    mode, baseline, bleach = impact._resolve_dynamic_fit_settings(str(analysis_out))
+    assert mode == "global_linear_regression"
+    assert baseline is False
+    assert bleach == "double_exponential"
 
 
 def test_main_generates_png_with_four_panel_layout(tmp_path, monkeypatch):
@@ -224,6 +310,7 @@ def test_main_generates_png_with_four_panel_layout(tmp_path, monkeypatch):
     def _spy_build(*args, **kwargs):
         captured["dynamic_fit_mode"] = kwargs.get("dynamic_fit_mode")
         captured["baseline_subtract_before_fit"] = kwargs.get("baseline_subtract_before_fit")
+        captured["bleach_correction_mode"] = kwargs.get("bleach_correction_mode")
         return orig_build(*args, **kwargs)
 
     monkeypatch.setattr(impact, "build_correction_impact_figure", _spy_build)
@@ -251,6 +338,7 @@ def test_main_generates_png_with_four_panel_layout(tmp_path, monkeypatch):
     assert os.path.getsize(out_png) > 0
     assert captured.get("dynamic_fit_mode") == "global_linear_regression"
     assert captured.get("baseline_subtract_before_fit") is True
+    assert captured.get("bleach_correction_mode") == "none"
 
 
 def test_main_defaults_to_rolling_mode_when_config_missing(tmp_path, monkeypatch):
@@ -283,6 +371,7 @@ def test_main_defaults_to_rolling_mode_when_config_missing(tmp_path, monkeypatch
     def _spy_build(*args, **kwargs):
         captured["dynamic_fit_mode"] = kwargs.get("dynamic_fit_mode")
         captured["baseline_subtract_before_fit"] = kwargs.get("baseline_subtract_before_fit")
+        captured["bleach_correction_mode"] = kwargs.get("bleach_correction_mode")
         return orig_build(*args, **kwargs)
 
     monkeypatch.setattr(impact, "build_correction_impact_figure", _spy_build)
@@ -308,6 +397,7 @@ def test_main_defaults_to_rolling_mode_when_config_missing(tmp_path, monkeypatch
     assert out_png.exists()
     assert captured.get("dynamic_fit_mode") == "rolling_filtered_to_raw"
     assert captured.get("baseline_subtract_before_fit") is False
+    assert captured.get("bleach_correction_mode") == "none"
 
 
 def test_main_keeps_cli_failure_boundary_when_reader_raises_runtime_error(tmp_path, monkeypatch):
@@ -341,3 +431,4 @@ def test_main_keeps_cli_failure_boundary_when_reader_raises_runtime_error(tmp_pa
     with pytest.raises(SystemExit) as excinfo:
         impact.main()
     assert excinfo.value.code == 1
+

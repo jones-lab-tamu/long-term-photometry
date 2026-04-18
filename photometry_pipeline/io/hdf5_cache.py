@@ -77,6 +77,52 @@ class Hdf5TraceCacheWriter:
                 grp.attrs['signal_excursion_polarity'] = str(
                     getattr(self.config, 'signal_excursion_polarity', 'positive')
                 )
+                grp.attrs['bleach_correction_mode'] = str(
+                    getattr(self.config, 'bleach_correction_mode', 'none')
+                )
+                grp.attrs['bleach_correction_target'] = "signal_and_isosbestic_independent"
+                if (
+                    hasattr(chunk, 'metadata')
+                    and isinstance(chunk.metadata, dict)
+                ):
+                    roi_bleach = (
+                        chunk.metadata.get('bleach_correction', {})
+                        if isinstance(chunk.metadata.get('bleach_correction', {}), dict)
+                        else {}
+                    )
+                    roi_bleach_meta = roi_bleach.get(str(roi), {}) if isinstance(roi_bleach, dict) else {}
+                    grp.attrs['bleach_correction_applied'] = bool(
+                        chunk.metadata.get('bleach_correction_applied', False)
+                    )
+                    if isinstance(roi_bleach_meta, dict):
+                        sig_meta = roi_bleach_meta.get('signal', {}) if isinstance(roi_bleach_meta.get('signal', {}), dict) else {}
+                        uv_meta = roi_bleach_meta.get('isosbestic', {}) if isinstance(roi_bleach_meta.get('isosbestic', {}), dict) else {}
+                        def _set_float_attr_if_finite(attr_name: str, payload: dict, key: str) -> None:
+                            try:
+                                value = float(payload.get(key, np.nan))
+                            except Exception:
+                                return
+                            if np.isfinite(value):
+                                grp.attrs[attr_name] = value
+                        def _write_bleach_fit_attrs(prefix: str, payload: dict) -> None:
+                            grp.attrs[f'{prefix}_fit_succeeded'] = bool(payload.get('fit_succeeded', False))
+                            fit_model = str(payload.get('fit_model', '')).strip().lower()
+                            if fit_model:
+                                grp.attrs[f'{prefix}_fit_model'] = fit_model
+                            _set_float_attr_if_finite(f'{prefix}_offset', payload, 'offset')
+                            _set_float_attr_if_finite(f'{prefix}_fit_rmse', payload, 'fit_rmse')
+                            _set_float_attr_if_finite(f'{prefix}_tau_sec', payload, 'tau_sec')
+                            _set_float_attr_if_finite(f'{prefix}_amplitude', payload, 'amplitude')
+                            _set_float_attr_if_finite(f'{prefix}_tau_fast_sec', payload, 'tau_fast_sec')
+                            _set_float_attr_if_finite(f'{prefix}_amplitude_fast', payload, 'amplitude_fast')
+                            _set_float_attr_if_finite(f'{prefix}_tau_slow_sec', payload, 'tau_slow_sec')
+                            _set_float_attr_if_finite(f'{prefix}_amplitude_slow', payload, 'amplitude_slow')
+                            fail_reason = str(payload.get('fit_failure_reason', '')).strip()
+                            if fail_reason:
+                                grp.attrs[f'{prefix}_fit_failure_reason'] = fail_reason
+
+                        _write_bleach_fit_attrs('bleach_signal', sig_meta)
+                        _write_bleach_fit_attrs('bleach_iso', uv_meta)
             
             # Required Time axis
             grp.create_dataset('time_sec', data=chunk.time_sec, **self._dataset_create_kwargs)

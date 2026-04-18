@@ -140,6 +140,12 @@ _DYNAMIC_FIT_MODE_ALIASES = {
     # Backward-compatible alias retained to avoid breaking older configs/artifacts.
     "rolling_local_regression": "rolling_filtered_to_raw",
 }
+_BLEACH_CORRECTION_MODES = {
+    "none",
+    "single_exponential",
+    "double_exponential",
+}
+_DOUBLE_BLEACH_MIN_TAU_RATIO = 1.8
 
 
 def _normalize_signal_excursion_polarity(mode_raw: str) -> str:
@@ -147,6 +153,402 @@ def _normalize_signal_excursion_polarity(mode_raw: str) -> str:
     if mode not in {"positive", "negative", "both"}:
         return "positive"
     return mode
+
+
+def _normalize_bleach_correction_mode(mode_raw: Any) -> str:
+    mode = str(mode_raw or "none").strip().lower()
+    if mode not in _BLEACH_CORRECTION_MODES:
+        return "none"
+    return mode
+
+
+def _single_exponential_components(
+    n_samples: int,
+    sample_rate_hz: float,
+    *,
+    amplitude: float,
+    tau_sec: float,
+    offset: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    t = np.arange(int(n_samples), dtype=float) / max(float(sample_rate_hz), 1e-9)
+    decay_component = float(amplitude) * np.exp(-t / float(tau_sec))
+    full_fit = decay_component + float(offset)
+    return full_fit, decay_component
+
+
+def _double_exponential_components(
+    n_samples: int,
+    sample_rate_hz: float,
+    *,
+    amplitude_fast: float,
+    tau_fast_sec: float,
+    amplitude_slow: float,
+    tau_slow_sec: float,
+    offset: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    tau_fast = float(tau_fast_sec)
+    tau_slow = float(tau_slow_sec)
+    amp_fast = float(amplitude_fast)
+    amp_slow = float(amplitude_slow)
+    if tau_fast > tau_slow:
+        tau_fast, tau_slow = tau_slow, tau_fast
+        amp_fast, amp_slow = amp_slow, amp_fast
+    t = np.arange(int(n_samples), dtype=float) / max(float(sample_rate_hz), 1e-9)
+    decay_component = amp_fast * np.exp(-t / tau_fast) + amp_slow * np.exp(-t / tau_slow)
+    full_fit = decay_component + float(offset)
+    return full_fit, decay_component
+
+
+def _resolve_bleach_tau_bounds(
+    n_samples: int,
+    sample_rate_hz: float,
+) -> tuple[tuple[float, float] | None, str]:
+    fs_hz = float(sample_rate_hz)
+    if (not np.isfinite(fs_hz)) or fs_hz <= 0.0:
+        return None, "invalid_sample_rate"
+    duration_sec = float((int(n_samples) - 1) / fs_hz) if int(n_samples) > 1 else 0.0
+    if duration_sec <= 0.0:
+        return None, "nonpositive_duration"
+    tau_min = max(2.0 / fs_hz, min(2.0, 0.02 * duration_sec))
+    tau_max = max(tau_min * 2.0, duration_sec * 8.0)
+    if not (np.isfinite(tau_min) and np.isfinite(tau_max) and tau_max > tau_min):
+        return None, "invalid_tau_range"
+    return (float(tau_min), float(tau_max)), ""
+
+
+def _fit_single_exponential_with_offset(
+    trace: np.ndarray,
+    sample_rate_hz: float,
+) -> dict:
+    """
+    Fit y(t) ~= offset + amplitude*exp(-t/tau) using a tau grid + linear least squares.
+
+    Returns a metadata dict. On failure, fit_succeeded=False and fit_failure_reason
+    is populated; callers must fall back to no bleach correction for that trace.
+    """
+    y = np.asarray(trace, dtype=float).reshape(-1)
+    finite = np.isfinite(y)
+    n_finite = int(np.sum(finite))
+    out = {
+        "fit_model": "single_exponential",
+        "fit_succeeded": False,
+        "fit_failure_reason": "",
+        "n_finite_samples": n_finite,
+        "amplitude": float("nan"),
+        "tau_sec": float("nan"),
+        "offset": float("nan"),
+        "fit_rmse": float("nan"),
+    }
+    if y.size < 8 or n_finite < 8:
+        out["fit_failure_reason"] = "insufficient_finite_samples"
+        return out
+
+    tau_bounds, tau_err = _resolve_bleach_tau_bounds(y.size, sample_rate_hz)
+    if tau_bounds is None:
+        out["fit_failure_reason"] = tau_err or "invalid_tau_range"
+        return out
+    fs_hz = float(sample_rate_hz)
+    tau_min, tau_max = tau_bounds
+
+    t = np.arange(y.size, dtype=float) / fs_hz
+    t_fit = t[finite]
+    y_fit = y[finite]
+    tau_grid = np.geomspace(tau_min, tau_max, num=40)
+
+    best = None
+    for tau in tau_grid:
+        e = np.exp(-t_fit / float(tau))
+        X = np.column_stack((e, np.ones_like(e)))
+        try:
+            beta, residuals, rank, _singular = np.linalg.lstsq(X, y_fit, rcond=None)
+        except Exception:
+            continue
+        if int(rank) < 2:
+            continue
+        amplitude = float(beta[0])
+        offset = float(beta[1])
+        y_hat = X @ beta
+        rmse = float(np.sqrt(np.mean((y_fit - y_hat) ** 2)))
+        if not (np.isfinite(amplitude) and np.isfinite(offset) and np.isfinite(rmse)):
+            continue
+        if best is None or rmse < best["fit_rmse"]:
+            best = {
+                "amplitude": amplitude,
+                "offset": offset,
+                "tau_sec": float(tau),
+                "fit_rmse": rmse,
+            }
+
+    if best is None:
+        out["fit_failure_reason"] = "lstsq_fit_failed"
+        return out
+
+    out.update(best)
+    out["fit_succeeded"] = True
+    out["fit_failure_reason"] = ""
+    return out
+
+
+def _fit_double_exponential_with_offset(
+    trace: np.ndarray,
+    sample_rate_hz: float,
+) -> dict:
+    """
+    Fit y(t) ~= offset + a_fast*exp(-t/tau_fast) + a_slow*exp(-t/tau_slow)
+    using constrained tau-pair grid search + linear least squares.
+
+    Constraints:
+      - tau_fast > 0, tau_slow > 0
+      - tau_fast < tau_slow
+      - tau_slow / tau_fast >= _DOUBLE_BLEACH_MIN_TAU_RATIO
+      - amplitudes constrained to be non-negative
+    """
+    y = np.asarray(trace, dtype=float).reshape(-1)
+    finite = np.isfinite(y)
+    n_finite = int(np.sum(finite))
+    out = {
+        "fit_model": "double_exponential",
+        "fit_succeeded": False,
+        "fit_failure_reason": "",
+        "n_finite_samples": n_finite,
+        "amplitude_fast": float("nan"),
+        "tau_fast_sec": float("nan"),
+        "amplitude_slow": float("nan"),
+        "tau_slow_sec": float("nan"),
+        "offset": float("nan"),
+        "fit_rmse": float("nan"),
+    }
+    if y.size < 12 or n_finite < 12:
+        out["fit_failure_reason"] = "insufficient_finite_samples"
+        return out
+
+    tau_bounds, tau_err = _resolve_bleach_tau_bounds(y.size, sample_rate_hz)
+    if tau_bounds is None:
+        out["fit_failure_reason"] = tau_err or "invalid_tau_range"
+        return out
+    fs_hz = float(sample_rate_hz)
+    tau_min, tau_max = tau_bounds
+
+    t = np.arange(y.size, dtype=float) / fs_hz
+    t_fit = t[finite]
+    y_fit = y[finite]
+    tau_grid = np.geomspace(tau_min, tau_max, num=28)
+
+    best = None
+    for fast_idx, tau_fast in enumerate(tau_grid[:-1]):
+        for tau_slow in tau_grid[fast_idx + 1 :]:
+            tau_ratio = float(tau_slow) / float(tau_fast)
+            if tau_ratio < _DOUBLE_BLEACH_MIN_TAU_RATIO:
+                continue
+            e_fast = np.exp(-t_fit / float(tau_fast))
+            e_slow = np.exp(-t_fit / float(tau_slow))
+            X = np.column_stack((e_fast, e_slow, np.ones_like(e_fast)))
+            try:
+                beta, _residuals, rank, _singular = np.linalg.lstsq(X, y_fit, rcond=None)
+            except Exception:
+                continue
+            if int(rank) < 3:
+                continue
+            amp_fast = float(beta[0])
+            amp_slow = float(beta[1])
+            offset = float(beta[2])
+            if (
+                (not np.isfinite(amp_fast))
+                or (not np.isfinite(amp_slow))
+                or (not np.isfinite(offset))
+                or amp_fast < 0.0
+                or amp_slow < 0.0
+            ):
+                continue
+            y_hat = X @ beta
+            rmse = float(np.sqrt(np.mean((y_fit - y_hat) ** 2)))
+            if not np.isfinite(rmse):
+                continue
+            if best is None or rmse < best["fit_rmse"]:
+                best = {
+                    "amplitude_fast": amp_fast,
+                    "tau_fast_sec": float(tau_fast),
+                    "amplitude_slow": amp_slow,
+                    "tau_slow_sec": float(tau_slow),
+                    "offset": offset,
+                    "fit_rmse": rmse,
+                    "tau_ratio": tau_ratio,
+                }
+
+    if best is None:
+        out["fit_failure_reason"] = "lstsq_fit_failed_or_constrained_out"
+        return out
+    if float(best.get("tau_ratio", 0.0)) < _DOUBLE_BLEACH_MIN_TAU_RATIO:
+        out["fit_failure_reason"] = "degenerate_tau_separation"
+        return out
+
+    out.update(
+        {
+            "amplitude_fast": float(best["amplitude_fast"]),
+            "tau_fast_sec": float(best["tau_fast_sec"]),
+            "amplitude_slow": float(best["amplitude_slow"]),
+            "tau_slow_sec": float(best["tau_slow_sec"]),
+            "offset": float(best["offset"]),
+            "fit_rmse": float(best["fit_rmse"]),
+        }
+    )
+    out["fit_succeeded"] = True
+    out["fit_failure_reason"] = ""
+    return out
+
+
+def _bleach_fit_components_from_meta(
+    n_samples: int,
+    sample_rate_hz: float,
+    fit_meta: dict,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    if not isinstance(fit_meta, dict) or not bool(fit_meta.get("fit_succeeded", False)):
+        return None, None
+    model = str(fit_meta.get("fit_model", "")).strip().lower()
+    if not model:
+        if "tau_fast_sec" in fit_meta or "tau_slow_sec" in fit_meta:
+            model = "double_exponential"
+        else:
+            model = "single_exponential"
+    try:
+        if model == "double_exponential":
+            return _double_exponential_components(
+                n_samples,
+                sample_rate_hz,
+                amplitude_fast=float(fit_meta.get("amplitude_fast")),
+                tau_fast_sec=float(fit_meta.get("tau_fast_sec")),
+                amplitude_slow=float(fit_meta.get("amplitude_slow")),
+                tau_slow_sec=float(fit_meta.get("tau_slow_sec")),
+                offset=float(fit_meta.get("offset")),
+            )
+        return _single_exponential_components(
+            n_samples,
+            sample_rate_hz,
+            amplitude=float(fit_meta.get("amplitude")),
+            tau_sec=float(fit_meta.get("tau_sec")),
+            offset=float(fit_meta.get("offset")),
+        )
+    except Exception:
+        return None, None
+
+
+def _apply_bleach_correction_to_chunk_inputs(chunk: Chunk, config: Config) -> dict:
+    """
+    Optional correction-stage bleach correction prep for dynamic-fit inputs.
+
+    v1 scope:
+      - mode: none | single_exponential | double_exponential
+      - target: both signal and isosbestic traces, independently
+      - correction removes only the fitted exponential component (preserves offset)
+    """
+    mode_requested = str(getattr(config, "bleach_correction_mode", "none"))
+    mode_resolved = _normalize_bleach_correction_mode(mode_requested)
+
+    sig_raw = np.asarray(chunk.sig_raw, dtype=float)
+    uv_raw = np.asarray(chunk.uv_raw, dtype=float)
+    sig_corr = np.asarray(sig_raw, dtype=float).copy()
+    uv_corr = np.asarray(uv_raw, dtype=float).copy()
+    sig_decay_removed = np.zeros_like(sig_corr, dtype=float)
+    uv_decay_removed = np.zeros_like(uv_corr, dtype=float)
+    per_roi: Dict[str, Dict[str, Any]] = {}
+    applied_any = False
+
+    if mode_resolved not in {"single_exponential", "double_exponential"}:
+        return {
+            "mode_requested": mode_requested,
+            "mode_resolved": mode_resolved,
+            "target": "signal_and_isosbestic_independent",
+            "applied_any": False,
+            "sig_raw_corrected": sig_corr,
+            "uv_raw_corrected": uv_corr,
+            "sig_filt_corrected": (
+                None
+                if chunk.sig_filt is None
+                else np.asarray(chunk.sig_filt, dtype=float).copy()
+            ),
+            "uv_filt_corrected": (
+                None
+                if chunk.uv_filt is None
+                else np.asarray(chunk.uv_filt, dtype=float).copy()
+            ),
+            "sig_decay_removed": sig_decay_removed,
+            "uv_decay_removed": uv_decay_removed,
+            "per_roi": per_roi,
+        }
+
+    fs_hz = float(getattr(chunk, "fs_hz", np.nan))
+    n_samples, n_rois = int(sig_raw.shape[0]), int(sig_raw.shape[1])
+    fit_fn = (
+        _fit_double_exponential_with_offset
+        if mode_resolved == "double_exponential"
+        else _fit_single_exponential_with_offset
+    )
+    for r_idx in range(n_rois):
+        roi_name = (
+            str(chunk.channel_names[r_idx])
+            if r_idx < len(getattr(chunk, "channel_names", []))
+            else f"roi_{r_idx}"
+        )
+        sig_fit_meta = dict(fit_fn(sig_raw[:, r_idx], fs_hz))
+        uv_fit_meta = dict(fit_fn(uv_raw[:, r_idx], fs_hz))
+
+        sig_fit, sig_decay = _bleach_fit_components_from_meta(n_samples, fs_hz, sig_fit_meta)
+        uv_fit, uv_decay = _bleach_fit_components_from_meta(n_samples, fs_hz, uv_fit_meta)
+        sig_applied = sig_fit is not None and sig_decay is not None
+        uv_applied = uv_fit is not None and uv_decay is not None
+
+        if bool(sig_fit_meta.get("fit_succeeded", False)) and (not sig_applied):
+            sig_fit_meta["fit_succeeded"] = False
+            sig_fit_meta["fit_failure_reason"] = str(
+                sig_fit_meta.get("fit_failure_reason", "") or "fit_components_invalid"
+            )
+        if bool(uv_fit_meta.get("fit_succeeded", False)) and (not uv_applied):
+            uv_fit_meta["fit_succeeded"] = False
+            uv_fit_meta["fit_failure_reason"] = str(
+                uv_fit_meta.get("fit_failure_reason", "") or "fit_components_invalid"
+            )
+
+        if sig_applied:
+            sig_decay = np.asarray(sig_decay, dtype=float)
+            sig_decay_removed[:, r_idx] = sig_decay
+            sig_corr[:, r_idx] = sig_raw[:, r_idx] - sig_decay
+            applied_any = True
+
+        if uv_applied:
+            uv_decay = np.asarray(uv_decay, dtype=float)
+            uv_decay_removed[:, r_idx] = uv_decay
+            uv_corr[:, r_idx] = uv_raw[:, r_idx] - uv_decay
+            applied_any = True
+
+        per_roi[roi_name] = {
+            "mode": mode_resolved,
+            "target": "signal_and_isosbestic_independent",
+            "signal": dict(sig_fit_meta),
+            "isosbestic": dict(uv_fit_meta),
+            "signal_applied": sig_applied,
+            "isosbestic_applied": uv_applied,
+        }
+
+    sig_filt_corr = None
+    if chunk.sig_filt is not None:
+        sig_filt_corr = np.asarray(chunk.sig_filt, dtype=float).copy() - sig_decay_removed
+    uv_filt_corr = None
+    if chunk.uv_filt is not None:
+        uv_filt_corr = np.asarray(chunk.uv_filt, dtype=float).copy() - uv_decay_removed
+
+    return {
+        "mode_requested": mode_requested,
+        "mode_resolved": mode_resolved,
+        "target": "signal_and_isosbestic_independent",
+        "applied_any": bool(applied_any),
+        "sig_raw_corrected": sig_corr,
+        "uv_raw_corrected": uv_corr,
+        "sig_filt_corrected": sig_filt_corr,
+        "uv_filt_corrected": uv_filt_corr,
+        "sig_decay_removed": sig_decay_removed,
+        "uv_decay_removed": uv_decay_removed,
+        "per_roi": per_roi,
+    }
 
 
 def _residual_excursion_candidates(
@@ -1593,17 +1995,51 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
     fit_mode_requested = getattr(config, "dynamic_fit_mode", "rolling_local_regression")
     fit_mode = _resolve_dynamic_fit_mode(config)
     baseline_toggle = bool(getattr(config, "baseline_subtract_before_fit", False))
-    if fit_mode == "global_linear_regression":
-        uv_fit = _compute_dynamic_fit_ref_global_linear(chunk, config, mode)
-    elif fit_mode == "robust_global_event_reject":
-        uv_fit = _compute_dynamic_fit_ref_robust_global_event_reject(chunk, config, mode)
-    elif fit_mode == "adaptive_event_gated_regression":
-        uv_fit = _compute_dynamic_fit_ref_adaptive_event_gated_regression(chunk, config, mode)
-    else:
-        uv_fit = _compute_dynamic_fit_ref(chunk, config, mode, fit_mode=fit_mode)
+    bleach_info = _apply_bleach_correction_to_chunk_inputs(chunk, config)
+    bleach_mode_resolved = str(bleach_info.get("mode_resolved", "none"))
+    bleach_applied = bool(bleach_info.get("applied_any", False))
+
+    orig_sig_raw = chunk.sig_raw
+    orig_uv_raw = chunk.uv_raw
+    orig_sig_filt = chunk.sig_filt
+    orig_uv_filt = chunk.uv_filt
+    if bleach_mode_resolved != "none":
+        chunk.sig_raw = np.asarray(bleach_info["sig_raw_corrected"], dtype=float)
+        chunk.uv_raw = np.asarray(bleach_info["uv_raw_corrected"], dtype=float)
+        chunk.sig_filt = (
+            None
+            if bleach_info.get("sig_filt_corrected", None) is None
+            else np.asarray(bleach_info["sig_filt_corrected"], dtype=float)
+        )
+        chunk.uv_filt = (
+            None
+            if bleach_info.get("uv_filt_corrected", None) is None
+            else np.asarray(bleach_info["uv_filt_corrected"], dtype=float)
+        )
+
+    try:
+        if fit_mode == "global_linear_regression":
+            uv_fit = _compute_dynamic_fit_ref_global_linear(chunk, config, mode)
+        elif fit_mode == "robust_global_event_reject":
+            uv_fit = _compute_dynamic_fit_ref_robust_global_event_reject(chunk, config, mode)
+        elif fit_mode == "adaptive_event_gated_regression":
+            uv_fit = _compute_dynamic_fit_ref_adaptive_event_gated_regression(chunk, config, mode)
+        else:
+            uv_fit = _compute_dynamic_fit_ref(chunk, config, mode, fit_mode=fit_mode)
+    finally:
+        chunk.sig_raw = orig_sig_raw
+        chunk.uv_raw = orig_uv_raw
+        chunk.sig_filt = orig_sig_filt
+        chunk.uv_filt = orig_uv_filt
 
     if uv_fit is None:
         return None, None
+
+    if bleach_mode_resolved != "none":
+        uv_fit = np.asarray(uv_fit, dtype=float) + np.asarray(
+            bleach_info.get("sig_decay_removed", np.zeros_like(uv_fit)),
+            dtype=float,
+        )
 
     _ensure_chunk_metadata(chunk)
     chunk.metadata["dynamic_fit_mode_requested"] = (
@@ -1619,6 +2055,22 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
     chunk.metadata["baseline_subtract_before_fit_applied"] = (
         baseline_toggle and fit_mode in {"rolling_filtered_to_raw", "rolling_filtered_to_filtered"}
     )
+    chunk.metadata["bleach_correction_mode_requested"] = str(
+        bleach_info.get("mode_requested", getattr(config, "bleach_correction_mode", "none"))
+    )
+    chunk.metadata["bleach_correction_mode_resolved"] = bleach_mode_resolved
+    chunk.metadata["bleach_correction_target"] = str(
+        bleach_info.get("target", "signal_and_isosbestic_independent")
+    )
+    chunk.metadata["bleach_correction_applied"] = bleach_applied
+    chunk.metadata["bleach_correction"] = dict(bleach_info.get("per_roi", {}))
+    engine_info = chunk.metadata.get("dynamic_fit_engine_info", {})
+    if isinstance(engine_info, dict):
+        engine_info["bleach_correction_mode"] = bleach_mode_resolved
+        engine_info["bleach_correction_applied"] = bleach_applied
+        engine_info["bleach_correction_target"] = str(
+            bleach_info.get("target", "signal_and_isosbestic_independent")
+        )
 
     delta_f = _assemble_delta_f_from_fit(chunk.sig_raw, uv_fit)
     return uv_fit, delta_f

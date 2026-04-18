@@ -34,12 +34,12 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     open_phasic_cache,
     resolve_cache_roi,
 )
-from photometry_pipeline.viz.display_prep import prepare_centered_common_gain
 
 
 CORRECTION_RETUNABLE_KEYS = {
     "dynamic_fit_mode",
     "signal_excursion_polarity",
+    "bleach_correction_mode",
     "baseline_subtract_before_fit",
     "window_sec",
     "step_sec",
@@ -84,6 +84,7 @@ EXPLICITLY_UNSUPPORTED_KEYS = {
 _OVERRIDE_VALUE_CASTERS = {
     "dynamic_fit_mode": str,
     "signal_excursion_polarity": str,
+    "bleach_correction_mode": str,
     "baseline_subtract_before_fit": str,
     "window_sec": float,
     "step_sec": float,
@@ -171,6 +172,69 @@ def _true_spans(mask: np.ndarray) -> list[tuple[int, int]]:
     if start is not None:
         spans.append((start, m.size - 1))
     return spans
+
+
+def _reconstruct_bleach_trace_series(
+    raw_trace: np.ndarray,
+    *,
+    fs_hz: float,
+    fit_meta: dict,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """
+    Reconstruct fitted bleach trace and bleach-corrected trace from stored fit metadata.
+    Returns (fit_trace, corrected_trace) or (None, None) when unavailable.
+    """
+    if not isinstance(fit_meta, dict) or not bool(fit_meta.get("fit_succeeded", False)):
+        return None, None
+    trace = np.asarray(raw_trace, dtype=float).reshape(-1)
+    fs = float(fs_hz) if np.isfinite(float(fs_hz)) and float(fs_hz) > 0.0 else 1.0
+    t = np.arange(trace.size, dtype=float) / fs
+    model = str(fit_meta.get("fit_model", "")).strip().lower()
+    if not model:
+        model = (
+            "double_exponential"
+            if ("tau_fast_sec" in fit_meta or "tau_slow_sec" in fit_meta)
+            else "single_exponential"
+        )
+
+    if model == "double_exponential":
+        try:
+            tau_fast = float(fit_meta.get("tau_fast_sec"))
+            amp_fast = float(fit_meta.get("amplitude_fast"))
+            tau_slow = float(fit_meta.get("tau_slow_sec"))
+            amp_slow = float(fit_meta.get("amplitude_slow"))
+            offset = float(fit_meta.get("offset"))
+        except Exception:
+            return None, None
+        if (
+            (not np.isfinite(tau_fast))
+            or (not np.isfinite(tau_slow))
+            or tau_fast <= 0.0
+            or tau_slow <= 0.0
+            or (not np.isfinite(amp_fast))
+            or (not np.isfinite(amp_slow))
+            or (not np.isfinite(offset))
+        ):
+            return None, None
+        if tau_fast > tau_slow:
+            tau_fast, tau_slow = tau_slow, tau_fast
+            amp_fast, amp_slow = amp_slow, amp_fast
+        decay_component = amp_fast * np.exp(-t / tau_fast) + amp_slow * np.exp(-t / tau_slow)
+    else:
+        try:
+            tau_sec = float(fit_meta.get("tau_sec"))
+            amplitude = float(fit_meta.get("amplitude"))
+            offset = float(fit_meta.get("offset"))
+        except Exception:
+            return None, None
+        if (not np.isfinite(tau_sec)) or tau_sec <= 0.0:
+            return None, None
+        if (not np.isfinite(amplitude)) or (not np.isfinite(offset)):
+            return None, None
+        decay_component = amplitude * np.exp(-t / tau_sec)
+    fit_trace = decay_component + offset
+    corrected = trace - decay_component
+    return fit_trace, corrected
 
 
 def parse_key_value_overrides(items: Iterable[str]) -> Dict[str, Any]:
@@ -470,6 +534,7 @@ def _write_correction_inspection(
     dff = np.asarray(chunk.dff[:, 0]) if chunk.dff is not None else np.full_like(sig, np.nan)
     event_reject_info = {}
     adaptive_info = {}
+    bleach_info = {}
     if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
         by_roi = chunk.metadata.get("dynamic_fit_event_reject", {})
         if isinstance(by_roi, dict):
@@ -477,6 +542,49 @@ def _write_correction_inspection(
         adaptive_by_roi = chunk.metadata.get("dynamic_fit_adaptive_event_gated", {})
         if isinstance(adaptive_by_roi, dict):
             adaptive_info = adaptive_by_roi.get(roi, {}) or {}
+        bleach_by_roi = chunk.metadata.get("bleach_correction", {})
+        if isinstance(bleach_by_roi, dict):
+            bleach_info = bleach_by_roi.get(roi, {}) or {}
+
+    bleach_mode_resolved = "none"
+    if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
+        bleach_mode_resolved = str(
+            chunk.metadata.get("bleach_correction_mode_resolved", "none")
+        ).strip() or "none"
+    signal_bleach_fit_meta = (
+        bleach_info.get("signal", {}) if isinstance(bleach_info, dict) else {}
+    )
+    iso_bleach_fit_meta = (
+        bleach_info.get("isosbestic", {}) if isinstance(bleach_info, dict) else {}
+    )
+    def _meta_float(meta: dict, key: str) -> float:
+        try:
+            value = float(meta.get(key, np.nan))
+        except Exception:
+            return float("nan")
+        return value if np.isfinite(value) else float("nan")
+
+    sig_bleach_fit, sig_bleach_corrected = _reconstruct_bleach_trace_series(
+        sig,
+        fs_hz=float(getattr(chunk, "fs_hz", np.nan)),
+        fit_meta=signal_bleach_fit_meta if isinstance(signal_bleach_fit_meta, dict) else {},
+    )
+    uv_bleach_fit, uv_bleach_corrected = _reconstruct_bleach_trace_series(
+        uv,
+        fs_hz=float(getattr(chunk, "fs_hz", np.nan)),
+        fit_meta=iso_bleach_fit_meta if isinstance(iso_bleach_fit_meta, dict) else {},
+    )
+    sig_fit_engine = (
+        np.asarray(sig_bleach_corrected, dtype=float)
+        if sig_bleach_corrected is not None
+        else np.asarray(sig, dtype=float)
+    )
+    fit_engine = np.asarray(fit, dtype=float)
+    if sig_bleach_corrected is not None:
+        # fit_ref is reconciled to original frame; subtract removed signal decay
+        # so this panel shows the frame actually used by dynamic fit.
+        sig_decay_removed = np.asarray(sig, dtype=float) - np.asarray(sig_bleach_corrected, dtype=float)
+        fit_engine = fit_engine - sig_decay_removed
     excluded_mask = np.asarray(event_reject_info.get("excluded_mask", []), dtype=bool)
     if excluded_mask.shape != sig.shape:
         excluded_mask = np.zeros(sig.shape, dtype=bool)
@@ -579,6 +687,62 @@ def _write_correction_inspection(
             "n_trusted": int(np.sum(trusted_mask)),
             "n_gated": int(np.sum(gated_mask)),
         }
+    if bleach_mode_resolved != "none":
+        artifacts["retuned_correction_inspection_bleach_diagnostics"] = {
+            "bleach_correction_mode": bleach_mode_resolved,
+            "signal_fit_model": str(
+                signal_bleach_fit_meta.get("fit_model", "")
+            ) if isinstance(signal_bleach_fit_meta, dict) else "",
+            "isosbestic_fit_model": str(
+                iso_bleach_fit_meta.get("fit_model", "")
+            ) if isinstance(iso_bleach_fit_meta, dict) else "",
+            "signal_fit_succeeded": bool(
+                isinstance(signal_bleach_fit_meta, dict)
+                and signal_bleach_fit_meta.get("fit_succeeded", False)
+            ),
+            "isosbestic_fit_succeeded": bool(
+                isinstance(iso_bleach_fit_meta, dict)
+                and iso_bleach_fit_meta.get("fit_succeeded", False)
+            ),
+            "signal_fit_failure_reason": str(
+                signal_bleach_fit_meta.get("fit_failure_reason", "")
+            ) if isinstance(signal_bleach_fit_meta, dict) else "",
+            "isosbestic_fit_failure_reason": str(
+                iso_bleach_fit_meta.get("fit_failure_reason", "")
+            ) if isinstance(iso_bleach_fit_meta, dict) else "",
+            "signal_offset": _meta_float(signal_bleach_fit_meta, "offset")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "signal_amplitude": _meta_float(signal_bleach_fit_meta, "amplitude")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "signal_tau_sec": _meta_float(signal_bleach_fit_meta, "tau_sec")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "signal_amplitude_fast": _meta_float(signal_bleach_fit_meta, "amplitude_fast")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "signal_tau_fast_sec": _meta_float(signal_bleach_fit_meta, "tau_fast_sec")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "signal_amplitude_slow": _meta_float(signal_bleach_fit_meta, "amplitude_slow")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "signal_tau_slow_sec": _meta_float(signal_bleach_fit_meta, "tau_slow_sec")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "signal_fit_rmse": _meta_float(signal_bleach_fit_meta, "fit_rmse")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "isosbestic_offset": _meta_float(iso_bleach_fit_meta, "offset")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "isosbestic_amplitude": _meta_float(iso_bleach_fit_meta, "amplitude")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "isosbestic_tau_sec": _meta_float(iso_bleach_fit_meta, "tau_sec")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "isosbestic_amplitude_fast": _meta_float(iso_bleach_fit_meta, "amplitude_fast")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "isosbestic_tau_fast_sec": _meta_float(iso_bleach_fit_meta, "tau_fast_sec")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "isosbestic_amplitude_slow": _meta_float(iso_bleach_fit_meta, "amplitude_slow")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "isosbestic_tau_slow_sec": _meta_float(iso_bleach_fit_meta, "tau_slow_sec")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "isosbestic_fit_rmse": _meta_float(iso_bleach_fit_meta, "fit_rmse")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+        }
 
     csv_path = os.path.join(retune_dir, f"retuned_correction_session_{suffix}.csv")
     pd.DataFrame(
@@ -586,8 +750,75 @@ def _write_correction_inspection(
             "chunk_id": cid,
             "source_file": str(chunk.source_file),
             "t_s": t,
+            "bleach_correction_mode": bleach_mode_resolved,
+            "sig_bleach_fit_model": str(signal_bleach_fit_meta.get("fit_model", ""))
+            if isinstance(signal_bleach_fit_meta, dict) else "",
+            "sig_bleach_fit_succeeded": bool(
+                isinstance(signal_bleach_fit_meta, dict)
+                and signal_bleach_fit_meta.get("fit_succeeded", False)
+            ),
+            "sig_bleach_fit_failure_reason": str(
+                signal_bleach_fit_meta.get("fit_failure_reason", "")
+            ) if isinstance(signal_bleach_fit_meta, dict) else "",
+            "sig_bleach_offset": _meta_float(signal_bleach_fit_meta, "offset")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "sig_bleach_amplitude": _meta_float(signal_bleach_fit_meta, "amplitude")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "sig_bleach_tau_sec": _meta_float(signal_bleach_fit_meta, "tau_sec")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "sig_bleach_amplitude_fast": _meta_float(signal_bleach_fit_meta, "amplitude_fast")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "sig_bleach_tau_fast_sec": _meta_float(signal_bleach_fit_meta, "tau_fast_sec")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "sig_bleach_amplitude_slow": _meta_float(signal_bleach_fit_meta, "amplitude_slow")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "sig_bleach_tau_slow_sec": _meta_float(signal_bleach_fit_meta, "tau_slow_sec")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
+            "sig_bleach_fit_rmse": _meta_float(signal_bleach_fit_meta, "fit_rmse")
+            if isinstance(signal_bleach_fit_meta, dict) else float("nan"),
             "sig_raw": sig,
             "uv_raw": uv,
+            "uv_bleach_fit_model": str(iso_bleach_fit_meta.get("fit_model", ""))
+            if isinstance(iso_bleach_fit_meta, dict) else "",
+            "uv_bleach_fit_succeeded": bool(
+                isinstance(iso_bleach_fit_meta, dict)
+                and iso_bleach_fit_meta.get("fit_succeeded", False)
+            ),
+            "uv_bleach_fit_failure_reason": str(
+                iso_bleach_fit_meta.get("fit_failure_reason", "")
+            ) if isinstance(iso_bleach_fit_meta, dict) else "",
+            "uv_bleach_offset": _meta_float(iso_bleach_fit_meta, "offset")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "uv_bleach_amplitude": _meta_float(iso_bleach_fit_meta, "amplitude")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "uv_bleach_tau_sec": _meta_float(iso_bleach_fit_meta, "tau_sec")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "uv_bleach_amplitude_fast": _meta_float(iso_bleach_fit_meta, "amplitude_fast")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "uv_bleach_tau_fast_sec": _meta_float(iso_bleach_fit_meta, "tau_fast_sec")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "uv_bleach_amplitude_slow": _meta_float(iso_bleach_fit_meta, "amplitude_slow")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "uv_bleach_tau_slow_sec": _meta_float(iso_bleach_fit_meta, "tau_slow_sec")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "uv_bleach_fit_rmse": _meta_float(iso_bleach_fit_meta, "fit_rmse")
+            if isinstance(iso_bleach_fit_meta, dict) else float("nan"),
+            "sig_bleach_fit": (
+                sig_bleach_fit if sig_bleach_fit is not None else np.full_like(sig, np.nan)
+            ),
+            "sig_bleach_corrected": (
+                sig_bleach_corrected
+                if sig_bleach_corrected is not None
+                else np.full_like(sig, np.nan)
+            ),
+            "uv_bleach_fit": (
+                uv_bleach_fit if uv_bleach_fit is not None else np.full_like(uv, np.nan)
+            ),
+            "uv_bleach_corrected": (
+                uv_bleach_corrected
+                if uv_bleach_corrected is not None
+                else np.full_like(uv, np.nan)
+            ),
             "fit_ref": fit,
             "delta_f": delta_f,
             "dff": dff,
@@ -595,23 +826,11 @@ def _write_correction_inspection(
     ).to_csv(csv_path, index=False)
     artifacts["retuned_correction_session_csv"] = csv_path
 
-    try:
-        sig_centered, uv_centered = prepare_centered_common_gain(sig, uv)
-    except ValueError:
-        sig_centered = np.asarray(sig, dtype=np.float64).copy()
-        uv_centered = np.asarray(uv, dtype=np.float64).copy()
-        sig_finite = np.isfinite(sig_centered)
-        uv_finite = np.isfinite(uv_centered)
-        if np.any(sig_finite):
-            sig_centered = sig_centered - float(np.median(sig_centered[sig_finite]))
-        if np.any(uv_finite):
-            uv_centered = uv_centered - float(np.median(uv_centered[uv_finite]))
-
     panel_specs: list[tuple[str, str]] = [
-        ("raw", "Raw absolute sig/iso"),
-        ("centered", "Centered common-gain sig/iso"),
-        ("fit", "Dynamic fit"),
-        ("dff", "Final corrected dF/F"),
+        ("raw", "Stage 1: original sig/iso + bleach fits"),
+        ("centered", "Stage 2: bleach-corrected sig/iso"),
+        ("fit", "Stage 3: dynamic fit (bleach-corrected frame)"),
+        ("dff", "Stage 4: final corrected dF/F"),
     ]
     panel_paths: list[str] = []
     panel_labels: list[str] = []
@@ -630,38 +849,81 @@ def _write_correction_inspection(
         if panel_key == "raw":
             ax.plot(t, sig, color="forestgreen", linewidth=0.9, label="sig_raw")
             ax.plot(t, uv, color="purple", linewidth=0.8, alpha=0.8, label="uv_raw")
+            if sig_bleach_fit is not None:
+                ax.plot(
+                    t,
+                    sig_bleach_fit,
+                    color="#1f77b4",
+                    linewidth=0.9,
+                    linestyle=":",
+                    label="signal bleach fit",
+                )
+            if uv_bleach_fit is not None:
+                ax.plot(
+                    t,
+                    uv_bleach_fit,
+                    color="#7d3c98",
+                    linewidth=0.9,
+                    linestyle=":",
+                    label="isosbestic bleach fit",
+                )
             ax.set_ylabel("Raw output (V)")
         elif panel_key == "centered":
             ax.plot(
                 t,
-                sig_centered,
+                (
+                    np.asarray(sig_bleach_corrected, dtype=float)
+                    if sig_bleach_corrected is not None
+                    else np.asarray(sig, dtype=float)
+                ),
                 color="forestgreen",
                 linewidth=0.9,
-                label="sig_raw (centered)",
+                label="sig_bleach_corrected",
             )
             ax.plot(
                 t,
-                uv_centered,
+                (
+                    np.asarray(uv_bleach_corrected, dtype=float)
+                    if uv_bleach_corrected is not None
+                    else np.asarray(uv, dtype=float)
+                ),
                 color="purple",
                 linewidth=0.8,
                 alpha=0.8,
-                label="uv_raw (centered)",
+                label="uv_bleach_corrected",
             )
-            ax.set_ylabel("Centered (V)")
+            ax.set_ylabel("Bleach-corrected (V)")
+            if bleach_mode_resolved == "none":
+                ax.text(
+                    0.01,
+                    0.99,
+                    "Bleach correction disabled: traces equal original inputs",
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=8,
+                    bbox={"facecolor": "white", "alpha": 0.7, "edgecolor": "0.7"},
+                )
         elif panel_key == "fit":
-            ax.plot(t, sig, color="forestgreen", linewidth=0.9, label="sig_raw")
             ax.plot(
                 t,
-                fit,
+                sig_fit_engine,
+                color="forestgreen",
+                linewidth=0.9,
+                label="signal (fit input frame)",
+            )
+            ax.plot(
+                t,
+                fit_engine,
                 color="black",
                 linewidth=0.9,
                 linestyle="--",
-                label="fit_ref",
+                label="fit_ref (same frame)",
             )
             if np.any(excluded_mask):
                 ax.scatter(
                     t[excluded_mask],
-                    sig[excluded_mask],
+                    sig_fit_engine[excluded_mask],
                     s=8,
                     c="crimson",
                     alpha=0.45,
@@ -739,7 +1001,18 @@ def _write_correction_inspection(
                     f"Correction Retune Inspection ({roi}) | chunk={cid} | {panel_label} "
                     f"| keep={keep_pct:.1f}% | iters={len(iter_summaries)} | source={chunk.source_file}"
                 )
-            ax.set_ylabel("Fit view (V)")
+            if bleach_mode_resolved != "none":
+                ax.text(
+                    0.99,
+                    0.02,
+                    f"frame: bleach-corrected ({bleach_mode_resolved})",
+                    transform=ax.transAxes,
+                    ha="right",
+                    va="bottom",
+                    fontsize=8,
+                    bbox={"facecolor": "white", "alpha": 0.7, "edgecolor": "0.7"},
+                )
+            ax.set_ylabel("Fit frame (V)")
         else:
             ax.plot(t, dff, color="darkorange", linewidth=0.9, label="dff")
             ax.axhline(0.0, color="black", linewidth=0.6, alpha=0.5)

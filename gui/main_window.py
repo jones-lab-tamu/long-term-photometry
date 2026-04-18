@@ -308,6 +308,11 @@ _KNOWN_ALLOWED_VALUES = {
         "adaptive_event_gated_regression",
         "rolling_local_regression",
     ],
+    "bleach_correction_mode": [
+        "none",
+        "single_exponential",
+        "double_exponential",
+    ],
     "tonic_output_mode": [
         "preserve_raw_session_shape",
         "flatten_session_bleach_preserve_session_baseline",
@@ -336,6 +341,11 @@ _DYNAMIC_FIT_MODE_LABELS = {
     "robust_global_event_reject": "Robust global fit + event rejection",
     "adaptive_event_gated_regression": "Adaptive event-gated regression",
 }
+_BLEACH_CORRECTION_MODE_LABELS = {
+    "none": "None (disabled)",
+    "single_exponential": "Single exponential detrend",
+    "double_exponential": "Double exponential detrend",
+}
 _SIGNAL_EXCURSION_POLARITY_LABELS = {
     "positive": "Positive only",
     "negative": "Negative only",
@@ -359,6 +369,12 @@ _DYNAMIC_FIT_TOOLTIPS = {
     "baseline_subtract_before_fit": (
         "Rolling modes only. Subtracts a slow baseline from fit inputs before estimating "
         "coefficients. Turn on if slow drift biases rolling fits; leave off for standard behavior."
+    ),
+    "bleach_correction_mode": (
+        "Optional correction-stage bleach detrend. 'Single exponential detrend' fits "
+        "offset + amplitude*exp(-t/tau), while 'Double exponential detrend' fits "
+        "offset + a_fast*exp(-t/tau_fast) + a_slow*exp(-t/tau_slow), separately to "
+        "signal and isosbestic traces before dynamic fitting. Off by default."
     ),
     "regression_window_sec": (
         "Rolling modes only. Local regression window length in seconds. Larger values make the fit "
@@ -514,6 +530,16 @@ def get_allowed_dynamic_fit_modes_from_config() -> list[str]:
     return ordered
 
 
+def get_allowed_bleach_correction_modes_from_config() -> list[str]:
+    raw_modes = _get_allowed_from_config_field("bleach_correction_mode")
+    ordered = ["none", "single_exponential", "double_exponential"]
+    for mode in raw_modes:
+        normalized = normalize_bleach_correction_mode(mode)
+        if normalized not in ordered:
+            ordered.append(normalized)
+    return ordered
+
+
 def get_allowed_tonic_output_modes_from_config() -> list[str]:
     raw_modes = _get_allowed_from_config_field("tonic_output_mode")
     ordered: list[str] = [
@@ -577,6 +603,18 @@ def normalize_dynamic_fit_mode(mode_raw: str) -> str:
     if not mode:
         return "rolling_filtered_to_raw"
     return _DYNAMIC_FIT_MODE_ALIAS_TO_CANONICAL.get(mode, mode)
+
+
+def normalize_bleach_correction_mode(mode_raw: str) -> str:
+    mode = str(mode_raw or "").strip().lower()
+    if mode in _BLEACH_CORRECTION_MODE_LABELS:
+        return mode
+    return "none"
+
+
+def bleach_correction_mode_label(mode_raw: str) -> str:
+    mode = normalize_bleach_correction_mode(mode_raw)
+    return _BLEACH_CORRECTION_MODE_LABELS.get(mode, _BLEACH_CORRECTION_MODE_LABELS["none"])
 
 
 def normalize_signal_excursion_polarity(mode_raw: str) -> str:
@@ -2218,6 +2256,35 @@ class MainWindow(QMainWindow):
             self._on_correction_tuning_fit_mode_changed
         )
         form.addRow(_corr_row_label("Dynamic Fit Mode:"), self._correction_tuning_fit_mode_combo)
+
+        self._correction_tuning_bleach_correction_mode_combo = QComboBox()
+        self._correction_tuning_bleach_correction_mode_combo.setMinimumWidth(240)
+        for mode_name in get_allowed_bleach_correction_modes_from_config():
+            normalized_mode = normalize_bleach_correction_mode(mode_name)
+            self._correction_tuning_bleach_correction_mode_combo.addItem(
+                bleach_correction_mode_label(normalized_mode),
+                normalized_mode,
+            )
+        default_corr_bleach_mode = normalize_bleach_correction_mode(
+            str(getattr(self._default_cfg, "bleach_correction_mode", "none"))
+        )
+        idx_corr_bleach_mode = self._correction_tuning_bleach_correction_mode_combo.findData(
+            default_corr_bleach_mode
+        )
+        if idx_corr_bleach_mode >= 0:
+            self._correction_tuning_bleach_correction_mode_combo.setCurrentIndex(
+                idx_corr_bleach_mode
+            )
+        self._correction_tuning_bleach_correction_mode_combo.setToolTip(
+            _DYNAMIC_FIT_TOOLTIPS["bleach_correction_mode"]
+        )
+        self._correction_tuning_bleach_correction_mode_combo.currentIndexChanged.connect(
+            self._on_config_changed
+        )
+        form.addRow(
+            _corr_row_label("Bleach Correction:"),
+            self._correction_tuning_bleach_correction_mode_combo,
+        )
 
         self._correction_tuning_signal_excursion_polarity_combo = QComboBox()
         self._correction_tuning_signal_excursion_polarity_combo.setMinimumWidth(240)
@@ -4115,6 +4182,16 @@ class MainWindow(QMainWindow):
         idx_fit = self._correction_tuning_fit_mode_combo.findData(fit_mode)
         if idx_fit >= 0:
             self._correction_tuning_fit_mode_combo.setCurrentIndex(idx_fit)
+        bleach_mode = normalize_bleach_correction_mode(
+            str(getattr(cfg, "bleach_correction_mode", "none"))
+        )
+        idx_bleach = self._correction_tuning_bleach_correction_mode_combo.findData(
+            bleach_mode
+        )
+        if idx_bleach >= 0:
+            self._correction_tuning_bleach_correction_mode_combo.setCurrentIndex(
+                idx_bleach
+            )
         self._correction_tuning_baseline_pct_spin.setValue(float(cfg.baseline_percentile))
         self._correction_tuning_lowpass_spin.setValue(float(cfg.lowpass_hz))
         self._correction_tuning_baseline_subtract_cb.setChecked(
@@ -4176,6 +4253,7 @@ class MainWindow(QMainWindow):
         fit_mode = self._selected_correction_tuning_fit_mode()
         overrides = {
             "dynamic_fit_mode": fit_mode,
+            "bleach_correction_mode": self._selected_correction_tuning_bleach_correction_mode(),
             "signal_excursion_polarity": self._selected_correction_tuning_signal_excursion_polarity(),
             "baseline_method": self._correction_tuning_baseline_method_combo.currentText().strip(),
             "baseline_percentile": float(self._correction_tuning_baseline_pct_spin.value()),
@@ -4273,6 +4351,12 @@ class MainWindow(QMainWindow):
         idx_fit = self._dynamic_fit_mode_combo.findData(fit_mode)
         if idx_fit >= 0:
             self._dynamic_fit_mode_combo.setCurrentIndex(idx_fit)
+        _set_combo_if_allowed(
+            self._bleach_correction_mode_combo,
+            normalize_bleach_correction_mode(
+                str(overrides.get("bleach_correction_mode", "none"))
+            ),
+        )
 
         method = str(overrides.get("baseline_method", "")).strip()
         if method and self._baseline_method_combo.findText(method) >= 0:
@@ -4433,6 +4517,12 @@ class MainWindow(QMainWindow):
             lines = [
                 f"ROI: {result.get('selected_roi', roi)}",
                 f"Dynamic fit mode: {dynamic_fit_mode_label(overrides.get('dynamic_fit_mode', 'rolling_local_regression'))}",
+                (
+                    "Bleach correction: "
+                    + bleach_correction_mode_label(
+                        str(overrides.get("bleach_correction_mode", "none"))
+                    )
+                ),
                 (
                     "Excursion polarity: "
                     + signal_excursion_polarity_label(
@@ -5664,6 +5754,12 @@ class MainWindow(QMainWindow):
                 str(getattr(base_cfg, "dynamic_fit_mode", "rolling_local_regression"))
             ),
         )
+        _sync_combo_by_data_or_text(
+            self._bleach_correction_mode_combo,
+            normalize_bleach_correction_mode(
+                str(getattr(base_cfg, "bleach_correction_mode", "none"))
+            ),
+        )
         _sync_checkbox(
             self._baseline_subtract_before_fit_cb,
             bool(getattr(base_cfg, "baseline_subtract_before_fit", False)),
@@ -5901,6 +5997,12 @@ class MainWindow(QMainWindow):
             )
             if fit_mode != default_fit_mode:
                 config_overrides["dynamic_fit_mode"] = fit_mode
+            bleach_mode = self._selected_bleach_correction_mode()
+            default_bleach_mode = normalize_bleach_correction_mode(
+                str(getattr(base_cfg, "bleach_correction_mode", "none"))
+            )
+            if bleach_mode != default_bleach_mode:
+                config_overrides["bleach_correction_mode"] = bleach_mode
 
             default_dict = {
                 "window_sec": base_cfg.window_sec,
@@ -7655,6 +7757,16 @@ class MainWindow(QMainWindow):
         idx_fit = self._dynamic_fit_mode_combo.findData(fit_mode)
         if idx_fit >= 0:
             self._dynamic_fit_mode_combo.setCurrentIndex(idx_fit)
+        bleach_mode = normalize_bleach_correction_mode(
+            self._settings.value(
+                "bleach_correction_mode",
+                str(getattr(self._default_cfg, "bleach_correction_mode", "none")),
+                str,
+            )
+        )
+        idx_bleach = self._bleach_correction_mode_combo.findData(bleach_mode)
+        if idx_bleach >= 0:
+            self._bleach_correction_mode_combo.setCurrentIndex(idx_bleach)
         tonic_output_mode = normalize_tonic_output_mode(
             self._settings.value(
                 "tonic_output_mode",
@@ -7848,6 +7960,7 @@ class MainWindow(QMainWindow):
         self._settings.setValue("timeline_anchor_mode", self._timeline_anchor_mode_value())
         self._settings.setValue("fixed_daily_anchor_clock", self._fixed_daily_anchor_time_edit.text().strip())
         self._settings.setValue("dynamic_fit_mode", self._selected_dynamic_fit_mode())
+        self._settings.setValue("bleach_correction_mode", self._selected_bleach_correction_mode())
         self._settings.setValue(
             "baseline_subtract_before_fit",
             bool(getattr(self, "_baseline_subtract_before_fit_cb", None) and self._baseline_subtract_before_fit_cb.isChecked()),
@@ -8062,6 +8175,19 @@ class MainWindow(QMainWindow):
             str(getattr(self._default_cfg, "dynamic_fit_mode", "rolling_local_regression"))
         )
 
+    def _selected_bleach_correction_mode(self) -> str:
+        combo = getattr(self, "_bleach_correction_mode_combo", None)
+        if combo is not None:
+            data = combo.currentData()
+            if data:
+                return normalize_bleach_correction_mode(str(data))
+            text = combo.currentText().strip()
+            if text:
+                return normalize_bleach_correction_mode(text)
+        return normalize_bleach_correction_mode(
+            str(getattr(self._default_cfg, "bleach_correction_mode", "none"))
+        )
+
     def _selected_signal_excursion_polarity(self) -> str:
         combo = getattr(self, "_signal_excursion_polarity_combo", None)
         if combo is not None:
@@ -8096,6 +8222,17 @@ class MainWindow(QMainWindow):
             if text:
                 return normalize_signal_excursion_polarity(text)
         return self._selected_signal_excursion_polarity()
+
+    def _selected_correction_tuning_bleach_correction_mode(self) -> str:
+        combo = getattr(self, "_correction_tuning_bleach_correction_mode_combo", None)
+        if combo is not None:
+            data = combo.currentData()
+            if data:
+                return normalize_bleach_correction_mode(str(data))
+            text = combo.currentText().strip()
+            if text:
+                return normalize_bleach_correction_mode(text)
+        return self._selected_bleach_correction_mode()
 
     def _selected_tonic_output_mode(self) -> str:
         combo = getattr(self, "_tonic_output_mode_combo", None)
@@ -8313,6 +8450,12 @@ class MainWindow(QMainWindow):
                 else "Dynamic Fit Mode: (inactive in tonic mode)"
             ),
             (
+                "Bleach Correction: "
+                + bleach_correction_mode_label(self._selected_bleach_correction_mode())
+                if phasic_active
+                else "Bleach Correction: (inactive in tonic mode)"
+            ),
+            (
                 "Signal Excursion Polarity: "
                 + signal_excursion_polarity_label(self._selected_signal_excursion_polarity())
                 if phasic_active
@@ -8404,6 +8547,8 @@ class MainWindow(QMainWindow):
         self._apply_dynamic_fit_mode_ui_state()
         if hasattr(self, "_dynamic_fit_mode_combo"):
             self._dynamic_fit_mode_combo.setEnabled(phasic_active)
+        if hasattr(self, "_bleach_correction_mode_combo"):
+            self._bleach_correction_mode_combo.setEnabled(phasic_active)
         if hasattr(self, "_tonic_output_mode_combo"):
             self._tonic_output_mode_combo.setEnabled(tonic_active)
         if hasattr(self, "_tonic_timeline_mode_combo"):
@@ -9168,6 +9313,28 @@ class MainWindow(QMainWindow):
             "Baseline subtract before fit:",
             self._baseline_subtract_before_fit_cb,
         )
+
+        self._bleach_correction_mode_combo = QComboBox()
+        self._bleach_correction_mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._bleach_correction_mode_combo.setToolTip(
+            _DYNAMIC_FIT_TOOLTIPS["bleach_correction_mode"]
+        )
+        for mode_name in get_allowed_bleach_correction_modes_from_config():
+            normalized_mode = normalize_bleach_correction_mode(mode_name)
+            self._bleach_correction_mode_combo.addItem(
+                bleach_correction_mode_label(normalized_mode),
+                normalized_mode,
+            )
+        default_bleach_mode = normalize_bleach_correction_mode(
+            str(getattr(self._default_cfg, "bleach_correction_mode", "none"))
+        )
+        idx_bleach_mode = self._bleach_correction_mode_combo.findData(default_bleach_mode)
+        if idx_bleach_mode < 0 and self._bleach_correction_mode_combo.count() > 0:
+            idx_bleach_mode = 0
+        if idx_bleach_mode >= 0:
+            self._bleach_correction_mode_combo.setCurrentIndex(idx_bleach_mode)
+        self._bleach_correction_mode_combo.currentIndexChanged.connect(self._on_config_changed)
+        iso_sampling_form.addRow("Bleach Correction:", self._bleach_correction_mode_combo)
 
         self._window_sec_edit = QLineEdit(str(self._default_cfg.window_sec))
         self._window_sec_edit.setToolTip(

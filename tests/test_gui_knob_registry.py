@@ -209,6 +209,15 @@ class TestGuiKnobRegistry(unittest.TestCase):
         filtered = filter_config_overrides({"export_display_series_csv": True})
         self.assertEqual(filtered, {"export_display_series_csv": True})
 
+    def test_filter_config_overrides_accepts_bleach_correction_mode(self):
+        filtered = filter_config_overrides(
+            {"bleach_correction_mode": "single_exponential"}
+        )
+        self.assertEqual(
+            filtered,
+            {"bleach_correction_mode": "single_exponential"},
+        )
+
     def test_run_spec_generate_derived_config_uses_filtered_overrides(self):
         """generate_derived_config filters overrides and raises on unknown."""
         import os

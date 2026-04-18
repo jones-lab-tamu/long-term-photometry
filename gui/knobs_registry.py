@@ -29,6 +29,7 @@ GUI_KNOBS_ADVANCED: Set[str] = {
     "f0_min_value",
     # Dynammic Correction
     "dynamic_fit_mode",
+    "bleach_correction_mode",
     "baseline_subtract_before_fit",
     "window_sec",
     "step_sec",
@@ -175,6 +176,16 @@ KNOB_META: Dict[str, dict] = {
     "dynamic_fit_mode": {
         "label": "Dynamic Fit Mode",
         "help": "Isosbestic fit engine selector for rolling, global linear, or robust global event-reject fitting.",
+    },
+    "bleach_correction_mode": {
+        "label": "Bleach Correction",
+        "help": (
+            "Optional correction-stage bleach detrend mode. "
+            "'single_exponential' fits offset + amplitude*exp(-t/tau) separately "
+            "to signal and isosbestic traces before dynamic fitting. "
+            "'double_exponential' fits offset + a_fast*exp(-t/tau_fast) + "
+            "a_slow*exp(-t/tau_slow) separately before dynamic fitting."
+        ),
     },
     "baseline_subtract_before_fit": {
         "label": "Baseline Subtract Before Fit",

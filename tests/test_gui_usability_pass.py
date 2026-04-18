@@ -223,6 +223,7 @@ def test_advanced_tooltips_present(window):
     advanced_pairs = [
         ("Dynamic Fit Mode:", window._dynamic_fit_mode_combo),
         ("Baseline subtract before fit:", window._baseline_subtract_before_fit_cb),
+        ("Bleach Correction:", window._bleach_correction_mode_combo),
         ("Regression Window:", window._window_sec_edit),
         ("Min Samples per Window:", window._min_samples_per_window_spin),
         ("Lowpass Filter:", window._lowpass_hz_edit),
@@ -295,6 +296,7 @@ def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
     _set_minimally_valid_paths(window)
     assert window._dynamic_fit_mode_combo.currentData() == "rolling_filtered_to_raw"
     assert not window._baseline_subtract_before_fit_cb.isChecked()
+    assert window._bleach_correction_mode_combo.currentData() == "none"
 
     visible_modes = [
         window._dynamic_fit_mode_combo.itemData(i)
@@ -311,6 +313,7 @@ def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
     spec_default = window._build_run_spec(validate_only=True)
     assert spec_default.config_overrides.get("dynamic_fit_mode") is None
     assert "window_sec" not in spec_default.config_overrides
+    assert "bleach_correction_mode" not in spec_default.config_overrides
 
     window._baseline_subtract_before_fit_cb.setChecked(True)
     spec_roll_baseline = window._build_run_spec(validate_only=True)
@@ -346,6 +349,18 @@ def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
     with open(cfg_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     assert cfg.get("dynamic_fit_mode") == "global_linear_regression"
+
+    idx_bleach = window._bleach_correction_mode_combo.findData("single_exponential")
+    assert idx_bleach >= 0
+    window._bleach_correction_mode_combo.setCurrentIndex(idx_bleach)
+    spec_bleach = window._build_run_spec(validate_only=True)
+    assert spec_bleach.config_overrides.get("bleach_correction_mode") == "single_exponential"
+
+    idx_bleach_double = window._bleach_correction_mode_combo.findData("double_exponential")
+    assert idx_bleach_double >= 0
+    window._bleach_correction_mode_combo.setCurrentIndex(idx_bleach_double)
+    spec_bleach_double = window._build_run_spec(validate_only=True)
+    assert spec_bleach_double.config_overrides.get("bleach_correction_mode") == "double_exponential"
 
 
 def test_display_series_export_checkbox_plumbs_into_run_spec(window):

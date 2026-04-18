@@ -217,10 +217,10 @@ def test_correction_retune_success_and_output_isolation(tmp_path):
     for p in inspection_pngs:
         assert os.path.isfile(p)
     assert artifacts["retuned_correction_inspection_panel_labels"] == [
-        "Raw absolute sig/iso",
-        "Centered common-gain sig/iso",
-        "Dynamic fit",
-        "Final corrected dF/F",
+        "Stage 1: original sig/iso + bleach fits",
+        "Stage 2: bleach-corrected sig/iso",
+        "Stage 3: dynamic fit (bleach-corrected frame)",
+        "Stage 4: final corrected dF/F",
     ]
 
     # Production features remain untouched.
@@ -263,6 +263,63 @@ def test_correction_retune_accepts_signal_excursion_polarity_override(tmp_path):
         req = json.load(f)
     assert req["correction_overrides_applied"]["signal_excursion_polarity"] == "both"
     assert "signal_excursion_polarity" in req["override_classification"]["correction_supported"]
+
+
+def test_correction_retune_accepts_bleach_correction_mode_override_and_records_it(tmp_path):
+    run_dir = _make_completed_run_fixture(tmp_path)
+    result = run_cache_correction_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={"bleach_correction_mode": "single_exponential"},
+    )
+
+    with open(os.path.join(result["retune_dir"], "retune_config_effective.yaml"), "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["bleach_correction_mode"] == "single_exponential"
+
+    with open(os.path.join(result["retune_dir"], "retune_request.json"), "r", encoding="utf-8") as f:
+        req = json.load(f)
+    assert req["correction_overrides_applied"]["bleach_correction_mode"] == "single_exponential"
+    assert "bleach_correction_mode" in req["override_classification"]["correction_supported"]
+
+    session_csv = result["artifacts"]["retuned_correction_session_csv"]
+    df = pd.read_csv(session_csv)
+    assert "bleach_correction_mode" in df.columns
+    assert "sig_bleach_fit_model" in df.columns
+    assert "uv_bleach_fit_model" in df.columns
+    assert "sig_bleach_fit" in df.columns
+    assert "sig_bleach_corrected" in df.columns
+    assert "uv_bleach_fit" in df.columns
+    assert "uv_bleach_corrected" in df.columns
+    assert set(df["bleach_correction_mode"].astype(str).unique()) == {"single_exponential"}
+
+
+def test_correction_retune_accepts_double_exponential_bleach_override_and_records_it(tmp_path):
+    run_dir = _make_completed_run_fixture(tmp_path)
+    result = run_cache_correction_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={"bleach_correction_mode": "double_exponential"},
+    )
+
+    with open(os.path.join(result["retune_dir"], "retune_config_effective.yaml"), "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["bleach_correction_mode"] == "double_exponential"
+
+    with open(os.path.join(result["retune_dir"], "retune_request.json"), "r", encoding="utf-8") as f:
+        req = json.load(f)
+    assert req["correction_overrides_applied"]["bleach_correction_mode"] == "double_exponential"
+    assert "bleach_correction_mode" in req["override_classification"]["correction_supported"]
+
+    session_csv = result["artifacts"]["retuned_correction_session_csv"]
+    df = pd.read_csv(session_csv)
+    assert set(df["bleach_correction_mode"].astype(str).unique()) == {"double_exponential"}
+    assert "sig_bleach_tau_fast_sec" in df.columns
+    assert "sig_bleach_tau_slow_sec" in df.columns
+    assert "uv_bleach_tau_fast_sec" in df.columns
+    assert "uv_bleach_tau_slow_sec" in df.columns
+    diagnostics = result["artifacts"].get("retuned_correction_inspection_bleach_diagnostics", {})
+    assert diagnostics.get("bleach_correction_mode") == "double_exponential"
 
 
 def test_correction_retune_accepts_baseline_subtract_override_and_records_it(tmp_path):
