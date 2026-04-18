@@ -56,6 +56,28 @@ PNG_SAVE_KWARGS = {
     # Keep PNG artifact format unchanged while reducing encoder CPU cost.
     "pil_kwargs": {"compress_level": 1},
 }
+DISPLAY_SERIES_COLUMNS = [
+    "roi",
+    "plot_type",
+    "source_run_profile",
+    "source_artifact",
+    "trace_kind",
+    "display_point_role",
+    "x",
+    "y",
+    "display_series_export",
+    "display_downsampled",
+    "display_downsample_rule",
+    "day_index",
+    "slot_index",
+    "slot_label",
+    "hour_index",
+    "session_in_hour",
+    "chunk_id",
+    "session_id",
+    "is_placeholder",
+    "display_marker_shape",
+]
 
 
 def _timeline_anchor_label(anchor_mode: str, fixed_daily_anchor_clock: str | None) -> str:
@@ -135,6 +157,19 @@ def parse_args():
     parser.add_argument('--dff-y-percentile-low', type=float, default=0.5)
     parser.add_argument('--dff-y-percentile-high', type=float, default=99.9)
     parser.add_argument('--dff-y-pad-frac', type=float, default=0.10)
+    parser.add_argument(
+        '--export-display-series-csv',
+        action='store_true',
+        help=(
+            "Advanced export: write long-format CSV files containing displayed "
+            "plot series (not canonical full-resolution analysis traces)."
+        ),
+    )
+    parser.add_argument(
+        '--source-run-profile',
+        default='unknown',
+        help="Run profile label to stamp into display-series export metadata.",
+    )
     
     return parser.parse_args()
 
@@ -1158,6 +1193,605 @@ def _compute_stacked_slot_layout(slot_traces):
     return step, data_y_min, data_y_max, y0, y1
 
 
+def _display_rule_for_render_mode(render_mode: str) -> str:
+    if str(render_mode).strip().lower() == "full":
+        return "none (full matplotlib display series)"
+    return (
+        "x-pixel min/max envelope from lightweight renderer bins "
+        "(values converted from pixel rows to axis units)"
+    )
+
+
+def _slot_metadata(day: int, hour_idx: int, col_idx: int, sph: int, panel: dict | None):
+    chunk_id = None
+    if panel is not None:
+        chunk_id = panel.get("chunk_id")
+    slot_index = int(hour_idx * sph + col_idx)
+    chunk_norm = "" if chunk_id is None else str(int(chunk_id))
+    return {
+        "day_index": int(day),
+        "slot_index": slot_index,
+        "slot_label": f"H{int(hour_idx):02d}_S{int(col_idx):02d}",
+        "hour_index": int(hour_idx),
+        "session_in_hour": int(col_idx),
+        "chunk_id": chunk_norm,
+        "session_id": chunk_norm,
+    }
+
+
+def _base_display_row(
+    *,
+    roi: str,
+    plot_type: str,
+    source_run_profile: str,
+    source_artifact: str,
+    trace_kind: str,
+    display_point_role: str,
+    x,
+    y,
+    display_downsampled: bool,
+    display_downsample_rule: str,
+    slot_meta: dict,
+    is_placeholder: bool,
+    display_marker_shape: str = "",
+):
+    row = {
+        "roi": str(roi),
+        "plot_type": str(plot_type),
+        "source_run_profile": str(source_run_profile),
+        "source_artifact": str(source_artifact),
+        "trace_kind": str(trace_kind),
+        "display_point_role": str(display_point_role),
+        "x": x,
+        "y": y,
+        "display_series_export": True,
+        "display_downsampled": bool(display_downsampled),
+        "display_downsample_rule": str(display_downsample_rule),
+        "day_index": int(slot_meta["day_index"]),
+        "slot_index": int(slot_meta["slot_index"]),
+        "slot_label": str(slot_meta["slot_label"]),
+        "hour_index": int(slot_meta["hour_index"]),
+        "session_in_hour": int(slot_meta["session_in_hour"]),
+        "chunk_id": str(slot_meta["chunk_id"]),
+        "session_id": str(slot_meta["session_id"]),
+        "is_placeholder": bool(is_placeholder),
+        "display_marker_shape": str(display_marker_shape),
+    }
+    return row
+
+
+def _append_placeholder_row(rows: list[dict], *, common: dict, slot_meta: dict):
+    rows.append(
+        _base_display_row(
+            trace_kind="panel_placeholder",
+            display_point_role="placeholder",
+            x=np.nan,
+            y=np.nan,
+            slot_meta=slot_meta,
+            is_placeholder=True,
+            **common,
+        )
+    )
+
+
+def _append_full_trace_rows(
+    rows: list[dict],
+    *,
+    common: dict,
+    slot_meta: dict,
+    trace_kind: str,
+    t_vals,
+    y_vals,
+):
+    t_arr = np.asarray(t_vals, dtype=np.float64)
+    y_arr = np.asarray(y_vals, dtype=np.float64)
+    mask = np.isfinite(t_arr) & np.isfinite(y_arr)
+    if not np.any(mask):
+        return
+    for x, y in zip(t_arr[mask], y_arr[mask]):
+        rows.append(
+            _base_display_row(
+                trace_kind=trace_kind,
+                display_point_role="sample",
+                x=float(x),
+                y=float(y),
+                slot_meta=slot_meta,
+                is_placeholder=False,
+                **common,
+            )
+        )
+
+
+def _append_qc_minmax_rows(
+    rows: list[dict],
+    *,
+    common: dict,
+    slot_meta: dict,
+    trace_kind: str,
+    t_vals,
+    y_vals,
+    x0: float,
+    x1: float,
+    y0: float,
+    y1: float,
+    plot_w: int,
+    plot_h: int,
+):
+    t_arr = np.asarray(t_vals, dtype=np.float64)
+    y_arr = np.asarray(y_vals, dtype=np.float64)
+    x_span = float(x1 - x0)
+    y_span = float(y1 - y0)
+    if plot_w <= 1 or plot_h <= 1 or x_span <= 0 or y_span <= 0:
+        return
+
+    mask = (
+        np.isfinite(t_arr)
+        & np.isfinite(y_arr)
+        & (t_arr >= x0)
+        & (t_arr <= x1)
+    )
+    if not np.any(mask):
+        return
+
+    t_use = t_arr[mask]
+    y_use = y_arr[mask]
+    x_float = ((t_use - x0) / x_span) * (plot_w - 1)
+    x_idx = np.rint(x_float).astype(np.int32)
+    x_idx = np.clip(x_idx, 0, plot_w - 1)
+
+    y_float = ((y_use - y0) / y_span) * (plot_h - 1)
+    y_idx = (plot_h - 1) - np.rint(y_float).astype(np.int32)
+    y_idx = np.clip(y_idx, 0, plot_h - 1)
+
+    y_min_idx = np.full(plot_w, plot_h, dtype=np.int32)
+    y_max_idx = np.full(plot_w, -1, dtype=np.int32)
+    np.minimum.at(y_min_idx, x_idx, y_idx)
+    np.maximum.at(y_max_idx, x_idx, y_idx)
+    valid = np.where(y_max_idx >= 0)[0]
+    if valid.size == 0:
+        return
+
+    for col in valid:
+        x_disp = x0 + (float(col) / float(plot_w - 1)) * x_span
+        y_min_disp = y0 + ((plot_h - 1 - float(y_min_idx[col])) / float(plot_h - 1)) * y_span
+        y_max_disp = y0 + ((plot_h - 1 - float(y_max_idx[col])) / float(plot_h - 1)) * y_span
+        rows.append(
+            _base_display_row(
+                trace_kind=trace_kind,
+                display_point_role="display_bin_min",
+                x=float(x_disp),
+                y=float(y_min_disp),
+                slot_meta=slot_meta,
+                is_placeholder=False,
+                **common,
+            )
+        )
+        rows.append(
+            _base_display_row(
+                trace_kind=trace_kind,
+                display_point_role="display_bin_max",
+                x=float(x_disp),
+                y=float(y_max_disp),
+                slot_meta=slot_meta,
+                is_placeholder=False,
+                **common,
+            )
+        )
+
+
+def _write_display_series_csv(csv_path: str, rows: list[dict]):
+    if not rows:
+        return
+    df = pd.DataFrame(rows, columns=DISPLAY_SERIES_COLUMNS)
+    df.to_csv(csv_path, index=False)
+
+
+def _sig_iso_geometry(layout: dict):
+    tile_h = layout["tile_h"]
+    tile_w = layout["tile_w"]
+    pad_x = max(8, int(0.02 * tile_w))
+    title_h = max(14, int(0.18 * tile_h))
+    plot_x0 = pad_x
+    plot_x1 = tile_w - pad_x - 1
+    plot_y0 = title_h + 2
+    plot_y1 = tile_h - max(6, int(0.08 * tile_h)) - 1
+    plot_w = max(2, plot_x1 - plot_x0 + 1)
+    plot_h = max(2, plot_y1 - plot_y0 + 1)
+    return plot_w, plot_h
+
+
+def _dff_geometry(layout: dict):
+    tile_h = layout["tile_h"]
+    tile_w = layout["tile_w"]
+    pad_x = max(8, int(0.02 * tile_w))
+    title_h = max(14, int(0.16 * tile_h))
+    plot_x0 = pad_x
+    plot_x1 = tile_w - pad_x - 1
+    plot_y0 = title_h + 2
+    plot_y1 = tile_h - max(6, int(0.08 * tile_h)) - 1
+    plot_w = max(2, plot_x1 - plot_x0 + 1)
+    plot_h = max(2, plot_y1 - plot_y0 + 1)
+    return plot_w, plot_h
+
+
+def _stacked_geometry(slot_traces, dpi: int):
+    n_slots = len(slot_traces)
+    fig_w_in = 6.0
+    fig_h_in = max(2.0, (n_slots * 0.285) + 1.6)
+    canvas_w = max(640, int(round(fig_w_in * dpi)))
+    canvas_h = max(320, int(round(fig_h_in * dpi)))
+    left_pad = max(44, int(0.075 * canvas_w))
+    right_pad = max(12, int(0.02 * canvas_w))
+    top_pad = max(28, int(0.03 * canvas_h))
+    bottom_pad = max(34, int(0.055 * canvas_h))
+    plot_x0 = left_pad
+    plot_x1 = canvas_w - right_pad - 1
+    plot_y0 = top_pad
+    plot_y1 = canvas_h - bottom_pad - 1
+    plot_w = max(2, plot_x1 - plot_x0 + 1)
+    plot_h = max(2, plot_y1 - plot_y0 + 1)
+    return plot_w, plot_h
+
+
+def _export_sig_iso_day_display_series_csv(
+    *,
+    args,
+    day: int,
+    plot_roi: str,
+    sph: int,
+    slot_map: dict,
+    panel_y_ranges: dict,
+    qc_layout: dict,
+):
+    out_png = f"phasic_sig_iso_day_{day:03d}.png"
+    csv_path = os.path.join(args.output_dir, f"phasic_sig_iso_day_{day:03d}_display_series.csv")
+    downsampled = args.sig_iso_render_mode != "full"
+    common = {
+        "roi": plot_roi,
+        "plot_type": "phasic_day_sig_iso",
+        "source_run_profile": str(args.source_run_profile),
+        "source_artifact": f"day_plots/{out_png}",
+        "display_downsampled": downsampled,
+        "display_downsample_rule": _display_rule_for_render_mode(args.sig_iso_render_mode),
+    }
+    rows = []
+    plot_w, plot_h = _sig_iso_geometry(qc_layout)
+
+    for h in range(24):
+        for c in range(sph):
+            panel = slot_map.get((h, c))
+            slot_meta = _slot_metadata(day, h, c, sph, panel)
+            if panel is None:
+                _append_placeholder_row(rows, common=common, slot_meta=slot_meta)
+                continue
+
+            x0, x1 = _trace_domain(panel["t"], panel.get("xlim_600", False))
+            panel_y = panel_y_ranges.get((h, c))
+            if panel_y is None:
+                panel_y = _yrange_from_panel(panel, x0, x1)
+            y0, y1 = float(panel_y[0]), float(panel_y[1])
+
+            if downsampled:
+                _append_qc_minmax_rows(
+                    rows,
+                    common=common,
+                    slot_meta=slot_meta,
+                    trace_kind="sig_centered",
+                    t_vals=panel["t"],
+                    y_vals=panel["sig"],
+                    x0=x0,
+                    x1=x1,
+                    y0=y0,
+                    y1=y1,
+                    plot_w=plot_w,
+                    plot_h=plot_h,
+                )
+                _append_qc_minmax_rows(
+                    rows,
+                    common=common,
+                    slot_meta=slot_meta,
+                    trace_kind="iso_centered",
+                    t_vals=panel["t"],
+                    y_vals=panel["uv"],
+                    x0=x0,
+                    x1=x1,
+                    y0=y0,
+                    y1=y1,
+                    plot_w=plot_w,
+                    plot_h=plot_h,
+                )
+            else:
+                _append_full_trace_rows(
+                    rows,
+                    common=common,
+                    slot_meta=slot_meta,
+                    trace_kind="sig_centered",
+                    t_vals=panel["t"],
+                    y_vals=panel["sig"],
+                )
+                _append_full_trace_rows(
+                    rows,
+                    common=common,
+                    slot_meta=slot_meta,
+                    trace_kind="iso_centered",
+                    t_vals=panel["t"],
+                    y_vals=panel["uv"],
+                )
+
+    _write_display_series_csv(csv_path, rows)
+
+
+def _export_dynamic_fit_day_display_series_csv(
+    *,
+    args,
+    day: int,
+    plot_roi: str,
+    sph: int,
+    slot_map: dict,
+    panel_y_ranges: dict,
+    dyn_layout: dict,
+):
+    out_png = f"phasic_dynamic_fit_day_{day:03d}.png"
+    csv_path = os.path.join(args.output_dir, f"phasic_dynamic_fit_day_{day:03d}_display_series.csv")
+    downsampled = args.sig_iso_render_mode != "full"
+    common = {
+        "roi": plot_roi,
+        "plot_type": "phasic_day_dynamic_fit",
+        "source_run_profile": str(args.source_run_profile),
+        "source_artifact": f"day_plots/{out_png}",
+        "display_downsampled": downsampled,
+        "display_downsample_rule": _display_rule_for_render_mode(args.sig_iso_render_mode),
+    }
+    rows = []
+    plot_w, plot_h = _sig_iso_geometry(dyn_layout)
+
+    for h in range(24):
+        for c in range(sph):
+            panel = slot_map.get((h, c))
+            slot_meta = _slot_metadata(day, h, c, sph, panel)
+            if panel is None:
+                _append_placeholder_row(rows, common=common, slot_meta=slot_meta)
+                continue
+
+            x0, x1 = _trace_domain(panel["t"], panel.get("xlim_600", False))
+            panel_y = panel_y_ranges.get((h, c))
+            if panel_y is None:
+                panel_y = _yrange_from_dynamic_panel(panel, x0, x1)
+            y0, y1 = float(panel_y[0]), float(panel_y[1])
+
+            if downsampled:
+                _append_qc_minmax_rows(
+                    rows,
+                    common=common,
+                    slot_meta=slot_meta,
+                    trace_kind="signal_raw_for_fit",
+                    t_vals=panel["t"],
+                    y_vals=panel["sig_fit"],
+                    x0=x0,
+                    x1=x1,
+                    y0=y0,
+                    y1=y1,
+                    plot_w=plot_w,
+                    plot_h=plot_h,
+                )
+                _append_qc_minmax_rows(
+                    rows,
+                    common=common,
+                    slot_meta=slot_meta,
+                    trace_kind="fitted_baseline",
+                    t_vals=panel["t"],
+                    y_vals=panel["fit_ref"],
+                    x0=x0,
+                    x1=x1,
+                    y0=y0,
+                    y1=y1,
+                    plot_w=plot_w,
+                    plot_h=plot_h,
+                )
+            else:
+                _append_full_trace_rows(
+                    rows,
+                    common=common,
+                    slot_meta=slot_meta,
+                    trace_kind="signal_raw_for_fit",
+                    t_vals=panel["t"],
+                    y_vals=panel["sig_fit"],
+                )
+                _append_full_trace_rows(
+                    rows,
+                    common=common,
+                    slot_meta=slot_meta,
+                    trace_kind="fitted_baseline",
+                    t_vals=panel["t"],
+                    y_vals=panel["fit_ref"],
+                )
+
+    _write_display_series_csv(csv_path, rows)
+
+
+def _export_dff_day_display_series_csv(
+    *,
+    args,
+    day: int,
+    plot_roi: str,
+    sph: int,
+    slot_map: dict,
+    dff_layout: dict,
+    global_ymin: float,
+    global_ymax: float,
+):
+    out_png = f"phasic_dFF_day_{day:03d}.png"
+    csv_path = os.path.join(args.output_dir, f"phasic_dFF_day_{day:03d}_display_series.csv")
+    downsampled = args.dff_render_mode != "full"
+    common = {
+        "roi": plot_roi,
+        "plot_type": "phasic_day_dff",
+        "source_run_profile": str(args.source_run_profile),
+        "source_artifact": f"day_plots/{out_png}",
+        "display_downsampled": downsampled,
+        "display_downsample_rule": _display_rule_for_render_mode(args.dff_render_mode),
+    }
+    rows = []
+    plot_w, plot_h = _dff_geometry(dff_layout)
+    y0 = float(global_ymin)
+    y1 = float(global_ymax)
+    if not np.isfinite(y0) or not np.isfinite(y1) or y1 <= y0:
+        y0, y1 = -1.0, 1.0
+
+    y_span = y1 - y0
+    y_eps = 0.01 * y_span if y_span > 0 else 1e-6
+
+    for h in range(24):
+        for c in range(sph):
+            panel = slot_map.get((h, c))
+            slot_meta = _slot_metadata(day, h, c, sph, panel)
+            if panel is None:
+                _append_placeholder_row(rows, common=common, slot_meta=slot_meta)
+                continue
+
+            x0, x1 = _trace_domain(panel["t"], False)
+            if downsampled:
+                _append_qc_minmax_rows(
+                    rows,
+                    common=common,
+                    slot_meta=slot_meta,
+                    trace_kind="dff_trace",
+                    t_vals=panel["t"],
+                    y_vals=panel["dff"],
+                    x0=x0,
+                    x1=x1,
+                    y0=y0,
+                    y1=y1,
+                    plot_w=plot_w,
+                    plot_h=plot_h,
+                )
+            else:
+                _append_full_trace_rows(
+                    rows,
+                    common=common,
+                    slot_meta=slot_meta,
+                    trace_kind="dff_trace",
+                    t_vals=panel["t"],
+                    y_vals=panel["dff"],
+                )
+
+            peak_indices = np.asarray(panel.get("peak_indices", np.array([], dtype=int)), dtype=int)
+            for idx in peak_indices.tolist():
+                if idx < 0 or idx >= len(panel["t"]):
+                    continue
+                px = float(panel["t"][idx])
+                py_true = float(panel["dff"][idx])
+                if not np.isfinite(px) or not np.isfinite(py_true):
+                    continue
+                if px < x0 or px > x1:
+                    continue
+
+                py_disp = float(np.clip(py_true, y0 + y_eps, y1 - y_eps))
+                marker_shape = "circle"
+                if py_true > (y1 - y_eps):
+                    marker_shape = "triangle_up_clipped"
+                elif py_true < (y0 + y_eps):
+                    marker_shape = "triangle_down_clipped"
+                rows.append(
+                    _base_display_row(
+                        trace_kind="peak_marker",
+                        display_point_role="marker",
+                        x=px,
+                        y=py_disp,
+                        slot_meta=slot_meta,
+                        is_placeholder=False,
+                        display_marker_shape=marker_shape,
+                        **common,
+                    )
+                )
+
+    _write_display_series_csv(csv_path, rows)
+
+
+def _export_stacked_day_display_series_csv(
+    *,
+    args,
+    day: int,
+    plot_roi: str,
+    sph: int,
+    slot_map: dict,
+    slot_traces: list,
+):
+    out_png = f"phasic_stacked_day_{day:03d}.png"
+    csv_path = os.path.join(args.output_dir, f"phasic_stacked_day_{day:03d}_display_series.csv")
+    downsampled = args.stacked_render_mode != "full"
+    common = {
+        "roi": plot_roi,
+        "plot_type": "phasic_day_stacked",
+        "source_run_profile": str(args.source_run_profile),
+        "source_artifact": f"day_plots/{out_png}",
+        "display_downsampled": downsampled,
+        "display_downsample_rule": _display_rule_for_render_mode(args.stacked_render_mode),
+    }
+    rows = []
+
+    step, _, _, y0, y1 = _compute_stacked_slot_layout(slot_traces)
+    n_slots = len(slot_traces)
+    xmins = []
+    xmaxs = []
+    for tr in slot_traces:
+        if tr is None:
+            continue
+        t, y = tr
+        mask = np.isfinite(t) & np.isfinite(y)
+        if not np.any(mask):
+            continue
+        tv = t[mask]
+        xmins.append(float(np.min(tv)))
+        xmaxs.append(float(np.max(tv)))
+    if xmins and xmaxs:
+        x0 = min(xmins)
+        x1 = max(xmaxs)
+    else:
+        x0, x1 = 0.0, 1.0
+    if not np.isfinite(x0) or not np.isfinite(x1) or x1 <= x0:
+        x0, x1 = 0.0, 1.0
+    plot_w, plot_h = _stacked_geometry(slot_traces, args.dpi)
+
+    for slot_index, tr in enumerate(slot_traces):
+        hour = slot_index // sph
+        col = slot_index % sph
+        panel = slot_map.get((hour, col))
+        slot_meta = _slot_metadata(day, hour, col, sph, panel)
+        if tr is None:
+            _append_placeholder_row(rows, common=common, slot_meta=slot_meta)
+            continue
+        t, y = tr
+        offset = (n_slots - 1 - slot_index) * step
+        y_disp = np.asarray(y, dtype=np.float64) + float(offset)
+
+        if downsampled:
+            _append_qc_minmax_rows(
+                rows,
+                common=common,
+                slot_meta=slot_meta,
+                trace_kind="stacked_smoothed_offset_trace",
+                t_vals=t,
+                y_vals=y_disp,
+                x0=x0,
+                x1=x1,
+                y0=float(y0),
+                y1=float(y1),
+                plot_w=plot_w,
+                plot_h=plot_h,
+            )
+        else:
+            _append_full_trace_rows(
+                rows,
+                common=common,
+                slot_meta=slot_meta,
+                trace_kind="stacked_smoothed_offset_trace",
+                t_vals=t,
+                y_vals=y_disp,
+            )
+
+    _write_display_series_csv(csv_path, rows)
+
 # ======================================================================
 # Main Driver
 # ======================================================================
@@ -1453,6 +2087,7 @@ def main():
     # 2. Render Family 1: dFF Grid
     # ------------------------------------------------------------------
     if args.write_dff_grid:
+        dff_qc_layout = _dff_tile_layout(sph, args.dpi)
         if args.dff_render_mode == 'full':
             fig_dff, axes_dff = init_grid_figure(sph, top=0.95)
             y_span = global_ymax - global_ymin
@@ -1517,9 +2152,19 @@ def main():
                 print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=plotting family=dff_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
                 save_png_fast(fig_dff, out_path, args.dpi)
                 print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=figure_save family=dff_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+                if args.export_display_series_csv:
+                    _export_dff_day_display_series_csv(
+                        args=args,
+                        day=d,
+                        plot_roi=plot_roi,
+                        sph=sph,
+                        slot_map=slot_map,
+                        dff_layout=dff_qc_layout,
+                        global_ymin=global_ymin,
+                        global_ymax=global_ymax,
+                    )
             plt.close(fig_dff)
         else:
-            dff_qc_layout = _dff_tile_layout(sph, args.dpi)
             for d in unique_days:
                 slot_map = day_slot_maps.get(d, {})
                 if not slot_map:
@@ -1560,11 +2205,23 @@ def main():
                     f"panels={proto_stats['panels']}",
                     flush=True
                 )
+                if args.export_display_series_csv:
+                    _export_dff_day_display_series_csv(
+                        args=args,
+                        day=d,
+                        plot_roi=plot_roi,
+                        sph=sph,
+                        slot_map=slot_map,
+                        dff_layout=dff_qc_layout,
+                        global_ymin=global_ymin,
+                        global_ymax=global_ymax,
+                    )
 
     # ------------------------------------------------------------------
     # 3. Render Family 2: Sig/Iso Grid
     # ------------------------------------------------------------------
     if args.write_sig_iso_grid:
+        qc_layout = _sig_iso_tile_layout(sph, args.dpi)
         if args.sig_iso_render_mode == 'full':
             fig_sig, axes_sig = init_grid_figure(sph, top=0.97)
             for d in unique_days:
@@ -1611,9 +2268,18 @@ def main():
                     f"step=figure_save family=sig_iso_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
                     flush=True
                 )
+                if args.export_display_series_csv:
+                    _export_sig_iso_day_display_series_csv(
+                        args=args,
+                        day=d,
+                        plot_roi=plot_roi,
+                        sph=sph,
+                        slot_map=slot_map,
+                        panel_y_ranges=panel_y_ranges,
+                        qc_layout=qc_layout,
+                    )
             plt.close(fig_sig)
         else:
-            qc_layout = _sig_iso_tile_layout(sph, args.dpi)
             for d in unique_days:
                 slot_map = day_slot_maps.get(d, {})
                 if not slot_map:
@@ -1641,12 +2307,23 @@ def main():
                     f"step=figure_save family=sig_iso_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
                     flush=True
                 )
+                if args.export_display_series_csv:
+                    _export_sig_iso_day_display_series_csv(
+                        args=args,
+                        day=d,
+                        plot_roi=plot_roi,
+                        sph=sph,
+                        slot_map=slot_map,
+                        panel_y_ranges=panel_y_ranges,
+                        qc_layout=qc_layout,
+                    )
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     # 4. Render Family 3: Dynamic Fit Grid
     # ------------------------------------------------------------------
     if write_dynamic_fit_grid:
+        dyn_layout = _dynamic_fit_tile_layout(sph, args.dpi)
         if args.sig_iso_render_mode == 'full':
             fig_dyn, axes_dyn = init_grid_figure(sph, top=0.97)
             for d in unique_days:
@@ -1693,9 +2370,18 @@ def main():
                     f"step=figure_save family=dynamic_fit_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
                     flush=True
                 )
+                if args.export_display_series_csv:
+                    _export_dynamic_fit_day_display_series_csv(
+                        args=args,
+                        day=d,
+                        plot_roi=plot_roi,
+                        sph=sph,
+                        slot_map=slot_map,
+                        panel_y_ranges=panel_y_ranges,
+                        dyn_layout=dyn_layout,
+                    )
             plt.close(fig_dyn)
         else:
-            dyn_layout = _dynamic_fit_tile_layout(sph, args.dpi)
             for d in unique_days:
                 slot_map = day_slot_maps.get(d, {})
                 if not slot_map:
@@ -1723,6 +2409,16 @@ def main():
                     f"step=figure_save family=dynamic_fit_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}",
                     flush=True
                 )
+                if args.export_display_series_csv:
+                    _export_dynamic_fit_day_display_series_csv(
+                        args=args,
+                        day=d,
+                        plot_roi=plot_roi,
+                        sph=sph,
+                        slot_map=slot_map,
+                        panel_y_ranges=panel_y_ranges,
+                        dyn_layout=dyn_layout,
+                    )
 
     # ------------------------------------------------------------------
     # 5. Render Family 4: Stacked Smoothed
@@ -1776,6 +2472,15 @@ def main():
                 print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=plotting family=stacked_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
                 plt.savefig(out_path, dpi=args.dpi)
                 print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=figure_save family=stacked_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+                if args.export_display_series_csv:
+                    _export_stacked_day_display_series_csv(
+                        args=args,
+                        day=d,
+                        plot_roi=plot_roi,
+                        sph=sph,
+                        slot_map=slot_map,
+                        slot_traces=slot_traces,
+                    )
                 plt.close(fig)
         else:
             for d in unique_days:
@@ -1796,6 +2501,15 @@ def main():
                 )
                 canvas.save(out_path, compress_level=1)
                 print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=figure_save family=stacked_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
+                if args.export_display_series_csv:
+                    _export_stacked_day_display_series_csv(
+                        args=args,
+                        day=d,
+                        plot_roi=plot_roi,
+                        sph=sph,
+                        slot_map=slot_map,
+                        slot_traces=slot_traces,
+                    )
 
     print(f"PLOT_TIMING DONE script=plot_phasic_dayplot_bundle.py total_sec={time.perf_counter() - t_start:.3f}", flush=True)
 

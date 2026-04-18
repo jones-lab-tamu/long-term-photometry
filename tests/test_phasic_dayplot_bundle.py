@@ -4,6 +4,7 @@ import unittest
 import tempfile
 import subprocess
 import textwrap
+import glob
 import pandas as pd
 import numpy as np
 from unittest.mock import patch
@@ -37,6 +38,7 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         self.assertTrue(args.write_dff_grid)
         self.assertTrue(args.write_sig_iso_grid)
         self.assertTrue(args.write_stacked)
+        self.assertFalse(args.export_display_series_csv)
 
     @patch('tools.plot_phasic_dayplot_bundle.sys.argv', ['plot_phasic_dayplot_bundle.py', '--analysis-out', '/f', '--roi', 'R0', '--output-dir', '/o', '--sessions-per-hour', '1', '--no-write-stacked'])
     def test_parse_args_overrides(self):
@@ -44,6 +46,77 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         self.assertTrue(args.write_dff_grid)
         self.assertTrue(args.write_sig_iso_grid)
         self.assertFalse(args.write_stacked)
+
+    def test_display_series_export_off_by_default(self):
+        self.create_synthetic_phasic_cache(
+            cid=0,
+            include_dff=True,
+            include_sig=True,
+            include_fit_ref=True,
+        )
+        test_args = [
+            'plot_phasic_dayplot_bundle.py',
+            '--analysis-out', self.analysis_out,
+            '--roi', 'Region0',
+            '--output-dir', self.output_dir,
+            '--sessions-per-hour', '1',
+            '--no-write-dff-grid',
+            '--no-write-stacked',
+        ]
+        with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
+            bundle.main()
+
+        self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_sig_iso_day_000.png')))
+        self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_dynamic_fit_day_000.png')))
+        self.assertEqual(glob.glob(os.path.join(self.output_dir, '*_display_series.csv')), [])
+
+    def test_display_series_export_enabled_writes_long_format_csv(self):
+        self.create_synthetic_phasic_cache(
+            cid=0,
+            include_dff=True,
+            include_sig=True,
+            include_fit_ref=True,
+        )
+        test_args = [
+            'plot_phasic_dayplot_bundle.py',
+            '--analysis-out', self.analysis_out,
+            '--roi', 'Region0',
+            '--output-dir', self.output_dir,
+            '--sessions-per-hour', '1',
+            '--no-write-dff-grid',
+            '--no-write-stacked',
+            '--export-display-series-csv',
+            '--source-run-profile', 'full',
+        ]
+        with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
+            bundle.main()
+
+        sig_csv = os.path.join(self.output_dir, 'phasic_sig_iso_day_000_display_series.csv')
+        dyn_csv = os.path.join(self.output_dir, 'phasic_dynamic_fit_day_000_display_series.csv')
+        self.assertTrue(os.path.exists(sig_csv))
+        self.assertTrue(os.path.exists(dyn_csv))
+
+        df = pd.read_csv(sig_csv)
+        required = {
+            'roi', 'plot_type', 'source_run_profile', 'source_artifact',
+            'trace_kind', 'x', 'y', 'display_series_export',
+            'display_downsampled', 'display_downsample_rule',
+            'day_index', 'slot_index', 'slot_label',
+            'chunk_id', 'session_id', 'is_placeholder',
+        }
+        self.assertTrue(required.issubset(set(df.columns)))
+        self.assertTrue(df['display_series_export'].astype(bool).all())
+        self.assertEqual(set(df['plot_type'].dropna().astype(str).unique()), {'phasic_day_sig_iso'})
+        self.assertEqual(set(df['source_run_profile'].dropna().astype(str).unique()), {'full'})
+        self.assertEqual(set(df['source_artifact'].dropna().astype(str).unique()), {'day_plots/phasic_sig_iso_day_000.png'})
+        self.assertEqual(set(df['display_downsampled'].astype(bool).unique()), {True})
+        self.assertTrue(df['display_downsample_rule'].astype(str).str.contains('x-pixel', case=False).all())
+
+        placeholder_flags = set(df['is_placeholder'].astype(str).str.lower().unique())
+        self.assertIn('true', placeholder_flags)
+        self.assertIn('false', placeholder_flags)
+        non_placeholder = df[df['is_placeholder'].astype(str).str.lower() == 'false']
+        self.assertTrue((non_placeholder['chunk_id'].astype(str).str.len() > 0).all())
 
     def test_check_monotonicity(self):
         self.assertTrue(bundle.check_monotonicity([0, 1, 2, 3]))

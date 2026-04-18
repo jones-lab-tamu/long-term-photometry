@@ -23,6 +23,7 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+import math
 
 from photometry_pipeline.core.tonic_output import (
     TONIC_OUTPUT_MODE_PRESERVE_RAW,
@@ -44,6 +45,9 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     resolve_cache_roi,
     iter_cache_chunks_for_roi
 )
+
+
+TONIC_OVERVIEW_TARGET_DISPLAY_POINTS = 30000
 
 
 def parse_args():
@@ -71,6 +75,19 @@ def parse_args():
             "Supported: real_elapsed_time, gap_free_elapsed_time "
             "(legacy alias compressed_recording_time also accepted)"
         ),
+    )
+    parser.add_argument(
+        '--export-display-series-csv',
+        action='store_true',
+        help=(
+            "Advanced export: write long-format CSV of tonic_overview displayed "
+            "series (post-display decimation)."
+        ),
+    )
+    parser.add_argument(
+        '--source-run-profile',
+        default='unknown',
+        help="Run profile label to stamp into display-series export metadata.",
     )
     return parser.parse_args()
 
@@ -226,6 +243,18 @@ def build_overview_prefix_from_time_hours(time_hours: np.ndarray) -> str:
     return "Overview"
 
 
+def compute_tonic_overview_display_decimation(
+    n_points: int,
+    target_points: int = TONIC_OVERVIEW_TARGET_DISPLAY_POINTS,
+) -> int:
+    """Return stride decimation for tonic overview display series."""
+    n_points = int(n_points)
+    target_points = max(1, int(target_points))
+    if n_points <= target_points:
+        return 1
+    return max(1, int(math.ceil(float(n_points) / float(target_points))))
+
+
 def plot_tonic_overview(
     t_h,
     sig_plot,
@@ -269,6 +298,73 @@ def plot_tonic_overview(
     plt.close(fig)
 
 
+def _write_tonic_display_series_csv(
+    *,
+    out_path: str,
+    roi: str,
+    source_run_profile: str,
+    t_plot: np.ndarray,
+    sig_plot: np.ndarray,
+    uv_plot: np.ndarray,
+    deltaf_plot: np.ndarray,
+    decimate: int,
+):
+    csv_path = os.path.splitext(out_path)[0] + "_display_series.csv"
+    source_artifact = os.path.basename(out_path)
+    display_downsampled = bool(int(decimate) > 1)
+    if display_downsampled:
+        downsample_rule = f"stride decimation from assembled tonic series: every {int(decimate)} points"
+    else:
+        downsample_rule = "none (display series equals assembled tonic series)"
+
+    rows = []
+    series_map = {
+        "sig_raw_display": np.asarray(sig_plot, dtype=np.float64),
+        "iso_raw_display": np.asarray(uv_plot, dtype=np.float64),
+        "tonic_deltaf_display": np.asarray(deltaf_plot, dtype=np.float64),
+    }
+    t_arr = np.asarray(t_plot, dtype=np.float64)
+    finite_t = np.isfinite(t_arr)
+    for trace_kind, y_arr in series_map.items():
+        mask = finite_t & np.isfinite(y_arr)
+        if not np.any(mask):
+            continue
+        for x, y in zip(t_arr[mask], y_arr[mask]):
+            rows.append(
+                {
+                    "roi": str(roi),
+                    "plot_type": "tonic_overview",
+                    "source_run_profile": str(source_run_profile),
+                    "source_artifact": str(source_artifact),
+                    "trace_kind": str(trace_kind),
+                    "display_point_role": "sample",
+                    "x": float(x),
+                    "y": float(y),
+                    "display_series_export": True,
+                    "display_downsampled": display_downsampled,
+                    "display_downsample_rule": downsample_rule,
+                }
+            )
+    if not rows:
+        return
+    cols = [
+        "roi",
+        "plot_type",
+        "source_run_profile",
+        "source_artifact",
+        "trace_kind",
+        "display_point_role",
+        "x",
+        "y",
+        "display_series_export",
+        "display_downsampled",
+        "display_downsample_rule",
+    ]
+    import pandas as pd
+    pd.DataFrame(rows, columns=cols).to_csv(csv_path, index=False)
+    print(f"Saved {csv_path}")
+
+
 # ======================================================================
 # Main Driver
 # ======================================================================
@@ -300,7 +396,7 @@ def main():
     # --- Stage 2b: Decimation ---
     t_h = continuous_time / 3600.0
     n_pts = len(t_h)
-    decimate = max(1, n_pts // 100000)
+    decimate = compute_tonic_overview_display_decimation(n_pts)
 
     t_plot = t_h[::decimate]
     sig_plot = sig_raw[::decimate]
@@ -333,6 +429,17 @@ def main():
         timeline_mode_name,
         timeline_axis,
     )
+    if args.export_display_series_csv:
+        _write_tonic_display_series_csv(
+            out_path=out_path,
+            roi=roi,
+            source_run_profile=args.source_run_profile,
+            t_plot=t_plot,
+            sig_plot=sig_plot,
+            uv_plot=uv_plot,
+            deltaf_plot=deltaf_plot,
+            decimate=decimate,
+        )
 
     print(f"PLOT_TIMING DONE script=plot_tonic_48h.py total_sec={time.perf_counter() - t_start:.3f}", flush=True)
 

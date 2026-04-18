@@ -6019,6 +6019,16 @@ class MainWindow(QMainWindow):
             changed_ev_overrides = compute_overrides_user_changed(ev_overrides, default_ev_dict)
             config_overrides.update(changed_ev_overrides)
 
+        selected_export_display_series_csv = bool(
+            getattr(self, "_export_display_series_csv_cb", None)
+            and self._export_display_series_csv_cb.isChecked()
+        )
+        default_export_display_series_csv = bool(
+            getattr(base_cfg, "export_display_series_csv", False)
+        )
+        if selected_export_display_series_csv != default_export_display_series_csv:
+            config_overrides["export_display_series_csv"] = selected_export_display_series_csv
+
         # Ensure effective config tracks the selected RWD dataset contract.
         # This prevents stale/default baseline config values (e.g., fs/suffix/time-col)
         # from conflicting with the currently selected input data.
@@ -7190,6 +7200,13 @@ class MainWindow(QMainWindow):
 
         smooth = self._settings.value("smooth_window_s", 1.0, float)
         self._smooth_spin.setValue(smooth)
+        self._export_display_series_csv_cb.setChecked(
+            self._settings.value(
+                "export_display_series_csv",
+                bool(getattr(self._default_cfg, "export_display_series_csv", False)),
+                bool,
+            )
+        )
 
         plotting_mode = self._settings.value("plotting_mode", "", str).strip()
         if not plotting_mode:
@@ -7403,6 +7420,13 @@ class MainWindow(QMainWindow):
         self._settings.setValue("sessions_per_hour", self._sph_edit.text().strip())
         self._settings.setValue("session_duration_s", self._duration_edit.text().strip())
         self._settings.setValue("smooth_window_s", self._smooth_spin.value())
+        self._settings.setValue(
+            "export_display_series_csv",
+            bool(
+                getattr(self, "_export_display_series_csv_cb", None)
+                and self._export_display_series_csv_cb.isChecked()
+            ),
+        )
         self._settings.setValue("plotting_mode", self._plotting_mode_combo.currentText())
         self._settings.setValue("timeline_anchor_mode", self._timeline_anchor_mode_value())
         self._settings.setValue("fixed_daily_anchor_clock", self._fixed_daily_anchor_time_edit.text().strip())
@@ -8543,6 +8567,22 @@ class MainWindow(QMainWindow):
         )
         self._smooth_spin.valueChanged.connect(self._on_config_changed)
         layout.addRow("Smoothing Window Duration (s):", self._smooth_spin)
+
+        self._export_display_series_csv_cb = QCheckBox("")
+        self._export_display_series_csv_cb.setChecked(
+            bool(getattr(self._default_cfg, "export_display_series_csv", False))
+        )
+        self._export_display_series_csv_cb.setToolTip(
+            "Advanced external replotting export. Writes displayed plotted series CSVs for "
+            "supported plots (phasic day plots and tonic overview) when available. Off by "
+            "default. This exports plotted display-series data, not canonical raw/full-resolution "
+            "analysis traces."
+        )
+        self._export_display_series_csv_cb.stateChanged.connect(self._on_config_changed)
+        layout.addRow(
+            "Export displayed plot series as CSV (advanced):",
+            self._export_display_series_csv_cb,
+        )
 
         self._timeline_anchor_mode_combo = QComboBox()
         self._timeline_anchor_mode_combo.addItem("Civil clock", "civil")

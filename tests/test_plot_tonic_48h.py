@@ -19,6 +19,7 @@ import tempfile
 import subprocess
 import numpy as np
 import h5py
+import pandas as pd
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
@@ -86,6 +87,96 @@ class TestPlotTonic48h(unittest.TestCase):
         default_path = os.path.join(self.tonic_out, 'tonic_qc', 'tonic_48h_overview_Region0.png')
         self.assertTrue(os.path.exists(default_path), f"Expected default output at {default_path}")
         self.assertGreater(os.path.getsize(default_path), 0)
+
+    def test_display_series_export_off_by_default(self):
+        result = self._run_script()
+        self.assertEqual(result.returncode, 0, f"Script failed:\n{result.stderr}")
+        default_csv = os.path.join(
+            self.tonic_out,
+            'tonic_qc',
+            'tonic_48h_overview_Region0_display_series.csv',
+        )
+        self.assertFalse(os.path.exists(default_csv))
+
+    def test_display_series_export_enabled_writes_long_format_csv(self):
+        out_path = os.path.join(self.test_dir.name, 'custom', 'tonic_overview.png')
+        result = self._run_script([
+            '--out', out_path,
+            '--export-display-series-csv',
+            '--source-run-profile', 'full',
+        ])
+        self.assertEqual(result.returncode, 0, f"Script failed:\n{result.stderr}")
+        csv_path = os.path.join(self.test_dir.name, 'custom', 'tonic_overview_display_series.csv')
+        self.assertTrue(os.path.exists(csv_path))
+
+        df = pd.read_csv(csv_path)
+        required = {
+            'roi', 'plot_type', 'source_run_profile', 'source_artifact',
+            'trace_kind', 'x', 'y', 'display_series_export',
+            'display_downsampled', 'display_downsample_rule',
+        }
+        self.assertTrue(required.issubset(set(df.columns)))
+        self.assertEqual(set(df['plot_type'].dropna().astype(str).unique()), {'tonic_overview'})
+        self.assertEqual(set(df['source_run_profile'].dropna().astype(str).unique()), {'full'})
+        self.assertTrue(df['display_series_export'].astype(bool).all())
+        self.assertEqual(set(df['display_downsampled'].astype(bool).unique()), {False})
+        self.assertTrue(df['display_downsample_rule'].astype(str).str.contains('none', case=False).all())
+
+    def test_tonic_overview_display_decimation_helper(self):
+        from tools.plot_tonic_48h import (
+            TONIC_OVERVIEW_TARGET_DISPLAY_POINTS,
+            compute_tonic_overview_display_decimation,
+        )
+
+        target = int(TONIC_OVERVIEW_TARGET_DISPLAY_POINTS)
+        self.assertEqual(compute_tonic_overview_display_decimation(target), 1)
+        self.assertEqual(compute_tonic_overview_display_decimation(target + 1), 2)
+        self.assertEqual(compute_tonic_overview_display_decimation(target * 3 + 7), 4)
+
+    def test_display_series_export_reports_stride_decimation_when_triggered(self):
+        from tools.plot_tonic_48h import compute_tonic_overview_display_decimation
+
+        local_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(local_dir.cleanup)
+        analysis_out = os.path.join(local_dir.name, '_analysis')
+        tonic_out = os.path.join(analysis_out, 'tonic_out')
+        n_pts = 30050
+        _create_synthetic_tonic_cache(tonic_out, n_chunks=1, n_pts=n_pts, rois=['Region0'])
+
+        out_path = os.path.join(local_dir.name, 'custom', 'tonic_overview.png')
+        script = os.path.join(PROJECT_ROOT, 'tools', 'plot_tonic_48h.py')
+        result = subprocess.run(
+            [
+                sys.executable,
+                script,
+                '--analysis-out',
+                tonic_out,
+                '--out',
+                out_path,
+                '--export-display-series-csv',
+                '--source-run-profile',
+                'tuning_prep',
+            ],
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_ROOT,
+        )
+        self.assertEqual(result.returncode, 0, f"Script failed:\n{result.stderr}")
+
+        csv_path = os.path.join(local_dir.name, 'custom', 'tonic_overview_display_series.csv')
+        self.assertTrue(os.path.exists(csv_path))
+        df = pd.read_csv(csv_path)
+        expected_decimate = compute_tonic_overview_display_decimation(n_pts)
+        expected_plot_points = len(np.arange(0, n_pts, expected_decimate))
+        self.assertEqual(set(df['display_downsampled'].astype(bool).unique()), {True})
+        self.assertTrue(
+            df['display_downsample_rule']
+            .astype(str)
+            .str.contains(f"every {expected_decimate} points", case=False)
+            .all()
+        )
+        self.assertEqual(len(df), expected_plot_points * 3)
+        self.assertEqual(set(df['source_run_profile'].dropna().astype(str).unique()), {'tuning_prep'})
 
     def test_multi_chunk_stitching(self):
         """Multi-chunk input produces a valid output and exercises stitching."""

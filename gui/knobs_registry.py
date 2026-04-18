@@ -60,6 +60,7 @@ GUI_KNOBS_ADVANCED: Set[str] = {
     "peak_min_width_sec",
     "peak_pre_filter",
     "event_auc_baseline",
+    "export_display_series_csv",
 }
 
 GUI_KNOBS_DEVELOPER: Set[str] = {
@@ -158,6 +159,14 @@ KNOB_META: Dict[str, dict] = {
     "event_auc_baseline": {
         "label": "Event AUC Baseline",
         "help": "Baseline method for AUC calculation: 'zero' or 'median'.",
+    },
+    "export_display_series_csv": {
+        "label": "Export displayed plot series as CSV (advanced)",
+        "help": (
+            "Advanced external replotting export for displayed plotted series on "
+            "supported plots (phasic day plots and tonic overview). This is not "
+            "canonical raw/full-resolution analysis output."
+        ),
     },
     "window_sec": {
         "label": "Regression Window (sec)",

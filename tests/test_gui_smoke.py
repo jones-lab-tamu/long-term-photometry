@@ -75,6 +75,7 @@ class TestGuiSmoke(unittest.TestCase):
         w1._input_dir.setText(test_input)
         w1._sph_edit.setText("4")
         w1._smooth_spin.setValue(2.5)
+        w1._export_display_series_csv_cb.setChecked(True)
         w1._overwrite_cb.setChecked(True)
         w1._save_widgets_to_settings()
         w1.close()
@@ -84,6 +85,7 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertEqual(w2._input_dir.text(), test_input)
         self.assertEqual(w2._sph_edit.text(), "4")
         self.assertAlmostEqual(w2._smooth_spin.value(), 2.5, places=1)
+        self.assertTrue(w2._export_display_series_csv_cb.isChecked())
         self.assertTrue(w2._overwrite_cb.isChecked())
         w2.close()
 

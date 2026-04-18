@@ -203,6 +203,10 @@ def test_advanced_tooltips_present(window):
         ("Run Type:", window._run_profile_combo),
         ("Plotting Mode:", window._plotting_mode_combo),
         ("Smoothing Window Duration (s):", window._smooth_spin),
+        (
+            "Export displayed plot series as CSV (advanced):",
+            window._export_display_series_csv_cb,
+        ),
         ("Timeline Anchor:", window._timeline_anchor_mode_combo),
         ("Fixed Anchor Time:", window._fixed_daily_anchor_time_edit),
     ]
@@ -258,6 +262,10 @@ def test_advanced_tooltips_present(window):
     auc_tip = window._event_auc_combo.toolTip().lower()
     assert "auc sign follows signal excursion polarity" in auc_tip
     assert "signed net area" in auc_tip
+    display_series_tip = window._export_display_series_csv_cb.toolTip().lower()
+    assert "displayed plotted series" in display_series_tip
+    assert "external replotting" in display_series_tip
+    assert "not canonical raw/full-resolution analysis" in display_series_tip
     inline_anchor_help_lines = window._timeline_anchor_help_label.text().splitlines()
     assert inline_anchor_help_lines == [
         "Civil clock: real time-of-day",
@@ -338,6 +346,18 @@ def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
     with open(cfg_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     assert cfg.get("dynamic_fit_mode") == "global_linear_regression"
+
+
+def test_display_series_export_checkbox_plumbs_into_run_spec(window):
+    _set_minimally_valid_paths(window)
+    assert window._export_display_series_csv_cb.isChecked() is False
+
+    spec_default = window._build_run_spec(validate_only=True)
+    assert "export_display_series_csv" not in spec_default.config_overrides
+
+    window._export_display_series_csv_cb.setChecked(True)
+    spec_enabled = window._build_run_spec(validate_only=True)
+    assert spec_enabled.config_overrides.get("export_display_series_csv") is True
 
 
 def test_gui_dynamic_fit_mode_robust_event_reject_plumbs_mode_specific_overrides(window):

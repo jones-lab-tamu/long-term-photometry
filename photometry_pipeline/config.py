@@ -94,6 +94,7 @@ class Config:
         'gap_free_elapsed_time',
         'compressed_recording_time',
     ] = 'real_elapsed_time'
+    export_display_series_csv: bool = False
 
     # channel identifiers - MUST be provided in config (no defaults for these essentially)
     rwd_time_col: str = "Time(s)" # Default often seen, but user should override
@@ -198,6 +199,11 @@ class Config:
                     f"Invalid tonic_timeline_mode: {data['tonic_timeline_mode']}. "
                     "Allowed: {'real_elapsed_time', 'gap_free_elapsed_time'} "
                     "(legacy alias 'compressed_recording_time' is also accepted)"
+                )
+        if 'export_display_series_csv' in data:
+            if not isinstance(data['export_display_series_csv'], bool):
+                raise ValueError(
+                    "export_display_series_csv must be a boolean (true/false)"
                 )
         
         obj = cls(**data)

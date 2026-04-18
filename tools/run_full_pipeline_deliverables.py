@@ -536,6 +536,14 @@ def parse_args():
                         help="Render mode for dFF day plots (qc or full).")
     parser.add_argument('--stacked-render-mode', choices=['qc', 'full'], default='qc',
                         help="Render mode for stacked day plots (qc or full).")
+    parser.add_argument(
+        '--export-display-series-csv',
+        action='store_true',
+        help=(
+            "Advanced export: write long-format CSVs of plotted display-series data "
+            "for selected figures. Off by default."
+        ),
+    )
     parser.add_argument('--event-signal', type=str, choices=['dff', 'delta_f'], help="Signal to use for peak/event detection")
     parser.add_argument('--representative-session-index', type=int, default=None, help="Force a specific session index for representative artifacts (0-based)")
     parser.add_argument('--preview-first-n', type=int, default=None, help="Preview mode: process only the first N discovered sessions (after discovery/sort).")
@@ -739,6 +747,7 @@ def main():
     effective_preview_first_n = args.preview_first_n
     effective_tonic_output_mode = TONIC_OUTPUT_MODE_PRESERVE_RAW
     effective_tonic_timeline_mode = TONIC_TIMELINE_MODE_REAL_ELAPSED
+    effective_export_display_series_csv = bool(args.export_display_series_csv)
     
     if (
         effective_event_signal is None
@@ -764,6 +773,10 @@ def main():
             effective_tonic_timeline_mode = normalize_tonic_timeline_mode(
                 getattr(cfg, "tonic_timeline_mode", TONIC_TIMELINE_MODE_REAL_ELAPSED)
             )
+            if not effective_export_display_series_csv:
+                effective_export_display_series_csv = bool(
+                    getattr(cfg, "export_display_series_csv", False)
+                )
         except Exception as e:
             print(f"WARNING: Failed to parse config for runner stamping: {e}", flush=True)
             if effective_event_signal is None: 
@@ -772,6 +785,7 @@ def main():
             # others remain as given or None
             effective_tonic_output_mode = TONIC_OUTPUT_MODE_PRESERVE_RAW
             effective_tonic_timeline_mode = TONIC_TIMELINE_MODE_REAL_ELAPSED
+            effective_export_display_series_csv = bool(args.export_display_series_csv)
 
     print(
         f"Using tonic_output_mode={effective_tonic_output_mode}",
@@ -779,6 +793,11 @@ def main():
     )
     print(
         f"Using tonic_timeline_mode={effective_tonic_timeline_mode}",
+        flush=True,
+    )
+    print(
+        "Using export_display_series_csv="
+        f"{'enabled' if effective_export_display_series_csv else 'disabled'}",
         flush=True,
     )
     effective_run_type = _resolve_effective_run_type(
@@ -1457,7 +1476,10 @@ def main():
                                  '--analysis-out', tonic_out, '--roi', roi,
                                  '--out', out_tonic,
                                  '--tonic-output-mode', effective_tonic_output_mode,
-                                 '--tonic-timeline-mode', effective_tonic_timeline_mode]
+                                  '--tonic-timeline-mode', effective_tonic_timeline_mode]
+                if effective_export_display_series_csv:
+                    cmd_tonic_roi.append('--export-display-series-csv')
+                    cmd_tonic_roi.extend(['--source-run-profile', str(args.run_type)])
                 if args.input:
                     cmd_tonic_roi.extend(['--input', args.input])
                 if args.format:
@@ -1726,6 +1748,9 @@ def main():
                               '--sig-iso-render-mode', str(args.sig_iso_render_mode),
                               '--dff-render-mode', str(args.dff_render_mode),
                               '--stacked-render-mode', str(args.stacked_render_mode)]
+                if effective_export_display_series_csv:
+                    cmd_bundle.append('--export-display-series-csv')
+                    cmd_bundle.extend(['--source-run-profile', str(args.run_type)])
                 if args.timeline_anchor_mode != "civil":
                     cmd_bundle.extend(['--timeline-anchor-mode', str(args.timeline_anchor_mode)])
                 if args.timeline_anchor_mode == "fixed_daily_anchor" and args.fixed_daily_anchor_clock:
