@@ -53,6 +53,11 @@ def discover_inputs(
     # ------------------------------------------------------------------
     file_list: list = []
     resolved_format = force_format.lower() if force_format else "auto"
+    valid_formats = {"auto", "rwd", "npm", "custom_tabular"}
+    if resolved_format not in valid_formats:
+        raise ValueError(
+            f"Unsupported force_format '{force_format}'. Allowed: {sorted(valid_formats)}"
+        )
 
     if resolved_format == "rwd":
         from photometry_pipeline.io.adapters import discover_rwd_chunks

@@ -103,6 +103,11 @@ class Pipeline:
             print(f"TIMING METRIC phase=phasic_analysis name={name} value={value}", flush=True)
 
     def discover_files(self, input_path: str, recursive: bool = False, file_glob: str = "*.csv", force_format: str = 'auto'):
+        valid_formats = {"auto", "rwd", "npm", "custom_tabular"}
+        if force_format not in valid_formats:
+            raise ValueError(
+                f"Unsupported format '{force_format}'. Allowed: {sorted(valid_formats)}"
+            )
         if force_format == 'rwd':
             # RWD Discovery: Treat input_path as root containing timestamped subdirectories
             from .io.adapters import discover_rwd_chunks

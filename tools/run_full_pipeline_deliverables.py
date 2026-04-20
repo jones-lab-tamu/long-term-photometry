@@ -501,7 +501,7 @@ def parse_args():
     parser.add_argument('--run-id', default=None,
                         help="Optional run ID for --out-base mode (no path separators)")
     parser.add_argument('--config', required=True)
-    parser.add_argument('--format', required=True, choices=['rwd', 'npm', 'auto'])
+    parser.add_argument('--format', required=True, choices=['rwd', 'npm', 'custom_tabular', 'auto'])
     parser.add_argument('--mode', choices=['both', 'tonic', 'phasic'], default='both', help="Analysis mode (both, tonic, or phasic)")
     parser.add_argument(
         '--run-type',
@@ -584,7 +584,7 @@ def validate_inputs(args):
         raise RuntimeError(f"Config file does not exist or is not a file: {args.config}")
 
     # Format (already constrained by argparse choices, but belt-and-suspenders)
-    if args.format not in ('rwd', 'npm', 'auto'):
+    if args.format not in ('rwd', 'npm', 'custom_tabular', 'auto'):
         raise RuntimeError(f"Invalid format: {args.format}")
 
     run_profile = str(getattr(args, "run_type", "full") or "full").strip().lower()

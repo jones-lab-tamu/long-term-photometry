@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 from gui.knobs_schema import is_config_key
 
-FORMAT_CHOICES = ("auto", "rwd", "npm")
+FORMAT_CHOICES = ("auto", "rwd", "npm", "custom_tabular")
 TIMELINE_ANCHOR_CHOICES = ("civil", "elapsed", "fixed_daily_anchor")
 RUN_PROFILE_CHOICES = ("full", "tuning_prep")
 _ANCHOR_CLOCK_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
@@ -108,6 +108,10 @@ class RunSpec:
     user_set_fields: List[str] = field(default_factory=list)
 
     def __post_init__(self):
+        if self.format not in FORMAT_CHOICES:
+            raise ValueError(
+                f"format must be one of {FORMAT_CHOICES}, got {self.format!r}"
+            )
         if self.include_roi_ids is not None and self.exclude_roi_ids is not None:
             raise ValueError("include_roi_ids and exclude_roi_ids are mutually exclusive")
         if self.timeline_anchor_mode not in TIMELINE_ANCHOR_CHOICES:

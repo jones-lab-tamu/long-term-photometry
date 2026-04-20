@@ -420,6 +420,56 @@ def sort_npm_files(paths: List[str]) -> List[str]:
 def _create_canonical_names(n_rois: int) -> List[str]:
     return [f"Region{i}" for i in range(n_rois)]
 
+
+def _resolve_custom_tabular_channel_pairs(
+    columns: List[str],
+    uv_suffix: str,
+    sig_suffix: str,
+) -> List[Tuple[str, str, str]]:
+    """
+    Resolve strict custom-tabular ROI pairs from exact suffix contract.
+
+    Contract:
+      - each ROI base must have BOTH "<base><uv_suffix>" and "<base><sig_suffix>"
+      - no inference/guessing beyond explicit suffix matching
+    """
+    uv_cols = [c for c in columns if c.endswith(uv_suffix)]
+    sig_cols = [c for c in columns if c.endswith(sig_suffix)]
+    if not uv_cols or not sig_cols:
+        raise ValueError(
+            "custom_tabular: missing required paired signal/isosbestic columns. "
+            f"Expected columns ending with uv_suffix='{uv_suffix}' and sig_suffix='{sig_suffix}'."
+        )
+
+    def _bases(cols: List[str], suffix: str) -> List[str]:
+        out = []
+        for col in cols:
+            base = col[: -len(suffix)] if suffix else col
+            if base:
+                out.append(base)
+        return out
+
+    uv_bases = set(_bases(uv_cols, uv_suffix))
+    sig_bases = set(_bases(sig_cols, sig_suffix))
+    if not uv_bases or not sig_bases:
+        raise ValueError(
+            "custom_tabular: no valid ROI bases could be resolved from suffix contract."
+        )
+
+    missing_sig = sorted(uv_bases - sig_bases, key=natural_sort_key)
+    missing_uv = sorted(sig_bases - uv_bases, key=natural_sort_key)
+    if missing_sig or missing_uv:
+        raise ValueError(
+            "custom_tabular: unmatched ROI pairs detected. "
+            f"Missing signal for bases={missing_sig or []}, "
+            f"missing isosbestic for bases={missing_uv or []}. "
+            "Each ROI must provide both channels in the same file."
+        )
+
+    ordered_bases = sorted(uv_bases & sig_bases, key=natural_sort_key)
+    return [(base, f"{base}{uv_suffix}", f"{base}{sig_suffix}") for base in ordered_bases]
+
+
 def _require_strict_check(
     t_relative: np.ndarray,
     time_sec: np.ndarray,
@@ -681,6 +731,8 @@ def load_chunk(path: str, format_type: str, config: Config, chunk_id: int) -> Ch
         chunk = _load_rwd(path, config, chunk_id)
     elif format_type == 'npm':
         chunk = _load_npm(path, config, chunk_id)
+    elif format_type == 'custom_tabular':
+        chunk = _load_custom_tabular(path, config, chunk_id)
     else:
         raise ValueError(f"Unknown format: {format_type}")
     
@@ -769,6 +821,103 @@ def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
     )
     # chunk.validate() moved to load_chunk
     return chunk
+
+
+def _load_custom_tabular(path: str, config: Config, chunk_id: int) -> Chunk:
+    """
+    Strict custom-tabular importer (one CSV == one session).
+
+    Required contract (v1):
+      - exact time column name: config.custom_tabular_time_col
+      - paired ROI columns with exact suffixes:
+          <roi_base> + config.custom_tabular_uv_suffix
+          <roi_base> + config.custom_tabular_sig_suffix
+      - no heuristic column guessing
+    """
+    df = pd.read_csv(path)
+    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+    cols = [str(c) for c in df.columns]
+
+    time_col = str(getattr(config, "custom_tabular_time_col", "time_sec")).strip()
+    uv_suffix = str(getattr(config, "custom_tabular_uv_suffix", "_iso")).strip()
+    sig_suffix = str(getattr(config, "custom_tabular_sig_suffix", "_sig")).strip()
+
+    if not time_col:
+        raise ValueError("custom_tabular: custom_tabular_time_col must be configured")
+    if not uv_suffix or not sig_suffix:
+        raise ValueError(
+            "custom_tabular: custom_tabular_uv_suffix and custom_tabular_sig_suffix must be configured"
+        )
+    if uv_suffix == sig_suffix:
+        raise ValueError(
+            "custom_tabular: custom_tabular_uv_suffix and custom_tabular_sig_suffix must differ"
+        )
+    if time_col not in cols:
+        raise ValueError(
+            "custom_tabular: missing required time column "
+            f"'{time_col}'. Configure custom_tabular_time_col or fix CSV header."
+        )
+
+    t_raw = pd.to_numeric(df[time_col], errors="coerce").values
+    if not np.all(np.isfinite(t_raw)):
+        raise ValueError(
+            f"custom_tabular: time column '{time_col}' contains non-numeric/NaN values."
+        )
+    if t_raw.size < 2:
+        raise ValueError("custom_tabular: requires at least 2 time samples")
+
+    channel_data = _resolve_custom_tabular_channel_pairs(cols, uv_suffix, sig_suffix)
+    n_rois = len(channel_data)
+    names = [x[0] for x in channel_data]
+    roi_map = {names[i]: {"raw_uv": x[1], "raw_sig": x[2]} for i, x in enumerate(channel_data)}
+
+    uv_df = df[[x[1] for x in channel_data]].apply(pd.to_numeric, errors="coerce")
+    sig_df = df[[x[2] for x in channel_data]].apply(pd.to_numeric, errors="coerce")
+    if uv_df.isna().values.any():
+        raise ValueError(
+            "custom_tabular: isosbestic channel columns contain non-numeric/NaN values."
+        )
+    if sig_df.isna().values.any():
+        raise ValueError(
+            "custom_tabular: signal channel columns contain non-numeric/NaN values."
+        )
+    uv_raw = uv_df.values
+    sig_raw = sig_df.values
+
+    t_rel = t_raw - t_raw[0]
+    if np.any(np.diff(t_rel) <= 0):
+        raise ValueError("custom_tabular: timestamps must be strictly increasing")
+
+    time_sec, data_out = _resample_strict(
+        t_rel,
+        np.hstack([uv_raw, sig_raw]),
+        config,
+        "CUSTOM_TABULAR strict",
+    )
+    uv_grid = data_out[:, :n_rois]
+    sig_grid = data_out[:, n_rois:]
+
+    chunk = Chunk(
+        chunk_id=chunk_id,
+        source_file=path,
+        format='custom_tabular',
+        time_sec=time_sec,
+        uv_raw=uv_grid,
+        sig_raw=sig_grid,
+        fs_hz=config.target_fs_hz,
+        channel_names=names,
+        metadata={
+            "roi_map": roi_map,
+            "custom_tabular_contract": {
+                "session_model": "one_csv_per_session",
+                "time_col": time_col,
+                "uv_suffix": uv_suffix,
+                "sig_suffix": sig_suffix,
+            },
+        },
+    )
+    return chunk
+
 
 def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
     df = pd.read_csv(path)

@@ -35,7 +35,7 @@ class Chunk:
     """
     chunk_id: int
     source_file: str
-    format: str # 'rwd' | 'npm'
+    format: str # 'rwd' | 'npm' | 'custom_tabular'
     
     # Time axis: Uniform grid, starting at 0.0
     time_sec: np.ndarray

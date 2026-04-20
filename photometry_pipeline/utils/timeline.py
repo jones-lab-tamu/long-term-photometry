@@ -19,7 +19,7 @@ def map_cached_sources_to_schedule_positions(
     
     Arguments:
         raw_input_dir: The dataset directory string.
-        fmt: 'rwd', 'npm', or 'auto'.
+        fmt: 'rwd', 'npm', 'custom_tabular', or 'auto'.
         cached_source_files: The decoded string paths recovered from cache meta 'source_files'.
         cids: The sequential chunk_ids matched against the cached_source_files length.
         

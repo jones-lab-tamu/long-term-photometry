@@ -8917,7 +8917,9 @@ class MainWindow(QMainWindow):
         self._format_combo = QComboBox()
         self._format_combo.addItems(list(FORMAT_CHOICES))
         self._format_combo.setToolTip(
-            "Input format hint. Use auto to detect format from the selected input directory."
+            "Input format hint. Use auto to detect RWD/NPM from the selected input directory. "
+            "Use custom_tabular only for strict one-CSV-per-session tabular imports with "
+            "explicit time/signal/isosbestic schema."
         )
         self._format_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Format:", self._format_combo)

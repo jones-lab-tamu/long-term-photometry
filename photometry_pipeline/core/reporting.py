@@ -143,6 +143,12 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
             "event_signal": getattr(config, 'event_signal', 'dff'),
             "signal_excursion_polarity": getattr(config, "signal_excursion_polarity", "positive"),
             "bleach_correction_mode": getattr(config, "bleach_correction_mode", "none"),
+            "custom_tabular_contract": {
+                "session_model": "one_csv_per_session",
+                "time_col": getattr(config, "custom_tabular_time_col", "time_sec"),
+                "uv_suffix": getattr(config, "custom_tabular_uv_suffix", "_iso"),
+                "sig_suffix": getattr(config, "custom_tabular_sig_suffix", "_sig"),
+            },
             "sessions_per_hour": resolved_sph,
             "sessions_per_hour_source": resolved_sph_source,
             "representative_session_index": representative_info.get("representative_session_index") if representative_info else None,

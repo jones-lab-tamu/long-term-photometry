@@ -112,6 +112,9 @@ class Config:
     npm_led_col: str = "LedState"
     npm_region_prefix: str = "Region"
     npm_region_suffix: str = "G"
+    custom_tabular_time_col: str = "time_sec"
+    custom_tabular_uv_suffix: str = "_iso"
+    custom_tabular_sig_suffix: str = "_sig"
 
     @classmethod
     def from_yaml(cls, path: str) -> 'Config':
@@ -268,6 +271,18 @@ class Config:
         if obj.bleach_correction_mode not in {"none", "single_exponential", "double_exponential"}:
             raise ValueError(
                 "bleach_correction_mode must be one of {'none', 'single_exponential', 'double_exponential'}"
+            )
+        for field_name in (
+            "custom_tabular_time_col",
+            "custom_tabular_uv_suffix",
+            "custom_tabular_sig_suffix",
+        ):
+            value = str(getattr(obj, field_name, "")).strip()
+            if not value:
+                raise ValueError(f"{field_name} must be a non-empty string")
+        if str(obj.custom_tabular_uv_suffix) == str(obj.custom_tabular_sig_suffix):
+            raise ValueError(
+                "custom_tabular_uv_suffix and custom_tabular_sig_suffix must be different"
             )
                 
         return obj
