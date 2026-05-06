@@ -464,6 +464,7 @@ class TestPhasicDayplotBundle(unittest.TestCase):
             '--write-dff-grid',
             '--no-write-sig-iso-grid',
             '--no-write-stacked',
+            '--dff-render-mode', 'full',
             '--hide-peak-markers',
             '--export-display-series-csv',
             '--source-run-profile', 'full',
@@ -479,6 +480,79 @@ class TestPhasicDayplotBundle(unittest.TestCase):
         df = pd.read_csv(dff_csv)
         self.assertEqual(set(df['plot_type'].dropna().astype(str).unique()), {'phasic_day_dff'})
         self.assertNotIn('peak_marker', set(df['trace_kind'].dropna().astype(str).unique()))
+
+    def test_marker_on_full_render_skips_missing_peak_indices_without_crashing(self):
+        t = np.arange(0, 600, 0.1)
+        dff_data = np.zeros_like(t)
+        dff_data[100] = 100.0
+        dff_data[200] = 100.0
+        self.create_synthetic_phasic_cache(cid=0, include_dff=True, dff_data=dff_data, time_data=t)
+        self.create_features_csv(peak_count=2)
+
+        orig_build_day_slot_maps = bundle.build_day_slot_maps
+
+        def _strip_peak_indices(*args, **kwargs):
+            out = orig_build_day_slot_maps(*args, **kwargs)
+            for slot_map in out.values():
+                for panel in slot_map.values():
+                    panel.pop("peak_indices", None)
+            return out
+
+        test_args = [
+            'plot_phasic_dayplot_bundle.py',
+            '--analysis-out', self.analysis_out,
+            '--roi', 'Region0',
+            '--output-dir', self.output_dir,
+            '--sessions-per-hour', '1',
+            '--write-dff-grid',
+            '--no-write-sig-iso-grid',
+            '--no-write-stacked',
+            '--dff-render-mode', 'full',
+            '--show-peak-markers',
+        ]
+        with patch('tools.plot_phasic_dayplot_bundle.build_day_slot_maps', side_effect=_strip_peak_indices):
+            with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
+                bundle.main()
+
+        self.assertTrue(os.path.exists(os.path.join(self.output_dir, 'phasic_dFF_day_000.png')))
+
+    def test_marker_on_display_series_exports_peak_markers_when_indices_exist(self):
+        t = np.arange(0, 600, 0.1)
+        dff_data = np.zeros_like(t)
+        dff_data[100] = 100.0
+        dff_data[200] = 100.0
+        self.create_synthetic_phasic_cache(cid=0, include_dff=True, dff_data=dff_data, time_data=t)
+        self.create_features_csv(peak_count=2)
+
+        test_args = [
+            'plot_phasic_dayplot_bundle.py',
+            '--analysis-out', self.analysis_out,
+            '--roi', 'Region0',
+            '--output-dir', self.output_dir,
+            '--sessions-per-hour', '1',
+            '--write-dff-grid',
+            '--no-write-sig-iso-grid',
+            '--no-write-stacked',
+            '--show-peak-markers',
+            '--export-display-series-csv',
+            '--source-run-profile', 'full',
+        ]
+        with patch('tools.plot_phasic_dayplot_bundle.sys.argv', test_args):
+            bundle.main()
+
+        dff_csv = os.path.join(self.output_dir, 'phasic_dFF_day_000_display_series.csv')
+        self.assertTrue(os.path.exists(dff_csv))
+        df = pd.read_csv(dff_csv)
+        marker_rows = df[df['trace_kind'].astype(str) == 'peak_marker']
+        self.assertGreaterEqual(len(marker_rows), 2)
+
+    def test_extract_peak_indices_supports_aliases_and_filters_invalid_values(self):
+        record = {
+            "peak_index": [1, 2.0, 2.4, np.nan, "bad", -1, 7],
+        }
+        indices, skipped = bundle._extract_peak_indices(record, n_samples=5)
+        np.testing.assert_array_equal(indices, np.array([1, 2], dtype=int))
+        self.assertEqual(skipped, 5)
 
     def test_full_dff_mode(self):
         # D. full dFF mode passes when feature and dff traces match

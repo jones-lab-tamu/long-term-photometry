@@ -78,6 +78,12 @@ DISPLAY_SERIES_COLUMNS = [
     "is_placeholder",
     "display_marker_shape",
 ]
+PEAK_INDEX_FIELD_CANDIDATES = (
+    "peak_indices",
+    "peak_idx",
+    "peak_index",
+    "peak_sample",
+)
 
 
 def _timeline_anchor_label(anchor_mode: str, fixed_daily_anchor_clock: str | None) -> str:
@@ -271,6 +277,65 @@ def verify_peak_count_strict(detection_trace, time_arr, fs, config, expected_cou
         sys.exit(1)
         
     return local_peaks
+
+
+def _extract_peak_indices(record, *, n_samples: int | None = None) -> tuple[np.ndarray, int]:
+    """
+    Extract optional peak marker indices from a panel/event record safely.
+
+    Returns:
+      (indices, skipped_count)
+    - indices: int array of valid, unique sample indices
+    - skipped_count: number of malformed/out-of-range candidate values discarded
+    """
+    if not isinstance(record, dict):
+        return np.array([], dtype=int), 0
+
+    raw_values = None
+    for key in PEAK_INDEX_FIELD_CANDIDATES:
+        if key in record:
+            raw_values = record.get(key)
+            break
+    if raw_values is None:
+        return np.array([], dtype=int), 0
+
+    try:
+        raw_arr = np.asarray(raw_values, dtype=object).reshape(-1)
+    except Exception:
+        return np.array([], dtype=int), 1
+
+    limit = None
+    if n_samples is not None:
+        try:
+            limit = int(n_samples)
+        except Exception:
+            limit = None
+
+    seen = set()
+    out = []
+    skipped = 0
+    for val in raw_arr.tolist():
+        try:
+            fval = float(val)
+        except Exception:
+            skipped += 1
+            continue
+        if not np.isfinite(fval):
+            skipped += 1
+            continue
+        ival = int(np.rint(fval))
+        if not np.isclose(fval, float(ival), rtol=0.0, atol=1e-6):
+            skipped += 1
+            continue
+        if limit is not None and (ival < 0 or ival >= limit):
+            skipped += 1
+            continue
+        if ival in seen:
+            continue
+        seen.add(ival)
+        out.append(ival)
+
+    return np.asarray(out, dtype=int), skipped
 
 def infer_fs(time_arr, config, context=""):
     if len(time_arr) < 2: return getattr(config, 'sampling_rate_hz_fallback', config.target_fs_hz)
@@ -920,11 +985,12 @@ def _render_dff_panel_tile_lightweight(
     draw.text((plot_x0, max(1, int(0.02 * tile_h))), f"Chunk {panel['chunk_id']}", fill='black', font=title_font)
     title_text_sec = time.perf_counter() - title_t0
 
-    p_idxs = panel.get('peak_indices', np.array([], dtype=int))
     y_eps = 0.01 * y_span if y_span > 0 else 1e-6
+    skipped_marker_values = 0
 
     if show_peak_markers:
         marker_t0 = time.perf_counter()
+        p_idxs, skipped_marker_values = _extract_peak_indices(panel, n_samples=len(t))
         for idx in p_idxs:
             if idx < 0 or idx >= len(t):
                 continue
@@ -952,6 +1018,7 @@ def _render_dff_panel_tile_lightweight(
         "trace_sec": trace_sec,
         "marker_sec": marker_sec,
         "title_text_sec": title_text_sec,
+        "skipped_marker_values": int(skipped_marker_values),
     }
 
 
@@ -993,6 +1060,7 @@ def _compose_dff_day_tile_canvas_lightweight(
         "marker_sec": 0.0,
         "title_text_sec": 0.0,
         "paste_sec": 0.0,
+        "skipped_marker_values": 0,
         "panels": 0,
     }
 
@@ -1022,6 +1090,7 @@ def _compose_dff_day_tile_canvas_lightweight(
                 stats["trace_sec"] += panel_stats["trace_sec"]
                 stats["marker_sec"] += panel_stats["marker_sec"]
                 stats["title_text_sec"] += panel_stats["title_text_sec"]
+                stats["skipped_marker_values"] += int(panel_stats.get("skipped_marker_values", 0))
                 stats["panels"] += 1
 
     return day_canvas, stats
@@ -1669,6 +1738,7 @@ def _export_dff_day_display_series_csv(
 
     y_span = y1 - y0
     y_eps = 0.01 * y_span if y_span > 0 else 1e-6
+    skipped_marker_values = 0
 
     for h in range(24):
         for c in range(sph):
@@ -1705,7 +1775,8 @@ def _export_dff_day_display_series_csv(
                 )
 
             if show_peak_markers:
-                peak_indices = np.asarray(panel.get("peak_indices", np.array([], dtype=int)), dtype=int)
+                peak_indices, n_skipped = _extract_peak_indices(panel, n_samples=len(panel["t"]))
+                skipped_marker_values += int(n_skipped)
                 for idx in peak_indices.tolist():
                     if idx < 0 or idx >= len(panel["t"]):
                         continue
@@ -1736,6 +1807,12 @@ def _export_dff_day_display_series_csv(
                     )
 
     _write_display_series_csv(csv_path, rows)
+    if show_peak_markers and skipped_marker_values > 0:
+        print(
+            f"NOTICE: Skipped {int(skipped_marker_values)} invalid/out-of-range peak marker indices "
+            f"while exporting dF/F display-series CSV for day {int(day)}.",
+            flush=True,
+        )
 
 
 def _export_stacked_day_display_series_csv(
@@ -2126,6 +2203,7 @@ def main():
             y_span = global_ymax - global_ymin
             eps = 0.01 * y_span if y_span > 0 else 1e-6
             for d in unique_days:
+                skipped_marker_values_day = 0
                 slot_map = day_slot_maps.get(d, {})
                 if not slot_map:
                     continue
@@ -2151,8 +2229,11 @@ def main():
                         ax.plot(p['t'], p['dff'], 'k', lw=0.8)
 
                         # Peak Overlays (Clipped vs unclipped)
-                        p_idxs = p['peak_indices']
+                        p_idxs = np.array([], dtype=int)
                         n_clipped = 0
+                        if args.show_peak_markers:
+                            p_idxs, n_skipped = _extract_peak_indices(p, n_samples=len(p['t']))
+                            skipped_marker_values_day += int(n_skipped)
                         if args.show_peak_markers and len(p_idxs) > 0:
                             px = p['t'][p_idxs]
                             py_true = p['dff'][p_idxs]
@@ -2171,7 +2252,7 @@ def main():
                             n_clipped = np.sum(mask_hi) + np.sum(mask_lo)
 
                         # Annotation
-                        val = p['count']
+                        val = p.get('count', np.nan)
                         txt = "peaks=NaN" if pd.isna(val) else f"peaks={int(val)}"
                         if n_clipped > 0:
                             txt += f"\n({n_clipped} clipped)"
@@ -2181,6 +2262,12 @@ def main():
                             bbox=dict(facecolor='white', alpha=0.7, edgecolor='none')
                         )
 
+                if args.show_peak_markers and skipped_marker_values_day > 0:
+                    print(
+                        f"NOTICE: Skipped {int(skipped_marker_values_day)} invalid/out-of-range peak marker "
+                        f"indices while rendering dF/F day {int(d)}.",
+                        flush=True,
+                    )
                 out_path = os.path.join(args.output_dir, f"phasic_dFF_day_{d:03d}.png")
                 print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=plotting family=dff_full day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
                 save_png_fast(fig_dff, out_path, args.dpi)
@@ -2235,6 +2322,7 @@ def main():
                     f"PLOT_TIMING DETAIL script=plot_phasic_dayplot_bundle.py "
                     f"family=dff_qc day={d} "
                     f"trace_sec={proto_stats['trace_sec']:.4f} marker_sec={proto_stats['marker_sec']:.4f} "
+                    f"marker_skipped_values={int(proto_stats.get('skipped_marker_values', 0))} "
                     f"title_text_sec={proto_stats['title_text_sec']:.4f} "
                     f"paste_sec={proto_stats['paste_sec']:.4f} compose_sec={compose_sec:.4f} save_sec={save_sec:.4f} "
                     f"panels={proto_stats['panels']}",
