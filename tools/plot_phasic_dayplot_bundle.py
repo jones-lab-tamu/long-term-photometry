@@ -337,6 +337,41 @@ def _extract_peak_indices(record, *, n_samples: int | None = None) -> tuple[np.n
 
     return np.asarray(out, dtype=int), skipped
 
+
+def _build_peak_count_annotation(
+    *,
+    show_peak_markers: bool,
+    count_value,
+    n_clipped: int,
+) -> tuple[str | None, str | None]:
+    """
+    Build optional dF/F peak-count annotation text/color for full renderer.
+
+    Rules:
+    - Markers hidden: no annotation.
+    - Markers shown + finite/non-negative count: "peaks=N" (+ clipped suffix).
+    - Markers shown + missing/invalid count: no annotation.
+    """
+    if not bool(show_peak_markers):
+        return None, None
+
+    try:
+        count_f = float(count_value)
+    except Exception:
+        return None, None
+    if (not np.isfinite(count_f)) or count_f < 0:
+        return None, None
+
+    count_i = int(np.rint(count_f))
+    if not np.isclose(count_f, float(count_i), rtol=0.0, atol=1e-6):
+        return None, None
+
+    txt = f"peaks={count_i}"
+    if int(n_clipped) > 0:
+        txt += f"\n({int(n_clipped)} clipped)"
+    return txt, "blue"
+
+
 def infer_fs(time_arr, config, context=""):
     if len(time_arr) < 2: return getattr(config, 'sampling_rate_hz_fallback', config.target_fs_hz)
     dt = np.median(np.diff(time_arr))
@@ -2251,16 +2286,24 @@ def main():
                                 ax.scatter(px[mask_lo], py_plot[mask_lo], s=12, marker='v', c='red', alpha=0.8, zorder=4)
                             n_clipped = np.sum(mask_hi) + np.sum(mask_lo)
 
-                        # Annotation
-                        val = p.get('count', np.nan)
-                        txt = "peaks=NaN" if pd.isna(val) else f"peaks={int(val)}"
-                        if n_clipped > 0:
-                            txt += f"\n({n_clipped} clipped)"
-                        color = 'red' if pd.isna(val) else 'blue'
-                        ax.text(
-                            0.95, 0.9, txt, transform=ax.transAxes, ha='right', va='top', fontsize=8, color=color,
-                            bbox=dict(facecolor='white', alpha=0.7, edgecolor='none')
+                        # Peak-count annotation follows marker visibility and valid count metadata.
+                        txt, color = _build_peak_count_annotation(
+                            show_peak_markers=bool(args.show_peak_markers),
+                            count_value=p.get('count', np.nan),
+                            n_clipped=int(n_clipped),
                         )
+                        if txt is not None:
+                            ax.text(
+                                0.95,
+                                0.9,
+                                txt,
+                                transform=ax.transAxes,
+                                ha='right',
+                                va='top',
+                                fontsize=8,
+                                color=color,
+                                bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'),
+                            )
 
                 if args.show_peak_markers and skipped_marker_values_day > 0:
                     print(

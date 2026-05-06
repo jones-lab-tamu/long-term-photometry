@@ -24,6 +24,37 @@ import tools.plot_phasic_dayplot_bundle as bundle
 def _run_cli(cmd, cwd):
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
 
+
+def test_peak_count_annotation_hidden_when_markers_hidden():
+    txt, color = bundle._build_peak_count_annotation(
+        show_peak_markers=False,
+        count_value=5,
+        n_clipped=0,
+    )
+    assert txt is None
+    assert color is None
+
+
+def test_peak_count_annotation_shown_for_valid_marker_on_count():
+    txt, color = bundle._build_peak_count_annotation(
+        show_peak_markers=True,
+        count_value=7,
+        n_clipped=2,
+    )
+    assert txt == "peaks=7\n(2 clipped)"
+    assert color == "blue"
+
+
+def test_peak_count_annotation_omitted_for_missing_or_invalid_count():
+    for val in (np.nan, None, "NaN", "bad", -1):
+        txt, color = bundle._build_peak_count_annotation(
+            show_peak_markers=True,
+            count_value=val,
+            n_clipped=0,
+        )
+        assert txt is None
+        assert color is None
+
 class TestPhasicDayplotBundle(unittest.TestCase):
     
     @patch('tools.plot_phasic_dayplot_bundle.sys.argv', ['plot_phasic_dayplot_bundle.py', '--analysis-out', '/fake', '--roi', 'Region0', '--output-dir', '/fake_out', '--sessions-per-hour', '2'])
