@@ -6,6 +6,10 @@ import numpy as np
 import pandas as pd
 import datetime
 import csv
+import subprocess
+from typing import Any
+
+import yaml
 
 # Self-contained repo root bootstrap
 from pathlib import Path
@@ -15,6 +19,76 @@ if _repo_root not in sys.path:
 
 from photometry_pipeline.config import Config
 
+
+def _parse_cli_bool(value: Any) -> bool:
+    """Parse permissive CLI bool values."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(
+        f"Invalid boolean value '{value}'. Use true/false, 1/0, yes/no, on/off."
+    )
+
+
+def _safe_git_commit() -> str:
+    """Best-effort git commit lookup for manifest provenance."""
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        return str(res.stdout).strip()
+    except Exception:
+        return "unknown"
+
+
+def _json_yaml_safe(value: Any) -> Any:
+    """Recursively normalize values for JSON/YAML serialization."""
+    if isinstance(value, dict):
+        return {str(k): _json_yaml_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_yaml_safe(v) for v in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            return None
+        return float(value)
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    return value
+
+
+def _summarize_numeric(values: list[float]) -> dict[str, Any]:
+    arr = np.asarray(values, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return {
+            "count": 0,
+            "mean": None,
+            "std": None,
+            "min": None,
+            "max": None,
+        }
+    return {
+        "count": int(finite.size),
+        "mean": float(np.mean(finite)),
+        "std": float(np.std(finite)),
+        "min": float(np.min(finite)),
+        "max": float(np.max(finite)),
+    }
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate synthetic photometry dataset (RWD/NPM).")
     
@@ -22,7 +96,11 @@ def parse_args():
     parser.add_argument('--out', required=True, help="Output root directory")
     parser.add_argument('--format', required=True, choices=['rwd', 'npm'], help="Output format")
     parser.add_argument('--config', required=True, help="Path to config YAML")
-    parser.add_argument('--preset', choices=['biological_shared_nuisance'], help="Apply specific parameter preset")
+    parser.add_argument(
+        '--preset',
+        choices=['biological_shared_nuisance', 'realism_stress'],
+        help="Apply specific parameter preset",
+    )
     
     # Scheduling
     parser.add_argument('--total-days', type=float, default=3.0)
@@ -32,6 +110,40 @@ def parse_args():
     parser.add_argument('--n-rois', type=int, default=2)
     parser.add_argument('--start-iso', type=str, default="2025-01-01T00:00:00")
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument(
+        '--start-iso-random-offset-min',
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("MIN", "MAX"),
+        help=(
+            "Optional random offset in minutes added to --start-iso. "
+            "Uses uniform draw [MIN, MAX] with the same seed for determinism."
+        ),
+    )
+
+    # Realism stress controls
+    parser.add_argument('--session-drop-prob', type=float, default=0.0)
+    parser.add_argument('--edge-truncate-samples-max', type=int, default=0)
+    parser.add_argument('--timestamp-jitter-ms-std', type=float, default=0.0)
+    parser.add_argument('--npm-uv-sig-time-offset-ms', type=float, default=0.0)
+    parser.add_argument('--npm-uv-sig-jitter-ms-std', type=float, default=0.0)
+    parser.add_argument('--npm-ledstate-startup-rows', type=int, default=0)
+    parser.add_argument(
+        '--near-threshold-end-coverage',
+        type=_parse_cli_bool,
+        default=False,
+        help=(
+            "Enable near-threshold endpoint manipulations that remain close to strict "
+            "coverage tolerances."
+        ),
+    )
+    parser.add_argument(
+        '--write-generation-manifest',
+        type=_parse_cli_bool,
+        default=True,
+        help="Write generation_manifest.yaml (default: true).",
+    )
     
     # Baseline / Scaling
     # Deprecated fallback
@@ -183,10 +295,58 @@ def parse_args():
         print(f"  Shared Wobble: Amp={args.shared_wobble_amp}, Tau={args.shared_wobble_tau_sec}")
         print(f"  Gain Drift: Mean={args.shared_wobble_gain_mean}, SD={args.shared_wobble_gain_sd}, Tau={args.shared_wobble_gain_tau_sec}")
         print(f"  Offset Drift: Amp={args.shared_wobble_offset_amp}, Tau={args.shared_wobble_offset_tau_sec}")
+    elif args.preset == 'realism_stress':
+        # Inherit biologically plausible nuisance baseline.
+        args.shared_wobble_enable = True
+        args.shared_wobble_amp = 2.0
+        args.shared_wobble_tau_sec = 60.0
+        args.shared_wobble_gain_enable = True
+        args.shared_wobble_gain_mean = 1.0
+        args.shared_wobble_gain_sd = 0.20
+        args.shared_wobble_gain_tau_sec = 120.0
+        args.shared_wobble_offset_enable = True
+        args.shared_wobble_offset_amp = 1.0
+        args.shared_wobble_offset_tau_sec = 180.0
+
+        # Real-world acquisition irregularities (non-catastrophic defaults).
+        args.session_drop_prob = max(args.session_drop_prob, 0.08)
+        args.edge_truncate_samples_max = max(args.edge_truncate_samples_max, 2)
+        args.timestamp_jitter_ms_std = max(args.timestamp_jitter_ms_std, 2.0)
+        args.npm_uv_sig_time_offset_ms = args.npm_uv_sig_time_offset_ms or 4.0
+        args.npm_uv_sig_jitter_ms_std = max(args.npm_uv_sig_jitter_ms_std, 1.5)
+        args.npm_ledstate_startup_rows = max(args.npm_ledstate_startup_rows, 4)
+        if args.start_iso_random_offset_min is None:
+            args.start_iso_random_offset_min = [23.0, 311.0]
+        if not args.near_threshold_end_coverage:
+            args.near_threshold_end_coverage = True
+
+        print(f"Applied Preset: {args.preset}")
+        print(
+            "  Realism: "
+            f"drop_prob={args.session_drop_prob}, "
+            f"truncate_max={args.edge_truncate_samples_max}, "
+            f"jitter_ms_std={args.timestamp_jitter_ms_std}, "
+            f"npm_uv_sig_offset_ms={args.npm_uv_sig_time_offset_ms}, "
+            f"npm_uv_sig_jitter_ms_std={args.npm_uv_sig_jitter_ms_std}"
+        )
     
     # Validate
     if args.artifact_motion_neg_prob < 0.0 or args.artifact_motion_neg_prob > 1.0:
         raise ValueError("--artifact-motion-neg-prob must be between 0 and 1")
+    if args.session_drop_prob < 0.0 or args.session_drop_prob > 1.0:
+        raise ValueError("--session-drop-prob must be between 0 and 1")
+    if args.edge_truncate_samples_max < 0:
+        raise ValueError("--edge-truncate-samples-max must be >= 0")
+    if args.timestamp_jitter_ms_std < 0.0:
+        raise ValueError("--timestamp-jitter-ms-std must be >= 0")
+    if args.npm_uv_sig_jitter_ms_std < 0.0:
+        raise ValueError("--npm-uv-sig-jitter-ms-std must be >= 0")
+    if args.npm_ledstate_startup_rows < 0:
+        raise ValueError("--npm-ledstate-startup-rows must be >= 0")
+    if args.start_iso_random_offset_min is not None:
+        low, high = float(args.start_iso_random_offset_min[0]), float(args.start_iso_random_offset_min[1])
+        if high < low:
+            raise ValueError("--start-iso-random-offset-min requires MIN <= MAX")
 
     # Enforce Best-Biology Constraints
     if args.shared_wobble_gain_enable or args.shared_wobble_offset_enable:
@@ -212,8 +372,6 @@ def parse_args():
     else:
         if args.raw_baseline_sig is None: args.raw_baseline_sig = 250.0
         if args.raw_baseline_uv is None: args.raw_baseline_uv = 235.0
-
-    return args
 
     return args
 
@@ -581,7 +739,18 @@ def _build_vendor_npm_filename(chunk_start_dt):
     return f"photometryData{chunk_start_dt.strftime('%Y-%m-%dT%H_%M_%S')}.csv"
 
 
-def _build_vendor_npm_frame_df(cfg, t_local, uv_data_all, sig_data_all):
+def _build_vendor_npm_frame_df(
+    cfg,
+    t_local,
+    uv_data_all,
+    sig_data_all,
+    *,
+    uv_sig_offset_sec: float = 0.0,
+    uv_sig_jitter_std_sec: float = 0.0,
+    startup_rows: int = 0,
+    rng=None,
+    near_threshold_end_coverage: bool = False,
+):
     """
     Build one vendor-style NPM session CSV frame.
 
@@ -599,31 +768,126 @@ def _build_vendor_npm_frame_df(cfg, t_local, uv_data_all, sig_data_all):
     leds = np.zeros(n_total, dtype=int)
     leds[0::2] = 1  # UV
     leds[1::2] = 2  # SIG
+    t_local = np.asarray(t_local, dtype=float).reshape(-1)
 
-    # Vendor-style paired rows: UV/SIG share the same nominal sample timestamp.
-    t_interleaved = np.zeros(n_total, dtype=float)
-    t_interleaved[0::2] = t_local
-    t_interleaved[1::2] = t_local
+    if rng is None:
+        rng = np.random.default_rng(0)
+
+    # Create UV/SIG time streams with optional asymmetry and jitter.
+    t_uv = t_local.copy()
+    t_sig = t_local + float(uv_sig_offset_sec)
+    if uv_sig_jitter_std_sec > 0.0:
+        t_uv = t_uv + rng.normal(0.0, uv_sig_jitter_std_sec, size=t_uv.shape)
+        t_sig = t_sig + rng.normal(0.0, uv_sig_jitter_std_sec, size=t_sig.shape)
+        # Keep per-channel clocks monotonically increasing.
+        eps = 1e-9
+        t_uv = np.maximum.accumulate(t_uv)
+        t_sig = np.maximum.accumulate(t_sig)
+        for i in range(1, t_uv.size):
+            if t_uv[i] <= t_uv[i - 1]:
+                t_uv[i] = t_uv[i - 1] + eps
+            if t_sig[i] <= t_sig[i - 1]:
+                t_sig[i] = t_sig[i - 1] + eps
+
+    # Optional near-threshold support asymmetry: trim exactly one trailing sample
+    # from one channel (strict checks tolerate this at one-sample boundary).
+    near_threshold_meta = {"applied": False, "trimmed_channel": None, "trimmed_samples": 0}
+    if near_threshold_end_coverage and n_samples_chunk >= 4:
+        if bool(rng.integers(0, 2)):
+            t_uv = t_uv[:-1]
+            uv_data_all = [np.asarray(v, dtype=float)[:-1] for v in uv_data_all]
+            near_threshold_meta = {
+                "applied": True,
+                "trimmed_channel": "uv",
+                "trimmed_samples": 1,
+            }
+        else:
+            t_sig = t_sig[:-1]
+            sig_data_all = [np.asarray(v, dtype=float)[:-1] for v in sig_data_all]
+            near_threshold_meta = {
+                "applied": True,
+                "trimmed_channel": "sig",
+                "trimmed_samples": 1,
+            }
+
+    n_uv = int(t_uv.size)
+    n_sig = int(t_sig.size)
+    n_rows = int(n_uv + n_sig)
+
+    frames = np.arange(n_rows + int(startup_rows), dtype=int)
+    leds_core = np.empty(n_rows, dtype=int)
+    ts_core = np.empty(n_rows, dtype=float)
+    uv_idx = 0
+    sig_idx = 0
+    row = 0
+    while uv_idx < n_uv or sig_idx < n_sig:
+        take_uv = False
+        if uv_idx < n_uv and sig_idx < n_sig:
+            take_uv = t_uv[uv_idx] <= t_sig[sig_idx]
+        elif uv_idx < n_uv:
+            take_uv = True
+        if take_uv:
+            leds_core[row] = 1
+            ts_core[row] = t_uv[uv_idx]
+            uv_idx += 1
+        else:
+            leds_core[row] = 2
+            ts_core[row] = t_sig[sig_idx]
+            sig_idx += 1
+        row += 1
+    leds_core = leds_core[:row]
+    ts_core = ts_core[:row]
 
     cols = {
         "FrameCounter": frames,
-        "Timestamp": t_interleaved,
-        "LedState": leds,
-        "Stimulation": np.zeros(n_total, dtype=int),
-        "Output0": np.zeros(n_total, dtype=int),
-        "Output1": np.zeros(n_total, dtype=int),
-        "Input0": np.zeros(n_total, dtype=int),
-        "Input1": np.zeros(n_total, dtype=int),
+        "Timestamp": np.zeros(frames.size, dtype=float),
+        "LedState": np.zeros(frames.size, dtype=int),
+        "Stimulation": np.zeros(frames.size, dtype=int),
+        "Output0": np.zeros(frames.size, dtype=int),
+        "Output1": np.zeros(frames.size, dtype=int),
+        "Input0": np.zeros(frames.size, dtype=int),
+        "Input1": np.zeros(frames.size, dtype=int),
     }
+    offset = int(startup_rows)
+    if startup_rows > 0:
+        # Startup rows emulate vendor warm-up/non-analysis LED states.
+        cols["LedState"][:offset] = 7
+        ts_start = float(min(t_uv[0], t_sig[0])) if (n_uv > 0 and n_sig > 0) else 0.0
+        cols["Timestamp"][:offset] = ts_start - np.linspace(0.25, 0.01, offset)
+    cols["LedState"][offset:offset + row] = leds_core
+    cols["Timestamp"][offset:offset + row] = ts_core
 
     for i in range(len(uv_data_all)):
         col_name = f"Region{i}G"
-        vals = np.zeros(n_total, dtype=float)
-        vals[0::2] = uv_data_all[i]
-        vals[1::2] = sig_data_all[i]
+        vals = np.zeros(frames.size, dtype=float)
+        uv_series = np.asarray(uv_data_all[i], dtype=float)
+        sig_series = np.asarray(sig_data_all[i], dtype=float)
+        uv_used = 0
+        sig_used = 0
+        for ridx in range(row):
+            led_state = int(leds_core[ridx])
+            abs_idx = offset + ridx
+            if led_state == 1 and uv_used < uv_series.size:
+                vals[abs_idx] = uv_series[uv_used]
+                uv_used += 1
+            elif led_state == 2 and sig_used < sig_series.size:
+                vals[abs_idx] = sig_series[sig_used]
+                sig_used += 1
         cols[col_name] = vals
+    df = pd.DataFrame(cols)
 
-    return pd.DataFrame(cols)
+    support = {
+        "uv_count": n_uv,
+        "sig_count": n_sig,
+        "uv_start_sec": float(t_uv[0]) if n_uv else float("nan"),
+        "sig_start_sec": float(t_sig[0]) if n_sig else float("nan"),
+        "uv_end_sec": float(t_uv[-1]) if n_uv else float("nan"),
+        "sig_end_sec": float(t_sig[-1]) if n_sig else float("nan"),
+        "start_gap_sec": float(abs((float(t_uv[0]) if n_uv else 0.0) - (float(t_sig[0]) if n_sig else 0.0))),
+        "end_gap_sec": float(abs((float(t_uv[-1]) if n_uv else 0.0) - (float(t_sig[-1]) if n_sig else 0.0))),
+        "near_threshold_end_coverage": near_threshold_meta,
+    }
+    return df, support
 
 
 def main():
@@ -644,11 +908,17 @@ def main():
         raise ValueError(f"recording duration mismatch: args {actual_dur}s vs config {expected_chunk_dur}s")
 
     rng = np.random.default_rng(args.seed)
-    
+
     os.makedirs(args.out, exist_ok=True)
-    
+
     chunk_interval_sec = 3600.0 / args.recordings_per_hour
-    start_dt = datetime.datetime.fromisoformat(args.start_iso)
+    base_start_dt = datetime.datetime.fromisoformat(args.start_iso)
+    start_dt_offset_min = 0.0
+    if args.start_iso_random_offset_min is not None:
+        offset_min = float(args.start_iso_random_offset_min[0])
+        offset_max = float(args.start_iso_random_offset_min[1])
+        start_dt_offset_min = float(rng.uniform(offset_min, offset_max))
+    start_dt = base_start_dt + datetime.timedelta(minutes=float(start_dt_offset_min))
     
     total_hours = args.total_days * 24.0
     total_intervals = int(np.floor(total_hours * args.recordings_per_hour))
@@ -673,7 +943,15 @@ def main():
         if rng.random() > 0.5: off_uv *= -1
         roi_uv_offsets.append(off_uv)
         
-    print(f"Generating {total_intervals} chunks over {args.total_days} days...")
+    print(f"Generating up to {total_intervals} chunks over {args.total_days} days...")
+
+    manifest_sessions: list[dict[str, Any]] = []
+    dropped_sessions: list[dict[str, Any]] = []
+    truncated_sessions: list[dict[str, Any]] = []
+    near_threshold_sessions: list[dict[str, Any]] = []
+    jitter_session_stats: list[dict[str, Any]] = []
+    rwd_support_stats: list[dict[str, Any]] = []
+    npm_support_stats: list[dict[str, Any]] = []
     
     # Verification accumulators
     verify_stats = {
@@ -690,24 +968,128 @@ def main():
     # Pre-calc phase map if needed
     for k in range(total_intervals):
         chunk_start_dt = start_dt + datetime.timedelta(seconds=k * chunk_interval_sec)
-        
+
+        session_label = chunk_start_dt.strftime("%Y_%m_%d-%H_%M_%S")
+        session_drop = bool(rng.uniform() < args.session_drop_prob)
+        if session_drop:
+            dropped_sessions.append(
+                {
+                    "chunk_index": int(k),
+                    "session_label": session_label,
+                    "reason": "session_drop_prob",
+                }
+            )
+            manifest_sessions.append(
+                {
+                    "chunk_index": int(k),
+                    "session_label": session_label,
+                    "scheduled_start_iso": chunk_start_dt.isoformat(),
+                    "dropped": True,
+                    "samples_target": int(n_samples_chunk),
+                    "samples_written": 0,
+                    "truncate_head_samples": 0,
+                    "truncate_tail_samples": 0,
+                }
+            )
+            continue
+
+        truncate_head = 0
+        truncate_tail = 0
+        if args.edge_truncate_samples_max > 0:
+            truncate_tail = int(rng.integers(0, args.edge_truncate_samples_max + 1))
+            if k == 0 or k == (total_intervals - 1):
+                truncate_head = int(rng.integers(0, args.edge_truncate_samples_max + 1))
+            elif bool(rng.integers(0, 6) == 0):
+                truncate_head = int(rng.integers(0, args.edge_truncate_samples_max + 1))
+        if args.near_threshold_end_coverage and n_samples_chunk >= 4 and bool(rng.integers(0, 5) == 0):
+            truncate_tail = max(truncate_tail, 1)
+            if truncate_tail > 1:
+                truncate_tail = 1
+            near_threshold_sessions.append(
+                {
+                    "chunk_index": int(k),
+                    "session_label": session_label,
+                    "manipulation": "tail_trim_exactly_one_sample",
+                }
+            )
+
+        trim_total = truncate_head + truncate_tail
+        if trim_total >= (n_samples_chunk - 2):
+            truncate_head = 0
+            truncate_tail = min(1, max(0, n_samples_chunk - 3))
+
+        if truncate_head > 0 or truncate_tail > 0:
+            truncated_sessions.append(
+                {
+                    "chunk_index": int(k),
+                    "session_label": session_label,
+                    "truncate_head_samples": int(truncate_head),
+                    "truncate_tail_samples": int(truncate_tail),
+                }
+            )
+
         chunk_time_offset_sec = k * chunk_interval_sec
         t_local = np.arange(n_samples_chunk) / args.fs_hz
+        if truncate_tail > 0:
+            t_local = t_local[:-truncate_tail]
+        if truncate_head > 0:
+            t_local = t_local[truncate_head:]
+        if t_local.size < 2:
+            dropped_sessions.append(
+                {
+                    "chunk_index": int(k),
+                    "session_label": session_label,
+                    "reason": "too_few_samples_after_truncation",
+                }
+            )
+            manifest_sessions.append(
+                {
+                    "chunk_index": int(k),
+                    "session_label": session_label,
+                    "scheduled_start_iso": chunk_start_dt.isoformat(),
+                    "dropped": True,
+                    "samples_target": int(n_samples_chunk),
+                    "samples_written": 0,
+                    "truncate_head_samples": int(truncate_head),
+                    "truncate_tail_samples": int(truncate_tail),
+                }
+            )
+            continue
+        if args.timestamp_jitter_ms_std > 0.0:
+            jitter_std_sec = args.timestamp_jitter_ms_std / 1000.0
+            jitter_sec = rng.normal(0.0, jitter_std_sec, size=t_local.shape)
+            t_local = t_local + jitter_sec
+            t_local = np.maximum.accumulate(t_local)
+            eps = 1e-9
+            for j in range(1, t_local.size):
+                if t_local[j] <= t_local[j - 1]:
+                    t_local[j] = t_local[j - 1] + eps
+            jitter_session_stats.append(
+                {
+                    "chunk_index": int(k),
+                    "session_label": session_label,
+                    "jitter_ms_mean": float(np.mean(jitter_sec) * 1000.0),
+                    "jitter_ms_std": float(np.std(jitter_sec) * 1000.0),
+                    "jitter_ms_max_abs": float(np.max(np.abs(jitter_sec)) * 1000.0),
+                }
+            )
+        t_local = t_local - t_local[0]
         t_global_sec = chunk_time_offset_sec + t_local
         t_global_hours = t_global_sec / 3600.0
         
         daily_var = 0.0
         if args.day_variation_enable:
              daily_var = rng.normal(0, args.day_variation_au)
-             
+
+        n_samples_current = int(t_local.size)
         uv_data_all = []
         sig_data_all = []
         
         # Shared Artifacts
         if args.artifact_enable_motion:
-            motion_base = generate_motion_artifacts(n_samples_chunk, args, rng)
+            motion_base = generate_motion_artifacts(n_samples_current, args, rng)
         else:
-            motion_base = np.zeros(n_samples_chunk)
+            motion_base = np.zeros(n_samples_current)
         
         motion_base *= args.artifact_scale
             
@@ -722,11 +1104,11 @@ def main():
         drift_au *= args.artifact_scale
         
         # Refined Noise Model
-        noise_shared = rng.normal(0, args.noise_shared_std, n_samples_chunk)
+        noise_shared = rng.normal(0, args.noise_shared_std, n_samples_current)
         
         # Shared Wobble (Base is usually considered 'UV-like' in shape, applied to both)
         # Using AR1 helper
-        wobble_base = generate_ar1_wobble(n_samples_chunk, args, rng)
+        wobble_base = generate_ar1_wobble(n_samples_current, args, rng)
         
 
 
@@ -739,21 +1121,21 @@ def main():
         #   Synchronous: w_base is same for both. gain/offset modulate signal relative to UV.
         
         if args.shared_wobble_gain_enable:
-             gain_vec = generate_ar1_series(n_samples_chunk, args, rng, 
+             gain_vec = generate_ar1_series(n_samples_current, args, rng, 
                                             args.shared_wobble_gain_mean, 
                                             args.shared_wobble_gain_sd, 
                                             args.shared_wobble_gain_tau_sec, 
                                             clamp_min=0.1)
         else:
-             gain_vec = np.ones(n_samples_chunk)
+             gain_vec = np.ones(n_samples_current)
              
         if args.shared_wobble_offset_enable:
-             offset_vec = generate_ar1_series(n_samples_chunk, args, rng, 
+             offset_vec = generate_ar1_series(n_samples_current, args, rng, 
                                               0.0, 
                                               args.shared_wobble_offset_amp, 
                                               args.shared_wobble_offset_tau_sec)
         else:
-             offset_vec = np.zeros(n_samples_chunk)
+             offset_vec = np.zeros(n_samples_current)
 
         # Apply Wobble (No Lag)
         # If gain/offset enabled, we strictly ignore iso-lag-sec as requested ("NO phase lag").
@@ -890,7 +1272,7 @@ def main():
             # Old: comp_uv = ... + noise_uv ...; uv = base + scale * comp_uv.
             # noise_uv was rng.normal(0, args.noise_uv_std).
             # So noise amplitude in final UV is scale * noise_uv_std.
-            noise_uv = rng.normal(0, args.noise_uv_std, n_samples_chunk)
+            noise_uv = rng.normal(0, args.noise_uv_std, n_samples_current)
             
             uv_raw_no_noise = (args.raw_baseline_uv + roi_uv_offsets[i]) + args.raw_scale * comp_uv
             uv = uv_raw_no_noise + args.raw_scale * noise_uv
@@ -911,7 +1293,7 @@ def main():
             # In old code, sig had 'noise_sig' which was 'shared + independent'.
             # Here, 'shared' is already in 'iso_true' (via uv).
             # We add independent sig noise.
-            noise_sig_independent = rng.normal(0, args.noise_sig_std, n_samples_chunk)
+            noise_sig_independent = rng.normal(0, args.noise_sig_std, n_samples_current)
             sig = iso_true + neural + args.raw_scale * noise_sig_independent
             
             # Guardrails / Debug
@@ -953,7 +1335,7 @@ def main():
             os.makedirs(chunk_dir, exist_ok=True)
             cols = {
                 "TimeStamp": t_local,
-                "Events": [""] * n_samples_chunk,
+                "Events": [""] * n_samples_current,
             }
             for i in range(args.n_rois):
                 ch_name = f"CH{i + 1}"
@@ -971,18 +1353,168 @@ def main():
                 df_vendor,
                 metadata_blob,
             )
+            rwd_support_stats.append(
+                {
+                    "chunk_index": int(k),
+                    "session_label": session_label,
+                    "n_samples": int(n_samples_current),
+                    "start_sec": float(t_local[0]),
+                    "end_sec": float(t_local[-1]),
+                    "dt_median_sec": float(np.median(np.diff(t_local))) if t_local.size > 1 else float("nan"),
+                    "near_threshold_end_coverage_applied": bool(
+                        args.near_threshold_end_coverage and truncate_tail == 1
+                    ),
+                }
+            )
             
         elif args.format == 'npm':
             fname = _build_vendor_npm_filename(chunk_start_dt)
             fpath = os.path.join(args.out, fname)
-            df_vendor_npm = _build_vendor_npm_frame_df(
+            df_vendor_npm, npm_support = _build_vendor_npm_frame_df(
                 cfg=cfg,
                 t_local=t_local,
                 uv_data_all=uv_data_all,
                 sig_data_all=sig_data_all,
+                uv_sig_offset_sec=float(args.npm_uv_sig_time_offset_ms) / 1000.0,
+                uv_sig_jitter_std_sec=float(args.npm_uv_sig_jitter_ms_std) / 1000.0,
+                startup_rows=int(args.npm_ledstate_startup_rows),
+                rng=rng,
+                near_threshold_end_coverage=bool(args.near_threshold_end_coverage),
             )
             df_vendor_npm.to_csv(fpath, index=False)
+            npm_support_stats.append(
+                {
+                    "chunk_index": int(k),
+                    "session_label": session_label,
+                    **npm_support,
+                }
+            )
+            if npm_support.get("near_threshold_end_coverage", {}).get("applied", False):
+                near_threshold_sessions.append(
+                    {
+                        "chunk_index": int(k),
+                        "session_label": session_label,
+                        "manipulation": "npm_channel_tail_trim_one_sample",
+                        **npm_support.get("near_threshold_end_coverage", {}),
+                    }
+                )
+
+        manifest_sessions.append(
+            {
+                "chunk_index": int(k),
+                "session_label": session_label,
+                "scheduled_start_iso": chunk_start_dt.isoformat(),
+                "dropped": False,
+                "samples_target": int(n_samples_chunk),
+                "samples_written": int(n_samples_current),
+                "truncate_head_samples": int(truncate_head),
+                "truncate_tail_samples": int(truncate_tail),
+                "timestamp_start_sec": float(t_local[0]),
+                "timestamp_end_sec": float(t_local[-1]),
+                "timestamp_dt_median_sec": (
+                    float(np.median(np.diff(t_local))) if t_local.size > 1 else float("nan")
+                ),
+                "format": args.format,
+            }
+        )
             
+    generated_sessions = [s for s in manifest_sessions if not bool(s.get("dropped", False))]
+    jitter_summary = {
+        "enabled": bool(args.timestamp_jitter_ms_std > 0.0),
+        "configured_std_ms": float(args.timestamp_jitter_ms_std),
+        "n_sessions_jittered": int(len(jitter_session_stats)),
+        "session_stats": jitter_session_stats,
+        "jitter_ms_mean_summary": _summarize_numeric(
+            [float(s.get("jitter_ms_mean", np.nan)) for s in jitter_session_stats]
+        ),
+        "jitter_ms_std_summary": _summarize_numeric(
+            [float(s.get("jitter_ms_std", np.nan)) for s in jitter_session_stats]
+        ),
+        "jitter_ms_max_abs_summary": _summarize_numeric(
+            [float(s.get("jitter_ms_max_abs", np.nan)) for s in jitter_session_stats]
+        ),
+    }
+    npm_asymmetry_summary = {
+        "configured_uv_sig_time_offset_ms": float(args.npm_uv_sig_time_offset_ms),
+        "configured_uv_sig_jitter_ms_std": float(args.npm_uv_sig_jitter_ms_std),
+        "configured_ledstate_startup_rows": int(args.npm_ledstate_startup_rows),
+        "observed_start_gap_sec": _summarize_numeric(
+            [float(s.get("start_gap_sec", np.nan)) for s in npm_support_stats]
+        ),
+        "observed_end_gap_sec": _summarize_numeric(
+            [float(s.get("end_gap_sec", np.nan)) for s in npm_support_stats]
+        ),
+        "observed_uv_sample_count": _summarize_numeric(
+            [float(s.get("uv_count", np.nan)) for s in npm_support_stats]
+        ),
+        "observed_sig_sample_count": _summarize_numeric(
+            [float(s.get("sig_count", np.nan)) for s in npm_support_stats]
+        ),
+    }
+    per_session_sample_counts = [
+        {
+            "chunk_index": int(s.get("chunk_index", -1)),
+            "session_label": s.get("session_label"),
+            "samples_target": int(s.get("samples_target", 0)),
+            "samples_written": int(s.get("samples_written", 0)),
+            "dropped": bool(s.get("dropped", False)),
+        }
+        for s in manifest_sessions
+    ]
+    generation_manifest = {
+        "generator": {
+            "script": "tools/synth_photometry_dataset.py",
+            "git_commit": _safe_git_commit(),
+        },
+        "command": {
+            "argv": list(sys.argv[1:]),
+            "argv_string": " ".join(sys.argv[1:]),
+            "parsed_args": _json_yaml_safe(vars(args)),
+        },
+        "resolved_preset": str(args.preset or "none"),
+        "seed": int(args.seed),
+        "format": str(args.format),
+        "start_time": {
+            "requested_start_iso": str(args.start_iso),
+            "random_offset_min_applied": float(start_dt_offset_min),
+            "resolved_start_iso": start_dt.isoformat(),
+        },
+        "sessions_requested": int(total_intervals),
+        "sessions_generated": int(len(generated_sessions)),
+        "sessions_dropped": {
+            "count": int(len(dropped_sessions)),
+            "items": dropped_sessions,
+        },
+        "sessions_truncated": {
+            "count": int(len(truncated_sessions)),
+            "items": truncated_sessions,
+        },
+        "per_session_sample_counts": per_session_sample_counts,
+        "sessions": manifest_sessions,
+        "timestamp_jitter": jitter_summary,
+        "per_channel_support_summary": {
+            "rwd_sessions": rwd_support_stats,
+            "npm_sessions": npm_support_stats,
+        },
+        "npm_uv_sig_asymmetry": npm_asymmetry_summary,
+        "near_threshold_coverage": {
+            "enabled": bool(args.near_threshold_end_coverage),
+            "manipulations": near_threshold_sessions,
+            "count": int(len(near_threshold_sessions)),
+        },
+    }
+
+    if bool(args.write_generation_manifest):
+        manifest_path = os.path.join(args.out, "generation_manifest.yaml")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                _json_yaml_safe(generation_manifest),
+                f,
+                sort_keys=False,
+                allow_unicode=False,
+            )
+        print(f"Wrote generation manifest: {manifest_path}")
+
     # Verify Phase Locking
     # Verify Phase Locking
     if args.phasic_mode == 'phase_locked_to_tonic':
