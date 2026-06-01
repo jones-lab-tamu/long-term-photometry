@@ -133,6 +133,10 @@ If you need different names, the contract can be adjusted through configuration 
 - `custom_tabular_uv_suffix`
 - `custom_tabular_sig_suffix`
 
+Reference files:
+- conversion guide: `docs/custom_tabular_conversion_guide.md`
+- template/examples: `examples/custom_tabular/`
+
 ## Core Workflows
 
 ### Validate Before Run

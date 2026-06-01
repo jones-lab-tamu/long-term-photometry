@@ -1,0 +1,6 @@
+chunk_duration_sec: 1.0
+target_fs_hz: 10.0
+allow_partial_final_chunk: false
+custom_tabular_time_col: time_sec
+custom_tabular_uv_suffix: _iso
+custom_tabular_sig_suffix: _sig

@@ -13,6 +13,7 @@ All commands below write `generation_manifest.yaml` by default. The manifest rec
 - Run commands from repo root.
 - Use `tests/test_config.yaml` unless a different config is explicitly required.
 - For wrapper runs, pass `--sessions-per-hour` to match generation.
+- For strict tabular conversion datasets, use `docs/custom_tabular_conversion_guide.md` and `examples/custom_tabular/`.
 
 ## A) Clean RWD fixture
 ```powershell
