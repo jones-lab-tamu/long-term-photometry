@@ -4906,6 +4906,26 @@ class MainWindow(QMainWindow):
             return "fixed_daily_anchor"
         return "civil"
 
+    def _selected_acquisition_mode(self) -> str:
+        """Return normalized acquisition mode from run configuration controls."""
+        combo = getattr(self, "_acquisition_mode_combo", None)
+        if combo is None:
+            return "intermittent"
+        data = combo.currentData()
+        if isinstance(data, str):
+            mode = data.strip().lower()
+            if mode in {"intermittent", "continuous"}:
+                return mode
+        text = combo.currentText().strip().lower()
+        return "continuous" if text.startswith("continuous") else "intermittent"
+
+    def _acquisition_mode_summary(self) -> str:
+        """Human-readable acquisition-mode summary for UI text."""
+        mode = self._selected_acquisition_mode()
+        if mode == "continuous":
+            return "Continuous recording (internally windowed)"
+        return "Intermittent/session-based"
+
     def _timeline_anchor_summary(self) -> str:
         """Human-readable timeline anchor summary for UI text."""
         mode = self._timeline_anchor_mode_value()
@@ -5904,6 +5924,25 @@ class MainWindow(QMainWindow):
         dur_val = float(dur_text) if dur_text else None
         self._track_if_nonempty("session_duration_s", dur_text, user_set)
 
+        acquisition_mode_val = self._selected_acquisition_mode()
+        self._track_if_changed(
+            "acquisition_mode", acquisition_mode_val, "intermittent", user_set
+        )
+        continuous_window_sec_val = float(self._continuous_window_sec_spin.value())
+        self._track_if_changed(
+            "continuous_window_sec", continuous_window_sec_val, 600.0, user_set
+        )
+        continuous_step_sec_val = float(self._continuous_step_sec_spin.value())
+        self._track_if_changed(
+            "continuous_step_sec", continuous_step_sec_val, 600.0, user_set
+        )
+        allow_partial_final_window_val = bool(
+            self._allow_partial_final_window_cb.isChecked()
+        )
+        self._track_if_changed(
+            "allow_partial_final_window", allow_partial_final_window_val, False, user_set
+        )
+
         timeline_anchor_mode_val = self._timeline_anchor_mode_value()
         self._track_if_changed("timeline_anchor_mode", timeline_anchor_mode_val, "civil", user_set)
         fixed_daily_anchor_clock_val = None
@@ -6204,6 +6243,10 @@ class MainWindow(QMainWindow):
             validate_only=validate_only,
             sessions_per_hour=sph_val,
             session_duration_s=dur_val,
+            acquisition_mode=acquisition_mode_val,
+            continuous_window_sec=continuous_window_sec_val,
+            continuous_step_sec=continuous_step_sec_val,
+            allow_partial_final_window=allow_partial_final_window_val,
             timeline_anchor_mode=timeline_anchor_mode_val,
             fixed_daily_anchor_clock=fixed_daily_anchor_clock_val,
             smooth_window_s=smooth,
@@ -6316,6 +6359,19 @@ class MainWindow(QMainWindow):
                     return "Session Duration must be > 0."
             except ValueError:
                 return f"Session Duration must be a number, got: '{dur}'"
+
+        acquisition_mode = self._selected_acquisition_mode()
+        continuous_window_sec = float(self._continuous_window_sec_spin.value())
+        continuous_step_sec = float(self._continuous_step_sec_spin.value())
+        if continuous_window_sec <= 0.0:
+            return "Continuous Window Duration must be > 0."
+        if continuous_step_sec <= 0.0:
+            return "Continuous Step Duration must be > 0."
+        if acquisition_mode == "continuous" and abs(continuous_step_sec - continuous_window_sec) > 1e-9:
+            return (
+                "continuous_step_sec must equal continuous_window_sec in this version; "
+                "overlapping/sliding windows are not yet supported."
+            )
 
         anchor_mode = self._timeline_anchor_mode_value()
         if anchor_mode == "fixed_daily_anchor":
@@ -6528,6 +6584,10 @@ class MainWindow(QMainWindow):
             input_dir=self._input_dir.text().strip(),
             run_dir="",
             format=fmt,
+            acquisition_mode=self._selected_acquisition_mode(),
+            continuous_window_sec=float(self._continuous_window_sec_spin.value()),
+            continuous_step_sec=float(self._continuous_step_sec_spin.value()),
+            allow_partial_final_window=bool(self._allow_partial_final_window_cb.isChecked()),
             config_source_path=self._active_config_source_path(),
             data_contract_overrides=data_contract_overrides,
         )
@@ -7716,6 +7776,46 @@ class MainWindow(QMainWindow):
 
         self._sph_edit.setText(self._settings.value("sessions_per_hour", "", str))
         self._duration_edit.setText(self._settings.value("session_duration_s", "", str))
+        acquisition_mode = str(
+            self._settings.value(
+                "acquisition_mode",
+                str(getattr(self._default_cfg, "acquisition_mode", "intermittent")),
+                str,
+            )
+            or "intermittent"
+        ).strip().lower()
+        idx_acq = self._acquisition_mode_combo.findData(acquisition_mode)
+        if idx_acq < 0:
+            idx_acq = self._acquisition_mode_combo.findData("intermittent")
+        if idx_acq >= 0:
+            self._acquisition_mode_combo.setCurrentIndex(idx_acq)
+        self._continuous_window_sec_spin.setValue(
+            float(
+                self._settings.value(
+                    "continuous_window_sec",
+                    float(getattr(self._default_cfg, "continuous_window_sec", 600.0)),
+                    float,
+                )
+            )
+        )
+        self._continuous_step_sec_spin.setValue(
+            float(
+                self._settings.value(
+                    "continuous_step_sec",
+                    float(getattr(self._default_cfg, "continuous_step_sec", 600.0)),
+                    float,
+                )
+            )
+        )
+        self._allow_partial_final_window_cb.setChecked(
+            bool(
+                self._settings.value(
+                    "allow_partial_final_window",
+                    bool(getattr(self._default_cfg, "allow_partial_final_window", False)),
+                    bool,
+                )
+            )
+        )
 
         smooth = self._settings.value("smooth_window_s", 1.0, float)
         self._smooth_spin.setValue(smooth)
@@ -7948,6 +8048,17 @@ class MainWindow(QMainWindow):
         self._settings.setValue("run_profile", self._selected_run_profile())
         self._settings.setValue("sessions_per_hour", self._sph_edit.text().strip())
         self._settings.setValue("session_duration_s", self._duration_edit.text().strip())
+        self._settings.setValue("acquisition_mode", self._selected_acquisition_mode())
+        self._settings.setValue(
+            "continuous_window_sec", float(self._continuous_window_sec_spin.value())
+        )
+        self._settings.setValue(
+            "continuous_step_sec", float(self._continuous_step_sec_spin.value())
+        )
+        self._settings.setValue(
+            "allow_partial_final_window",
+            bool(self._allow_partial_final_window_cb.isChecked()),
+        )
         self._settings.setValue("smooth_window_s", self._smooth_spin.value())
         self._settings.setValue(
             "export_display_series_csv",
@@ -8418,6 +8529,10 @@ class MainWindow(QMainWindow):
         render_text = self._plotting_mode_combo.currentText()
         if not phasic_active:
             render_text += " (inactive in tonic mode)"
+        acquisition_mode = self._selected_acquisition_mode()
+        continuous_window_sec = float(self._continuous_window_sec_spin.value())
+        continuous_step_sec = float(self._continuous_step_sec_spin.value())
+        allow_partial_final_window = bool(self._allow_partial_final_window_cb.isChecked())
         roi_text = self._compute_roi_filter_summary()
         rep_text = self._compute_representative_summary()
 
@@ -8433,6 +8548,19 @@ class MainWindow(QMainWindow):
         summary_lines = [
             f"Run Type: {self._run_profile_display_name(run_profile)}",
             f"Mode: {mode_text}",
+            f"Acquisition Mode: {self._acquisition_mode_summary()}",
+            (
+                "Continuous Window Plan: "
+                f"window={continuous_window_sec:.1f}s, step={continuous_step_sec:.1f}s, "
+                f"allow partial final window={'on' if allow_partial_final_window else 'off'}"
+                if acquisition_mode == "continuous"
+                else "Continuous Window Plan: inactive in intermittent mode"
+            ),
+            (
+                "Continuous mode note: continuous mode is for uninterrupted acquisition files. In continuous-capable runs, recordings are split into internal computational windows; these windows are not acquisition sessions."
+                if acquisition_mode == "continuous"
+                else "Continuous mode note: inactive (session-based acquisition assumptions apply)."
+            ),
             f"Analysis: {analysis_scope}",
             (
                 f"Tonic Output Mode: {tonic_output_mode_label(self._selected_tonic_output_mode())}"
@@ -8542,9 +8670,45 @@ class MainWindow(QMainWindow):
     def _update_context_sensitive_controls(self) -> None:
         """Enable/disable controls that are irrelevant in current mode/context."""
         mode_text = self._mode_combo.currentText()
+        acquisition_mode = self._selected_acquisition_mode()
+        continuous_mode = acquisition_mode == "continuous"
         phasic_active = is_isosbestic_active(mode_text)
         tonic_active = mode_text in ("both", "tonic")
         self._apply_dynamic_fit_mode_ui_state()
+        if hasattr(self, "_acquisition_mode_combo"):
+            self._acquisition_mode_combo.setEnabled(True)
+        if hasattr(self, "_continuous_window_sec_spin"):
+            self._continuous_window_sec_spin.setEnabled(continuous_mode)
+        if hasattr(self, "_continuous_step_sec_spin"):
+            self._continuous_step_sec_spin.setEnabled(continuous_mode)
+        if hasattr(self, "_allow_partial_final_window_cb"):
+            self._allow_partial_final_window_cb.setEnabled(continuous_mode)
+        if hasattr(self, "_sph_edit"):
+            self._sph_edit.setEnabled(not continuous_mode)
+        if hasattr(self, "_duration_edit"):
+            self._duration_edit.setEnabled(not continuous_mode)
+        if hasattr(self, "_sph_warning"):
+            if continuous_mode:
+                self._sph_warning.setText(
+                    "Ignored in continuous mode. Continuous windows are computational, not acquisition sessions."
+                )
+                self._set_status_label_style(self._sph_warning, "info")
+            else:
+                self._sph_warning.setText(
+                    "Required for duty-cycled data unless timestamps are available."
+                )
+                self._set_status_label_style(self._sph_warning, "warn")
+        if hasattr(self, "_acquisition_mode_help_label"):
+            if continuous_mode:
+                self._acquisition_mode_help_label.setText(
+                    "Continuous mode is for one uninterrupted acquisition file that will be split into internal computational windows. These windows are not acquisition sessions."
+                )
+                self._set_status_label_style(self._acquisition_mode_help_label, "info")
+            else:
+                self._acquisition_mode_help_label.setText(
+                    "Intermittent mode uses acquisition sessions/chunks and session-based timing controls."
+                )
+                self._set_status_label_style(self._acquisition_mode_help_label, "ready")
         if hasattr(self, "_dynamic_fit_mode_combo"):
             self._dynamic_fit_mode_combo.setEnabled(phasic_active)
         if hasattr(self, "_bleach_correction_mode_combo"):
@@ -8955,6 +9119,58 @@ class MainWindow(QMainWindow):
         )
         self._duration_edit.textChanged.connect(self._on_config_changed)
         form.addRow("Session Duration (s):", self._duration_edit)
+
+        self._acquisition_mode_combo = QComboBox()
+        self._acquisition_mode_combo.addItem(
+            "Intermittent/session-based recording",
+            "intermittent",
+        )
+        self._acquisition_mode_combo.addItem("Continuous recording", "continuous")
+        self._acquisition_mode_combo.setCurrentIndex(0)
+        self._acquisition_mode_combo.setToolTip(
+            "Choose acquisition structure: intermittent/session-based recordings "
+            "or one uninterrupted continuous recording."
+        )
+        self._acquisition_mode_combo.currentIndexChanged.connect(self._on_config_changed)
+        form.addRow("Acquisition Mode:", self._acquisition_mode_combo)
+
+        self._continuous_window_sec_spin = QDoubleSpinBox()
+        self._continuous_window_sec_spin.setRange(1.0, 86400.0)
+        self._continuous_window_sec_spin.setDecimals(1)
+        self._continuous_window_sec_spin.setSingleStep(30.0)
+        self._continuous_window_sec_spin.setValue(600.0)
+        self._continuous_window_sec_spin.setToolTip(
+            "Continuous mode only: internal computational window duration in seconds."
+        )
+        self._continuous_window_sec_spin.valueChanged.connect(self._on_config_changed)
+        form.addRow("Continuous Window (s):", self._continuous_window_sec_spin)
+
+        self._continuous_step_sec_spin = QDoubleSpinBox()
+        self._continuous_step_sec_spin.setRange(1.0, 86400.0)
+        self._continuous_step_sec_spin.setDecimals(1)
+        self._continuous_step_sec_spin.setSingleStep(30.0)
+        self._continuous_step_sec_spin.setValue(600.0)
+        self._continuous_step_sec_spin.setToolTip(
+            "Continuous mode only: internal computational step size in seconds. "
+            "This build requires step == window."
+        )
+        self._continuous_step_sec_spin.valueChanged.connect(self._on_config_changed)
+        form.addRow("Continuous Step (s):", self._continuous_step_sec_spin)
+
+        self._allow_partial_final_window_cb = QCheckBox("")
+        self._allow_partial_final_window_cb.setChecked(False)
+        self._allow_partial_final_window_cb.setToolTip(
+            "Continuous mode only: allow the trailing undersized window to be included."
+        )
+        self._allow_partial_final_window_cb.stateChanged.connect(self._on_config_changed)
+        form.addRow("Allow Partial Final Window:", self._allow_partial_final_window_cb)
+
+        self._acquisition_mode_help_label = QLabel(
+            "Intermittent mode uses acquisition sessions/chunks and session-based timing controls."
+        )
+        self._acquisition_mode_help_label.setWordWrap(True)
+        self._acquisition_mode_help_label.setObjectName("resultsSummaryHint")
+        form.addRow("", self._acquisition_mode_help_label)
 
         self._mode_combo = QComboBox()
         self._mode_combo.addItems(["both", "phasic", "tonic"])

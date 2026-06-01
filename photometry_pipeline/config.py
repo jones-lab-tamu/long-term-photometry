@@ -116,6 +116,14 @@ class Config:
     custom_tabular_uv_suffix: str = "_iso"
     custom_tabular_sig_suffix: str = "_sig"
 
+    # acquisition planning (phase 1 continuous-mode plumbing only)
+    acquisition_mode: Literal['intermittent', 'continuous'] = 'intermittent'
+    continuous_window_sec: float = 600.0
+    continuous_step_sec: float = 600.0
+    # Safer default is False so any trailing undersized window is not silently
+    # admitted before explicit continuous-window ingestion is implemented.
+    allow_partial_final_window: bool = False
+
     @classmethod
     def from_yaml(cls, path: str) -> 'Config':
         if not os.path.exists(path):
@@ -223,6 +231,12 @@ class Config:
                 raise ValueError(
                     "export_display_series_csv must be a boolean (true/false)"
                 )
+        if 'acquisition_mode' in data:
+            if data['acquisition_mode'] not in {'intermittent', 'continuous'}:
+                raise ValueError(
+                    f"Invalid acquisition_mode: {data['acquisition_mode']}. "
+                    "Allowed: {'intermittent', 'continuous'}"
+                )
         
         obj = cls(**data)
         
@@ -283,6 +297,19 @@ class Config:
         if str(obj.custom_tabular_uv_suffix) == str(obj.custom_tabular_sig_suffix):
             raise ValueError(
                 "custom_tabular_uv_suffix and custom_tabular_sig_suffix must be different"
+            )
+        if obj.acquisition_mode not in {'intermittent', 'continuous'}:
+            raise ValueError(
+                "acquisition_mode must be one of {'intermittent', 'continuous'}"
+            )
+        if obj.continuous_window_sec <= 0.0:
+            raise ValueError("continuous_window_sec must be > 0")
+        if obj.continuous_step_sec <= 0.0:
+            raise ValueError("continuous_step_sec must be > 0")
+        if abs(float(obj.continuous_step_sec) - float(obj.continuous_window_sec)) > 1e-9:
+            raise ValueError(
+                "continuous_step_sec must equal continuous_window_sec in this version; "
+                "overlapping/sliding windows are not yet supported."
             )
                 
         return obj

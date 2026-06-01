@@ -2310,5 +2310,77 @@ class TestEventFeatureKnobs(unittest.TestCase):
             self.assertEqual(data["timeline_anchor_mode"], "fixed_daily_anchor")
             self.assertEqual(data["fixed_daily_anchor_clock"], "07:00")
 
+    def test_acquisition_defaults_round_trip_without_cli_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = os.path.join(tmp, "base.yaml")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write("target_fs_hz: 20.0\n")
+            run_dir = os.path.join(tmp, "run_acq_default")
+            spec = RunSpec(
+                input_dir="/data/in",
+                run_dir=run_dir,
+                config_source_path=cfg_path,
+            )
+            argv = spec.build_runner_argv()
+            self.assertNotIn("--acquisition-mode", argv)
+            self.assertNotIn("--continuous-window-sec", argv)
+            self.assertNotIn("--continuous-step-sec", argv)
+            self.assertNotIn("--allow-partial-final-window", argv)
+            self.assertNotIn("--no-allow-partial-final-window", argv)
+
+            cfg_effective = yaml.safe_load(spec.get_derived_config_preview())
+            self.assertEqual(cfg_effective["acquisition_mode"], "intermittent")
+            self.assertEqual(float(cfg_effective["continuous_window_sec"]), 600.0)
+            self.assertEqual(float(cfg_effective["continuous_step_sec"]), 600.0)
+            self.assertIs(cfg_effective["allow_partial_final_window"], False)
+
+    def test_continuous_acquisition_round_trip_to_argv_json_and_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = os.path.join(tmp, "base.yaml")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write("target_fs_hz: 20.0\n")
+            run_dir = os.path.join(tmp, "run_acq_continuous")
+            spec = RunSpec(
+                input_dir="/data/in",
+                run_dir=run_dir,
+                config_source_path=cfg_path,
+                acquisition_mode="continuous",
+                continuous_window_sec=900.0,
+                continuous_step_sec=900.0,
+                allow_partial_final_window=True,
+            )
+            argv = spec.build_runner_argv()
+            self.assertIn("--acquisition-mode", argv)
+            self.assertEqual(argv[argv.index("--acquisition-mode") + 1], "continuous")
+            self.assertIn("--continuous-window-sec", argv)
+            self.assertEqual(argv[argv.index("--continuous-window-sec") + 1], "900.0")
+            self.assertIn("--continuous-step-sec", argv)
+            self.assertEqual(argv[argv.index("--continuous-step-sec") + 1], "900.0")
+            self.assertIn("--allow-partial-final-window", argv)
+
+            cfg_path_effective = spec.generate_derived_config(run_dir)
+            with open(cfg_path_effective, "r", encoding="utf-8") as f:
+                cfg_effective = yaml.safe_load(f)
+            self.assertEqual(cfg_effective["acquisition_mode"], "continuous")
+            self.assertEqual(float(cfg_effective["continuous_window_sec"]), 900.0)
+            self.assertEqual(float(cfg_effective["continuous_step_sec"]), 900.0)
+            self.assertIs(cfg_effective["allow_partial_final_window"], True)
+
+            spec_path = spec.write_gui_run_spec(run_dir)
+            with open(spec_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            self.assertEqual(payload["acquisition_mode"], "continuous")
+            self.assertEqual(float(payload["continuous_window_sec"]), 900.0)
+            self.assertEqual(float(payload["continuous_step_sec"]), 900.0)
+            self.assertIs(payload["allow_partial_final_window"], True)
+
+    def test_run_spec_rejects_continuous_step_window_mismatch(self):
+        with self.assertRaises(ValueError, msg="continuous step/window mismatch must fail"):
+            RunSpec(
+                acquisition_mode="continuous",
+                continuous_window_sec=600.0,
+                continuous_step_sec=300.0,
+            )
+
 if __name__ == "__main__":
     unittest.main()

@@ -285,6 +285,18 @@ def _cleanup_run_outputs_in_place(run_dir, emitter=None):
 
 
 RUN_PROFILE_CHOICES = ("full", "tuning_prep")
+INTERMITTENT_ONLY_OUTPUT_KEYS = [
+    "session-slot dayplots",
+    "stacked session views",
+    "duty-cycle occupancy plots",
+    "anchored phasic summaries requiring sessions_per_hour",
+    "outputs requiring duration <= stride assumptions",
+    "dayplot rerender paths requiring sessions-per-hour metadata",
+]
+CONTINUOUS_MODE_NOT_IMPLEMENTED_MESSAGE = (
+    "Continuous acquisition mode is recognized, but continuous windowed ingestion "
+    "is not yet implemented in this build."
+)
 TUNING_PREP_SKIPPED_PHASES = [
     "analysis.tonic_analysis",
     "plots.tonic_overview",
@@ -327,6 +339,15 @@ TUNING_PREP_ARTIFACT_CONTRACT = {
         "full production deliverable package (day-plot families and extended per-ROI summaries)",
     ],
 }
+
+
+def intermittent_only_output_message() -> str:
+    """Stable user-facing message for intermittent-only output families."""
+    return (
+        "This output is designed for intermittent/session-based recordings and is "
+        "not available in continuous mode. Use continuous elapsed-time outputs when "
+        "available."
+    )
 
 
 def _resolve_effective_run_type(*, run_profile: str, preview_first_n) -> str:
@@ -396,6 +417,11 @@ def _ensure_root_run_report(
     intentional_skips=None,
     sessions_per_hour=None,
     sessions_per_hour_source=None,
+    acquisition_mode="intermittent",
+    continuous_window_sec=600.0,
+    continuous_step_sec=600.0,
+    allow_partial_final_window=False,
+    acquisition_mode_source=None,
     timeline_anchor_mode="civil",
     fixed_daily_anchor_clock=None,
 ):
@@ -439,6 +465,11 @@ def _ensure_root_run_report(
              if isinstance(run_ctx, dict):
                  run_ctx['sessions_per_hour'] = sessions_per_hour
                  run_ctx['sessions_per_hour_source'] = sessions_per_hour_source
+                 run_ctx['acquisition_mode'] = acquisition_mode
+                 run_ctx['continuous_window_sec'] = continuous_window_sec
+                 run_ctx['continuous_step_sec'] = continuous_step_sec
+                 run_ctx['allow_partial_final_window'] = allow_partial_final_window
+                 run_ctx['acquisition_mode_source'] = acquisition_mode_source
                  run_ctx['timeline_anchor_mode'] = timeline_anchor_mode
                  run_ctx['fixed_daily_anchor_clock'] = fixed_daily_anchor_clock
                  if run_type:
@@ -454,6 +485,11 @@ def _ensure_root_run_report(
              if isinstance(derived_settings, dict):
                  derived_settings['sessions_per_hour'] = sessions_per_hour
                  derived_settings['sessions_per_hour_source'] = sessions_per_hour_source
+                 derived_settings['acquisition_mode'] = acquisition_mode
+                 derived_settings['continuous_window_sec'] = continuous_window_sec
+                 derived_settings['continuous_step_sec'] = continuous_step_sec
+                 derived_settings['allow_partial_final_window'] = allow_partial_final_window
+                 derived_settings['acquisition_mode_source'] = acquisition_mode_source
                  derived_settings['timeline_anchor_mode'] = timeline_anchor_mode
                  derived_settings['fixed_daily_anchor_clock'] = fixed_daily_anchor_clock
 
@@ -519,6 +555,38 @@ def parse_args():
     parser.add_argument('--traces-only', action='store_true', help="Run traces and QC, skip feature extraction (features.csv) and feature-dependent summaries.")
     parser.add_argument('--sessions-per-hour', type=int, help="Force sessions per hour (integer)")
     parser.add_argument('--session-duration-s', type=float, help="Recording duration in seconds (data length per chunk). If provided, validated against traces.")
+    parser.add_argument(
+        '--acquisition-mode',
+        choices=['intermittent', 'continuous'],
+        default=None,
+        help="Acquisition structure: intermittent/session-based or continuous recording.",
+    )
+    parser.add_argument(
+        '--continuous-window-sec',
+        type=float,
+        default=None,
+        help="Continuous mode window duration in seconds.",
+    )
+    parser.add_argument(
+        '--continuous-step-sec',
+        type=float,
+        default=None,
+        help="Continuous mode step duration in seconds (phase 1 requires step == window).",
+    )
+    partial_group = parser.add_mutually_exclusive_group()
+    partial_group.add_argument(
+        '--allow-partial-final-window',
+        dest='allow_partial_final_window',
+        action='store_true',
+        help="Continuous mode only: include a trailing undersized final window.",
+    )
+    partial_group.add_argument(
+        '--no-allow-partial-final-window',
+        dest='allow_partial_final_window',
+        action='store_false',
+        help="Continuous mode only: drop a trailing undersized final window.",
+    )
+    parser.set_defaults(allow_partial_final_window=None)
     parser.add_argument(
         '--timeline-anchor-mode',
         choices=['civil', 'elapsed', 'fixed_daily_anchor'],
@@ -604,6 +672,26 @@ def validate_inputs(args):
     if args.session_duration_s is not None:
         if args.session_duration_s <= 0:
             raise RuntimeError(f"--session-duration-s must be > 0, got {args.session_duration_s}")
+    acquisition_mode = getattr(args, "acquisition_mode", "intermittent")
+    continuous_window_sec = getattr(args, "continuous_window_sec", 600.0)
+    continuous_step_sec = getattr(args, "continuous_step_sec", 600.0)
+    if acquisition_mode not in {"intermittent", "continuous"}:
+        raise RuntimeError(
+            "acquisition_mode must be 'intermittent' or 'continuous'."
+        )
+    if continuous_window_sec is None or float(continuous_window_sec) <= 0:
+        raise RuntimeError(
+            f"continuous_window_sec must be > 0, got {continuous_window_sec}"
+        )
+    if continuous_step_sec is None or float(continuous_step_sec) <= 0:
+        raise RuntimeError(
+            f"continuous_step_sec must be > 0, got {continuous_step_sec}"
+        )
+    if abs(float(continuous_step_sec) - float(continuous_window_sec)) > 1e-9:
+        raise RuntimeError(
+            "continuous_step_sec must equal continuous_window_sec in this version; "
+            "overlapping/sliding windows are not yet supported."
+        )
 
     if args.timeline_anchor_mode == "fixed_daily_anchor":
         if args.fixed_daily_anchor_clock is None or not str(args.fixed_daily_anchor_clock).strip():
@@ -845,6 +933,60 @@ def main():
     else:
         print("Using sessions_per_hour=None (no source found)", flush=True)
 
+    cfg_for_resolution = None
+    cfg_parse_failed = False
+    try:
+        cfg_for_resolution = Config.from_yaml(args.config)
+    except Exception as e:
+        cfg_parse_failed = True
+        print(f"WARNING: Failed to parse config for runner stamping: {e}", flush=True)
+
+    # Resolve acquisition-mode planning fields (CLI overrides config).
+    effective_acquisition_mode = "intermittent"
+    effective_continuous_window_sec = 600.0
+    effective_continuous_step_sec = 600.0
+    effective_allow_partial_final_window = False
+    acquisition_mode_source = "default"
+    if cfg_for_resolution is not None:
+        effective_acquisition_mode = str(
+            getattr(cfg_for_resolution, "acquisition_mode", "intermittent")
+        )
+        effective_continuous_window_sec = float(
+            getattr(cfg_for_resolution, "continuous_window_sec", 600.0)
+        )
+        effective_continuous_step_sec = float(
+            getattr(cfg_for_resolution, "continuous_step_sec", 600.0)
+        )
+        effective_allow_partial_final_window = bool(
+            getattr(cfg_for_resolution, "allow_partial_final_window", False)
+        )
+        acquisition_mode_source = "config"
+
+    if args.acquisition_mode is not None:
+        effective_acquisition_mode = str(args.acquisition_mode)
+        acquisition_mode_source = "user-provided"
+    if args.continuous_window_sec is not None:
+        effective_continuous_window_sec = float(args.continuous_window_sec)
+    if args.continuous_step_sec is not None:
+        effective_continuous_step_sec = float(args.continuous_step_sec)
+    if args.allow_partial_final_window is not None:
+        effective_allow_partial_final_window = bool(args.allow_partial_final_window)
+
+    # Canonicalize args so validation + provenance all reference one resolved set.
+    args.acquisition_mode = effective_acquisition_mode
+    args.continuous_window_sec = effective_continuous_window_sec
+    args.continuous_step_sec = effective_continuous_step_sec
+    args.allow_partial_final_window = effective_allow_partial_final_window
+
+    print(
+        "Using acquisition_mode="
+        f"{effective_acquisition_mode} ({acquisition_mode_source}), "
+        f"continuous_window_sec={effective_continuous_window_sec}, "
+        f"continuous_step_sec={effective_continuous_step_sec}, "
+        f"allow_partial_final_window={effective_allow_partial_final_window}",
+        flush=True,
+    )
+
     # Determine effective event signal, excursion polarity, representative index, and preview for stamping
     effective_event_signal = args.event_signal
     effective_signal_excursion_polarity = "positive"
@@ -862,7 +1004,12 @@ def main():
         or effective_tonic_timeline_mode == TONIC_TIMELINE_MODE_REAL_ELAPSED
     ):
         try:
-            cfg = Config.from_yaml(args.config)
+            if cfg_for_resolution is not None:
+                cfg = cfg_for_resolution
+            elif cfg_parse_failed:
+                raise RuntimeError("config_parse_failed")
+            else:
+                cfg = Config.from_yaml(args.config)
             if effective_event_signal is None:
                 effective_event_signal = getattr(cfg, "event_signal", "dff")
             effective_signal_excursion_polarity = str(
@@ -948,6 +1095,11 @@ def main():
         'events_path': events_path,
         'cancel_flag_path': cancel_flag_path,
         'args': vars(args),
+        'acquisition_mode': effective_acquisition_mode,
+        'continuous_window_sec': effective_continuous_window_sec,
+        'continuous_step_sec': effective_continuous_step_sec,
+        'allow_partial_final_window': effective_allow_partial_final_window,
+        'acquisition_mode_source': acquisition_mode_source,
         'timeline_anchor_mode': args.timeline_anchor_mode,
         'fixed_daily_anchor_clock': args.fixed_daily_anchor_clock,
         'intentional_skips': effective_skip_plan,
@@ -1019,6 +1171,11 @@ def main():
                 "format": args.format,
                 "sessions_per_hour": resolved_sessions_per_hour,
                 "sessions_per_hour_source": sessions_per_hour_source,
+                "acquisition_mode": effective_acquisition_mode,
+                "continuous_window_sec": effective_continuous_window_sec,
+                "continuous_step_sec": effective_continuous_step_sec,
+                "allow_partial_final_window": effective_allow_partial_final_window,
+                "acquisition_mode_source": acquisition_mode_source,
                 "timeline_anchor_mode": args.timeline_anchor_mode,
                 "fixed_daily_anchor_clock": args.fixed_daily_anchor_clock,
                 "events_mode": args.events,
@@ -1079,6 +1236,24 @@ def main():
             argv.extend(["--sessions-per-hour", str(resolved_sessions_per_hour)])
         if args.session_duration_s is not None:
             argv.extend(["--session-duration-s", str(args.session_duration_s)])
+        if effective_acquisition_mode != "intermittent":
+            argv.extend(["--acquisition-mode", str(effective_acquisition_mode)])
+        if (
+            effective_acquisition_mode != "intermittent"
+            or float(effective_continuous_window_sec) != 600.0
+        ):
+            argv.extend(["--continuous-window-sec", str(effective_continuous_window_sec)])
+        if (
+            effective_acquisition_mode != "intermittent"
+            or float(effective_continuous_step_sec) != 600.0
+        ):
+            argv.extend(["--continuous-step-sec", str(effective_continuous_step_sec)])
+        if effective_acquisition_mode != "intermittent" or bool(effective_allow_partial_final_window):
+            argv.append(
+                "--allow-partial-final-window"
+                if effective_allow_partial_final_window
+                else "--no-allow-partial-final-window"
+            )
         if args.timeline_anchor_mode != "civil":
             argv.extend(["--timeline-anchor-mode", str(args.timeline_anchor_mode)])
         if args.timeline_anchor_mode == "fixed_daily_anchor" and args.fixed_daily_anchor_clock:
@@ -1096,6 +1271,23 @@ def main():
         print(f"VALIDATE-ONLY: run_dir={run_dir}", flush=True)
         print(f"VALIDATE-ONLY: events_path={vo_events_path}", flush=True)
         print(f"VALIDATE-ONLY: cancel_flag_path={cancel_flag_path}", flush=True)
+        print(
+            "VALIDATE-ONLY: acquisition plan "
+            f"(mode={effective_acquisition_mode}, "
+            f"window_sec={effective_continuous_window_sec}, "
+            f"step_sec={effective_continuous_step_sec}, "
+            f"allow_partial_final_window={effective_allow_partial_final_window})",
+            flush=True,
+        )
+        if effective_acquisition_mode == "continuous":
+            print(
+                f"VALIDATE-ONLY: NOTE: {CONTINUOUS_MODE_NOT_IMPLEMENTED_MESSAGE}",
+                flush=True,
+            )
+            print(
+                f"VALIDATE-ONLY: NOTE: {intermittent_only_output_message()}",
+                flush=True,
+            )
         print(f"VALIDATE-ONLY: argv={json.dumps(argv)}", flush=True)
 
         emitter.emit("engine", "done", "Validate-only complete")
@@ -1150,6 +1342,11 @@ def main():
         "format": args.format,
         "sessions_per_hour": resolved_sessions_per_hour,
         "sessions_per_hour_source": sessions_per_hour_source,
+        "acquisition_mode": effective_acquisition_mode,
+        "continuous_window_sec": effective_continuous_window_sec,
+        "continuous_step_sec": effective_continuous_step_sec,
+        "allow_partial_final_window": effective_allow_partial_final_window,
+        "acquisition_mode_source": acquisition_mode_source,
         "timeline_anchor_mode": args.timeline_anchor_mode,
         "fixed_daily_anchor_clock": args.fixed_daily_anchor_clock,
         "events_mode": args.events,
@@ -1230,12 +1427,33 @@ def main():
         "representative_session_index": effective_representative_index,
         "sessions_per_hour": resolved_sessions_per_hour,
         "sessions_per_hour_source": sessions_per_hour_source,
+        "acquisition_mode": effective_acquisition_mode,
+        "continuous_window_sec": effective_continuous_window_sec,
+        "continuous_step_sec": effective_continuous_step_sec,
+        "allow_partial_final_window": effective_allow_partial_final_window,
+        "acquisition_mode_source": acquisition_mode_source,
         "timeline_anchor_mode": args.timeline_anchor_mode,
         "fixed_daily_anchor_clock": args.fixed_daily_anchor_clock,
     })
     substantive_work_completed = False
 
     try:
+        if effective_acquisition_mode == "continuous":
+            emitter.emit(
+                "engine",
+                "error",
+                CONTINUOUS_MODE_NOT_IMPLEMENTED_MESSAGE,
+                error_code="CONTINUOUS_MODE_NOT_IMPLEMENTED",
+                payload={
+                    "intermittent_only_outputs": INTERMITTENT_ONLY_OUTPUT_KEYS,
+                    "guidance": intermittent_only_output_message(),
+                },
+            )
+            raise RuntimeError(
+                f"{CONTINUOUS_MODE_NOT_IMPLEMENTED_MESSAGE} "
+                f"{intermittent_only_output_message()}"
+            )
+
         # -- Check cancel immediately --
         check_cancel(cancel_flag_path, emitter, "engine_start", manifest_path, manifest)
     
@@ -1984,6 +2202,11 @@ def main():
                                      intentional_skips=effective_skip_plan,
                                      sessions_per_hour=resolved_sessions_per_hour,
                                      sessions_per_hour_source=sessions_per_hour_source,
+                                     acquisition_mode=effective_acquisition_mode,
+                                     continuous_window_sec=effective_continuous_window_sec,
+                                     continuous_step_sec=effective_continuous_step_sec,
+                                     allow_partial_final_window=effective_allow_partial_final_window,
+                                     acquisition_mode_source=acquisition_mode_source,
                                      timeline_anchor_mode=args.timeline_anchor_mode,
                                      fixed_daily_anchor_clock=args.fixed_daily_anchor_clock)
         err_payload = None
@@ -2016,6 +2239,11 @@ def main():
                                           intentional_skips=effective_skip_plan,
                                           sessions_per_hour=resolved_sessions_per_hour,
                                           sessions_per_hour_source=sessions_per_hour_source,
+                                          acquisition_mode=effective_acquisition_mode,
+                                          continuous_window_sec=effective_continuous_window_sec,
+                                          continuous_step_sec=effective_continuous_step_sec,
+                                          allow_partial_final_window=effective_allow_partial_final_window,
+                                          acquisition_mode_source=acquisition_mode_source,
                                           timeline_anchor_mode=args.timeline_anchor_mode,
                                           fixed_daily_anchor_clock=args.fixed_daily_anchor_clock)
         except Exception:
@@ -2066,6 +2294,11 @@ def main():
                                           intentional_skips=effective_skip_plan,
                                           sessions_per_hour=resolved_sessions_per_hour,
                                           sessions_per_hour_source=sessions_per_hour_source,
+                                          acquisition_mode=effective_acquisition_mode,
+                                          continuous_window_sec=effective_continuous_window_sec,
+                                          continuous_step_sec=effective_continuous_step_sec,
+                                          allow_partial_final_window=effective_allow_partial_final_window,
+                                          acquisition_mode_source=acquisition_mode_source,
                                           timeline_anchor_mode=args.timeline_anchor_mode,
                                           fixed_daily_anchor_clock=args.fixed_daily_anchor_clock)
         except Exception:

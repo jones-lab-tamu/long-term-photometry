@@ -61,6 +61,10 @@ def test_wrapper_derives_provenance_from_numeric_arg(mock_cfg_load, mock_run_cmd
     
     cfg = MagicMock()
     cfg.sessions_per_hour = 1
+    cfg.acquisition_mode = "intermittent"
+    cfg.continuous_window_sec = 600.0
+    cfg.continuous_step_sec = 600.0
+    cfg.allow_partial_final_window = False
     mock_cfg_load.return_value = cfg
     
     test_argv = [
@@ -145,6 +149,11 @@ def test_wrapper_stamps_run_report():
                                 intentional_skips={"skipped_outputs": ["day_plots/phasic_sig_iso_day_*.png"]},
                                 sessions_per_hour=2, 
                                 sessions_per_hour_source="auth-stamp",
+                                acquisition_mode="continuous",
+                                continuous_window_sec=900.0,
+                                continuous_step_sec=900.0,
+                                allow_partial_final_window=True,
+                                acquisition_mode_source="user-provided",
                                 timeline_anchor_mode="fixed_daily_anchor",
                                 fixed_daily_anchor_clock="07:00")
         
@@ -157,6 +166,11 @@ def test_wrapper_stamps_run_report():
         assert stamped["run_context"]["run_profile"] == "tuning_prep"
         assert stamped["run_context"]["timeline_anchor_mode"] == "fixed_daily_anchor"
         assert stamped["run_context"]["fixed_daily_anchor_clock"] == "07:00"
+        assert stamped["run_context"]["acquisition_mode"] == "continuous"
+        assert float(stamped["run_context"]["continuous_window_sec"]) == 900.0
+        assert float(stamped["run_context"]["continuous_step_sec"]) == 900.0
+        assert stamped["run_context"]["allow_partial_final_window"] is True
+        assert stamped["run_context"]["acquisition_mode_source"] == "user-provided"
         assert stamped["run_context"]["artifact_contract"]["required_for_post_run_tuning"] == [
             "phasic_trace_cache.h5",
             "config_used.yaml",
@@ -170,6 +184,11 @@ def test_wrapper_stamps_run_report():
         ]
         assert stamped["derived_settings"]["timeline_anchor_mode"] == "fixed_daily_anchor"
         assert stamped["derived_settings"]["fixed_daily_anchor_clock"] == "07:00"
+        assert stamped["derived_settings"]["acquisition_mode"] == "continuous"
+        assert float(stamped["derived_settings"]["continuous_window_sec"]) == 900.0
+        assert float(stamped["derived_settings"]["continuous_step_sec"]) == 900.0
+        assert stamped["derived_settings"]["allow_partial_final_window"] is True
+        assert stamped["derived_settings"]["acquisition_mode_source"] == "user-provided"
 
 
 def test_wrapper_run_type_resolution_prefers_tuning_prep_over_preview():
@@ -211,8 +230,49 @@ def test_validate_inputs_rejects_tuning_prep_tonic_only(tmp_path):
         run_type="tuning_prep",
         sessions_per_hour=2,
         session_duration_s=10.0,
+        acquisition_mode="intermittent",
+        continuous_window_sec=600.0,
+        continuous_step_sec=600.0,
         timeline_anchor_mode="civil",
         fixed_daily_anchor_clock=None,
     )
     with pytest.raises(RuntimeError, match="requires phasic-capable mode"):
         validate_inputs(args)
+
+
+def test_validate_inputs_rejects_continuous_step_window_mismatch(tmp_path):
+    from tools.run_full_pipeline_deliverables import validate_inputs
+
+    input_dir = tmp_path / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text("target_fs_hz: 20.0\n", encoding="utf-8")
+    args = SimpleNamespace(
+        input=str(input_dir),
+        config=str(cfg_path),
+        format="npm",
+        mode="both",
+        run_type="full",
+        sessions_per_hour=2,
+        session_duration_s=10.0,
+        acquisition_mode="continuous",
+        continuous_window_sec=600.0,
+        continuous_step_sec=300.0,
+        timeline_anchor_mode="civil",
+        fixed_daily_anchor_clock=None,
+    )
+    with pytest.raises(RuntimeError, match="continuous_step_sec must equal continuous_window_sec"):
+        validate_inputs(args)
+
+
+def test_continuous_mode_gating_message_is_stable():
+    from tools.run_full_pipeline_deliverables import (
+        INTERMITTENT_ONLY_OUTPUT_KEYS,
+        intermittent_only_output_message,
+    )
+
+    msg = intermittent_only_output_message().lower()
+    assert "intermittent/session-based recordings" in msg
+    assert "not available in continuous mode" in msg
+    assert isinstance(INTERMITTENT_ONLY_OUTPUT_KEYS, list)
+    assert "session-slot dayplots" in INTERMITTENT_ONLY_OUTPUT_KEYS

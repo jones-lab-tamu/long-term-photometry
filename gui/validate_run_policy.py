@@ -40,6 +40,8 @@ def compute_run_signature(run_dir: str) -> str:
     # for identical user intent regardless of timing or directory name.
     STABLE_FIELDS = {
         "input_dir", "format", "sessions_per_hour", "session_duration_s",
+        "acquisition_mode", "continuous_window_sec", "continuous_step_sec",
+        "allow_partial_final_window",
         "smooth_window_s", "config_source_path", "config_overrides",
         "sig_iso_render_mode", "dff_render_mode", "stacked_render_mode",
         "mode", "run_profile", "traces_only", "preview_first_n", "representative_session_index",

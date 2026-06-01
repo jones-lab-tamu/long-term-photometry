@@ -67,6 +67,10 @@ class RunSpec:
     validate_only: bool = False     # Set by _on_validate path
     sessions_per_hour: Optional[int] = None    # _sph_edit widget
     session_duration_s: Optional[float] = None # _duration_edit widget
+    acquisition_mode: str = "intermittent"  # _acquisition_mode_combo widget
+    continuous_window_sec: float = 600.0
+    continuous_step_sec: float = 600.0
+    allow_partial_final_window: bool = False
     timeline_anchor_mode: str = "civil"  # _timeline_anchor_mode_combo widget
     fixed_daily_anchor_clock: Optional[str] = None  # _fixed_daily_anchor_time_edit widget
     smooth_window_s: float = 1.0    # _smooth_spin widget
@@ -119,6 +123,20 @@ class RunSpec:
                 f"timeline_anchor_mode must be one of {TIMELINE_ANCHOR_CHOICES}, "
                 f"got {self.timeline_anchor_mode!r}"
             )
+        if self.acquisition_mode not in {"intermittent", "continuous"}:
+            raise ValueError(
+                "acquisition_mode must be 'intermittent' or 'continuous', "
+                f"got {self.acquisition_mode!r}"
+            )
+        if float(self.continuous_window_sec) <= 0.0:
+            raise ValueError("continuous_window_sec must be > 0")
+        if float(self.continuous_step_sec) <= 0.0:
+            raise ValueError("continuous_step_sec must be > 0")
+        if abs(float(self.continuous_step_sec) - float(self.continuous_window_sec)) > 1e-9:
+            raise ValueError(
+                "continuous_step_sec must equal continuous_window_sec in this version; "
+                "overlapping/sliding windows are not yet supported."
+            )
 
         if isinstance(self.fixed_daily_anchor_clock, str):
             self.fixed_daily_anchor_clock = self.fixed_daily_anchor_clock.strip() or None
@@ -150,6 +168,13 @@ class RunSpec:
     def to_dict(self) -> dict:
         """Serialize to a JSON-safe dictionary."""
         return asdict(self)
+
+    def _apply_acquisition_plan_to_config(self, merged_cfg: Dict[str, Any]) -> None:
+        """Stamp acquisition-planning fields into effective config."""
+        merged_cfg["acquisition_mode"] = str(self.acquisition_mode)
+        merged_cfg["continuous_window_sec"] = float(self.continuous_window_sec)
+        merged_cfg["continuous_step_sec"] = float(self.continuous_step_sec)
+        merged_cfg["allow_partial_final_window"] = bool(self.allow_partial_final_window)
 
     def generate_derived_config(self, run_dir: str) -> str:
         """
@@ -192,6 +217,8 @@ class RunSpec:
                 )
             for key, value in self.data_contract_overrides.items():
                 base[key] = value
+
+        self._apply_acquisition_plan_to_config(base)
 
         os.makedirs(run_dir, exist_ok=True)
         config_path = os.path.join(run_dir, "config_effective.yaml")
@@ -283,6 +310,8 @@ class RunSpec:
             for key, value in self.data_contract_overrides.items():
                 base[key] = value
 
+        self._apply_acquisition_plan_to_config(base)
+
         return _stable_yaml_dump(base)
 
     def build_runner_argv(self) -> list:
@@ -319,6 +348,21 @@ class RunSpec:
 
         if self.session_duration_s is not None:
             argv.extend(["--session-duration-s", str(self.session_duration_s)])
+
+        if self.acquisition_mode != "intermittent":
+            argv.extend(["--acquisition-mode", str(self.acquisition_mode)])
+        if (
+            self.acquisition_mode != "intermittent"
+            or float(self.continuous_window_sec) != 600.0
+        ):
+            argv.extend(["--continuous-window-sec", str(self.continuous_window_sec)])
+        if (
+            self.acquisition_mode != "intermittent"
+            or float(self.continuous_step_sec) != 600.0
+        ):
+            argv.extend(["--continuous-step-sec", str(self.continuous_step_sec)])
+        if self.acquisition_mode != "intermittent" or bool(self.allow_partial_final_window):
+            argv.append("--allow-partial-final-window" if self.allow_partial_final_window else "--no-allow-partial-final-window")
 
         if self.timeline_anchor_mode != "civil":
             argv.extend(["--timeline-anchor-mode", str(self.timeline_anchor_mode)])

@@ -117,6 +117,35 @@ def test_effective_run_summary_updates(window):
     assert "ROI Filter: Include subset (2/3)" in text2
     assert "Representative Session: Session index 1 (S1)" in text2
 
+    window._acquisition_mode_combo.setCurrentIndex(
+        window._acquisition_mode_combo.findData("continuous")
+    )
+    window._continuous_window_sec_spin.setValue(900.0)
+    window._continuous_step_sec_spin.setValue(900.0)
+    window._allow_partial_final_window_cb.setChecked(True)
+    text3 = window._effective_summary_label.text()
+    assert "Acquisition Mode: Continuous recording (internally windowed)" in text3
+    assert "Continuous Window Plan: window=900.0s, step=900.0s, allow partial final window=on" in text3
+    assert (
+        "Continuous mode note: continuous mode is for uninterrupted acquisition files. "
+        "In continuous-capable runs, recordings are split into internal computational windows; "
+        "these windows are not acquisition sessions."
+    ) in text3
+
+
+def test_continuous_mode_deemphasizes_session_controls(window):
+    _set_minimally_valid_paths(window)
+    window._acquisition_mode_combo.setCurrentIndex(
+        window._acquisition_mode_combo.findData("continuous")
+    )
+    window._update_context_sensitive_controls()
+    assert not window._sph_edit.isEnabled()
+    assert not window._duration_edit.isEnabled()
+    assert window._continuous_window_sec_spin.isEnabled()
+    assert window._continuous_step_sec_spin.isEnabled()
+    assert window._allow_partial_final_window_cb.isEnabled()
+    assert "Ignored in continuous mode" in window._sph_warning.text()
+
 
 def test_run_profile_selector_plumbs_tuning_prep_into_run_spec(window):
     _set_minimally_valid_paths(window)
@@ -199,6 +228,10 @@ def test_advanced_tooltips_present(window):
         ("Format:", window._format_combo),
         ("Sessions/Hour:", window._sph_edit),
         ("Session Duration (s):", window._duration_edit),
+        ("Acquisition Mode:", window._acquisition_mode_combo),
+        ("Continuous Window (s):", window._continuous_window_sec_spin),
+        ("Continuous Step (s):", window._continuous_step_sec_spin),
+        ("Allow Partial Final Window:", window._allow_partial_final_window_cb),
         ("Mode:", window._mode_combo),
         ("Run Type:", window._run_profile_combo),
         ("Plotting Mode:", window._plotting_mode_combo),
