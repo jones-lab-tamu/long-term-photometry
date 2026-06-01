@@ -117,6 +117,7 @@ def discover_inputs(
     # Load a few chunks and intersect channel names, preserving discovered
     # order from the first valid chunk — identical to Pipeline.run().
     channels_seen: list = []
+    file_level_errors: list = []
     max_sniff = min(len(file_list), 5)
 
     for i in range(max_sniff):
@@ -124,12 +125,22 @@ def discover_inputs(
         try:
             chunk = load_chunk(fpath, resolved_format, config, chunk_id=i)
             channels_seen.append(chunk.channel_names)
-        except Exception:
+        except Exception as e:
             logging.debug("discover_inputs: load_chunk %s failed", fpath,
                           exc_info=True)
+            file_level_errors.append((fpath, str(e).strip() or repr(e)))
             continue
 
     if not channels_seen:
+        if resolved_format == "custom_tabular" and file_level_errors:
+            first = []
+            for fpath, reason in file_level_errors[:5]:
+                first.append(f"- {os.path.basename(fpath)}: {reason}")
+            raise RuntimeError(
+                "No valid custom_tabular files could be parsed.\n\n"
+                "First file-level errors:\n"
+                + "\n".join(first)
+            )
         raise RuntimeError(
             "No valid data files could be parsed to discover ROIs."
         )

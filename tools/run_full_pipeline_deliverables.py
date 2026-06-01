@@ -65,6 +65,7 @@ try:
     from photometry_pipeline.io.hdf5_cache_reader import (
         open_tonic_cache, open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields, list_cache_chunk_ids
     )
+    from photometry_pipeline.io.adapters import load_chunk
 except ImportError:
     print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.", flush=True)
     raise SystemExit(1)
@@ -617,6 +618,110 @@ def validate_inputs(args):
             raise RuntimeError(
                 f"Impossible schedule: Duration {args.session_duration_s:.2f}s > "
                 f"Stride {stride_s:.2f}s (SPH={args.sessions_per_hour}).")
+
+    # Deep contract validation is intentionally limited to validate-only
+    # custom_tabular runs, so full-run preflight remains cheap.
+    if (
+        str(getattr(args, "format", "")).strip().lower() == "custom_tabular"
+        and bool(getattr(args, "validate_only", False))
+    ):
+        _validate_custom_tabular_contract_validate_only(
+            input_dir=str(args.input),
+            config_path=str(args.config),
+        )
+
+
+def _discover_custom_tabular_csv_files(input_dir: str) -> list:
+    pattern = os.path.join(input_dir, "*.csv")
+    files = glob.glob(pattern)
+    files.sort(key=natural_sort_key)
+    if not files:
+        raise RuntimeError(
+            "custom_tabular validation failed: no CSV files were found in the input directory. "
+            "custom_tabular expects one CSV per session/chunk."
+        )
+    return files
+
+
+def _select_custom_tabular_validation_subset(files: list) -> tuple[list, bool]:
+    """Return (files_to_validate, was_sampled)."""
+    n = len(files)
+    if n <= 200:
+        return list(files), False
+
+    sample_size = 12
+    # Include first and last and a spread of interior files.
+    interior_needed = max(0, sample_size - 2)
+    indices = {0, n - 1}
+    if interior_needed > 0:
+        stride = max(1, (n - 2) // interior_needed)
+        idx = 1
+        while len(indices) < sample_size and idx < n - 1:
+            indices.add(idx)
+            idx += stride
+        # Ensure we fill any shortfall from the tail inward.
+        tail = n - 2
+        while len(indices) < sample_size and tail > 0:
+            indices.add(tail)
+            tail -= 1
+
+    selected = [files[i] for i in sorted(indices)]
+    return selected, True
+
+
+def _validate_custom_tabular_contract_validate_only(input_dir: str, config_path: str) -> None:
+    """Deep custom_tabular contract validation used by validate-only mode."""
+    try:
+        cfg = Config.from_yaml(config_path)
+    except Exception as e:
+        raise RuntimeError(
+            f"custom_tabular validation failed: could not load config '{config_path}': {e}"
+        ) from e
+
+    files = _discover_custom_tabular_csv_files(input_dir)
+    selected, sampled = _select_custom_tabular_validation_subset(files)
+
+    errors = []
+    n_valid = 0
+    for idx, fpath in enumerate(selected):
+        try:
+            load_chunk(fpath, "custom_tabular", cfg, chunk_id=idx)
+            n_valid += 1
+        except Exception as e:
+            fname = os.path.basename(fpath)
+            detail = str(e).strip() or repr(e)
+            errors.append(f"- {fname}: {detail}")
+
+    if errors:
+        scope_line = (
+            f"Checked {len(selected)} of {len(files)} file(s) (sampled for scale)."
+            if sampled
+            else f"Checked all {len(files)} discovered file(s)."
+        )
+        header = "custom_tabular validate-only contract check failed."
+        if n_valid == 0:
+            body = "No valid custom_tabular files could be parsed."
+        else:
+            body = (
+                f"{len(errors)} file(s) failed custom_tabular contract validation "
+                f"while {n_valid} file(s) passed."
+            )
+        first_errors = "\n".join(errors[:5])
+        raise RuntimeError(
+            f"{header}\n{scope_line}\n{body}\n\nFirst file-level errors:\n{first_errors}"
+        )
+
+    if sampled:
+        print(
+            f"VALIDATE-ONLY: custom_tabular contract check validated {len(selected)}/"
+            f"{len(files)} files (sampled).",
+            flush=True,
+        )
+    else:
+        print(
+            f"VALIDATE-ONLY: custom_tabular contract check validated all {len(files)} files.",
+            flush=True,
+        )
 
 # ======================================================================
 # Run-dir Resolution

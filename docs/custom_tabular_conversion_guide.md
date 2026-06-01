@@ -76,6 +76,8 @@ Each file is one session/chunk.
 
 ## Validation and contract check
 Use the committed strict short-session config file at `examples/custom_tabular/custom_tabular_example_config.yaml`.
+`--validate-only` performs a custom_tabular contract check and reports file/column-level issues when inputs do not match the contract.
+When converting exports from another acquisition system, run this validation command before full analysis.
 
 ```powershell
 python tools/run_full_pipeline_deliverables.py --input examples/custom_tabular --out tutorial_outputs/custom_tabular_validate --config examples/custom_tabular/custom_tabular_example_config.yaml --format custom_tabular --mode both --sessions-per-hour 2 --validate-only --overwrite
