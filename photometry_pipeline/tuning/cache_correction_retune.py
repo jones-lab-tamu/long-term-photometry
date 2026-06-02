@@ -26,11 +26,13 @@ import pandas as pd
 import yaml
 
 from photometry_pipeline.config import Config
+from photometry_pipeline.continuous_outputs import generate_retuned_continuous_phasic_outputs
 from photometry_pipeline.core import baseline, regression, normalization, preprocessing
 from photometry_pipeline.core.feature_extraction import extract_features
 from photometry_pipeline.core.types import Chunk, SessionStats
 from photometry_pipeline.io.hdf5_cache import Hdf5TraceCacheWriter
 from photometry_pipeline.io.hdf5_cache_reader import (
+    load_cache_chunk_attrs,
     open_phasic_cache,
     resolve_cache_roi,
 )
@@ -125,6 +127,23 @@ _CORRECTION_INSPECTION_DPI = 200
 
 _BOOL_TRUE_TOKENS = {"1", "true", "yes", "on"}
 _BOOL_FALSE_TOKENS = {"0", "false", "no", "off"}
+
+
+def _merge_retuned_continuous_artifacts(
+    artifacts: Dict[str, Any],
+    retuned_continuous: Dict[str, Any],
+) -> None:
+    summary_csv = retuned_continuous.get("summary_csv")
+    if summary_csv:
+        artifacts["retuned_continuous_phasic_summary_csv"] = str(summary_csv)
+    plots = retuned_continuous.get("plots", {})
+    if isinstance(plots, dict):
+        if plots.get("peak_rate"):
+            artifacts["retuned_continuous_phasic_peak_rate_png"] = str(plots["peak_rate"])
+        if plots.get("peak_count"):
+            artifacts["retuned_continuous_phasic_peak_count_png"] = str(plots["peak_count"])
+        if plots.get("auc"):
+            artifacts["retuned_continuous_phasic_auc_png"] = str(plots["auc"])
 
 
 def _parse_bool_override(value: Any, *, key: str = "value") -> bool:
@@ -366,6 +385,17 @@ def _load_roi_raw_entries(cache, roi: str, cfg: Config) -> list[dict[str, Any]]:
         raise RuntimeError(f"No chunks found in phasic cache for ROI {roi}.")
 
     entries: list[dict[str, Any]] = []
+    preserved_attr_keys = (
+        "acquisition_mode",
+        "window_index",
+        "window_start_sec",
+        "window_end_sec",
+        "window_duration_sec",
+        "original_file_duration_sec",
+        "is_partial_final_window",
+        "continuous_window_sec",
+        "continuous_step_sec",
+    )
     for idx, cid in enumerate(chunk_ids):
         grp = roi_group.get(f"chunk_{cid}")
         if grp is None:
@@ -384,6 +414,12 @@ def _load_roi_raw_entries(cache, roi: str, cfg: Config) -> list[dict[str, Any]]:
         uv_raw = grp["uv_raw"][()]
         fs_hz = _compute_chunk_fs_hz(time_sec, cfg.target_fs_hz)
         source_file = source_files[idx] if source_files and idx < len(source_files) else f"chunk_{cid}"
+        source_attrs = load_cache_chunk_attrs(cache, roi, int(cid))
+        metadata = {
+            key: source_attrs[key]
+            for key in preserved_attr_keys
+            if key in source_attrs
+        }
 
         entries.append(
             {
@@ -393,6 +429,7 @@ def _load_roi_raw_entries(cache, roi: str, cfg: Config) -> list[dict[str, Any]]:
                 "sig_raw": np.asarray(sig_raw),
                 "uv_raw": np.asarray(uv_raw),
                 "fs_hz": float(fs_hz),
+                "metadata": metadata,
             }
         )
 
@@ -462,7 +499,7 @@ def _recompute_roi_chunks(
             sig_raw=np.asarray(rec["sig_raw"]).reshape(-1, 1),
             fs_hz=float(rec["fs_hz"]),
             channel_names=[roi],
-            metadata={},
+            metadata=dict(rec.get("metadata", {})),
         )
 
         chunk.uv_filt, _ = preprocessing.lowpass_filter_with_meta(chunk.uv_raw, chunk.fs_hz, cfg)
@@ -1158,6 +1195,13 @@ def run_cache_correction_retune(
         "retuned_correction_cache_h5": retune_cache_path,
     }
     artifacts.update(_write_features_artifacts(retune_dir, resolved_roi, features_df, median_duration_s))
+    retuned_continuous_outputs = generate_retuned_continuous_phasic_outputs(
+        features_path=artifacts.get("retuned_features_csv", ""),
+        cache_path=retune_cache_path,
+        output_dir=retune_dir,
+        roi=resolved_roi,
+    )
+    _merge_retuned_continuous_artifacts(artifacts, retuned_continuous_outputs)
 
     inspection_chunk = next((c for c in chunks if int(c.chunk_id) == int(inspection_chunk_id)), None)
     if inspection_chunk is None:
@@ -1182,6 +1226,7 @@ def run_cache_correction_retune(
         "n_chunks": int(len(chunks)),
         "n_rows": int(len(features_df)),
         "correction_overrides_applied": dict(overrides),
+        "retuned_continuous_outputs": retuned_continuous_outputs,
         "artifacts": artifacts,
     }
     with open(os.path.join(retune_dir, "retune_result.json"), "w", encoding="utf-8") as f:

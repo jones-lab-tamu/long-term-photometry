@@ -27,6 +27,7 @@ import pandas as pd
 import yaml
 
 from photometry_pipeline.config import Config
+from photometry_pipeline.continuous_outputs import generate_retuned_continuous_phasic_outputs
 from photometry_pipeline.core.feature_extraction import (
     apply_peak_prefilter,
     compute_detection_threshold_bounds,
@@ -102,6 +103,23 @@ _OVERRIDE_VALUE_CASTERS = {
 _RETUNE_DEBUG_ENV = "PHOTOMETRY_RETUNE_DEBUG"
 _RETUNE_OVERLAY_FIGSIZE = (14.0, 5.0)
 _RETUNE_OVERLAY_DPI = 220
+
+
+def _merge_retuned_continuous_artifacts(
+    artifacts: Dict[str, Any],
+    retuned_continuous: Dict[str, Any],
+) -> None:
+    summary_csv = retuned_continuous.get("summary_csv")
+    if summary_csv:
+        artifacts["retuned_continuous_phasic_summary_csv"] = str(summary_csv)
+    plots = retuned_continuous.get("plots", {})
+    if isinstance(plots, dict):
+        if plots.get("peak_rate"):
+            artifacts["retuned_continuous_phasic_peak_rate_png"] = str(plots["peak_rate"])
+        if plots.get("peak_count"):
+            artifacts["retuned_continuous_phasic_peak_count_png"] = str(plots["peak_count"])
+        if plots.get("auc"):
+            artifacts["retuned_continuous_phasic_auc_png"] = str(plots["auc"])
 
 
 def _retune_debug_enabled() -> bool:
@@ -879,6 +897,13 @@ def run_cache_downstream_retune(
             cfg=effective_config,
         )
     )
+    retuned_continuous_outputs = generate_retuned_continuous_phasic_outputs(
+        features_path=artifact_paths.get("retuned_features_csv", ""),
+        cache_path=cache_path,
+        output_dir=retune_dir,
+        roi=resolved_roi,
+    )
+    _merge_retuned_continuous_artifacts(artifact_paths, retuned_continuous_outputs)
     if _retune_debug_enabled():
         backend_debug = {
             "schema_version": 1,
@@ -935,6 +960,7 @@ def run_cache_downstream_retune(
         "n_chunks": int(features_df["chunk_id"].nunique()) if not features_df.empty else 0,
         "n_rows": int(len(features_df)),
         "downstream_overrides_applied": dict(overrides),
+        "retuned_continuous_outputs": retuned_continuous_outputs,
         "artifacts": artifact_paths,
     }
     with open(os.path.join(retune_dir, "retune_result.json"), "w", encoding="utf-8") as f:

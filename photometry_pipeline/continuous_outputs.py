@@ -24,6 +24,10 @@ PHASIC_RATE_PLOT_FILENAME = "phasic_peak_rate_timeseries.png"
 PHASIC_COUNT_PLOT_FILENAME = "phasic_peak_count_timeseries.png"
 PHASIC_AUC_PLOT_FILENAME = "phasic_auc_timeseries.png"
 TONIC_OVERVIEW_PLOT_FILENAME = "tonic_overview.png"
+_RETUNED_PHASIC_SUMMARY_TEMPLATE = "{prefix}_continuous_phasic_window_summary_{roi}.csv"
+_RETUNED_PHASIC_RATE_PLOT_TEMPLATE = "{prefix}_phasic_peak_rate_timeseries_{roi}.png"
+_RETUNED_PHASIC_COUNT_PLOT_TEMPLATE = "{prefix}_phasic_peak_count_timeseries_{roi}.png"
+_RETUNED_PHASIC_AUC_PLOT_TEMPLATE = "{prefix}_phasic_auc_timeseries_{roi}.png"
 _AUC_SEMANTICS = (
     "aggregate finite-run AUC from feature_extraction output; not per-event AUC"
 )
@@ -136,6 +140,112 @@ def _write_roi_and_aggregate_tables(
     result["row_counts"]["all_rois"] = int(len(df))
 
 
+_PHASIC_SUMMARY_COLUMNS = [
+    "roi",
+    "source_file",
+    "chunk_id",
+    "window_index",
+    "window_start_sec",
+    "window_end_sec",
+    "window_duration_sec",
+    "elapsed_hour_start",
+    "elapsed_hour_mid",
+    "event_count",
+    "event_rate_per_min",
+    "event_rate_per_hour",
+    "event_signal_auc",
+    "event_signal_auc_semantics",
+    "event_signal_mean",
+    "event_signal_median",
+    "event_signal_std",
+    "event_signal_mad",
+    "is_partial_final_window",
+    "original_file_duration_sec",
+    "continuous_window_sec",
+    "continuous_step_sec",
+    "acquisition_mode",
+]
+
+
+def _load_phasic_features(features_path: str, *, roi: str | None = None) -> pd.DataFrame:
+    features = pd.read_csv(features_path)
+    required = {"chunk_id", "roi", "peak_count", "auc"}
+    missing = sorted(required - set(features.columns))
+    if missing:
+        raise RuntimeError(f"Missing required columns in phasic features.csv: {missing}")
+
+    features["chunk_id"] = pd.to_numeric(features["chunk_id"], errors="raise").astype(int)
+    if roi is not None:
+        features = features[features["roi"].astype(str) == str(roi)].copy()
+    return features
+
+
+def _continuous_status_for_features(
+    *,
+    features: pd.DataFrame,
+    cache_path: str,
+    roi: str,
+) -> tuple[bool, str]:
+    if features.empty:
+        return False, f"No feature rows found for ROI {roi}."
+
+    first_chunk_id = int(features.sort_values("chunk_id").iloc[0]["chunk_id"])
+    with open_phasic_cache(cache_path) as cache:
+        attrs = load_cache_chunk_attrs(cache, roi, first_chunk_id)
+
+    mode = str(attrs.get("acquisition_mode", "")).strip().lower()
+    if mode != "continuous":
+        return False, (
+            "source cache is not continuous; retuned continuous outputs skipped: "
+            f"roi={roi} chunk_id={first_chunk_id} acquisition_mode={attrs.get('acquisition_mode')!r}"
+        )
+    _require_continuous_attrs(attrs, roi=roi, chunk_id=first_chunk_id)
+    return True, ""
+
+
+def _build_continuous_phasic_summary_dataframe(
+    *,
+    features_path: str,
+    cache_path: str,
+    roi: str | None = None,
+) -> pd.DataFrame:
+    features = _load_phasic_features(features_path, roi=roi)
+    rows: list[dict[str, Any]] = []
+    with open_phasic_cache(cache_path) as cache:
+        for record in features.to_dict(orient="records"):
+            row_roi = str(record["roi"])
+            chunk_id = int(record["chunk_id"])
+            attrs = load_cache_chunk_attrs(cache, row_roi, chunk_id)
+            meta = _window_metadata_row(attrs, roi=row_roi, chunk_id=chunk_id)
+            duration_min = meta["window_duration_sec"] / 60.0
+            duration_hour = meta["window_duration_sec"] / 3600.0
+            event_count = int(record["peak_count"])
+            rows.append(
+                {
+                    **meta,
+                    "event_count": event_count,
+                    "event_rate_per_min": (
+                        event_count / duration_min if duration_min > 0 else np.nan
+                    ),
+                    "event_rate_per_hour": (
+                        event_count / duration_hour if duration_hour > 0 else np.nan
+                    ),
+                    "event_signal_auc": _float_or_nan(record.get("auc")),
+                    "event_signal_auc_semantics": _AUC_SEMANTICS,
+                    "event_signal_mean": _float_or_nan(record.get("mean", np.nan)),
+                    "event_signal_median": _float_or_nan(record.get("median", np.nan)),
+                    "event_signal_std": _float_or_nan(record.get("std", np.nan)),
+                    "event_signal_mad": _float_or_nan(record.get("mad", np.nan)),
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(columns=_PHASIC_SUMMARY_COLUMNS)
+    return pd.DataFrame(rows, columns=_PHASIC_SUMMARY_COLUMNS).sort_values(
+        ["roi", "window_index", "chunk_id"]
+    )
+
+
 def generate_continuous_phasic_summary(
     phasic_out_dir: str,
     output_root_or_run_dir: str,
@@ -153,67 +263,10 @@ def generate_continuous_phasic_summary(
     if not os.path.exists(cache_path):
         return _skip(result, PHASIC_SUMMARY_FILENAME, f"phasic cache not found: {cache_path}")
 
-    features = pd.read_csv(features_path)
-    required = {"chunk_id", "roi", "peak_count", "auc"}
-    missing = sorted(required - set(features.columns))
-    if missing:
-        raise RuntimeError(f"Missing required columns in phasic features.csv: {missing}")
-
-    features["chunk_id"] = pd.to_numeric(features["chunk_id"], errors="raise").astype(int)
-    rows: list[dict[str, Any]] = []
-    with open_phasic_cache(cache_path) as cache:
-        for row in features.itertuples(index=False):
-            roi = str(getattr(row, "roi"))
-            chunk_id = int(getattr(row, "chunk_id"))
-            attrs = load_cache_chunk_attrs(cache, roi, chunk_id)
-            meta = _window_metadata_row(attrs, roi=roi, chunk_id=chunk_id)
-            duration_min = meta["window_duration_sec"] / 60.0
-            duration_hour = meta["window_duration_sec"] / 3600.0
-            event_count = int(getattr(row, "peak_count"))
-            out = {
-                **meta,
-                "event_count": event_count,
-                "event_rate_per_min": (
-                    event_count / duration_min if duration_min > 0 else np.nan
-                ),
-                "event_rate_per_hour": (
-                    event_count / duration_hour if duration_hour > 0 else np.nan
-                ),
-                "event_signal_auc": _float_or_nan(getattr(row, "auc")),
-                "event_signal_auc_semantics": _AUC_SEMANTICS,
-                "event_signal_mean": _float_or_nan(getattr(row, "mean", np.nan)),
-                "event_signal_median": _float_or_nan(getattr(row, "median", np.nan)),
-                "event_signal_std": _float_or_nan(getattr(row, "std", np.nan)),
-                "event_signal_mad": _float_or_nan(getattr(row, "mad", np.nan)),
-            }
-            rows.append(out)
-
-    columns = [
-        "roi",
-        "source_file",
-        "chunk_id",
-        "window_index",
-        "window_start_sec",
-        "window_end_sec",
-        "window_duration_sec",
-        "elapsed_hour_start",
-        "elapsed_hour_mid",
-        "event_count",
-        "event_rate_per_min",
-        "event_rate_per_hour",
-        "event_signal_auc",
-        "event_signal_auc_semantics",
-        "event_signal_mean",
-        "event_signal_median",
-        "event_signal_std",
-        "event_signal_mad",
-        "is_partial_final_window",
-        "original_file_duration_sec",
-        "continuous_window_sec",
-        "continuous_step_sec",
-        "acquisition_mode",
-    ]
-    summary = pd.DataFrame(rows, columns=columns).sort_values(["roi", "window_index", "chunk_id"])
+    summary = _build_continuous_phasic_summary_dataframe(
+        features_path=features_path,
+        cache_path=cache_path,
+    )
     _write_roi_and_aggregate_tables(
         df=summary,
         run_dir=output_root_or_run_dir,
@@ -221,6 +274,182 @@ def generate_continuous_phasic_summary(
         result=result,
     )
     _log(logger, f"Generated continuous phasic summary rows={len(summary)}")
+    return result
+
+
+def _retuned_continuous_skip(
+    *,
+    features_path: str,
+    cache_path: str,
+    output_dir: str,
+    roi: str,
+    reason: str,
+    continuous_detected: bool = False,
+) -> dict[str, Any]:
+    return {
+        "generated": False,
+        "summary_csv": "",
+        "plots": {},
+        "skips": [{"output": "retuned_continuous_phasic_outputs", "reason": reason}],
+        "source_features_path": features_path,
+        "source_cache_path": cache_path,
+        "output_dir": output_dir,
+        "roi": str(roi),
+        "reason": reason,
+        "continuous_detected": bool(continuous_detected),
+    }
+
+
+def _generate_retuned_phasic_plots(
+    *,
+    summary_csv: str,
+    output_dir: str,
+    roi: str,
+    output_prefix: str,
+) -> tuple[dict[str, str], list[dict[str, str]]]:
+    df = pd.read_csv(summary_csv)
+    plot_specs = [
+        (
+            "peak_rate",
+            _RETUNED_PHASIC_RATE_PLOT_TEMPLATE.format(prefix=output_prefix, roi=roi),
+            "event_rate_per_min",
+            "Event rate (events/min)",
+            f"{roi} retuned continuous event rate",
+        ),
+        (
+            "peak_count",
+            _RETUNED_PHASIC_COUNT_PLOT_TEMPLATE.format(prefix=output_prefix, roi=roi),
+            "event_count",
+            "Event count per window",
+            f"{roi} retuned continuous event count",
+        ),
+        (
+            "auc",
+            _RETUNED_PHASIC_AUC_PLOT_TEMPLATE.format(prefix=output_prefix, roi=roi),
+            "event_signal_auc",
+            "Aggregate event-signal AUC per window",
+            f"{roi} retuned continuous aggregate event-signal AUC",
+        ),
+    ]
+    plots: dict[str, str] = {}
+    skips: list[dict[str, str]] = []
+    for key, filename, y_col, y_label, title in plot_specs:
+        out_path = os.path.join(output_dir, filename)
+        ok = _plot_xy_from_summary(
+            df=df,
+            x_col="elapsed_hour_mid",
+            y_col=y_col,
+            y_label=y_label,
+            title=title,
+            out_path=out_path,
+        )
+        if ok:
+            plots[key] = out_path
+        else:
+            skips.append(
+                {
+                    "output": filename,
+                    "reason": (
+                        "No finite values available for required columns "
+                        f"elapsed_hour_mid/{y_col}"
+                    ),
+                }
+            )
+    return plots, skips
+
+
+def generate_retuned_continuous_phasic_outputs(
+    *,
+    features_path: str,
+    cache_path: str,
+    output_dir: str,
+    roi: str,
+    output_prefix: str = "retuned",
+    logger=None,
+) -> dict[str, Any]:
+    """
+    Generate flat retune-root continuous phasic summary/plot outputs.
+
+    Missing source files and non-continuous/intermittent caches are treated as
+    retune skips. Caches that explicitly claim continuous mode must include the
+    required continuous window attrs.
+    """
+    output_dir = os.path.abspath(output_dir)
+    features_path = os.path.abspath(features_path)
+    cache_path = os.path.abspath(cache_path)
+    resolved_roi = str(roi)
+    if not os.path.exists(features_path):
+        return _retuned_continuous_skip(
+            features_path=features_path,
+            cache_path=cache_path,
+            output_dir=output_dir,
+            roi=resolved_roi,
+            reason=f"Retuned features CSV not found: {features_path}",
+        )
+    if not os.path.exists(cache_path):
+        return _retuned_continuous_skip(
+            features_path=features_path,
+            cache_path=cache_path,
+            output_dir=output_dir,
+            roi=resolved_roi,
+            reason=f"Retuned/source phasic cache not found: {cache_path}",
+        )
+
+    features = _load_phasic_features(features_path, roi=resolved_roi)
+    continuous_detected, reason = _continuous_status_for_features(
+        features=features,
+        cache_path=cache_path,
+        roi=resolved_roi,
+    )
+    if not continuous_detected:
+        return _retuned_continuous_skip(
+            features_path=features_path,
+            cache_path=cache_path,
+            output_dir=output_dir,
+            roi=resolved_roi,
+            reason=reason,
+        )
+
+    summary = _build_continuous_phasic_summary_dataframe(
+        features_path=features_path,
+        cache_path=cache_path,
+        roi=resolved_roi,
+    )
+    if summary.empty:
+        return _retuned_continuous_skip(
+            features_path=features_path,
+            cache_path=cache_path,
+            output_dir=output_dir,
+            roi=resolved_roi,
+            reason=f"No retuned continuous summary rows generated for ROI {resolved_roi}.",
+            continuous_detected=True,
+        )
+
+    os.makedirs(output_dir, exist_ok=True)
+    summary_csv = os.path.join(
+        output_dir,
+        _RETUNED_PHASIC_SUMMARY_TEMPLATE.format(prefix=output_prefix, roi=resolved_roi),
+    )
+    summary.to_csv(summary_csv, index=False)
+    plots, skips = _generate_retuned_phasic_plots(
+        summary_csv=summary_csv,
+        output_dir=output_dir,
+        roi=resolved_roi,
+        output_prefix=output_prefix,
+    )
+    result = {
+        "generated": True,
+        "summary_csv": summary_csv,
+        "plots": plots,
+        "skips": skips,
+        "source_features_path": features_path,
+        "source_cache_path": cache_path,
+        "output_dir": output_dir,
+        "roi": resolved_roi,
+        "continuous_detected": True,
+        "row_count": int(len(summary)),
+    }
+    _log(logger, f"Generated retuned continuous phasic rows={len(summary)} roi={resolved_roi}")
     return result
 
 
