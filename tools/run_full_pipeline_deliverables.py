@@ -65,7 +65,12 @@ try:
     from photometry_pipeline.io.hdf5_cache_reader import (
         open_tonic_cache, open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields, list_cache_chunk_ids
     )
-    from photometry_pipeline.io.adapters import load_chunk
+    from photometry_pipeline.io.adapters import (
+        load_chunk,
+        sniff_format,
+        estimate_continuous_source_duration,
+        plan_continuous_windows_for_source,
+    )
 except ImportError:
     print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.", flush=True)
     raise SystemExit(1)
@@ -293,9 +298,12 @@ INTERMITTENT_ONLY_OUTPUT_KEYS = [
     "outputs requiring duration <= stride assumptions",
     "dayplot rerender paths requiring sessions-per-hour metadata",
 ]
-CONTINUOUS_MODE_NOT_IMPLEMENTED_MESSAGE = (
-    "Continuous acquisition mode is recognized, but continuous windowed ingestion "
-    "is not yet implemented in this build."
+CONTINUOUS_NPM_UNSUPPORTED_MESSAGE = (
+    "Continuous acquisition mode is not yet implemented for NPM/interleaved inputs."
+)
+CONTINUOUS_AUTO_FORMAT_MESSAGE = (
+    "Continuous mode with --format auto is ambiguous for mixed/unknown inputs. "
+    "Use --format rwd or --format custom_tabular."
 )
 TUNING_PREP_SKIPPED_PHASES = [
     "analysis.tonic_analysis",
@@ -693,6 +701,21 @@ def validate_inputs(args):
             "overlapping/sliding windows are not yet supported."
         )
 
+    if acquisition_mode == "continuous":
+        try:
+            cfg = Config.from_yaml(args.config)
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not parse config for continuous-mode validation: {e}"
+            ) from e
+        cfg.acquisition_mode = "continuous"
+        cfg.continuous_window_sec = float(continuous_window_sec)
+        cfg.continuous_step_sec = float(continuous_step_sec)
+        cfg.allow_partial_final_window = bool(
+            getattr(args, "allow_partial_final_window", cfg.allow_partial_final_window)
+        )
+        _resolve_continuous_format(str(args.input), str(args.format), cfg)
+
     if args.timeline_anchor_mode == "fixed_daily_anchor":
         if args.fixed_daily_anchor_clock is None or not str(args.fixed_daily_anchor_clock).strip():
             raise RuntimeError(
@@ -810,6 +833,118 @@ def _validate_custom_tabular_contract_validate_only(input_dir: str, config_path:
             f"VALIDATE-ONLY: custom_tabular contract check validated all {len(files)} files.",
             flush=True,
         )
+
+
+def _discover_continuous_sources(input_dir: str, fmt: str) -> list:
+    fmt_l = str(fmt).strip().lower()
+    if fmt_l == "rwd":
+        from photometry_pipeline.io.adapters import discover_rwd_chunks
+
+        files = discover_rwd_chunks(input_dir)
+        files.sort(key=natural_sort_key)
+        return files
+    if fmt_l == "custom_tabular":
+        files = glob.glob(os.path.join(input_dir, "*.csv"))
+        files.sort(key=natural_sort_key)
+        if not files:
+            raise RuntimeError(
+                f"No files found in {input_dir}"
+            )
+        return files
+    raise RuntimeError(
+        f"Continuous acquisition mode is unsupported for format '{fmt}'."
+    )
+
+
+def _resolve_continuous_format(input_dir: str, fmt: str, cfg: Config) -> str:
+    fmt_l = str(fmt).strip().lower()
+    if fmt_l in {"rwd", "custom_tabular"}:
+        return fmt_l
+    if fmt_l == "npm":
+        raise RuntimeError(CONTINUOUS_NPM_UNSUPPORTED_MESSAGE)
+    if fmt_l != "auto":
+        raise RuntimeError(f"Invalid format: {fmt}")
+
+    csv_candidates = glob.glob(os.path.join(input_dir, "*.csv"))
+    csv_candidates.sort(key=natural_sort_key)
+    direct_fluorescence = os.path.join(input_dir, "fluorescence.csv")
+    if os.path.isfile(direct_fluorescence):
+        csv_candidates.append(direct_fluorescence)
+    if not csv_candidates:
+        raise RuntimeError(CONTINUOUS_AUTO_FORMAT_MESSAGE)
+
+    sniffed = []
+    for c in csv_candidates[:20]:
+        fmt_guess = sniff_format(c, cfg)
+        if fmt_guess:
+            sniffed.append(fmt_guess)
+    sniffed = sorted(set(sniffed))
+    if sniffed == ["rwd"]:
+        return "rwd"
+    if sniffed == ["custom_tabular"]:
+        return "custom_tabular"
+    if sniffed == ["npm"]:
+        raise RuntimeError(CONTINUOUS_NPM_UNSUPPORTED_MESSAGE)
+    raise RuntimeError(CONTINUOUS_AUTO_FORMAT_MESSAGE)
+
+
+def _plan_continuous_windows_summary(input_dir: str, fmt: str, cfg: Config) -> dict:
+    resolved_format = _resolve_continuous_format(input_dir, fmt, cfg)
+    source_files = _discover_continuous_sources(input_dir, resolved_format)
+    source_cache = {}
+    per_source = []
+    planned_windows = 0
+    partial_windows = 0
+    dropped_partial_windows = 0
+
+    for src in source_files:
+        duration_info = estimate_continuous_source_duration(
+            src,
+            resolved_format,
+            cfg,
+            source_cache=source_cache,
+        )
+        windows = plan_continuous_windows_for_source(
+            src,
+            resolved_format,
+            cfg,
+            source_cache=source_cache,
+        )
+        planned_windows += len(windows)
+        partial_count = int(sum(1 for w in windows if bool(w.get("is_partial_final_window", False))))
+        partial_windows += partial_count
+        expected_full = int(
+            np.floor(
+                float(duration_info["duration_sec"]) / float(cfg.continuous_window_sec)
+            )
+        )
+        remainder = float(duration_info["duration_sec"]) - (
+            expected_full * float(cfg.continuous_window_sec)
+        )
+        if remainder > 1e-9 and not bool(cfg.allow_partial_final_window):
+            dropped_partial_windows += 1
+        per_source.append(
+            {
+                "source_file": os.path.abspath(src),
+                "duration_sec": float(duration_info["duration_sec"]),
+                "median_dt_sec": float(duration_info["median_dt_sec"]),
+                "window_count": len(windows),
+                "partial_window_count": partial_count,
+            }
+        )
+
+    return {
+        "acquisition_mode": "continuous",
+        "resolved_format": resolved_format,
+        "source_file_count": len(source_files),
+        "continuous_window_sec": float(cfg.continuous_window_sec),
+        "continuous_step_sec": float(cfg.continuous_step_sec),
+        "allow_partial_final_window": bool(cfg.allow_partial_final_window),
+        "planned_window_count": int(planned_windows),
+        "partial_window_count": int(partial_windows),
+        "dropped_partial_window_count": int(dropped_partial_windows),
+        "per_source": per_source,
+    }
 
 # ======================================================================
 # Run-dir Resolution
@@ -1061,6 +1196,8 @@ def main():
     selected_tonic_mode = args.mode in ('both', 'tonic')
     run_tonic_mode = selected_tonic_mode and not tune_prep_light_mode
     run_phasic_mode = args.mode in ('both', 'phasic')
+    continuous_mode = bool(effective_acquisition_mode == "continuous")
+    analysis_force_format = str(args.format)
     effective_traces_only = bool(args.traces_only or args.run_type == "tuning_prep")
     effective_skip_plan = _skip_plan_for_profile(
         args.run_type,
@@ -1149,6 +1286,7 @@ def main():
         vo_t0 = time.time()
         vo_created_utc = datetime.now(timezone.utc).isoformat()
         vo_out_base = os.path.abspath(args.out_base) if args.out_base else None
+        continuous_plan_summary = None
 
         def _vo_status_template():
             """Return the base status dict for validate-only mode."""
@@ -1190,6 +1328,7 @@ def main():
                 "artifact_contract": effective_artifact_contract,
                 "intentional_skips": effective_skip_plan,
                 "traces_only": effective_traces_only,
+                "continuous_plan": continuous_plan_summary,
             }
 
         def _vo_write_final_status(status, error_msg=None):
@@ -1206,6 +1345,19 @@ def main():
 
         try:
             validate_inputs(args)
+            if effective_acquisition_mode == "continuous":
+                cfg_plan = Config.from_yaml(args.config)
+                cfg_plan.acquisition_mode = "continuous"
+                cfg_plan.continuous_window_sec = float(effective_continuous_window_sec)
+                cfg_plan.continuous_step_sec = float(effective_continuous_step_sec)
+                cfg_plan.allow_partial_final_window = bool(
+                    effective_allow_partial_final_window
+                )
+                continuous_plan_summary = _plan_continuous_windows_summary(
+                    input_dir=str(args.input),
+                    fmt=str(args.format),
+                    cfg=cfg_plan,
+                )
         except RuntimeError as e:
             emitter.emit("validate", "error", str(e), error_code="VALIDATION_FAILED")
             emitter.close()
@@ -1279,11 +1431,25 @@ def main():
             f"allow_partial_final_window={effective_allow_partial_final_window})",
             flush=True,
         )
-        if effective_acquisition_mode == "continuous":
+        if effective_acquisition_mode == "continuous" and continuous_plan_summary is not None:
             print(
-                f"VALIDATE-ONLY: NOTE: {CONTINUOUS_MODE_NOT_IMPLEMENTED_MESSAGE}",
+                "VALIDATE-ONLY: continuous planning "
+                f"resolved_format={continuous_plan_summary['resolved_format']} "
+                f"source_files={continuous_plan_summary['source_file_count']} "
+                f"planned_windows={continuous_plan_summary['planned_window_count']} "
+                f"partial_windows={continuous_plan_summary['partial_window_count']} "
+                f"dropped_partial_windows={continuous_plan_summary['dropped_partial_window_count']}",
                 flush=True,
             )
+            for src in continuous_plan_summary.get("per_source", []):
+                print(
+                    "VALIDATE-ONLY: continuous source "
+                    f"path={src['source_file']} duration_sec={src['duration_sec']:.6f} "
+                    f"median_dt_sec={src['median_dt_sec']:.6f} "
+                    f"window_count={src['window_count']} "
+                    f"partial_window_count={src['partial_window_count']}",
+                    flush=True,
+                )
             print(
                 f"VALIDATE-ONLY: NOTE: {intermittent_only_output_message()}",
                 flush=True,
@@ -1436,22 +1602,33 @@ def main():
         "fixed_daily_anchor_clock": args.fixed_daily_anchor_clock,
     })
     substantive_work_completed = False
+    continuous_full_plan_summary = None
 
     try:
-        if effective_acquisition_mode == "continuous":
+        if continuous_mode:
+            cfg_plan = Config.from_yaml(args.config)
+            cfg_plan.acquisition_mode = "continuous"
+            cfg_plan.continuous_window_sec = float(effective_continuous_window_sec)
+            cfg_plan.continuous_step_sec = float(effective_continuous_step_sec)
+            cfg_plan.allow_partial_final_window = bool(effective_allow_partial_final_window)
+            continuous_full_plan_summary = _plan_continuous_windows_summary(
+                input_dir=str(args.input),
+                fmt=str(args.format),
+                cfg=cfg_plan,
+            )
+            analysis_force_format = str(continuous_full_plan_summary["resolved_format"])
+            manifest["continuous_plan"] = continuous_full_plan_summary
             emitter.emit(
                 "engine",
-                "error",
-                CONTINUOUS_MODE_NOT_IMPLEMENTED_MESSAGE,
-                error_code="CONTINUOUS_MODE_NOT_IMPLEMENTED",
-                payload={
-                    "intermittent_only_outputs": INTERMITTENT_ONLY_OUTPUT_KEYS,
-                    "guidance": intermittent_only_output_message(),
-                },
+                "audit",
+                "Continuous mode planning resolved.",
+                payload=continuous_full_plan_summary,
             )
-            raise RuntimeError(
-                f"{CONTINUOUS_MODE_NOT_IMPLEMENTED_MESSAGE} "
-                f"{intermittent_only_output_message()}"
+            emitter.emit(
+                "engine",
+                "notice",
+                intermittent_only_output_message(),
+                payload={"intermittent_only_outputs": INTERMITTENT_ONLY_OUTPUT_KEYS},
             )
 
         # -- Check cancel immediately --
@@ -1499,7 +1676,7 @@ def main():
                          '--out', tonic_out,
                          '--config', args.config,
                          '--mode', 'tonic',
-                         '--format', args.format,
+                         '--format', analysis_force_format,
                          '--recursive', '--overwrite']
             if args.include_rois: cmd_tonic.extend(['--include-rois', args.include_rois])
             if args.exclude_rois: cmd_tonic.extend(['--exclude-rois', args.exclude_rois])
@@ -1533,7 +1710,7 @@ def main():
                           '--out', phasic_out,
                           '--config', args.config,
                           '--mode', 'phasic',
-                          '--format', args.format,
+                          '--format', analysis_force_format,
                           '--recursive', '--overwrite']
             if args.include_rois: cmd_phasic.extend(['--include-rois', args.include_rois])
             if args.exclude_rois: cmd_phasic.extend(['--exclude-rois', args.exclude_rois])
@@ -1552,6 +1729,85 @@ def main():
             _phase_done(status_data, manifest, "phasic_analysis", t_phase, started_utc_phase, status_path=status_path)
 
             check_cancel(cancel_flag_path, emitter, "phasic", manifest_path, manifest)
+
+        if continuous_mode:
+            manifest["sessions_per_hour"] = resolved_sessions_per_hour
+            manifest["sessions_per_hour_source"] = sessions_per_hour_source
+            manifest["session_duration_s"] = None
+            manifest["session_stride_s"] = None
+            manifest["continuous_outputs"] = {
+                "analysis_caches_generated": True,
+                "intermittent_only_outputs_skipped": INTERMITTENT_ONLY_OUTPUT_KEYS,
+                "guidance": intermittent_only_output_message(),
+            }
+            emitter.emit(
+                "session_compute",
+                "skipped",
+                "Session/stride computation skipped in continuous mode.",
+            )
+            emitter.emit(
+                "plots",
+                "skipped",
+                intermittent_only_output_message(),
+                payload={"intermittent_only_outputs": INTERMITTENT_ONLY_OUTPUT_KEYS},
+            )
+
+            t_phase, started_utc_phase = _phase_start(status_data, "manifest_write")
+            emitter.emit("package", "start", "Writing final manifest")
+            manifest["timing"]["total_runtime_sec"] = time.perf_counter() - t0_total
+            _atomic_write_json(manifest_path, manifest)
+            emitter.emit("package", "done", "Manifest written")
+            _phase_done(
+                status_data,
+                manifest,
+                "manifest_write",
+                t_phase,
+                started_utc_phase,
+                status_path=status_path,
+            )
+
+            t_phase, started_utc_phase = _phase_start(status_data, "finalize_artifacts")
+            ok = _ensure_root_run_report(
+                run_dir,
+                phasic_out,
+                tonic_out,
+                emitter,
+                run_type=effective_run_type,
+                run_profile=args.run_type,
+                artifact_contract=effective_artifact_contract,
+                intentional_skips=effective_skip_plan,
+                sessions_per_hour=resolved_sessions_per_hour,
+                sessions_per_hour_source=sessions_per_hour_source,
+                acquisition_mode=effective_acquisition_mode,
+                continuous_window_sec=effective_continuous_window_sec,
+                continuous_step_sec=effective_continuous_step_sec,
+                allow_partial_final_window=effective_allow_partial_final_window,
+                acquisition_mode_source=acquisition_mode_source,
+                timeline_anchor_mode=args.timeline_anchor_mode,
+                fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
+            )
+            err_payload = None
+            if not ok:
+                err_payload = (
+                    "STRICT ORDERING VIOLATION: root run_report.json missing at terminal finalize"
+                )
+                emitter.emit("package", "error", err_payload)
+            _phase_done(
+                status_data,
+                manifest,
+                "finalize_artifacts",
+                t_phase,
+                started_utc_phase,
+                status_path=status_path,
+            )
+
+            manifest["timing"]["total_runtime_sec"] = time.perf_counter() - t0_total
+            _atomic_write_json(manifest_path, manifest)
+            substantive_work_completed = True
+            _finalize_status("success", error_msg=err_payload)
+            emitter.emit("engine", "done", "Execution complete")
+            emitter.close()
+            return
 
         # ============================================================
         # 6. Session / Stride Computation

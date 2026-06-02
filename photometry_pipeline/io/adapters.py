@@ -6,7 +6,7 @@ import warnings
 import itertools
 import csv
 import re
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any
 from datetime import datetime
 from ..config import Config
 from ..core.types import Chunk, SessionTimeMetadata
@@ -17,6 +17,7 @@ import logging
 
 
 _RWD_METADATA_LED_KEYS: Tuple[str, ...] = ("Led410Enable", "Led470Enable", "Led560Enable")
+_CONTINUOUS_TIME_SCAN_CHUNKSIZE = 200_000
 
 
 def _unique_ordered(values: List[str]) -> List[str]:
@@ -684,6 +685,109 @@ def _resample_strict(t_rel: np.ndarray, data_in: np.ndarray, config: Config, con
         
     return time_sec, data_out
 
+
+def _resample_strict_for_duration(
+    t_rel: np.ndarray,
+    data_in: np.ndarray,
+    *,
+    target_fs_hz: float,
+    duration_sec: float,
+    context: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Resample onto a strict grid defined by `duration_sec * target_fs_hz`.
+    This is used by continuous-mode window loading where duration is window-specific.
+    """
+    fs = float(target_fs_hz)
+    duration = float(duration_sec)
+    if not np.isfinite(fs) or fs <= 0.0:
+        raise ValueError(f"{context}: target_fs_hz must be > 0")
+    if not np.isfinite(duration) or duration <= 0.0:
+        raise ValueError(f"{context}: duration_sec must be > 0")
+
+    n_target = int(np.round(duration * fs))
+    if n_target < 2:
+        raise ValueError(
+            f"{context}: window too short after resampling target "
+            f"(duration_sec={duration:.6f}, target_fs_hz={fs:.6f}, n_target={n_target})"
+        )
+    time_sec = np.arange(n_target, dtype=float) / fs
+    _require_strict_check(t_rel, time_sec, fs, context)
+
+    data_out = np.zeros((n_target, data_in.shape[1]), dtype=float)
+    for i in range(data_in.shape[1]):
+        data_out[:, i] = np.interp(time_sec, t_rel, data_in[:, i])
+    return time_sec, data_out
+
+
+def _duration_summary_from_t_rel(t_rel: np.ndarray, *, context: str) -> Dict[str, float]:
+    """
+    Compute source-support duration summary from strictly increasing elapsed time.
+    Returns duration_sec using right-open support semantics (end + median_dt).
+    """
+    t = np.asarray(t_rel, dtype=float).reshape(-1)
+    if t.size < 2:
+        raise ValueError(f"{context}: requires at least 2 timestamps")
+    if not np.all(np.isfinite(t)):
+        raise ValueError(f"{context}: timestamps must be finite")
+    if np.any(np.diff(t) <= 0):
+        raise ValueError(f"{context}: timestamps must be strictly increasing")
+    dt = _median_positive_dt_sec(t)
+    if dt is None or (not np.isfinite(dt)) or dt <= 0.0:
+        raise ValueError(f"{context}: could not resolve positive timestamp cadence")
+    end_sec = float(t[-1])
+    duration_sec = float(end_sec + dt)
+    if not np.isfinite(duration_sec) or duration_sec <= 0.0:
+        raise ValueError(f"{context}: invalid computed duration")
+    return {
+        "duration_sec": duration_sec,
+        "median_dt_sec": float(dt),
+        "end_sec": end_sec,
+    }
+
+
+def _scan_time_column_chunked(
+    *,
+    path: str,
+    time_col: str,
+    header_row: int,
+    context: str,
+) -> np.ndarray:
+    """
+    Scan only one time column from CSV with chunked reads.
+    Keeps continuous metadata scanning bounded and avoids full-table materialization.
+    """
+    use_chunks = pd.read_csv(
+        path,
+        header=header_row,
+        usecols=[time_col],
+        chunksize=_CONTINUOUS_TIME_SCAN_CHUNKSIZE,
+    )
+    parts: List[np.ndarray] = []
+    for chunk in use_chunks:
+        vals = pd.to_numeric(chunk[time_col], errors="coerce").to_numpy(dtype=float)
+        parts.append(vals)
+    if not parts:
+        raise ValueError(f"{context}: requires at least 2 time samples")
+    out = np.concatenate(parts, axis=0)
+    if out.size < 2:
+        raise ValueError(f"{context}: requires at least 2 time samples")
+    return out
+
+
+def _continuous_window_metadata(window: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "acquisition_mode": "continuous",
+        "window_index": int(window["window_index"]),
+        "window_start_sec": float(window["window_start_sec"]),
+        "window_end_sec": float(window["window_end_sec"]),
+        "window_duration_sec": float(window["window_duration_sec"]),
+        "original_file_duration_sec": float(window["original_file_duration_sec"]),
+        "is_partial_final_window": bool(window["is_partial_final_window"]),
+        "continuous_window_sec": float(window["continuous_window_sec"]),
+        "continuous_step_sec": float(window["continuous_step_sec"]),
+    }
+
 def _ensure_session_time_metadata(chunk: Chunk):
     """
     Ensures 'session_time' metadata key exists and strictly adheres to SessionTimeMetadata schema.
@@ -726,22 +830,7 @@ def _ensure_session_time_metadata(chunk: Chunk):
     if "zt_offset_hours" in meta and (meta["zt_offset_hours"] is None or meta["zt_offset_hours"] == ""):
          meta["zt_offset_hours"] = float('nan')
 
-def load_chunk(path: str, format_type: str, config: Config, chunk_id: int) -> Chunk:
-    if format_type == 'rwd':
-        chunk = _load_rwd(path, config, chunk_id)
-    elif format_type == 'npm':
-        chunk = _load_npm(path, config, chunk_id)
-    elif format_type == 'custom_tabular':
-        chunk = _load_custom_tabular(path, config, chunk_id)
-    else:
-        raise ValueError(f"Unknown format: {format_type}")
-    
-    _ensure_session_time_metadata(chunk)
-    # Use config.timestamp_cv_max as tolerance fraction
-    chunk.validate(tolerance_frac=config.timestamp_cv_max)
-    return chunk
-
-def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
+def _scan_rwd_source_metadata(path: str, config: Config) -> Dict[str, Any]:
     header_info = _detect_rwd_header(path, config)
     if header_info is None:
         raise ValueError(
@@ -750,19 +839,29 @@ def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
         )
 
     header_row, detected_time_col = header_info
-    df = pd.read_csv(path, header=header_row)
+    # Header/schema only: avoid loading full signal/control table in metadata scan.
+    header_df = pd.read_csv(path, header=header_row, nrows=0)
+    header_df.columns = [str(c).strip().lstrip("\ufeff") for c in header_df.columns]
+    cols = [str(c) for c in header_df.columns]
 
-    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
     time_candidates = _rwd_time_candidates(config)
-    time_col = detected_time_col if detected_time_col in df.columns else None
+    time_col = detected_time_col if detected_time_col in cols else None
     if time_col is None:
-        time_col = next((c for c in time_candidates if c in df.columns), None)
+        time_col = next((c for c in time_candidates if c in cols), None)
     if time_col is None:
         raise ValueError("RWD: Missing supported time column after header parse.")
 
-    t_raw = pd.to_numeric(df[time_col], errors='coerce').values
+    t_raw = _scan_time_column_chunked(
+        path=path,
+        time_col=time_col,
+        header_row=header_row,
+        context="RWD",
+    )
     if np.isnan(t_raw).any():
-        raise ValueError(f"RWD: Time column '{time_col}' contains non-numeric or NaN values.")
+        raise ValueError(
+            f"RWD: Time column '{time_col}' contains non-numeric or NaN values."
+        )
+
     metadata_fps, enabled_excitation_count = _extract_rwd_metadata_context(path, header_row)
     scale_to_seconds, timestamp_unit = _resolve_rwd_timestamp_scale(
         t_raw,
@@ -772,7 +871,6 @@ def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
     if scale_to_seconds != 1.0:
         t_raw = t_raw * scale_to_seconds
 
-    cols = [str(c) for c in df.columns]
     uv_suffixes, sig_suffixes = _rwd_suffix_candidates(config)
     channel_data = _extract_rwd_channel_pairs(cols, uv_suffixes, sig_suffixes)
     if not channel_data:
@@ -780,63 +878,38 @@ def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
             "RWD: Recognizable header found, but no valid UV/SIG channel pairs were found. "
             f"Checked UV suffixes={uv_suffixes} and SIG suffixes={sig_suffixes}."
         )
-    
-    n_rois = len(channel_data)
-    # POLICY: We preserve ROI base names derived directly from column headers (e.g., Region_0).
-    # This ensures user labels (including underscores) are not lost but rather round-trip 
-    # successfully into roi_selection and downstream packaging.
+
     names = [x[0] for x in channel_data]
     roi_map = {names[i]: {"raw_uv": x[1], "raw_sig": x[2]} for i, x in enumerate(channel_data)}
-    
-    uv_raw = df[[x[1] for x in channel_data]].values
-    sig_raw = df[[x[2] for x in channel_data]].values
-    
-    # Relative Time
-    t_rel = t_raw - t_raw[0]
-    
-    # Strict Resampling
-    time_sec, data_out = _resample_strict(t_rel, np.hstack([uv_raw, sig_raw]), config, "RWD strict")
-    
-    uv_grid = data_out[:, :n_rois]
-    sig_grid = data_out[:, n_rois:]
-    
-    chunk = Chunk(
-        chunk_id=chunk_id,
-        source_file=path,
-        format='rwd',
-        time_sec=time_sec,
-        uv_raw=uv_grid,
-        sig_raw=sig_grid,
-        fs_hz=config.target_fs_hz,
-        channel_names=names,
-        metadata={
-            "roi_map": roi_map,
-            "rwd_time_col_resolved": time_col,
-            "rwd_timestamp_unit": timestamp_unit,
-            "rwd_metadata_fps": (float(metadata_fps) if metadata_fps is not None else np.nan),
-            "rwd_enabled_excitation_count": (
-                int(enabled_excitation_count) if enabled_excitation_count is not None else -1
-            ),
-        }
-    )
-    # chunk.validate() moved to load_chunk
-    return chunk
+    t_rel = np.asarray(t_raw, dtype=float) - float(t_raw[0])
+
+    return {
+        "format": "rwd",
+        "path": path,
+        "header_row": int(header_row),
+        "columns": cols,
+        "time_col": time_col,
+        "t_rel": t_rel,
+        "n_rows": int(t_rel.size),
+        "n_rois": len(channel_data),
+        "channel_names": names,
+        "roi_map": roi_map,
+        "uv_cols": [x[1] for x in channel_data],
+        "sig_cols": [x[2] for x in channel_data],
+        "rwd_time_col_resolved": time_col,
+        "rwd_timestamp_unit": timestamp_unit,
+        "rwd_metadata_fps": (float(metadata_fps) if metadata_fps is not None else np.nan),
+        "rwd_enabled_excitation_count": (
+            int(enabled_excitation_count) if enabled_excitation_count is not None else -1
+        ),
+    }
 
 
-def _load_custom_tabular(path: str, config: Config, chunk_id: int) -> Chunk:
-    """
-    Strict custom-tabular importer (one CSV == one session).
-
-    Required contract (v1):
-      - exact time column name: config.custom_tabular_time_col
-      - paired ROI columns with exact suffixes:
-          <roi_base> + config.custom_tabular_uv_suffix
-          <roi_base> + config.custom_tabular_sig_suffix
-      - no heuristic column guessing
-    """
-    df = pd.read_csv(path)
-    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
-    cols = [str(c) for c in df.columns]
+def _scan_custom_tabular_source_metadata(path: str, config: Config) -> Dict[str, Any]:
+    # Header/schema only: avoid loading full signal/control table in metadata scan.
+    header_df = pd.read_csv(path, nrows=0)
+    header_df.columns = [str(c).strip().lstrip("\ufeff") for c in header_df.columns]
+    cols = [str(c) for c in header_df.columns]
 
     time_col = str(getattr(config, "custom_tabular_time_col", "time_sec")).strip()
     uv_suffix = str(getattr(config, "custom_tabular_uv_suffix", "_iso")).strip()
@@ -858,7 +931,12 @@ def _load_custom_tabular(path: str, config: Config, chunk_id: int) -> Chunk:
             f"'{time_col}'. Configure custom_tabular_time_col or fix CSV header."
         )
 
-    t_raw = pd.to_numeric(df[time_col], errors="coerce").values
+    t_raw = _scan_time_column_chunked(
+        path=path,
+        time_col=time_col,
+        header_row=0,
+        context="custom_tabular",
+    )
     if not np.all(np.isfinite(t_raw)):
         raise ValueError(
             f"custom_tabular: time column '{time_col}' contains non-numeric/NaN values."
@@ -867,56 +945,447 @@ def _load_custom_tabular(path: str, config: Config, chunk_id: int) -> Chunk:
         raise ValueError("custom_tabular: requires at least 2 time samples")
 
     channel_data = _resolve_custom_tabular_channel_pairs(cols, uv_suffix, sig_suffix)
-    n_rois = len(channel_data)
     names = [x[0] for x in channel_data]
     roi_map = {names[i]: {"raw_uv": x[1], "raw_sig": x[2]} for i, x in enumerate(channel_data)}
 
-    uv_df = df[[x[1] for x in channel_data]].apply(pd.to_numeric, errors="coerce")
-    sig_df = df[[x[2] for x in channel_data]].apply(pd.to_numeric, errors="coerce")
-    if uv_df.isna().values.any():
-        raise ValueError(
-            "custom_tabular: isosbestic channel columns contain non-numeric/NaN values."
-        )
-    if sig_df.isna().values.any():
-        raise ValueError(
-            "custom_tabular: signal channel columns contain non-numeric/NaN values."
-        )
-    uv_raw = uv_df.values
-    sig_raw = sig_df.values
-
-    t_rel = t_raw - t_raw[0]
+    t_rel = np.asarray(t_raw, dtype=float) - float(t_raw[0])
     if np.any(np.diff(t_rel) <= 0):
         raise ValueError("custom_tabular: timestamps must be strictly increasing")
 
-    time_sec, data_out = _resample_strict(
-        t_rel,
-        np.hstack([uv_raw, sig_raw]),
-        config,
-        "CUSTOM_TABULAR strict",
+    return {
+        "format": "custom_tabular",
+        "path": path,
+        "columns": cols,
+        "time_col": time_col,
+        "t_rel": t_rel,
+        "n_rows": int(t_rel.size),
+        "n_rois": len(channel_data),
+        "channel_names": names,
+        "roi_map": roi_map,
+        "uv_cols": [x[1] for x in channel_data],
+        "sig_cols": [x[2] for x in channel_data],
+        "custom_tabular_contract": {
+            "session_model": "one_csv_per_session",
+            "time_col": time_col,
+            "uv_suffix": uv_suffix,
+            "sig_suffix": sig_suffix,
+        },
+    }
+
+
+def _resolve_source_data(
+    path: str,
+    format_type: str,
+    config: Config,
+    source_cache: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    fmt = str(format_type).strip().lower()
+    key = f"{fmt}:{os.path.abspath(path)}"
+    if source_cache is not None and key in source_cache:
+        return source_cache[key]
+
+    if fmt == "rwd":
+        source = _scan_rwd_source_metadata(path, config)
+    elif fmt == "custom_tabular":
+        source = _scan_custom_tabular_source_metadata(path, config)
+    else:
+        raise ValueError(f"Continuous source duration is unsupported for format: {format_type}")
+
+    if source_cache is not None:
+        source_cache[key] = source
+    return source
+
+
+def _compute_window_row_bounds(
+    t_rel: np.ndarray,
+    *,
+    window_start_sec: float,
+    window_end_sec: float,
+    is_final_window: bool,
+) -> Tuple[int, int]:
+    t = np.asarray(t_rel, dtype=float).reshape(-1)
+    if t.size < 2:
+        raise ValueError("continuous window slice requires at least 2 timestamps")
+    if np.any(np.diff(t) <= 0):
+        raise ValueError("continuous window slice requires strictly increasing timestamps")
+
+    start = float(window_start_sec)
+    end = float(window_end_sec)
+    if not np.isfinite(start) or not np.isfinite(end) or end <= start:
+        raise ValueError(
+            f"Invalid continuous window bounds: start={window_start_sec}, end={window_end_sec}"
+        )
+
+    core_left = int(np.searchsorted(t, start, side="left"))
+    core_right_exclusive = int(
+        np.searchsorted(t, end, side=("right" if is_final_window else "left"))
     )
+    left_idx = int(np.searchsorted(t, start, side="right") - 1)
+    right_idx = int(np.searchsorted(t, end, side="left"))
+
+    candidates: List[int] = []
+    if core_left < core_right_exclusive:
+        candidates.extend([core_left, core_right_exclusive - 1])
+    if 0 <= left_idx < t.size:
+        candidates.append(left_idx)
+    if 0 <= right_idx < t.size:
+        candidates.append(right_idx)
+
+    if not candidates:
+        raise ValueError(
+            f"Window [{start:.6f}, {end:.6f}] has no usable timestamp support"
+        )
+
+    start_idx = int(min(candidates))
+    end_idx = int(max(candidates))
+    if end_idx - start_idx + 1 < 2:
+        raise ValueError(
+            f"Window [{start:.6f}, {end:.6f}] has insufficient support rows "
+            f"({end_idx - start_idx + 1})"
+        )
+    return start_idx, end_idx
+
+
+def _read_csv_window_rows(
+    *,
+    path: str,
+    format_type: str,
+    columns: List[str],
+    usecols: List[str],
+    start_idx: int,
+    end_idx: int,
+    header_row: int,
+) -> pd.DataFrame:
+    if start_idx < 0 or end_idx < start_idx:
+        raise ValueError(f"Invalid row bounds [{start_idx}, {end_idx}]")
+    n_rows = int(end_idx - start_idx + 1)
+    if n_rows < 1:
+        raise ValueError("Window row read resolved no rows")
+
+    if format_type == "rwd":
+        # RWD may include metadata lines above the detected header.
+        skiprows = int(header_row + 1 + start_idx)
+    else:
+        # custom_tabular has a single header row at line 0.
+        skiprows = int(1 + start_idx)
+
+    return pd.read_csv(
+        path,
+        header=None,
+        names=columns,
+        usecols=usecols,
+        skiprows=skiprows,
+        nrows=n_rows,
+    )
+
+
+def _load_bounded_window_arrays(
+    source_data: Dict[str, Any],
+    *,
+    continuous_window: Dict[str, Any],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    fmt = str(source_data.get("format", "")).strip().lower()
+    start = float(continuous_window["window_start_sec"])
+    end = float(continuous_window["window_end_sec"])
+    is_partial = bool(continuous_window.get("is_partial_final_window", False))
+    is_final = bool(
+        is_partial
+        or (abs(end - float(continuous_window["original_file_duration_sec"])) <= 1e-6)
+    )
+    start_idx, end_idx = _compute_window_row_bounds(
+        source_data["t_rel"],
+        window_start_sec=start,
+        window_end_sec=end,
+        is_final_window=is_final,
+    )
+    read_cols = (
+        [str(source_data["time_col"])]
+        + [str(c) for c in source_data["uv_cols"]]
+        + [str(c) for c in source_data["sig_cols"]]
+    )
+    window_df = _read_csv_window_rows(
+        path=str(source_data["path"]),
+        format_type=fmt,
+        columns=[str(c) for c in source_data["columns"]],
+        usecols=read_cols,
+        start_idx=start_idx,
+        end_idx=end_idx,
+        header_row=int(source_data.get("header_row", 0)),
+    )
+    if len(window_df) != (end_idx - start_idx + 1):
+        raise ValueError(
+            f"{fmt.upper()} continuous window read length mismatch: "
+            f"expected {end_idx - start_idx + 1}, got {len(window_df)}"
+        )
+
+    t_rel_full = np.asarray(source_data["t_rel"], dtype=float)
+    t_window = t_rel_full[start_idx : end_idx + 1] - start
+
+    uv_df = window_df[[str(c) for c in source_data["uv_cols"]]].apply(
+        pd.to_numeric, errors="coerce"
+    )
+    sig_df = window_df[[str(c) for c in source_data["sig_cols"]]].apply(
+        pd.to_numeric, errors="coerce"
+    )
+    if uv_df.isna().values.any():
+        raise ValueError(
+            f"{fmt}: isosbestic channel columns contain non-numeric/NaN values."
+        )
+    if sig_df.isna().values.any():
+        raise ValueError(
+            f"{fmt}: signal channel columns contain non-numeric/NaN values."
+        )
+    uv_raw = uv_df.to_numpy(dtype=float)
+    sig_raw = sig_df.to_numpy(dtype=float)
+    return t_window, uv_raw, sig_raw
+
+
+def estimate_continuous_source_duration(
+    path: str,
+    format_type: str,
+    config: Config,
+    *,
+    source_cache: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    source = _resolve_source_data(path, format_type, config, source_cache=source_cache)
+    summary = _duration_summary_from_t_rel(
+        source["t_rel"],
+        context=f"{str(format_type).upper()} continuous duration",
+    )
+    return {
+        "source_file": path,
+        "format": str(format_type).lower(),
+        "duration_sec": float(summary["duration_sec"]),
+        "median_dt_sec": float(summary["median_dt_sec"]),
+        "end_sec": float(summary["end_sec"]),
+    }
+
+
+def plan_continuous_windows_for_source(
+    path: str,
+    format_type: str,
+    config: Config,
+    *,
+    source_cache: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    fmt = str(format_type).strip().lower()
+    if fmt not in {"rwd", "custom_tabular"}:
+        raise ValueError(
+            f"Continuous acquisition mode is not yet implemented for format '{format_type}'."
+        )
+
+    window_sec = float(getattr(config, "continuous_window_sec", 600.0))
+    step_sec = float(getattr(config, "continuous_step_sec", window_sec))
+    allow_partial = bool(getattr(config, "allow_partial_final_window", False))
+
+    if window_sec <= 0.0 or step_sec <= 0.0:
+        raise ValueError("continuous_window_sec and continuous_step_sec must be > 0")
+    if abs(step_sec - window_sec) > 1e-9:
+        raise ValueError(
+            "continuous_step_sec must equal continuous_window_sec in this version; "
+            "overlapping/sliding windows are not yet supported."
+        )
+
+    source = _resolve_source_data(path, fmt, config, source_cache=source_cache)
+    duration_summary = _duration_summary_from_t_rel(
+        source["t_rel"],
+        context=f"{fmt.upper()} continuous duration",
+    )
+    duration_sec = float(duration_summary["duration_sec"])
+    fs = float(getattr(config, "target_fs_hz", 40.0))
+
+    windows: List[Dict[str, Any]] = []
+    eps = 1e-9
+    n_full = int(np.floor((duration_sec + eps) / window_sec))
+
+    for idx in range(n_full):
+        start = float(idx * step_sec)
+        end = float(start + window_sec)
+        windows.append(
+            {
+                "source_file": path,
+                "window_index": idx,
+                "window_start_sec": start,
+                "window_end_sec": end,
+                "window_duration_sec": float(window_sec),
+                "original_file_duration_sec": duration_sec,
+                "is_partial_final_window": False,
+                "acquisition_mode": "continuous",
+                "continuous_window_sec": window_sec,
+                "continuous_step_sec": step_sec,
+            }
+        )
+
+    remainder = float(duration_sec - (n_full * window_sec))
+    if remainder > eps:
+        if allow_partial:
+            n_target_partial = int(np.round(remainder * fs))
+            if n_target_partial >= 2:
+                start = float(n_full * step_sec)
+                end = float(start + remainder)
+                windows.append(
+                    {
+                        "source_file": path,
+                        "window_index": len(windows),
+                        "window_start_sec": start,
+                        "window_end_sec": end,
+                        "window_duration_sec": remainder,
+                        "original_file_duration_sec": duration_sec,
+                        "is_partial_final_window": True,
+                        "acquisition_mode": "continuous",
+                        "continuous_window_sec": window_sec,
+                        "continuous_step_sec": step_sec,
+                    }
+                )
+        elif n_full == 0:
+            raise ValueError(
+                "Continuous source shorter than configured continuous_window_sec and "
+                "allow_partial_final_window is false. Either reduce continuous_window_sec "
+                "or enable allow_partial_final_window."
+            )
+
+    if not windows:
+        raise ValueError(
+            "No valid continuous windows could be planned. "
+            "Check recording duration and continuous window settings."
+        )
+    return windows
+
+
+def _load_full_arrays_from_metadata(
+    source_data: Dict[str, Any],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    fmt = str(source_data.get("format", "")).strip().lower()
+    if fmt == "rwd":
+        df = pd.read_csv(str(source_data["path"]), header=int(source_data["header_row"]))
+        df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+    elif fmt == "custom_tabular":
+        df = pd.read_csv(str(source_data["path"]))
+        df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+    else:
+        raise ValueError(f"Unsupported format for full-source read: {fmt}")
+
+    uv_df = df[[str(c) for c in source_data["uv_cols"]]].apply(pd.to_numeric, errors="coerce")
+    sig_df = df[[str(c) for c in source_data["sig_cols"]]].apply(pd.to_numeric, errors="coerce")
+    if uv_df.isna().values.any():
+        raise ValueError(f"{fmt}: isosbestic channel columns contain non-numeric/NaN values.")
+    if sig_df.isna().values.any():
+        raise ValueError(f"{fmt}: signal channel columns contain non-numeric/NaN values.")
+    return (
+        np.asarray(source_data["t_rel"], dtype=float),
+        uv_df.to_numpy(dtype=float),
+        sig_df.to_numpy(dtype=float),
+    )
+
+
+def _build_chunk_from_source(
+    path: str,
+    format_type: str,
+    config: Config,
+    chunk_id: int,
+    *,
+    source_data: Dict[str, Any],
+    continuous_window: Optional[Dict[str, Any]] = None,
+) -> Chunk:
+    n_rois = int(source_data["n_rois"])
+    names = list(source_data["channel_names"])
+    roi_map = dict(source_data["roi_map"])
+
+    metadata: Dict[str, Any] = {"roi_map": roi_map}
+    if str(format_type).lower() == "rwd":
+        metadata.update(
+            {
+                "rwd_time_col_resolved": source_data.get("rwd_time_col_resolved"),
+                "rwd_timestamp_unit": source_data.get("rwd_timestamp_unit"),
+                "rwd_metadata_fps": source_data.get("rwd_metadata_fps"),
+                "rwd_enabled_excitation_count": source_data.get("rwd_enabled_excitation_count"),
+            }
+        )
+    if str(format_type).lower() == "custom_tabular":
+        metadata["custom_tabular_contract"] = dict(source_data.get("custom_tabular_contract", {}))
+
+    if continuous_window is None:
+        t_rel, uv_raw, sig_raw = _load_full_arrays_from_metadata(source_data)
+        stacked = np.hstack([uv_raw, sig_raw])
+        time_sec, data_out = _resample_strict(
+            t_rel,
+            stacked,
+            config,
+            f"{str(format_type).upper()} strict",
+        )
+    else:
+        duration_sec = float(continuous_window["window_duration_sec"])
+        t_window, uv_window, sig_window = _load_bounded_window_arrays(
+            source_data,
+            continuous_window=continuous_window,
+        )
+        data_window = np.hstack([uv_window, sig_window])
+        time_sec, data_out = _resample_strict_for_duration(
+            t_window,
+            data_window,
+            target_fs_hz=float(config.target_fs_hz),
+            duration_sec=duration_sec,
+            context=f"{str(format_type).upper()} continuous window",
+        )
+        metadata.update(_continuous_window_metadata(continuous_window))
+
     uv_grid = data_out[:, :n_rois]
     sig_grid = data_out[:, n_rois:]
-
-    chunk = Chunk(
+    return Chunk(
         chunk_id=chunk_id,
         source_file=path,
-        format='custom_tabular',
+        format=str(format_type).lower(),
         time_sec=time_sec,
         uv_raw=uv_grid,
         sig_raw=sig_grid,
         fs_hz=config.target_fs_hz,
         channel_names=names,
-        metadata={
-            "roi_map": roi_map,
-            "custom_tabular_contract": {
-                "session_model": "one_csv_per_session",
-                "time_col": time_col,
-                "uv_suffix": uv_suffix,
-                "sig_suffix": sig_suffix,
-            },
-        },
+        metadata=metadata,
     )
+
+
+def load_chunk(
+    path: str,
+    format_type: str,
+    config: Config,
+    chunk_id: int,
+    *,
+    continuous_window: Optional[Dict[str, Any]] = None,
+    source_cache: Optional[Dict[str, Any]] = None,
+) -> Chunk:
+    fmt = str(format_type).strip().lower()
+    if fmt in {"rwd", "custom_tabular"}:
+        source_data = _resolve_source_data(path, fmt, config, source_cache=source_cache)
+        chunk = _build_chunk_from_source(
+            path,
+            fmt,
+            config,
+            chunk_id,
+            source_data=source_data,
+            continuous_window=continuous_window,
+        )
+    elif fmt == "npm":
+        if continuous_window is not None:
+            raise ValueError(
+                "Continuous acquisition mode is not yet implemented for NPM/interleaved inputs."
+            )
+        chunk = _load_npm(path, config, chunk_id)
+    else:
+        raise ValueError(f"Unknown format: {format_type}")
+
+    _ensure_session_time_metadata(chunk)
+    chunk.validate(tolerance_frac=config.timestamp_cv_max)
     return chunk
+
+
+def _load_rwd(path: str, config: Config, chunk_id: int) -> Chunk:
+    source = _scan_rwd_source_metadata(path, config)
+    return _build_chunk_from_source(path, "rwd", config, chunk_id, source_data=source)
+
+
+def _load_custom_tabular(path: str, config: Config, chunk_id: int) -> Chunk:
+    source = _scan_custom_tabular_source_metadata(path, config)
+    return _build_chunk_from_source(path, "custom_tabular", config, chunk_id, source_data=source)
 
 
 def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:

@@ -70,6 +70,28 @@ class Hdf5TraceCacheWriter:
             grp = self.roi_group[roi].create_group(chunk_group_name)
 
             grp.attrs['fs_hz'] = float(chunk.fs_hz)
+            if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
+                if "acquisition_mode" in chunk.metadata:
+                    grp.attrs["acquisition_mode"] = str(chunk.metadata.get("acquisition_mode"))
+                for key in (
+                    "window_index",
+                    "window_start_sec",
+                    "window_end_sec",
+                    "window_duration_sec",
+                    "original_file_duration_sec",
+                    "continuous_window_sec",
+                    "continuous_step_sec",
+                ):
+                    if key in chunk.metadata:
+                        try:
+                            grp.attrs[key] = float(chunk.metadata.get(key))
+                        except Exception:
+                            pass
+                if "is_partial_final_window" in chunk.metadata:
+                    grp.attrs["is_partial_final_window"] = bool(
+                        chunk.metadata.get("is_partial_final_window")
+                    )
+            grp.attrs["source_file"] = str(source_file)
 
             if self.mode == 'phasic' and self.config:
                 grp.attrs['peak_threshold_method'] = str(self.config.peak_threshold_method)

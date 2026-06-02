@@ -12,7 +12,12 @@ from typing import List, Optional
 
 from .config import Config
 from .core.types import Chunk, SessionStats
-from .io.adapters import load_chunk, sniff_format, sort_npm_files
+from .io.adapters import (
+    load_chunk,
+    sniff_format,
+    sort_npm_files,
+    plan_continuous_windows_for_source,
+)
 from .core import preprocessing, regression, normalization, feature_extraction, baseline
 from .core.utils import natural_sort_key
 from .core.reporting import generate_run_report, append_run_report_warnings
@@ -41,6 +46,9 @@ class Pipeline:
         self.config = config
         self.mode = mode
         self.file_list = []
+        self._continuous_window_map = {}
+        self._continuous_source_cache = {}
+        self._continuous_plan_summary = None
         self.stats = SessionStats()
         self.stats.tonic_fit_params = {} # ROI -> {slope, intercept} (Ad-hoc extension)
         self.qc_summary = {
@@ -60,6 +68,9 @@ class Pipeline:
 
     def _is_phasic_timing_enabled(self) -> bool:
         return self.mode == 'phasic'
+
+    def _is_continuous_mode_enabled(self) -> bool:
+        return str(getattr(self.config, "acquisition_mode", "intermittent")).strip().lower() == "continuous"
 
     def _add_phasic_phase_bucket(self, bucket: str, elapsed_sec: float):
         if not self._is_phasic_timing_enabled():
@@ -103,6 +114,9 @@ class Pipeline:
             print(f"TIMING METRIC phase=phasic_analysis name={name} value={value}", flush=True)
 
     def discover_files(self, input_path: str, recursive: bool = False, file_glob: str = "*.csv", force_format: str = 'auto'):
+        self._continuous_window_map = {}
+        self._continuous_source_cache = {}
+        self._continuous_plan_summary = None
         valid_formats = {"auto", "rwd", "npm", "custom_tabular"}
         if force_format not in valid_formats:
             raise ValueError(
@@ -161,6 +175,56 @@ class Pipeline:
             
         print(f"Found {len(self.file_list)} files.")
 
+        if self._is_continuous_mode_enabled():
+            expanded_entries = []
+            source_files = list(self.file_list)
+            planned_window_total = 0
+            partial_window_total = 0
+            for src in source_files:
+                fmt = self._get_format(src, force_format)
+                if fmt == "npm":
+                    raise ValueError(
+                        "Continuous acquisition mode is not yet implemented for NPM/interleaved inputs."
+                    )
+                if fmt not in {"rwd", "custom_tabular"}:
+                    raise ValueError(
+                        f"Continuous acquisition mode is unsupported for format '{fmt}'."
+                    )
+                planned = plan_continuous_windows_for_source(
+                    src,
+                    fmt,
+                    self.config,
+                    source_cache=self._continuous_source_cache,
+                )
+                for win in planned:
+                    entry_id = (
+                        f"{src}::window_{int(win['window_index']):06d}"
+                    )
+                    record = dict(win)
+                    record["format"] = fmt
+                    record["entry_id"] = entry_id
+                    self._continuous_window_map[entry_id] = record
+                    expanded_entries.append(entry_id)
+                    planned_window_total += 1
+                    if bool(win.get("is_partial_final_window", False)):
+                        partial_window_total += 1
+
+            self.file_list = expanded_entries
+            self._continuous_plan_summary = {
+                "acquisition_mode": "continuous",
+                "source_file_count": len(source_files),
+                "planned_window_count": planned_window_total,
+                "partial_window_count": partial_window_total,
+                "continuous_window_sec": float(getattr(self.config, "continuous_window_sec", 600.0)),
+                "continuous_step_sec": float(getattr(self.config, "continuous_step_sec", 600.0)),
+                "allow_partial_final_window": bool(getattr(self.config, "allow_partial_final_window", False)),
+            }
+            print(
+                f"Continuous mode: planned {planned_window_total} windows across "
+                f"{len(source_files)} source file(s).",
+                flush=True,
+            )
+
     def _get_format(self, path: str, force_format: str) -> str:
         if force_format != 'auto':
             return force_format
@@ -169,6 +233,43 @@ class Pipeline:
         if fmt is None:
             raise ValueError(f"Could not automatically detect format for {path}. Use --format to specify.")
         return fmt
+
+    def _entry_source_file(self, entry: str) -> str:
+        record = self._continuous_window_map.get(entry)
+        if record is not None:
+            return str(record["source_file"])
+        return str(entry)
+
+    def _entry_window_info(self, entry: str) -> Optional[dict]:
+        rec = self._continuous_window_map.get(entry)
+        return dict(rec) if rec is not None else None
+
+    def _entry_session_id(self, entry: str) -> str:
+        rec = self._continuous_window_map.get(entry)
+        if rec is None:
+            return self._session_entry_to_id(entry)
+        src_id = self._session_entry_to_id(str(rec["source_file"]))
+        return f"{src_id}__window_{int(rec['window_index']):04d}"
+
+    def _load_entry_chunk(self, entry: str, chunk_id: int, force_format: str) -> Chunk:
+        rec = self._continuous_window_map.get(entry)
+        if rec is not None:
+            return load_chunk(
+                str(rec["source_file"]),
+                str(rec["format"]),
+                self.config,
+                chunk_id=chunk_id,
+                continuous_window=rec,
+                source_cache=self._continuous_source_cache,
+            )
+        fmt = self._get_format(entry, force_format)
+        return load_chunk(
+            entry,
+            fmt,
+            self.config,
+            chunk_id=chunk_id,
+            source_cache=self._continuous_source_cache,
+        )
 
     def run_pass_1(self, force_format: str = 'auto'):
         """
@@ -190,8 +291,7 @@ class Pipeline:
             for i, fpath in enumerate(self.file_list):
                 try:
                     t_load = time.perf_counter()
-                    fmt = self._get_format(fpath, force_format)
-                    chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                    chunk = self._load_entry_chunk(fpath, i, force_format)
                     if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
                     pass1_chunk_load_sec += (time.perf_counter() - t_load)
                     
@@ -227,8 +327,7 @@ class Pipeline:
             for i, fpath in enumerate(self.file_list):
                 try:
                     t_load = time.perf_counter()
-                    fmt = self._get_format(fpath, force_format)
-                    chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                    chunk = self._load_entry_chunk(fpath, i, force_format)
                     if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
                     pass1_chunk_load_sec += (time.perf_counter() - t_load)
                     
@@ -260,8 +359,7 @@ class Pipeline:
             for i, fpath in enumerate(self.file_list):
                 try:
                     t_load = time.perf_counter()
-                    fmt = self._get_format(fpath, force_format)
-                    chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                    chunk = self._load_entry_chunk(fpath, i, force_format)
                     if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
                     pass1_chunk_load_sec += (time.perf_counter() - t_load)
                     
@@ -330,8 +428,7 @@ class Pipeline:
             
             for i, fpath in enumerate(self.file_list):
                 try:
-                    fmt = self._get_format(fpath, force_format)
-                    chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                    chunk = self._load_entry_chunk(fpath, i, force_format)
                     if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
                     for ch_idx, ch_name in enumerate(chunk.channel_names):
                         if ch_name not in acc_uv:
@@ -425,15 +522,14 @@ class Pipeline:
             if not isinstance(user_idx, int) or not (0 <= user_idx < n_sessions_resolved):
                 raise ValueError(f"representative_session_index out of range: idx={user_idx}, n_sessions={n_sessions_resolved}")
             rep_idx_effective = user_idx
-            rep_session_id = self._session_entry_to_id(self.file_list[user_idx])
+            rep_session_id = self._entry_session_id(self.file_list[user_idx])
         else:
             # Legacy Default: find first loadable
             for i, fpath in enumerate(self.file_list):
                 try:
-                    fmt = self._get_format(fpath, force_format)
-                    load_chunk(fpath, fmt, self.config, chunk_id=i) # Validation load
+                    self._load_entry_chunk(fpath, i, force_format) # Validation load
                     rep_idx_effective = i
-                    rep_session_id = self._session_entry_to_id(fpath)
+                    rep_session_id = self._entry_session_id(fpath)
                     break
                 except Exception as e:
                     logging.warning(f"Resolution: Skipping session {fpath} for representative selection: {e}")
@@ -447,7 +543,7 @@ class Pipeline:
             "representative_session_index": self.representative_session_index,
             "representative_session_id": self.representative_session_id,
             "n_sessions_resolved": self.n_sessions_resolved,
-            "resolved_session_ids_preview": [self._session_entry_to_id(f) for f in self.file_list[:5]],
+            "resolved_session_ids_preview": [self._entry_session_id(f) for f in self.file_list[:5]],
             "user_provided": self.representative_user_provided
         }
 
@@ -568,8 +664,7 @@ class Pipeline:
         for i, fpath in enumerate(frozen_manifest):
             try:
                 t_read = time.perf_counter()
-                fmt = self._get_format(fpath, force_format)
-                chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                chunk = self._load_entry_chunk(fpath, i, force_format)
                 if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
                 pass2_chunk_read_sec += (time.perf_counter() - t_read)
                 pass2_chunks_processed += 1
@@ -609,7 +704,7 @@ class Pipeline:
                 
                 if hasattr(self, '_cache_writer'):
                     t_cache = time.perf_counter()
-                    self._cache_writer.add_chunk(chunk, i, fpath)
+                    self._cache_writer.add_chunk(chunk, i, self._entry_source_file(fpath))
                     pass2_cache_write_sec += (time.perf_counter() - t_cache)
                 
                 t_scan = time.perf_counter()
@@ -674,6 +769,26 @@ class Pipeline:
             # D1: Write invalid baseline ROIs
             'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', [])
         }
+        if self._is_continuous_mode_enabled():
+            run_meta.update(
+                {
+                    'acquisition_mode': 'continuous',
+                    'continuous_window_sec': float(getattr(self.config, 'continuous_window_sec', 600.0)),
+                    'continuous_step_sec': float(getattr(self.config, 'continuous_step_sec', 600.0)),
+                    'allow_partial_final_window': bool(getattr(self.config, 'allow_partial_final_window', False)),
+                    'continuous_plan_summary': self._continuous_plan_summary,
+                    'continuous_source_file_count': int(
+                        self._continuous_plan_summary.get('source_file_count', 0)
+                    )
+                    if isinstance(self._continuous_plan_summary, dict)
+                    else 0,
+                    'continuous_planned_window_count': int(
+                        self._continuous_plan_summary.get('planned_window_count', len(self.file_list))
+                    )
+                    if isinstance(self._continuous_plan_summary, dict)
+                    else int(len(self.file_list)),
+                }
+            )
         t_meta_write = time.perf_counter()
         with open(os.path.join(output_dir, 'run_metadata.json'), 'w') as f:
             json.dump(_sanitize_metadata(run_meta), f, indent=2)
@@ -794,8 +909,7 @@ class Pipeline:
         for i, fpath in enumerate(self.file_list):
             try:
                 t_roi_read = time.perf_counter()
-                fmt = self._get_format(fpath, force_format)
-                chunk = load_chunk(fpath, fmt, self.config, chunk_id=i)
+                chunk = self._load_entry_chunk(fpath, i, force_format)
                 roi_read_sec += (time.perf_counter() - t_roi_read)
                 channels_seen.append(chunk.channel_names)
             except Exception as e:
