@@ -20,6 +20,10 @@ from photometry_pipeline.io.hdf5_cache_reader import (
 
 PHASIC_SUMMARY_FILENAME = "continuous_phasic_window_summary.csv"
 TONIC_SUMMARY_FILENAME = "continuous_tonic_window_summary.csv"
+PHASIC_RATE_PLOT_FILENAME = "phasic_peak_rate_timeseries.png"
+PHASIC_COUNT_PLOT_FILENAME = "phasic_peak_count_timeseries.png"
+PHASIC_AUC_PLOT_FILENAME = "phasic_auc_timeseries.png"
+TONIC_OVERVIEW_PLOT_FILENAME = "tonic_overview.png"
 _AUC_SEMANTICS = (
     "aggregate finite-run AUC from feature_extraction output; not per-event AUC"
 )
@@ -42,6 +46,12 @@ def _rel(path: str, root: str) -> str:
 
 def _roi_tables_dir(run_dir: str, roi: str) -> str:
     path = os.path.join(run_dir, str(roi), "tables")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _roi_summary_dir(run_dir: str, roi: str) -> str:
+    path = os.path.join(run_dir, str(roi), "summary")
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -303,6 +313,227 @@ def generate_continuous_tonic_summary(
     )
     _log(logger, f"Generated continuous tonic summary rows={len(summary)}")
     return result
+
+
+def _candidate_roi_dirs(run_dir: str) -> list[tuple[str, str]]:
+    if not os.path.isdir(run_dir):
+        return []
+    out = []
+    for name in sorted(os.listdir(run_dir), key=lambda s: s.lower()):
+        path = os.path.join(run_dir, name)
+        if not os.path.isdir(path):
+            continue
+        if name.startswith(".") or name.startswith("_"):
+            continue
+        out.append((name, path))
+    return out
+
+
+def _plot_xy_from_summary(
+    *,
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    y_label: str,
+    title: str,
+    out_path: str,
+) -> bool:
+    import matplotlib.pyplot as plt
+
+    if x_col not in df.columns or y_col not in df.columns:
+        return False
+    plot_df = df[[x_col, y_col]].copy()
+    plot_df[x_col] = pd.to_numeric(plot_df[x_col], errors="coerce")
+    plot_df[y_col] = pd.to_numeric(plot_df[y_col], errors="coerce")
+    plot_df = plot_df[np.isfinite(plot_df[x_col]) & np.isfinite(plot_df[y_col])]
+    if plot_df.empty:
+        return False
+    plot_df = plot_df.sort_values(x_col)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(plot_df[x_col], plot_df[y_col], marker="o", linewidth=1.2)
+    ax.set_xlabel("Elapsed time (hours)")
+    ax.set_ylabel(y_label)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return True
+
+
+def _record_generated_plot(
+    result: dict[str, Any],
+    *,
+    run_dir: str,
+    roi: str,
+    path: str,
+    source_csv: str,
+) -> None:
+    result["generated_files"].append(path)
+    result["rois_processed"].append(str(roi))
+    result.setdefault("source_artifacts", []).append(source_csv)
+    result["row_counts"][str(roi)] = result["row_counts"].get(str(roi), 0) + 1
+
+
+def generate_continuous_phasic_plots(run_dir: str, *, logger=None) -> dict[str, Any]:
+    """Generate continuous phasic elapsed-time plots from Patch 3a summary CSVs."""
+    result = _empty_result("phasic_plots")
+    any_table = False
+    for roi, roi_dir in _candidate_roi_dirs(run_dir):
+        table_path = os.path.join(roi_dir, "tables", PHASIC_SUMMARY_FILENAME)
+        if not os.path.exists(table_path):
+            continue
+        any_table = True
+        df = pd.read_csv(table_path)
+        summary_dir = os.path.join(run_dir, str(roi), "summary")
+        plot_specs = [
+            (
+                PHASIC_RATE_PLOT_FILENAME,
+                "event_rate_per_min",
+                "Event rate (events/min)",
+                f"{roi} continuous event rate",
+            ),
+            (
+                PHASIC_COUNT_PLOT_FILENAME,
+                "event_count",
+                "Event count per window",
+                f"{roi} continuous event count",
+            ),
+            (
+                PHASIC_AUC_PLOT_FILENAME,
+                "event_signal_auc",
+                "Aggregate event-signal AUC per window",
+                f"{roi} continuous aggregate event-signal AUC",
+            ),
+        ]
+        for filename, y_col, y_label, title in plot_specs:
+            out_path = os.path.join(summary_dir, filename)
+            ok = _plot_xy_from_summary(
+                df=df,
+                x_col="elapsed_hour_mid",
+                y_col=y_col,
+                y_label=y_label,
+                title=title,
+                out_path=out_path,
+            )
+            if ok:
+                _record_generated_plot(
+                    result,
+                    run_dir=run_dir,
+                    roi=roi,
+                    path=out_path,
+                    source_csv=table_path,
+                )
+            else:
+                _skip(
+                    result,
+                    f"{roi}/summary/{filename}",
+                    f"No finite values available for required columns elapsed_hour_mid/{y_col}",
+                )
+    if not any_table:
+        _skip(
+            result,
+            PHASIC_RATE_PLOT_FILENAME,
+            f"No per-ROI {PHASIC_SUMMARY_FILENAME} tables found under {run_dir}",
+        )
+    result["rois_processed"] = sorted(set(result["rois_processed"]))
+    result["source_artifacts"] = sorted(set(result.get("source_artifacts", [])))
+    _log(logger, f"Generated continuous phasic plot files={len(result['generated_files'])}")
+    return result
+
+
+def generate_continuous_tonic_plots(run_dir: str, *, logger=None) -> dict[str, Any]:
+    """Generate continuous tonic elapsed-time plots from Patch 3a summary CSVs."""
+    result = _empty_result("tonic_plots")
+    any_table = False
+    for roi, roi_dir in _candidate_roi_dirs(run_dir):
+        table_path = os.path.join(roi_dir, "tables", TONIC_SUMMARY_FILENAME)
+        if not os.path.exists(table_path):
+            continue
+        any_table = True
+        df = pd.read_csv(table_path)
+        if "tonic_median" in df.columns:
+            y_col = "tonic_median"
+            y_label = "Tonic dF/F, median per window"
+        else:
+            y_col = "tonic_mean"
+            y_label = "Tonic dF/F, mean per window"
+        summary_dir = os.path.join(run_dir, str(roi), "summary")
+        out_path = os.path.join(summary_dir, TONIC_OVERVIEW_PLOT_FILENAME)
+        ok = _plot_xy_from_summary(
+            df=df,
+            x_col="elapsed_hour_mid",
+            y_col=y_col,
+            y_label=y_label,
+            title=f"{roi} continuous tonic summary",
+            out_path=out_path,
+        )
+        if ok:
+            _record_generated_plot(
+                result,
+                run_dir=run_dir,
+                roi=roi,
+                path=out_path,
+                source_csv=table_path,
+            )
+        else:
+            _skip(
+                result,
+                f"{roi}/summary/{TONIC_OVERVIEW_PLOT_FILENAME}",
+                f"No finite values available for required columns elapsed_hour_mid/{y_col}",
+            )
+    if not any_table:
+        _skip(
+            result,
+            TONIC_OVERVIEW_PLOT_FILENAME,
+            f"No per-ROI {TONIC_SUMMARY_FILENAME} tables found under {run_dir}",
+        )
+    result["rois_processed"] = sorted(set(result["rois_processed"]))
+    result["source_artifacts"] = sorted(set(result.get("source_artifacts", [])))
+    _log(logger, f"Generated continuous tonic plot files={len(result['generated_files'])}")
+    return result
+
+
+def generate_continuous_summary_plots(
+    run_dir: str,
+    *,
+    mode: str = "both",
+    logger=None,
+) -> dict[str, Any]:
+    """Generate continuous elapsed-time plots from existing summary tables."""
+    requested = str(mode or "both").strip().lower()
+    if requested not in {"both", "phasic", "tonic"}:
+        raise ValueError(f"Unsupported continuous plot mode: {mode!r}")
+
+    results: dict[str, Any] = {
+        "summary_plots_generated": False,
+        "summary_plots": [],
+        "plot_skips": [],
+        "phasic": None,
+        "tonic": None,
+    }
+    if requested in {"both", "phasic"}:
+        results["phasic"] = generate_continuous_phasic_plots(run_dir, logger=logger)
+    else:
+        results["phasic"] = _skip(_empty_result("phasic_plots"), PHASIC_RATE_PLOT_FILENAME, "phasic mode not requested")
+
+    if requested in {"both", "tonic"}:
+        results["tonic"] = generate_continuous_tonic_plots(run_dir, logger=logger)
+    else:
+        results["tonic"] = _skip(_empty_result("tonic_plots"), TONIC_OVERVIEW_PLOT_FILENAME, "tonic mode not requested")
+
+    for key in ("phasic", "tonic"):
+        sub = results[key] or {}
+        for path in sub.get("generated_files", []):
+            results["summary_plots"].append(_rel(path, run_dir))
+        for skip in sub.get("skipped_outputs", []):
+            results["plot_skips"].append(skip)
+
+    results["summary_plots"] = sorted(set(results["summary_plots"]))
+    results["summary_plots_generated"] = bool(results["summary_plots"])
+    return results
 
 
 def generate_continuous_summary_tables(

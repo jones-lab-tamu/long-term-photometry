@@ -1734,7 +1734,10 @@ def main():
             t_phase, started_utc_phase = _phase_start(status_data, "continuous_summary_tables")
             _write_status_update("continuous_summary_tables")
             emitter.emit("continuous_outputs", "start", "Generating continuous summary tables")
-            from photometry_pipeline.continuous_outputs import generate_continuous_summary_tables
+            from photometry_pipeline.continuous_outputs import (
+                generate_continuous_summary_plots,
+                generate_continuous_summary_tables,
+            )
 
             summary_result = generate_continuous_summary_tables(
                 run_dir,
@@ -1763,6 +1766,40 @@ def main():
                 status_path=status_path,
             )
 
+            t_phase, started_utc_phase = _phase_start(status_data, "continuous_summary_plots")
+            _write_status_update("continuous_summary_plots")
+            emitter.emit("continuous_outputs", "start", "Generating continuous summary plots")
+            plot_result = generate_continuous_summary_plots(
+                run_dir,
+                mode=str(args.mode),
+                logger=lambda msg: emitter.emit("continuous_outputs", "notice", str(msg)),
+            )
+            status_data["continuous_outputs"].update(
+                {
+                    "summary_plots_generated": bool(plot_result.get("summary_plots_generated", False)),
+                    "summary_plots": list(plot_result.get("summary_plots", [])),
+                    "plot_skips": list(plot_result.get("plot_skips", [])),
+                }
+            )
+            emitter.emit(
+                "continuous_outputs",
+                "done",
+                "Continuous summary plot generation complete",
+                payload={
+                    "summary_plots_generated": status_data["continuous_outputs"]["summary_plots_generated"],
+                    "summary_plots": status_data["continuous_outputs"]["summary_plots"],
+                    "plot_skips": status_data["continuous_outputs"]["plot_skips"],
+                },
+            )
+            _phase_done(
+                status_data,
+                manifest,
+                "continuous_summary_plots",
+                t_phase,
+                started_utc_phase,
+                status_path=status_path,
+            )
+
             manifest["sessions_per_hour"] = resolved_sessions_per_hour
             manifest["sessions_per_hour_source"] = sessions_per_hour_source
             manifest["session_duration_s"] = None
@@ -1772,9 +1809,16 @@ def main():
                 "summary_tables_generated": bool(summary_result.get("summary_tables_generated", False)),
                 "summary_tables": list(summary_result.get("summary_tables", [])),
                 "summary_skips": list(summary_result.get("summary_skips", [])),
+                "summary_plots_generated": bool(plot_result.get("summary_plots_generated", False)),
+                "summary_plots": list(plot_result.get("summary_plots", [])),
+                "plot_skips": list(plot_result.get("plot_skips", [])),
                 "summary_details": {
                     "phasic": summary_result.get("phasic"),
                     "tonic": summary_result.get("tonic"),
+                },
+                "plot_details": {
+                    "phasic": plot_result.get("phasic"),
+                    "tonic": plot_result.get("tonic"),
                 },
                 "intermittent_only_outputs_skipped": INTERMITTENT_ONLY_OUTPUT_KEYS,
                 "guidance": intermittent_only_output_message(),
