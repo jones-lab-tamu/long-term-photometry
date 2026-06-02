@@ -6852,27 +6852,47 @@ class MainWindow(QMainWindow):
 
     def _on_open_results(self):
         """Open a completed successful output directory into complete-state workspace."""
-        selected = QFileDialog.getExistingDirectory(
-            self, "Select Output Directory with MANIFEST.json",
-            self._output_dir.text().strip(),
-        )
+        def _valid_completed_dir(path: str) -> tuple[bool, str]:
+            return self._is_openable_completed_results_dir(path)
+
+        current = (self._current_run_dir or "").strip()
+        output = self._output_dir.text().strip()
+        selected = ""
+        evidence = ""
+
+        current_ok, current_evidence = _valid_completed_dir(current)
+        if current_ok:
+            selected = current
+            evidence = current_evidence
+        else:
+            output_ok, output_evidence = _valid_completed_dir(output)
+            if output_ok:
+                selected = output
+                evidence = output_evidence
+            else:
+                start_dir = output if output and os.path.isdir(output) else current
+                selected = QFileDialog.getExistingDirectory(
+                    self,
+                    "Select Completed Pipeline Run Folder",
+                    start_dir,
+                )
+                if not selected:
+                    return
+                selected_ok, selected_evidence = _valid_completed_dir(selected)
+                evidence = selected_evidence
+                if not selected_ok:
+                    selected = ""
+
         if not selected:
-            return
-
-        self._current_run_dir = selected
-        self._output_dir.setText(selected)
-        self._save_widgets_to_settings()
-
-        is_successful_complete, evidence = is_successful_completed_run_dir(selected)
-        if not is_successful_complete:
             self._append_run_log(
                 f"Open Results blocked: selected directory is not a confirmed successful completed run. {evidence}"
             )
             QMessageBox.information(
                 self,
                 "Results Not Opened",
-                "The selected directory is not confirmed as a successfully completed run.\n\n"
-                "Choose a run folder with final-success metadata (status.json or MANIFEST).\n\n"
+                "This folder does not look like a completed pipeline run. "
+                "Choose an output run folder containing status.json/MANIFEST.json "
+                "and region summary/tables.\n\n"
                 f"Details: {evidence}",
             )
             self._apply_results_idle_placeholder()
@@ -6884,6 +6904,9 @@ class MainWindow(QMainWindow):
             self._update_button_states()
             return
 
+        self._current_run_dir = selected
+        self._output_dir.setText(selected)
+        self._save_widgets_to_settings()
         self._append_run_log(f"--- Opening results from {selected} ---")
 
         loaded = self._report_viewer.load_report(selected)
@@ -8896,7 +8919,7 @@ class MainWindow(QMainWindow):
             selected_results_dir
         )
         self._open_results_btn.setEnabled(
-            bool((is_success and has_success_code) or selected_is_openable)
+            bool(not running and ((is_success and has_success_code) or selected_is_openable or is_idle_or_done))
         )
 
         # Open Run Folder: enabled when done and run_dir exists

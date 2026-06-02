@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from gui.main_window import MainWindow
 
@@ -95,7 +95,7 @@ def _open_results_from(window: MainWindow, monkeypatch, path: Path) -> None:
     window._on_open_results()
 
 
-def test_open_results_enabled_and_loads_continuous_custom_tabular_completed_run(
+def test_idle_open_results_browses_and_loads_continuous_completed_run(
     window,
     qapp,
     tmp_path: Path,
@@ -106,16 +106,76 @@ def test_open_results_enabled_and_loads_continuous_custom_tabular_completed_run(
         ("Region0", "Region1"),
     )
 
-    _set_output_path_and_refresh(window, run_dir)
+    calls = {"picker": 0}
+
+    def _pick_dir(*args, **kwargs):
+        calls["picker"] += 1
+        return str(run_dir)
+
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", _pick_dir)
+    window._output_dir.setText("")
+    window._current_run_dir = ""
+    window._update_button_states()
 
     assert window._open_results_btn.isEnabled()
-    _open_results_from(window, monkeypatch, run_dir)
+    window._on_open_results()
     qapp.processEvents()
+    assert calls["picker"] == 1
     assert window._report_viewer.has_loaded_results()
     assert window._report_viewer.available_regions() == ["Region0", "Region1"]
     tab_map = window._report_viewer._region_tab_images["Region0"]
     assert "phasic_peak_rate_timeseries.png" in [Path(p).name for p in tab_map["Phasic Summary"]]
     assert "tonic_overview.png" in [Path(p).name for p in tab_map["Tonic"]]
+
+
+def test_current_successful_run_opens_directly_without_picker(
+    window,
+    qapp,
+    tmp_path: Path,
+    monkeypatch,
+):
+    run_dir = _make_continuous_completed_run(
+        tmp_path / "current_completed_run",
+        ("Region0", "Region1"),
+    )
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        lambda *args, **kwargs: pytest.fail("picker should not be used for valid current run"),
+    )
+    window._current_run_dir = str(run_dir)
+    window._output_dir.setText("")
+    window._update_button_states()
+
+    assert window._open_results_btn.isEnabled()
+    window._on_open_results()
+    qapp.processEvents()
+    assert window._report_viewer.has_loaded_results()
+    assert window._report_viewer.available_regions() == ["Region0", "Region1"]
+
+
+def test_output_directory_completed_run_opens_directly_without_picker(
+    window,
+    qapp,
+    tmp_path: Path,
+    monkeypatch,
+):
+    run_dir = _make_continuous_completed_run(
+        tmp_path / "output_completed_run",
+        ("Region0", "Region1"),
+    )
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        lambda *args, **kwargs: pytest.fail("picker should not be used for valid output dir"),
+    )
+    _set_output_path_and_refresh(window, run_dir)
+
+    assert window._open_results_btn.isEnabled()
+    window._on_open_results()
+    qapp.processEvents()
+    assert window._report_viewer.has_loaded_results()
+    assert window._report_viewer.available_regions() == ["Region0", "Region1"]
 
 
 def test_open_results_enabled_and_loads_continuous_rwd_completed_run(
@@ -155,7 +215,11 @@ def test_open_results_still_enabled_for_intermittent_completed_run(
     assert window._report_viewer.available_regions() == ["Region0", "Region1"]
 
 
-def test_open_results_disabled_for_input_dataset_folder(window, tmp_path: Path):
+def test_open_results_rejects_input_dataset_folder_without_starting_pipeline(
+    window,
+    tmp_path: Path,
+    monkeypatch,
+):
     input_dir = tmp_path / "continuous_input_only"
     input_dir.mkdir(parents=True)
     (input_dir / "continuous_recording.csv").write_text(
@@ -168,8 +232,24 @@ def test_open_results_disabled_for_input_dataset_folder(window, tmp_path: Path):
     )
 
     _set_output_path_and_refresh(window, input_dir)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args, **kwargs: str(input_dir))
+    messages = []
 
-    assert not window._open_results_btn.isEnabled()
+    def _capture_message(_parent, title, text):
+        messages.append((title, text))
+        return QMessageBox.Ok
+
+    monkeypatch.setattr(QMessageBox, "information", _capture_message)
+
+    assert window._open_results_btn.isEnabled()
+    window._on_open_results()
+
+    assert not window._report_viewer.has_loaded_results()
+    assert not window._runner.is_running()
+    assert messages
+    assert messages[0][0] == "Results Not Opened"
+    assert "does not look like a completed pipeline run" in messages[0][1]
+    assert "status.json/MANIFEST.json" in messages[0][1]
 
 
 def test_open_results_enabled_when_completed_run_has_no_day_plots(window, tmp_path: Path):
