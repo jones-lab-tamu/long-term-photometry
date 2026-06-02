@@ -29,6 +29,38 @@ def main():
     parser.add_argument('--representative-session-index', type=int, default=None, help="Force a specific session index for representative artifacts (0-based)")
     parser.add_argument('--preview-first-n', type=int, default=None, help="Preview mode: process only the first N discovered sessions (after discovery/sort).")
     parser.add_argument('--sessions-per-hour', type=int, default=None, help="Force sessions per hour for timing inference (overrides inference/defaults)")
+    parser.add_argument(
+        '--acquisition-mode',
+        choices=['intermittent', 'continuous'],
+        default=None,
+        help="Override acquisition structure from config.",
+    )
+    parser.add_argument(
+        '--continuous-window-sec',
+        type=float,
+        default=None,
+        help="Override continuous-mode window duration from config.",
+    )
+    parser.add_argument(
+        '--continuous-step-sec',
+        type=float,
+        default=None,
+        help="Override continuous-mode step duration from config.",
+    )
+    partial_group = parser.add_mutually_exclusive_group()
+    partial_group.add_argument(
+        '--allow-partial-final-window',
+        dest='allow_partial_final_window',
+        action='store_true',
+        help="Continuous mode only: include a trailing undersized final window.",
+    )
+    partial_group.add_argument(
+        '--no-allow-partial-final-window',
+        dest='allow_partial_final_window',
+        action='store_false',
+        help="Continuous mode only: drop a trailing undersized final window.",
+    )
+    parser.set_defaults(allow_partial_final_window=None)
     
     args = parser.parse_args()
     
@@ -53,6 +85,14 @@ def main():
             config.representative_session_index = args.representative_session_index
         if args.preview_first_n is not None:
             config.preview_first_n = args.preview_first_n
+        if args.acquisition_mode is not None:
+            config.acquisition_mode = args.acquisition_mode
+        if args.continuous_window_sec is not None:
+            config.continuous_window_sec = float(args.continuous_window_sec)
+        if args.continuous_step_sec is not None:
+            config.continuous_step_sec = float(args.continuous_step_sec)
+        if args.allow_partial_final_window is not None:
+            config.allow_partial_final_window = bool(args.allow_partial_final_window)
         
         # Init Pipeline
         pipeline = Pipeline(config, mode=args.mode)

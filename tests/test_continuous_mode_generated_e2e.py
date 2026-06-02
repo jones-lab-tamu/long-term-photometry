@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pandas as pd
 import yaml
@@ -66,8 +67,15 @@ def _write_continuous_config(path: Path) -> Path:
     return path
 
 
-def _generate_continuous_dataset(tmp_path: Path, fmt: str, *, hours: float = 0.34) -> tuple[Path, dict]:
-    cfg = _write_continuous_config(tmp_path / f"{fmt}_config.yaml")
+def _generate_continuous_dataset(
+    tmp_path: Path,
+    fmt: str,
+    *,
+    hours: float = 0.34,
+    cfg: Path | None = None,
+) -> tuple[Path, dict]:
+    if cfg is None:
+        cfg = _write_continuous_config(tmp_path / f"{fmt}_config.yaml")
     input_dir = tmp_path / f"{fmt}_input"
     cmd = [
         sys.executable,
@@ -304,3 +312,59 @@ def test_generated_custom_tabular_continuous_retune_smoke(tmp_path: Path):
     assert Path(correction["artifacts"]["retuned_correction_cache_h5"]).exists()
     _assert_retuned_continuous_outputs(correction, roi)
     assert _hash_production_outputs(run_dir, roi) == before
+
+
+def test_wrapper_continuous_cli_overrides_propagate_to_analysis_subprocess(tmp_path: Path):
+    cfg = REPO_ROOT / "tests" / "test_config.yaml"
+    input_dir, _generation_manifest = _generate_continuous_dataset(
+        tmp_path,
+        "custom_tabular",
+        hours=0.67,
+        cfg=cfg,
+    )
+    run_dir = tmp_path / "manual_failure_regression_out"
+
+    _run_full_workflow(input_dir, run_dir, cfg, "custom_tabular", mode="both")
+
+    phasic_cache = run_dir / "_analysis" / "phasic_out" / "phasic_trace_cache.h5"
+    tonic_cache = run_dir / "_analysis" / "tonic_out" / "tonic_trace_cache.h5"
+    assert phasic_cache.exists()
+    assert tonic_cache.exists()
+    assert (run_dir / "Region0" / "tables" / "continuous_phasic_window_summary.csv").exists()
+    assert (run_dir / "Region0" / "tables" / "continuous_tonic_window_summary.csv").exists()
+    assert (run_dir / "Region0" / "summary" / "phasic_peak_rate_timeseries.png").exists()
+    assert (run_dir / "Region0" / "summary" / "phasic_auc_timeseries.png").exists()
+    assert (run_dir / "Region0" / "summary" / "tonic_overview.png").exists()
+
+    status = _load_json(run_dir / "status.json")
+    assert status["status"] == "success"
+    phasic_summary = pd.read_csv(run_dir / "Region0" / "tables" / "continuous_phasic_window_summary.csv")
+    tonic_summary = pd.read_csv(run_dir / "Region0" / "tables" / "continuous_tonic_window_summary.csv")
+    assert len(phasic_summary) > 1
+    assert len(tonic_summary) > 1
+
+    with h5py.File(phasic_cache, "r") as h5:
+        attrs = h5["roi"]["Region0"]["chunk_0"].attrs
+        assert attrs["acquisition_mode"] == "continuous"
+        assert int(attrs["window_index"]) == 0
+        assert float(attrs["window_start_sec"]) == 0.0
+        assert float(attrs["window_end_sec"]) == WINDOW_SEC
+        assert float(attrs["window_duration_sec"]) == WINDOW_SEC
+
+    phasic_cfg = yaml.safe_load(
+        (run_dir / "_analysis" / "phasic_out" / "config_used.yaml").read_text(encoding="utf-8")
+    )
+    tonic_cfg = yaml.safe_load(
+        (run_dir / "_analysis" / "tonic_out" / "config_used.yaml").read_text(encoding="utf-8")
+    )
+    assert phasic_cfg["acquisition_mode"] == "continuous"
+    assert tonic_cfg["acquisition_mode"] == "continuous"
+    assert float(phasic_cfg["continuous_window_sec"]) == WINDOW_SEC
+    assert float(tonic_cfg["continuous_window_sec"]) == WINDOW_SEC
+
+    manifest = _load_json(run_dir / "MANIFEST.json")
+    command_text = "\n".join(" ".join(entry["cmd"]) for entry in manifest["commands"])
+    assert "--acquisition-mode continuous" in command_text
+    assert "--continuous-window-sec 600.0" in command_text
+    assert "--continuous-step-sec 600.0" in command_text
+    assert "--no-allow-partial-final-window" in command_text

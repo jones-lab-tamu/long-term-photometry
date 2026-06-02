@@ -1665,6 +1665,19 @@ def main():
         tools_dir = os.path.dirname(os.path.abspath(__file__))
         root_dir = os.path.dirname(tools_dir)
         analyze_script = os.path.join(root_dir, 'analyze_photometry.py')
+
+        def _append_continuous_analysis_args(cmd):
+            """Propagate wrapper-resolved continuous settings to analysis subprocesses."""
+            if effective_acquisition_mode != "continuous":
+                return
+            cmd.extend(["--acquisition-mode", "continuous"])
+            cmd.extend(["--continuous-window-sec", str(effective_continuous_window_sec)])
+            cmd.extend(["--continuous-step-sec", str(effective_continuous_step_sec)])
+            cmd.append(
+                "--allow-partial-final-window"
+                if effective_allow_partial_final_window
+                else "--no-allow-partial-final-window"
+            )
         
         if run_tonic_mode:
             t_phase, started_utc_phase = _phase_start(status_data, "tonic_analysis")
@@ -1687,6 +1700,7 @@ def main():
                 cmd_tonic.extend(['--preview-first-n', str(args.preview_first_n)])
             if resolved_sessions_per_hour is not None: 
                 cmd_tonic.extend(['--sessions-per-hour', str(resolved_sessions_per_hour)])
+            _append_continuous_analysis_args(cmd_tonic)
             if events_path: cmd_tonic.extend(['--events-path', events_path])
             try:
                 manifest['commands'].append(run_cmd(cmd_tonic))
@@ -1720,6 +1734,7 @@ def main():
             if args.preview_first_n is not None: cmd_phasic.extend(['--preview-first-n', str(args.preview_first_n)])
             if resolved_sessions_per_hour is not None: 
                 cmd_phasic.extend(['--sessions-per-hour', str(resolved_sessions_per_hour)])
+            _append_continuous_analysis_args(cmd_phasic)
             if events_path: cmd_phasic.extend(['--events-path', events_path])
             try:
                 manifest['commands'].append(run_cmd(cmd_phasic))
