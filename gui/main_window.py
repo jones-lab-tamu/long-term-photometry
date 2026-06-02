@@ -6852,38 +6852,25 @@ class MainWindow(QMainWindow):
 
     def _on_open_results(self):
         """Open a completed successful output directory into complete-state workspace."""
-        def _valid_completed_dir(path: str) -> tuple[bool, str]:
-            return self._is_openable_completed_results_dir(path)
-
         current = (self._current_run_dir or "").strip()
         output = self._output_dir.text().strip()
-        selected = ""
-        evidence = ""
+        start_dir = ""
+        if output and os.path.isdir(output):
+            start_dir = output
+        elif current and os.path.isdir(current):
+            start_dir = current
 
-        current_ok, current_evidence = _valid_completed_dir(current)
-        if current_ok:
-            selected = current
-            evidence = current_evidence
-        else:
-            output_ok, output_evidence = _valid_completed_dir(output)
-            if output_ok:
-                selected = output
-                evidence = output_evidence
-            else:
-                start_dir = output if output and os.path.isdir(output) else current
-                selected = QFileDialog.getExistingDirectory(
-                    self,
-                    "Select Completed Pipeline Run Folder",
-                    start_dir,
-                )
-                if not selected:
-                    return
-                selected_ok, selected_evidence = _valid_completed_dir(selected)
-                evidence = selected_evidence
-                if not selected_ok:
-                    selected = ""
-
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select Completed Pipeline Run Folder",
+            start_dir,
+        )
         if not selected:
+            return
+
+        selected_ok, evidence = self._is_openable_completed_results_dir(selected)
+
+        if not selected_ok:
             self._append_run_log(
                 f"Open Results blocked: selected directory is not a confirmed successful completed run. {evidence}"
             )
@@ -8909,18 +8896,10 @@ class MainWindow(QMainWindow):
         # Cancel: enabled only when RUNNING (not VALIDATING per rule A)
         self._cancel_btn.setEnabled(state == RunnerState.RUNNING and running)
 
-        # Open Results: enabled after a GUI success, or when the selected output
-        # path is already a completed run with region deliverables.  Continuous
-        # completed runs may have Summary/Tables without intermittent day_plots.
-        is_success = bool(state == RunnerState.SUCCESS)
-        has_success_code = bool(self._runner.final_status_code == "success")
-        selected_results_dir = self._selected_completed_results_dir()
-        selected_is_openable, _selected_evidence = self._is_openable_completed_results_dir(
-            selected_results_dir
-        )
-        self._open_results_btn.setEnabled(
-            bool(not running and ((is_success and has_success_code) or selected_is_openable or is_idle_or_done))
-        )
+        # Open Results is a browse action.  It should be available whenever
+        # no validation/run subprocess is active, independent of current paths
+        # or previous run state.
+        self._open_results_btn.setEnabled(bool(not running))
 
         # Open Run Folder: enabled when done and run_dir exists
         has_run_dir = bool(self._current_run_dir and os.path.isdir(self._current_run_dir))
