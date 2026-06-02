@@ -89,16 +89,21 @@ def _summarize_numeric(values: list[float]) -> dict[str, Any]:
         "max": float(np.max(finite)),
     }
 
+def _cli_option_supplied(option: str) -> bool:
+    prefix = f"{option}="
+    return any(arg == option or str(arg).startswith(prefix) for arg in sys.argv[1:])
+
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="Generate synthetic photometry dataset (RWD/NPM).")
+    parser = argparse.ArgumentParser(description="Generate synthetic photometry dataset (RWD/NPM/custom_tabular).")
     
     # Required
     parser.add_argument('--out', required=True, help="Output root directory")
-    parser.add_argument('--format', required=True, choices=['rwd', 'npm'], help="Output format")
+    parser.add_argument('--format', required=True, choices=['rwd', 'npm', 'custom_tabular'], help="Output format")
     parser.add_argument('--config', required=True, help="Path to config YAML")
     parser.add_argument(
         '--preset',
-        choices=['biological_shared_nuisance', 'realism_stress'],
+        choices=['biological_shared_nuisance', 'realism_stress', 'continuous_realistic'],
         help="Apply specific parameter preset",
     )
     
@@ -106,6 +111,8 @@ def parse_args():
     parser.add_argument('--total-days', type=float, default=3.0)
     parser.add_argument('--recording-duration-min', type=float, default=10.0)
     parser.add_argument('--recordings-per-hour', type=int, default=2)
+    parser.add_argument('--acquisition-mode', choices=['intermittent', 'continuous'], default='intermittent')
+    parser.add_argument('--continuous-duration-hours', type=float, default=None)
     parser.add_argument('--fs-hz', type=float, default=None, help="Sampling rate. If None, uses config.target_fs_hz")
     parser.add_argument('--n-rois', type=int, default=2)
     parser.add_argument('--start-iso', type=str, default="2025-01-01T00:00:00")
@@ -329,6 +336,40 @@ def parse_args():
             f"npm_uv_sig_offset_ms={args.npm_uv_sig_time_offset_ms}, "
             f"npm_uv_sig_jitter_ms_std={args.npm_uv_sig_jitter_ms_std}"
         )
+    elif args.preset == 'continuous_realistic':
+        args.shared_wobble_enable = True
+        args.shared_wobble_amp = 2.0
+        args.shared_wobble_tau_sec = 90.0
+        args.shared_wobble_gain_enable = True
+        args.shared_wobble_gain_mean = 1.0
+        args.shared_wobble_gain_sd = 0.18
+        args.shared_wobble_gain_tau_sec = 180.0
+        args.shared_wobble_offset_enable = True
+        args.shared_wobble_offset_amp = 0.8
+        args.shared_wobble_offset_tau_sec = 240.0
+        args.timestamp_jitter_ms_std = max(args.timestamp_jitter_ms_std, 1.0)
+        args.artifact_motion_rate_per_day = max(args.artifact_motion_rate_per_day, 48.0)
+        args.artifact_motion_amp_range = [
+            max(float(args.artifact_motion_amp_range[0]), 6.0),
+            max(float(args.artifact_motion_amp_range[1]), 18.0),
+        ]
+        args.artifact_drift_amp = max(args.artifact_drift_amp, 18.0)
+        args.artifact_bleach_tau_days = min(args.artifact_bleach_tau_days, 4.0)
+        args.phasic_mode = "phase_locked_to_tonic"
+        args.phasic_ct_gating_mode = "soft"
+        args.phasic_ct_soft_floor = max(args.phasic_ct_soft_floor, 0.35)
+        args.phasic_events_per_10min_mean = max(args.phasic_events_per_10min_mean, 6.0)
+        args.phasic_events_per_10min_sd = max(args.phasic_events_per_10min_sd, 2.0)
+        args.phasic_events_per_10min_min = max(args.phasic_events_per_10min_min, 1)
+        args.phasic_events_per_10min_max = max(args.phasic_events_per_10min_max, 14)
+
+        print(f"Applied Preset: {args.preset}")
+        print(
+            "  Continuous realism: "
+            f"jitter_ms_std={args.timestamp_jitter_ms_std}, "
+            f"motion_rate_per_day={args.artifact_motion_rate_per_day}, "
+            f"events_per_10min_mean={args.phasic_events_per_10min_mean}"
+        )
     
     # Validate
     if args.artifact_motion_neg_prob < 0.0 or args.artifact_motion_neg_prob > 1.0:
@@ -347,6 +388,15 @@ def parse_args():
         low, high = float(args.start_iso_random_offset_min[0]), float(args.start_iso_random_offset_min[1])
         if high < low:
             raise ValueError("--start-iso-random-offset-min requires MIN <= MAX")
+    if args.continuous_duration_hours is not None and args.continuous_duration_hours <= 0:
+        raise ValueError("--continuous-duration-hours must be > 0")
+    if args.acquisition_mode == "continuous" and args.format == "npm":
+        raise ValueError("continuous synthetic generation is not supported for NPM/interleaved format")
+    if args.acquisition_mode == "intermittent" and args.format == "custom_tabular":
+        raise ValueError(
+            "custom_tabular synthetic generation is currently supported only for "
+            "acquisition_mode=continuous; intermittent custom_tabular generation is unsupported."
+        )
 
     # Enforce Best-Biology Constraints
     if args.shared_wobble_gain_enable or args.shared_wobble_offset_enable:
@@ -372,6 +422,10 @@ def parse_args():
     else:
         if args.raw_baseline_sig is None: args.raw_baseline_sig = 250.0
         if args.raw_baseline_uv is None: args.raw_baseline_uv = 235.0
+
+    args._total_days_explicit = _cli_option_supplied("--total-days")
+    args._recording_duration_min_explicit = _cli_option_supplied("--recording-duration-min")
+    args._recordings_per_hour_explicit = _cli_option_supplied("--recordings-per-hour")
 
     return args
 
@@ -890,6 +944,353 @@ def _build_vendor_npm_frame_df(
     return df, support
 
 
+def _strictly_increasing_jittered_time(t_base: np.ndarray, args, rng) -> tuple[np.ndarray, dict[str, Any]]:
+    t = np.asarray(t_base, dtype=float).copy()
+    jitter_summary = {
+        "enabled": bool(args.timestamp_jitter_ms_std > 0.0),
+        "configured_std_ms": float(args.timestamp_jitter_ms_std),
+        "observed_mean_ms": None,
+        "observed_std_ms": None,
+        "observed_max_abs_ms": None,
+    }
+    if args.timestamp_jitter_ms_std > 0.0:
+        jitter_sec = rng.normal(0.0, float(args.timestamp_jitter_ms_std) / 1000.0, size=t.shape)
+        t = t + jitter_sec
+        t = np.maximum.accumulate(t)
+        eps = 1e-9
+        for idx in range(1, t.size):
+            if t[idx] <= t[idx - 1]:
+                t[idx] = t[idx - 1] + eps
+        t = t - float(t[0])
+        jitter_summary.update(
+            {
+                "observed_mean_ms": float(np.mean(jitter_sec) * 1000.0),
+                "observed_std_ms": float(np.std(jitter_sec) * 1000.0),
+                "observed_max_abs_ms": float(np.max(np.abs(jitter_sec)) * 1000.0),
+            }
+        )
+    return t, jitter_summary
+
+
+def _count_waveform_segments(trace: np.ndarray) -> tuple[int, list[float]]:
+    arr = np.asarray(trace, dtype=float)
+    active = np.isfinite(arr) & (np.abs(arr) > 1e-9)
+    starts = np.flatnonzero(active & np.r_[True, ~active[:-1]])
+    return int(starts.size), [float(i) for i in starts]
+
+
+def _continuous_duration_hours(args) -> float:
+    if args.continuous_duration_hours is not None:
+        return float(args.continuous_duration_hours)
+    if bool(getattr(args, "_total_days_explicit", False)):
+        return float(args.total_days) * 24.0
+    return 24.0
+
+
+def _continuous_roi_parameters(args, rng) -> tuple[list[float], list[float], list[float]]:
+    roi_phases = []
+    roi_sig_offsets = []
+    roi_uv_offsets = []
+    for _idx in range(args.n_rois):
+        jitter = rng.uniform(-args.tonic_phase_jitter_hr, args.tonic_phase_jitter_hr)
+        roi_phases.append((args.tonic_phase_ct + jitter) % 24.0)
+
+        off_sig = rng.uniform(args.roi_baseline_offset_range[0], args.roi_baseline_offset_range[1])
+        if rng.random() > 0.5:
+            off_sig *= -1
+        roi_sig_offsets.append(off_sig)
+
+        off_uv = rng.uniform(args.roi_uv_baseline_offset_range[0], args.roi_uv_baseline_offset_range[1])
+        if rng.random() > 0.5:
+            off_uv *= -1
+        roi_uv_offsets.append(off_uv)
+    return roi_phases, roi_sig_offsets, roi_uv_offsets
+
+
+def _continuous_phasic_trace(
+    *,
+    t_global_hours: np.ndarray,
+    phi_rad: np.ndarray,
+    phase_hr: float,
+    args,
+    rng,
+) -> tuple[np.ndarray, int]:
+    out = np.zeros_like(t_global_hours, dtype=float)
+    total_events = 0
+    segment_samples = max(1, int(round(600.0 * float(args.fs_hz))))
+    for start in range(0, len(t_global_hours), segment_samples):
+        end = min(len(t_global_hours), start + segment_samples)
+        if end - start < 2:
+            continue
+        segment, event_indices, _rate_vec, _is_day_vec, _stats = generate_events(
+            t_global_hours[start:end],
+            phi_rad[start:end],
+            phase_hr,
+            args,
+            rng,
+        )
+        out[start:end] += segment
+        total_events += int(len(event_indices))
+    return out, total_events
+
+
+def _generate_continuous_dataset(
+    *,
+    args,
+    cfg: Config,
+    rng,
+    start_dt: datetime.datetime,
+    start_dt_offset_min: float,
+) -> None:
+    if args.format == "npm":
+        raise ValueError("continuous synthetic generation is not supported for NPM/interleaved format")
+
+    duration_hours = _continuous_duration_hours(args)
+    duration_sec = float(duration_hours) * 3600.0
+    n_samples = int(round(duration_sec * float(args.fs_hz)))
+    if n_samples < 2:
+        raise ValueError("continuous synthetic generation requires at least 2 samples")
+    t_base = np.arange(n_samples, dtype=float) / float(args.fs_hz)
+    t_write, jitter_summary = _strictly_increasing_jittered_time(t_base, args, rng)
+    t_global_sec = t_base
+    t_global_hours = t_global_sec / 3600.0
+    t_days = t_global_sec / 86400.0
+
+    roi_names = [f"Region{i}" for i in range(args.n_rois)]
+    roi_phases, roi_sig_offsets, roi_uv_offsets = _continuous_roi_parameters(args, rng)
+
+    if args.artifact_enable_motion:
+        motion_base = generate_motion_artifacts(n_samples, args, rng)
+    else:
+        motion_base = np.zeros(n_samples, dtype=float)
+    motion_base *= args.artifact_scale
+    motion_count, motion_starts_idx = _count_waveform_segments(motion_base)
+    motion_times_sec = [float(t_base[int(i)]) for i in motion_starts_idx]
+
+    bleach_frac = 1.0 - np.exp(-t_days / args.artifact_bleach_tau_days)
+    drift_au = args.artifact_drift_amp * bleach_frac
+    if not args.artifact_enable_drift:
+        drift_au = np.zeros_like(drift_au)
+    drift_au *= args.artifact_scale
+
+    noise_shared = rng.normal(0, args.noise_shared_std, n_samples)
+    wobble_base = generate_ar1_wobble(n_samples, args, rng)
+    if args.shared_wobble_gain_enable:
+        gain_vec = generate_ar1_series(
+            n_samples,
+            args,
+            rng,
+            args.shared_wobble_gain_mean,
+            args.shared_wobble_gain_sd,
+            args.shared_wobble_gain_tau_sec,
+            clamp_min=0.1,
+        )
+    else:
+        gain_vec = np.ones(n_samples)
+    if args.shared_wobble_offset_enable:
+        offset_vec = generate_ar1_series(
+            n_samples,
+            args,
+            rng,
+            0.0,
+            args.shared_wobble_offset_amp,
+            args.shared_wobble_offset_tau_sec,
+        )
+    else:
+        offset_vec = np.zeros(n_samples)
+
+    wobble_uv = wobble_base * args.shared_wobble_iso_scale
+    event_counts: dict[str, int] = {}
+    uv_data_all: list[np.ndarray] = []
+    sig_data_all: list[np.ndarray] = []
+
+    for idx, roi in enumerate(roi_names):
+        phase = roi_phases[idx]
+        period_sec = 24.0 * 3600.0
+        peak_center_phi01 = get_peak_center_phi01()
+        peak_center_hr = peak_center_phi01 * 24.0
+        phase_offset = (peak_center_hr - phase) * 3600.0
+        phi_01 = ((t_global_sec + phase_offset) % period_sec) / period_sec
+        phi_rad_unwrapped = (phi_01 - 0.625) * 2.0 * np.pi
+        phi_rad = (phi_rad_unwrapped + np.pi) % (2.0 * np.pi) - np.pi
+        tonic_env = tonic_envelope_from_phase_01(phi_01)
+        tonic_val = tonic_env * (20.0 * args.tonic_amplitude)
+        phasic_val, n_events = _continuous_phasic_trace(
+            t_global_hours=t_global_hours,
+            phi_rad=phi_rad,
+            phase_hr=phase,
+            args=args,
+            rng=rng,
+        )
+        event_counts[roi] = int(n_events)
+
+        comp_uv = (
+            (motion_base * args.artifact_coupling)
+            - (drift_au * args.uv_drift_scale)
+            + wobble_uv
+            + noise_shared * args.noise_shared_uv_scale
+        )
+        noise_uv = rng.normal(0, args.noise_uv_std, n_samples)
+        uv = (args.raw_baseline_uv + roi_uv_offsets[idx]) + args.raw_scale * comp_uv
+        uv = uv + args.raw_scale * noise_uv
+
+        iso_true = args.iso_slope_true * uv + args.iso_intercept_true
+        neural = args.raw_scale * (tonic_val + phasic_val)
+        noise_sig_independent = rng.normal(0, args.noise_sig_std, n_samples)
+        sig = iso_true + neural + args.raw_scale * noise_sig_independent
+        sig = np.maximum(sig, 1.0)
+        uv = np.maximum(uv, 1.0)
+
+        uv_data_all.append(uv)
+        sig_data_all.append(sig)
+
+    channel_columns: dict[str, Any] = {}
+    pipeline_channel_names: list[str] = list(roi_names)
+    output_files: list[str] = []
+    if args.format == "custom_tabular":
+        time_col = str(getattr(cfg, "custom_tabular_time_col", "time_sec") or "time_sec")
+        uv_suffix = str(getattr(cfg, "custom_tabular_uv_suffix", "_iso") or "_iso")
+        sig_suffix = str(getattr(cfg, "custom_tabular_sig_suffix", "_sig") or "_sig")
+        cols: dict[str, Any] = {time_col: t_write}
+        per_roi_cols = {}
+        for idx, roi in enumerate(roi_names):
+            uv_col = f"{roi}{uv_suffix}"
+            sig_col = f"{roi}{sig_suffix}"
+            cols[uv_col] = uv_data_all[idx]
+            cols[sig_col] = sig_data_all[idx]
+            per_roi_cols[roi] = {"pipeline_channel_name": roi, "uv": uv_col, "sig": sig_col}
+        out_csv = os.path.join(args.out, "continuous_recording.csv")
+        pd.DataFrame(cols).to_csv(out_csv, index=False)
+        output_files.append("continuous_recording.csv")
+        channel_columns = {"time_col": time_col, "per_roi": per_roi_cols}
+    elif args.format == "rwd":
+        dirname = start_dt.strftime("%Y_%m_%d-%H_%M_%S")
+        chunk_dir = os.path.join(args.out, dirname)
+        os.makedirs(chunk_dir, exist_ok=True)
+        cols = {"TimeStamp": t_write, "Events": [""] * n_samples}
+        per_roi_cols = {}
+        pipeline_channel_names = []
+        for idx, roi in enumerate(roi_names):
+            ch_name = f"CH{idx + 1}"
+            pipeline_channel_names.append(ch_name)
+            uv_col = f"{ch_name}{cfg.uv_suffix}"
+            sig_col = f"{ch_name}{cfg.sig_suffix}"
+            cols[uv_col] = uv_data_all[idx]
+            cols[sig_col] = sig_data_all[idx]
+            per_roi_cols[roi] = {"pipeline_channel_name": ch_name, "uv": uv_col, "sig": sig_col}
+        metadata_blob = _build_vendor_rwd_metadata_blob(
+            n_rois=args.n_rois,
+            fs_hz=args.fs_hz,
+            chunk_duration_sec=duration_sec,
+        )
+        rel_path = os.path.join(dirname, "fluorescence.csv")
+        _write_vendor_rwd_chunk_csv(
+            os.path.join(args.out, rel_path),
+            pd.DataFrame(cols),
+            metadata_blob,
+        )
+        output_files.append(rel_path.replace("\\", "/"))
+        channel_columns = {"time_col": "TimeStamp", "per_roi": per_roi_cols}
+    else:
+        raise ValueError(f"Unsupported continuous synthetic format: {args.format}")
+
+    expected_full_windows = int(np.floor(duration_sec / 600.0))
+    remainder = float(duration_sec - expected_full_windows * 600.0)
+    generation_manifest = {
+        "schema_version": 1,
+        "generator": {
+            "script": "tools/synth_photometry_dataset.py",
+            "git_commit": _safe_git_commit(),
+        },
+        "command": {
+            "argv": list(sys.argv[1:]),
+            "argv_string": " ".join(sys.argv[1:]),
+            "parsed_args": _json_yaml_safe(vars(args)),
+        },
+        "acquisition_mode": "continuous",
+        "format": str(args.format),
+        "preset": str(args.preset or "none"),
+        "resolved_preset": str(args.preset or "none"),
+        "seed": int(args.seed),
+        "start_time": {
+            "requested_start_iso": str(args.start_iso),
+            "random_offset_min_applied": float(start_dt_offset_min),
+            "resolved_start_iso": start_dt.isoformat(),
+        },
+        "duration": {
+            "duration_sec": float(duration_sec),
+            "duration_hours": float(duration_hours),
+            "total_days": float(duration_hours) / 24.0,
+        },
+        "fs_hz": float(args.fs_hz),
+        "n_samples": int(n_samples),
+        "n_rois": int(args.n_rois),
+        "roi_names": roi_names,
+        "pipeline_channel_names": pipeline_channel_names,
+        "channel_columns": channel_columns,
+        "output_files": output_files,
+        "continuous_windows": {
+            "default_window_sec": 600.0,
+            "expected_continuous_window_count": int(expected_full_windows),
+            "expected_partial_final_window": bool(remainder > 1e-9),
+        },
+        "signal_components": {
+            "tonic": True,
+            "phasic": True,
+            "shared_nuisance": bool(args.shared_wobble_enable),
+            "motion_artifacts": bool(args.artifact_enable_motion),
+            "bleaching_drift": bool(args.artifact_enable_drift),
+        },
+        "bleaching_drift": {
+            "enabled": bool(args.artifact_enable_drift),
+            "amplitude_au": float(args.artifact_drift_amp),
+            "tau_days": float(args.artifact_bleach_tau_days),
+        },
+        "circadian": {
+            "enabled": True,
+            "period_hours": 24.0,
+            "tonic_amplitude": float(args.tonic_amplitude),
+            "roi_phase_hours": [float(x) for x in roi_phases],
+        },
+        "events": {
+            "event_counts_per_roi": event_counts,
+            "events_per_10min_mean": float(args.phasic_events_per_10min_mean),
+            "events_per_10min_sd": float(args.phasic_events_per_10min_sd),
+            "ct_gating_mode": str(args.phasic_ct_gating_mode),
+            "ct_soft_floor": float(args.phasic_ct_soft_floor),
+        },
+        "artifacts": {
+            "motion_artifact_count": int(motion_count),
+            "motion_artifact_times_sec": motion_times_sec,
+            "motion_rate_per_day": float(args.artifact_motion_rate_per_day),
+        },
+        "timestamp_jitter": jitter_summary,
+        "provenance": {
+            "generated_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        },
+        "ignored_in_continuous_mode": [
+            "recording_duration_min and recordings_per_hour are ignored in acquisition_mode=continuous"
+        ],
+        "session_model": "single_continuous_source",
+        "sessions_requested": 1,
+        "sessions_generated": 1,
+    }
+    if bool(args.write_generation_manifest):
+        manifest_path = os.path.join(args.out, "generation_manifest.yaml")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                _json_yaml_safe(generation_manifest),
+                f,
+                sort_keys=False,
+                allow_unicode=False,
+            )
+        print(f"Wrote generation manifest: {manifest_path}")
+    print(
+        "Generated continuous synthetic dataset: "
+        f"format={args.format}, samples={n_samples}, duration_hours={duration_hours:.3f}"
+    )
+
+
 def main():
     args = parse_args()
     
@@ -902,16 +1303,8 @@ def main():
     if args.fs_hz is None:
         args.fs_hz = float(cfg.target_fs_hz)
 
-    expected_chunk_dur = float(cfg.chunk_duration_sec)
-    actual_dur = args.recording_duration_min * 60.0
-    if abs(actual_dur - expected_chunk_dur) > (1.0 / args.fs_hz):
-        raise ValueError(f"recording duration mismatch: args {actual_dur}s vs config {expected_chunk_dur}s")
-
     rng = np.random.default_rng(args.seed)
 
-    os.makedirs(args.out, exist_ok=True)
-
-    chunk_interval_sec = 3600.0 / args.recordings_per_hour
     base_start_dt = datetime.datetime.fromisoformat(args.start_iso)
     start_dt_offset_min = 0.0
     if args.start_iso_random_offset_min is not None:
@@ -919,6 +1312,28 @@ def main():
         offset_max = float(args.start_iso_random_offset_min[1])
         start_dt_offset_min = float(rng.uniform(offset_min, offset_max))
     start_dt = base_start_dt + datetime.timedelta(minutes=float(start_dt_offset_min))
+
+    if args.acquisition_mode == "continuous":
+        if args.format == "npm":
+            raise ValueError("continuous synthetic generation is not supported for NPM/interleaved format")
+        os.makedirs(args.out, exist_ok=True)
+        _generate_continuous_dataset(
+            args=args,
+            cfg=cfg,
+            rng=rng,
+            start_dt=start_dt,
+            start_dt_offset_min=start_dt_offset_min,
+        )
+        return
+
+    expected_chunk_dur = float(cfg.chunk_duration_sec)
+    actual_dur = args.recording_duration_min * 60.0
+    if abs(actual_dur - expected_chunk_dur) > (1.0 / args.fs_hz):
+        raise ValueError(f"recording duration mismatch: args {actual_dur}s vs config {expected_chunk_dur}s")
+
+    os.makedirs(args.out, exist_ok=True)
+
+    chunk_interval_sec = 3600.0 / args.recordings_per_hour
     
     total_hours = args.total_days * 24.0
     total_intervals = int(np.floor(total_hours * args.recordings_per_hour))

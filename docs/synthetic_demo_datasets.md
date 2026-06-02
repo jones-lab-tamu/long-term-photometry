@@ -92,6 +92,37 @@ Characteristics:
 - multi-ROI sessions
 - auditable anomaly manifest
 
+## Continuous synthetic demo datasets
+
+Continuous synthetic datasets use the same signal realism components as the intermittent generator but emit one continuous acquisition source. CI examples are intentionally short; multi-day demo commands use the same code path.
+
+Short custom_tabular CI/regression command:
+```powershell
+python tools/synth_photometry_dataset.py --out tests/out_continuous_custom_tabular_ci --format custom_tabular --config tests/test_config.yaml --acquisition-mode continuous --preset continuous_realistic --continuous-duration-hours 0.67 --fs-hz 10 --n-rois 2 --start-iso 2025-01-01T13:37:11 --seed 401
+```
+
+Short RWD CI/regression command:
+```powershell
+python tools/synth_photometry_dataset.py --out tests/out_continuous_rwd_ci --format rwd --config tests/test_config.yaml --acquisition-mode continuous --preset continuous_realistic --continuous-duration-hours 0.67 --fs-hz 10 --n-rois 2 --start-iso 2025-01-01T13:37:11 --seed 402
+```
+
+Multi-day custom_tabular demo command:
+```powershell
+python tools/synth_photometry_dataset.py --out example_data/demo_continuous_custom_tabular --format custom_tabular --config tests/test_config.yaml --acquisition-mode continuous --preset continuous_realistic --total-days 3 --fs-hz 10 --n-rois 4 --start-iso 2025-01-03T11:22:00 --seed 2026
+```
+
+Multi-day RWD demo command:
+```powershell
+python tools/synth_photometry_dataset.py --out example_data/demo_continuous_rwd --format rwd --config tests/test_config.yaml --acquisition-mode continuous --preset continuous_realistic --total-days 3 --fs-hz 10 --n-rois 4 --start-iso 2025-01-03T11:22:00 --seed 2027
+```
+
+Continuous dataset characteristics:
+- `custom_tabular` output is one top-level `continuous_recording.csv`
+- RWD output is one timestamped folder containing one `fluorescence.csv`
+- `generation_manifest.yaml` records duration, sample count, ROI count, channel columns, event counts, motion artifacts, timestamp jitter, and expected 600 s continuous windows
+- NPM/interleaved continuous synthetic generation is intentionally unsupported
+- `continuous_realistic` is pipeline-usable synthetic data, not a malformed-file stress fixture
+
 ## What these fixtures do not test
 
 These fixtures do not currently simulate:
