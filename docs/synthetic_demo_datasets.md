@@ -123,6 +123,33 @@ Continuous dataset characteristics:
 - NPM/interleaved continuous synthetic generation is intentionally unsupported
 - `continuous_realistic` is pipeline-usable synthetic data, not a malformed-file stress fixture
 
+## Manual end-to-end continuous workflow smoke test
+
+Use this sequence when manually checking the generated continuous workflow outside pytest. It creates a short generated custom_tabular continuous dataset, runs validation, then runs the full tonic+phasic workflow with 600 s windows.
+
+```powershell
+python tools/synth_photometry_dataset.py --out example_data/continuous_custom_tabular_smoke --format custom_tabular --config tests/test_config.yaml --acquisition-mode continuous --preset continuous_realistic --continuous-duration-hours 0.67 --fs-hz 10 --n-rois 2 --start-iso 2025-01-01T13:37:11 --seed 2026
+```
+
+```powershell
+python tools/run_full_pipeline_deliverables.py --input example_data/continuous_custom_tabular_smoke --out example_data/continuous_custom_tabular_validate --config tests/test_config.yaml --format custom_tabular --acquisition-mode continuous --continuous-window-sec 600 --continuous-step-sec 600 --validate-only --overwrite
+```
+
+Expected validation behavior:
+- `VALIDATE-ONLY: OK`
+- planned windows should match `generation_manifest.yaml` `continuous_windows.expected_continuous_window_count`
+
+```powershell
+python tools/run_full_pipeline_deliverables.py --input example_data/continuous_custom_tabular_smoke --out example_data/continuous_custom_tabular_full --config tests/test_config.yaml --format custom_tabular --mode both --acquisition-mode continuous --continuous-window-sec 600 --continuous-step-sec 600 --overwrite
+```
+
+Expected full-run behavior:
+- `status.json` and `MANIFEST.json` report success
+- `_analysis/phasic_out/phasic_trace_cache.h5` and `_analysis/tonic_out/tonic_trace_cache.h5` are produced
+- each ROI has continuous phasic and tonic summary tables under `<roi>/tables/`
+- each ROI has elapsed-time phasic and tonic summary plots under `<roi>/summary/`
+- completed-run loading should expose the ROI `Summary` and `Tables` folders
+
 ## What these fixtures do not test
 
 These fixtures do not currently simulate:
