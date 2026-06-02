@@ -78,7 +78,6 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertGreaterEqual(idx_cont, 0)
         w1._acquisition_mode_combo.setCurrentIndex(idx_cont)
         w1._continuous_window_sec_spin.setValue(900.0)
-        w1._continuous_step_sec_spin.setValue(900.0)
         w1._allow_partial_final_window_cb.setChecked(True)
         w1._smooth_spin.setValue(2.5)
         w1._export_display_series_csv_cb.setChecked(True)

@@ -121,11 +121,10 @@ def test_effective_run_summary_updates(window):
         window._acquisition_mode_combo.findData("continuous")
     )
     window._continuous_window_sec_spin.setValue(900.0)
-    window._continuous_step_sec_spin.setValue(900.0)
     window._allow_partial_final_window_cb.setChecked(True)
     text3 = window._effective_summary_label.text()
     assert "Acquisition Mode: Continuous recording (internally windowed)" in text3
-    assert "Continuous Window Plan: window=900.0s, step=900.0s, allow partial final window=on" in text3
+    assert "Continuous Window Plan: window=900.0s, non-overlapping step=900.0s, allow partial final window=on" in text3
     assert (
         "Continuous mode note: continuous mode is for uninterrupted acquisition files. "
         "In continuous-capable runs, recordings are split into internal computational windows; "
@@ -142,7 +141,8 @@ def test_continuous_mode_deemphasizes_session_controls(window):
     assert not window._sph_edit.isEnabled()
     assert not window._duration_edit.isEnabled()
     assert window._continuous_window_sec_spin.isEnabled()
-    assert window._continuous_step_sec_spin.isEnabled()
+    assert not window._continuous_step_sec_spin.isVisible()
+    assert not window._continuous_step_sec_spin.isEnabled()
     assert window._allow_partial_final_window_cb.isEnabled()
     assert "Ignored in continuous mode" in window._sph_warning.text()
 
@@ -230,7 +230,6 @@ def test_advanced_tooltips_present(window):
         ("Session Duration (s):", window._duration_edit),
         ("Acquisition Mode:", window._acquisition_mode_combo),
         ("Continuous Window (s):", window._continuous_window_sec_spin),
-        ("Continuous Step (s):", window._continuous_step_sec_spin),
         ("Allow Partial Final Window:", window._allow_partial_final_window_cb),
         ("Mode:", window._mode_combo),
         ("Run Type:", window._run_profile_combo),

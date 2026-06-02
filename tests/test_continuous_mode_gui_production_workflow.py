@@ -86,7 +86,6 @@ def _configure_gui_for_custom_tabular(
     window._mode_combo.setCurrentText(validate_mode)
     _select_combo_data(window._acquisition_mode_combo, acquisition_mode)
     window._continuous_window_sec_spin.setValue(600.0)
-    window._continuous_step_sec_spin.setValue(600.0)
     window._allow_partial_final_window_cb.setChecked(False)
     window._sph_edit.setText("2")
     window._duration_edit.setText("600")
@@ -101,12 +100,13 @@ def _run(argv: list[str]) -> subprocess.CompletedProcess:
 def test_gui_runspec_serializes_continuous_mode_and_widget_state(window, tmp_path: Path):
     _configure_gui_for_custom_tabular(window, tmp_path, acquisition_mode="continuous")
     window._continuous_window_sec_spin.setValue(900.0)
-    window._continuous_step_sec_spin.setValue(900.0)
     window._allow_partial_final_window_cb.setChecked(True)
     window._update_context_sensitive_controls()
 
     assert window._continuous_window_sec_spin.isEnabled()
-    assert window._continuous_step_sec_spin.isEnabled()
+    assert not window._continuous_step_sec_spin.isVisible()
+    assert not window._continuous_step_sec_spin.isEnabled()
+    assert window._continuous_step_sec_spin.value() == pytest.approx(900.0)
     assert window._allow_partial_final_window_cb.isEnabled()
     assert not window._sph_edit.isEnabled()
     assert not window._duration_edit.isEnabled()
@@ -126,8 +126,78 @@ def test_gui_runspec_serializes_continuous_mode_and_widget_state(window, tmp_pat
     _select_combo_data(window._acquisition_mode_combo, "intermittent")
     window._update_context_sensitive_controls()
     assert not window._continuous_window_sec_spin.isEnabled()
+    assert not window._continuous_step_sec_spin.isVisible()
     assert not window._continuous_step_sec_spin.isEnabled()
     assert not window._allow_partial_final_window_cb.isEnabled()
+
+
+def test_continuous_window_tooltip_and_step_sync(window, tmp_path: Path):
+    _configure_gui_for_custom_tabular(window, tmp_path, acquisition_mode="continuous")
+    tooltip = window._continuous_window_sec_spin.toolTip().lower()
+    assert "analysis window" in tooltip
+    assert "continuous recording" in tooltip
+    assert "non-overlapping" in tooltip
+    assert "chunk" in tooltip
+
+    step_tooltip = window._continuous_step_sec_spin.toolTip().lower()
+    assert "automatically set to match continuous window" in step_tooltip
+    assert "non-overlapping windows only" in step_tooltip
+    assert "sliding/overlapping windows are not supported" in step_tooltip
+
+    window._continuous_window_sec_spin.setValue(300.0)
+    window._update_context_sensitive_controls()
+
+    assert not window._continuous_step_sec_spin.isVisible()
+    assert not window._continuous_step_sec_spin.isEnabled()
+    assert window._continuous_step_sec_spin.value() == pytest.approx(300.0)
+    spec = window._build_run_spec(validate_only=True)
+    assert spec.continuous_window_sec == pytest.approx(300.0)
+    assert spec.continuous_step_sec == pytest.approx(300.0)
+    argv = spec.build_runner_argv()
+    assert "--continuous-window-sec" in argv
+    assert argv[argv.index("--continuous-window-sec") + 1] == "300.0"
+    assert "--continuous-step-sec" in argv
+    assert argv[argv.index("--continuous-step-sec") + 1] == "300.0"
+
+
+def test_partial_final_window_tooltip(window):
+    tooltip = window._allow_partial_final_window_cb.toolTip().lower()
+    assert "keeps a final shorter window" in tooltip
+    assert "trailing partial window is dropped" in tooltip
+
+
+def test_continuous_tuning_terminology_uses_window_chunk(window, tmp_path: Path):
+    run_dir = tmp_path / "continuous_completed"
+    phasic_out = run_dir / "_analysis" / "phasic_out"
+    phasic_out.mkdir(parents=True)
+    (phasic_out / "config_used.yaml").write_text(
+        "acquisition_mode: continuous\ncontinuous_window_sec: 600\ncontinuous_step_sec: 600\n",
+        encoding="utf-8",
+    )
+    window._current_run_dir = str(run_dir)
+    window._refresh_tuning_chunk_terminology()
+
+    assert "window" in window._tuning_chunk_label.text().lower()
+    assert "chunk" in window._tuning_chunk_label.text().lower()
+    assert "session" not in window._tuning_chunk_label.text().lower()
+    assert "fixed-length analysis windows" in window._tuning_chunk_combo.toolTip()
+    assert "not acquisition sessions" in window._tuning_chunk_combo.toolTip()
+    assert "window" in window._correction_tuning_chunk_label.text().lower()
+    assert "chunk" in window._correction_tuning_chunk_label.text().lower()
+    assert "session" not in window._correction_tuning_chunk_label.text().lower()
+    assert "fixed-length analysis windows" in window._correction_tuning_chunk_combo.toolTip()
+
+
+def test_intermittent_tuning_terminology_remains_session_based(window, tmp_path: Path):
+    _configure_gui_for_custom_tabular(window, tmp_path, acquisition_mode="intermittent")
+    window._current_run_dir = ""
+    window._refresh_tuning_chunk_terminology()
+    window._update_context_sensitive_controls()
+
+    assert window._tuning_chunk_label.text() == "Preview session:"
+    assert "session" in window._tuning_chunk_combo.toolTip().lower()
+    assert window._correction_tuning_chunk_label.text() == "Preview session:"
+    assert "session" in window._correction_tuning_chunk_combo.toolTip().lower()
     assert window._sph_edit.isEnabled()
     assert window._duration_edit.isEnabled()
 

@@ -1848,9 +1848,12 @@ class MainWindow(QMainWindow):
         self._tuning_chunk_combo = QComboBox()
         self._tuning_chunk_combo.setMinimumWidth(220)
         self._tuning_chunk_combo.setToolTip(
-            "Used for preview/inspection in the tuning workspace."
+            "Preview window/chunk used for inspection in the tuning workspace. "
+            "Continuous mode chunks are fixed-length analysis windows from the "
+            "continuous recording, not acquisition sessions."
         )
-        tuning_form.addRow(_tuning_row_label("Preview session:"), self._tuning_chunk_combo)
+        self._tuning_chunk_label = _tuning_row_label("Preview session:")
+        tuning_form.addRow(self._tuning_chunk_label, self._tuning_chunk_combo)
 
         self._tuning_event_signal_combo = QComboBox()
         self._tuning_event_signal_combo.setMinimumWidth(220)
@@ -1971,7 +1974,7 @@ class MainWindow(QMainWindow):
         btn_row = QHBoxLayout()
         self._run_tuning_btn = QPushButton("Run Tuning")
         self._run_tuning_btn.setToolTip(
-            "Run downstream cache retuning for the selected ROI and preview session."
+            "Run downstream cache retuning for the selected ROI and preview window/chunk."
         )
         self._run_tuning_btn.clicked.connect(self._on_run_tuning)
         btn_row.addWidget(self._run_tuning_btn)
@@ -2032,11 +2035,11 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(self._tuning_overlay_title)
 
         self._tuning_overlay_label = _ClickableImageLabel(
-            "Run tuning to generate an ROI preview-session event overlay."
+            "Run tuning to generate an ROI preview window/chunk event overlay."
         )
         self._tuning_overlay_label.setAlignment(Qt.AlignCenter)
         self._tuning_overlay_label.setToolTip(
-            "Preview overlay for the selected downstream ROI and preview session. "
+            "Preview overlay for the selected downstream ROI and preview window/chunk. "
             "Click image to toggle fit/full-size inspection."
         )
         self._tuning_overlay_label.setStyleSheet(
@@ -2199,7 +2202,7 @@ class MainWindow(QMainWindow):
         self._correction_tuning_roi_combo = QComboBox()
         self._correction_tuning_roi_combo.setMinimumWidth(220)
         self._correction_tuning_roi_combo.setToolTip(
-            "ROI whose baseline and correction will be recomputed across all available sessions."
+            "ROI whose baseline and correction will be recomputed across all available sessions/windows."
         )
         self._correction_tuning_roi_combo.currentIndexChanged.connect(
             self._on_correction_tuning_roi_changed
@@ -2209,9 +2212,12 @@ class MainWindow(QMainWindow):
         self._correction_tuning_chunk_combo = QComboBox()
         self._correction_tuning_chunk_combo.setMinimumWidth(220)
         self._correction_tuning_chunk_combo.setToolTip(
-            "Used only for the inspection figure. Does not limit recomputation."
+            "Preview window/chunk used only for the inspection figure. Does not "
+            "limit recomputation. Continuous mode chunks are fixed-length analysis "
+            "windows from the continuous recording, not acquisition sessions."
         )
-        form.addRow(_corr_row_label("Preview session:"), self._correction_tuning_chunk_combo)
+        self._correction_tuning_chunk_label = _corr_row_label("Preview session:")
+        form.addRow(self._correction_tuning_chunk_label, self._correction_tuning_chunk_combo)
 
         self._correction_tuning_baseline_method_combo = QComboBox()
         self._correction_tuning_baseline_method_combo.setMinimumWidth(240)
@@ -2674,7 +2680,7 @@ class MainWindow(QMainWindow):
         )
         self._correction_tuning_inspection_label.setAlignment(Qt.AlignCenter)
         self._correction_tuning_inspection_label.setToolTip(
-            "Inspection panel for the selected preview session after correction retune. "
+            "Inspection panel for the selected preview window/chunk after correction retune. "
             "Use previous/next to switch Raw/Centered/Fit/dF/F views. "
             "Click image to toggle fit/full-size inspection."
         )
@@ -3352,6 +3358,61 @@ class MainWindow(QMainWindow):
             self._tuning_chunk_combo.addItem(str(cid), cid)
         self._tuning_chunk_combo.blockSignals(False)
 
+    def _refresh_tuning_chunk_terminology(self) -> None:
+        continuous = self._is_loaded_continuous_run()
+        tooltip = (
+            "Continuous mode chunks are fixed-length analysis windows from the "
+            "continuous recording, not acquisition sessions."
+        )
+        if hasattr(self, "_tuning_chunk_label"):
+            self._tuning_chunk_label.setText(
+                "Preview window / chunk:" if continuous else "Preview session:"
+            )
+            self._tuning_chunk_label.setToolTip(
+                tooltip if continuous else "Preview session used for inspection in the tuning workspace."
+            )
+        if hasattr(self, "_tuning_chunk_combo"):
+            self._tuning_chunk_combo.setToolTip(
+                (
+                    "Preview window/chunk used for inspection in the tuning workspace. "
+                    + tooltip
+                )
+                if continuous
+                else "Preview session used for inspection in the tuning workspace."
+            )
+        if hasattr(self, "_correction_tuning_chunk_label"):
+            self._correction_tuning_chunk_label.setText(
+                "Preview window / chunk:" if continuous else "Preview session:"
+            )
+            self._correction_tuning_chunk_label.setToolTip(
+                tooltip if continuous else "Preview session used only for the inspection figure."
+            )
+        if hasattr(self, "_correction_tuning_chunk_combo"):
+            self._correction_tuning_chunk_combo.setToolTip(
+                (
+                    "Preview window/chunk used only for the inspection figure. "
+                    "Does not limit recomputation. "
+                    + tooltip
+                )
+                if continuous
+                else "Preview session used only for the inspection figure. Does not limit recomputation."
+            )
+        if hasattr(self, "_correction_tuning_scope_note"):
+            if continuous:
+                self._correction_tuning_scope_note.setText(
+                    "Recomputes baseline and correction for the selected ROI across all available windows/chunks. "
+                    "The preview window/chunk is used only for the inspection figure. "
+                    "Outputs are written to an isolated retune directory. "
+                    "Production run artifacts are not modified."
+                )
+            else:
+                self._correction_tuning_scope_note.setText(
+                    "Recomputes baseline and correction for the selected ROI across all sessions available for that ROI. "
+                    "The preview session is used only for the inspection figure. "
+                    "Outputs are written to an isolated retune directory. "
+                    "Production run artifacts are not modified."
+                )
+
     def _populate_tuning_roi_choices(
         self,
         *,
@@ -3443,6 +3504,7 @@ class MainWindow(QMainWindow):
             self._refresh_dff_dayplot_rerender_availability()
             return
         self._roi_chunk_ids_cache = {}
+        self._refresh_tuning_chunk_terminology()
 
         # Keep complete-state flag synchronized with a loaded results workspace.
         # This prevents stale "no completed run loaded" tuning gating when the
@@ -3524,21 +3586,23 @@ class MainWindow(QMainWindow):
         try:
             roi_chunk_map = self._roi_chunk_ids_map(cache_path)
         except Exception as exc:
+            target_text = "ROI/window targets" if self._is_loaded_continuous_run() else "ROI/session targets"
             self._set_tuning_workspace_unavailable(
-                f"Tuning unavailable: unable to read ROI/session targets from phasic cache ({exc})."
+                f"Tuning unavailable: unable to read {target_text} from phasic cache ({exc})."
             )
             self._set_correction_tuning_workspace_unavailable(
-                f"Correction retune unavailable: unable to read ROI/session targets from phasic cache ({exc})."
+                f"Correction retune unavailable: unable to read {target_text} from phasic cache ({exc})."
             )
             return
         self._roi_chunk_ids_cache = roi_chunk_map
         valid_rois = sorted(roi_chunk_map.keys(), key=lambda s: s.lower())
         if not valid_rois:
+            group_text = "window data" if self._is_loaded_continuous_run() else "session data"
             self._set_tuning_workspace_unavailable(
-                "Tuning unavailable: no valid ROI groups with session data found in phasic cache."
+                f"Tuning unavailable: no valid ROI groups with {group_text} found in phasic cache."
             )
             self._set_correction_tuning_workspace_unavailable(
-                "Correction retune unavailable: no valid ROI groups with session data found in phasic cache."
+                f"Correction retune unavailable: no valid ROI groups with {group_text} found in phasic cache."
             )
             return
 
@@ -3557,11 +3621,12 @@ class MainWindow(QMainWindow):
             )
             return
         if self._tuning_chunk_combo.count() == 0:
+            unit_text = "windows/chunks" if self._is_loaded_continuous_run() else "sessions"
             self._set_tuning_workspace_unavailable(
-                f"Tuning unavailable: selected ROI '{selected_roi}' has no available sessions in phasic cache."
+                f"Tuning unavailable: selected ROI '{selected_roi}' has no available {unit_text} in phasic cache."
             )
             self._set_correction_tuning_workspace_unavailable(
-                f"Correction retune unavailable: selected ROI '{selected_roi}' has no available sessions in phasic cache."
+                f"Correction retune unavailable: selected ROI '{selected_roi}' has no available {unit_text} in phasic cache."
             )
             return
 
@@ -3581,16 +3646,23 @@ class MainWindow(QMainWindow):
             )
             return
         if self._correction_tuning_chunk_combo.count() == 0:
+            unit_text = "windows/chunks" if self._is_loaded_continuous_run() else "sessions"
             self._set_correction_tuning_workspace_unavailable(
-                f"Correction retune unavailable: selected ROI '{selected_corr_roi}' has no available sessions in phasic cache."
+                f"Correction retune unavailable: selected ROI '{selected_corr_roi}' has no available {unit_text} in phasic cache."
             )
             return
 
         self._apply_correction_tuning_defaults_from_config(self._load_tuning_base_config())
-        self._set_correction_tuning_workspace_available(
-            "Ready: correction retune recomputes the selected ROI across all available sessions. "
-            "The preview session is used only for inspection."
-        )
+        if self._is_loaded_continuous_run():
+            self._set_correction_tuning_workspace_available(
+                "Ready: correction retune recomputes the selected ROI across all available windows/chunks. "
+                "The preview window/chunk is used only for inspection."
+            )
+        else:
+            self._set_correction_tuning_workspace_available(
+                "Ready: correction retune recomputes the selected ROI across all available sessions. "
+                "The preview session is used only for inspection."
+            )
         self._refresh_dff_dayplot_rerender_availability()
 
     def _collect_tuning_overrides(self) -> dict:
@@ -3709,9 +3781,10 @@ class MainWindow(QMainWindow):
             f"applied ({self._tuning_applyback_timestamp})"
             if self._tuning_applyback_applied else "not applied"
         )
+        preview_label = "Preview window/chunk" if self._is_loaded_continuous_run() else "Preview session"
         lines = [
             f"ROI: {roi}",
-            f"Preview session: {chunk}",
+            f"{preview_label}: {chunk}",
             f"Event signal: {event_signal}",
             f"Excursion polarity: {signal_excursion_polarity_label(polarity_used)}",
             signal_excursion_polarity_auc_summary_text(polarity_used),
@@ -3740,10 +3813,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Tuning Error", "Select an ROI before running tuning.")
             return
         if self._tuning_chunk_combo.currentIndex() < 0:
+            unit_text = "preview window/chunk" if self._is_loaded_continuous_run() else "preview session"
             QMessageBox.warning(
                 self,
                 "Tuning Error",
-                "Select a preview session before running tuning.",
+                f"Select a {unit_text} before running tuning.",
             )
             return
         chunk_id = int(self._tuning_chunk_combo.currentData())
@@ -4472,10 +4546,11 @@ class MainWindow(QMainWindow):
                 )
                 return
             if self._correction_tuning_chunk_combo.currentIndex() < 0:
+                unit_text = "preview window/chunk" if self._is_loaded_continuous_run() else "preview session"
                 QMessageBox.warning(
                     self,
                     "Correction Retune Error",
-                    "Select a preview session before running correction retune.",
+                    f"Select a {unit_text} before running correction retune.",
                 )
                 return
 
@@ -4518,6 +4593,13 @@ class MainWindow(QMainWindow):
                 ).strip()
                 self._set_correction_tuning_overlay_image(inspect_path)
 
+            continuous_loaded = self._is_loaded_continuous_run()
+            preview_label = "Preview window/chunk" if continuous_loaded else "Preview session"
+            recompute_scope = (
+                "Recomputed across: all available windows/chunks for this ROI"
+                if continuous_loaded
+                else "Recomputed across: all available sessions for this ROI"
+            )
             lines = [
                 f"ROI: {result.get('selected_roi', roi)}",
                 f"Dynamic fit mode: {dynamic_fit_mode_label(overrides.get('dynamic_fit_mode', 'rolling_local_regression'))}",
@@ -4551,8 +4633,8 @@ class MainWindow(QMainWindow):
                         )
                     )
                 ),
-                "Recomputed across: all available sessions for this ROI",
-                f"Preview session: {result.get('inspection_chunk_id', chunk_id)}",
+                recompute_scope,
+                f"{preview_label}: {result.get('inspection_chunk_id', chunk_id)}",
                 f"Retune output: {result.get('retune_dir', '(unknown)')}",
             ]
             if is_robust_event_reject_mode(overrides.get("dynamic_fit_mode", "")):
@@ -4922,6 +5004,60 @@ class MainWindow(QMainWindow):
                 return mode
         text = combo.currentText().strip().lower()
         return "continuous" if text.startswith("continuous") else "intermittent"
+
+    def _sync_continuous_step_to_window(self, value: float | None = None) -> None:
+        """Keep GUI-owned continuous step fixed to the editable window length."""
+        if not hasattr(self, "_continuous_step_sec_spin") or not hasattr(self, "_continuous_window_sec_spin"):
+            return
+        target = float(self._continuous_window_sec_spin.value() if value is None else value)
+        if abs(float(self._continuous_step_sec_spin.value()) - target) <= 1e-9:
+            return
+        self._continuous_step_sec_spin.blockSignals(True)
+        self._continuous_step_sec_spin.setValue(target)
+        self._continuous_step_sec_spin.blockSignals(False)
+
+    def _on_continuous_window_changed(self, value: float) -> None:
+        self._sync_continuous_step_to_window(float(value))
+        self._on_config_changed()
+
+    def _current_loaded_acquisition_mode(self) -> str:
+        """Best-effort acquisition mode from loaded run provenance."""
+        run_dir = (self._current_run_dir or "").strip()
+        candidates = [
+            os.path.join(run_dir, "_analysis", "phasic_out", "config_used.yaml"),
+            os.path.join(run_dir, "_analysis", "tonic_out", "config_used.yaml"),
+            os.path.join(run_dir, "MANIFEST.json"),
+            os.path.join(run_dir, "status.json"),
+        ]
+        for path in candidates:
+            if not os.path.isfile(path):
+                continue
+            try:
+                if path.lower().endswith((".yaml", ".yml")):
+                    import yaml
+
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = yaml.safe_load(f) or {}
+                else:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f) or {}
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            containers = [
+                data,
+                data.get("run_context", {}) if isinstance(data.get("run_context"), dict) else {},
+                data.get("args", {}) if isinstance(data.get("args"), dict) else {},
+            ]
+            for container in containers:
+                mode = str(container.get("acquisition_mode", "")).strip().lower()
+                if mode in {"continuous", "intermittent"}:
+                    return mode
+        return "intermittent"
+
+    def _is_loaded_continuous_run(self) -> bool:
+        return self._current_loaded_acquisition_mode() == "continuous"
 
     def _acquisition_mode_summary(self) -> str:
         """Human-readable acquisition-mode summary for UI text."""
@@ -5936,7 +6072,8 @@ class MainWindow(QMainWindow):
         self._track_if_changed(
             "continuous_window_sec", continuous_window_sec_val, 600.0, user_set
         )
-        continuous_step_sec_val = float(self._continuous_step_sec_spin.value())
+        continuous_step_sec_val = continuous_window_sec_val
+        self._sync_continuous_step_to_window(continuous_window_sec_val)
         self._track_if_changed(
             "continuous_step_sec", continuous_step_sec_val, 600.0, user_set
         )
@@ -6366,7 +6503,8 @@ class MainWindow(QMainWindow):
 
         acquisition_mode = self._selected_acquisition_mode()
         continuous_window_sec = float(self._continuous_window_sec_spin.value())
-        continuous_step_sec = float(self._continuous_step_sec_spin.value())
+        continuous_step_sec = continuous_window_sec
+        self._sync_continuous_step_to_window(continuous_window_sec)
         if continuous_window_sec <= 0.0:
             return "Continuous Window Duration must be > 0."
         if continuous_step_sec <= 0.0:
@@ -6590,7 +6728,7 @@ class MainWindow(QMainWindow):
             format=fmt,
             acquisition_mode=self._selected_acquisition_mode(),
             continuous_window_sec=float(self._continuous_window_sec_spin.value()),
-            continuous_step_sec=float(self._continuous_step_sec_spin.value()),
+            continuous_step_sec=float(self._continuous_window_sec_spin.value()),
             allow_partial_final_window=bool(self._allow_partial_final_window_cb.isChecked()),
             config_source_path=self._active_config_source_path(),
             data_contract_overrides=data_contract_overrides,
@@ -7725,7 +7863,7 @@ class MainWindow(QMainWindow):
         self._tuning_applyback_applied = False
         self._tuning_applyback_timestamp = ""
         self._set_tuning_overlay_message(
-            "Run tuning to generate an ROI preview-session event overlay."
+            "Run tuning to generate an ROI preview window/chunk event overlay."
         )
         self._refresh_tuning_feedback_summary()
         self._reset_correction_tuning_state()
@@ -7812,15 +7950,7 @@ class MainWindow(QMainWindow):
                 )
             )
         )
-        self._continuous_step_sec_spin.setValue(
-            float(
-                self._settings.value(
-                    "continuous_step_sec",
-                    float(getattr(self._default_cfg, "continuous_step_sec", 600.0)),
-                    float,
-                )
-            )
-        )
+        self._sync_continuous_step_to_window()
         self._allow_partial_final_window_cb.setChecked(
             bool(
                 self._settings.value(
@@ -8067,7 +8197,7 @@ class MainWindow(QMainWindow):
             "continuous_window_sec", float(self._continuous_window_sec_spin.value())
         )
         self._settings.setValue(
-            "continuous_step_sec", float(self._continuous_step_sec_spin.value())
+            "continuous_step_sec", float(self._continuous_window_sec_spin.value())
         )
         self._settings.setValue(
             "allow_partial_final_window",
@@ -8545,7 +8675,8 @@ class MainWindow(QMainWindow):
             render_text += " (inactive in tonic mode)"
         acquisition_mode = self._selected_acquisition_mode()
         continuous_window_sec = float(self._continuous_window_sec_spin.value())
-        continuous_step_sec = float(self._continuous_step_sec_spin.value())
+        continuous_step_sec = continuous_window_sec
+        self._sync_continuous_step_to_window(continuous_window_sec)
         allow_partial_final_window = bool(self._allow_partial_final_window_cb.isChecked())
         roi_text = self._compute_roi_filter_summary()
         rep_text = self._compute_representative_summary()
@@ -8565,7 +8696,7 @@ class MainWindow(QMainWindow):
             f"Acquisition Mode: {self._acquisition_mode_summary()}",
             (
                 "Continuous Window Plan: "
-                f"window={continuous_window_sec:.1f}s, step={continuous_step_sec:.1f}s, "
+                f"window={continuous_window_sec:.1f}s, non-overlapping step={continuous_step_sec:.1f}s, "
                 f"allow partial final window={'on' if allow_partial_final_window else 'off'}"
                 if acquisition_mode == "continuous"
                 else "Continuous Window Plan: inactive in intermittent mode"
@@ -8693,10 +8824,22 @@ class MainWindow(QMainWindow):
             self._acquisition_mode_combo.setEnabled(True)
         if hasattr(self, "_continuous_window_sec_spin"):
             self._continuous_window_sec_spin.setEnabled(continuous_mode)
+            self._continuous_window_sec_spin.setVisible(continuous_mode)
+        if hasattr(self, "_continuous_window_label"):
+            self._continuous_window_label.setVisible(continuous_mode)
         if hasattr(self, "_continuous_step_sec_spin"):
-            self._continuous_step_sec_spin.setEnabled(continuous_mode)
+            self._sync_continuous_step_to_window()
+            self._continuous_step_sec_spin.setEnabled(False)
+            self._continuous_step_sec_spin.setVisible(False)
+        if hasattr(self, "_continuous_step_label"):
+            self._continuous_step_label.setVisible(False)
         if hasattr(self, "_allow_partial_final_window_cb"):
             self._allow_partial_final_window_cb.setEnabled(continuous_mode)
+            self._allow_partial_final_window_cb.setVisible(continuous_mode)
+        if hasattr(self, "_allow_partial_final_window_label"):
+            self._allow_partial_final_window_label.setVisible(continuous_mode)
+        if hasattr(self, "_continuous_mode_help_label"):
+            self._continuous_mode_help_label.setVisible(continuous_mode)
         if hasattr(self, "_sph_edit"):
             self._sph_edit.setEnabled(not continuous_mode)
         if hasattr(self, "_duration_edit"):
@@ -9178,10 +9321,15 @@ class MainWindow(QMainWindow):
         self._continuous_window_sec_spin.setSingleStep(30.0)
         self._continuous_window_sec_spin.setValue(600.0)
         self._continuous_window_sec_spin.setToolTip(
-            "Continuous mode only: internal computational window duration in seconds."
+            "Length of each analysis window cut from the continuous recording. "
+            "For example, 600 seconds means the pipeline analyzes the trace in "
+            "10-minute non-overlapping windows. Each window becomes a chunk for "
+            "analysis, summaries, and tuning."
         )
-        self._continuous_window_sec_spin.valueChanged.connect(self._on_config_changed)
-        form.addRow("Continuous Window (s):", self._continuous_window_sec_spin)
+        self._continuous_window_sec_spin.valueChanged.connect(self._on_continuous_window_changed)
+        self._continuous_window_label = QLabel("Continuous Window (s):")
+        self._continuous_window_label.setToolTip(self._continuous_window_sec_spin.toolTip())
+        form.addRow(self._continuous_window_label, self._continuous_window_sec_spin)
 
         self._continuous_step_sec_spin = QDoubleSpinBox()
         self._continuous_step_sec_spin.setRange(1.0, 86400.0)
@@ -9189,19 +9337,36 @@ class MainWindow(QMainWindow):
         self._continuous_step_sec_spin.setSingleStep(30.0)
         self._continuous_step_sec_spin.setValue(600.0)
         self._continuous_step_sec_spin.setToolTip(
-            "Continuous mode only: internal computational step size in seconds. "
-            "This build requires step == window."
+            "Automatically set to match Continuous Window. This build uses "
+            "non-overlapping windows only. Sliding/overlapping windows are not supported."
         )
-        self._continuous_step_sec_spin.valueChanged.connect(self._on_config_changed)
-        form.addRow("Continuous Step (s):", self._continuous_step_sec_spin)
+        self._continuous_step_sec_spin.setEnabled(False)
+        self._continuous_step_label = QLabel("Continuous Step (s):")
+        self._continuous_step_label.setToolTip(self._continuous_step_sec_spin.toolTip())
+        form.addRow(self._continuous_step_label, self._continuous_step_sec_spin)
 
         self._allow_partial_final_window_cb = QCheckBox("")
         self._allow_partial_final_window_cb.setChecked(False)
         self._allow_partial_final_window_cb.setToolTip(
-            "Continuous mode only: allow the trailing undersized window to be included."
+            "If enabled, the pipeline keeps a final shorter window when the recording "
+            "does not divide evenly by the window length. If disabled, the trailing "
+            "partial window is dropped."
         )
         self._allow_partial_final_window_cb.stateChanged.connect(self._on_config_changed)
-        form.addRow("Allow Partial Final Window:", self._allow_partial_final_window_cb)
+        self._allow_partial_final_window_label = QLabel("Allow Partial Final Window:")
+        self._allow_partial_final_window_label.setToolTip(
+            self._allow_partial_final_window_cb.toolTip()
+        )
+        form.addRow(self._allow_partial_final_window_label, self._allow_partial_final_window_cb)
+
+        self._continuous_mode_help_label = QLabel(
+            "Continuous mode splits one long recording into fixed-length, "
+            "non-overlapping analysis windows. These windows are called chunks "
+            "in caches and tuning."
+        )
+        self._continuous_mode_help_label.setWordWrap(True)
+        self._continuous_mode_help_label.setObjectName("resultsSummaryHint")
+        form.addRow("", self._continuous_mode_help_label)
 
         self._acquisition_mode_help_label = QLabel(
             "Intermittent mode uses acquisition sessions/chunks and session-based timing controls."
