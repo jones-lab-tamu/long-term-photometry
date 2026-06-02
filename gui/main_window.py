@@ -43,7 +43,11 @@ from gui.run_spec import RunSpec, FORMAT_CHOICES
 from gui.status_follower import StatusFollower
 from gui.log_follower import LogFollower
 from gui.run_report_viewer import RunReportViewer
-from gui.run_report_parser import is_successful_completed_run_dir, get_run_type
+from gui.run_report_parser import (
+    get_run_type,
+    is_successful_completed_run_dir,
+    resolve_region_deliverables,
+)
 from gui.validate_run_policy import (
     compute_run_signature,
     is_validation_current
@@ -8801,6 +8805,30 @@ class MainWindow(QMainWindow):
         self._open_manifest_file_btn.setEnabled(can_open and has_file("MANIFEST.json"))
         self._open_report_file_btn.setEnabled(can_open and has_file("run_report.json"))
 
+    def _selected_completed_results_dir(self) -> str:
+        """Return the best current folder candidate for opening completed results."""
+        output_path = self._output_dir.text().strip() if hasattr(self, "_output_dir") else ""
+        if output_path and os.path.isdir(output_path):
+            return output_path
+        if self._current_run_dir and os.path.isdir(self._current_run_dir):
+            return self._current_run_dir
+        return ""
+
+    def _is_openable_completed_results_dir(self, path: str) -> tuple[bool, str]:
+        """Completed-run gate for Open Results; accepts continuous Summary/Tables-only runs."""
+        if not path or not os.path.isdir(path):
+            return False, "No existing directory is selected."
+        is_successful_complete, evidence = is_successful_completed_run_dir(path)
+        if not is_successful_complete:
+            return False, evidence
+        regions = resolve_region_deliverables(path)
+        if not regions:
+            return False, (
+                "Completed-run metadata was found, but no region deliverables "
+                "(summary, day_plots, or tables folders) were found."
+            )
+        return True, evidence
+
     def _compute_run_readiness_reason(self) -> tuple[str, str]:
         """
         Returns (reason_text, severity) for run-state guidance.
@@ -8858,10 +8886,18 @@ class MainWindow(QMainWindow):
         # Cancel: enabled only when RUNNING (not VALIDATING per rule A)
         self._cancel_btn.setEnabled(state == RunnerState.RUNNING and running)
 
-        # Open Results: enabled only when SUCCESS and status code is "success" (Requirement 5.2)
+        # Open Results: enabled after a GUI success, or when the selected output
+        # path is already a completed run with region deliverables.  Continuous
+        # completed runs may have Summary/Tables without intermittent day_plots.
         is_success = bool(state == RunnerState.SUCCESS)
         has_success_code = bool(self._runner.final_status_code == "success")
-        self._open_results_btn.setEnabled(bool(is_success and has_success_code))
+        selected_results_dir = self._selected_completed_results_dir()
+        selected_is_openable, _selected_evidence = self._is_openable_completed_results_dir(
+            selected_results_dir
+        )
+        self._open_results_btn.setEnabled(
+            bool((is_success and has_success_code) or selected_is_openable)
+        )
 
         # Open Run Folder: enabled when done and run_dir exists
         has_run_dir = bool(self._current_run_dir and os.path.isdir(self._current_run_dir))
