@@ -175,6 +175,63 @@ def load_cache_chunk_metadata(cache: h5py.File, roi: str, chunk_id: int, keys: l
     return out
 
 
+def _normalize_attr_value(value):
+    """Convert HDF5/numpy attr scalars to plain Python values."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        if value.size == 1:
+            return _normalize_attr_value(value.item())
+        return [_normalize_attr_value(v) for v in value.tolist()]
+    return value
+
+
+def load_cache_chunk_attrs(cache: h5py.File, roi: str, chunk_id: int) -> dict:
+    """
+    Load all chunk attributes as normalized Python values.
+
+    This helper is intentionally tolerant of missing optional attrs so it can be
+    used on both intermittent and continuous caches. Missing ROI/chunk groups
+    still raise CacheReadError.
+    """
+    roi_group = cache.get(f"roi/{roi}")
+    if not roi_group:
+        _raise_cache_error(f"Missing dataset group for ROI {roi}")
+
+    chunk_group_name = f"chunk_{chunk_id}"
+    if chunk_group_name not in roi_group:
+        _raise_cache_error(f"Missing {chunk_group_name} in {roi} group.")
+
+    attrs = {
+        str(k): _normalize_attr_value(v)
+        for k, v in roi_group[chunk_group_name].attrs.items()
+    }
+    if "window_index" in attrs:
+        try:
+            attrs["window_index"] = int(round(float(attrs["window_index"])))
+        except Exception:
+            pass
+    for key in (
+        "window_start_sec",
+        "window_end_sec",
+        "window_duration_sec",
+        "original_file_duration_sec",
+        "continuous_window_sec",
+        "continuous_step_sec",
+        "fs_hz",
+    ):
+        if key in attrs:
+            try:
+                attrs[key] = float(attrs[key])
+            except Exception:
+                pass
+    if "is_partial_final_window" in attrs:
+        attrs["is_partial_final_window"] = bool(attrs["is_partial_final_window"])
+    return attrs
+
+
 def iter_cache_chunks_for_roi(cache: h5py.File, roi: str, fields: list[str]):
     """
     Yields tuple of fields for each valid chunk sequentially based on /meta/chunk_ids order.

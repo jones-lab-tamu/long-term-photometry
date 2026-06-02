@@ -95,7 +95,10 @@ def _assert_continuous_completed_run_contract(out_dir: Path) -> None:
     assert ok, reason
     report, err = parse_run_report(str(out_dir / "run_report.json"))
     assert err is None
-    assert resolve_region_deliverables(str(out_dir)) == []
+    regions = resolve_region_deliverables(str(out_dir))
+    assert len(regions) == 1
+    assert regions[0]["name"] == "Region0"
+    assert any(label == "Tables" and status == "ok" for label, _path, status in regions[0]["subfolders"])
 
     internal = resolve_internal_artifacts(str(out_dir))
     assert any(label == "Phasic Analysis (Internal)" and status == "ok" for label, _path, status in internal)

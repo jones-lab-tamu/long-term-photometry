@@ -13,6 +13,7 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     list_cache_chunk_ids,
     resolve_cache_roi,
     load_cache_chunk_fields,
+    load_cache_chunk_attrs,
     iter_cache_chunks_for_roi
 )
 
@@ -189,6 +190,42 @@ class TestHDF5CacheReader(unittest.TestCase):
             self.assertEqual(len(chunks), 2)
             self.assertTrue(np.array_equal(chunks[0][0], np.arange(5))) # time_sec
             self.assertTrue(np.array_equal(chunks[0][1], np.full(5, 5.0))) # dff
+
+    def test_load_cache_chunk_attrs_normalizes_optional_continuous_metadata(self):
+        """15. test_load_cache_chunk_attrs_normalizes_optional_continuous_metadata"""
+        with h5py.File(self.valid_phasic_path, 'a') as f:
+            grp = f['roi']['Region0']['chunk_0']
+            grp.attrs['acquisition_mode'] = 'continuous'
+            grp.attrs['source_file'] = 'source.csv'
+            grp.attrs['window_index'] = np.float64(0.0)
+            grp.attrs['window_start_sec'] = np.float64(0.0)
+            grp.attrs['window_end_sec'] = np.float64(600.0)
+            grp.attrs['window_duration_sec'] = np.float64(600.0)
+            grp.attrs['original_file_duration_sec'] = np.float64(1200.0)
+            grp.attrs['is_partial_final_window'] = np.bool_(False)
+            grp.attrs['continuous_window_sec'] = np.float64(600.0)
+            grp.attrs['continuous_step_sec'] = np.float64(600.0)
+            grp.attrs['fs_hz'] = np.float64(10.0)
+
+        with open_phasic_cache(self.valid_phasic_path) as f:
+            attrs = load_cache_chunk_attrs(f, 'Region0', 0)
+            self.assertEqual(attrs['acquisition_mode'], 'continuous')
+            self.assertEqual(attrs['source_file'], 'source.csv')
+            self.assertEqual(attrs['window_index'], 0)
+            self.assertIsInstance(attrs['window_index'], int)
+            self.assertEqual(attrs['window_start_sec'], 0.0)
+            self.assertEqual(attrs['window_end_sec'], 600.0)
+            self.assertEqual(attrs['window_duration_sec'], 600.0)
+            self.assertEqual(attrs['original_file_duration_sec'], 1200.0)
+            self.assertIs(attrs['is_partial_final_window'], False)
+            self.assertEqual(attrs['continuous_window_sec'], 600.0)
+            self.assertEqual(attrs['continuous_step_sec'], 600.0)
+            self.assertEqual(attrs['fs_hz'], 10.0)
+
+        with open_phasic_cache(self.valid_phasic_path) as f:
+            intermittent_attrs = load_cache_chunk_attrs(f, 'Region0', 1)
+            self.assertNotIn('window_start_sec', intermittent_attrs)
+            self.assertIsInstance(intermittent_attrs, dict)
 
 if __name__ == '__main__':
     unittest.main()
