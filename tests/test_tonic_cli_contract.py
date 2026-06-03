@@ -66,6 +66,7 @@ peak_threshold_k: 2.0
             "--phasic-events-per-10min-mean", "12.0", 
             "--phasic-ct-soft-floor", "0.25", 
             "--phasic-mode", "phase_locked_to_tonic",
+            "--phasic-ct-mode", "phase_aligned",
             "--phasic-phase-lock-alpha", "0.75",
             "--seed", "42"
         ]
