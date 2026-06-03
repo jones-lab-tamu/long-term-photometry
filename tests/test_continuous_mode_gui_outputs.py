@@ -113,12 +113,14 @@ def test_gui_completed_run_parser_accepts_continuous_phasic_summary_outputs(
     assert (out_dir / "Region0" / "tables" / "continuous_phasic_window_summary.csv").exists()
     assert (out_dir / "Region0" / "summary" / "phasic_peak_rate_timeseries.png").exists()
     assert (out_dir / "Region0" / "summary" / "phasic_auc_timeseries.png").exists()
+    assert (out_dir / "Region0" / "summary" / "continuous_phasic_dff_trace_overview.png").exists()
 
     tab_map = _load_viewer_tab_map(qapp, out_dir)
     assert tab_map["Phasic Summary"] == [
         "phasic_auc_timeseries.png",
         "phasic_peak_rate_timeseries.png",
     ]
+    assert tab_map["Continuous Trace"] == ["continuous_phasic_dff_trace_overview.png"]
     assert tab_map["Tonic"] == []
     assert tab_map["Phasic Sig/Iso"] == []
     assert tab_map["Dynamic Fit"] == []
@@ -138,12 +140,18 @@ def test_gui_completed_run_parser_accepts_continuous_both_summary_outputs(
     assert (out_dir / "Region0" / "summary" / "phasic_peak_rate_timeseries.png").exists()
     assert (out_dir / "Region0" / "summary" / "phasic_auc_timeseries.png").exists()
     assert (out_dir / "Region0" / "summary" / "tonic_overview.png").exists()
+    assert (out_dir / "Region0" / "summary" / "continuous_phasic_dff_trace_overview.png").exists()
+    assert (out_dir / "Region0" / "summary" / "continuous_tonic_trace_overview.png").exists()
 
     tab_map = _load_viewer_tab_map(qapp, out_dir)
     assert tab_map["Tonic"] == ["tonic_overview.png"]
     assert tab_map["Phasic Summary"] == [
         "phasic_auc_timeseries.png",
         "phasic_peak_rate_timeseries.png",
+    ]
+    assert tab_map["Continuous Trace"] == [
+        "continuous_phasic_dff_trace_overview.png",
+        "continuous_tonic_trace_overview.png",
     ]
     assert tab_map["Phasic Sig/Iso"] == []
     assert tab_map["Dynamic Fit"] == []
@@ -160,6 +168,7 @@ def test_gui_completed_run_parser_accepts_continuous_tonic_only_summary_outputs(
     _assert_continuous_region_deliverables(out_dir)
     assert (out_dir / "Region0" / "tables" / "continuous_tonic_window_summary.csv").exists()
     assert (out_dir / "Region0" / "summary" / "tonic_overview.png").exists()
+    assert (out_dir / "Region0" / "summary" / "continuous_tonic_trace_overview.png").exists()
     assert not (out_dir / "Region0" / "summary" / "phasic_peak_rate_timeseries.png").exists()
     assert not (out_dir / "Region0" / "summary" / "phasic_auc_timeseries.png").exists()
 
@@ -171,6 +180,7 @@ def test_gui_completed_run_parser_accepts_continuous_tonic_only_summary_outputs(
 
     tab_map = _load_viewer_tab_map(qapp, out_dir)
     assert tab_map["Tonic"] == ["tonic_overview.png"]
+    assert tab_map["Continuous Trace"] == ["continuous_tonic_trace_overview.png"]
     assert tab_map["Phasic Summary"] == []
     assert tab_map["Phasic Sig/Iso"] == []
     assert tab_map["Dynamic Fit"] == []

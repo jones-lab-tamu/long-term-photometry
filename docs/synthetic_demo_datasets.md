@@ -148,6 +148,7 @@ Expected full-run behavior:
 - `_analysis/phasic_out/phasic_trace_cache.h5` and `_analysis/tonic_out/tonic_trace_cache.h5` are produced
 - each ROI has continuous phasic and tonic summary tables under `<roi>/tables/`
 - each ROI has elapsed-time phasic and tonic summary plots under `<roi>/summary/`
+- each ROI has full cached-trace overview plots under `<roi>/summary/`: `continuous_phasic_dff_trace_overview.png` and `continuous_tonic_trace_overview.png`
 - completed-run loading should expose the ROI `Summary` and `Tables` folders
 
 ## What these fixtures do not test

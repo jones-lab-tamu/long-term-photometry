@@ -39,6 +39,7 @@ TAB_PHASIC_DYNAMIC_FIT = "Dynamic Fit"
 TAB_PHASIC_DFF = "Phasic dFF"
 TAB_PHASIC_STACKED = "Phasic Stacked"
 TAB_PHASIC_SUMMARY = "Phasic Summary"
+TAB_CONTINUOUS_TRACE = "Continuous Trace"
 
 TAB_ORDER = [
     TAB_VERIFICATION,
@@ -48,6 +49,7 @@ TAB_ORDER = [
     TAB_PHASIC_DFF,
     TAB_PHASIC_STACKED,
     TAB_PHASIC_SUMMARY,
+    TAB_CONTINUOUS_TRACE,
 ]
 
 
@@ -294,6 +296,7 @@ class RunReportViewer(QWidget):
 
         verification = self._discover_verification_images(summary_dir)
         tonic = self._discover_tonic_images(summary_dir)
+        continuous_trace = self._discover_continuous_trace_images(summary_dir)
         phasic_raw = self._discover_day_series_images(
             day_plots_dir,
             r"^phasic_sig_iso_day_\d{3,}\.png$",
@@ -324,6 +327,7 @@ class RunReportViewer(QWidget):
             TAB_PHASIC_DFF: phasic_dff,
             TAB_PHASIC_STACKED: phasic_stacked,
             TAB_PHASIC_SUMMARY: phasic_summary,
+            TAB_CONTINUOUS_TRACE: continuous_trace,
         }
 
     @staticmethod
@@ -386,6 +390,19 @@ class RunReportViewer(QWidget):
                 candidates.append(os.path.join(summary_dir, name))
             if name.startswith("phasic_peak_rate_timeseries_") and name.endswith(".png"):
                 candidates.append(os.path.join(summary_dir, name))
+        return self._dedupe_sorted_existing(candidates)
+
+    def _discover_continuous_trace_images(self, summary_dir: str) -> List[str]:
+        """
+        Continuous Trace tab contract.
+        Full elapsed trace overviews are separate from per-window summary plots.
+        """
+        if not os.path.isdir(summary_dir):
+            return []
+        candidates = [
+            os.path.join(summary_dir, "continuous_tonic_trace_overview.png"),
+            os.path.join(summary_dir, "continuous_phasic_dff_trace_overview.png"),
+        ]
         return self._dedupe_sorted_existing(candidates)
 
     def _discover_day_series_images(self, directory: str, pattern: str, ignore_case: bool) -> List[str]:

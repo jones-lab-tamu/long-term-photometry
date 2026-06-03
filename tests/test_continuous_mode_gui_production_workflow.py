@@ -270,6 +270,8 @@ def test_gui_equivalent_continuous_full_run_outputs_are_viewer_visible(
     assert (run_dir / "Region0" / "summary" / "phasic_peak_rate_timeseries.png").exists()
     assert (run_dir / "Region0" / "summary" / "phasic_auc_timeseries.png").exists()
     assert (run_dir / "Region0" / "summary" / "tonic_overview.png").exists()
+    assert (run_dir / "Region0" / "summary" / "continuous_phasic_dff_trace_overview.png").exists()
+    assert (run_dir / "Region0" / "summary" / "continuous_tonic_trace_overview.png").exists()
     assert not (run_dir / "Region0" / "day_plots").exists()
 
     manifest = json.loads((run_dir / "MANIFEST.json").read_text(encoding="utf-8"))
@@ -278,8 +280,17 @@ def test_gui_equivalent_continuous_full_run_outputs_are_viewer_visible(
         continuous_outputs = payload["continuous_outputs"]
         assert continuous_outputs["summary_tables_generated"] is True
         assert continuous_outputs["summary_plots_generated"] is True
+        assert continuous_outputs["trace_overview_plots_generated"] is True
         assert "Region0/tables/continuous_phasic_window_summary.csv" in continuous_outputs["summary_tables"]
         assert "Region0/summary/phasic_auc_timeseries.png" in continuous_outputs["summary_plots"]
+        assert (
+            "Region0/summary/continuous_phasic_dff_trace_overview.png"
+            in continuous_outputs["trace_overview_plots"]
+        )
+        assert (
+            "Region0/summary/continuous_tonic_trace_overview.png"
+            in continuous_outputs["trace_overview_plots"]
+        )
     assert manifest["continuous_outputs"]["intermittent_only_outputs_skipped"]
 
     regions = resolve_region_deliverables(str(run_dir))
@@ -299,6 +310,10 @@ def test_gui_equivalent_continuous_full_run_outputs_are_viewer_visible(
         assert tab_map["Phasic Summary"] == [
             "phasic_auc_timeseries.png",
             "phasic_peak_rate_timeseries.png",
+        ]
+        assert tab_map["Continuous Trace"] == [
+            "continuous_phasic_dff_trace_overview.png",
+            "continuous_tonic_trace_overview.png",
         ]
         assert tab_map["Phasic Sig/Iso"] == []
         assert tab_map["Dynamic Fit"] == []

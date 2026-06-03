@@ -1752,6 +1752,7 @@ def main():
             from photometry_pipeline.continuous_outputs import (
                 generate_continuous_summary_plots,
                 generate_continuous_summary_tables,
+                generate_continuous_trace_overview_plots,
             )
 
             summary_result = generate_continuous_summary_tables(
@@ -1815,6 +1816,49 @@ def main():
                 status_path=status_path,
             )
 
+            t_phase, started_utc_phase = _phase_start(status_data, "continuous_trace_overview_plots")
+            _write_status_update("continuous_trace_overview_plots")
+            emitter.emit("continuous_outputs", "start", "Generating continuous trace overview plots")
+            trace_overview_result = generate_continuous_trace_overview_plots(
+                run_dir,
+                mode=str(args.mode),
+                logger=lambda msg: emitter.emit("continuous_outputs", "notice", str(msg)),
+            )
+            status_data["continuous_outputs"].update(
+                {
+                    "trace_overview_plots_generated": bool(
+                        trace_overview_result.get("generated", False)
+                    ),
+                    "trace_overview_plots": list(trace_overview_result.get("plots", [])),
+                    "trace_overview_skips": list(trace_overview_result.get("skips", [])),
+                    "trace_overview_details": dict(trace_overview_result.get("details", {})),
+                }
+            )
+            emitter.emit(
+                "continuous_outputs",
+                "done",
+                "Continuous trace overview plot generation complete",
+                payload={
+                    "trace_overview_plots_generated": status_data["continuous_outputs"][
+                        "trace_overview_plots_generated"
+                    ],
+                    "trace_overview_plots": status_data["continuous_outputs"][
+                        "trace_overview_plots"
+                    ],
+                    "trace_overview_skips": status_data["continuous_outputs"][
+                        "trace_overview_skips"
+                    ],
+                },
+            )
+            _phase_done(
+                status_data,
+                manifest,
+                "continuous_trace_overview_plots",
+                t_phase,
+                started_utc_phase,
+                status_path=status_path,
+            )
+
             manifest["sessions_per_hour"] = resolved_sessions_per_hour
             manifest["sessions_per_hour_source"] = sessions_per_hour_source
             manifest["session_duration_s"] = None
@@ -1827,6 +1871,10 @@ def main():
                 "summary_plots_generated": bool(plot_result.get("summary_plots_generated", False)),
                 "summary_plots": list(plot_result.get("summary_plots", [])),
                 "plot_skips": list(plot_result.get("plot_skips", [])),
+                "trace_overview_plots_generated": bool(trace_overview_result.get("generated", False)),
+                "trace_overview_plots": list(trace_overview_result.get("plots", [])),
+                "trace_overview_skips": list(trace_overview_result.get("skips", [])),
+                "trace_overview_details": dict(trace_overview_result.get("details", {})),
                 "summary_details": {
                     "phasic": summary_result.get("phasic"),
                     "tonic": summary_result.get("tonic"),

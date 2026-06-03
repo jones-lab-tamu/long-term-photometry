@@ -331,6 +331,7 @@ def test_generated_rwd_continuous_full_phasic_run_succeeds(tmp_path: Path):
     assert (roi_dir / "tables" / "continuous_phasic_window_summary.csv").exists()
     assert (roi_dir / "summary" / "phasic_peak_rate_timeseries.png").exists()
     assert (roi_dir / "summary" / "phasic_auc_timeseries.png").exists()
+    assert (roi_dir / "summary" / "continuous_phasic_dff_trace_overview.png").exists()
 
     manifest = _load_manifest(input_dir)
     assert manifest["pipeline_channel_names"] == ["CH1", "CH2"]
@@ -393,5 +394,6 @@ def test_generated_custom_tabular_continuous_full_phasic_run_succeeds(tmp_path: 
     assert (out_dir / "Region0" / "tables" / "continuous_phasic_window_summary.csv").exists()
     assert (out_dir / "Region0" / "summary" / "phasic_peak_rate_timeseries.png").exists()
     assert (out_dir / "Region0" / "summary" / "phasic_auc_timeseries.png").exists()
+    assert (out_dir / "Region0" / "summary" / "continuous_phasic_dff_trace_overview.png").exists()
     status = json.loads((out_dir / "status.json").read_text(encoding="utf-8"))
     assert status["status"] == "success"

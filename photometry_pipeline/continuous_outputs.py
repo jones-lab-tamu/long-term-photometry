@@ -24,6 +24,9 @@ PHASIC_RATE_PLOT_FILENAME = "phasic_peak_rate_timeseries.png"
 PHASIC_COUNT_PLOT_FILENAME = "phasic_peak_count_timeseries.png"
 PHASIC_AUC_PLOT_FILENAME = "phasic_auc_timeseries.png"
 TONIC_OVERVIEW_PLOT_FILENAME = "tonic_overview.png"
+CONTINUOUS_TONIC_TRACE_OVERVIEW_FILENAME = "continuous_tonic_trace_overview.png"
+CONTINUOUS_PHASIC_DFF_TRACE_OVERVIEW_FILENAME = "continuous_phasic_dff_trace_overview.png"
+CONTINUOUS_TRACE_OVERVIEW_MAX_POINTS = 100_000
 _RETUNED_PHASIC_SUMMARY_TEMPLATE = "{prefix}_continuous_phasic_window_summary_{roi}.csv"
 _RETUNED_PHASIC_RATE_PLOT_TEMPLATE = "{prefix}_phasic_peak_rate_timeseries_{roi}.png"
 _RETUNED_PHASIC_COUNT_PLOT_TEMPLATE = "{prefix}_phasic_peak_count_timeseries_{roi}.png"
@@ -590,6 +593,399 @@ def _plot_xy_from_summary(
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     return True
+
+
+def _evenly_spaced_indices(n_items: int, n_select: int) -> np.ndarray:
+    """Return deterministic indices spanning a finite chunk."""
+    n_items = int(n_items)
+    n_select = int(n_select)
+    if n_items <= 0 or n_select <= 0:
+        return np.array([], dtype=int)
+    if n_select >= n_items:
+        return np.arange(n_items, dtype=int)
+    return np.unique(np.linspace(0, n_items - 1, n_select, dtype=int))
+
+
+def _select_finite_positions_for_chunk(
+    n_finite: int,
+    n_select: int,
+    *,
+    force_first: bool = False,
+    force_last: bool = False,
+) -> np.ndarray:
+    """Select bounded positions within a finite chunk while preserving required endpoints."""
+    n_finite = int(n_finite)
+    n_select = int(n_select)
+    if n_finite <= 0 or n_select <= 0:
+        return np.array([], dtype=int)
+    if n_select >= n_finite:
+        return np.arange(n_finite, dtype=int)
+
+    required: list[int] = []
+    if force_first:
+        required.append(0)
+    if force_last:
+        required.append(n_finite - 1)
+    required = sorted(set(required))
+
+    if len(required) >= n_select:
+        # This only occurs when an endpoint chunk receives a single slot. Prefer
+        # the global final endpoint for last-only chunks; otherwise keep first.
+        if force_last and not force_first:
+            return np.array([n_finite - 1], dtype=int)
+        return np.array(required[:n_select], dtype=int)
+
+    selected = set(required)
+    for idx in _evenly_spaced_indices(n_finite, n_select):
+        selected.add(int(idx))
+        if len(selected) >= n_select:
+            break
+
+    if len(selected) < n_select:
+        for idx in range(n_finite):
+            selected.add(idx)
+            if len(selected) >= n_select:
+                break
+
+    return np.array(sorted(selected), dtype=int)
+
+
+def _allocate_trace_points(
+    chunk_records: list[dict[str, Any]],
+    *,
+    max_points: int,
+) -> dict[int, int]:
+    """Allocate a bounded number of display points proportionally across chunks."""
+    if max_points < 2:
+        raise ValueError("max_points must be >= 2")
+    finite_records = [r for r in chunk_records if int(r["n_finite"]) > 0]
+    if not finite_records:
+        return {}
+
+    total_finite = int(sum(int(r["n_finite"]) for r in finite_records))
+    if total_finite <= max_points:
+        return {int(r["chunk_id"]): int(r["n_finite"]) for r in finite_records}
+
+    if len(finite_records) <= max_points:
+        allocations = {int(r["chunk_id"]): 1 for r in finite_records}
+        remaining = int(max_points - len(finite_records))
+    else:
+        allocations = {int(r["chunk_id"]): 0 for r in finite_records}
+        remaining = int(max_points)
+        # Preserve the full recording span when there are more finite chunks than points.
+        allocations[int(finite_records[0]["chunk_id"])] = 1
+        allocations[int(finite_records[-1]["chunk_id"])] = 1
+        remaining -= 2
+
+    weighted: list[tuple[float, int, int]] = []
+    for rec in finite_records:
+        cid = int(rec["chunk_id"])
+        n_finite = int(rec["n_finite"])
+        target = (n_finite / float(total_finite)) * float(max_points)
+        whole = int(np.floor(target))
+        if allocations[cid] > 0:
+            whole = max(0, whole - allocations[cid])
+        add = min(max(0, whole), n_finite - allocations[cid], remaining)
+        allocations[cid] += add
+        remaining -= add
+        weighted.append((target - np.floor(target), n_finite, cid))
+
+    for _frac, _n_finite, cid in sorted(weighted, key=lambda item: (-item[0], -item[1], item[2])):
+        if remaining <= 0:
+            break
+        capacity = int(next(r["n_finite"] for r in finite_records if int(r["chunk_id"]) == cid))
+        if allocations[cid] < capacity:
+            allocations[cid] += 1
+            remaining -= 1
+
+    # Defensive trim in case floor/min logic changes later.
+    while sum(allocations.values()) > max_points:
+        candidates = sorted(
+            (cid for cid, count in allocations.items() if count > 1),
+            key=lambda c: (-allocations[c], c),
+        )
+        if not candidates:
+            break
+        allocations[candidates[0]] -= 1
+
+    return {cid: count for cid, count in allocations.items() if count > 0}
+
+
+def _sample_elapsed_trace_from_cache(
+    cache,
+    roi: str,
+    field: str,
+    *,
+    max_points: int = CONTINUOUS_TRACE_OVERVIEW_MAX_POINTS,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """
+    Sample a bounded elapsed-time trace from continuous HDF5 chunks.
+
+    This intentionally reads one chunk at a time and concatenates only selected
+    display points, never the full recording.
+    """
+    chunk_records: list[dict[str, Any]] = []
+    n_samples_seen = 0
+    for chunk_id in list_cache_chunk_ids(cache):
+        cid = int(chunk_id)
+        attrs = load_cache_chunk_attrs(cache, roi, cid)
+        _require_continuous_attrs(attrs, roi=roi, chunk_id=cid)
+        time_sec, values = load_cache_chunk_fields(cache, roi, cid, ["time_sec", field])
+        local_t = np.asarray(time_sec, dtype=float).reshape(-1)
+        y = np.asarray(values, dtype=float).reshape(-1)
+        if local_t.shape != y.shape:
+            raise RuntimeError(
+                f"Trace field shape mismatch for roi={roi} chunk_id={cid} field={field}: "
+                f"time_sec={local_t.shape} values={y.shape}"
+            )
+        n_samples_seen += int(y.size)
+        start = float(attrs["window_start_sec"])
+        finite = np.isfinite(local_t) & np.isfinite(y)
+        finite_idx = np.flatnonzero(finite)
+        elapsed_finite = start + local_t[finite_idx] if finite_idx.size else np.array([], dtype=float)
+        chunk_records.append(
+            {
+                "chunk_id": cid,
+                "window_start_sec": start,
+                "window_index": int(round(float(attrs.get("window_index", cid)))),
+                "n_samples": int(y.size),
+                "n_finite": int(finite_idx.size),
+                "elapsed_start": (
+                    float(elapsed_finite[0]) if elapsed_finite.size else float("nan")
+                ),
+                "elapsed_end": (
+                    float(elapsed_finite[-1]) if elapsed_finite.size else float("nan")
+                ),
+            }
+        )
+
+    chunk_records.sort(key=lambda r: (float(r["window_start_sec"]), int(r["window_index"]), int(r["chunk_id"])))
+    finite_records = [r for r in chunk_records if int(r["n_finite"]) > 0]
+    first_finite_chunk_id = int(finite_records[0]["chunk_id"]) if finite_records else None
+    last_finite_chunk_id = int(finite_records[-1]["chunk_id"]) if finite_records else None
+    allocations = _allocate_trace_points(chunk_records, max_points=max_points)
+
+    elapsed_parts: list[np.ndarray] = []
+    value_parts: list[np.ndarray] = []
+    for rec in chunk_records:
+        cid = int(rec["chunk_id"])
+        n_select = int(allocations.get(cid, 0))
+        if n_select <= 0:
+            continue
+        time_sec, values = load_cache_chunk_fields(cache, roi, cid, ["time_sec", field])
+        local_t = np.asarray(time_sec, dtype=float).reshape(-1)
+        y = np.asarray(values, dtype=float).reshape(-1)
+        start = float(rec["window_start_sec"])
+        finite = np.isfinite(local_t) & np.isfinite(y)
+        finite_idx = np.flatnonzero(finite)
+        selected_positions = _select_finite_positions_for_chunk(
+            finite_idx.size,
+            n_select,
+            force_first=cid == first_finite_chunk_id,
+            force_last=cid == last_finite_chunk_id,
+        )
+        selected = finite_idx[selected_positions]
+        elapsed_parts.append(start + local_t[selected])
+        value_parts.append(y[selected])
+
+    if elapsed_parts:
+        elapsed = np.concatenate(elapsed_parts)
+        values = np.concatenate(value_parts)
+        order = np.argsort(elapsed, kind="mergesort")
+        elapsed = elapsed[order]
+        values = values[order]
+    else:
+        elapsed = np.array([], dtype=float)
+        values = np.array([], dtype=float)
+
+    details = {
+        "n_chunks": int(len(chunk_records)),
+        "n_samples_seen": int(n_samples_seen),
+        "n_finite_samples": int(sum(int(r["n_finite"]) for r in chunk_records)),
+        "n_points_plotted": int(values.size),
+        "max_plot_points": int(max_points),
+        "chunk_ids": [int(r["chunk_id"]) for r in chunk_records],
+        "finite_chunk_ids": [int(r["chunk_id"]) for r in finite_records],
+        "elapsed_hour_start": (
+            float(elapsed[0] / 3600.0) if elapsed.size else float("nan")
+        ),
+        "elapsed_hour_end": (
+            float(elapsed[-1] / 3600.0) if elapsed.size else float("nan")
+        ),
+    }
+    return elapsed, values, details
+
+
+def _plot_continuous_trace_overview(
+    *,
+    elapsed_sec: np.ndarray,
+    values: np.ndarray,
+    roi: str,
+    ylabel: str,
+    title: str,
+    out_path: str,
+) -> dict[str, Any]:
+    import matplotlib.pyplot as plt
+
+    x_plot = np.asarray(elapsed_sec, dtype=float).reshape(-1)
+    y_plot = np.asarray(values, dtype=float).reshape(-1)
+    if x_plot.size == 0 or y_plot.size == 0:
+        return {
+            "generated": False,
+            "reason": "No finite values available for full continuous trace overview.",
+        }
+
+    fig, ax = plt.subplots(figsize=(12, 4.8))
+    ax.plot(x_plot / 3600.0, y_plot, linewidth=0.8)
+    ax.set_xlabel("Elapsed time (hours)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(f"{roi} {title}")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return {
+        "generated": True,
+    }
+
+
+def _generate_trace_overview_for_cache(
+    *,
+    run_dir: str,
+    cache_path: str,
+    cache_kind: str,
+    field: str,
+    filename: str,
+    ylabel: str,
+    title: str,
+    opener,
+    max_plot_points: int,
+) -> dict[str, Any]:
+    result = _empty_result(f"{cache_kind}_trace_overview")
+    result["details"] = {}
+    result["source_artifacts"] = [cache_path]
+    if not os.path.exists(cache_path):
+        return _skip(result, filename, f"{cache_kind} cache not found: {cache_path}")
+
+    with opener(cache_path) as cache:
+        for roi in list_cache_rois(cache):
+            rel_output = f"{roi}/summary/{filename}"
+            try:
+                elapsed_sec, values, details = _sample_elapsed_trace_from_cache(
+                    cache,
+                    str(roi),
+                    field,
+                    max_points=max_plot_points,
+                )
+                out_path = os.path.join(run_dir, str(roi), "summary", filename)
+                plot_details = _plot_continuous_trace_overview(
+                    elapsed_sec=elapsed_sec,
+                    values=values,
+                    roi=str(roi),
+                    ylabel=ylabel,
+                    title=title,
+                    out_path=out_path,
+                )
+                details.update(plot_details)
+                details["field"] = field
+                details["cache_kind"] = cache_kind
+                result["details"][str(roi)] = details
+                if plot_details.get("generated"):
+                    result["generated_files"].append(out_path)
+                    result["rois_processed"].append(str(roi))
+                    result["row_counts"][str(roi)] = 1
+                else:
+                    _skip(result, rel_output, str(plot_details.get("reason", "plot skipped")))
+            except Exception as exc:
+                result["details"][str(roi)] = {
+                    "generated": False,
+                    "field": field,
+                    "cache_kind": cache_kind,
+                    "reason": str(exc),
+                }
+                _skip(result, rel_output, str(exc))
+
+    result["rois_processed"] = sorted(set(result["rois_processed"]))
+    return result
+
+
+def generate_continuous_trace_overview_plots(
+    run_dir: str,
+    *,
+    mode: str = "both",
+    logger=None,
+    max_plot_points: int = CONTINUOUS_TRACE_OVERVIEW_MAX_POINTS,
+) -> dict[str, Any]:
+    """Generate per-ROI full elapsed trace overview plots from continuous HDF5 caches."""
+    requested = str(mode or "both").strip().lower()
+    if requested not in {"both", "phasic", "tonic"}:
+        raise ValueError(f"Unsupported continuous trace overview mode: {mode!r}")
+
+    run_dir = os.path.abspath(run_dir)
+    tonic_cache = os.path.join(run_dir, "_analysis", "tonic_out", "tonic_trace_cache.h5")
+    phasic_cache = os.path.join(run_dir, "_analysis", "phasic_out", "phasic_trace_cache.h5")
+    results: dict[str, Any] = {
+        "generated": False,
+        "plots": [],
+        "skips": [],
+        "details": {},
+        "tonic": None,
+        "phasic": None,
+        "max_plot_points": int(max_plot_points),
+    }
+
+    if requested in {"both", "tonic"}:
+        results["tonic"] = _generate_trace_overview_for_cache(
+            run_dir=run_dir,
+            cache_path=tonic_cache,
+            cache_kind="tonic",
+            field="deltaF",
+            filename=CONTINUOUS_TONIC_TRACE_OVERVIEW_FILENAME,
+            ylabel="Tonic deltaF",
+            title="full continuous tonic trace overview",
+            opener=open_tonic_cache,
+            max_plot_points=max_plot_points,
+        )
+    else:
+        results["tonic"] = _skip(
+            _empty_result("tonic_trace_overview"),
+            CONTINUOUS_TONIC_TRACE_OVERVIEW_FILENAME,
+            "tonic mode not requested",
+        )
+
+    if requested in {"both", "phasic"}:
+        results["phasic"] = _generate_trace_overview_for_cache(
+            run_dir=run_dir,
+            cache_path=phasic_cache,
+            cache_kind="phasic",
+            field="dff",
+            filename=CONTINUOUS_PHASIC_DFF_TRACE_OVERVIEW_FILENAME,
+            ylabel="Phasic dF/F",
+            title="full continuous phasic dF/F trace overview",
+            opener=open_phasic_cache,
+            max_plot_points=max_plot_points,
+        )
+    else:
+        results["phasic"] = _skip(
+            _empty_result("phasic_trace_overview"),
+            CONTINUOUS_PHASIC_DFF_TRACE_OVERVIEW_FILENAME,
+            "phasic mode not requested",
+        )
+
+    details: dict[str, Any] = {}
+    for key in ("tonic", "phasic"):
+        sub = results[key] or {}
+        for path in sub.get("generated_files", []):
+            results["plots"].append(_rel(path, run_dir))
+        for skip in sub.get("skipped_outputs", []):
+            results["skips"].append(skip)
+        details[key] = sub.get("details", {})
+    results["details"] = details
+    results["plots"] = sorted(set(results["plots"]))
+    results["generated"] = bool(results["plots"])
+    _log(logger, f"Generated continuous trace overview files={len(results['plots'])}")
+    return results
 
 
 def _record_generated_plot(

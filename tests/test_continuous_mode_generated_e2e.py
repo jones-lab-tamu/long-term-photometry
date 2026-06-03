@@ -202,6 +202,8 @@ def _assert_continuous_both_outputs(run_dir: Path, roi: str, expected_rows: int)
     assert (run_dir / roi / "summary" / "phasic_peak_count_timeseries.png").exists()
     assert (run_dir / roi / "summary" / "phasic_auc_timeseries.png").exists()
     assert (run_dir / roi / "summary" / "tonic_overview.png").exists()
+    assert (run_dir / roi / "summary" / "continuous_phasic_dff_trace_overview.png").exists()
+    assert (run_dir / roi / "summary" / "continuous_tonic_trace_overview.png").exists()
 
 
 def _hash_production_outputs(run_dir: Path, roi: str) -> dict[Path, str]:
@@ -214,6 +216,7 @@ def _hash_production_outputs(run_dir: Path, roi: str) -> dict[Path, str]:
         run_dir / roi / "summary" / "phasic_peak_rate_timeseries.png",
         run_dir / roi / "summary" / "phasic_peak_count_timeseries.png",
         run_dir / roi / "summary" / "phasic_auc_timeseries.png",
+        run_dir / roi / "summary" / "continuous_phasic_dff_trace_overview.png",
     ]
     return {path: _sha256(path) for path in paths}
 
@@ -260,6 +263,8 @@ def test_generated_custom_tabular_continuous_mode_both_e2e(tmp_path: Path):
     assert "Region0/tables/continuous_tonic_window_summary.csv" in continuous_outputs["summary_tables"]
     assert "Region0/summary/phasic_auc_timeseries.png" in continuous_outputs["summary_plots"]
     assert "Region0/summary/tonic_overview.png" in continuous_outputs["summary_plots"]
+    assert "Region0/summary/continuous_phasic_dff_trace_overview.png" in continuous_outputs["trace_overview_plots"]
+    assert "Region0/summary/continuous_tonic_trace_overview.png" in continuous_outputs["trace_overview_plots"]
 
 
 def test_generated_rwd_continuous_mode_both_e2e(tmp_path: Path):
@@ -335,6 +340,8 @@ def test_wrapper_continuous_cli_overrides_propagate_to_analysis_subprocess(tmp_p
     assert (run_dir / "Region0" / "summary" / "phasic_peak_rate_timeseries.png").exists()
     assert (run_dir / "Region0" / "summary" / "phasic_auc_timeseries.png").exists()
     assert (run_dir / "Region0" / "summary" / "tonic_overview.png").exists()
+    assert (run_dir / "Region0" / "summary" / "continuous_phasic_dff_trace_overview.png").exists()
+    assert (run_dir / "Region0" / "summary" / "continuous_tonic_trace_overview.png").exists()
 
     status = _load_json(run_dir / "status.json")
     assert status["status"] == "success"
