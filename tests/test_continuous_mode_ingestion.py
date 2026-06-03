@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from photometry_pipeline.config import Config
+from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.io.adapters import plan_continuous_windows_for_source
 from photometry_pipeline.pipeline import Pipeline
 
@@ -148,6 +149,117 @@ def test_rwd_continuous_pipeline_writes_multiple_chunks(tmp_path: Path):
         assert g1.attrs["source_file"].endswith("fluorescence.csv")
         assert g1.attrs["window_start_sec"] == pytest.approx(600.0)
         assert g1.attrs["window_end_sec"] == pytest.approx(1200.0)
+
+
+def test_continuous_tonic_global_fit_uses_bounded_paired_sampler(monkeypatch):
+    cfg = _continuous_cfg()
+    cfg.seed = 123
+    p = Pipeline(cfg, mode="tonic")
+    p.file_list = [f"window_{i}" for i in range(3)]
+    fit_calls = []
+
+    def _fake_chunk(_entry: str, chunk_id: int, _force_format: str) -> Chunk:
+        n = 100_000
+        t = np.arange(n, dtype=float) / 10.0
+        uv = 1.0 + 0.01 * chunk_id + 0.05 * np.sin(2.0 * np.pi * 0.03 * t)
+        sig = 0.4 + 1.8 * uv + 0.02 * np.cos(2.0 * np.pi * 0.05 * t)
+        return Chunk(
+            chunk_id=chunk_id,
+            source_file=f"window_{chunk_id}.csv",
+            format="custom_tabular",
+            time_sec=t,
+            uv_raw=uv.reshape(-1, 1),
+            sig_raw=sig.reshape(-1, 1),
+            fs_hz=10.0,
+            channel_names=["Region0"],
+            metadata={
+                "acquisition_mode": "continuous",
+                "window_index": chunk_id,
+                "window_start_sec": float(chunk_id * 600.0),
+                "window_end_sec": float((chunk_id + 1) * 600.0),
+                "window_duration_sec": 600.0,
+                "original_file_duration_sec": 1800.0,
+                "continuous_window_sec": 600.0,
+                "continuous_step_sec": 600.0,
+                "is_partial_final_window": False,
+            },
+        )
+
+    def _fake_robust_fit(uv_sample, sig_sample):
+        fit_calls.append((np.asarray(uv_sample), np.asarray(sig_sample)))
+        assert len(uv_sample) <= 200_000
+        assert len(sig_sample) <= 200_000
+        assert len(uv_sample) == len(sig_sample)
+        return 1.8, 0.4, True, len(uv_sample)
+
+    monkeypatch.setattr(p, "_load_entry_chunk", _fake_chunk)
+    monkeypatch.setattr(
+        "photometry_pipeline.core.tonic_dff.compute_global_iso_fit_robust",
+        _fake_robust_fit,
+    )
+
+    p.run_pass_1(force_format="custom_tabular")
+
+    assert len(fit_calls) == 1
+    assert len(fit_calls[0][0]) == 200_000
+    assert "Region0" in p.stats.tonic_fit_params
+    provenance = p.stats.tonic_global_fit_provenance["Region0"]
+    assert provenance["tonic_global_fit_sampling_mode"] == "bounded_paired_reservoir"
+    assert provenance["tonic_global_fit_sample_capacity"] == 200_000
+    assert provenance["tonic_global_fit_seed"] == cfg.seed
+    assert provenance["tonic_global_fit_samples_seen"] == 300_000
+    assert provenance["tonic_global_fit_samples_used"] == 200_000
+    assert provenance["tonic_global_fit_samples_seen"] > provenance["tonic_global_fit_samples_used"]
+    assert np.isfinite(p.stats.tonic_fit_params["Region0"]["slope"])
+    assert np.isfinite(p.stats.tonic_fit_params["Region0"]["intercept"])
+
+
+def test_intermittent_tonic_global_fit_preserves_full_accumulation(monkeypatch):
+    cfg = Config()
+    cfg.seed = 123
+    cfg.acquisition_mode = "intermittent"
+    p = Pipeline(cfg, mode="tonic")
+    p.file_list = [f"session_{i}" for i in range(3)]
+    fit_calls = []
+
+    def _fake_chunk(_entry: str, chunk_id: int, _force_format: str) -> Chunk:
+        n = 500
+        t = np.arange(n, dtype=float) / 10.0
+        uv = 1.0 + 0.01 * chunk_id + 0.05 * np.sin(2.0 * np.pi * 0.03 * t)
+        sig = 0.4 + 1.8 * uv + 0.02 * np.cos(2.0 * np.pi * 0.05 * t)
+        return Chunk(
+            chunk_id=chunk_id,
+            source_file=f"session_{chunk_id}.csv",
+            format="custom_tabular",
+            time_sec=t,
+            uv_raw=uv.reshape(-1, 1),
+            sig_raw=sig.reshape(-1, 1),
+            fs_hz=10.0,
+            channel_names=["Region0"],
+            metadata={},
+        )
+
+    def _fake_robust_fit(uv_full, sig_full):
+        fit_calls.append((np.asarray(uv_full), np.asarray(sig_full)))
+        assert len(uv_full) == 1500
+        assert len(sig_full) == 1500
+        return 1.8, 0.4, True, len(uv_full)
+
+    monkeypatch.setattr(p, "_load_entry_chunk", _fake_chunk)
+    monkeypatch.setattr(
+        "photometry_pipeline.core.tonic_dff.compute_global_iso_fit_robust",
+        _fake_robust_fit,
+    )
+
+    p.run_pass_1(force_format="custom_tabular")
+
+    assert len(fit_calls) == 1
+    provenance = p.stats.tonic_global_fit_provenance["Region0"]
+    assert provenance["tonic_global_fit_sampling_mode"] == "full_accumulation"
+    assert provenance["tonic_global_fit_samples_seen"] == 1500
+    assert provenance["tonic_global_fit_samples_used"] == 1500
+    assert "tonic_global_fit_sample_capacity" not in provenance
+    assert "Region0" in p.stats.tonic_fit_params
 
 
 def test_wrapper_continuous_skips_intermittent_outputs_and_succeeds(tmp_path: Path):

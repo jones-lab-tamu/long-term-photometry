@@ -368,6 +368,13 @@ def test_wrapper_continuous_cli_overrides_propagate_to_analysis_subprocess(tmp_p
     assert tonic_cfg["acquisition_mode"] == "continuous"
     assert float(phasic_cfg["continuous_window_sec"]) == WINDOW_SEC
     assert float(tonic_cfg["continuous_window_sec"]) == WINDOW_SEC
+    tonic_report = _load_json(run_dir / "_analysis" / "tonic_out" / "run_report.json")
+    tonic_fit_provenance = tonic_report["derived_settings"]["tonic_global_fit_provenance"]["Region0"]
+    assert tonic_fit_provenance["tonic_global_fit_sampling_mode"] == "bounded_paired_reservoir"
+    assert tonic_fit_provenance["tonic_global_fit_sample_capacity"] == 200000
+    assert tonic_fit_provenance["tonic_global_fit_seed"] == tonic_cfg["seed"]
+    assert tonic_fit_provenance["tonic_global_fit_samples_seen"] >= tonic_fit_provenance["tonic_global_fit_samples_used"]
+    assert tonic_fit_provenance["channel"] == "Region0"
 
     manifest = _load_json(run_dir / "MANIFEST.json")
     command_text = "\n".join(" ".join(entry["cmd"]) for entry in manifest["commands"])

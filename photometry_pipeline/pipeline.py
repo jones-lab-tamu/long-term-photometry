@@ -23,6 +23,80 @@ from .core.utils import natural_sort_key
 from .core.reporting import generate_run_report, append_run_report_warnings
 # from .viz import plots # Moved to run() to avoid side effects
 
+TONIC_GLOBAL_FIT_SAMPLE_CAPACITY = 200_000
+
+class _PairedDeterministicReservoir:
+    """Bounded deterministic sampler for paired UV/SIG samples used by tonic fit."""
+
+    def __init__(self, seed: int, capacity: int = 200_000):
+        self.seed = int(seed)
+        self.capacity = int(capacity)
+        self.buffer = {}
+        self.count = {}
+        self._rng = np.random.default_rng(self.seed)
+
+    def _ensure_channel(self, channel: str) -> None:
+        if channel in self.buffer:
+            return
+        self.buffer[channel] = {
+            "uv": np.zeros(self.capacity, dtype=np.float64),
+            "sig": np.zeros(self.capacity, dtype=np.float64),
+        }
+        self.count[channel] = 0
+
+    def add(self, channel: str, uv: np.ndarray, sig: np.ndarray) -> None:
+        self._ensure_channel(channel)
+        uv_arr = np.asarray(uv, dtype=np.float64).reshape(-1)
+        sig_arr = np.asarray(sig, dtype=np.float64).reshape(-1)
+        if uv_arr.shape != sig_arr.shape:
+            raise ValueError(f"Paired reservoir shape mismatch for {channel}: {uv_arr.shape} vs {sig_arr.shape}")
+
+        valid = np.isfinite(uv_arr) & np.isfinite(sig_arr)
+        if not np.any(valid):
+            return
+        u = uv_arr[valid]
+        s = sig_arr[valid]
+        n = int(u.size)
+        current = int(self.count[channel])
+
+        if current < self.capacity:
+            take = min(n, self.capacity - current)
+            if take > 0:
+                self.buffer[channel]["uv"][current: current + take] = u[:take]
+                self.buffer[channel]["sig"][current: current + take] = s[:take]
+                self.count[channel] = current + take
+                current = int(self.count[channel])
+            if take < n:
+                self._update_existing(channel, u[take:], s[take:], total_seen=current)
+        else:
+            self._update_existing(channel, u, s, total_seen=current)
+
+    def _update_existing(self, channel: str, uv: np.ndarray, sig: np.ndarray, *, total_seen: int) -> None:
+        n_new = int(uv.size)
+        if n_new <= 0:
+            return
+        probs = self._rng.random(n_new)
+        denominators = np.arange(total_seen + 1, total_seen + n_new + 1)
+        mask = probs < (self.capacity / denominators)
+        n_replace = int(np.sum(mask))
+        if n_replace > 0:
+            replace_indices = self._rng.integers(0, self.capacity, size=n_replace)
+            self.buffer[channel]["uv"][replace_indices] = uv[mask]
+            self.buffer[channel]["sig"][replace_indices] = sig[mask]
+        self.count[channel] = total_seen + n_new
+
+    def channels(self) -> List[str]:
+        return sorted(self.buffer.keys())
+
+    def arrays(self, channel: str) -> tuple[np.ndarray, np.ndarray]:
+        n_valid = min(int(self.count.get(channel, 0)), self.capacity)
+        if n_valid <= 0:
+            return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+        return (
+            self.buffer[channel]["uv"][:n_valid].copy(),
+            self.buffer[channel]["sig"][:n_valid].copy(),
+        )
+
 def _sanitize_metadata(obj):
     """
     Recursively convert metadata to JSON-safe primitives.
@@ -41,6 +115,21 @@ def _sanitize_metadata(obj):
         return obj
     return repr(obj)
 
+def _append_run_report_section(output_dir: str, section: str, payload) -> None:
+    """Best-effort run_report.json updater for analysis provenance generated after Pass 1."""
+    path = os.path.join(output_dir, "run_report.json")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        derived = data.setdefault("derived_settings", {})
+        derived[section] = _sanitize_metadata(payload)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        logging.warning("Failed to append %s to run_report.json", section, exc_info=True)
+
 class Pipeline:
     def __init__(self, config: Config, mode: str = 'phasic'):
         self.config = config
@@ -51,6 +140,7 @@ class Pipeline:
         self._continuous_plan_summary = None
         self.stats = SessionStats()
         self.stats.tonic_fit_params = {} # ROI -> {slope, intercept} (Ad-hoc extension)
+        self.stats.tonic_global_fit_provenance = {}
         self.qc_summary = {
             'failed_chunks': [],
             'chunk_fail_fraction': 0.0,
@@ -419,39 +509,102 @@ class Pipeline:
         if self.mode == 'tonic':
             print("Pass 1c (Tonic Global Fit accumulation)...")
             from .core.tonic_dff import compute_global_iso_fit_robust
+            use_bounded_tonic_sampling = self._is_continuous_mode_enabled()
             
-            # Aggregate data per channel for robust fit
-            # We must fit on FULL dataset to satisfy requirement: "fit exactly once... using full arrays"
-            # Using basic list accumulator (memory constrained? RWD 48h ~ 3.5e6 samples -> ~28MB per float64 column. Fine.)
-            acc_uv = {}
-            acc_sig = {}
-            
-            for i, fpath in enumerate(self.file_list):
-                try:
-                    chunk = self._load_entry_chunk(fpath, i, force_format)
-                    if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
-                    for ch_idx, ch_name in enumerate(chunk.channel_names):
-                        if ch_name not in acc_uv:
-                            acc_uv[ch_name] = []
-                            acc_sig[ch_name] = []
-                        acc_uv[ch_name].append(chunk.uv_raw[:, ch_idx])
-                        acc_sig[ch_name].append(chunk.sig_raw[:, ch_idx])
-                        
-                    if fpath not in self._pass1_manifest:
-                        self._pass1_manifest.append(fpath)
-                except Exception:
-                    continue
-            
-            # Solve
-            for ch in acc_uv.keys():
-                uv_full = np.concatenate(acc_uv[ch])
-                sig_full = np.concatenate(acc_sig[ch])
-                slope, intercept, ok, n_used = compute_global_iso_fit_robust(uv_full, sig_full)
-                if ok:
-                    self.stats.tonic_fit_params[ch] = {'slope': slope, 'intercept': intercept}
-                    print(f"  Tonic Fit ({ch}): slope={slope:.4f}, int={intercept:.4f} (N={n_used})")
-                else:
-                    logging.warning(f"  Tonic Fit ({ch}) FAILED.")
+            if use_bounded_tonic_sampling:
+                # Sample paired raw UV/SIG values per ROI for a single global tonic fit.
+                # The robust fit itself caps at 200k points; this reservoir enforces
+                # that bound before fitting so continuous recordings do not accumulate
+                # every multi-day sample in memory.
+                tonic_fit_sampler = _PairedDeterministicReservoir(
+                    seed=self.config.seed,
+                    capacity=TONIC_GLOBAL_FIT_SAMPLE_CAPACITY,
+                )
+
+                for i, fpath in enumerate(self.file_list):
+                    try:
+                        chunk = self._load_entry_chunk(fpath, i, force_format)
+                        if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
+                        for ch_idx, ch_name in enumerate(chunk.channel_names):
+                            tonic_fit_sampler.add(
+                                ch_name,
+                                chunk.uv_raw[:, ch_idx],
+                                chunk.sig_raw[:, ch_idx],
+                            )
+
+                        if fpath not in self._pass1_manifest:
+                            self._pass1_manifest.append(fpath)
+                    except Exception:
+                        continue
+
+                for ch in tonic_fit_sampler.channels():
+                    uv_sample, sig_sample = tonic_fit_sampler.arrays(ch)
+                    slope, intercept, ok, n_used = compute_global_iso_fit_robust(
+                        uv_sample,
+                        sig_sample,
+                    )
+                    total_seen = int(tonic_fit_sampler.count.get(ch, 0))
+                    self.stats.tonic_global_fit_provenance[ch] = {
+                        "channel": ch,
+                        "tonic_global_fit_sampling_mode": "bounded_paired_reservoir",
+                        "tonic_global_fit_sample_capacity": TONIC_GLOBAL_FIT_SAMPLE_CAPACITY,
+                        "tonic_global_fit_seed": int(self.config.seed),
+                        "tonic_global_fit_samples_seen": total_seen,
+                        "tonic_global_fit_samples_used": int(n_used),
+                        "slope": float(slope),
+                        "intercept": float(intercept),
+                        "ok": bool(ok),
+                        "n_used": int(n_used),
+                    }
+                    if ok:
+                        self.stats.tonic_fit_params[ch] = {'slope': slope, 'intercept': intercept}
+                        print(
+                            f"  Tonic Fit ({ch}): slope={slope:.4f}, int={intercept:.4f} "
+                            f"(N={n_used}, sampled_from={total_seen})"
+                        )
+                    else:
+                        logging.warning(f"  Tonic Fit ({ch}) FAILED.")
+            else:
+                # Preserve intermittent tonic behavior: collect all raw UV/SIG
+                # arrays per ROI, then fit once on the full accumulated recording.
+                acc_uv = {}
+                acc_sig = {}
+
+                for i, fpath in enumerate(self.file_list):
+                    try:
+                        chunk = self._load_entry_chunk(fpath, i, force_format)
+                        if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
+                        for ch_idx, ch_name in enumerate(chunk.channel_names):
+                            if ch_name not in acc_uv:
+                                acc_uv[ch_name] = []
+                                acc_sig[ch_name] = []
+                            acc_uv[ch_name].append(chunk.uv_raw[:, ch_idx])
+                            acc_sig[ch_name].append(chunk.sig_raw[:, ch_idx])
+
+                        if fpath not in self._pass1_manifest:
+                            self._pass1_manifest.append(fpath)
+                    except Exception:
+                        continue
+
+                for ch in acc_uv.keys():
+                    uv_full = np.concatenate(acc_uv[ch])
+                    sig_full = np.concatenate(acc_sig[ch])
+                    slope, intercept, ok, n_used = compute_global_iso_fit_robust(uv_full, sig_full)
+                    self.stats.tonic_global_fit_provenance[ch] = {
+                        "channel": ch,
+                        "tonic_global_fit_sampling_mode": "full_accumulation",
+                        "tonic_global_fit_samples_seen": int(np.sum(np.isfinite(uv_full) & np.isfinite(sig_full))),
+                        "tonic_global_fit_samples_used": int(n_used),
+                        "slope": float(slope),
+                        "intercept": float(intercept),
+                        "ok": bool(ok),
+                        "n_used": int(n_used),
+                    }
+                    if ok:
+                        self.stats.tonic_fit_params[ch] = {'slope': slope, 'intercept': intercept}
+                        print(f"  Tonic Fit ({ch}): slope={slope:.4f}, int={intercept:.4f} (N={n_used})")
+                    else:
+                        logging.warning(f"  Tonic Fit ({ch}) FAILED.")
             
         # End Pass 1
 
@@ -974,6 +1127,12 @@ class Pipeline:
         t_pass1 = time.perf_counter()
         self.run_pass_1(force_format)
         self._add_phasic_phase_bucket("phase.pass1_total", time.perf_counter() - t_pass1)
+        if self.mode == "tonic":
+            _append_run_report_section(
+                output_dir,
+                "tonic_global_fit_provenance",
+                getattr(self.stats, "tonic_global_fit_provenance", {}),
+            )
         
         baseline_warnings = []
         invalid_rois = []
