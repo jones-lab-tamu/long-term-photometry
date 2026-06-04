@@ -64,7 +64,10 @@ def test_continuous_source_cache_stores_metadata_only(tmp_path: Path):
         assert "uv_raw" not in entry
         assert "sig_raw" not in entry
         assert "stacked" not in entry
-        assert "t_rel" in entry
+        assert "t_rel" not in entry
+        assert "duration_sec" in entry
+        assert "median_dt_sec" in entry
+        assert "n_time_samples" in entry
         assert int(entry.get("n_rows", 0)) > 0
 
     rwd_dir = tmp_path / "rwd"
@@ -81,7 +84,10 @@ def test_continuous_source_cache_stores_metadata_only(tmp_path: Path):
         assert "uv_raw" not in entry
         assert "sig_raw" not in entry
         assert "stacked" not in entry
-        assert "t_rel" in entry
+        assert "t_rel" not in entry
+        assert "duration_sec" in entry
+        assert "median_dt_sec" in entry
+        assert "n_time_samples" in entry
         assert int(entry.get("n_rows", 0)) > 0
 
 
