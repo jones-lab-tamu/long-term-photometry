@@ -32,7 +32,7 @@ def _prepare_filtered(chunk: Chunk, cfg: Config) -> None:
     chunk.sig_filt, _ = preprocessing.lowpass_filter_with_meta(chunk.sig_raw, chunk.fs_hz, cfg)
 
 
-def test_dynamic_fit_mode_default_matches_explicit_rolling_filtered_to_raw():
+def test_dynamic_fit_mode_default_matches_explicit_robust_global_event_reject():
     rng = np.random.default_rng(123)
     n = 3200
     fs = 40.0
@@ -46,7 +46,7 @@ def test_dynamic_fit_mode_default_matches_explicit_rolling_filtered_to_raw():
         min_samples_per_window=20,
         lowpass_hz=3.5,
         filter_order=2,
-        dynamic_fit_mode="rolling_filtered_to_raw",
+        dynamic_fit_mode="robust_global_event_reject",
     )
 
     c_default = _make_chunk(uv, sig, fs)
@@ -59,9 +59,9 @@ def test_dynamic_fit_mode_default_matches_explicit_rolling_filtered_to_raw():
 
     np.testing.assert_allclose(uv_fit_default, uv_fit_explicit, rtol=0.0, atol=1e-12)
     np.testing.assert_allclose(delta_default, delta_explicit, rtol=0.0, atol=1e-12)
-    assert c_default.metadata["dynamic_fit_mode_resolved"] == "rolling_filtered_to_raw"
-    assert c_default.metadata["dynamic_fit_mode_alias_applied"] is True
-    assert c_default.metadata["dynamic_fit_engine"] == "rolling_local_ols_v1"
+    assert c_default.metadata["dynamic_fit_mode_resolved"] == "robust_global_event_reject"
+    assert c_default.metadata["dynamic_fit_mode_alias_applied"] is False
+    assert c_default.metadata["dynamic_fit_engine"] == "robust_global_event_reject_v1"
 
 
 def test_rolling_filtered_to_filtered_changes_reconstruction_domain_only():

@@ -45,7 +45,7 @@ class Config:
         'global_linear_regression',
         'robust_global_event_reject',
         'adaptive_event_gated_regression',
-    ] = 'rolling_local_regression'
+    ] = 'robust_global_event_reject'
     robust_event_reject_max_iters: int = 3
     robust_event_reject_residual_z_thresh: float = 3.5
     robust_event_reject_local_var_window_sec: Optional[float] = 10.0
@@ -77,9 +77,9 @@ class Config:
     peak_threshold_k: float = 2.0
     peak_threshold_percentile: float = 95.0
     peak_threshold_abs: float = 0.0 # Used only when method is 'absolute'
-    peak_min_distance_sec: float = 0.5 # Default kept at 0.5 per user request (was 1.0 in previous file but user asked to keep default 0.5)
-    peak_min_prominence_k: float = 0.0
-    peak_min_width_sec: float = 0.0
+    peak_min_distance_sec: float = 1.0
+    peak_min_prominence_k: float = 1.0
+    peak_min_width_sec: float = 0.2
     peak_pre_filter: str = 'none'
     event_auc_baseline: str = 'zero'
     event_signal: Literal['dff', 'delta_f'] = 'dff'

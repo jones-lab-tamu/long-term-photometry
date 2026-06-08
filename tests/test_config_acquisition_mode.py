@@ -10,6 +10,35 @@ def test_config_defaults_include_intermittent_acquisition_mode():
     assert float(cfg.continuous_step_sec) > 0.0
 
 
+def test_config_defaults_use_artifact_aware_correction_and_nonzero_event_filters():
+    cfg = Config()
+    assert cfg.dynamic_fit_mode == "robust_global_event_reject"
+    assert cfg.peak_min_distance_sec == pytest.approx(1.0)
+    assert cfg.peak_min_prominence_k == pytest.approx(1.0)
+    assert cfg.peak_min_width_sec == pytest.approx(0.2)
+
+
+def test_explicit_yaml_overrides_artifact_aware_defaults(tmp_path):
+    cfg_path = tmp_path / "explicit_defaults_override.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "dynamic_fit_mode: rolling_filtered_to_raw",
+                "peak_min_distance_sec: 0.25",
+                "peak_min_prominence_k: 0.0",
+                "peak_min_width_sec: 0.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cfg = Config.from_yaml(str(cfg_path))
+    assert cfg.dynamic_fit_mode == "rolling_filtered_to_raw"
+    assert cfg.peak_min_distance_sec == pytest.approx(0.25)
+    assert cfg.peak_min_prominence_k == pytest.approx(0.0)
+    assert cfg.peak_min_width_sec == pytest.approx(0.0)
+
+
 def test_config_accepts_continuous_mode_values(tmp_path):
     cfg_path = tmp_path / "continuous_ok.yaml"
     cfg_path.write_text(

@@ -7,6 +7,10 @@ rwd_time_col: TimeStamp
 uv_suffix: "-410"
 sig_suffix: "-470"
 peak_threshold_method: mean_std
+peak_min_distance_sec: 1.0
+peak_min_prominence_k: 1.0
+peak_min_width_sec: 0.2
+dynamic_fit_mode: robust_global_event_reject
 window_sec: 20.0
 step_sec: 5.0
 # NPM config keys if needed for standardization (though CLI tools use args or defaults)

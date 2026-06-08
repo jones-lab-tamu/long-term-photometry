@@ -186,6 +186,36 @@ def test_cache_retune_overlay_png_has_high_enough_resolution_for_gui_preview(tmp
     assert height >= 1000
 
 
+def test_cache_retune_preserves_saved_event_detection_settings_without_adopting_new_defaults(tmp_path):
+    run_dir = _make_completed_run_fixture(tmp_path)
+    phasic_out = run_dir / "_analysis" / "phasic_out"
+    saved_cfg = Config(
+        dynamic_fit_mode="rolling_filtered_to_raw",
+        peak_min_distance_sec=0.5,
+        peak_min_prominence_k=0.0,
+        peak_min_width_sec=0.0,
+    )
+    with open(phasic_out / "config_used.yaml", "w", encoding="utf-8") as f:
+        yaml.safe_dump(dataclasses.asdict(saved_cfg), f, sort_keys=True)
+
+    result = run_cache_downstream_retune(
+        run_dir=str(run_dir),
+        roi="Region0",
+        overrides={},
+    )
+
+    with open(
+        os.path.join(result["retune_dir"], "retune_config_effective.yaml"),
+        "r",
+        encoding="utf-8",
+    ) as f:
+        effective = yaml.safe_load(f)
+    assert effective["dynamic_fit_mode"] == "rolling_filtered_to_raw"
+    assert effective["peak_min_distance_sec"] == pytest.approx(0.5)
+    assert effective["peak_min_prominence_k"] == pytest.approx(0.0)
+    assert effective["peak_min_width_sec"] == pytest.approx(0.0)
+
+
 def test_cache_retune_rejects_correction_sensitive_override(tmp_path):
     run_dir = _make_completed_run_fixture(tmp_path)
     with pytest.raises(ValueError, match="recompute"):

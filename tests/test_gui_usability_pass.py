@@ -326,7 +326,7 @@ def test_advanced_tooltips_present(window):
 
 def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
     _set_minimally_valid_paths(window)
-    assert window._dynamic_fit_mode_combo.currentData() == "rolling_filtered_to_raw"
+    assert window._dynamic_fit_mode_combo.currentData() == "robust_global_event_reject"
     assert not window._baseline_subtract_before_fit_cb.isChecked()
     assert window._bleach_correction_mode_combo.currentData() == "none"
 
@@ -347,13 +347,13 @@ def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
     assert "window_sec" not in spec_default.config_overrides
     assert "bleach_correction_mode" not in spec_default.config_overrides
 
+    idx = window._dynamic_fit_mode_combo.findData("rolling_filtered_to_filtered")
+    assert idx >= 0
+    window._dynamic_fit_mode_combo.setCurrentIndex(idx)
     window._baseline_subtract_before_fit_cb.setChecked(True)
     spec_roll_baseline = window._build_run_spec(validate_only=True)
     assert spec_roll_baseline.config_overrides.get("baseline_subtract_before_fit") is True
 
-    idx = window._dynamic_fit_mode_combo.findData("rolling_filtered_to_filtered")
-    assert idx >= 0
-    window._dynamic_fit_mode_combo.setCurrentIndex(idx)
     spec_filtered = window._build_run_spec(validate_only=True)
     overrides_filtered = dict(spec_filtered.config_overrides)
     assert overrides_filtered.get("dynamic_fit_mode") == "rolling_filtered_to_filtered"

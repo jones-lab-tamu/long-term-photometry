@@ -275,6 +275,15 @@ def test_generated_custom_tabular_continuous_mode_both_e2e(tmp_path: Path):
     assert "Region0/summary/continuous_phasic_dff_trace_overview.png" in continuous_outputs["trace_overview_plots"]
     assert "Region0/summary/continuous_tonic_trace_overview.png" in continuous_outputs["trace_overview_plots"]
 
+    phasic_cfg = yaml.safe_load(
+        (out_dir / "_analysis" / "phasic_out" / "config_used.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert phasic_cfg["dynamic_fit_mode"] == "robust_global_event_reject"
+    assert phasic_cfg["peak_min_prominence_k"] == 1.0
+    assert phasic_cfg["peak_min_width_sec"] == 0.2
+
     status = _load_json(out_dir / "status.json")
     timing = status["timing"]
     expected_timing_phases = {
