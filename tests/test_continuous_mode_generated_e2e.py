@@ -281,8 +281,8 @@ def test_generated_custom_tabular_continuous_mode_both_e2e(tmp_path: Path):
         )
     )
     assert phasic_cfg["dynamic_fit_mode"] == "robust_global_event_reject"
-    assert phasic_cfg["peak_min_prominence_k"] == 1.0
-    assert phasic_cfg["peak_min_width_sec"] == 0.2
+    assert phasic_cfg["peak_min_prominence_k"] == 2.0
+    assert phasic_cfg["peak_min_width_sec"] == 0.3
 
     status = _load_json(out_dir / "status.json")
     timing = status["timing"]

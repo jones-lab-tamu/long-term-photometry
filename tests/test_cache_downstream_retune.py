@@ -293,6 +293,8 @@ def test_cache_retune_both_polarity_writes_interpretable_event_overlay_metadata(
             "peak_threshold_method": "absolute",
             "peak_threshold_abs": 0.6,
             "peak_min_distance_sec": 1.0,
+            "peak_min_prominence_k": 0.0,
+            "peak_min_width_sec": 0.0,
         },
         chunk_id=0,
     )

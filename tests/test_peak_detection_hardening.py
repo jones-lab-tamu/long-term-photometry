@@ -228,9 +228,10 @@ def test_dayplot_verification_parity_with_hardening_enabled():
 
 def test_config_defaults_and_roundtrip_for_hardening_knobs(tmp_path):
     cfg_default = Config()
+    assert cfg_default.peak_threshold_k == pytest.approx(2.5)
     assert cfg_default.peak_min_distance_sec == pytest.approx(1.0)
-    assert cfg_default.peak_min_prominence_k == pytest.approx(1.0)
-    assert cfg_default.peak_min_width_sec == pytest.approx(0.2)
+    assert cfg_default.peak_min_prominence_k == pytest.approx(2.0)
+    assert cfg_default.peak_min_width_sec == pytest.approx(0.3)
 
     cfg_path = tmp_path / "cfg.yaml"
     cfg_path.write_text(

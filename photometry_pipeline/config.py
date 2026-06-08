@@ -74,12 +74,12 @@ class Config:
     
     # peak detection (exposed params per user request)
     peak_threshold_method: str = 'mean_std'
-    peak_threshold_k: float = 2.0
+    peak_threshold_k: float = 2.5
     peak_threshold_percentile: float = 95.0
     peak_threshold_abs: float = 0.0 # Used only when method is 'absolute'
     peak_min_distance_sec: float = 1.0
-    peak_min_prominence_k: float = 1.0
-    peak_min_width_sec: float = 0.2
+    peak_min_prominence_k: float = 2.0
+    peak_min_width_sec: float = 0.3
     peak_pre_filter: str = 'none'
     event_auc_baseline: str = 'zero'
     event_signal: Literal['dff', 'delta_f'] = 'dff'
