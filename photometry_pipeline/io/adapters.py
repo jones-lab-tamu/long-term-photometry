@@ -6,7 +6,7 @@ import warnings
 import itertools
 import csv
 import re
-from typing import Optional, List, Dict, Tuple, Any
+from typing import Optional, List, Dict, Tuple, Any, Iterable
 from datetime import datetime
 from ..config import Config
 from ..core.types import Chunk, SessionTimeMetadata
@@ -18,6 +18,7 @@ import logging
 
 _RWD_METADATA_LED_KEYS: Tuple[str, ...] = ("Led410Enable", "Led470Enable", "Led560Enable")
 _CONTINUOUS_TIME_SCAN_CHUNKSIZE = 200_000
+_CONTINUOUS_WINDOW_READ_CHUNKSIZE = 200_000
 
 
 def _unique_ordered(values: List[str]) -> List[str]:
@@ -1119,6 +1120,17 @@ def _resolve_source_data(
     return source
 
 
+def resolve_continuous_source_metadata(
+    path: str,
+    format_type: str,
+    config: Config,
+    *,
+    source_cache: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return header/time metadata for a continuous source without reading signal arrays."""
+    return _resolve_source_data(path, format_type, config, source_cache=source_cache)
+
+
 def _compute_window_row_bounds(
     t_rel: np.ndarray,
     *,
@@ -1372,6 +1384,21 @@ def _load_bounded_window_arrays(
             f"expected {end_idx - start_idx + 1}, got {len(window_df)}"
         )
 
+    return _window_arrays_from_dataframe(
+        source_data,
+        continuous_window=continuous_window,
+        window_df=window_df,
+    )
+
+
+def _window_arrays_from_dataframe(
+    source_data: Dict[str, Any],
+    *,
+    continuous_window: Dict[str, Any],
+    window_df: pd.DataFrame,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    fmt = str(source_data.get("format", "")).strip().lower()
+    start = float(continuous_window["window_start_sec"])
     time_vals = pd.to_numeric(window_df[str(source_data["time_col"])], errors="coerce").to_numpy(dtype=float)
     if not np.all(np.isfinite(time_vals)):
         raise ValueError(
@@ -1398,6 +1425,227 @@ def _load_bounded_window_arrays(
     uv_raw = uv_df.to_numpy(dtype=float)
     sig_raw = sig_df.to_numpy(dtype=float)
     return t_window, uv_raw, sig_raw
+
+
+def _build_continuous_chunk_from_window_arrays(
+    path: str,
+    format_type: str,
+    config: Config,
+    chunk_id: int,
+    *,
+    source_data: Dict[str, Any],
+    continuous_window: Dict[str, Any],
+    t_window: np.ndarray,
+    uv_window: np.ndarray,
+    sig_window: np.ndarray,
+) -> Chunk:
+    n_rois = int(source_data["n_rois"])
+    names = list(source_data["channel_names"])
+    roi_map = dict(source_data["roi_map"])
+    metadata: Dict[str, Any] = {"roi_map": roi_map}
+    if str(format_type).lower() == "custom_tabular":
+        metadata["custom_tabular_contract"] = dict(source_data.get("custom_tabular_contract", {}))
+
+    duration_sec = float(continuous_window["window_duration_sec"])
+    data_window = np.hstack([uv_window, sig_window])
+    time_sec, data_out = _resample_strict_for_duration(
+        t_window,
+        data_window,
+        target_fs_hz=float(config.target_fs_hz),
+        duration_sec=duration_sec,
+        context=f"{str(format_type).upper()} continuous window",
+    )
+    metadata.update(_continuous_window_metadata(continuous_window))
+    uv_grid = data_out[:, :n_rois]
+    sig_grid = data_out[:, n_rois:]
+    chunk = Chunk(
+        chunk_id=chunk_id,
+        source_file=path,
+        format=str(format_type).lower(),
+        time_sec=time_sec,
+        uv_raw=uv_grid,
+        sig_raw=sig_grid,
+        fs_hz=config.target_fs_hz,
+        channel_names=names,
+        metadata=metadata,
+    )
+    _ensure_session_time_metadata(chunk)
+    chunk.validate(tolerance_frac=config.timestamp_cv_max)
+    return chunk
+
+
+def iter_continuous_custom_tabular_chunks(
+    source_data: Dict[str, Any],
+    windows: List[Dict[str, Any]],
+    config: Config,
+    *,
+    chunk_ids: Optional[List[int]] = None,
+    read_chunksize: int = _CONTINUOUS_WINDOW_READ_CHUNKSIZE,
+) -> Iterable[Tuple[int, Dict[str, Any], Chunk]]:
+    """
+    Yield continuous custom_tabular chunks using one forward CSV scan.
+
+    Memory remains bounded: pandas holds one source chunk, and this function only
+    retains DataFrame slices for windows intersecting that source chunk. Current
+    continuous planning disallows overlapping/sliding windows, so active windows
+    are limited to the current window plus small row-boundary overlap.
+    """
+    if str(source_data.get("format", "")).strip().lower() != "custom_tabular":
+        raise ValueError("Sequential continuous iteration is only implemented for custom_tabular")
+    if not windows:
+        return
+    if chunk_ids is None:
+        chunk_ids = list(range(len(windows)))
+    if len(chunk_ids) != len(windows):
+        raise ValueError("chunk_ids length must match windows length")
+    if read_chunksize <= 0:
+        raise ValueError("read_chunksize must be > 0")
+
+    ordered = list(zip(chunk_ids, windows))
+    previous_start = -1
+    previous_stop = -1
+    previous_window_end: Optional[float] = None
+    for _, win in ordered:
+        row_start = int(win["row_start"])
+        row_stop = int(win["row_stop"])
+        window_start = float(win.get("window_start_sec", np.nan))
+        if row_stop <= row_start:
+            raise ValueError(f"Invalid continuous window row bounds [{row_start}, {row_stop})")
+        if row_start < previous_start:
+            raise ValueError(
+                "Sequential continuous custom_tabular iteration requires windows in source row order"
+            )
+        if row_start < previous_stop and (
+            previous_window_end is None
+            or not np.isfinite(previous_window_end)
+            or not np.isfinite(window_start)
+            or window_start < previous_window_end
+        ):
+            raise ValueError(
+                "Sequential continuous custom_tabular iteration does not support overlapping windows"
+            )
+        previous_start = row_start
+        previous_stop = row_stop
+        previous_window_end = float(win.get("window_end_sec", np.nan))
+
+    # Selected-ROI filtering currently happens after chunk creation in Pipeline.
+    # Reading all ROI columns here preserves ROI-map consistency; a future
+    # optimization can safely prune usecols once selected-ROI provenance is wired
+    # through this adapter layer.
+    read_cols = (
+        [str(source_data["time_col"])]
+        + [str(c) for c in source_data["uv_cols"]]
+        + [str(c) for c in source_data["sig_cols"]]
+    )
+    chunks = pd.read_csv(
+        str(source_data["path"]),
+        usecols=read_cols,
+        chunksize=int(read_chunksize),
+    )
+
+    active: Dict[int, List[pd.DataFrame]] = {}
+    next_add = 0
+    next_yield = 0
+    row_offset = 0
+
+    for source_chunk in chunks:
+        chunk_start = int(row_offset)
+        chunk_end = int(row_offset + len(source_chunk))
+        row_offset = chunk_end
+        if chunk_end <= chunk_start:
+            continue
+
+        while next_add < len(ordered) and int(ordered[next_add][1]["row_start"]) < chunk_end:
+            active[next_add] = []
+            next_add += 1
+
+        for order_idx, parts in list(active.items()):
+            _, win = ordered[order_idx]
+            row_start = int(win["row_start"])
+            row_stop = int(win["row_stop"])
+            left = max(row_start, chunk_start)
+            right = min(row_stop, chunk_end)
+            if left < right:
+                # Copy only the intersecting rows so later pandas chunk reuse
+                # cannot mutate active window pieces.
+                parts.append(source_chunk.iloc[left - chunk_start: right - chunk_start].copy())
+
+        while next_yield in active and int(ordered[next_yield][1]["row_stop"]) <= chunk_end:
+            chunk_id, win = ordered[next_yield]
+            parts = active.pop(next_yield)
+            if not parts:
+                raise ValueError(
+                    f"Sequential continuous window {win.get('window_index')} resolved no source rows"
+                )
+            window_df = pd.concat(parts, ignore_index=True) if len(parts) > 1 else parts[0]
+            expected_rows = int(win["row_stop"]) - int(win["row_start"])
+            if len(window_df) != expected_rows:
+                raise ValueError(
+                    f"custom_tabular sequential window read length mismatch: "
+                    f"expected {expected_rows}, got {len(window_df)}"
+                )
+            t_window, uv_window, sig_window = _window_arrays_from_dataframe(
+                source_data,
+                continuous_window=win,
+                window_df=window_df,
+            )
+            yield (
+                int(chunk_id),
+                win,
+                _build_continuous_chunk_from_window_arrays(
+                    str(source_data["path"]),
+                    "custom_tabular",
+                    config,
+                    int(chunk_id),
+                    source_data=source_data,
+                    continuous_window=win,
+                    t_window=t_window,
+                    uv_window=uv_window,
+                    sig_window=sig_window,
+                ),
+            )
+            next_yield += 1
+
+    while next_yield in active:
+        chunk_id, win = ordered[next_yield]
+        parts = active.pop(next_yield)
+        if not parts:
+            raise ValueError(
+                f"Sequential continuous window {win.get('window_index')} resolved no source rows"
+            )
+        window_df = pd.concat(parts, ignore_index=True) if len(parts) > 1 else parts[0]
+        expected_rows = int(win["row_stop"]) - int(win["row_start"])
+        if len(window_df) != expected_rows:
+            raise ValueError(
+                f"custom_tabular sequential window read length mismatch: "
+                f"expected {expected_rows}, got {len(window_df)}"
+            )
+        t_window, uv_window, sig_window = _window_arrays_from_dataframe(
+            source_data,
+            continuous_window=win,
+            window_df=window_df,
+        )
+        yield (
+            int(chunk_id),
+            win,
+            _build_continuous_chunk_from_window_arrays(
+                str(source_data["path"]),
+                "custom_tabular",
+                config,
+                int(chunk_id),
+                source_data=source_data,
+                continuous_window=win,
+                t_window=t_window,
+                uv_window=uv_window,
+                sig_window=sig_window,
+            ),
+        )
+        next_yield += 1
+
+    if next_yield != len(ordered):
+        raise ValueError(
+            f"custom_tabular sequential iterator yielded {next_yield} of {len(ordered)} windows"
+        )
 
 
 def estimate_continuous_source_duration(

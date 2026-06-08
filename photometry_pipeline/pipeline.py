@@ -17,6 +17,8 @@ from .io.adapters import (
     sniff_format,
     sort_npm_files,
     plan_continuous_windows_for_source,
+    iter_continuous_custom_tabular_chunks,
+    resolve_continuous_source_metadata,
 )
 from .core import preprocessing, regression, normalization, feature_extraction, baseline
 from .core.utils import natural_sort_key
@@ -155,6 +157,13 @@ class Pipeline:
         self._phasic_phase_buckets = {}
         self._phasic_detail_buckets = {}
         self._phasic_metrics = {}
+        self._continuous_csv_reading = {
+            "sequential_csv_reading_used": False,
+            "source_csv_open_read_passes": 0,
+            "windows_yielded_sequentially": 0,
+            "bounded_loader_fallback_count": 0,
+            "phases": {},
+        }
 
     def _is_phasic_timing_enabled(self) -> bool:
         return self.mode == 'phasic'
@@ -181,6 +190,35 @@ class Pipeline:
         if not self._is_phasic_timing_enabled():
             return
         self._phasic_metrics[name] = self._phasic_metrics.get(name, 0) + delta
+
+    def _record_continuous_csv_reading(
+        self,
+        phase: str,
+        *,
+        sequential_passes: int = 0,
+        windows_yielded: int = 0,
+        fallback_windows: int = 0,
+    ) -> None:
+        if not self._is_continuous_mode_enabled():
+            return
+        phase_stats = self._continuous_csv_reading.setdefault("phases", {}).setdefault(
+            str(phase),
+            {
+                "source_csv_open_read_passes": 0,
+                "windows_yielded_sequentially": 0,
+                "bounded_loader_fallback_count": 0,
+            },
+        )
+        if sequential_passes:
+            self._continuous_csv_reading["sequential_csv_reading_used"] = True
+            self._continuous_csv_reading["source_csv_open_read_passes"] += int(sequential_passes)
+            phase_stats["source_csv_open_read_passes"] += int(sequential_passes)
+        if windows_yielded:
+            self._continuous_csv_reading["windows_yielded_sequentially"] += int(windows_yielded)
+            phase_stats["windows_yielded_sequentially"] += int(windows_yielded)
+        if fallback_windows:
+            self._continuous_csv_reading["bounded_loader_fallback_count"] += int(fallback_windows)
+            phase_stats["bounded_loader_fallback_count"] += int(fallback_windows)
 
     def _emit_phasic_timing_details(self, total_elapsed_sec: float):
         if not self._is_phasic_timing_enabled():
@@ -361,6 +399,136 @@ class Pipeline:
             source_cache=self._continuous_source_cache,
         )
 
+    def _continuous_entries_support_sequential_custom_tabular(self, entries) -> bool:
+        if not self._is_continuous_mode_enabled() or not entries:
+            return False
+        last_key = None
+        last_row_start = -1
+        last_row_stop = -1
+        last_window_end = None
+        for entry in entries:
+            rec = self._continuous_window_map.get(entry)
+            if rec is None or str(rec.get("format", "")).lower() != "custom_tabular":
+                return False
+            if "row_start" not in rec or "row_stop" not in rec:
+                return False
+            key = os.path.abspath(str(rec["source_file"]))
+            row_start = int(rec["row_start"])
+            row_stop = int(rec["row_stop"])
+            window_start = float(rec.get("window_start_sec", np.nan))
+            if key != last_key:
+                last_key = key
+                last_row_start = -1
+                last_row_stop = -1
+                last_window_end = None
+            if row_start < last_row_start:
+                return False
+            # Sequential custom_tabular optimization is intentionally limited to
+            # non-overlapping windows. Adjacent planned windows may share support
+            # rows for interpolation coverage; true sliding/overlapping windows
+            # remain correct through the existing bounded random-access loader.
+            if row_start < last_row_stop and (
+                last_window_end is None
+                or not np.isfinite(last_window_end)
+                or not np.isfinite(window_start)
+                or window_start < last_window_end
+            ):
+                return False
+            last_row_start = row_start
+            last_row_stop = row_stop
+            last_window_end = float(rec.get("window_end_sec", np.nan))
+        return True
+
+    def _iter_entry_chunks_for_pass(self, entries, force_format: str, phase_name: str):
+        if self._continuous_entries_support_sequential_custom_tabular(entries):
+            group_entries = []
+            group_chunk_ids = []
+            group_windows = []
+            group_source = None
+
+            def _flush_group():
+                if not group_entries:
+                    return
+                source_data = resolve_continuous_source_metadata(
+                    str(group_source),
+                    "custom_tabular",
+                    self.config,
+                    source_cache=self._continuous_source_cache,
+                )
+                self._record_continuous_csv_reading(phase_name, sequential_passes=1)
+                yielded = 0
+                iterator = iter_continuous_custom_tabular_chunks(
+                    source_data,
+                    group_windows,
+                    self.config,
+                    chunk_ids=group_chunk_ids,
+                )
+                while True:
+                    t_load = time.perf_counter()
+                    try:
+                        chunk_id, _win, chunk = next(iterator)
+                    except StopIteration:
+                        break
+                    yielded += 1
+                    yield (
+                        chunk_id,
+                        group_entries[group_chunk_ids.index(chunk_id)],
+                        chunk,
+                        time.perf_counter() - t_load,
+                    )
+                self._record_continuous_csv_reading(phase_name, windows_yielded=yielded)
+
+            for chunk_id, entry in enumerate(entries):
+                rec = self._continuous_window_map[entry]
+                src = str(rec["source_file"])
+                if group_source is not None and os.path.abspath(src) != os.path.abspath(str(group_source)):
+                    yield from _flush_group()
+                    group_entries = []
+                    group_chunk_ids = []
+                    group_windows = []
+                group_source = src
+                group_entries.append(entry)
+                group_chunk_ids.append(chunk_id)
+                group_windows.append(rec)
+            yield from _flush_group()
+            return
+
+        self._record_continuous_csv_reading(
+            phase_name,
+            fallback_windows=len(entries) if self._is_continuous_mode_enabled() else 0,
+        )
+        for chunk_id, entry in enumerate(entries):
+            t_load = time.perf_counter()
+            chunk = self._load_entry_chunk(entry, chunk_id, force_format)
+            yield chunk_id, entry, chunk, time.perf_counter() - t_load
+
+    def _continuous_metadata_channels_seen(self, entries):
+        if not self._continuous_entries_support_sequential_custom_tabular(entries):
+            return None
+        channels_seen = []
+        seen_sources = set()
+        for entry in entries:
+            rec = self._continuous_window_map.get(entry)
+            if rec is None:
+                return None
+            src = os.path.abspath(str(rec["source_file"]))
+            if src in seen_sources:
+                continue
+            source_data = resolve_continuous_source_metadata(
+                str(rec["source_file"]),
+                "custom_tabular",
+                self.config,
+                source_cache=self._continuous_source_cache,
+            )
+            names = list(source_data.get("channel_names", []))
+            if not names:
+                return None
+            channels_seen.append(names)
+            if not self.roi_map and source_data.get("roi_map"):
+                self.roi_map = dict(source_data["roi_map"])
+            seen_sources.add(src)
+        return channels_seen or None
+
     def run_pass_1(self, force_format: str = 'auto'):
         """
         Baseline Computation.
@@ -378,12 +546,11 @@ class Pipeline:
         
         if method == 'uv_raw_percentile_session':
             print("Pass 1 (Reservoir)...")
-            for i, fpath in enumerate(self.file_list):
+            for i, fpath, chunk, load_elapsed in self._iter_entry_chunks_for_pass(self.file_list, force_format, "pass1"):
                 try:
                     t_load = time.perf_counter()
-                    chunk = self._load_entry_chunk(fpath, i, force_format)
                     if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
-                    pass1_chunk_load_sec += (time.perf_counter() - t_load)
+                    pass1_chunk_load_sec += load_elapsed + (time.perf_counter() - t_load)
                     
                     if not self.roi_map and chunk.metadata.get('roi_map'):
                         self.roi_map = chunk.metadata['roi_map']
@@ -414,12 +581,11 @@ class Pipeline:
             accumulator = baseline.GlobalFitAccumulator()
             
             print("Pass 1a (Stats)...")
-            for i, fpath in enumerate(self.file_list):
+            for i, fpath, chunk, load_elapsed in self._iter_entry_chunks_for_pass(self.file_list, force_format, "pass1a"):
                 try:
                     t_load = time.perf_counter()
-                    chunk = self._load_entry_chunk(fpath, i, force_format)
                     if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
-                    pass1_chunk_load_sec += (time.perf_counter() - t_load)
+                    pass1_chunk_load_sec += load_elapsed + (time.perf_counter() - t_load)
                     
                     if not self.roi_map and chunk.metadata.get('roi_map'):
                         self.roi_map = chunk.metadata['roi_map']
@@ -446,12 +612,11 @@ class Pipeline:
             pass1_solve_sec += (time.perf_counter() - t_solve)
             
             print("Pass 1b (Reservoir)...")
-            for i, fpath in enumerate(self.file_list):
+            for i, fpath, chunk, load_elapsed in self._iter_entry_chunks_for_pass(self.file_list, force_format, "pass1b"):
                 try:
                     t_load = time.perf_counter()
-                    chunk = self._load_entry_chunk(fpath, i, force_format)
                     if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
-                    pass1_chunk_load_sec += (time.perf_counter() - t_load)
+                    pass1_chunk_load_sec += load_elapsed + (time.perf_counter() - t_load)
                     
                     t_acc = time.perf_counter()
                     for ch_idx, ch_name in enumerate(chunk.channel_names):
@@ -521,9 +686,8 @@ class Pipeline:
                     capacity=TONIC_GLOBAL_FIT_SAMPLE_CAPACITY,
                 )
 
-                for i, fpath in enumerate(self.file_list):
+                for i, fpath, chunk, _load_elapsed in self._iter_entry_chunks_for_pass(self.file_list, force_format, "tonic_pass1c"):
                     try:
-                        chunk = self._load_entry_chunk(fpath, i, force_format)
                         if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
                         for ch_idx, ch_name in enumerate(chunk.channel_names):
                             tonic_fit_sampler.add(
@@ -570,9 +734,8 @@ class Pipeline:
                 acc_uv = {}
                 acc_sig = {}
 
-                for i, fpath in enumerate(self.file_list):
+                for i, fpath, chunk, _load_elapsed in self._iter_entry_chunks_for_pass(self.file_list, force_format, "tonic_pass1c"):
                     try:
-                        chunk = self._load_entry_chunk(fpath, i, force_format)
                         if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
                         for ch_idx, ch_name in enumerate(chunk.channel_names):
                             if ch_name not in acc_uv:
@@ -814,12 +977,11 @@ class Pipeline:
         
         print("Pass 2 (Analysis)...")
         # Ensure we only iterate over files successfully processed in Pass 1
-        for i, fpath in enumerate(frozen_manifest):
+        for i, fpath, chunk, load_elapsed in self._iter_entry_chunks_for_pass(frozen_manifest, force_format, "pass2"):
             try:
                 t_read = time.perf_counter()
-                chunk = self._load_entry_chunk(fpath, i, force_format)
                 if self._selected_rois is not None: chunk = self._apply_roi_filter(chunk)
-                pass2_chunk_read_sec += (time.perf_counter() - t_read)
+                pass2_chunk_read_sec += load_elapsed + (time.perf_counter() - t_read)
                 pass2_chunks_processed += 1
                 if hasattr(chunk, 'sig_raw') and chunk.sig_raw is not None:
                     pass2_sample_rows_processed += int(chunk.sig_raw.shape[0])
@@ -940,6 +1102,7 @@ class Pipeline:
                     )
                     if isinstance(self._continuous_plan_summary, dict)
                     else int(len(self.file_list)),
+                    'continuous_csv_reading': _sanitize_metadata(self._continuous_csv_reading),
                 }
             )
         t_meta_write = time.perf_counter()
@@ -1058,15 +1221,26 @@ class Pipeline:
         
         # --- ROI Discovery & Resolution ---
         roi_read_sec = 0.0
-        channels_seen = []
-        for i, fpath in enumerate(self.file_list):
-            try:
-                t_roi_read = time.perf_counter()
-                chunk = self._load_entry_chunk(fpath, i, force_format)
-                roi_read_sec += (time.perf_counter() - t_roi_read)
-                channels_seen.append(chunk.channel_names)
-            except Exception as e:
-                logging.warning(f"ROI Discovery: Failed to read {fpath}: {e}")
+        channels_seen = self._continuous_metadata_channels_seen(self.file_list)
+        if channels_seen is not None:
+            self._record_continuous_csv_reading("roi_discovery", sequential_passes=0, windows_yielded=0)
+            self._set_phasic_metric("roi_discovery_source", "continuous_metadata")
+        else:
+            channels_seen = []
+            for i, fpath in enumerate(self.file_list):
+                try:
+                    t_roi_read = time.perf_counter()
+                    chunk = self._load_entry_chunk(fpath, i, force_format)
+                    roi_read_sec += (time.perf_counter() - t_roi_read)
+                    channels_seen.append(chunk.channel_names)
+                except Exception as e:
+                    logging.warning(f"ROI Discovery: Failed to read {fpath}: {e}")
+            if self._is_continuous_mode_enabled():
+                self._record_continuous_csv_reading(
+                    "roi_discovery",
+                    fallback_windows=len(self.file_list),
+                )
+            self._set_phasic_metric("roi_discovery_source", "chunk_reads")
         self._add_phasic_phase_bucket("phase.roi_discovery_read_chunks", roi_read_sec)
         
         if not channels_seen:
@@ -1177,6 +1351,13 @@ class Pipeline:
             self._cache_writer.abort()
             raise
 
+        if self._is_continuous_mode_enabled():
+            _append_run_report_section(
+                output_dir,
+                "continuous_csv_reading",
+                self._continuous_csv_reading,
+            )
+
         if self._is_phasic_timing_enabled():
             dyn_total = self._phasic_detail_buckets.get("pass2.dynamic_regression", 0.0)
             dyn_sub_sum = sum(
@@ -1204,6 +1385,23 @@ class Pipeline:
             )
 
             self._set_phasic_metric("traces_only", int(bool(self.traces_only)))
+            if self._is_continuous_mode_enabled():
+                self._set_phasic_metric(
+                    "continuous_csv_reading.sequential_used",
+                    int(bool(self._continuous_csv_reading.get("sequential_csv_reading_used", False))),
+                )
+                self._set_phasic_metric(
+                    "continuous_csv_reading.source_csv_open_read_passes",
+                    int(self._continuous_csv_reading.get("source_csv_open_read_passes", 0)),
+                )
+                self._set_phasic_metric(
+                    "continuous_csv_reading.windows_yielded_sequentially",
+                    int(self._continuous_csv_reading.get("windows_yielded_sequentially", 0)),
+                )
+                self._set_phasic_metric(
+                    "continuous_csv_reading.bounded_loader_fallback_count",
+                    int(self._continuous_csv_reading.get("bounded_loader_fallback_count", 0)),
+                )
             self._emit_phasic_timing_details(time.perf_counter() - run_started)
         
         print("Pipeline Done.")
