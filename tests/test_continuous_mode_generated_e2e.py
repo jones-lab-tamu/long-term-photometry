@@ -142,6 +142,15 @@ def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _load_events(path: Path) -> list[dict]:
+    assert path.exists()
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -265,6 +274,43 @@ def test_generated_custom_tabular_continuous_mode_both_e2e(tmp_path: Path):
     assert "Region0/summary/tonic_overview.png" in continuous_outputs["summary_plots"]
     assert "Region0/summary/continuous_phasic_dff_trace_overview.png" in continuous_outputs["trace_overview_plots"]
     assert "Region0/summary/continuous_tonic_trace_overview.png" in continuous_outputs["trace_overview_plots"]
+
+    status = _load_json(out_dir / "status.json")
+    timing = status["timing"]
+    expected_timing_phases = {
+        "validate",
+        "tonic_analysis",
+        "phasic_analysis",
+        "continuous_summary_tables",
+        "continuous_summary_plots",
+        "continuous_trace_overview_plots",
+        "manifest_write",
+        "finalize_artifacts",
+    }
+    history_by_phase = {record["phase"]: record for record in timing["phase_history"]}
+    assert expected_timing_phases.issubset(history_by_phase)
+    assert expected_timing_phases.issubset(timing["phase_elapsed_sec"])
+    for phase in expected_timing_phases:
+        record = history_by_phase[phase]
+        assert record["started_utc"]
+        assert record["finished_utc"]
+        assert record["elapsed_sec"] >= 0
+        assert timing["phase_elapsed_sec"][phase] >= 0
+
+    events = _load_events(out_dir / "events.ndjson")
+    timing_events = [event for event in events if event.get("stage") == "timing"]
+    timing_start_phases = {
+        event.get("payload", {}).get("phase")
+        for event in timing_events
+        if event.get("type") == "timing_start"
+    }
+    timing_done_phases = {
+        event.get("payload", {}).get("phase")
+        for event in timing_events
+        if event.get("type") == "timing_done"
+    }
+    assert expected_timing_phases.issubset(timing_start_phases)
+    assert expected_timing_phases.issubset(timing_done_phases)
 
 
 def test_generated_rwd_continuous_mode_both_e2e(tmp_path: Path):

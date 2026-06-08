@@ -2,6 +2,8 @@ import os
 import sys
 import json
 import pytest
+import h5py
+import numpy as np
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -37,6 +39,21 @@ def test_wrapper_timing_manifest_full_run_mocked(mock_run_dir, tmp_path):
     # Mock phasic out so has_features is true
     (phasic_out / "features").mkdir(parents=True)
     (phasic_out / "features" / "features.csv").write_text("roi,chunk_id\nRegion0,0")
+    with h5py.File(phasic_out / "phasic_trace_cache.h5", "w") as f:
+        meta = f.create_group("meta")
+        meta.attrs["mode"] = "phasic"
+        meta.attrs["schema_version"] = "1"
+        meta.create_dataset("rois", data=np.array([b"Region0"]))
+        meta.create_dataset("chunk_ids", data=np.array([0], dtype=np.int64))
+        meta.create_dataset("source_files", data=np.array([b"chunk_0000.csv"]))
+        grp = f.create_group("roi/Region0/chunk_0")
+        t = np.array([0.0, 3600.0], dtype=float)
+        grp.create_dataset("time_sec", data=t)
+        grp.create_dataset("sig_raw", data=np.array([1.0, 1.1], dtype=float))
+        grp.create_dataset("uv_raw", data=np.array([0.5, 0.6], dtype=float))
+        grp.create_dataset("fit_ref", data=np.array([0.9, 1.0], dtype=float))
+        grp.create_dataset("delta_f", data=np.array([0.1, 0.1], dtype=float))
+        grp.create_dataset("dff", data=np.array([0.0, 0.1], dtype=float))
     
     # Also need tonic_out for plots
     tonic_out = mock_run_dir / "_analysis" / "tonic_out"
@@ -128,3 +145,21 @@ def test_wrapper_timing_manifest_full_run_mocked(mock_run_dir, tmp_path):
         assert "timing" in status
         assert status["timing"]["last_completed_phase"] == "finalize_artifacts"
         assert "last_phase_elapsed_sec" in status["timing"]
+        assert "phase_history" in status["timing"]
+        assert "phase_elapsed_sec" in status["timing"]
+        history_phases = [record["phase"] for record in status["timing"]["phase_history"]]
+        for p in expected_phases:
+            assert p in history_phases
+            assert p in status["timing"]["phase_elapsed_sec"]
+            assert status["timing"]["phase_elapsed_sec"][p] >= 0
+
+        events_path = mock_run_dir / "events.ndjson"
+        assert events_path.exists()
+        events = [
+            json.loads(line)
+            for line in events_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        timing_events = [event for event in events if event.get("stage") == "timing"]
+        assert any(event.get("type") == "timing_start" for event in timing_events)
+        assert any(event.get("type") == "timing_done" for event in timing_events)

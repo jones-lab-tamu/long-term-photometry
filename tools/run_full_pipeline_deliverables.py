@@ -136,37 +136,65 @@ def _log_roi_timing_metric(roi, name, value):
     print(f"TIMING METRIC roi={roi} name={name} value={value}", flush=True)
 
 
-def _phase_start(status_data, phase_name):
+def _ensure_phase_timing_containers(status_data):
+    timing = status_data.setdefault("timing", {})
+    timing.setdefault("phase_history", [])
+    timing.setdefault("phase_elapsed_sec", {})
+    return timing
+
+
+def _phase_start(status_data, phase_name, emitter=None):
     """Record phase start in status and print log."""
     now_utc = _utc_now_iso()
-    status_data["timing"]["current_phase"] = phase_name
-    status_data["timing"]["phase_started_utc"] = now_utc
+    timing = _ensure_phase_timing_containers(status_data)
+    timing["current_phase"] = phase_name
+    timing["phase_started_utc"] = now_utc
+    if emitter is not None:
+        emitter.emit(
+            "timing",
+            "timing_start",
+            f"Timing started for phase: {phase_name}",
+            payload={"phase": phase_name, "started_utc": now_utc},
+        )
     print(f"TIMING START phase={phase_name} at {now_utc}", flush=True)
     return time.perf_counter(), now_utc
 
 
-def _phase_done(status_data, manifest, phase_name, t0, started_utc, status_path=None):
+def _phase_done(status_data, manifest, phase_name, t0, started_utc, status_path=None, emitter=None):
     """Record phase completion in status and manifest, and print log."""
     elapsed = time.perf_counter() - t0
     finished_utc = _utc_now_iso()
+    record = {
+        "phase": phase_name,
+        "started_utc": started_utc,
+        "finished_utc": finished_utc,
+        "elapsed_sec": elapsed,
+    }
     
     # Update status
-    status_data["timing"]["last_completed_phase"] = phase_name
-    status_data["timing"]["last_phase_elapsed_sec"] = elapsed
-    status_data["timing"]["current_phase"] = None
-    status_data["timing"]["phase_started_utc"] = None
+    timing = _ensure_phase_timing_containers(status_data)
+    timing["last_completed_phase"] = phase_name
+    timing["last_phase_elapsed_sec"] = elapsed
+    timing["current_phase"] = None
+    timing["phase_started_utc"] = None
+    timing["phase_history"].append(dict(record))
+    timing["phase_elapsed_sec"][phase_name] = elapsed
     
     # Update manifest
     if "timing" not in manifest:
         manifest["timing"] = {"phases": {}}
-    manifest["timing"]["phases"][phase_name] = {
-        "started_utc": started_utc,
-        "finished_utc": finished_utc,
-        "elapsed_sec": elapsed
-    }
+    manifest["timing"]["phases"][phase_name] = dict(record)
     
     if status_path:
         _write_status_json(status_path, status_data)
+
+    if emitter is not None:
+        emitter.emit(
+            "timing",
+            "timing_done",
+            f"Timing completed for phase: {phase_name}",
+            payload=dict(record),
+        )
     
     print(f"TIMING DONE phase={phase_name} elapsed_sec={elapsed:.3f}", flush=True)
 
@@ -1532,7 +1560,9 @@ def main():
             "current_phase": None,
             "phase_started_utc": None,
             "last_completed_phase": None,
-            "last_phase_elapsed_sec": None
+            "last_phase_elapsed_sec": None,
+            "phase_history": [],
+            "phase_elapsed_sec": {},
         }
     }
     t0_status = time.time()
@@ -1648,12 +1678,12 @@ def main():
         # ============================================================
         # 3. Validate
         # ============================================================
-        t_phase, started_utc_phase = _phase_start(status_data, "validate")
+        t_phase, started_utc_phase = _phase_start(status_data, "validate", emitter=emitter)
         _write_status_update("validating")
         emitter.emit("validate", "start", "Validating inputs")
         validate_inputs(args)
         emitter.emit("validate", "done", "Validation passed")
-        _phase_done(status_data, manifest, "validate", t_phase, started_utc_phase, status_path=status_path)
+        _phase_done(status_data, manifest, "validate", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
 
         check_cancel(cancel_flag_path, emitter, "validate", manifest_path, manifest)
 
@@ -1680,7 +1710,7 @@ def main():
             )
         
         if run_tonic_mode:
-            t_phase, started_utc_phase = _phase_start(status_data, "tonic_analysis")
+            t_phase, started_utc_phase = _phase_start(status_data, "tonic_analysis", emitter=emitter)
             _write_status_update("tonic_analysis")
             emitter.emit("tonic", "start", "Running tonic analysis")
             emitter.close()  # Release file lock so subprocess can append events
@@ -1707,7 +1737,7 @@ def main():
             finally:
                 emitter = EventEmitter(events_path, run_id, run_dir, file_mode="a")
             emitter.emit("tonic", "done", "Tonic analysis complete")
-            _phase_done(status_data, manifest, "tonic_analysis", t_phase, started_utc_phase, status_path=status_path)
+            _phase_done(status_data, manifest, "tonic_analysis", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
 
             check_cancel(cancel_flag_path, emitter, "tonic", manifest_path, manifest)
 
@@ -1715,7 +1745,7 @@ def main():
         # 5. Phasic Analysis
         # ============================================================
         if run_phasic_mode:
-            t_phase, started_utc_phase = _phase_start(status_data, "phasic_analysis")
+            t_phase, started_utc_phase = _phase_start(status_data, "phasic_analysis", emitter=emitter)
             _write_status_update("phasic_analysis")
             emitter.emit("phasic", "start", "Running phasic analysis")
             emitter.close()  # Release file lock so subprocess can append events
@@ -1741,12 +1771,12 @@ def main():
             finally:
                 emitter = EventEmitter(events_path, run_id, run_dir, file_mode="a")
             emitter.emit("phasic", "done", "Phasic analysis complete")
-            _phase_done(status_data, manifest, "phasic_analysis", t_phase, started_utc_phase, status_path=status_path)
+            _phase_done(status_data, manifest, "phasic_analysis", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
 
             check_cancel(cancel_flag_path, emitter, "phasic", manifest_path, manifest)
 
         if continuous_mode:
-            t_phase, started_utc_phase = _phase_start(status_data, "continuous_summary_tables")
+            t_phase, started_utc_phase = _phase_start(status_data, "continuous_summary_tables", emitter=emitter)
             _write_status_update("continuous_summary_tables")
             emitter.emit("continuous_outputs", "start", "Generating continuous summary tables")
             from photometry_pipeline.continuous_outputs import (
@@ -1780,9 +1810,10 @@ def main():
                 t_phase,
                 started_utc_phase,
                 status_path=status_path,
+                emitter=emitter,
             )
 
-            t_phase, started_utc_phase = _phase_start(status_data, "continuous_summary_plots")
+            t_phase, started_utc_phase = _phase_start(status_data, "continuous_summary_plots", emitter=emitter)
             _write_status_update("continuous_summary_plots")
             emitter.emit("continuous_outputs", "start", "Generating continuous summary plots")
             plot_result = generate_continuous_summary_plots(
@@ -1814,9 +1845,10 @@ def main():
                 t_phase,
                 started_utc_phase,
                 status_path=status_path,
+                emitter=emitter,
             )
 
-            t_phase, started_utc_phase = _phase_start(status_data, "continuous_trace_overview_plots")
+            t_phase, started_utc_phase = _phase_start(status_data, "continuous_trace_overview_plots", emitter=emitter)
             _write_status_update("continuous_trace_overview_plots")
             emitter.emit("continuous_outputs", "start", "Generating continuous trace overview plots")
             trace_overview_result = generate_continuous_trace_overview_plots(
@@ -1857,6 +1889,7 @@ def main():
                 t_phase,
                 started_utc_phase,
                 status_path=status_path,
+                emitter=emitter,
             )
 
             manifest["sessions_per_hour"] = resolved_sessions_per_hour
@@ -1898,7 +1931,7 @@ def main():
                 payload={"intermittent_only_outputs": INTERMITTENT_ONLY_OUTPUT_KEYS},
             )
 
-            t_phase, started_utc_phase = _phase_start(status_data, "manifest_write")
+            t_phase, started_utc_phase = _phase_start(status_data, "manifest_write", emitter=emitter)
             emitter.emit("package", "start", "Writing final manifest")
             manifest["timing"]["total_runtime_sec"] = time.perf_counter() - t0_total
             _atomic_write_json(manifest_path, manifest)
@@ -1910,9 +1943,10 @@ def main():
                 t_phase,
                 started_utc_phase,
                 status_path=status_path,
+                emitter=emitter,
             )
 
-            t_phase, started_utc_phase = _phase_start(status_data, "finalize_artifacts")
+            t_phase, started_utc_phase = _phase_start(status_data, "finalize_artifacts", emitter=emitter)
             ok = _ensure_root_run_report(
                 run_dir,
                 phasic_out,
@@ -1945,6 +1979,7 @@ def main():
                 t_phase,
                 started_utc_phase,
                 status_path=status_path,
+                emitter=emitter,
             )
 
             manifest["timing"]["total_runtime_sec"] = time.perf_counter() - t0_total
@@ -1958,7 +1993,7 @@ def main():
         # ============================================================
         # 6. Session / Stride Computation
         # ============================================================
-        t_phase, started_utc_phase = _phase_start(status_data, "session_compute")
+        t_phase, started_utc_phase = _phase_start(status_data, "session_compute", emitter=emitter)
         
         # Timing Resolution Cache Measurement (Mandatory)
         if run_tonic_mode and not run_phasic_mode:
@@ -2051,13 +2086,13 @@ def main():
         manifest['session_duration_s'] = session_duration_s
         manifest['session_stride_s'] = stride_s
         print(f"Deterministic Sessions Per Hour: {sessions_per_hour} (Stride={stride_s:.1f}s, Dur={session_duration_s:.1f}s)", flush=True)
-        _phase_done(status_data, manifest, "session_compute", t_phase, started_utc_phase, status_path=status_path)
+        _phase_done(status_data, manifest, "session_compute", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
 
         check_cancel(cancel_flag_path, emitter, "session_compute", manifest_path, manifest)
 
         # 7. Per-Region Processing (Plots & Packaging)
         # ============================================================
-        t_phase, started_utc_phase = _phase_start(status_data, "plots_total")
+        t_phase, started_utc_phase = _phase_start(status_data, "plots_total", emitter=emitter)
         _write_status_update("plots")
         emitter.emit("plots", "start", "Generating per-ROI deliverables")
         if tune_prep_light_mode and effective_skip_plan is not None:
@@ -2573,14 +2608,14 @@ def main():
             print(f"TIMING DONE roi={roi} elapsed_sec={elapsed_roi:.3f}", flush=True)
 
         emitter.emit("plots", "done", "All ROI deliverables complete")
-        _phase_done(status_data, manifest, "plots_total", t_phase, started_utc_phase, status_path=status_path)
+        _phase_done(status_data, manifest, "plots_total", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
 
         check_cancel(cancel_flag_path, emitter, "package", manifest_path, manifest)
         
         # ============================================================
         # 8. Write Manifest (LAST, atomic)
         # ============================================================
-        t_phase, started_utc_phase = _phase_start(status_data, "manifest_write")
+        t_phase, started_utc_phase = _phase_start(status_data, "manifest_write", emitter=emitter)
         emitter.emit("package", "start", "Writing final manifest")
         
         # Add authoritative total runtime to manifest timing
@@ -2588,12 +2623,12 @@ def main():
         
         _atomic_write_json(manifest_path, manifest)
         emitter.emit("package", "done", "Manifest written")
-        _phase_done(status_data, manifest, "manifest_write", t_phase, started_utc_phase, status_path=status_path)
+        _phase_done(status_data, manifest, "manifest_write", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
 
         # ============================================================
         # 9. Finalize Artifacts (Strict Ordering Gate)
         # ============================================================
-        t_phase, started_utc_phase = _phase_start(status_data, "finalize_artifacts")
+        t_phase, started_utc_phase = _phase_start(status_data, "finalize_artifacts", emitter=emitter)
         # ============================================================
         # Finalize Status (Success)
         # ============================================================
@@ -2617,7 +2652,7 @@ def main():
             emitter.emit("package", "error", msg)
             err_payload = msg
             
-        _phase_done(status_data, manifest, "finalize_artifacts", t_phase, started_utc_phase, status_path=status_path)
+        _phase_done(status_data, manifest, "finalize_artifacts", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
 
         # Final manifest update for end-to-end timing
         manifest["timing"]["total_runtime_sec"] = time.perf_counter() - t0_total
