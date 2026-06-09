@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import os
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, fields
 from datetime import datetime
@@ -54,6 +55,19 @@ BatchCommandRunner = Callable[
 BatchRowCallback = Callable[[BatchDatasetRow], None]
 BatchSpecCallback = Callable[[BatchRunSpec], None]
 BatchMessageCallback = Callable[[str], None]
+
+
+class BatchCancelToken:
+    """Thread-safe cancellation flag shared across GUI and worker threads."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def request_cancel(self) -> None:
+        self._event.set()
+
+    def is_cancel_requested(self) -> bool:
+        return self._event.is_set()
 
 
 def derive_dataset_run_spec(
@@ -117,6 +131,7 @@ class BatchRunner:
         batch_spec: BatchRunSpec,
         *,
         command_runner: BatchCommandRunner | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
         on_row_update: BatchRowCallback | None = None,
         on_batch_update: BatchSpecCallback | None = None,
         on_message: BatchMessageCallback | None = None,
@@ -124,6 +139,7 @@ class BatchRunner:
     ) -> None:
         self.batch_spec = batch_spec
         self.command_runner = command_runner or default_subprocess_command_runner
+        self._external_cancel_requested = cancel_requested
         self.on_row_update = on_row_update
         self.on_batch_update = on_batch_update
         self.on_message = on_message
@@ -154,7 +170,16 @@ class BatchRunner:
             _write_cancel_flag(self._active_row.output_path)
 
     def is_cancel_requested(self) -> bool:
-        return bool(self._cancel_requested)
+        external_requested = False
+        if self._external_cancel_requested is not None:
+            try:
+                external_requested = bool(self._external_cancel_requested())
+            except Exception:
+                external_requested = False
+        requested = bool(self._cancel_requested or external_requested)
+        if requested and self._active_row is not None:
+            _write_cancel_flag(self._active_row.output_path)
+        return requested
 
     def run(self, *, validate_only: bool = False) -> BatchRunSpec:
         """Run pending rows sequentially and update manifests incrementally."""
@@ -168,7 +193,7 @@ class BatchRunner:
         self._write_live_manifests()
 
         for index, row in enumerate(self.batch_spec.datasets):
-            if self._cancel_requested:
+            if self.is_cancel_requested():
                 self._cancel_remaining_from(index)
                 break
             if row.status == "skipped":
@@ -222,7 +247,7 @@ class BatchRunner:
                     message=str(exc),
                 )
 
-            if self._cancel_requested or result.cancelled:
+            if self.is_cancel_requested() or result.cancelled:
                 row.status = "cancelled"
                 row.message = result.message or "Batch cancellation requested."
                 self._finalize_row_paths(row)

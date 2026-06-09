@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import yaml
 
 from gui.batch_runner import (
     BatchCommandResult,
+    BatchCancelToken,
     BatchRunner,
     default_subprocess_command_runner,
     derive_dataset_run_spec,
@@ -324,6 +326,55 @@ def test_cancellation_marks_current_and_remaining_rows(tmp_path: Path):
     assert result.datasets[0].message == "cancelled in fake"
     assert result.datasets[1].status == "cancelled"
     assert "before dataset execution" in result.datasets[1].message
+    assert Path(result.datasets[0].output_path, "CANCEL.REQUESTED").exists()
+
+
+def test_external_cancel_token_reaches_active_command_runner(tmp_path: Path):
+    rows = _rows(tmp_path, "AnimalA", "AnimalB")
+    token = BatchCancelToken()
+    command_started = threading.Event()
+    cancel_seen = threading.Event()
+    release_command = threading.Event()
+
+    def fake_runner(_argv, _row, _run_spec, cancel_requested):
+        command_started.set()
+        if cancel_requested():
+            cancel_seen.set()
+        while not cancel_seen.is_set():
+            if cancel_requested():
+                cancel_seen.set()
+                break
+            release_command.wait(0.01)
+        release_command.wait(1.0)
+        return BatchCommandResult(
+            exit_code=130,
+            cancelled=True,
+            message="cancelled by external token",
+        )
+
+    runner = BatchRunner(
+        _batch_spec(tmp_path, rows),
+        command_runner=fake_runner,
+        cancel_requested=token.is_cancel_requested,
+    )
+    result_holder = {}
+    thread = threading.Thread(
+        target=lambda: result_holder.setdefault("result", runner.run(validate_only=True)),
+        daemon=True,
+    )
+
+    thread.start()
+    assert command_started.wait(2.0)
+    token.request_cancel()
+    assert cancel_seen.wait(2.0)
+    release_command.set()
+    thread.join(2.0)
+
+    assert not thread.is_alive()
+    result = result_holder["result"]
+    assert result.datasets[0].status == "cancelled"
+    assert result.datasets[0].message == "cancelled by external token"
+    assert result.datasets[1].status == "cancelled"
     assert Path(result.datasets[0].output_path, "CANCEL.REQUESTED").exists()
 
 

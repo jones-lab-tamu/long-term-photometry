@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 from gui.process_runner import PipelineRunner, RunnerState
 from gui.interactive_image import InteractiveImageLabel, InteractiveImageController
 from gui.run_spec import RunSpec, FORMAT_CHOICES
+from gui.batch_run_dialog import BatchRunDialog
 from gui.status_follower import StatusFollower
 from gui.log_follower import LogFollower
 from gui.run_report_viewer import RunReportViewer
@@ -6988,46 +6989,68 @@ class MainWindow(QMainWindow):
     def _on_cancel(self):
         self._runner.cancel()
 
-    def _on_open_results(self):
-        """Open a completed successful output directory into complete-state workspace."""
-        current = (self._current_run_dir or "").strip()
-        output = self._output_dir.text().strip()
-        start_dir = ""
-        if output and os.path.isdir(output):
-            start_dir = output
-        elif current and os.path.isdir(current):
-            start_dir = current
-
-        selected = QFileDialog.getExistingDirectory(
-            self,
-            "Select Completed Pipeline Run Folder",
-            start_dir,
-        )
-        if not selected:
+    def _on_batch_run(self):
+        if self._runner.is_running():
+            QMessageBox.information(
+                self,
+                "Batch Run Unavailable",
+                "Batch Run is unavailable while validation or analysis is running.",
+            )
             return
+        existing = getattr(self, "_batch_run_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dlg = BatchRunDialog(
+            build_base_run_spec=self._build_batch_base_run_spec,
+            open_completed_run=self._open_completed_results_dir,
+            open_folder=_open_folder,
+            parent=self,
+        )
+        self._batch_run_dialog = dlg
+        try:
+            dlg.exec()
+        finally:
+            self._batch_run_dialog = None
 
+    def _build_batch_base_run_spec(
+        self,
+        validate_only: bool,
+        input_placeholder: str | None = None,
+        output_placeholder: str | None = None,
+    ) -> RunSpec:
+        """Freeze current GUI analysis settings using harmless batch placeholders."""
+        previous_run_dir = self._current_run_dir
+        previous_input = self._input_dir.text()
+        previous_output = self._output_dir.text()
+        input_placeholder = input_placeholder or "__batch_placeholder_input__"
+        output_placeholder = output_placeholder or "__batch_placeholder_output__"
+        try:
+            self._input_dir.blockSignals(True)
+            self._output_dir.blockSignals(True)
+            self._input_dir.setText(input_placeholder)
+            self._output_dir.setText(os.path.dirname(output_placeholder) or output_placeholder)
+            spec = self._build_run_spec(validate_only=validate_only)
+            spec.input_dir = input_placeholder
+            spec.run_dir = output_placeholder
+            return spec
+        finally:
+            self._input_dir.setText(previous_input)
+            self._output_dir.setText(previous_output)
+            self._input_dir.blockSignals(False)
+            self._output_dir.blockSignals(False)
+            self._current_run_dir = previous_run_dir
+
+    def _open_completed_results_dir(self, run_dir: str) -> bool:
+        """Load a completed run folder into the existing complete-state workspace."""
+        selected = str(run_dir or "").strip()
         selected_ok, evidence = self._is_openable_completed_results_dir(selected)
-
         if not selected_ok:
             self._append_run_log(
                 f"Open Results blocked: selected directory is not a confirmed successful completed run. {evidence}"
             )
-            QMessageBox.information(
-                self,
-                "Results Not Opened",
-                "This folder does not look like a completed pipeline run. "
-                "Choose an output run folder containing status.json/MANIFEST.json "
-                "and region summary/tables.\n\n"
-                f"Details: {evidence}",
-            )
-            self._apply_results_idle_placeholder()
-            self._exit_complete_state_workspace()
-            self._refresh_tuning_workspace_availability()
-            self._state_str = RunnerState.IDLE.value
-            self._ui_state = RunnerState.IDLE
-            self._render_status_label()
-            self._update_button_states()
-            return
+            return False
 
         self._current_run_dir = selected
         self._output_dir.setText(selected)
@@ -7057,6 +7080,45 @@ class MainWindow(QMainWindow):
             self._exit_complete_state_workspace()
             self._refresh_tuning_workspace_availability()
         self._update_button_states()
+        return bool(loaded)
+
+    def _on_open_results(self):
+        """Open a completed successful output directory into complete-state workspace."""
+        current = (self._current_run_dir or "").strip()
+        output = self._output_dir.text().strip()
+        start_dir = ""
+        if output and os.path.isdir(output):
+            start_dir = output
+        elif current and os.path.isdir(current):
+            start_dir = current
+
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select Completed Pipeline Run Folder",
+            start_dir,
+        )
+        if not selected:
+            return
+
+        loaded = self._open_completed_results_dir(selected)
+        if not loaded:
+            _ok, evidence = self._is_openable_completed_results_dir(selected)
+            QMessageBox.information(
+                self,
+                "Results Not Opened",
+                "This folder does not look like a completed pipeline run. "
+                "Choose an output run folder containing status.json/MANIFEST.json "
+                "and region summary/tables.\n\n"
+                f"Details: {evidence}",
+            )
+            self._apply_results_idle_placeholder()
+            self._exit_complete_state_workspace()
+            self._refresh_tuning_workspace_availability()
+            self._state_str = RunnerState.IDLE.value
+            self._ui_state = RunnerState.IDLE
+            self._render_status_label()
+            self._update_button_states()
+            return
 
     def _on_open_folder(self):
         """Open the current run_dir in the system file manager."""
@@ -9043,6 +9105,7 @@ class MainWindow(QMainWindow):
         # no validation/run subprocess is active, independent of current paths
         # or previous run state.
         self._open_results_btn.setEnabled(bool(not running))
+        self._batch_run_btn.setEnabled(bool(not running))
 
         # Open Run Folder: enabled when done and run_dir exists
         has_run_dir = bool(self._current_run_dir and os.path.isdir(self._current_run_dir))
@@ -9512,10 +9575,17 @@ class MainWindow(QMainWindow):
         self._open_results_btn.clicked.connect(self._on_open_results)
         self._open_results_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         actions.addWidget(self._open_results_btn, 1, 1)
+        self._batch_run_btn = QPushButton("Batch Run...")
+        self._batch_run_btn.clicked.connect(self._on_batch_run)
+        self._batch_run_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._batch_run_btn.setToolTip(
+            "Run the current analysis settings across multiple independent dataset folders."
+        )
+        actions.addWidget(self._batch_run_btn, 2, 0, 1, 2)
         self._open_folder_btn = QPushButton("Open Run Folder")
         self._open_folder_btn.clicked.connect(self._on_open_folder)
         self._open_folder_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        actions.addWidget(self._open_folder_btn, 2, 0, 1, 2)
+        actions.addWidget(self._open_folder_btn, 3, 0, 1, 2)
         layout.addWidget(self._run_actions_container)
 
         self._run_reason_label = QLabel("Run status: Validation required before first run.")
