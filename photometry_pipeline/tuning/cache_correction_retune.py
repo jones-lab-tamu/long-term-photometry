@@ -411,6 +411,20 @@ def _load_roi_raw_entries(cache, roi: str, cfg: Config) -> list[dict[str, Any]]:
         "dynamic_fit_slope_n_negative_slope_spans",
         "dynamic_fit_slope_longest_negative_slope_span_samples",
         "dynamic_fit_slope_longest_negative_slope_span_sec",
+        "dynamic_fit_slope_constraint_mode",
+        "dynamic_fit_slope_min_allowed",
+        "dynamic_fit_slope_constraint_applied",
+        "dynamic_fit_slope_clamped_fraction",
+        "dynamic_fit_slope_n_clamped_slope_samples",
+        "dynamic_fit_slope_n_clamped_slope_spans",
+        "dynamic_fit_slope_longest_clamped_slope_span_samples",
+        "dynamic_fit_slope_longest_clamped_slope_span_sec",
+        "dynamic_fit_slope_unconstrained_slope_min",
+        "dynamic_fit_slope_unconstrained_slope_max",
+        "dynamic_fit_slope_unconstrained_slope_negative_fraction",
+        "dynamic_fit_slope_constrained_slope_min",
+        "dynamic_fit_slope_constrained_slope_max",
+        "dynamic_fit_slope_constrained_slope_negative_fraction",
     )
     for idx, cid in enumerate(chunk_ids):
         grp = roi_group.get(f"chunk_{cid}")
@@ -672,6 +686,12 @@ def _write_correction_inspection(
         if isinstance(slope_source_info, dict)
         else {}
     )
+    constraint_summary = (
+        dict(slope_source_info.get("slope_constraint_summary", {}))
+        if isinstance(slope_source_info, dict)
+        and isinstance(slope_source_info.get("slope_constraint_summary", {}), dict)
+        else {}
+    )
     if not slope_summary and hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
         if chunk.metadata.get("dynamic_fit_slope_summary_available", False):
             slope_summary = {
@@ -693,15 +713,71 @@ def _write_correction_inspection(
                     "dynamic_fit_slope_longest_negative_slope_span_sec", np.nan
                 ),
             }
+    if not constraint_summary and hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
+        if "dynamic_fit_slope_constraint_mode" in chunk.metadata:
+            constraint_summary = {
+                "slope_constraint_mode": str(
+                    chunk.metadata.get("dynamic_fit_slope_constraint_mode", "unavailable")
+                ),
+                "slope_min_allowed": chunk.metadata.get("dynamic_fit_slope_min_allowed", np.nan),
+                "slope_constraint_applied": bool(
+                    chunk.metadata.get("dynamic_fit_slope_constraint_applied", False)
+                ),
+                "slope_clamped_fraction": chunk.metadata.get(
+                    "dynamic_fit_slope_clamped_fraction", np.nan
+                ),
+                "n_clamped_slope_samples": chunk.metadata.get(
+                    "dynamic_fit_slope_n_clamped_slope_samples", 0
+                ),
+                "n_clamped_slope_spans": chunk.metadata.get(
+                    "dynamic_fit_slope_n_clamped_slope_spans", 0
+                ),
+                "longest_clamped_slope_span_samples": chunk.metadata.get(
+                    "dynamic_fit_slope_longest_clamped_slope_span_samples", 0
+                ),
+                "longest_clamped_slope_span_sec": chunk.metadata.get(
+                    "dynamic_fit_slope_longest_clamped_slope_span_sec", np.nan
+                ),
+                "unconstrained_slope_summary": {
+                    "slope_min": chunk.metadata.get(
+                        "dynamic_fit_slope_unconstrained_slope_min", np.nan
+                    ),
+                    "slope_max": chunk.metadata.get(
+                        "dynamic_fit_slope_unconstrained_slope_max", np.nan
+                    ),
+                    "slope_negative_fraction": chunk.metadata.get(
+                        "dynamic_fit_slope_unconstrained_slope_negative_fraction", np.nan
+                    ),
+                },
+                "constrained_slope_summary": {
+                    "slope_min": chunk.metadata.get(
+                        "dynamic_fit_slope_constrained_slope_min", np.nan
+                    ),
+                    "slope_max": chunk.metadata.get(
+                        "dynamic_fit_slope_constrained_slope_max", np.nan
+                    ),
+                    "slope_negative_fraction": chunk.metadata.get(
+                        "dynamic_fit_slope_constrained_slope_negative_fraction", np.nan
+                    ),
+                },
+            }
     slope_trace = None
+    unconstrained_slope_trace = None
     if isinstance(adaptive_info, dict):
         candidate = np.asarray(adaptive_info.get("coef_slope", []), dtype=float)
         if candidate.shape == sig.shape and np.any(np.isfinite(candidate)):
             slope_trace = candidate
+        candidate_unconstrained = np.asarray(adaptive_info.get("coef_slope_unconstrained", []), dtype=float)
+        if candidate_unconstrained.shape == sig.shape and np.any(np.isfinite(candidate_unconstrained)):
+            unconstrained_slope_trace = candidate_unconstrained
     if slope_trace is None and isinstance(rolling_info, dict):
         candidate = np.asarray(rolling_info.get("coef_slope", []), dtype=float)
         if candidate.shape == sig.shape and np.any(np.isfinite(candidate)):
             slope_trace = candidate
+    if unconstrained_slope_trace is None and isinstance(rolling_info, dict):
+        candidate_unconstrained = np.asarray(rolling_info.get("coef_slope_unconstrained", []), dtype=float)
+        if candidate_unconstrained.shape == sig.shape and np.any(np.isfinite(candidate_unconstrained)):
+            unconstrained_slope_trace = candidate_unconstrained
     robust_mode = (
         fit_mode_resolved == "robust_global_event_reject"
         or bool(event_reject_info)
@@ -793,6 +869,16 @@ def _write_correction_inspection(
             "n_gated": int(np.sum(gated_mask)),
         }
     if slope_summary:
+        unconstrained_summary = (
+            constraint_summary.get("unconstrained_slope_summary", {})
+            if isinstance(constraint_summary, dict)
+            else {}
+        )
+        constrained_summary = (
+            constraint_summary.get("constrained_slope_summary", {})
+            if isinstance(constraint_summary, dict)
+            else {}
+        )
         artifacts["retuned_correction_inspection_slope_diagnostics"] = {
             "fit_mode_resolved": fit_mode_resolved or "unknown",
             "warning_level": str(slope_summary.get("warning_level", "none")),
@@ -803,6 +889,24 @@ def _write_correction_inspection(
                 slope_summary, "longest_negative_slope_span_sec"
             ),
             "slope_trace_available": bool(slope_trace is not None),
+            "slope_constraint_mode": str(
+                constraint_summary.get("slope_constraint_mode", "unavailable")
+            ) if isinstance(constraint_summary, dict) and constraint_summary else "unavailable",
+            "slope_constraint_applied": bool(
+                constraint_summary.get("slope_constraint_applied", False)
+            ) if isinstance(constraint_summary, dict) else False,
+            "slope_clamped_fraction": _meta_float(
+                constraint_summary, "slope_clamped_fraction"
+            ) if isinstance(constraint_summary, dict) else float("nan"),
+            "slope_min_allowed": _meta_float(
+                constraint_summary, "slope_min_allowed"
+            ) if isinstance(constraint_summary, dict) else float("nan"),
+            "unconstrained_slope_negative_fraction": _meta_float(
+                unconstrained_summary, "slope_negative_fraction"
+            ) if isinstance(unconstrained_summary, dict) else float("nan"),
+            "constrained_slope_negative_fraction": _meta_float(
+                constrained_summary, "slope_negative_fraction"
+            ) if isinstance(constrained_summary, dict) else float("nan"),
         }
     if bleach_mode_resolved != "none":
         artifacts["retuned_correction_inspection_bleach_diagnostics"] = {
@@ -876,6 +980,23 @@ def _write_correction_inspection(
             if slope_summary else float("nan"),
             "dynamic_fit_slope_max": _meta_float(slope_summary, "slope_max")
             if slope_summary else float("nan"),
+            "dynamic_fit_slope_constraint_mode": str(
+                constraint_summary.get("slope_constraint_mode", "unavailable")
+            ) if constraint_summary else "unavailable",
+            "dynamic_fit_slope_constraint_applied": bool(
+                constraint_summary.get("slope_constraint_applied", False)
+            ) if constraint_summary else False,
+            "dynamic_fit_slope_clamped_fraction": _meta_float(
+                constraint_summary, "slope_clamped_fraction"
+            ) if constraint_summary else float("nan"),
+            "dynamic_fit_slope_unconstrained_negative_fraction": _meta_float(
+                constraint_summary.get("unconstrained_slope_summary", {}),
+                "slope_negative_fraction",
+            ) if constraint_summary else float("nan"),
+            "dynamic_fit_slope_constrained_negative_fraction": _meta_float(
+                constraint_summary.get("constrained_slope_summary", {}),
+                "slope_negative_fraction",
+            ) if constraint_summary else float("nan"),
             "sig_bleach_fit_model": str(signal_bleach_fit_meta.get("fit_model", ""))
             if isinstance(signal_bleach_fit_meta, dict) else "",
             "sig_bleach_fit_succeeded": bool(
@@ -1140,6 +1261,16 @@ def _write_correction_inspection(
                     bbox={"facecolor": "white", "alpha": 0.7, "edgecolor": "0.7"},
                 )
             if slope_summary and slope_trace is None:
+                unconstrained_summary = (
+                    constraint_summary.get("unconstrained_slope_summary", {})
+                    if isinstance(constraint_summary, dict)
+                    else {}
+                )
+                constrained_summary = (
+                    constraint_summary.get("constrained_slope_summary", {})
+                    if isinstance(constraint_summary, dict)
+                    else {}
+                )
                 ax.text(
                     0.99,
                     0.98,
@@ -1148,7 +1279,13 @@ def _write_correction_inspection(
                         f"warning: {slope_summary.get('warning_level', 'none')}\n"
                         f"neg frac: {_meta_float(slope_summary, 'slope_negative_fraction'):.3g}\n"
                         f"min/max: {_meta_float(slope_summary, 'slope_min'):.3g}/"
-                        f"{_meta_float(slope_summary, 'slope_max'):.3g}"
+                        f"{_meta_float(slope_summary, 'slope_max'):.3g}\n"
+                        f"constraint: {constraint_summary.get('slope_constraint_mode', 'unavailable') if isinstance(constraint_summary, dict) and constraint_summary else 'unavailable'}\n"
+                        f"applied: {bool(constraint_summary.get('slope_constraint_applied', False)) if isinstance(constraint_summary, dict) else False}\n"
+                        f"clamped frac: {_meta_float(constraint_summary, 'slope_clamped_fraction') if isinstance(constraint_summary, dict) else float('nan'):.3g}\n"
+                        f"unconstr neg: {_meta_float(unconstrained_summary, 'slope_negative_fraction') if isinstance(unconstrained_summary, dict) else float('nan'):.3g}\n"
+                        f"constr neg: {_meta_float(constrained_summary, 'slope_negative_fraction') if isinstance(constrained_summary, dict) else float('nan'):.3g}\n"
+                        f"min allowed: {_meta_float(constraint_summary, 'slope_min_allowed') if isinstance(constraint_summary, dict) else float('nan'):.3g}"
                     ),
                     transform=ax.transAxes,
                     ha="right",
@@ -1158,8 +1295,33 @@ def _write_correction_inspection(
                 )
             ax.set_ylabel("Fit frame (V)")
         elif panel_key == "slope":
+            if unconstrained_slope_trace is not None and np.any(
+                np.isfinite(unconstrained_slope_trace)
+            ):
+                ax.plot(
+                    t,
+                    unconstrained_slope_trace,
+                    color="#9A3412",
+                    linewidth=0.8,
+                    alpha=0.85,
+                    label="unconstrained slope",
+                )
             ax.plot(t, slope_trace, color="#155E75", linewidth=0.9, label="UV-to-signal slope")
             ax.axhline(0.0, color="black", linewidth=0.8, linestyle="--", alpha=0.7, label="zero slope")
+            if (
+                isinstance(constraint_summary, dict)
+                and str(constraint_summary.get("slope_constraint_mode", "")) == "nonnegative"
+            ):
+                min_allowed = _meta_float(constraint_summary, "slope_min_allowed")
+                if np.isfinite(min_allowed):
+                    ax.axhline(
+                        min_allowed,
+                        color="#DC2626",
+                        linewidth=0.8,
+                        linestyle=":",
+                        alpha=0.8,
+                        label="min allowed slope",
+                    )
             if slope_summary:
                 ax.text(
                     0.01,

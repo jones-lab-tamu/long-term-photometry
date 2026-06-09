@@ -159,6 +159,7 @@ class Pipeline:
         self._phasic_metrics = {}
         self.dynamic_fit_slope_records = []
         self.dynamic_fit_slope_warning_records = []
+        self.dynamic_fit_slope_constraint_records = []
         self.dynamic_fit_slope_warning_summary = {
             "roi_chunk_fits_with_any_negative_slope": 0,
             "roi_chunk_fits_by_warning_level": {
@@ -172,6 +173,15 @@ class Pipeline:
             "min_slope_min_observed": None,
             "dynamic_fit_modes_affected": [],
             "rois_affected": [],
+        }
+        self.dynamic_fit_slope_constraint_summary = {
+            "roi_chunk_fits_with_slope_constraint_applied": 0,
+            "roi_chunk_fits_by_constraint_mode": {},
+            "roi_chunk_fits_with_any_clamped_slope": 0,
+            "max_slope_clamped_fraction": 0.0,
+            "max_unconstrained_slope_negative_fraction_among_clamped": 0.0,
+            "dynamic_fit_modes_with_slope_constraint_applied": [],
+            "rois_with_slope_constraint_applied": [],
         }
         self._continuous_csv_reading = {
             "sequential_csv_reading_used": False,
@@ -219,7 +229,24 @@ class Pipeline:
                 self.dynamic_fit_slope_warning_records.append(warning_record)
                 self.qc_summary.setdefault("dynamic_fit_slope_warnings", []).append(warning_record)
 
+            constraint_summary = payload.get("slope_constraint_summary", {})
+            if isinstance(constraint_summary, dict) and constraint_summary:
+                constraint_record = {
+                    "roi": str(roi),
+                    "chunk_id": int(chunk_id),
+                    "source_file": str(source_file),
+                    "dynamic_fit_mode": fit_mode,
+                    "acquisition_mode": acquisition_mode,
+                    **_sanitize_metadata(constraint_summary),
+                }
+                if bool(constraint_summary.get("slope_constraint_applied", False)):
+                    self.dynamic_fit_slope_constraint_records.append(constraint_record)
+                    self.qc_summary.setdefault(
+                        "dynamic_fit_slope_constraint_warnings", []
+                    ).append(constraint_record)
+
         self._update_dynamic_fit_slope_warning_summary()
+        self._update_dynamic_fit_slope_constraint_summary()
 
     def _update_dynamic_fit_slope_warning_summary(self) -> None:
         records = list(self.dynamic_fit_slope_warning_records)
@@ -277,6 +304,61 @@ class Pipeline:
         }
         self.dynamic_fit_slope_warning_summary = summary
         self.qc_summary["dynamic_fit_slope_warning_summary"] = _sanitize_metadata(summary)
+
+    def _update_dynamic_fit_slope_constraint_summary(self) -> None:
+        records = list(self.dynamic_fit_slope_constraint_records)
+        mode_counts: dict[str, int] = {}
+        max_clamped = 0.0
+        max_unconstrained_neg = 0.0
+        for rec in records:
+            mode = str(rec.get("slope_constraint_mode", "unavailable"))
+            mode_counts[mode] = mode_counts.get(mode, 0) + 1
+            try:
+                max_clamped = max(max_clamped, float(rec.get("slope_clamped_fraction", 0.0)))
+            except Exception:
+                pass
+            unconstrained = rec.get("unconstrained_slope_summary", {})
+            if isinstance(unconstrained, dict):
+                try:
+                    max_unconstrained_neg = max(
+                        max_unconstrained_neg,
+                        float(unconstrained.get("slope_negative_fraction", 0.0)),
+                    )
+                except Exception:
+                    pass
+        summary = {
+            "roi_chunk_fits_with_slope_constraint_applied": int(len(records)),
+            "roi_chunk_fits_by_constraint_mode": {
+                str(key): int(value) for key, value in sorted(mode_counts.items())
+            },
+            "roi_chunk_fits_with_any_clamped_slope": int(
+                sum(
+                    1
+                    for rec in records
+                    if float(rec.get("n_clamped_slope_samples", 0) or 0) > 0
+                )
+            ),
+            "max_slope_clamped_fraction": float(max_clamped),
+            "max_unconstrained_slope_negative_fraction_among_clamped": float(
+                max_unconstrained_neg
+            ),
+            "dynamic_fit_modes_with_slope_constraint_applied": sorted(
+                {
+                    str(rec.get("dynamic_fit_mode", ""))
+                    for rec in records
+                    if str(rec.get("dynamic_fit_mode", ""))
+                }
+            ),
+            "rois_with_slope_constraint_applied": sorted(
+                {
+                    str(rec.get("roi", ""))
+                    for rec in records
+                    if str(rec.get("roi", ""))
+                }
+            ),
+        }
+        self.dynamic_fit_slope_constraint_summary = summary
+        self.qc_summary["dynamic_fit_slope_constraint_summary"] = _sanitize_metadata(summary)
 
     def _is_phasic_timing_enabled(self) -> bool:
         return self.mode == 'phasic'
@@ -1174,6 +1256,7 @@ class Pipeline:
             if bad_rois:
                 logging.warning(f"Baseline invalid for {len(bad_rois)} ROIs across {total_chunks} chunks ({total_affected} pairs).")
         self._update_dynamic_fit_slope_warning_summary()
+        self._update_dynamic_fit_slope_constraint_summary()
             
         if self.mode != 'tonic':
             t_qc_write = time.perf_counter()
@@ -1199,9 +1282,11 @@ class Pipeline:
             # D1: Write invalid baseline ROIs
             'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', []),
             'dynamic_fit_slope_warning_summary': self.dynamic_fit_slope_warning_summary,
+            'dynamic_fit_slope_constraint_summary': self.dynamic_fit_slope_constraint_summary,
         }
         if self.mode != 'tonic':
             run_meta['dynamic_fit_slope_warning_records'] = self.dynamic_fit_slope_warning_records
+            run_meta['dynamic_fit_slope_constraint_records'] = self.dynamic_fit_slope_constraint_records
         if self._is_continuous_mode_enabled():
             run_meta.update(
                 {
@@ -1480,6 +1565,11 @@ class Pipeline:
                 output_dir,
                 "dynamic_fit_slope_warning_summary",
                 self.dynamic_fit_slope_warning_summary,
+            )
+            _append_run_report_section(
+                output_dir,
+                "dynamic_fit_slope_constraint_summary",
+                self.dynamic_fit_slope_constraint_summary,
             )
 
         if self._is_phasic_timing_enabled():

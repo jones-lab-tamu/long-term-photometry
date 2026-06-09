@@ -3,6 +3,7 @@ import dataclasses
 from typing import List, Optional, Dict, Literal
 import yaml
 import os
+import math
 
 @dataclass
 class Config:
@@ -46,6 +47,8 @@ class Config:
         'robust_global_event_reject',
         'adaptive_event_gated_regression',
     ] = 'robust_global_event_reject'
+    dynamic_fit_slope_constraint: Literal['unconstrained', 'nonnegative'] = 'unconstrained'
+    dynamic_fit_min_slope: float = 0.0
     robust_event_reject_max_iters: int = 3
     robust_event_reject_residual_z_thresh: float = 3.5
     robust_event_reject_local_var_window_sec: Optional[float] = 10.0
@@ -189,6 +192,12 @@ class Config:
                     "'rolling_filtered_to_filtered', 'global_linear_regression', "
                     "'robust_global_event_reject', 'adaptive_event_gated_regression'}"
                 )
+        if 'dynamic_fit_slope_constraint' in data:
+            if data['dynamic_fit_slope_constraint'] not in {'unconstrained', 'nonnegative'}:
+                raise ValueError(
+                    f"Invalid dynamic_fit_slope_constraint: {data['dynamic_fit_slope_constraint']}. "
+                    "Allowed: {'unconstrained', 'nonnegative'}"
+                )
         if 'bleach_correction_mode' in data:
             if data['bleach_correction_mode'] not in {
                 'none',
@@ -282,6 +291,24 @@ class Config:
             raise ValueError("adaptive_event_gate_min_trust_fraction must be in (0, 1]")
         if obj.adaptive_event_gate_freeze_interp_method not in {"linear_hold"}:
             raise ValueError("adaptive_event_gate_freeze_interp_method must be 'linear_hold'")
+        if obj.dynamic_fit_slope_constraint not in {"unconstrained", "nonnegative"}:
+            raise ValueError(
+                "dynamic_fit_slope_constraint must be one of {'unconstrained', 'nonnegative'}"
+            )
+        try:
+            obj.dynamic_fit_min_slope = float(obj.dynamic_fit_min_slope)
+        except Exception as exc:
+            raise ValueError("dynamic_fit_min_slope must be a finite float") from exc
+        if not math.isfinite(obj.dynamic_fit_min_slope):
+            raise ValueError("dynamic_fit_min_slope must be a finite float")
+        if (
+            obj.dynamic_fit_slope_constraint == "nonnegative"
+            and obj.dynamic_fit_min_slope < 0.0
+        ):
+            raise ValueError(
+                "dynamic_fit_min_slope must be >= 0 when "
+                "dynamic_fit_slope_constraint is 'nonnegative'"
+            )
         if obj.bleach_correction_mode not in {"none", "single_exponential", "double_exponential"}:
             raise ValueError(
                 "bleach_correction_mode must be one of {'none', 'single_exponential', 'double_exponential'}"

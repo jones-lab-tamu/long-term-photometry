@@ -3,7 +3,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 from ..config import Config
 from .types import Chunk
-from .slope_qc import summarize_slope
+from .slope_qc import apply_slope_constraint, summarize_slope
 
 def _get_window_indices(center: int, window_samples: int, n_samples: int) -> Optional[Tuple[int, int]]:
     """
@@ -71,6 +71,57 @@ def _attach_slope_warning(chunk: Chunk, roi: str, mode: str, summary: dict) -> N
     if msg:
         _ensure_chunk_metadata(chunk)
         chunk.metadata.setdefault("qc_warnings", []).append(msg)
+
+
+def _constraint_warning_message(roi: str, mode: str, summary: dict) -> str | None:
+    if not isinstance(summary, dict) or not summary.get("slope_constraint_applied", False):
+        return None
+    unconstrained = summary.get("unconstrained_slope_summary", {})
+    constrained = summary.get("constrained_slope_summary", {})
+    span_sec = summary.get("longest_clamped_slope_span_sec", None)
+    span_part = ""
+    if span_sec is not None:
+        try:
+            span_part = f" longest_clamped_slope_span_sec={float(span_sec):.6g}"
+        except Exception:
+            span_part = ""
+    return (
+        "DYNAMIC_FIT_SLOPE_CONSTRAINT_APPLIED "
+        f"roi={roi} dynamic_fit_mode={mode} "
+        f"slope_constraint_mode={summary.get('slope_constraint_mode', 'unavailable')} "
+        f"slope_min_allowed={float(summary.get('slope_min_allowed', np.nan)):.6g} "
+        f"slope_clamped_fraction={float(summary.get('slope_clamped_fraction', 0.0)):.6g} "
+        f"n_clamped_slope_samples={int(summary.get('n_clamped_slope_samples', 0))}"
+        f"{span_part} "
+        f"unconstrained_slope_negative_fraction={float(unconstrained.get('slope_negative_fraction', 0.0)):.6g} "
+        f"constrained_slope_negative_fraction={float(constrained.get('slope_negative_fraction', 0.0)):.6g} "
+        f"unconstrained_slope_min={float(unconstrained.get('slope_min', np.nan)):.6g} "
+        f"constrained_slope_min={float(constrained.get('slope_min', np.nan)):.6g}"
+    )
+
+
+def _attach_constraint_warning(chunk: Chunk, roi: str, mode: str, summary: dict) -> None:
+    msg = _constraint_warning_message(roi, mode, summary)
+    if msg:
+        _ensure_chunk_metadata(chunk)
+        chunk.metadata.setdefault("qc_warnings", []).append(msg)
+
+
+def _slope_constraint_settings(config: Config) -> tuple[str, float]:
+    return (
+        str(getattr(config, "dynamic_fit_slope_constraint", "unconstrained") or "unconstrained"),
+        float(getattr(config, "dynamic_fit_min_slope", 0.0)),
+    )
+
+
+def _constraint_metadata(summary: dict) -> dict:
+    return {
+        "unconstrained_slope_summary": dict(summary.get("unconstrained_slope_summary", {})),
+        "slope_constraint_summary": dict(summary),
+        "slope_constraint_mode": str(summary.get("slope_constraint_mode", "unconstrained")),
+        "slope_min_allowed": float(summary.get("slope_min_allowed", 0.0)),
+        "slope_constraint_applied": bool(summary.get("slope_constraint_applied", False)),
+    }
 
 
 def _rolling_sum_centered(values: np.ndarray, window_samples: int) -> np.ndarray:
@@ -838,6 +889,8 @@ def fit_robust_global_event_reject(
     sample_rate_hz: float,
     use_intercept: bool = True,
     signal_excursion_polarity: str = "positive",
+    slope_constraint: str = "unconstrained",
+    min_slope: float = 0.0,
 ) -> dict:
     """
     Robust global fit with iterative event-dominated sample rejection.
@@ -997,27 +1050,37 @@ def fit_robust_global_event_reject(
     )
     if params is not None:
         final_slope, final_intercept = float(params[0]), float(params[1])
-        final_fit = (final_slope * iso) + final_intercept
         robust_backend_used = str(backend_used)
     elif not np.isfinite(final_slope):
         raise RuntimeError(
             "robust_global_event_reject final fit failed: "
             f"{fail_reason or 'unknown'}"
         )
+    constrained_slope, constraint_summary = apply_slope_constraint(
+        float(final_slope),
+        constraint_mode=slope_constraint,
+        min_slope=min_slope,
+        sample_rate_hz=sample_rate_hz,
+    )
+    final_slope_used = float(constrained_slope)
+    final_fit = (final_slope_used * iso) + final_intercept
 
     return {
         "iso_fit_signal_units": np.asarray(final_fit, dtype=float),
         "keep_mask": np.asarray(keep_mask, dtype=bool),
         "excluded_mask": np.asarray(finite & (~keep_mask), dtype=bool),
         "final_coef": {
-            "slope": float(final_slope),
+            "slope": float(final_slope_used),
+            "unconstrained_slope": float(final_slope),
             "intercept": float(final_intercept),
             "use_intercept": bool(use_intercept),
             "n_kept": int(np.sum(keep_mask)),
             "n_finite": int(n_finite),
             "keep_fraction": float(np.sum(keep_mask) / float(max(1, n_finite))),
         },
-        "slope_summary": summarize_slope(float(final_slope), sample_rate_hz=sample_rate_hz),
+        "slope_summary": summarize_slope(float(final_slope_used), sample_rate_hz=sample_rate_hz),
+        "unconstrained_slope_summary": constraint_summary["unconstrained_slope_summary"],
+        "slope_constraint_summary": constraint_summary,
         "iteration_summaries": iteration_summaries,
         "local_var_rule_enabled": bool(use_var_rule),
         "local_var_window_samples": int(local_var_window_samples),
@@ -1044,6 +1107,8 @@ def fit_adaptive_event_gated_regression(
     freeze_interp_method: str = "linear_hold",
     use_intercept: bool = True,
     signal_excursion_polarity: str = "positive",
+    slope_constraint: str = "unconstrained",
+    min_slope: float = 0.0,
 ) -> dict:
     """
     Slow adaptive fit with event gating and coefficient freezing.
@@ -1207,6 +1272,14 @@ def fit_adaptive_event_gated_regression(
         slope_final = slope_reg
         intercept_final = intercept_reg
 
+    slope_unconstrained = np.asarray(slope_final, dtype=float).copy()
+    slope_final, constraint_summary = apply_slope_constraint(
+        slope_unconstrained,
+        constraint_mode=slope_constraint,
+        min_slope=min_slope,
+        sample_rate_hz=sample_rate_hz,
+    )
+    slope_final = np.asarray(slope_final, dtype=float)
     fit_raw = (slope_final * iso_raw_arr) + intercept_final
     finite_raw = np.isfinite(sig_raw_arr) & np.isfinite(iso_raw_arr)
     fit_raw = np.asarray(fit_raw, dtype=float)
@@ -1222,8 +1295,11 @@ def fit_adaptive_event_gated_regression(
             "robust_fit_backend_used": str(robust_backend_used),
         },
         "coef_slope": np.asarray(slope_final, dtype=float),
+        "coef_slope_unconstrained": np.asarray(slope_unconstrained, dtype=float),
         "coef_intercept": np.asarray(intercept_final, dtype=float),
         "slope_summary": summarize_slope(slope_final, sample_rate_hz=sample_rate_hz),
+        "unconstrained_slope_summary": constraint_summary["unconstrained_slope_summary"],
+        "slope_constraint_summary": constraint_summary,
         "residual_median": float(residual_median),
         "residual_mad": float(mad),
         "residual_robust_scale": float(robust_scale),
@@ -1274,6 +1350,7 @@ def _compute_dynamic_fit_ref_global_linear(chunk: Chunk, config: Config, mode: s
         "legacy_knobs_not_used_in_engine": _legacy_knobs_not_used_in_engine(),
     }
     chunk.metadata["dynamic_fit_global_linear"] = {}
+    slope_constraint_mode, slope_min_allowed = _slope_constraint_settings(config)
 
     for r_idx in range(n_rois):
         roi_name = str(chunk.channel_names[r_idx]) if r_idx < len(chunk.channel_names) else f"roi_{r_idx}"
@@ -1292,13 +1369,26 @@ def _compute_dynamic_fit_ref_global_linear(chunk: Chunk, config: Config, mode: s
             continue
 
         slope, intercept = params
-        uv_fit_all[:, r_idx] = intercept + slope * chunk.uv_raw[:, r_idx]
-        slope_summary = summarize_slope(float(slope), sample_rate_hz=float(chunk.fs_hz))
+        constrained_slope, constraint_summary = apply_slope_constraint(
+            float(slope),
+            constraint_mode=slope_constraint_mode,
+            min_slope=slope_min_allowed,
+            sample_rate_hz=float(chunk.fs_hz),
+        )
+        slope_used = float(constrained_slope)
+        uv_fit_all[:, r_idx] = intercept + slope_used * chunk.uv_raw[:, r_idx]
+        slope_summary = summarize_slope(float(slope_used), sample_rate_hz=float(chunk.fs_hz))
         chunk.metadata["dynamic_fit_global_linear"][roi_name] = {
-            "final_coef": {"slope": float(slope), "intercept": float(intercept)},
+            "final_coef": {
+                "slope": float(slope_used),
+                "unconstrained_slope": float(slope),
+                "intercept": float(intercept),
+            },
             "slope_summary": slope_summary,
+            **_constraint_metadata(constraint_summary),
         }
         _attach_slope_warning(chunk, roi_name, "global_linear_regression", slope_summary)
+        _attach_constraint_warning(chunk, roi_name, "global_linear_regression", constraint_summary)
 
     return uv_fit_all
 
@@ -1360,6 +1450,7 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
     local_var_window_sec = getattr(config, "robust_event_reject_local_var_window_sec", 10.0)
     local_var_ratio_thresh = getattr(config, "robust_event_reject_local_var_ratio_thresh", None)
     min_keep_fraction = float(getattr(config, "robust_event_reject_min_keep_fraction", 0.5))
+    slope_constraint_mode, slope_min_allowed = _slope_constraint_settings(config)
 
     fallback_roi_count = 0
     robust_backend_used_counts: Dict[str, int] = {}
@@ -1379,6 +1470,8 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
                 sample_rate_hz=float(chunk.fs_hz),
                 use_intercept=True,
                 signal_excursion_polarity=signal_excursion_polarity,
+                slope_constraint=slope_constraint_mode,
+                min_slope=slope_min_allowed,
             )
             uv_fit_all[:, r_idx] = np.asarray(
                 robust_result["iso_fit_signal_units"], dtype=float
@@ -1388,6 +1481,27 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
                 "excluded_mask": np.asarray(robust_result.get("excluded_mask", []), dtype=bool),
                 "final_coef": dict(robust_result.get("final_coef", {})),
                 "slope_summary": dict(robust_result.get("slope_summary", {})),
+                "unconstrained_slope_summary": dict(
+                    robust_result.get("unconstrained_slope_summary", {})
+                ),
+                "slope_constraint_summary": dict(
+                    robust_result.get("slope_constraint_summary", {})
+                ),
+                "slope_constraint_mode": str(
+                    robust_result.get("slope_constraint_summary", {}).get(
+                        "slope_constraint_mode", slope_constraint_mode
+                    )
+                ),
+                "slope_min_allowed": float(
+                    robust_result.get("slope_constraint_summary", {}).get(
+                        "slope_min_allowed", slope_min_allowed
+                    )
+                ),
+                "slope_constraint_applied": bool(
+                    robust_result.get("slope_constraint_summary", {}).get(
+                        "slope_constraint_applied", False
+                    )
+                ),
                 "iteration_summaries": list(robust_result.get("iteration_summaries", [])),
                 "robust_fit_backend_used": str(robust_result.get("robust_fit_backend_used", "unknown")),
                 "n_iterations_completed": int(robust_result.get("n_iterations_completed", 0)),
@@ -1403,6 +1517,12 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
                 roi_name,
                 "robust_global_event_reject",
                 robust_result.get("slope_summary", {}),
+            )
+            _attach_constraint_warning(
+                chunk,
+                roi_name,
+                "robust_global_event_reject",
+                robust_result.get("slope_constraint_summary", {}),
             )
             backend_used = str(robust_result.get("robust_fit_backend_used", "unknown"))
             robust_backend_used_counts[backend_used] = robust_backend_used_counts.get(backend_used, 0) + 1
@@ -1450,16 +1570,25 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
 
         fallback_roi_count += 1
         slope, intercept = params
-        uv_fit_all[:, r_idx] = intercept + slope * uv_raw
-        slope_summary = summarize_slope(float(slope), sample_rate_hz=float(chunk.fs_hz))
+        constrained_slope, constraint_summary = apply_slope_constraint(
+            float(slope),
+            constraint_mode=slope_constraint_mode,
+            min_slope=slope_min_allowed,
+            sample_rate_hz=float(chunk.fs_hz),
+        )
+        slope_used = float(constrained_slope)
+        uv_fit_all[:, r_idx] = intercept + slope_used * uv_raw
+        slope_summary = summarize_slope(float(slope_used), sample_rate_hz=float(chunk.fs_hz))
         chunk.metadata["dynamic_fit_event_reject"][roi_name] = {
             "keep_mask": np.isfinite(sig_raw) & np.isfinite(uv_raw),
             "excluded_mask": np.zeros(sig_raw.shape, dtype=bool),
             "final_coef": {
-                "slope": float(slope),
+                "slope": float(slope_used),
+                "unconstrained_slope": float(slope),
                 "intercept": float(intercept),
             },
             "slope_summary": slope_summary,
+            **_constraint_metadata(constraint_summary),
             "iteration_summaries": [],
             "robust_fit_backend_used": "global_linear_fallback",
             "n_iterations_completed": 0,
@@ -1469,6 +1598,7 @@ def _compute_dynamic_fit_ref_robust_global_event_reject(
             "fallback_failed": False,
         }
         _attach_slope_warning(chunk, roi_name, "robust_global_event_reject", slope_summary)
+        _attach_constraint_warning(chunk, roi_name, "robust_global_event_reject", constraint_summary)
         robust_backend_used_counts["global_linear_fallback"] = robust_backend_used_counts.get(
             "global_linear_fallback", 0
         ) + 1
@@ -1551,6 +1681,7 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
     smooth_window_sec = float(getattr(config, "adaptive_event_gate_smooth_window_sec", 60.0))
     min_trust_fraction = float(getattr(config, "adaptive_event_gate_min_trust_fraction", 0.5))
     freeze_interp_method = str(getattr(config, "adaptive_event_gate_freeze_interp_method", "linear_hold"))
+    slope_constraint_mode, slope_min_allowed = _slope_constraint_settings(config)
 
     success_roi_count = 0
     fallback_robust_roi_count = 0
@@ -1586,6 +1717,8 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 freeze_interp_method=freeze_interp_method,
                 use_intercept=True,
                 signal_excursion_polarity=signal_excursion_polarity,
+                slope_constraint=slope_constraint_mode,
+                min_slope=slope_min_allowed,
             )
             uv_fit_all[:, r_idx] = np.asarray(adaptive_result["iso_fit_signal_units"], dtype=float)
             global_coef = dict(adaptive_result.get("global_init_coef", {}))
@@ -1596,8 +1729,32 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 "gated_mask": np.asarray(adaptive_result.get("gated_mask", []), dtype=bool),
                 "global_init_coef": global_coef,
                 "coef_slope": np.asarray(adaptive_result.get("coef_slope", []), dtype=float),
+                "coef_slope_unconstrained": np.asarray(
+                    adaptive_result.get("coef_slope_unconstrained", []), dtype=float
+                ),
                 "coef_intercept": np.asarray(adaptive_result.get("coef_intercept", []), dtype=float),
                 "slope_summary": dict(adaptive_result.get("slope_summary", {})),
+                "unconstrained_slope_summary": dict(
+                    adaptive_result.get("unconstrained_slope_summary", {})
+                ),
+                "slope_constraint_summary": dict(
+                    adaptive_result.get("slope_constraint_summary", {})
+                ),
+                "slope_constraint_mode": str(
+                    adaptive_result.get("slope_constraint_summary", {}).get(
+                        "slope_constraint_mode", slope_constraint_mode
+                    )
+                ),
+                "slope_min_allowed": float(
+                    adaptive_result.get("slope_constraint_summary", {}).get(
+                        "slope_min_allowed", slope_min_allowed
+                    )
+                ),
+                "slope_constraint_applied": bool(
+                    adaptive_result.get("slope_constraint_summary", {}).get(
+                        "slope_constraint_applied", False
+                    )
+                ),
                 "trust_fraction": float(adaptive_result.get("trust_fraction", np.nan)),
                 "gated_fraction": float(adaptive_result.get("gated_fraction", np.nan)),
                 "n_trusted": int(adaptive_result.get("n_trusted", 0)),
@@ -1620,6 +1777,12 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 "adaptive_event_gated_regression",
                 adaptive_result.get("slope_summary", {}),
             )
+            _attach_constraint_warning(
+                chunk,
+                roi_name,
+                "adaptive_event_gated_regression",
+                adaptive_result.get("slope_constraint_summary", {}),
+            )
             success_roi_count += 1
             continue
         except Exception as exc:
@@ -1640,6 +1803,8 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 sample_rate_hz=float(chunk.fs_hz),
                 use_intercept=True,
                 signal_excursion_polarity=signal_excursion_polarity,
+                slope_constraint=slope_constraint_mode,
+                min_slope=slope_min_allowed,
             )
             uv_fit_all[:, r_idx] = np.asarray(robust_result.get("iso_fit_signal_units", np.full_like(sig_raw, np.nan)), dtype=float)
             slope_summary = dict(robust_result.get("slope_summary", {}))
@@ -1648,8 +1813,30 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 "gated_mask": np.asarray(robust_result.get("excluded_mask", []), dtype=bool),
                 "global_init_coef": dict(robust_result.get("final_coef", {})),
                 "coef_slope": np.full(sig_raw.shape, np.nan, dtype=float),
+                "coef_slope_unconstrained": np.full(sig_raw.shape, np.nan, dtype=float),
                 "coef_intercept": np.full(sig_raw.shape, np.nan, dtype=float),
                 "slope_summary": slope_summary,
+                "unconstrained_slope_summary": dict(
+                    robust_result.get("unconstrained_slope_summary", {})
+                ),
+                "slope_constraint_summary": dict(
+                    robust_result.get("slope_constraint_summary", {})
+                ),
+                "slope_constraint_mode": str(
+                    robust_result.get("slope_constraint_summary", {}).get(
+                        "slope_constraint_mode", slope_constraint_mode
+                    )
+                ),
+                "slope_min_allowed": float(
+                    robust_result.get("slope_constraint_summary", {}).get(
+                        "slope_min_allowed", slope_min_allowed
+                    )
+                ),
+                "slope_constraint_applied": bool(
+                    robust_result.get("slope_constraint_summary", {}).get(
+                        "slope_constraint_applied", False
+                    )
+                ),
                 "trust_fraction": float(robust_result.get("final_keep_fraction", np.nan)),
                 "gated_fraction": float(np.mean(np.asarray(robust_result.get("excluded_mask", []), dtype=bool))),
                 "n_trusted": int(np.sum(np.asarray(robust_result.get("keep_mask", []), dtype=bool))),
@@ -1686,6 +1873,12 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 "adaptive_event_gated_regression",
                 slope_summary,
             )
+            _attach_constraint_warning(
+                chunk,
+                roi_name,
+                "adaptive_event_gated_regression",
+                robust_result.get("slope_constraint_summary", {}),
+            )
             fallback_robust_roi_count += 1
             backend_used = str(robust_result.get("robust_fit_backend_used", "unknown"))
             backend_counts[backend_used] = backend_counts.get(backend_used, 0) + 1
@@ -1720,6 +1913,7 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
                 "gated_mask": np.zeros(sig_raw.shape, dtype=bool),
                 "global_init_coef": {},
                 "coef_slope": np.full(sig_raw.shape, np.nan, dtype=float),
+                "coef_slope_unconstrained": np.full(sig_raw.shape, np.nan, dtype=float),
                 "coef_intercept": np.full(sig_raw.shape, np.nan, dtype=float),
                 "trust_fraction": 0.0,
                 "gated_fraction": 0.0,
@@ -1736,15 +1930,28 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
             fallback_global_roi_count += 1
             continue
         slope, intercept = params
-        uv_fit_all[:, r_idx] = intercept + slope * uv_raw
-        slope_summary = summarize_slope(float(slope), sample_rate_hz=float(chunk.fs_hz))
+        constrained_slope, constraint_summary = apply_slope_constraint(
+            float(slope),
+            constraint_mode=slope_constraint_mode,
+            min_slope=slope_min_allowed,
+            sample_rate_hz=float(chunk.fs_hz),
+        )
+        slope_used = float(constrained_slope)
+        uv_fit_all[:, r_idx] = intercept + slope_used * uv_raw
+        slope_summary = summarize_slope(float(slope_used), sample_rate_hz=float(chunk.fs_hz))
         chunk.metadata["dynamic_fit_adaptive_event_gated"][roi_name] = {
             "trusted_mask": np.isfinite(sig_raw) & np.isfinite(uv_raw),
             "gated_mask": np.zeros(sig_raw.shape, dtype=bool),
-            "global_init_coef": {"slope": float(slope), "intercept": float(intercept)},
-            "coef_slope": np.full(sig_raw.shape, float(slope), dtype=float),
+            "global_init_coef": {
+                "slope": float(slope_used),
+                "unconstrained_slope": float(slope),
+                "intercept": float(intercept),
+            },
+            "coef_slope": np.full(sig_raw.shape, float(slope_used), dtype=float),
+            "coef_slope_unconstrained": np.full(sig_raw.shape, float(slope), dtype=float),
             "coef_intercept": np.full(sig_raw.shape, float(intercept), dtype=float),
             "slope_summary": slope_summary,
+            **_constraint_metadata(constraint_summary),
             "trust_fraction": 1.0,
             "gated_fraction": 0.0,
             "n_trusted": int(np.sum(np.isfinite(sig_raw) & np.isfinite(uv_raw))),
@@ -1762,6 +1969,12 @@ def _compute_dynamic_fit_ref_adaptive_event_gated_regression(
             roi_name,
             "adaptive_event_gated_regression",
             slope_summary,
+        )
+        _attach_constraint_warning(
+            chunk,
+            roi_name,
+            "adaptive_event_gated_regression",
+            constraint_summary,
         )
         fallback_global_roi_count += 1
         backend_counts["global_linear_fallback"] = backend_counts.get("global_linear_fallback", 0) + 1
@@ -1895,6 +2108,7 @@ def _compute_dynamic_fit_ref(
         'legacy_knobs_not_used_in_engine': _legacy_knobs_not_used_in_engine(),
     }
     chunk.metadata['dynamic_fit_rolling_local'] = {}
+    slope_constraint_mode, slope_min_allowed = _slope_constraint_settings(config)
 
     min_samples = int(config.min_samples_per_window)
     if min_samples <= 0:
@@ -1944,19 +2158,33 @@ def _compute_dynamic_fit_ref(
 
             slope, intercept = params
             t_fallback_apply = time.perf_counter()
+            constrained_slope, constraint_summary = apply_slope_constraint(
+                float(slope),
+                constraint_mode=slope_constraint_mode,
+                min_slope=slope_min_allowed,
+                sample_rate_hz=float(chunk.fs_hz),
+            )
+            slope_used = float(constrained_slope)
             if baseline_applied and u_fit_baseline is not None and s_fit_baseline is not None:
-                uv_fit_all[:, i] = slope * (u_recon - u_fit_baseline) + intercept + s_fit_baseline
+                uv_fit_all[:, i] = slope_used * (u_recon - u_fit_baseline) + intercept + s_fit_baseline
             else:
-                uv_fit_all[:, i] = intercept + slope * u_recon
+                uv_fit_all[:, i] = intercept + slope_used * u_recon
             roi_name = str(chunk.channel_names[i]) if i < len(chunk.channel_names) else f"roi_{i}"
-            slope_summary = summarize_slope(float(slope), sample_rate_hz=float(chunk.fs_hz))
+            slope_summary = summarize_slope(float(slope_used), sample_rate_hz=float(chunk.fs_hz))
             chunk.metadata['dynamic_fit_rolling_local'][roi_name] = {
-                "final_coef": {"slope": float(slope), "intercept": float(intercept)},
-                "coef_slope": np.full(u_recon.shape, float(slope), dtype=float),
+                "final_coef": {
+                    "slope": float(slope_used),
+                    "unconstrained_slope": float(slope),
+                    "intercept": float(intercept),
+                },
+                "coef_slope": np.full(u_recon.shape, float(slope_used), dtype=float),
+                "coef_slope_unconstrained": np.full(u_recon.shape, float(slope), dtype=float),
                 "slope_summary": slope_summary,
+                **_constraint_metadata(constraint_summary),
                 "fallback_to_global_linear": True,
             }
             _attach_slope_warning(chunk, roi_name, fit_mode, slope_summary)
+            _attach_constraint_warning(chunk, roi_name, fit_mode, constraint_summary)
             timing_buckets['fallback_apply_fit'] += (time.perf_counter() - t_fallback_apply)
             timing_metrics['fallback_roi_count'] += 1
 
@@ -2061,6 +2289,14 @@ def _compute_dynamic_fit_ref(
             timing_buckets['rolling_param_interpolation'] += (time.perf_counter() - t_interp)
 
         t_apply = time.perf_counter()
+        slope_unconstrained = np.asarray(slope, dtype=float).copy()
+        slope, constraint_summary = apply_slope_constraint(
+            slope_unconstrained,
+            constraint_mode=slope_constraint_mode,
+            min_slope=slope_min_allowed,
+            sample_rate_hz=float(chunk.fs_hz),
+        )
+        slope = np.asarray(slope, dtype=float)
         if baseline_applied and u_fit_baseline is not None and s_fit_baseline is not None:
             uv_fit_all[:, r_idx] = slope * (u_recon - u_fit_baseline) + intercept + s_fit_baseline
         else:
@@ -2069,10 +2305,13 @@ def _compute_dynamic_fit_ref(
         slope_summary = summarize_slope(slope, sample_rate_hz=float(chunk.fs_hz))
         chunk.metadata['dynamic_fit_rolling_local'][roi_name] = {
             "coef_slope": np.asarray(slope, dtype=float),
+            "coef_slope_unconstrained": np.asarray(slope_unconstrained, dtype=float),
             "slope_summary": slope_summary,
+            **_constraint_metadata(constraint_summary),
             "fallback_to_global_linear": False,
         }
         _attach_slope_warning(chunk, roi_name, fit_mode, slope_summary)
+        _attach_constraint_warning(chunk, roi_name, fit_mode, constraint_summary)
         timing_buckets['rolling_apply_fit'] += (time.perf_counter() - t_apply)
 
     _finalize_and_attach()

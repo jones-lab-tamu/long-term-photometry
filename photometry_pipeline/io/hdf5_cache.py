@@ -195,6 +195,69 @@ class Hdf5TraceCacheWriter:
                                 continue
                             if np.isfinite(numeric):
                                 grp.attrs[f'dynamic_fit_slope_{key}'] = numeric
+                    constraint_summary = (
+                        roi_fit_meta.get('slope_constraint_summary', {})
+                        if isinstance(roi_fit_meta, dict)
+                        else {}
+                    )
+                    if isinstance(constraint_summary, dict) and constraint_summary:
+                        mode_value = str(
+                            constraint_summary.get('slope_constraint_mode', 'unconstrained')
+                        ).strip() or 'unconstrained'
+                        grp.attrs['dynamic_fit_slope_constraint_mode'] = mode_value
+                        grp.attrs['dynamic_fit_slope_constraint_applied'] = bool(
+                            constraint_summary.get('slope_constraint_applied', False)
+                        )
+                        for attr_name, key in (
+                            ('dynamic_fit_slope_min_allowed', 'slope_min_allowed'),
+                            ('dynamic_fit_slope_clamped_fraction', 'slope_clamped_fraction'),
+                            ('dynamic_fit_slope_n_clamped_slope_samples', 'n_clamped_slope_samples'),
+                            ('dynamic_fit_slope_n_clamped_slope_spans', 'n_clamped_slope_spans'),
+                            (
+                                'dynamic_fit_slope_longest_clamped_slope_span_samples',
+                                'longest_clamped_slope_span_samples',
+                            ),
+                            (
+                                'dynamic_fit_slope_longest_clamped_slope_span_sec',
+                                'longest_clamped_slope_span_sec',
+                            ),
+                        ):
+                            value = constraint_summary.get(key, None)
+                            if value is None:
+                                continue
+                            try:
+                                numeric = float(value)
+                            except Exception:
+                                continue
+                            if np.isfinite(numeric):
+                                grp.attrs[attr_name] = numeric
+
+                        def _write_nested_slope_attrs(prefix: str, payload: dict) -> None:
+                            if not isinstance(payload, dict):
+                                return
+                            for attr_suffix, key in (
+                                ('slope_min', 'slope_min'),
+                                ('slope_max', 'slope_max'),
+                                ('slope_negative_fraction', 'slope_negative_fraction'),
+                            ):
+                                value = payload.get(key, None)
+                                if value is None:
+                                    continue
+                                try:
+                                    numeric = float(value)
+                                except Exception:
+                                    continue
+                                if np.isfinite(numeric):
+                                    grp.attrs[f'{prefix}_{attr_suffix}'] = numeric
+
+                        _write_nested_slope_attrs(
+                            'dynamic_fit_slope_unconstrained',
+                            constraint_summary.get('unconstrained_slope_summary', {}),
+                        )
+                        _write_nested_slope_attrs(
+                            'dynamic_fit_slope_constrained',
+                            constraint_summary.get('constrained_slope_summary', {}),
+                        )
             
             # Required Time axis
             grp.create_dataset('time_sec', data=chunk.time_sec, **self._dataset_create_kwargs)

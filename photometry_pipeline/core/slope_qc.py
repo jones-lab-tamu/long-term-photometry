@@ -94,6 +94,76 @@ def summarize_slope(values: Any, sample_rate_hz: float | None = None) -> dict[st
     }
 
 
+def apply_slope_constraint(
+    slope_values: Any,
+    *,
+    constraint_mode: str,
+    min_slope: float,
+    sample_rate_hz: float | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Apply optional final-stage slope constraints and return compact provenance."""
+    mode = str(constraint_mode or "unconstrained").strip().lower()
+    if mode not in {"unconstrained", "nonnegative"}:
+        raise ValueError(
+            "dynamic_fit_slope_constraint must be one of {'unconstrained', 'nonnegative'}"
+        )
+    try:
+        min_allowed = float(min_slope)
+    except Exception as exc:
+        raise ValueError("dynamic_fit_min_slope must be a finite float") from exc
+    if not np.isfinite(min_allowed):
+        raise ValueError("dynamic_fit_min_slope must be a finite float")
+    if mode == "nonnegative" and min_allowed < 0.0:
+        raise ValueError(
+            "dynamic_fit_min_slope must be >= 0 when "
+            "dynamic_fit_slope_constraint is 'nonnegative'"
+        )
+
+    original = np.asarray(slope_values, dtype=float)
+    original_shape = original.shape
+    arr = original.reshape(-1)
+    unconstrained_summary = summarize_slope(arr, sample_rate_hz=sample_rate_hz)
+
+    finite = np.isfinite(arr)
+    clamped_mask = finite & (arr < min_allowed) if mode == "nonnegative" else np.zeros(arr.shape, dtype=bool)
+    if mode == "nonnegative":
+        constrained_arr = np.array(arr, dtype=float, copy=True)
+        constrained_arr[clamped_mask] = min_allowed
+    else:
+        constrained_arr = np.array(arr, dtype=float, copy=True)
+
+    constrained_summary = summarize_slope(constrained_arr, sample_rate_hz=sample_rate_hz)
+    n_samples = int(arr.size)
+    n_clamped = int(np.sum(clamped_mask))
+    n_spans, longest_span = _negative_span_stats(clamped_mask)
+    span_sec = None
+    try:
+        fs = float(sample_rate_hz) if sample_rate_hz is not None else float("nan")
+    except Exception:
+        fs = float("nan")
+    if np.isfinite(fs) and fs > 0.0:
+        span_sec = float(longest_span / fs)
+
+    summary = {
+        "slope_constraint_mode": mode,
+        "slope_min_allowed": min_allowed,
+        "slope_constraint_applied": bool(n_clamped > 0),
+        "n_slope_samples": n_samples,
+        "n_clamped_slope_samples": n_clamped,
+        "slope_clamped_fraction": float(n_clamped / n_samples) if n_samples > 0 else 0.0,
+        "n_clamped_slope_spans": int(n_spans),
+        "longest_clamped_slope_span_samples": int(longest_span),
+        "longest_clamped_slope_span_sec": span_sec,
+        "unconstrained_slope_summary": unconstrained_summary,
+        "constrained_slope_summary": constrained_summary,
+    }
+
+    constrained = constrained_arr.reshape(original_shape)
+    if np.isscalar(slope_values) or original_shape == ():
+        return float(constrained.reshape(-1)[0]) if constrained.size else float("nan"), summary
+    return constrained, summary
+
+
 SLOPE_SUMMARY_NUMERIC_FIELDS = (
     "slope_min",
     "slope_max",

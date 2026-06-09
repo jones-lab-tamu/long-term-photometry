@@ -219,6 +219,9 @@ def load_cache_chunk_attrs(cache: h5py.File, roi: str, chunk_id: int) -> dict:
         "dynamic_fit_slope_n_nonfinite_slope_samples",
         "dynamic_fit_slope_n_negative_slope_spans",
         "dynamic_fit_slope_longest_negative_slope_span_samples",
+        "dynamic_fit_slope_n_clamped_slope_samples",
+        "dynamic_fit_slope_n_clamped_slope_spans",
+        "dynamic_fit_slope_longest_clamped_slope_span_samples",
     ):
         if key in attrs:
             try:
@@ -240,6 +243,15 @@ def load_cache_chunk_attrs(cache: h5py.File, roi: str, chunk_id: int) -> dict:
         "dynamic_fit_slope_slope_negative_fraction",
         "dynamic_fit_slope_slope_nonfinite_fraction",
         "dynamic_fit_slope_longest_negative_slope_span_sec",
+        "dynamic_fit_slope_min_allowed",
+        "dynamic_fit_slope_clamped_fraction",
+        "dynamic_fit_slope_longest_clamped_slope_span_sec",
+        "dynamic_fit_slope_unconstrained_slope_min",
+        "dynamic_fit_slope_unconstrained_slope_max",
+        "dynamic_fit_slope_unconstrained_slope_negative_fraction",
+        "dynamic_fit_slope_constrained_slope_min",
+        "dynamic_fit_slope_constrained_slope_max",
+        "dynamic_fit_slope_constrained_slope_negative_fraction",
     ):
         if key in attrs:
             try:
@@ -248,6 +260,10 @@ def load_cache_chunk_attrs(cache: h5py.File, roi: str, chunk_id: int) -> dict:
                 pass
     if "is_partial_final_window" in attrs:
         attrs["is_partial_final_window"] = bool(attrs["is_partial_final_window"])
+    if "dynamic_fit_slope_constraint_applied" in attrs:
+        attrs["dynamic_fit_slope_constraint_applied"] = bool(
+            attrs["dynamic_fit_slope_constraint_applied"]
+        )
     return attrs
 
 

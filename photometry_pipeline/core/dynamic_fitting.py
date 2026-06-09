@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from .slope_qc import summarize_slope
+from .slope_qc import apply_slope_constraint, summarize_slope
 
 __all__ = [
     "fit_robust_global_event_reject",
@@ -271,6 +271,8 @@ def fit_robust_global_event_reject(
     sample_rate_hz: float,
     use_intercept: bool = True,
     signal_excursion_polarity: str = "positive",
+    slope_constraint: str = "unconstrained",
+    min_slope: float = 0.0,
 ) -> dict:
     """
     Robust global fit with iterative event-dominated sample rejection.
@@ -430,27 +432,37 @@ def fit_robust_global_event_reject(
     )
     if params is not None:
         final_slope, final_intercept = float(params[0]), float(params[1])
-        final_fit = (final_slope * iso) + final_intercept
         robust_backend_used = str(backend_used)
     elif not np.isfinite(final_slope):
         raise RuntimeError(
             "robust_global_event_reject final fit failed: "
             f"{fail_reason or 'unknown'}"
         )
+    constrained_slope, constraint_summary = apply_slope_constraint(
+        float(final_slope),
+        constraint_mode=slope_constraint,
+        min_slope=min_slope,
+        sample_rate_hz=sample_rate_hz,
+    )
+    final_slope_used = float(constrained_slope)
+    final_fit = (final_slope_used * iso) + final_intercept
 
     return {
         "iso_fit_signal_units": np.asarray(final_fit, dtype=float),
         "keep_mask": np.asarray(keep_mask, dtype=bool),
         "excluded_mask": np.asarray(finite & (~keep_mask), dtype=bool),
         "final_coef": {
-            "slope": float(final_slope),
+            "slope": float(final_slope_used),
+            "unconstrained_slope": float(final_slope),
             "intercept": float(final_intercept),
             "use_intercept": bool(use_intercept),
             "n_kept": int(np.sum(keep_mask)),
             "n_finite": int(n_finite),
             "keep_fraction": float(np.sum(keep_mask) / float(max(1, n_finite))),
         },
-        "slope_summary": summarize_slope(float(final_slope), sample_rate_hz=sample_rate_hz),
+        "slope_summary": summarize_slope(float(final_slope_used), sample_rate_hz=sample_rate_hz),
+        "unconstrained_slope_summary": constraint_summary["unconstrained_slope_summary"],
+        "slope_constraint_summary": constraint_summary,
         "iteration_summaries": iteration_summaries,
         "local_var_rule_enabled": bool(use_var_rule),
         "local_var_window_samples": int(local_var_window_samples),
@@ -477,6 +489,8 @@ def fit_adaptive_event_gated_regression(
     freeze_interp_method: str = "linear_hold",
     use_intercept: bool = True,
     signal_excursion_polarity: str = "positive",
+    slope_constraint: str = "unconstrained",
+    min_slope: float = 0.0,
 ) -> dict:
     """
     Slow adaptive fit with event gating and coefficient freezing.
@@ -640,6 +654,14 @@ def fit_adaptive_event_gated_regression(
         slope_final = slope_reg
         intercept_final = intercept_reg
 
+    slope_unconstrained = np.asarray(slope_final, dtype=float).copy()
+    slope_final, constraint_summary = apply_slope_constraint(
+        slope_unconstrained,
+        constraint_mode=slope_constraint,
+        min_slope=min_slope,
+        sample_rate_hz=sample_rate_hz,
+    )
+    slope_final = np.asarray(slope_final, dtype=float)
     fit_raw = (slope_final * iso_raw_arr) + intercept_final
     finite_raw = np.isfinite(sig_raw_arr) & np.isfinite(iso_raw_arr)
     fit_raw = np.asarray(fit_raw, dtype=float)
@@ -655,8 +677,11 @@ def fit_adaptive_event_gated_regression(
             "robust_fit_backend_used": str(robust_backend_used),
         },
         "coef_slope": np.asarray(slope_final, dtype=float),
+        "coef_slope_unconstrained": np.asarray(slope_unconstrained, dtype=float),
         "coef_intercept": np.asarray(intercept_final, dtype=float),
         "slope_summary": summarize_slope(slope_final, sample_rate_hz=sample_rate_hz),
+        "unconstrained_slope_summary": constraint_summary["unconstrained_slope_summary"],
+        "slope_constraint_summary": constraint_summary,
         "residual_median": float(residual_median),
         "residual_mad": float(mad),
         "residual_robust_scale": float(robust_scale),
