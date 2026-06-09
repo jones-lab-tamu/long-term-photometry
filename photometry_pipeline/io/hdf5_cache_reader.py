@@ -214,6 +214,18 @@ def load_cache_chunk_attrs(cache: h5py.File, roi: str, chunk_id: int) -> dict:
         except Exception:
             pass
     for key in (
+        "dynamic_fit_slope_n_slope_samples",
+        "dynamic_fit_slope_n_negative_slope_samples",
+        "dynamic_fit_slope_n_nonfinite_slope_samples",
+        "dynamic_fit_slope_n_negative_slope_spans",
+        "dynamic_fit_slope_longest_negative_slope_span_samples",
+    ):
+        if key in attrs:
+            try:
+                attrs[key] = int(round(float(attrs[key])))
+            except Exception:
+                pass
+    for key in (
         "window_start_sec",
         "window_end_sec",
         "window_duration_sec",
@@ -221,6 +233,13 @@ def load_cache_chunk_attrs(cache: h5py.File, roi: str, chunk_id: int) -> dict:
         "continuous_window_sec",
         "continuous_step_sec",
         "fs_hz",
+        "dynamic_fit_slope_slope_min",
+        "dynamic_fit_slope_slope_max",
+        "dynamic_fit_slope_slope_median",
+        "dynamic_fit_slope_slope_mean",
+        "dynamic_fit_slope_slope_negative_fraction",
+        "dynamic_fit_slope_slope_nonfinite_fraction",
+        "dynamic_fit_slope_longest_negative_slope_span_sec",
     ):
         if key in attrs:
             try:

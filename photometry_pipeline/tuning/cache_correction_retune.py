@@ -395,6 +395,22 @@ def _load_roi_raw_entries(cache, roi: str, cfg: Config) -> list[dict[str, Any]]:
         "is_partial_final_window",
         "continuous_window_sec",
         "continuous_step_sec",
+        "dynamic_fit_mode_resolved",
+        "dynamic_fit_engine",
+        "dynamic_fit_slope_summary_available",
+        "dynamic_fit_slope_warning_level",
+        "dynamic_fit_slope_slope_min",
+        "dynamic_fit_slope_slope_max",
+        "dynamic_fit_slope_slope_median",
+        "dynamic_fit_slope_slope_mean",
+        "dynamic_fit_slope_slope_negative_fraction",
+        "dynamic_fit_slope_slope_nonfinite_fraction",
+        "dynamic_fit_slope_n_slope_samples",
+        "dynamic_fit_slope_n_negative_slope_samples",
+        "dynamic_fit_slope_n_nonfinite_slope_samples",
+        "dynamic_fit_slope_n_negative_slope_spans",
+        "dynamic_fit_slope_longest_negative_slope_span_samples",
+        "dynamic_fit_slope_longest_negative_slope_span_sec",
     )
     for idx, cid in enumerate(chunk_ids):
         grp = roi_group.get(f"chunk_{cid}")
@@ -571,6 +587,8 @@ def _write_correction_inspection(
     dff = np.asarray(chunk.dff[:, 0]) if chunk.dff is not None else np.full_like(sig, np.nan)
     event_reject_info = {}
     adaptive_info = {}
+    rolling_info = {}
+    global_info = {}
     bleach_info = {}
     if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
         by_roi = chunk.metadata.get("dynamic_fit_event_reject", {})
@@ -579,6 +597,12 @@ def _write_correction_inspection(
         adaptive_by_roi = chunk.metadata.get("dynamic_fit_adaptive_event_gated", {})
         if isinstance(adaptive_by_roi, dict):
             adaptive_info = adaptive_by_roi.get(roi, {}) or {}
+        rolling_by_roi = chunk.metadata.get("dynamic_fit_rolling_local", {})
+        if isinstance(rolling_by_roi, dict):
+            rolling_info = rolling_by_roi.get(roi, {}) or {}
+        global_by_roi = chunk.metadata.get("dynamic_fit_global_linear", {})
+        if isinstance(global_by_roi, dict):
+            global_info = global_by_roi.get(roi, {}) or {}
         bleach_by_roi = chunk.metadata.get("bleach_correction", {})
         if isinstance(bleach_by_roi, dict):
             bleach_info = bleach_by_roi.get(roi, {}) or {}
@@ -634,6 +658,50 @@ def _write_correction_inspection(
     fit_mode_resolved = ""
     if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
         fit_mode_resolved = str(chunk.metadata.get("dynamic_fit_mode_resolved", "") or "")
+    slope_source_info = {}
+    for candidate in (adaptive_info, rolling_info, event_reject_info, global_info):
+        if (
+            isinstance(candidate, dict)
+            and isinstance(candidate.get("slope_summary", {}), dict)
+            and bool(candidate.get("slope_summary", {}))
+        ):
+            slope_source_info = candidate
+            break
+    slope_summary = (
+        dict(slope_source_info.get("slope_summary", {}))
+        if isinstance(slope_source_info, dict)
+        else {}
+    )
+    if not slope_summary and hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
+        if chunk.metadata.get("dynamic_fit_slope_summary_available", False):
+            slope_summary = {
+                "warning_level": str(chunk.metadata.get("dynamic_fit_slope_warning_level", "none")),
+                "slope_min": chunk.metadata.get("dynamic_fit_slope_slope_min", np.nan),
+                "slope_max": chunk.metadata.get("dynamic_fit_slope_slope_max", np.nan),
+                "slope_median": chunk.metadata.get("dynamic_fit_slope_slope_median", np.nan),
+                "slope_mean": chunk.metadata.get("dynamic_fit_slope_slope_mean", np.nan),
+                "slope_negative_fraction": chunk.metadata.get("dynamic_fit_slope_slope_negative_fraction", np.nan),
+                "slope_nonfinite_fraction": chunk.metadata.get("dynamic_fit_slope_slope_nonfinite_fraction", np.nan),
+                "n_slope_samples": chunk.metadata.get("dynamic_fit_slope_n_slope_samples", 0),
+                "n_negative_slope_samples": chunk.metadata.get("dynamic_fit_slope_n_negative_slope_samples", 0),
+                "n_nonfinite_slope_samples": chunk.metadata.get("dynamic_fit_slope_n_nonfinite_slope_samples", 0),
+                "n_negative_slope_spans": chunk.metadata.get("dynamic_fit_slope_n_negative_slope_spans", 0),
+                "longest_negative_slope_span_samples": chunk.metadata.get(
+                    "dynamic_fit_slope_longest_negative_slope_span_samples", 0
+                ),
+                "longest_negative_slope_span_sec": chunk.metadata.get(
+                    "dynamic_fit_slope_longest_negative_slope_span_sec", np.nan
+                ),
+            }
+    slope_trace = None
+    if isinstance(adaptive_info, dict):
+        candidate = np.asarray(adaptive_info.get("coef_slope", []), dtype=float)
+        if candidate.shape == sig.shape and np.any(np.isfinite(candidate)):
+            slope_trace = candidate
+    if slope_trace is None and isinstance(rolling_info, dict):
+        candidate = np.asarray(rolling_info.get("coef_slope", []), dtype=float)
+        if candidate.shape == sig.shape and np.any(np.isfinite(candidate)):
+            slope_trace = candidate
     robust_mode = (
         fit_mode_resolved == "robust_global_event_reject"
         or bool(event_reject_info)
@@ -724,6 +792,18 @@ def _write_correction_inspection(
             "n_trusted": int(np.sum(trusted_mask)),
             "n_gated": int(np.sum(gated_mask)),
         }
+    if slope_summary:
+        artifacts["retuned_correction_inspection_slope_diagnostics"] = {
+            "fit_mode_resolved": fit_mode_resolved or "unknown",
+            "warning_level": str(slope_summary.get("warning_level", "none")),
+            "slope_negative_fraction": _meta_float(slope_summary, "slope_negative_fraction"),
+            "slope_min": _meta_float(slope_summary, "slope_min"),
+            "slope_max": _meta_float(slope_summary, "slope_max"),
+            "longest_negative_slope_span_sec": _meta_float(
+                slope_summary, "longest_negative_slope_span_sec"
+            ),
+            "slope_trace_available": bool(slope_trace is not None),
+        }
     if bleach_mode_resolved != "none":
         artifacts["retuned_correction_inspection_bleach_diagnostics"] = {
             "bleach_correction_mode": bleach_mode_resolved,
@@ -788,6 +868,14 @@ def _write_correction_inspection(
             "source_file": str(chunk.source_file),
             "t_s": t,
             "bleach_correction_mode": bleach_mode_resolved,
+            "dynamic_fit_slope_warning_level": str(slope_summary.get("warning_level", "unavailable"))
+            if slope_summary else "unavailable",
+            "dynamic_fit_slope_negative_fraction": _meta_float(slope_summary, "slope_negative_fraction")
+            if slope_summary else float("nan"),
+            "dynamic_fit_slope_min": _meta_float(slope_summary, "slope_min")
+            if slope_summary else float("nan"),
+            "dynamic_fit_slope_max": _meta_float(slope_summary, "slope_max")
+            if slope_summary else float("nan"),
             "sig_bleach_fit_model": str(signal_bleach_fit_meta.get("fit_model", ""))
             if isinstance(signal_bleach_fit_meta, dict) else "",
             "sig_bleach_fit_succeeded": bool(
@@ -867,10 +955,12 @@ def _write_correction_inspection(
         ("raw", "Stage 1: original sig/iso + bleach fits"),
         ("centered", "Stage 2: bleach-corrected sig/iso"),
         ("fit", "Stage 3: dynamic fit (bleach-corrected frame)"),
+        *([("slope", "UV-to-signal slope diagnostics")] if slope_trace is not None else []),
         ("dff", "Stage 4: final corrected dF/F"),
     ]
     panel_paths: list[str] = []
     panel_labels: list[str] = []
+    panel_path_by_key: dict[str, str] = {}
 
     for panel_key, panel_label in panel_specs:
         panel_path = os.path.join(
@@ -1049,7 +1139,44 @@ def _write_correction_inspection(
                     fontsize=8,
                     bbox={"facecolor": "white", "alpha": 0.7, "edgecolor": "0.7"},
                 )
+            if slope_summary and slope_trace is None:
+                ax.text(
+                    0.99,
+                    0.98,
+                    (
+                        "UV-to-signal slope summary\n"
+                        f"warning: {slope_summary.get('warning_level', 'none')}\n"
+                        f"neg frac: {_meta_float(slope_summary, 'slope_negative_fraction'):.3g}\n"
+                        f"min/max: {_meta_float(slope_summary, 'slope_min'):.3g}/"
+                        f"{_meta_float(slope_summary, 'slope_max'):.3g}"
+                    ),
+                    transform=ax.transAxes,
+                    ha="right",
+                    va="top",
+                    fontsize=8,
+                    bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "0.7"},
+                )
             ax.set_ylabel("Fit frame (V)")
+        elif panel_key == "slope":
+            ax.plot(t, slope_trace, color="#155E75", linewidth=0.9, label="UV-to-signal slope")
+            ax.axhline(0.0, color="black", linewidth=0.8, linestyle="--", alpha=0.7, label="zero slope")
+            if slope_summary:
+                ax.text(
+                    0.01,
+                    0.99,
+                    (
+                        f"warning: {slope_summary.get('warning_level', 'none')}\n"
+                        f"neg frac: {_meta_float(slope_summary, 'slope_negative_fraction'):.3g}\n"
+                        f"longest neg span: "
+                        f"{_meta_float(slope_summary, 'longest_negative_slope_span_sec'):.3g}s"
+                    ),
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=8,
+                    bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "0.7"},
+                )
+            ax.set_ylabel("Slope")
         else:
             ax.plot(t, dff, color="darkorange", linewidth=0.9, label="dff")
             ax.axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
@@ -1060,15 +1187,16 @@ def _write_correction_inspection(
         plt.close(fig)
         panel_paths.append(panel_path)
         panel_labels.append(panel_label)
+        panel_path_by_key[panel_key] = panel_path
 
     artifacts["retuned_correction_inspection_pngs"] = panel_paths
     artifacts["retuned_correction_inspection_panel_labels"] = panel_labels
     # Backward-compatibility key for existing consumers expecting a single image path.
     artifacts["retuned_correction_inspection_png"] = panel_paths[0]
-    artifacts["retuned_correction_inspection_raw_png"] = panel_paths[0]
-    artifacts["retuned_correction_inspection_centered_png"] = panel_paths[1]
-    artifacts["retuned_correction_inspection_fit_png"] = panel_paths[2]
-    artifacts["retuned_correction_inspection_dff_png"] = panel_paths[3]
+    artifacts["retuned_correction_inspection_raw_png"] = panel_path_by_key["raw"]
+    artifacts["retuned_correction_inspection_centered_png"] = panel_path_by_key["centered"]
+    artifacts["retuned_correction_inspection_fit_png"] = panel_path_by_key["fit"]
+    artifacts["retuned_correction_inspection_dff_png"] = panel_path_by_key["dff"]
 
     return artifacts
 

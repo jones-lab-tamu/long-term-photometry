@@ -37,6 +37,8 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from .slope_qc import summarize_slope
+
 __all__ = [
     "fit_robust_global_event_reject",
     "fit_adaptive_event_gated_regression",
@@ -448,6 +450,7 @@ def fit_robust_global_event_reject(
             "n_finite": int(n_finite),
             "keep_fraction": float(np.sum(keep_mask) / float(max(1, n_finite))),
         },
+        "slope_summary": summarize_slope(float(final_slope), sample_rate_hz=sample_rate_hz),
         "iteration_summaries": iteration_summaries,
         "local_var_rule_enabled": bool(use_var_rule),
         "local_var_window_samples": int(local_var_window_samples),
@@ -653,6 +656,7 @@ def fit_adaptive_event_gated_regression(
         },
         "coef_slope": np.asarray(slope_final, dtype=float),
         "coef_intercept": np.asarray(intercept_final, dtype=float),
+        "slope_summary": summarize_slope(slope_final, sample_rate_hz=sample_rate_hz),
         "residual_median": float(residual_median),
         "residual_mad": float(mad),
         "residual_robust_scale": float(robust_scale),

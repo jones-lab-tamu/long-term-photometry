@@ -145,6 +145,56 @@ class Hdf5TraceCacheWriter:
 
                         _write_bleach_fit_attrs('bleach_signal', sig_meta)
                         _write_bleach_fit_attrs('bleach_iso', uv_meta)
+
+                    fit_mode = str(chunk.metadata.get('dynamic_fit_mode_resolved', '')).strip()
+                    if fit_mode:
+                        grp.attrs['dynamic_fit_mode_resolved'] = fit_mode
+                    engine = str(chunk.metadata.get('dynamic_fit_engine', '')).strip()
+                    if engine:
+                        grp.attrs['dynamic_fit_engine'] = engine
+
+                    def _roi_fit_meta() -> dict:
+                        if fit_mode == 'global_linear_regression':
+                            return chunk.metadata.get('dynamic_fit_global_linear', {}).get(str(roi), {})
+                        if fit_mode == 'robust_global_event_reject':
+                            return chunk.metadata.get('dynamic_fit_event_reject', {}).get(str(roi), {})
+                        if fit_mode == 'adaptive_event_gated_regression':
+                            return chunk.metadata.get('dynamic_fit_adaptive_event_gated', {}).get(str(roi), {})
+                        return chunk.metadata.get('dynamic_fit_rolling_local', {}).get(str(roi), {})
+
+                    roi_fit_meta = _roi_fit_meta()
+                    slope_summary = (
+                        roi_fit_meta.get('slope_summary', {})
+                        if isinstance(roi_fit_meta, dict)
+                        else {}
+                    )
+                    if isinstance(slope_summary, dict) and slope_summary:
+                        grp.attrs['dynamic_fit_slope_summary_available'] = True
+                        warning_level = str(slope_summary.get('warning_level', 'none')).strip() or 'none'
+                        grp.attrs['dynamic_fit_slope_warning_level'] = warning_level
+                        for key in (
+                            'slope_min',
+                            'slope_max',
+                            'slope_median',
+                            'slope_mean',
+                            'slope_negative_fraction',
+                            'slope_nonfinite_fraction',
+                            'n_slope_samples',
+                            'n_negative_slope_samples',
+                            'n_nonfinite_slope_samples',
+                            'n_negative_slope_spans',
+                            'longest_negative_slope_span_samples',
+                            'longest_negative_slope_span_sec',
+                        ):
+                            value = slope_summary.get(key, None)
+                            if value is None:
+                                continue
+                            try:
+                                numeric = float(value)
+                            except Exception:
+                                continue
+                            if np.isfinite(numeric):
+                                grp.attrs[f'dynamic_fit_slope_{key}'] = numeric
             
             # Required Time axis
             grp.create_dataset('time_sec', data=chunk.time_sec, **self._dataset_create_kwargs)

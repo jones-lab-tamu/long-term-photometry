@@ -157,6 +157,22 @@ class Pipeline:
         self._phasic_phase_buckets = {}
         self._phasic_detail_buckets = {}
         self._phasic_metrics = {}
+        self.dynamic_fit_slope_records = []
+        self.dynamic_fit_slope_warning_records = []
+        self.dynamic_fit_slope_warning_summary = {
+            "roi_chunk_fits_with_any_negative_slope": 0,
+            "roi_chunk_fits_by_warning_level": {
+                "low": 0,
+                "moderate": 0,
+                "high": 0,
+                "critical": 0,
+            },
+            "roi_chunk_fits_with_moderate_high_critical_warnings": 0,
+            "max_slope_negative_fraction": 0.0,
+            "min_slope_min_observed": None,
+            "dynamic_fit_modes_affected": [],
+            "rois_affected": [],
+        }
         self._continuous_csv_reading = {
             "sequential_csv_reading_used": False,
             "source_csv_open_read_passes": 0,
@@ -164,6 +180,103 @@ class Pipeline:
             "bounded_loader_fallback_count": 0,
             "phases": {},
         }
+
+    def _record_dynamic_fit_slope_summaries(self, chunk: Chunk, chunk_id: int, source_file: str) -> None:
+        if self.mode == "tonic" or not hasattr(chunk, "metadata") or not isinstance(chunk.metadata, dict):
+            return
+        fit_mode = str(chunk.metadata.get("dynamic_fit_mode_resolved", "") or "")
+        if fit_mode == "global_linear_regression":
+            by_roi = chunk.metadata.get("dynamic_fit_global_linear", {})
+        elif fit_mode == "robust_global_event_reject":
+            by_roi = chunk.metadata.get("dynamic_fit_event_reject", {})
+        elif fit_mode == "adaptive_event_gated_regression":
+            by_roi = chunk.metadata.get("dynamic_fit_adaptive_event_gated", {})
+        else:
+            by_roi = chunk.metadata.get("dynamic_fit_rolling_local", {})
+        if not isinstance(by_roi, dict):
+            return
+
+        acquisition_mode = str(getattr(self.config, "acquisition_mode", "intermittent"))
+        for roi, payload in by_roi.items():
+            if not isinstance(payload, dict):
+                continue
+            summary = payload.get("slope_summary", {})
+            if not isinstance(summary, dict) or not summary:
+                continue
+            record = {
+                "roi": str(roi),
+                "chunk_id": int(chunk_id),
+                "source_file": str(source_file),
+                "dynamic_fit_mode": fit_mode,
+                "acquisition_mode": acquisition_mode,
+                **_sanitize_metadata(summary),
+            }
+            self.dynamic_fit_slope_records.append(record)
+
+            level = str(summary.get("warning_level", "none"))
+            if level != "none":
+                warning_record = dict(record)
+                self.dynamic_fit_slope_warning_records.append(warning_record)
+                self.qc_summary.setdefault("dynamic_fit_slope_warnings", []).append(warning_record)
+
+        self._update_dynamic_fit_slope_warning_summary()
+
+    def _update_dynamic_fit_slope_warning_summary(self) -> None:
+        records = list(self.dynamic_fit_slope_warning_records)
+        level_counts = {
+            "low": 0,
+            "moderate": 0,
+            "high": 0,
+            "critical": 0,
+        }
+        severe = {"moderate", "high", "critical"}
+        max_neg = 0.0
+        min_slope = None
+        for rec in records:
+            level = str(rec.get("warning_level", "none"))
+            if level in level_counts:
+                level_counts[level] += 1
+            try:
+                max_neg = max(max_neg, float(rec.get("slope_negative_fraction", 0.0)))
+            except Exception:
+                pass
+            try:
+                slope_min = float(rec.get("slope_min"))
+            except Exception:
+                continue
+            if np.isfinite(slope_min):
+                min_slope = slope_min if min_slope is None else min(min_slope, slope_min)
+        summary = {
+            "roi_chunk_fits_with_any_negative_slope": int(len(records)),
+            "roi_chunk_fits_by_warning_level": {
+                key: int(value) for key, value in level_counts.items()
+            },
+            "roi_chunk_fits_with_low_warnings": int(level_counts["low"]),
+            "roi_chunk_fits_with_moderate_warnings": int(level_counts["moderate"]),
+            "roi_chunk_fits_with_high_warnings": int(level_counts["high"]),
+            "roi_chunk_fits_with_critical_warnings": int(level_counts["critical"]),
+            "roi_chunk_fits_with_moderate_high_critical_warnings": int(
+                sum(1 for rec in records if str(rec.get("warning_level", "none")) in severe)
+            ),
+            "max_slope_negative_fraction": float(max_neg),
+            "min_slope_min_observed": min_slope,
+            "dynamic_fit_modes_affected": sorted(
+                {
+                    str(rec.get("dynamic_fit_mode", ""))
+                    for rec in records
+                    if str(rec.get("dynamic_fit_mode", ""))
+                }
+            ),
+            "rois_affected": sorted(
+                {
+                    str(rec.get("roi", ""))
+                    for rec in records
+                    if str(rec.get("roi", ""))
+                }
+            ),
+        }
+        self.dynamic_fit_slope_warning_summary = summary
+        self.qc_summary["dynamic_fit_slope_warning_summary"] = _sanitize_metadata(summary)
 
     def _is_phasic_timing_enabled(self) -> bool:
         return self.mode == 'phasic'
@@ -994,6 +1107,7 @@ class Pipeline:
                 
                 # SHARED PROCESSING (single source of truth for filtering, regression, dff)
                 chunk = self._apply_standard_analysis(chunk, i)
+                self._record_dynamic_fit_slope_summaries(chunk, i, self._entry_source_file(fpath))
                 
                 # Retain for representative plotting
                 if rep_idx is not None and i == rep_idx:
@@ -1059,6 +1173,7 @@ class Pipeline:
             self.qc_summary['baseline_invalid_roi_chunk_pairs'] = total_affected
             if bad_rois:
                 logging.warning(f"Baseline invalid for {len(bad_rois)} ROIs across {total_chunks} chunks ({total_affected} pairs).")
+        self._update_dynamic_fit_slope_warning_summary()
             
         if self.mode != 'tonic':
             t_qc_write = time.perf_counter()
@@ -1082,8 +1197,11 @@ class Pipeline:
             'regression_step_sec': self.config.step_sec,
             'regression_mode': 'dynamic' if self.mode == 'phasic' else self.mode,
             # D1: Write invalid baseline ROIs
-            'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', [])
+            'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', []),
+            'dynamic_fit_slope_warning_summary': self.dynamic_fit_slope_warning_summary,
         }
+        if self.mode != 'tonic':
+            run_meta['dynamic_fit_slope_warning_records'] = self.dynamic_fit_slope_warning_records
         if self._is_continuous_mode_enabled():
             run_meta.update(
                 {
@@ -1356,6 +1474,12 @@ class Pipeline:
                 output_dir,
                 "continuous_csv_reading",
                 self._continuous_csv_reading,
+            )
+        if self.mode != "tonic":
+            _append_run_report_section(
+                output_dir,
+                "dynamic_fit_slope_warning_summary",
+                self.dynamic_fit_slope_warning_summary,
             )
 
         if self._is_phasic_timing_enabled():
