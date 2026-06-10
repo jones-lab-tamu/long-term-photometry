@@ -84,6 +84,26 @@ Notes:
 - `--validate-only` checks inputs and configuration without running the analysis.
 - `--discover` reports what the software finds in the input path, then exits without creating run artifacts.
 
+## Quickstart and Documentation
+
+Start here if you are new to the app:
+
+- GUI quickstart with bundled synthetic data: `docs/quickstart_gui_synthetic.md`
+- Bundled synthetic dataset: `examples/data/synthetic_photometry_basic/`
+- Synthetic generator/demo dataset guide: `docs/synthetic_demo_datasets.md`
+- Supported input formats: `docs/input_formats.md`
+- Strict custom tabular conversion guide: `docs/custom_tabular_conversion_guide.md`
+- Correction and dynamic fitting: `docs/correction_and_dynamic_fit.md`
+- Event detection: `docs/event_detection.md`
+- Continuous recordings: `docs/continuous_recordings.md`
+- Batch processing: `docs/batch_processing.md`
+- Standalone dynamic fitting example: `examples/standalone_dynamic_fit_slope_constraint.py`
+
+Bundled synthetic data are for workflow demonstration and software testing.
+They are not biological validation datasets. Biological validity and
+generalizability depend on the user's data, sensor, acquisition system, and
+experimental design.
+
 ## Supported Input Formats
 The software currently supports four input-format modes:
 - `auto`

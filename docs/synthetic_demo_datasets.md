@@ -2,6 +2,10 @@
 
 This project uses `tools/synth_photometry_dataset.py` for both regression fixtures and tutorial datasets.
 
+For a first GUI walkthrough, users do not need to run the generator. A small
+bundled RWD-style dataset is committed at `examples/data/synthetic_photometry_basic/`
+and documented in `docs/quickstart_gui_synthetic.md`.
+
 ## Dataset classes
 - clean regression fixtures: deterministic happy-path checks
 - realism-stress regression fixtures: biologically plausible data with timing/session irregularities

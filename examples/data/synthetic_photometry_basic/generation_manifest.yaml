@@ -1,0 +1,271 @@
+generator:
+  script: tools/synth_photometry_dataset.py
+  git_commit: a7a9c183880b5e54ecdb4a8077dd54f12aedb81d
+command:
+  argv:
+  - --out
+  - examples/data/synthetic_photometry_basic
+  - --format
+  - rwd
+  - --config
+  - examples/data/synthetic_photometry_basic/tutorial_config.yaml
+  - --preset
+  - biological_shared_nuisance
+  - --total-days
+  - '0.05'
+  - --recording-duration-min
+  - '2'
+  - --recordings-per-hour
+  - '2'
+  - --fs-hz
+  - '10'
+  - --n-rois
+  - '2'
+  - --start-iso
+  - '2025-01-03T11:22:00'
+  - --seed
+  - '2026'
+  - --phasic-min-events-per-chunk
+  - '3'
+  - --artifact-enable-motion
+  - --artifact-motion-min-per-day
+  - '1'
+  - --artifact-motion-rate-per-day
+  - '20'
+  argv_string: --out examples/data/synthetic_photometry_basic --format rwd --config
+    examples/data/synthetic_photometry_basic/tutorial_config.yaml --preset biological_shared_nuisance
+    --total-days 0.05 --recording-duration-min 2 --recordings-per-hour 2 --fs-hz 10
+    --n-rois 2 --start-iso 2025-01-03T11:22:00 --seed 2026 --phasic-min-events-per-chunk
+    3 --artifact-enable-motion --artifact-motion-min-per-day 1 --artifact-motion-rate-per-day
+    20
+  parsed_args:
+    out: examples/data/synthetic_photometry_basic
+    format: rwd
+    config: examples/data/synthetic_photometry_basic/tutorial_config.yaml
+    preset: biological_shared_nuisance
+    total_days: 0.05
+    recording_duration_min: 2.0
+    recordings_per_hour: 2
+    acquisition_mode: intermittent
+    continuous_duration_hours: null
+    fs_hz: 10.0
+    n_rois: 2
+    start_iso: '2025-01-03T11:22:00'
+    seed: 2026
+    start_iso_random_offset_min: null
+    session_drop_prob: 0.0
+    edge_truncate_samples_max: 0
+    timestamp_jitter_ms_std: 0.0
+    npm_uv_sig_time_offset_ms: 0.0
+    npm_uv_sig_jitter_ms_std: 0.0
+    npm_ledstate_startup_rows: 0
+    near_threshold_end_coverage: false
+    write_generation_manifest: true
+    raw_baseline: null
+    raw_baseline_sig: 250.0
+    raw_baseline_uv: 235.0
+    raw_scale: 1.0
+    roi_baseline_offset_range:
+    - 5.0
+    - 20.0
+    roi_uv_baseline_offset_range:
+    - 3.0
+    - 15.0
+    tonic_amplitude: 1.0
+    tonic_amplitude_mode: high
+    tonic_phase_ct: 6.0
+    tonic_phase_jitter_hr: 1.0
+    debug_tonic_plot: null
+    phasic_mode: high_phasic
+    phasic_base_rate_hz: 0.0005
+    phasic_peak_rate_hz: 0.01
+    phasic_vonmises_kappa: 4.0
+    phasic_sine_depth: 0.7
+    phasic_refractory_sec: 0.75
+    phasic_min_events_per_chunk: 3
+    phasic_ct_mode: absolute
+    phasic_day_start_ct: 0.0
+    phasic_day_end_ct: 12.0
+    phasic_day_high: true
+    phasic_decay_sec: 1.2
+    phasic_rise_sec: 0.12
+    phasic_amp_logmean: 2.5
+    phasic_amp_logsd: 0.35
+    phasic_amp_scale: 1.0
+    phasic_dur_mult: 6.0
+    artifact_scale: 1.0
+    artifact_enable_motion: true
+    no_artifact_enable_motion: false
+    artifact_enable_drift: true
+    no_artifact_enable_drift: false
+    artifact_coupling: 1.0
+    artifact_motion_rate_per_day: 20.0
+    artifact_motion_min_per_day: 1.0
+    artifact_motion_amp_range:
+    - 8.0
+    - 30.0
+    artifact_motion_decay_sec: 2.5
+    artifact_motion_rise_sec: 0.3
+    artifact_motion_dur_mult: 6.0
+    artifact_motion_neg_prob: 0.85
+    artifact_motion_same_sign: false
+    artifact_motion_refractory_sec: 2.0
+    artifact_drift_amp: 20.0
+    artifact_bleach_tau_days: 6.0
+    uv_drift_scale: 1.0
+    shared_wobble_enable: true
+    shared_wobble_amp: 2.0
+    shared_wobble_tau_sec: 60.0
+    shared_wobble_iso_scale: 1.0
+    shared_wobble_iso_lag_sec: 0.0
+    shared_wobble_gain_enable: true
+    shared_wobble_gain_mean: 1.0
+    shared_wobble_gain_sd: 0.2
+    shared_wobble_gain_tau_sec: 120.0
+    shared_wobble_offset_enable: true
+    shared_wobble_offset_amp: 1.0
+    shared_wobble_offset_tau_sec: 180.0
+    noise_sig_std: 0.8
+    noise_uv_std: 0.4
+    noise_shared_std: 0.4
+    noise_shared_uv_scale: 1.0
+    day_variation_enable: false
+    day_variation_au: 0.0
+    iso_slope_true: 1.0
+    iso_intercept_true: 0.0
+    debug_verify_iso_structure: false
+    debug_dump_phase_lock: false
+    phasic_phase_lock_alpha: 0.7
+    phasic_min_rate_frac: 0.15
+    phasic_ct_gating_mode: soft
+    phasic_ct_soft_floor: 0.25
+    phasic_events_per_10min_mean: 10.0
+    phasic_events_per_10min_sd: 3.0
+    phasic_events_per_10min_min: 0
+    phasic_events_per_10min_max: 25
+    _total_days_explicit: true
+    _recording_duration_min_explicit: true
+    _recordings_per_hour_explicit: true
+resolved_preset: biological_shared_nuisance
+seed: 2026
+format: rwd
+start_time:
+  requested_start_iso: '2025-01-03T11:22:00'
+  random_offset_min_applied: 0.0
+  resolved_start_iso: '2025-01-03T11:22:00'
+sessions_requested: 2
+sessions_generated: 2
+sessions_dropped:
+  count: 0
+  items: []
+sessions_truncated:
+  count: 0
+  items: []
+per_session_sample_counts:
+- chunk_index: 0
+  session_label: 2025_01_03-11_22_00
+  samples_target: 1200
+  samples_written: 1200
+  dropped: false
+- chunk_index: 1
+  session_label: 2025_01_03-11_52_00
+  samples_target: 1200
+  samples_written: 1200
+  dropped: false
+sessions:
+- chunk_index: 0
+  session_label: 2025_01_03-11_22_00
+  scheduled_start_iso: '2025-01-03T11:22:00'
+  dropped: false
+  samples_target: 1200
+  samples_written: 1200
+  truncate_head_samples: 0
+  truncate_tail_samples: 0
+  timestamp_start_sec: 0.0
+  timestamp_end_sec: 119.9
+  timestamp_dt_median_sec: 0.10000000000000053
+  format: rwd
+- chunk_index: 1
+  session_label: 2025_01_03-11_52_00
+  scheduled_start_iso: '2025-01-03T11:52:00'
+  dropped: false
+  samples_target: 1200
+  samples_written: 1200
+  truncate_head_samples: 0
+  truncate_tail_samples: 0
+  timestamp_start_sec: 0.0
+  timestamp_end_sec: 119.9
+  timestamp_dt_median_sec: 0.10000000000000053
+  format: rwd
+timestamp_jitter:
+  enabled: false
+  configured_std_ms: 0.0
+  n_sessions_jittered: 0
+  session_stats: []
+  jitter_ms_mean_summary:
+    count: 0
+    mean: null
+    std: null
+    min: null
+    max: null
+  jitter_ms_std_summary:
+    count: 0
+    mean: null
+    std: null
+    min: null
+    max: null
+  jitter_ms_max_abs_summary:
+    count: 0
+    mean: null
+    std: null
+    min: null
+    max: null
+per_channel_support_summary:
+  rwd_sessions:
+  - chunk_index: 0
+    session_label: 2025_01_03-11_22_00
+    n_samples: 1200
+    start_sec: 0.0
+    end_sec: 119.9
+    dt_median_sec: 0.10000000000000053
+    near_threshold_end_coverage_applied: false
+  - chunk_index: 1
+    session_label: 2025_01_03-11_52_00
+    n_samples: 1200
+    start_sec: 0.0
+    end_sec: 119.9
+    dt_median_sec: 0.10000000000000053
+    near_threshold_end_coverage_applied: false
+  npm_sessions: []
+npm_uv_sig_asymmetry:
+  configured_uv_sig_time_offset_ms: 0.0
+  configured_uv_sig_jitter_ms_std: 0.0
+  configured_ledstate_startup_rows: 0
+  observed_start_gap_sec:
+    count: 0
+    mean: null
+    std: null
+    min: null
+    max: null
+  observed_end_gap_sec:
+    count: 0
+    mean: null
+    std: null
+    min: null
+    max: null
+  observed_uv_sample_count:
+    count: 0
+    mean: null
+    std: null
+    min: null
+    max: null
+  observed_sig_sample_count:
+    count: 0
+    mean: null
+    std: null
+    min: null
+    max: null
+near_threshold_coverage:
+  enabled: false
+  manipulations: []
+  count: 0
