@@ -47,6 +47,16 @@ def test_bundled_synthetic_dataset_assets_exist():
     assert manifest["command"]["parsed_args"]["n_rois"] >= 1
 
 
+def test_bundled_synthetic_tutorial_config_uses_conservative_event_defaults():
+    cfg = yaml.safe_load(BUNDLED_CONFIG.read_text(encoding="utf-8"))
+
+    assert cfg["peak_threshold_method"] == "mean_std"
+    assert cfg["peak_threshold_k"] == 2.5
+    assert cfg["peak_min_distance_sec"] == 1.0
+    assert cfg["peak_min_prominence_k"] == 2.0
+    assert cfg["peak_min_width_sec"] == 0.3
+
+
 def test_key_documentation_files_exist_and_reference_bundled_dataset():
     for path in DOC_PATHS:
         assert path.exists(), path

@@ -1312,6 +1312,48 @@ def test_peak_hardening_controls_follow_active_baseline_config(window, tmp_path)
     assert window._event_auc_combo.currentText() == str(expected_cfg.event_auc_baseline)
 
 
+def test_default_gui_event_detection_controls_are_conservative(window):
+    baseline_cfg = window._active_baseline_config()
+    defaults = {
+        "event_signal": baseline_cfg.event_signal,
+        "signal_excursion_polarity": baseline_cfg.signal_excursion_polarity,
+        "peak_threshold_method": baseline_cfg.peak_threshold_method,
+        "peak_threshold_k": baseline_cfg.peak_threshold_k,
+        "peak_threshold_percentile": baseline_cfg.peak_threshold_percentile,
+        "peak_threshold_abs": baseline_cfg.peak_threshold_abs,
+        "peak_min_distance_sec": baseline_cfg.peak_min_distance_sec,
+        "peak_min_prominence_k": baseline_cfg.peak_min_prominence_k,
+        "peak_min_width_sec": baseline_cfg.peak_min_width_sec,
+        "event_auc_baseline": baseline_cfg.event_auc_baseline,
+    }
+
+    assert window._peak_method_combo.currentText() == "mean_std"
+    assert float(window._peak_k_edit.text()) == pytest.approx(2.5)
+    assert float(window._peak_dist_edit.text()) == pytest.approx(1.0)
+    assert float(window._peak_min_prominence_k_edit.text()) == pytest.approx(2.0)
+    assert float(window._peak_min_width_sec_edit.text()) == pytest.approx(0.3)
+
+    cfg, err = main_window_module.parse_and_validate_event_feature_knobs(
+        window._event_signal_combo.currentText(),
+        window._peak_method_combo.currentText(),
+        window._peak_k_edit.text(),
+        window._peak_pct_edit.text(),
+        window._peak_abs_edit.text(),
+        window._peak_dist_edit.text(),
+        window._event_auc_combo.currentText(),
+        defaults,
+        signal_excursion_polarity_text=window._signal_excursion_polarity_combo.currentText(),
+        peak_prominence_k_str=window._peak_min_prominence_k_edit.text(),
+        peak_width_sec_str=window._peak_min_width_sec_edit.text(),
+    )
+    assert err is None
+    assert cfg["peak_threshold_method"] == "mean_std"
+    assert cfg["peak_threshold_k"] == pytest.approx(2.5)
+    assert cfg["peak_min_distance_sec"] == pytest.approx(1.0)
+    assert cfg["peak_min_prominence_k"] == pytest.approx(2.0)
+    assert cfg["peak_min_width_sec"] == pytest.approx(0.3)
+
+
 def test_validate_to_run_progress_does_not_start_at_stale_99(window, monkeypatch, tmp_path):
     """Regression: a successful validate must not make the next run start at 99%."""
     # Simulate completed validate terminal state carrying stale completion progress.

@@ -14,6 +14,8 @@ GUI users can also choose `Tools -> Generate Synthetic Demo Dataset`:
 
 For full command-line parameter control, see `docs/synthetic_dataset_generator_cli.md`.
 
+Tutorial/demo configs use conservative event-detection defaults (`mean_std`, `peak_threshold_k=2.5`, `peak_min_distance_sec=1.0`, `peak_min_prominence_k=2.0`, `peak_min_width_sec=0.3`) to reduce obvious noise-floor over-detection in realistic synthetic traces. These are starting settings, not universal sensor-independent defaults; if users tune them for weaker events, the selected settings should be reused consistently across comparable datasets and are saved in config/provenance outputs.
+
 ## Dataset classes
 - clean regression fixtures: deterministic happy-path checks
 - realism-stress regression fixtures: biologically plausible data with timing/session irregularities

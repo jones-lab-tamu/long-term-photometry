@@ -50,7 +50,9 @@ Key defaults in this tutorial config:
 - dynamic fit mode: `robust_global_event_reject`
 - negative-slope constraint: default package behavior is unconstrained unless changed in the GUI/config
 - bleach correction: not enabled in this tutorial config
-- event threshold: `mean_std` with modest tutorial settings
+- event detection: conservative tutorial defaults using `mean_std`, `peak_threshold_k=2.5`, `peak_min_distance_sec=1.0`, `peak_min_prominence_k=2.0`, and `peak_min_width_sec=0.3`
+
+These event settings are intended to avoid obvious noise-floor over-detection in the bundled synthetic demo. They are not universally optimal for every sensor or dataset. Users can lower threshold or prominence settings for weaker events, but should apply the chosen settings consistently across comparable datasets and rely on saved configs/provenance.
 
 The optional `Prevent negative slopes` / nonnegative slope constraint can be useful when the fitted reference channel inverts polarity. Treat it as an explicit analysis intervention and report it if used. Do not enable it by default just because a warning appears; inspect correction-quality plots first.
 

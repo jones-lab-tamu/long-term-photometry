@@ -30,6 +30,8 @@ python examples/generate_long_duration_demo.py
 
 This wrapper writes the matching `tutorial_config.yaml`, runs the curated long-duration generator command, and prints the input folder, config path, and recommended GUI settings.
 
+The generated tutorial config uses conservative event-detection defaults (`mean_std`, `peak_threshold_k=2.5`, `peak_min_distance_sec=1.0`, `peak_min_prominence_k=2.0`, `peak_min_width_sec=0.3`). These settings reduce obvious noise-floor over-detection in synthetic demos but are not universal sensor-independent settings. If you lower thresholds or prominence to detect weaker events, reuse the chosen settings consistently across comparable datasets.
+
 Advanced equivalent command:
 
 ```powershell

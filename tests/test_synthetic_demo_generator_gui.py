@@ -12,6 +12,8 @@ from gui.synthetic_demo_generator import (
     LONG_DEMO_TYPE,
     build_long_duration_demo_command,
     copy_fast_quickstart_demo,
+    long_duration_tutorial_config_text,
+    write_long_duration_demo_config,
 )
 
 
@@ -102,6 +104,22 @@ def test_long_duration_demo_command_uses_fixed_curated_parameters(tmp_path: Path
     ):
         assert token in cmd or token in joined
     assert str(destination / "tutorial_config.yaml") in cmd
+
+
+def test_long_duration_demo_config_uses_conservative_event_defaults(tmp_path: Path):
+    text = long_duration_tutorial_config_text(recording_duration_min=1.0)
+    assert "peak_threshold_method: mean_std" in text
+    assert "peak_threshold_k: 2.5" in text
+    assert "peak_min_distance_sec: 1.0" in text
+    assert "peak_min_prominence_k: 2.0" in text
+    assert "peak_min_width_sec: 0.3" in text
+
+    destination = tmp_path / "long_demo_config"
+    config_path = write_long_duration_demo_config(destination, recording_duration_min=1.0)
+    written = config_path.read_text(encoding="utf-8")
+    assert "peak_threshold_k: 2.5" in written
+    assert "peak_min_prominence_k: 2.0" in written
+    assert "peak_min_width_sec: 0.3" in written
 
 
 def test_one_command_wrapper_shortened_smoke(tmp_path: Path):
