@@ -4,22 +4,24 @@ Run from the repository root:
 
     python examples/standalone_dynamic_fit_slope_constraint.py
 
-This uses the extracted dynamic fitting utility directly, without the GUI,
-Pipeline, Config, HDF5 caches, or file I/O. The nonnegative slope constraint
-prevents fitted UV/reference polarity inversion, but it does not prove the
-corrected trace is biologically true. Report it as an explicit intervention.
+This imports examples/dynamic_fitting_standalone.py, a single-file standalone
+utility that can be copied into another folder without the photometry_pipeline
+package or slope_qc.py.
+
+The package file photometry_pipeline/core/dynamic_fitting.py is package-oriented
+and imports slope_qc.py. For a single-file standalone copy, use
+examples/dynamic_fitting_standalone.py.
+
+The nonnegative slope constraint prevents fitted UV/reference polarity
+inversion, but it does not prove the corrected trace is biologically true.
+Report clamping as an explicit intervention.
 """
 
 from __future__ import annotations
 
-import os
-import sys
-
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from photometry_pipeline.core.dynamic_fitting import (
+from dynamic_fitting_standalone import (
     fit_adaptive_event_gated_regression,
 )
 
@@ -71,6 +73,10 @@ def main() -> None:
     print(constrained["slope_constraint_summary"]["slope_constraint_applied"])
     print("Clamped slope fraction:")
     print(constrained["slope_constraint_summary"]["slope_clamped_fraction"])
+    print("Unconstrained diagnostic negative slope fraction:")
+    print(constrained["unconstrained_slope_summary"]["slope_negative_fraction"])
+    print("Final constrained diagnostic negative slope fraction:")
+    print(constrained["slope_summary"]["slope_negative_fraction"])
 
     # Useful arrays for plotting or further inspection:
     coef_slope = constrained["coef_slope"]
