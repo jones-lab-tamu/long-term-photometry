@@ -75,6 +75,21 @@ from typing import get_args
 
 _SETTINGS_GROUP = "run_config"
 _ANCHOR_CLOCK_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
+_EVENT_DEFAULTS_VERSION = 2
+_OLD_PERMISSIVE_EVENT_DEFAULTS = {
+    "peak_threshold_method": "mean_std",
+    "peak_threshold_k": 1.5,
+    "peak_min_distance_sec": 1.0,
+    "peak_min_prominence_k": 0.5,
+    "peak_min_width_sec": 0.2,
+}
+_CONSERVATIVE_EVENT_DEFAULTS = {
+    "peak_threshold_method": "mean_std",
+    "peak_threshold_k": 2.5,
+    "peak_min_distance_sec": 1.0,
+    "peak_min_prominence_k": 2.0,
+    "peak_min_width_sec": 0.3,
+}
 
 
 def _generate_run_id():
@@ -8118,6 +8133,117 @@ class MainWindow(QMainWindow):
     # QSettings persistence
     # ==================================================================
 
+    @staticmethod
+    def _event_settings_match(a: dict, b: dict, *, tol: float = 1e-9) -> bool:
+        try:
+            if str(a.get("peak_threshold_method", "")).strip() != str(
+                b.get("peak_threshold_method", "")
+            ).strip():
+                return False
+            for key in (
+                "peak_threshold_k",
+                "peak_min_distance_sec",
+                "peak_min_prominence_k",
+                "peak_min_width_sec",
+            ):
+                if abs(float(a.get(key)) - float(b.get(key))) > tol:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def _apply_event_settings_to_main_controls(self, values: dict) -> None:
+        method = str(values.get("peak_threshold_method", "")).strip()
+        if method:
+            idx = self._peak_method_combo.findText(method)
+            if idx >= 0:
+                self._peak_method_combo.setCurrentIndex(idx)
+        if "peak_threshold_k" in values:
+            self._peak_k_edit.setText(str(float(values["peak_threshold_k"])))
+        if "peak_min_distance_sec" in values:
+            self._peak_dist_edit.setText(str(float(values["peak_min_distance_sec"])))
+        if "peak_min_prominence_k" in values:
+            self._peak_min_prominence_k_edit.setText(
+                str(float(values["peak_min_prominence_k"]))
+            )
+        if "peak_min_width_sec" in values:
+            self._peak_min_width_sec_edit.setText(str(float(values["peak_min_width_sec"])))
+        self._update_adv_ev_visibility()
+
+    def _read_persisted_event_settings(self) -> dict | None:
+        required = (
+            "peak_threshold_method",
+            "peak_threshold_k",
+            "peak_min_distance_sec",
+            "peak_min_prominence_k",
+            "peak_min_width_sec",
+        )
+        if not all(self._settings.contains(key) for key in required):
+            return None
+        try:
+            return {
+                "peak_threshold_method": self._settings.value(
+                    "peak_threshold_method",
+                    _CONSERVATIVE_EVENT_DEFAULTS["peak_threshold_method"],
+                    str,
+                ),
+                "peak_threshold_k": float(
+                    self._settings.value(
+                        "peak_threshold_k",
+                        _CONSERVATIVE_EVENT_DEFAULTS["peak_threshold_k"],
+                        float,
+                    )
+                ),
+                "peak_min_distance_sec": float(
+                    self._settings.value(
+                        "peak_min_distance_sec",
+                        _CONSERVATIVE_EVENT_DEFAULTS["peak_min_distance_sec"],
+                        float,
+                    )
+                ),
+                "peak_min_prominence_k": float(
+                    self._settings.value(
+                        "peak_min_prominence_k",
+                        _CONSERVATIVE_EVENT_DEFAULTS["peak_min_prominence_k"],
+                        float,
+                    )
+                ),
+                "peak_min_width_sec": float(
+                    self._settings.value(
+                        "peak_min_width_sec",
+                        _CONSERVATIVE_EVENT_DEFAULTS["peak_min_width_sec"],
+                        float,
+                    )
+                ),
+            }
+        except Exception:
+            return None
+
+    def _write_persisted_event_settings(self, values: dict) -> None:
+        self._settings.setValue(
+            "event_detection_defaults_version",
+            int(_EVENT_DEFAULTS_VERSION),
+        )
+        for key in (
+            "peak_threshold_method",
+            "peak_threshold_k",
+            "peak_min_distance_sec",
+            "peak_min_prominence_k",
+            "peak_min_width_sec",
+        ):
+            if key in values:
+                self._settings.setValue(key, values[key])
+
+    @staticmethod
+    def _event_settings_from_config(cfg: Config) -> dict:
+        return {
+            "peak_threshold_method": str(cfg.peak_threshold_method),
+            "peak_threshold_k": float(cfg.peak_threshold_k),
+            "peak_min_distance_sec": float(cfg.peak_min_distance_sec),
+            "peak_min_prominence_k": float(getattr(cfg, "peak_min_prominence_k", 0.0)),
+            "peak_min_width_sec": float(getattr(cfg, "peak_min_width_sec", 0.0)),
+        }
+
     def _load_settings_into_widgets(self):
         """Restore widget values from QSettings. Safe if keys are absent."""
         self._settings.beginGroup(_SETTINGS_GROUP)
@@ -8422,10 +8548,30 @@ class MainWindow(QMainWindow):
         if idx_signal_excursion >= 0:
             self._signal_excursion_polarity_combo.setCurrentIndex(idx_signal_excursion)
 
+        persisted_event_settings = self._read_persisted_event_settings()
+        use_custom_config = self._use_custom_config_cb.isChecked()
+        custom_config_available = bool(
+            use_custom_config and os.path.isfile(self._config_path.text().strip())
+        )
+        event_settings_applied_from_settings = False
+        if not custom_config_available and persisted_event_settings is not None:
+            if self._event_settings_match(
+                persisted_event_settings,
+                _OLD_PERMISSIVE_EVENT_DEFAULTS,
+            ):
+                persisted_event_settings = dict(_CONSERVATIVE_EVENT_DEFAULTS)
+                self._write_persisted_event_settings(persisted_event_settings)
+            self._apply_event_settings_to_main_controls(persisted_event_settings)
+            event_settings_applied_from_settings = True
+
         overwrite = self._settings.value("overwrite", False, bool)
         self._overwrite_cb.setChecked(overwrite)
         self._settings.endGroup()
         self._update_config_source_ui(sync_main_advanced=False)
+        if custom_config_available or not event_settings_applied_from_settings:
+            self._apply_event_settings_to_main_controls(
+                self._event_settings_from_config(self._active_baseline_config())
+            )
 
     def _save_widgets_to_settings(self):
         """Persist current widget values to QSettings."""
@@ -8559,6 +8705,19 @@ class MainWindow(QMainWindow):
         self._settings.setValue("sig_iso_render_mode", self._sig_iso_render_mode_combo.currentText())
         self._settings.setValue("dff_render_mode", self._dff_render_mode_combo.currentText())
         self._settings.setValue("stacked_render_mode", self._stacked_render_mode_combo.currentText())
+        self._write_persisted_event_settings(
+            {
+                "peak_threshold_method": self._peak_method_combo.currentText().strip(),
+                "peak_threshold_k": float(self._peak_k_edit.text().strip() or 0.0),
+                "peak_min_distance_sec": float(self._peak_dist_edit.text().strip() or 0.0),
+                "peak_min_prominence_k": float(
+                    self._peak_min_prominence_k_edit.text().strip() or 0.0
+                ),
+                "peak_min_width_sec": float(
+                    self._peak_min_width_sec_edit.text().strip() or 0.0
+                ),
+            }
+        )
         self._settings.setValue("peak_pre_filter", self._peak_pre_filter_combo.currentText())
         self._settings.setValue(
             "signal_excursion_polarity",

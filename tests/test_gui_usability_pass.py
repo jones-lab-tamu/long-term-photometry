@@ -1354,6 +1354,144 @@ def test_default_gui_event_detection_controls_are_conservative(window):
     assert cfg["peak_min_width_sec"] == pytest.approx(0.3)
 
 
+def test_saved_old_permissive_event_defaults_are_migrated_to_conservative(qapp, tmp_path):
+    settings = QSettings(str(tmp_path / "old_event_settings.ini"), QSettings.IniFormat)
+    settings.clear()
+    settings.beginGroup("run_config")
+    settings.setValue("peak_threshold_method", "mean_std")
+    settings.setValue("peak_threshold_k", 1.5)
+    settings.setValue("peak_min_distance_sec", 1.0)
+    settings.setValue("peak_min_prominence_k", 0.5)
+    settings.setValue("peak_min_width_sec", 0.2)
+    settings.endGroup()
+    settings.sync()
+
+    w = MainWindow(settings=settings)
+    try:
+        assert w._peak_method_combo.currentText() == "mean_std"
+        assert float(w._peak_k_edit.text()) == pytest.approx(2.5)
+        assert float(w._peak_dist_edit.text()) == pytest.approx(1.0)
+        assert float(w._peak_min_prominence_k_edit.text()) == pytest.approx(2.0)
+        assert float(w._peak_min_width_sec_edit.text()) == pytest.approx(0.3)
+
+        settings.beginGroup("run_config")
+        assert int(settings.value("event_detection_defaults_version", 0, int)) == 2
+        assert float(settings.value("peak_threshold_k", 0.0, float)) == pytest.approx(2.5)
+        assert float(settings.value("peak_min_prominence_k", 0.0, float)) == pytest.approx(2.0)
+        assert float(settings.value("peak_min_width_sec", 0.0, float)) == pytest.approx(0.3)
+        settings.endGroup()
+    finally:
+        w.close()
+        w.deleteLater()
+        settings.clear()
+
+
+def test_saved_nondefault_event_settings_are_preserved(qapp, tmp_path):
+    settings = QSettings(str(tmp_path / "custom_event_settings.ini"), QSettings.IniFormat)
+    settings.clear()
+    settings.beginGroup("run_config")
+    settings.setValue("peak_threshold_method", "mean_std")
+    settings.setValue("peak_threshold_k", 3.0)
+    settings.setValue("peak_min_distance_sec", 1.0)
+    settings.setValue("peak_min_prominence_k", 1.25)
+    settings.setValue("peak_min_width_sec", 0.4)
+    settings.endGroup()
+    settings.sync()
+
+    w = MainWindow(settings=settings)
+    try:
+        assert w._peak_method_combo.currentText() == "mean_std"
+        assert float(w._peak_k_edit.text()) == pytest.approx(3.0)
+        assert float(w._peak_dist_edit.text()) == pytest.approx(1.0)
+        assert float(w._peak_min_prominence_k_edit.text()) == pytest.approx(1.25)
+        assert float(w._peak_min_width_sec_edit.text()) == pytest.approx(0.4)
+    finally:
+        w.close()
+        w.deleteLater()
+        settings.clear()
+
+
+def test_default_gui_effective_config_contains_conservative_event_defaults(window, tmp_path):
+    _set_minimally_valid_paths(window)
+
+    spec = window._build_run_spec(validate_only=True)
+    cfg_path = spec.generate_derived_config(str(tmp_path / "default_event_config"))
+    cfg = yaml.safe_load(open(cfg_path, "r", encoding="utf-8"))
+
+    assert cfg["peak_threshold_method"] == "mean_std"
+    assert cfg["peak_threshold_k"] == pytest.approx(2.5)
+    assert cfg["peak_min_distance_sec"] == pytest.approx(1.0)
+    assert cfg["peak_min_prominence_k"] == pytest.approx(2.0)
+    assert cfg["peak_min_width_sec"] == pytest.approx(0.3)
+
+
+def test_explicit_loaded_permissive_config_remains_honored(window, tmp_path):
+    custom_cfg = tmp_path / "explicit_permissive.yaml"
+    custom_cfg.write_text(
+        yaml.safe_dump(
+            {
+                "peak_threshold_method": "mean_std",
+                "peak_threshold_k": 1.5,
+                "peak_min_distance_sec": 1.0,
+                "peak_min_prominence_k": 0.5,
+                "peak_min_width_sec": 0.2,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    _set_minimally_valid_paths(window)
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(custom_cfg))
+    window._update_config_source_ui()
+
+    assert float(window._peak_k_edit.text()) == pytest.approx(1.5)
+    assert float(window._peak_min_prominence_k_edit.text()) == pytest.approx(0.5)
+    assert float(window._peak_min_width_sec_edit.text()) == pytest.approx(0.2)
+
+    spec = window._build_run_spec(validate_only=True)
+    cfg_path = spec.generate_derived_config(str(tmp_path / "explicit_permissive_run"))
+    cfg = yaml.safe_load(open(cfg_path, "r", encoding="utf-8"))
+    assert cfg["peak_threshold_k"] == pytest.approx(1.5)
+    assert cfg["peak_min_prominence_k"] == pytest.approx(0.5)
+    assert cfg["peak_min_width_sec"] == pytest.approx(0.2)
+
+
+def test_post_run_tuning_fallback_defaults_are_conservative(window):
+    window._apply_tuning_defaults_from_config(window._default_cfg)
+
+    assert window._tuning_peak_method_combo.currentText() == "mean_std"
+    assert window._tuning_peak_k_spin.value() == pytest.approx(2.5)
+    assert window._tuning_peak_dist_spin.value() == pytest.approx(1.0)
+    assert window._tuning_peak_prominence_k_spin.value() == pytest.approx(2.0)
+    assert window._tuning_peak_width_sec_spin.value() == pytest.approx(0.3)
+
+
+def test_post_run_tuning_honors_run_specific_old_event_settings(window):
+    cfg = main_window_module.Config(
+        peak_threshold_method="mean_std",
+        peak_threshold_k=1.5,
+        peak_min_distance_sec=1.0,
+        peak_min_prominence_k=0.5,
+        peak_min_width_sec=0.2,
+    )
+    window._apply_tuning_defaults_from_config(cfg)
+
+    assert window._tuning_peak_method_combo.currentText() == "mean_std"
+    assert window._tuning_peak_k_spin.value() == pytest.approx(1.5)
+    assert window._tuning_peak_dist_spin.value() == pytest.approx(1.0)
+    assert window._tuning_peak_prominence_k_spin.value() == pytest.approx(0.5)
+    assert window._tuning_peak_width_sec_spin.value() == pytest.approx(0.2)
+
+
+def test_main_window_has_no_old_event_defaults_outside_migration_constant():
+    text = (os.path.dirname(main_window_module.__file__) and open(main_window_module.__file__, "r", encoding="utf-8").read())
+
+    assert text.count('"peak_threshold_k": 1.5') == 1
+    assert text.count('"peak_min_prominence_k": 0.5') == 1
+    assert text.count('"peak_min_width_sec": 0.2') == 1
+
+
 def test_validate_to_run_progress_does_not_start_at_stale_99(window, monkeypatch, tmp_path):
     """Regression: a successful validate must not make the next run start at 99%."""
     # Simulate completed validate terminal state carrying stale completion progress.

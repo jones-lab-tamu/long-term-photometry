@@ -31,6 +31,8 @@ Default first-run/tutorial settings are intentionally conservative for synthetic
 
 These defaults are designed to reduce obvious background-noise over-detection in tutorial data. They are not universal sensor-independent truth; weaker events may require lower thresholds or prominence settings after inspection.
 
+GUI first-run event-detection defaults matching the older permissive values (`mean_std`, `peak_threshold_k=1.5`, `peak_min_prominence_k=0.5`, `peak_min_width_sec=0.2`) are migrated automatically to the conservative tutorial/demo defaults. Explicit user configs and completed-run provenance remain honored.
+
 ## Standardizing settings
 
 Choose event settings before comparing datasets. Reuse a saved config or downstream retune configuration so all relevant datasets use the same event criteria.
