@@ -137,15 +137,15 @@ class BatchRunDialog(QDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
 
-        explainer = QLabel(
+        self._scope_label = QLabel(
             "Batch mode applies the same current analysis settings to each dataset folder.\n"
             "Each immediate subfolder of the batch input root is treated as one independent dataset.\n"
             "Each dataset produces a normal completed run.\n"
-            "Batch mode does not compute group statistics or multi-animal plots. "
+            "Batch mode does not perform group statistics, averaging, or multi-recording visualization. "
             "Use exported tables for downstream statistics and plotting."
         )
-        explainer.setWordWrap(True)
-        layout.addWidget(explainer)
+        self._scope_label.setWordWrap(True)
+        layout.addWidget(self._scope_label)
 
         paths_group = QGroupBox("Batch Folders")
         paths_layout = QGridLayout(paths_group)

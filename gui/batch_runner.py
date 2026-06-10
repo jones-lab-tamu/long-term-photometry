@@ -30,6 +30,7 @@ from gui.batch_spec import (
     write_batch_config_used_yaml,
     write_batch_manifest_csv,
     write_batch_manifest_json,
+    write_batch_readme_txt,
     write_batch_run_spec_json,
 )
 from gui.process_runner import _read_final_status
@@ -163,6 +164,10 @@ class BatchRunner:
     def batch_config_used_yaml_path(self) -> str:
         return os.path.join(self.batch_spec.batch_output_root, "batch_config_used.yaml")
 
+    @property
+    def batch_readme_txt_path(self) -> str:
+        return os.path.join(self.batch_spec.batch_output_root, "batch_readme.txt")
+
     def request_cancel(self) -> None:
         """Request batch cancellation and write the active run cancel flag if possible."""
         self._cancel_requested = True
@@ -190,6 +195,7 @@ class BatchRunner:
         frozen_intent = copy.deepcopy(self.batch_spec)
         write_batch_run_spec_json(frozen_intent, self.batch_run_spec_json_path)
         write_batch_config_used_yaml(frozen_intent, self.batch_config_used_yaml_path)
+        write_batch_readme_txt(frozen_intent, self.batch_readme_txt_path)
         self._write_live_manifests()
 
         for index, row in enumerate(self.batch_spec.datasets):

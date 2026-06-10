@@ -53,6 +53,7 @@ BATCH_MANIFEST_CSV_FIELDS = [
     "acquisition_mode",
     "continuous_window_sec",
     "continuous_step_sec",
+    "dynamic_fit_mode",
     "config_path",
     "message",
     "run_dir",
@@ -192,6 +193,12 @@ class BatchRunSpec:
     def to_dict(self) -> dict[str, Any]:
         return {
             "batch_id": self.batch_id,
+            "documentation": (
+                "Batch mode applies one shared configuration to multiple independent "
+                "immediate-subfolder datasets. Each dataset produces a standard "
+                "completed-run output under runs/. Batch mode does not perform group "
+                "statistics, averaging, or multi-recording visualization."
+            ),
             "created_at": self.created_at,
             "finished_at": self.finished_at,
             "batch_input_root": self.batch_input_root,
@@ -339,6 +346,10 @@ def write_batch_manifest_csv(batch_spec: BatchRunSpec, path: str) -> str:
     out_path = os.path.abspath(os.fspath(path))
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     shared = batch_spec.shared_settings
+    config_overrides = shared.get("config_overrides", {})
+    if not isinstance(config_overrides, dict):
+        config_overrides = {}
+    dynamic_fit_mode = str(config_overrides.get("dynamic_fit_mode", "") or "")
     with open(out_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=BATCH_MANIFEST_CSV_FIELDS)
         writer.writeheader()
@@ -360,6 +371,7 @@ def write_batch_manifest_csv(batch_spec: BatchRunSpec, path: str) -> str:
                     "acquisition_mode": shared.get("acquisition_mode", ""),
                     "continuous_window_sec": shared.get("continuous_window_sec", ""),
                     "continuous_step_sec": shared.get("continuous_step_sec", ""),
+                    "dynamic_fit_mode": dynamic_fit_mode,
                     "config_path": shared.get("config_path", shared.get("config_source_path", "")),
                     "message": row_dict.get("message", ""),
                     "run_dir": row.run_dir,
@@ -397,6 +409,56 @@ def write_batch_config_used_yaml(batch_spec: BatchRunSpec, path: str) -> str:
             sort_keys=True,
             allow_unicode=True,
         )
+    return out_path
+
+
+def write_batch_readme_txt(batch_spec: BatchRunSpec, path: str) -> str:
+    """Write a short user-facing README into the batch output root."""
+    out_path = os.path.abspath(os.fspath(path))
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    text = f"""Batch Processing Output
+=======================
+
+Batch ID: {batch_spec.batch_id}
+
+Scope
+-----
+Batch mode applies one shared analysis configuration to multiple independent
+dataset folders. It does not perform group statistics, averaging, per-dataset
+auto-tuning, batch retuning, or multi-recording visualization.
+
+Input Folder Structure
+----------------------
+Each immediate subfolder of the Batch Input Root is treated as one dataset.
+Root-level files are ignored, and nested folders are not discovered as separate
+datasets.
+
+Outputs
+-------
+Each dataset writes a standard completed-run folder under:
+
+  runs/<dataset_slug_index>/
+
+Batch-level provenance files in this folder:
+
+  batch_manifest.csv
+  batch_manifest.json
+  batch_run_spec.json
+  batch_config_used.yaml
+  batch_readme.txt
+
+Status Meanings
+---------------
+pending: planned but not started
+validating: validate-only command is active
+running: full pipeline command is active
+success: dataset command completed successfully
+failed: dataset command completed with an error
+skipped: dataset was not run, usually because output already existed
+cancelled: batch cancellation prevented or interrupted execution
+"""
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(text)
     return out_path
 
 

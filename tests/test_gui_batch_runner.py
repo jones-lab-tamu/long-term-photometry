@@ -68,7 +68,11 @@ def _base_run_spec_dict(tmp_path: Path, *, config_path: Path) -> dict:
         dff_render_mode="full",
         stacked_render_mode="full",
         run_profile="full",
-        config_overrides={"peak_threshold_k": 3.0},
+        config_overrides={
+            "peak_threshold_k": 3.0,
+            "dynamic_fit_slope_constraint": "unconstrained",
+            "dynamic_fit_min_slope": 0.0,
+        },
         user_set_fields=["format", "acquisition_mode"],
     )
     return spec.to_dict()
@@ -220,6 +224,7 @@ def test_sequential_success_with_fake_runner_writes_manifests_and_paths(tmp_path
     assert Path(runner.batch_manifest_csv_path).exists()
     assert Path(runner.batch_run_spec_json_path).exists()
     assert Path(runner.batch_config_used_yaml_path).exists()
+    assert Path(runner.batch_readme_txt_path).exists()
 
     manifest = json.loads(Path(runner.batch_manifest_json_path).read_text(encoding="utf-8"))
     assert manifest["summary"]["success"] == 2
@@ -227,6 +232,72 @@ def test_sequential_success_with_fake_runner_writes_manifests_and_paths(tmp_path
     with open(runner.batch_manifest_csv_path, "r", encoding="utf-8", newline="") as f:
         csv_rows = list(csv.DictReader(f))
     assert [row["status"] for row in csv_rows] == ["success", "success"]
+
+
+def test_shared_slope_constraint_overrides_written_to_each_dataset_config(tmp_path: Path):
+    rows = _rows(tmp_path, "Animal A", "Animal B")
+    config_path = _write_valid_config(tmp_path / "base_config.yaml")
+    base_spec = RunSpec(
+        input_dir=str(tmp_path / "placeholder_input"),
+        run_dir=str(tmp_path / "placeholder_output"),
+        format="custom_tabular",
+        config_source_path=str(config_path),
+        mode="phasic",
+        config_overrides={
+            "dynamic_fit_slope_constraint": "nonnegative",
+            "dynamic_fit_min_slope": 0.0,
+        },
+    )
+    batch = make_batch_run_spec(
+        batch_id="batch_slope_config",
+        created_at="2026-01-01T00:00:00+00:00",
+        batch_input_root=tmp_path / "inputs",
+        batch_output_root=tmp_path / "batch_out",
+        base_run_spec=base_spec.to_dict(),
+        shared_settings={
+            "format": "custom_tabular",
+            "mode": "phasic",
+            "config_source_path": str(config_path),
+            "config_overrides": {
+                "dynamic_fit_slope_constraint": "nonnegative",
+                "dynamic_fit_min_slope": 0.0,
+            },
+        },
+        datasets=rows,
+        overwrite=True,
+    )
+
+    def fake_runner(_argv, row, _run_spec, _cancel_requested):
+        cfg_path = Path(row.output_path) / "config_effective.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        assert cfg["dynamic_fit_slope_constraint"] == "nonnegative"
+        assert cfg["dynamic_fit_min_slope"] == 0.0
+        _write_success_status(row.output_path)
+        return BatchCommandResult(exit_code=0)
+
+    result = BatchRunner(batch, command_runner=fake_runner).run(validate_only=True)
+
+    assert [row.status for row in result.datasets] == ["success", "success"]
+    for row in result.datasets:
+        cfg = yaml.safe_load(Path(row.output_path, "config_effective.yaml").read_text(encoding="utf-8"))
+        assert cfg["dynamic_fit_slope_constraint"] == "nonnegative"
+        assert cfg["dynamic_fit_min_slope"] == 0.0
+
+
+def test_default_slope_constraint_written_to_each_dataset_config(tmp_path: Path):
+    rows = _rows(tmp_path, "AnimalA")
+    batch = _batch_spec(tmp_path, rows)
+
+    def fake_runner(_argv, row, _run_spec, _cancel_requested):
+        cfg = yaml.safe_load(Path(row.output_path, "config_effective.yaml").read_text(encoding="utf-8"))
+        assert cfg["dynamic_fit_slope_constraint"] == "unconstrained"
+        assert cfg["dynamic_fit_min_slope"] == 0.0
+        _write_success_status(row.output_path)
+        return BatchCommandResult(exit_code=0)
+
+    result = BatchRunner(batch, command_runner=fake_runner).run(validate_only=True)
+
+    assert result.datasets[0].status == "success"
 
 
 def test_failure_continues_when_stop_on_failure_false(tmp_path: Path):

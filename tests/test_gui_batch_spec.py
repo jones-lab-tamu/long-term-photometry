@@ -16,6 +16,7 @@ from gui.batch_spec import (
     write_batch_config_used_yaml,
     write_batch_manifest_csv,
     write_batch_manifest_json,
+    write_batch_readme_txt,
     write_batch_run_spec_json,
 )
 
@@ -156,6 +157,7 @@ def test_manifest_csv_json_and_config_writing_round_trip(tmp_path: Path):
         "continuous_window_sec": 600.0,
         "continuous_step_sec": 600.0,
         "config_source_path": "config.yaml",
+        "config_overrides": {"dynamic_fit_mode": "global_linear_regression"},
     }
     spec = make_batch_run_spec(
         batch_id="batch_test",
@@ -179,11 +181,15 @@ def test_manifest_csv_json_and_config_writing_round_trip(tmp_path: Path):
     assert csv_rows[0]["dataset_name"] == "Animal A"
     assert csv_rows[0]["status"] == "success"
     assert csv_rows[0]["format"] == "custom_tabular"
+    assert csv_rows[0]["dynamic_fit_mode"] == "global_linear_regression"
+    assert csv_rows[0]["status_json_path"].endswith("status.json")
+    assert csv_rows[0]["run_report_path"].endswith("run_report.json")
     assert csv_rows[1]["message"] == "validation failed"
 
     with open(json_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
     assert manifest["batch_id"] == "batch_test"
+    assert "does not perform group statistics" in manifest["documentation"]
     assert manifest["shared_settings"] == shared
     assert manifest["summary"]["total"] == 2
     assert manifest["summary"]["success"] == 1
@@ -199,6 +205,13 @@ def test_manifest_csv_json_and_config_writing_round_trip(tmp_path: Path):
     with open(yaml_path, "r", encoding="utf-8") as f:
         config_used = yaml.safe_load(f)
     assert config_used == shared
+
+    readme_path = write_batch_readme_txt(spec, tmp_path / "out" / "batch_readme.txt")
+    readme = Path(readme_path).read_text(encoding="utf-8")
+    assert "immediate subfolder" in readme
+    assert "standard completed-run folder" in readme
+    assert "does not perform group statistics" in readme
+    assert "cancelled" in readme
 
 
 def test_batch_run_spec_serialization_is_json_safe_and_freezes_shared_settings(tmp_path: Path):

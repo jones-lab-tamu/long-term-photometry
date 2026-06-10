@@ -82,6 +82,11 @@ def _wait_until(qapp, predicate, timeout_sec: float = 3.0) -> None:
 def test_dialog_discovery_lists_immediate_subfolders_and_reports_ignored_files(qapp, tmp_path: Path):
     dialog = _dialog(tmp_path)
     try:
+        assert "same current analysis settings" in dialog._scope_label.text()
+        assert (
+            "does not perform group statistics, averaging, or multi-recording visualization"
+            in dialog._scope_label.text()
+        )
         _input_root, output_root = _detect_two_datasets(dialog, tmp_path)
 
         assert dialog._table.rowCount() == 2
@@ -134,6 +139,10 @@ def test_main_window_batch_base_spec_uses_placeholders_without_valid_single_run_
         window._continuous_window_sec_spin.setValue(900.0)
         window._allow_partial_final_window_cb.setChecked(True)
         window._mode_combo.setCurrentText("phasic")
+        idx_constraint = window._dynamic_fit_slope_constraint_combo.findData("nonnegative")
+        assert idx_constraint >= 0
+        window._dynamic_fit_slope_constraint_combo.setCurrentIndex(idx_constraint)
+        window._dynamic_fit_min_slope_spin.setValue(0.0)
 
         dialog = BatchRunDialog(
             build_base_run_spec=window._build_batch_base_run_spec,
@@ -157,6 +166,10 @@ def test_main_window_batch_base_spec_uses_placeholders_without_valid_single_run_
         assert spec.shared_settings["acquisition_mode"] == "continuous"
         assert spec.shared_settings["continuous_window_sec"] == 900.0
         assert spec.shared_settings["allow_partial_final_window"] is True
+        assert spec.shared_settings["config_overrides"]["dynamic_fit_slope_constraint"] == "nonnegative"
+        assert spec.shared_settings["config_overrides"]["dynamic_fit_min_slope"] == 0.0
+        assert spec.base_run_spec["config_overrides"]["dynamic_fit_slope_constraint"] == "nonnegative"
+        assert spec.base_run_spec["config_overrides"]["dynamic_fit_min_slope"] == 0.0
         assert window._input_dir.text() == str(stale_input)
         assert window._output_dir.text() == str(stale_output)
     finally:
