@@ -22,6 +22,7 @@ DOC_PATHS = [
 README_LINKS = [
     "docs/quickstart_gui_synthetic.md",
     "examples/data/synthetic_photometry_basic/",
+    "docs/synthetic_dataset_generator_cli.md",
     "docs/synthetic_demo_datasets.md",
     "docs/input_formats.md",
     "docs/custom_tabular_conversion_guide.md",
@@ -63,6 +64,15 @@ def test_readme_documentation_links_point_to_existing_local_paths():
     for rel in README_LINKS:
         assert rel in readme
         assert (REPO_ROOT / rel).exists(), rel
+
+
+def test_synthetic_generator_cli_docs_clarify_long_demo_wrapper_and_config_contract():
+    text = (REPO_ROOT / "docs" / "synthetic_dataset_generator_cli.md").read_text(encoding="utf-8")
+    lower = text.lower()
+
+    assert "python examples/generate_long_duration_demo.py" in text
+    assert "writes the matching `tutorial_config.yaml`" in lower
+    assert "raw generator command assumes that the config file passed to `--config` already exists" in lower
 
 
 def test_docs_do_not_claim_native_doric_or_tdt_support():

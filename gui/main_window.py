@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from statistics import median
 
 from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, Signal
-from PySide6.QtGui import QColor, QFont, QPalette, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QCheckBox, QSpinBox,
@@ -41,6 +41,8 @@ from gui.process_runner import PipelineRunner, RunnerState
 from gui.interactive_image import InteractiveImageLabel, InteractiveImageController
 from gui.run_spec import RunSpec, FORMAT_CHOICES
 from gui.batch_run_dialog import BatchRunDialog
+from gui.synthetic_demo_dialog import GenerateSyntheticDemoDatasetDialog
+from gui.synthetic_demo_generator import DemoGenerationResult
 from gui.status_follower import StatusFollower
 from gui.log_follower import LogFollower
 from gui.run_report_viewer import RunReportViewer
@@ -1054,6 +1056,7 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle(self.WINDOW_TITLE_BASE)
         self.resize(1100, 850)
+        self._build_menu_bar()
 
         # Settings (injectable for testing)
         self._settings = settings if settings is not None else QSettings()
@@ -1178,6 +1181,17 @@ class MainWindow(QMainWindow):
     # ==================================================================
     # Config Panel
     # ==================================================================
+
+    def _build_menu_bar(self) -> None:
+        self._tools_menu = self.menuBar().addMenu("Tools")
+        self._generate_synthetic_demo_action = QAction(
+            "Generate Synthetic Demo Dataset",
+            self,
+        )
+        self._generate_synthetic_demo_action.triggered.connect(
+            self._on_generate_synthetic_demo_dataset
+        )
+        self._tools_menu.addAction(self._generate_synthetic_demo_action)
 
     def _build_status_strip(self) -> QWidget:
         """Top status strip with status/phase labels and progress."""
@@ -7103,6 +7117,55 @@ class MainWindow(QMainWindow):
             dlg.exec()
         finally:
             self._batch_run_dialog = None
+
+    def _on_generate_synthetic_demo_dataset(self):
+        if self._runner.is_running():
+            QMessageBox.information(
+                self,
+                "Synthetic Demo Generator Unavailable",
+                "Synthetic demo generation is unavailable while validation or analysis is running.",
+            )
+            return
+        existing = getattr(self, "_synthetic_demo_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dlg = GenerateSyntheticDemoDatasetDialog(
+            apply_result_callback=self._apply_synthetic_demo_result_to_inputs,
+            open_folder=_open_folder,
+            parent=self,
+        )
+        self._synthetic_demo_dialog = dlg
+        try:
+            dlg.exec()
+        finally:
+            self._synthetic_demo_dialog = None
+
+    def _apply_synthetic_demo_result_to_inputs(self, result: DemoGenerationResult) -> None:
+        self._input_dir.setText(str(result.input_dir))
+        self._config_path.setText(str(result.config_path))
+        if hasattr(self, "_use_custom_config_cb"):
+            self._use_custom_config_cb.setChecked(True)
+            self._update_config_source_ui()
+        if hasattr(self, "_format_combo"):
+            idx = self._format_combo.findText(result.format)
+            if idx >= 0:
+                self._format_combo.setCurrentIndex(idx)
+        if hasattr(self, "_sph_edit"):
+            self._sph_edit.setText(str(result.sessions_per_hour))
+        if hasattr(self, "_mode_combo"):
+            idx_mode = self._mode_combo.findText(result.mode)
+            if idx_mode >= 0:
+                self._mode_combo.setCurrentIndex(idx_mode)
+        if hasattr(self, "_acquisition_mode_combo"):
+            idx_acq = self._acquisition_mode_combo.findData("intermittent")
+            if idx_acq >= 0:
+                self._acquisition_mode_combo.setCurrentIndex(idx_acq)
+        self._on_config_changed()
+        self._append_run_log(
+            "Synthetic demo dataset set as current input. Validation was not started."
+        )
 
     def _build_batch_base_run_spec(
         self,

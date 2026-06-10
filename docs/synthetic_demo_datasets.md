@@ -6,6 +6,14 @@ For a first GUI walkthrough, users do not need to run the generator. A small
 bundled RWD-style dataset is committed at `examples/data/synthetic_photometry_basic/`
 and documented in `docs/quickstart_gui_synthetic.md`.
 
+GUI users can also choose `Tools -> Generate Synthetic Demo Dataset`:
+- `Fast quickstart demo` copies the bundled dataset to a selected folder.
+- `Long-duration intermittent demo` generates a 48 h RWD-style intermittent
+  dataset with 10 min sessions, 2 sessions/hour, 10 Hz sampling, 2 ROIs,
+  phasic events, and motion artifacts.
+
+For full command-line parameter control, see `docs/synthetic_dataset_generator_cli.md`.
+
 ## Dataset classes
 - clean regression fixtures: deterministic happy-path checks
 - realism-stress regression fixtures: biologically plausible data with timing/session irregularities

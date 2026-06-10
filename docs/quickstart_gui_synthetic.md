@@ -35,6 +35,13 @@ Use these paths in the GUI:
 
 The input folder already contains data. You do not need to run the synthetic generator for this quickstart.
 
+If you want to make a fresh copy without using the command line, use
+`Tools -> Generate Synthetic Demo Dataset` and choose `Fast quickstart demo`.
+That curated GUI preset copies the same bundled dataset to a folder you select.
+The `Long-duration intermittent demo` preset generates a 48 h RWD-style
+intermittent dataset with 10 min sessions, 2 sessions/hour, 10 Hz sampling,
+and 2 ROIs.
+
 ## 3. Keep default correction settings
 
 For the first run, use the config provided with the dataset.

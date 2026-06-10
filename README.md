@@ -90,6 +90,8 @@ Start here if you are new to the app:
 
 - GUI quickstart with bundled synthetic data: `docs/quickstart_gui_synthetic.md`
 - Bundled synthetic dataset: `examples/data/synthetic_photometry_basic/`
+- GUI demo generator: Tools -> Generate Synthetic Demo Dataset
+- Full synthetic generator CLI guide: `docs/synthetic_dataset_generator_cli.md`
 - Synthetic generator/demo dataset guide: `docs/synthetic_demo_datasets.md`
 - Supported input formats: `docs/input_formats.md`
 - Strict custom tabular conversion guide: `docs/custom_tabular_conversion_guide.md`
