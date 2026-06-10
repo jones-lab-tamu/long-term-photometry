@@ -1,0 +1,84 @@
+"""Standalone dynamic-fit slope constraint example.
+
+Run from the repository root:
+
+    python examples/standalone_dynamic_fit_slope_constraint.py
+
+This uses the extracted dynamic fitting utility directly, without the GUI,
+Pipeline, Config, HDF5 caches, or file I/O. The nonnegative slope constraint
+prevents fitted UV/reference polarity inversion, but it does not prove the
+corrected trace is biologically true. Report it as an explicit intervention.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from photometry_pipeline.core.dynamic_fitting import (
+    fit_adaptive_event_gated_regression,
+)
+
+
+def make_demo_trace() -> tuple[np.ndarray, np.ndarray, float]:
+    fs = 40.0
+    t = np.arange(2400, dtype=float) / fs
+    uv = 3.0 + 0.25 * np.sin(2.0 * np.pi * 0.08 * t)
+    sig = 1.2 * uv + 0.7
+
+    # Broad event-like region where local anti-correlation can drive negative
+    # adaptive slopes in an unconstrained fit.
+    event = (t >= 22.0) & (t <= 36.0)
+    uv[event] -= 0.7 * np.sin(np.pi * (t[event] - 22.0) / 14.0)
+    sig[event] += 1.3 * np.sin(np.pi * (t[event] - 22.0) / 14.0)
+    return sig, uv, fs
+
+
+def run_fit(sig: np.ndarray, uv: np.ndarray, fs: float, *, slope_constraint: str) -> dict:
+    return fit_adaptive_event_gated_regression(
+        signal_raw=sig,
+        iso_raw=uv,
+        signal_fit_input=sig,
+        iso_fit_input=uv,
+        sample_rate_hz=fs,
+        residual_z_thresh=50.0,
+        local_var_window_sec=None,
+        local_var_ratio_thresh=None,
+        smooth_window_sec=1.0,
+        min_trust_fraction=0.1,
+        freeze_interp_method="linear_hold",
+        signal_excursion_polarity="both",
+        slope_constraint=slope_constraint,
+        min_slope=0.0,
+    )
+
+
+def main() -> None:
+    sig, uv, fs = make_demo_trace()
+
+    unconstrained = run_fit(sig, uv, fs, slope_constraint="unconstrained")
+    constrained = run_fit(sig, uv, fs, slope_constraint="nonnegative")
+
+    print("Unconstrained negative slope fraction:")
+    print(unconstrained["slope_summary"]["slope_negative_fraction"])
+    print("Constrained negative slope fraction:")
+    print(constrained["slope_summary"]["slope_negative_fraction"])
+    print("Constraint applied:")
+    print(constrained["slope_constraint_summary"]["slope_constraint_applied"])
+    print("Clamped slope fraction:")
+    print(constrained["slope_constraint_summary"]["slope_clamped_fraction"])
+
+    # Useful arrays for plotting or further inspection:
+    coef_slope = constrained["coef_slope"]
+    coef_slope_unconstrained = constrained["coef_slope_unconstrained"]
+    fit_reference = constrained["iso_fit_signal_units"]
+    delta_f = sig - fit_reference
+    print("Array shapes:", coef_slope.shape, coef_slope_unconstrained.shape, delta_f.shape)
+
+
+if __name__ == "__main__":
+    main()

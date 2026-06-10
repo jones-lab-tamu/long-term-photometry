@@ -103,10 +103,83 @@ def test_robust_global_event_reject_nonnegative_constraint_clamps_standalone_fit
     )
 
     assert unconstrained["final_coef"]["slope"] < 0.0
+    assert unconstrained["final_coef"]["unconstrained_slope"] < 0.0
+    assert unconstrained["slope_constraint_summary"]["slope_constraint_applied"] is False
     assert constrained["final_coef"]["slope"] >= 0.0
+    assert constrained["final_coef"]["unconstrained_slope"] < 0.0
     assert constrained["unconstrained_slope_summary"]["slope_negative_fraction"] == pytest.approx(1.0)
     assert constrained["slope_summary"]["slope_negative_fraction"] == pytest.approx(0.0)
     assert constrained["slope_constraint_summary"]["slope_constraint_applied"] is True
+    expected_fit = (
+        constrained["final_coef"]["slope"] * iso
+        + constrained["final_coef"]["intercept"]
+    )
+    np.testing.assert_allclose(
+        constrained["iso_fit_signal_units"],
+        expected_fit,
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_robust_global_event_reject_defaults_match_explicit_unconstrained():
+    n = 1200
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    iso = 4.0 + 0.3 * np.sin(2.0 * np.pi * 0.08 * t)
+    signal = 7.5 - 1.4 * iso
+
+    default = fit_robust_global_event_reject(
+        signal_raw=signal,
+        iso_raw=iso,
+        **_robust_kwargs(fs),
+    )
+    explicit = fit_robust_global_event_reject(
+        signal_raw=signal,
+        iso_raw=iso,
+        slope_constraint="unconstrained",
+        min_slope=0.0,
+        **_robust_kwargs(fs),
+    )
+
+    np.testing.assert_allclose(
+        default["iso_fit_signal_units"],
+        explicit["iso_fit_signal_units"],
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert default["final_coef"] == explicit["final_coef"]
+    assert default["slope_constraint_summary"] == explicit["slope_constraint_summary"]
+
+
+def test_robust_global_event_reject_unconstrained_accepts_negative_min_slope():
+    n = 800
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    iso = 3.0 + 0.2 * np.sin(2.0 * np.pi * 0.11 * t)
+    signal = 5.0 - 0.8 * iso
+
+    default = fit_robust_global_event_reject(
+        signal_raw=signal,
+        iso_raw=iso,
+        **_robust_kwargs(fs),
+    )
+    unconstrained_negative_floor = fit_robust_global_event_reject(
+        signal_raw=signal,
+        iso_raw=iso,
+        slope_constraint="unconstrained",
+        min_slope=-10.0,
+        **_robust_kwargs(fs),
+    )
+
+    np.testing.assert_allclose(
+        default["iso_fit_signal_units"],
+        unconstrained_negative_floor["iso_fit_signal_units"],
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert unconstrained_negative_floor["final_coef"]["slope"] < 0.0
+    assert unconstrained_negative_floor["slope_constraint_summary"]["slope_constraint_applied"] is False
 
 
 def test_adaptive_event_gated_tracks_changing_slope_and_gates_event():
@@ -189,6 +262,121 @@ def test_adaptive_event_gated_nonnegative_constraint_clamps_standalone_trace():
     assert constrained["unconstrained_slope_summary"]["slope_negative_fraction"] > 0.0
     assert constrained["slope_summary"]["slope_negative_fraction"] == pytest.approx(0.0)
     assert constrained["slope_constraint_summary"]["slope_constraint_applied"] is True
+    np.testing.assert_allclose(
+        constrained["iso_fit_signal_units"],
+        constrained["coef_slope"] * iso + constrained["coef_intercept"],
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_adaptive_event_gated_broad_opposite_deflection_reports_constraint_diagnostics():
+    n = 2400
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    uv = 3.0 + 0.25 * np.sin(2.0 * np.pi * 0.08 * t)
+    signal = 1.2 * uv + 0.7
+
+    event = (t >= 22.0) & (t <= 36.0)
+    uv[event] -= 0.7 * np.sin(np.pi * (t[event] - 22.0) / 14.0)
+    signal[event] += 1.3 * np.sin(np.pi * (t[event] - 22.0) / 14.0)
+
+    kwargs = {
+        "signal_fit_input": signal,
+        "iso_fit_input": uv,
+        "sample_rate_hz": fs,
+        "residual_z_thresh": 50.0,
+        "local_var_window_sec": None,
+        "local_var_ratio_thresh": None,
+        "smooth_window_sec": 1.0,
+        "min_trust_fraction": 0.1,
+        "freeze_interp_method": "linear_hold",
+        "signal_excursion_polarity": "both",
+    }
+    unconstrained = fit_adaptive_event_gated_regression(
+        signal_raw=signal,
+        iso_raw=uv,
+        slope_constraint="unconstrained",
+        min_slope=0.0,
+        **kwargs,
+    )
+    constrained = fit_adaptive_event_gated_regression(
+        signal_raw=signal,
+        iso_raw=uv,
+        slope_constraint="nonnegative",
+        min_slope=0.0,
+        **kwargs,
+    )
+
+    assert np.nanmin(unconstrained["coef_slope"]) < 0.0
+    assert unconstrained["slope_constraint_summary"]["slope_constraint_applied"] is False
+    np.testing.assert_allclose(
+        unconstrained["iso_fit_signal_units"],
+        unconstrained["coef_slope"] * uv + unconstrained["coef_intercept"],
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+    finite_slope = constrained["coef_slope"][np.isfinite(constrained["coef_slope"])]
+    assert finite_slope.size > 0
+    assert np.min(finite_slope) >= 0.0
+    assert np.nanmin(constrained["coef_slope_unconstrained"]) < 0.0
+    assert constrained["slope_constraint_summary"]["slope_constraint_applied"] is True
+    assert constrained["slope_constraint_summary"]["slope_clamped_fraction"] > 0.0
+    assert constrained["slope_constraint_summary"]["n_clamped_slope_spans"] > 0
+    assert constrained["unconstrained_slope_summary"]["slope_negative_fraction"] > 0.0
+    assert constrained["slope_summary"]["slope_negative_fraction"] == pytest.approx(0.0)
+    np.testing.assert_allclose(
+        constrained["iso_fit_signal_units"],
+        constrained["coef_slope"] * uv + constrained["coef_intercept"],
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_adaptive_event_gated_defaults_match_explicit_unconstrained():
+    n = 2200
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    iso = 4.0 + 0.35 * np.sin(2.0 * np.pi * 0.02 * t)
+    signal = 1.3 * iso + 0.6 + 0.2 * np.sin(2.0 * np.pi * 0.05 * t)
+    kwargs = {**_adaptive_kwargs(fs), "signal_fit_input": signal, "iso_fit_input": iso}
+
+    default = fit_adaptive_event_gated_regression(
+        signal_raw=signal,
+        iso_raw=iso,
+        **kwargs,
+    )
+    explicit = fit_adaptive_event_gated_regression(
+        signal_raw=signal,
+        iso_raw=iso,
+        slope_constraint="unconstrained",
+        min_slope=0.0,
+        **kwargs,
+    )
+
+    np.testing.assert_allclose(
+        default["iso_fit_signal_units"],
+        explicit["iso_fit_signal_units"],
+        rtol=0.0,
+        atol=1e-12,
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        default["coef_slope"],
+        explicit["coef_slope"],
+        rtol=0.0,
+        atol=1e-12,
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        default["coef_slope_unconstrained"],
+        explicit["coef_slope_unconstrained"],
+        rtol=0.0,
+        atol=1e-12,
+        equal_nan=True,
+    )
+    assert default["slope_constraint_summary"] == explicit["slope_constraint_summary"]
 
 
 @pytest.mark.parametrize(

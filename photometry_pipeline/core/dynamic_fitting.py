@@ -28,9 +28,16 @@ Example::
         iso_raw=reference,
         sample_rate_hz=40.0,
         smooth_window_sec=60.0,
+        slope_constraint="unconstrained",
+        min_slope=0.0,
     )
     fit_reference = result["iso_fit_signal_units"]
     delta_f = signal - fit_reference
+
+Set ``slope_constraint="nonnegative"`` to prevent finite negative
+UV/reference slopes from being used in the fitted reference. This is an
+explicit correction intervention; inspect ``result["slope_constraint_summary"]``
+and report how often clamping occurred.
 """
 
 from typing import Any, Dict, List, Optional
