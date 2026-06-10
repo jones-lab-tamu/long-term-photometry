@@ -615,6 +615,22 @@ def fit_robust_global_event_reject(
         sample_rate_hz=sample_rate_hz,
     )
     final_slope_used = float(constrained_slope)
+
+    intercept_recomputed = False
+    global_negative_slope_constrained = False
+    if slope_constraint == "nonnegative" and final_slope < min_slope:
+        final_slope_used = min_slope
+        final_intercept = float(np.median(sig[keep_mask] - final_slope_used * iso[keep_mask]))
+        intercept_recomputed = True
+        global_negative_slope_constrained = True
+
+    constraint_summary.update({
+        "unconstrained_slope": float(final_slope),
+        "constrained_slope": float(final_slope_used),
+        "intercept_recomputed": bool(intercept_recomputed),
+        "global_negative_slope_constrained": bool(global_negative_slope_constrained),
+        "warning_level": str(constraint_summary.get("constrained_slope_summary", {}).get("warning_level", "none")),
+    })
     final_fit = (final_slope_used * iso) + final_intercept
 
     return {
@@ -629,6 +645,8 @@ def fit_robust_global_event_reject(
             "n_kept": int(np.sum(keep_mask)),
             "n_finite": int(n_finite),
             "keep_fraction": float(np.sum(keep_mask) / float(max(1, n_finite))),
+            "intercept_recomputed": bool(intercept_recomputed),
+            "global_negative_slope_constrained": bool(global_negative_slope_constrained),
         },
         "slope_summary": summarize_slope(float(final_slope_used), sample_rate_hz=sample_rate_hz),
         "unconstrained_slope_summary": constraint_summary["unconstrained_slope_summary"],
@@ -796,7 +814,9 @@ def fit_adaptive_event_gated_regression(
         & np.isfinite(var_u)
         & (var_u > var_floor)
     )
-    if int(np.sum(valid_coef)) < 2:
+    valid_coef_original = valid_coef.copy()
+    n_valid_unconstrained = int(np.sum(valid_coef_original))
+    if n_valid_unconstrained < 2:
         raise RuntimeError("adaptive_event_gated_regression insufficient_trusted_windows_for_local_fit")
 
     slope_local = np.full(sig_fit.shape, np.nan, dtype=float)
@@ -807,31 +827,159 @@ def fit_adaptive_event_gated_regression(
             sum_s[valid_coef] - slope_local[valid_coef] * sum_u[valid_coef]
         ) / np.maximum(n_valid[valid_coef], 1.0)
 
-    slope_interp = _interp_fill_nearest_finite(slope_local)
-    intercept_interp = _interp_fill_nearest_finite(intercept_local)
-    if not np.any(np.isfinite(slope_interp)) or not np.any(np.isfinite(intercept_interp)):
+    n_neg_support = 0
+    neg_frac = 0.0
+    n_valid_nonnegative = n_valid_unconstrained
+    valid_nonnegative_frac = 1.0
+    n_neg_spans = 0
+    longest_span = 0
+    longest_neg_span_sec = 0.0
+    insufficient = False
+    fallback_used = False
+    fallback_reason = None
+
+    if slope_constraint == "nonnegative":
+        neg_support = valid_coef_original & (slope_local < min_slope)
+        n_neg_support = int(np.sum(neg_support))
+        neg_frac = float(n_neg_support / n_valid_unconstrained) if n_valid_unconstrained > 0 else 0.0
+
+        valid_coef = valid_coef_original & ~neg_support
+        n_valid_nonnegative = int(np.sum(valid_coef))
+        valid_nonnegative_frac = float(n_valid_nonnegative / n_valid_unconstrained) if n_valid_unconstrained > 0 else 0.0
+
+        n_neg_spans, longest_span = _negative_span_stats(neg_support)
+        longest_neg_span_sec = float(longest_span / fs_hz)
+
+        if n_valid_nonnegative < 2 or valid_nonnegative_frac < 0.5:
+            insufficient = True
+            if slope_global >= min_slope:
+                fallback_used = True
+                fallback_reason = (
+                    f"insufficient nonnegative support (retained {n_valid_nonnegative}/{n_valid_unconstrained} windows, "
+                    f"fraction {valid_nonnegative_frac:.4f} < 0.5), fell back to global robust fit"
+                )
+            else:
+                raise RuntimeError(
+                    f"adaptive_event_gated_regression: insufficient nonnegative support "
+                    f"(retained {n_valid_nonnegative}/{n_valid_unconstrained} windows, "
+                    f"fraction {valid_nonnegative_frac:.4f} < 0.5) and global robust fit slope ({slope_global:.4f}) is also < min_slope ({min_slope})."
+                )
+
+        slope_local = np.array(slope_local, copy=True)
+        intercept_local = np.array(intercept_local, copy=True)
+        slope_local[neg_support] = np.nan
+        intercept_local[neg_support] = np.nan
+
+    # 1. Compute unconstrained final traces for diagnostics
+    slope_local_unc = np.full(sig_fit.shape, np.nan, dtype=float)
+    intercept_local_unc = np.full(sig_fit.shape, np.nan, dtype=float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        slope_local_unc[valid_coef_original] = cov_us[valid_coef_original] / var_u[valid_coef_original]
+        intercept_local_unc[valid_coef_original] = (
+            sum_s[valid_coef_original] - slope_local_unc[valid_coef_original] * sum_u[valid_coef_original]
+        ) / np.maximum(n_valid[valid_coef_original], 1.0)
+
+    slope_interp_unc = _interp_fill_nearest_finite(slope_local_unc)
+    intercept_interp_unc = _interp_fill_nearest_finite(intercept_local_unc)
+    if not np.any(np.isfinite(slope_interp_unc)) or not np.any(np.isfinite(intercept_interp_unc)):
         raise RuntimeError("adaptive_event_gated_regression interpolation_failed")
 
     support_frac = np.clip(n_valid / float(max(1, smooth_window_samples)), 0.0, 1.0)
-    slope_reg = slope_global + support_frac * (slope_interp - slope_global)
-    intercept_reg = intercept_global + support_frac * (intercept_interp - intercept_global)
+    slope_reg_unc = slope_global + support_frac * (slope_interp_unc - slope_global)
+    intercept_reg_unc = intercept_global + support_frac * (intercept_interp_unc - intercept_global)
 
-    trusted_anchor_mask = valid_coef & trusted_mask
+    trusted_anchor_mask_unc = valid_coef_original & trusted_mask
     if freeze_interp_method == "linear_hold":
-        slope_final = _freeze_values_over_gated_mask(slope_reg, gated_mask, trusted_anchor_mask)
-        intercept_final = _freeze_values_over_gated_mask(intercept_reg, gated_mask, trusted_anchor_mask)
+        slope_unconstrained = _freeze_values_over_gated_mask(slope_reg_unc, gated_mask, trusted_anchor_mask_unc)
+        intercept_unconstrained = _freeze_values_over_gated_mask(intercept_reg_unc, gated_mask, trusted_anchor_mask_unc)
     else:
-        slope_final = slope_reg
-        intercept_final = intercept_reg
+        slope_unconstrained = slope_reg_unc
+        intercept_unconstrained = intercept_reg_unc
 
-    slope_unconstrained = np.asarray(slope_final, dtype=float).copy()
-    slope_final, constraint_summary = apply_slope_constraint(
-        slope_unconstrained,
-        constraint_mode=slope_constraint,
+    # 2. Compute final constrained/reconstructed traces
+    if fallback_used:
+        slope_final = np.full(sig_fit.shape, slope_global, dtype=float)
+        intercept_final = np.full(sig_fit.shape, intercept_global, dtype=float)
+    else:
+        if slope_constraint == "nonnegative":
+            slope_interp = _interp_fill_nearest_finite(slope_local)
+            intercept_interp = _interp_fill_nearest_finite(intercept_local)
+            if not np.any(np.isfinite(slope_interp)) or not np.any(np.isfinite(intercept_interp)):
+                raise RuntimeError("adaptive_event_gated_regression interpolation_failed")
+
+            if slope_global < min_slope:
+                slope_reg = slope_interp
+                intercept_reg = intercept_interp
+            else:
+                slope_reg = slope_global + support_frac * (slope_interp - slope_global)
+                intercept_reg = intercept_global + support_frac * (intercept_interp - intercept_global)
+
+            trusted_anchor_mask = valid_coef & trusted_mask
+            if freeze_interp_method == "linear_hold":
+                slope_final = _freeze_values_over_gated_mask(slope_reg, gated_mask, trusted_anchor_mask)
+                intercept_final = _freeze_values_over_gated_mask(intercept_reg, gated_mask, trusted_anchor_mask)
+            else:
+                slope_final = slope_reg
+                intercept_final = intercept_reg
+        else:
+            slope_final = slope_unconstrained.copy()
+            intercept_final = intercept_unconstrained.copy()
+
+    # To obtain base constraint_summary structure without modifying slope_final,
+    # we call apply_slope_constraint with "unconstrained" mode:
+    _, constraint_summary = apply_slope_constraint(
+        slope_final,
+        constraint_mode="unconstrained",
         min_slope=min_slope,
-        sample_rate_hz=sample_rate_hz,
+        sample_rate_hz=fs_hz,
     )
-    slope_final = np.asarray(slope_final, dtype=float)
+
+    final_negative_mask = np.isfinite(slope_final) & (slope_final < min_slope - 1e-12)
+    final_neg_samples = int(np.sum(final_negative_mask))
+    final_neg_frac = float(final_neg_samples / final_negative_mask.size) if final_negative_mask.size > 0 else 0.0
+    final_negative_check_failed = False
+
+    if slope_constraint == "nonnegative" and final_neg_samples > 0:
+        final_negative_check_failed = True
+        if slope_global >= min_slope:
+            slope_final = np.full(sig_fit.shape, slope_global, dtype=float)
+            intercept_final = np.full(sig_fit.shape, intercept_global, dtype=float)
+            fallback_used = True
+            fallback_reason = (
+                "final adaptive reconstruction produced negative slopes after support filtering "
+                f"({final_neg_samples} samples, fraction {final_neg_frac:.6g}), fell back to global robust fit"
+            )
+        else:
+            raise RuntimeError(
+                f"adaptive_event_gated_regression nonnegative mode failed: final adaptive reconstruction still "
+                f"contained negative slopes ({final_neg_samples} samples, fraction {final_neg_frac:.6g}) and no valid nonnegative global fallback was available"
+            )
+
+    constraint_summary.update({
+        "slope_constraint_mode": slope_constraint,
+        "slope_constraint_applied": bool(n_neg_support > 0 or fallback_used or final_negative_check_failed),
+        "n_clamped_slope_samples": int(n_neg_support),
+        "slope_clamped_fraction": float(neg_frac),
+        "n_clamped_slope_spans": int(n_neg_spans),
+        "longest_clamped_slope_span_samples": int(longest_span),
+        "longest_clamped_slope_span_sec": float(longest_neg_span_sec) if longest_span > 0 else None,
+        "n_negative_slope_support_windows": int(n_neg_support),
+        "n_negative_slope_support_samples": int(n_neg_support),
+        "negative_slope_support_fraction": float(neg_frac),
+        "n_valid_nonnegative_support_windows": int(n_valid_nonnegative),
+        "n_valid_nonnegative_support_samples": int(n_valid_nonnegative),
+        "valid_nonnegative_support_fraction": float(valid_nonnegative_frac),
+        "longest_negative_slope_span_sec": float(longest_neg_span_sec),
+        "nonnegative_support_insufficient": bool(insufficient),
+        "fallback_used": bool(fallback_used),
+        "fallback_reason": fallback_reason,
+        "n_final_negative_slope_samples": int(final_neg_samples),
+        "final_negative_slope_fraction": float(final_neg_frac),
+        "final_negative_slope_check_failed": bool(final_negative_check_failed),
+        "unconstrained_slope_summary": summarize_slope(slope_unconstrained, sample_rate_hz=fs_hz),
+        "constrained_slope_summary": summarize_slope(slope_final, sample_rate_hz=fs_hz),
+    })
+
     fit_raw = (slope_final * iso_raw_arr) + intercept_final
     finite_raw = np.isfinite(sig_raw_arr) & np.isfinite(iso_raw_arr)
     fit_raw = np.asarray(fit_raw, dtype=float)

@@ -221,6 +221,34 @@ class Hdf5TraceCacheWriter:
                                 'dynamic_fit_slope_longest_clamped_slope_span_sec',
                                 'longest_clamped_slope_span_sec',
                             ),
+                            (
+                                'dynamic_fit_slope_n_negative_slope_support_windows',
+                                'n_negative_slope_support_windows',
+                            ),
+                            (
+                                'dynamic_fit_slope_n_negative_slope_support_samples',
+                                'n_negative_slope_support_samples',
+                            ),
+                            (
+                                'dynamic_fit_slope_negative_slope_support_fraction',
+                                'negative_slope_support_fraction',
+                            ),
+                            (
+                                'dynamic_fit_slope_n_valid_nonnegative_support_windows',
+                                'n_valid_nonnegative_support_windows',
+                            ),
+                            (
+                                'dynamic_fit_slope_n_valid_nonnegative_support_samples',
+                                'n_valid_nonnegative_support_samples',
+                            ),
+                            (
+                                'dynamic_fit_slope_valid_nonnegative_support_fraction',
+                                'valid_nonnegative_support_fraction',
+                            ),
+                            (
+                                'dynamic_fit_slope_longest_negative_slope_span_sec',
+                                'longest_negative_slope_span_sec',
+                            ),
                         ):
                             value = constraint_summary.get(key, None)
                             if value is None:
@@ -231,6 +259,23 @@ class Hdf5TraceCacheWriter:
                                 continue
                             if np.isfinite(numeric):
                                 grp.attrs[attr_name] = numeric
+
+                        grp.attrs['dynamic_fit_slope_nonnegative_support_insufficient'] = bool(
+                            constraint_summary.get('nonnegative_support_insufficient', False)
+                        )
+                        grp.attrs['dynamic_fit_slope_fallback_used'] = bool(
+                            constraint_summary.get('fallback_used', False)
+                        )
+                        fallback_reason = constraint_summary.get('fallback_reason')
+                        if fallback_reason is not None:
+                            grp.attrs['dynamic_fit_slope_fallback_reason'] = str(fallback_reason)
+
+                        grp.attrs['dynamic_fit_slope_intercept_recomputed'] = bool(
+                            constraint_summary.get('intercept_recomputed', False)
+                        )
+                        grp.attrs['dynamic_fit_slope_global_negative_slope_constrained'] = bool(
+                            constraint_summary.get('global_negative_slope_constrained', False)
+                        )
 
                         def _write_nested_slope_attrs(prefix: str, payload: dict) -> None:
                             if not isinstance(payload, dict):

@@ -222,6 +222,10 @@ def load_cache_chunk_attrs(cache: h5py.File, roi: str, chunk_id: int) -> dict:
         "dynamic_fit_slope_n_clamped_slope_samples",
         "dynamic_fit_slope_n_clamped_slope_spans",
         "dynamic_fit_slope_longest_clamped_slope_span_samples",
+        "dynamic_fit_slope_n_negative_slope_support_windows",
+        "dynamic_fit_slope_n_negative_slope_support_samples",
+        "dynamic_fit_slope_n_valid_nonnegative_support_windows",
+        "dynamic_fit_slope_n_valid_nonnegative_support_samples",
     ):
         if key in attrs:
             try:
@@ -252,6 +256,9 @@ def load_cache_chunk_attrs(cache: h5py.File, roi: str, chunk_id: int) -> dict:
         "dynamic_fit_slope_constrained_slope_min",
         "dynamic_fit_slope_constrained_slope_max",
         "dynamic_fit_slope_constrained_slope_negative_fraction",
+        "dynamic_fit_slope_negative_slope_support_fraction",
+        "dynamic_fit_slope_valid_nonnegative_support_fraction",
+        "dynamic_fit_slope_longest_negative_slope_span_sec",
     ):
         if key in attrs:
             try:
@@ -264,6 +271,16 @@ def load_cache_chunk_attrs(cache: h5py.File, roi: str, chunk_id: int) -> dict:
         attrs["dynamic_fit_slope_constraint_applied"] = bool(
             attrs["dynamic_fit_slope_constraint_applied"]
         )
+    for key in (
+        "dynamic_fit_slope_nonnegative_support_insufficient",
+        "dynamic_fit_slope_fallback_used",
+        "dynamic_fit_slope_intercept_recomputed",
+        "dynamic_fit_slope_global_negative_slope_constrained",
+    ):
+        if key in attrs:
+            attrs[key] = bool(attrs[key])
+    if "dynamic_fit_slope_fallback_reason" in attrs:
+        attrs["dynamic_fit_slope_fallback_reason"] = str(attrs["dynamic_fit_slope_fallback_reason"])
     return attrs
 
 

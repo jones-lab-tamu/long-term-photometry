@@ -212,7 +212,7 @@ def test_adaptive_event_gated_tracks_changing_slope_and_gates_event():
     assert result["n_trusted"] < result["n_finite"]
 
 
-def test_adaptive_event_gated_nonnegative_constraint_clamps_standalone_trace():
+def test_adaptive_event_gated_nonnegative_constraint_invalidates_negative_support_trace():
     n = 2400
     fs = 40.0
     t = np.arange(n, dtype=float) / fs

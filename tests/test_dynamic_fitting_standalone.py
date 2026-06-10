@@ -118,7 +118,7 @@ def test_standalone_robust_default_matches_package_and_nonnegative_clamps():
     )
 
 
-def test_standalone_adaptive_default_matches_package_and_nonnegative_clamps():
+def test_standalone_adaptive_default_matches_package_and_nonnegative_invalidates_support():
     standalone = _load_standalone_module()
     signal, uv, fs = _broad_opposite_deflection_trace()
     kwargs = {

@@ -245,7 +245,7 @@ def test_adaptive_negative_local_slope_summary_is_metadata_only():
     assert any("NEGATIVE_UV_TO_SIGNAL_SLOPE" in str(w) for w in chunk.metadata["qc_warnings"])
 
 
-def test_adaptive_nonnegative_constraint_clamps_local_slope_trace():
+def test_adaptive_nonnegative_constraint_invalidates_negative_local_support():
     n = 2400
     fs = 40.0
     t = np.arange(n, dtype=float) / fs
@@ -635,3 +635,202 @@ def test_retune_inspection_adds_slope_panel_when_trace_is_available(tmp_path):
         "slope_trace_available"
     ] is True
     assert artifacts["retuned_correction_inspection_dff_png"].endswith("_dff.png")
+
+
+def test_adaptive_nonnegative_does_not_post_hoc_repair_final_slope():
+    # Verify nonnegative mode does not call final slope repair behavior modifying slope_final
+    n = 1000
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    uv = 3.0 + 0.25 * np.sin(2.0 * np.pi * 0.08 * t)
+    signal = 1.2 * uv + 0.7
+    event = (t >= 22.0) & (t <= 36.0)
+    uv[event] -= 0.7 * np.sin(np.pi * (t[event] - 22.0) / 14.0)
+    signal[event] += 1.3 * np.sin(np.pi * (t[event] - 22.0) / 14.0)
+
+    from photometry_pipeline.core.dynamic_fitting import fit_adaptive_event_gated_regression
+    res = fit_adaptive_event_gated_regression(
+        signal_raw=signal,
+        iso_raw=uv,
+        sample_rate_hz=fs,
+        slope_constraint="nonnegative",
+        min_slope=0.0,
+        residual_z_thresh=1e9,  # prevent gating to verify actual slope_local logic
+        local_var_window_sec=None,
+        local_var_ratio_thresh=None,
+        smooth_window_sec=1.0,
+        min_trust_fraction=0.1,
+        freeze_interp_method="linear_hold",
+        signal_excursion_polarity="both",
+    )
+    # Check that the final slope array was constructed from nonnegative support,
+    # rather than repaired after reconstruction.
+    assert res["slope_constraint_summary"]["slope_constraint_applied"] is True
+    assert res["slope_constraint_summary"]["n_final_negative_slope_samples"] == 0
+    assert res["slope_constraint_summary"]["final_negative_slope_check_failed"] is False
+    assert np.min(res["coef_slope"]) >= 0.0
+    # No slope=0 + old intercept plateaus
+    assert res["slope_constraint_summary"]["fallback_used"] is False
+
+
+def test_adaptive_negative_global_anchor():
+    # If slope_global < min_slope, do not regularize local coefficients toward slope_global
+    fs = 10.0
+    n = 300
+    t = np.arange(n, dtype=float) / fs
+    uv = 5.0 - 0.1 * t
+    # Globally negative slope
+    sig = 10.0 - 1.5 * uv
+
+    # Introduce some positive slope excursions where local support is valid
+    # Adjusted to ensure nonnegative support fraction >= 0.5
+    for r in [(t >= 5.0) & (t <= 13.0), (t >= 17.0) & (t <= 25.0)]:
+        sig[r] = 0.5 * uv[r] + 1.0
+
+    from photometry_pipeline.core.dynamic_fitting import fit_adaptive_event_gated_regression
+    res = fit_adaptive_event_gated_regression(
+        signal_raw=sig,
+        iso_raw=uv,
+        sample_rate_hz=fs,
+        slope_constraint="nonnegative",
+        min_slope=0.0,
+        residual_z_thresh=1e9,
+        local_var_window_sec=None,
+        local_var_ratio_thresh=None,
+        smooth_window_sec=1.0,
+        min_trust_fraction=0.1,
+        freeze_interp_method="linear_hold",
+        signal_excursion_polarity="both",
+    )
+    # Global robust initialization is negative:
+    assert res["global_init_coef"]["slope"] < 0.0
+    # But fallback is not used because we have enough nonnegative local support:
+    assert res["slope_constraint_summary"]["fallback_used"] is False
+    # And we did not pull the final slope toward negative global anchor:
+    assert np.min(res["coef_slope"]) >= 0.0
+
+
+def test_adaptive_final_negative_check(monkeypatch):
+    n = 200
+    fs = 10.0
+    t = np.arange(n, dtype=float) / fs
+    uv = 3.0 + 0.1 * t
+    # Globally positive slope (slope_global >= 0)
+    sig = 1.0 + 0.8 * uv
+
+    import photometry_pipeline.core.dynamic_fitting as df_mod
+    orig_freeze = df_mod._freeze_values_over_gated_mask
+
+    # Force negative slope in output reconstruction
+    def mock_freeze(values, gated_mask, trusted_anchor_mask):
+        out = orig_freeze(values, gated_mask, trusted_anchor_mask)
+        if out.size > 0:
+            out[10:50] = -0.5
+        return out
+
+    monkeypatch.setattr(df_mod, "_freeze_values_over_gated_mask", mock_freeze)
+
+    from photometry_pipeline.core.dynamic_fitting import fit_adaptive_event_gated_regression
+    # Case 1: slope_global >= min_slope. Should fall back to global robust fit.
+    res = fit_adaptive_event_gated_regression(
+        signal_raw=sig,
+        iso_raw=uv,
+        sample_rate_hz=fs,
+        slope_constraint="nonnegative",
+        min_slope=0.0,
+        residual_z_thresh=1e9,
+        local_var_window_sec=None,
+        local_var_ratio_thresh=None,
+        smooth_window_sec=1.0,
+        min_trust_fraction=0.1,
+        freeze_interp_method="linear_hold",
+        signal_excursion_polarity="both",
+    )
+    assert res["slope_constraint_summary"]["fallback_used"] is True
+    assert "final adaptive reconstruction produced negative slopes" in res["slope_constraint_summary"]["fallback_reason"]
+    # Verify whole slope trace became the global slope
+    np.testing.assert_allclose(res["coef_slope"], res["global_init_coef"]["slope"])
+
+    # Case 2: slope_global < min_slope. Should raise RuntimeError.
+    n_neg = 300
+    t_neg = np.arange(n_neg, dtype=float) / fs
+    uv_neg = 5.0 - 0.1 * t_neg
+    sig_neg_global = 10.0 - 1.5 * uv_neg
+    for r in [(t_neg >= 5.0) & (t_neg <= 13.0), (t_neg >= 17.0) & (t_neg <= 25.0)]:
+        sig_neg_global[r] = 0.5 * uv_neg[r] + 1.0
+
+    with pytest.raises(RuntimeError, match="final adaptive reconstruction still contained negative slopes"):
+        fit_adaptive_event_gated_regression(
+            signal_raw=sig_neg_global,
+            iso_raw=uv_neg,
+            sample_rate_hz=fs,
+            slope_constraint="nonnegative",
+            min_slope=0.0,
+            residual_z_thresh=1e9,
+            local_var_window_sec=None,
+            local_var_ratio_thresh=None,
+            smooth_window_sec=1.0,
+            min_trust_fraction=0.1,
+            freeze_interp_method="linear_hold",
+            signal_excursion_polarity="both",
+        )
+
+
+def test_student_plateau_regression():
+    n = 2400
+    fs = 40.0
+    t = np.arange(n, dtype=float) / fs
+    rng = np.random.default_rng(123)
+    uv = 2.0 + 0.45 * np.sin(2 * np.pi * 0.25 * t) + 0.1 * np.sin(2 * np.pi * 0.73 * t)
+    sig = 1.4 * uv + 0.6 + 0.01 * rng.normal(size=n)
+    neg = (t >= 22.0) & (t <= 36.0)
+    sig[neg] = -1.1 * uv[neg] + 5.1 + 0.01 * rng.normal(size=int(np.sum(neg)))
+
+    from photometry_pipeline.core.dynamic_fitting import fit_adaptive_event_gated_regression
+    res = fit_adaptive_event_gated_regression(
+        signal_raw=sig,
+        iso_raw=uv,
+        sample_rate_hz=fs,
+        slope_constraint="nonnegative",
+        min_slope=0.0,
+        residual_z_thresh=50.0,
+        local_var_window_sec=None,
+        local_var_ratio_thresh=None,
+        smooth_window_sec=1.0,
+        min_trust_fraction=0.1,
+        freeze_interp_method="linear_hold",
+        signal_excursion_polarity="both",
+    )
+    # Check that fallback wasn't triggered if not necessary:
+    assert res["slope_constraint_summary"]["fallback_used"] is False
+    # No values should be negative
+    assert np.min(res["coef_slope"]) >= 0.0
+
+
+def test_source_guard_rejects_adaptive_final_slope_repair_patterns():
+    import inspect
+    import re
+
+    from photometry_pipeline.core.dynamic_fitting import fit_adaptive_event_gated_regression as df_fit
+    from photometry_pipeline.core.regression import fit_adaptive_event_gated_regression as reg_fit
+    from examples.dynamic_fitting_standalone import (
+        fit_adaptive_event_gated_regression as standalone_fit,
+    )
+
+    modifying_constraint_call = re.compile(
+        r"(?:^|[^\w])\(?\s*slope_final\s*(?:,\s*\w+)?\s*\)?\s*="
+        r"\s*apply_slope_constraint\s*\(|"
+        r"=\s*apply_slope_constraint\s*\(\s*slope_final\s*,"
+        r"\s*constraint_mode\s*=\s*slope_constraint",
+        re.DOTALL,
+    )
+    posthoc_slope_repair = re.compile(
+        r"(?:slope_final[^\n]*(?:np\.)?(?:maximum|clip)\s*\()|"
+        r"(?:(?:np\.)?(?:maximum|clip)\s*\([^)]*slope_final)",
+        re.DOTALL,
+    )
+
+    for fn in [df_fit, reg_fit, standalone_fit]:
+        source = inspect.getsource(fn)
+        assert not modifying_constraint_call.search(source)
+        assert not posthoc_slope_repair.search(source)
