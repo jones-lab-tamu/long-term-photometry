@@ -275,6 +275,39 @@ def parse_and_validate_adaptive_event_gated_knobs(
     return overrides, None
 
 
+def normalize_dynamic_fit_slope_constraint(mode_raw: str) -> str:
+    mode = str(mode_raw or "").strip().lower()
+    if mode in _DYNAMIC_FIT_SLOPE_CONSTRAINT_LABELS:
+        return mode
+    return "unconstrained"
+
+
+def dynamic_fit_slope_constraint_label(mode_raw: str) -> str:
+    mode = normalize_dynamic_fit_slope_constraint(mode_raw)
+    return _DYNAMIC_FIT_SLOPE_CONSTRAINT_LABELS.get(
+        mode, _DYNAMIC_FIT_SLOPE_CONSTRAINT_LABELS["unconstrained"]
+    )
+
+
+def parse_and_validate_dynamic_fit_slope_constraint_knobs(
+    constraint_text: str,
+    min_slope_val: float,
+) -> tuple[dict | None, str | None]:
+    constraint = normalize_dynamic_fit_slope_constraint(constraint_text)
+    try:
+        min_slope = float(min_slope_val)
+    except (TypeError, ValueError):
+        return None, "Minimum allowed slope must be a finite number."
+    if not math.isfinite(min_slope):
+        return None, "Minimum allowed slope must be a finite number."
+    if constraint == "nonnegative" and min_slope < 0.0:
+        return None, "Minimum allowed slope must be >= 0 when negative slopes are prevented."
+    return {
+        "dynamic_fit_slope_constraint": constraint,
+        "dynamic_fit_min_slope": min_slope,
+    }, None
+
+
 def is_isosbestic_active(mode_text: str) -> bool:
     """Return True if the mode implies phasic analysis will run."""
     return mode_text in ("both", "phasic")
@@ -351,6 +384,10 @@ _BLEACH_CORRECTION_MODE_LABELS = {
     "single_exponential": "Single exponential detrend",
     "double_exponential": "Double exponential detrend",
 }
+_DYNAMIC_FIT_SLOPE_CONSTRAINT_LABELS = {
+    "unconstrained": "Unconstrained",
+    "nonnegative": "Prevent negative slopes",
+}
 _SIGNAL_EXCURSION_POLARITY_LABELS = {
     "positive": "Positive only",
     "negative": "Negative only",
@@ -380,6 +417,18 @@ _DYNAMIC_FIT_TOOLTIPS = {
         "offset + amplitude*exp(-t/tau), while 'Double exponential detrend' fits "
         "offset + a_fast*exp(-t/tau_fast) + a_slow*exp(-t/tau_slow), separately to "
         "signal and isosbestic traces before dynamic fitting. Off by default."
+    ),
+    "dynamic_fit_slope_constraint": (
+        "Constrains the UV-to-signal fit slope to be nonnegative before constructing "
+        "the fitted reference. This prevents the fitted UV/reference trace from "
+        "flipping polarity relative to the UV channel. Use cautiously for recordings "
+        "where event-gated or local fitting estimates negative slopes around large "
+        "events. Constraint application is reported in QC/provenance."
+    ),
+    "dynamic_fit_min_slope": (
+        "Minimum slope used when negative slopes are prevented. Default 0.0 clamps "
+        "negative fitted slopes to zero; use cautiously because stronger minimums can "
+        "bias UV/reference correction."
     ),
     "regression_window_sec": (
         "Rolling modes only. Local regression window length in seconds. Larger values make the fit "
@@ -5921,6 +5970,16 @@ class MainWindow(QMainWindow):
                 str(getattr(base_cfg, "bleach_correction_mode", "none"))
             ),
         )
+        _sync_combo_by_data_or_text(
+            self._dynamic_fit_slope_constraint_combo,
+            normalize_dynamic_fit_slope_constraint(
+                str(getattr(base_cfg, "dynamic_fit_slope_constraint", "unconstrained"))
+            ),
+        )
+        _sync_spin_float(
+            self._dynamic_fit_min_slope_spin,
+            float(getattr(base_cfg, "dynamic_fit_min_slope", 0.0)),
+        )
         _sync_checkbox(
             self._baseline_subtract_before_fit_cb,
             bool(getattr(base_cfg, "baseline_subtract_before_fit", False)),
@@ -6013,7 +6072,7 @@ class MainWindow(QMainWindow):
         self._on_dynamic_fit_mode_changed()
         self._update_adv_prep_visibility()
 
-    def _update_config_source_ui(self) -> None:
+    def _update_config_source_ui(self, *, sync_main_advanced: bool = True) -> None:
         """Enable custom config widgets only when advanced custom mode is active."""
         use_custom = self._is_custom_config_enabled()
         self._config_path.setEnabled(use_custom)
@@ -6030,8 +6089,8 @@ class MainWindow(QMainWindow):
                 f"Active baseline source: lab standard default ({self._lab_default_config_path})"
             )
             self._set_status_label_style(self._active_config_source_label, "ready")
-        should_sync_main_advanced = True
-        if use_custom:
+        should_sync_main_advanced = bool(sync_main_advanced)
+        if should_sync_main_advanced and use_custom:
             cfg = self._config_path.text().strip()
             should_sync_main_advanced = bool(cfg and os.path.isfile(cfg))
         if should_sync_main_advanced:
@@ -6184,6 +6243,31 @@ class MainWindow(QMainWindow):
             )
             if bleach_mode != default_bleach_mode:
                 config_overrides["bleach_correction_mode"] = bleach_mode
+
+            slope_defaults = {
+                "dynamic_fit_slope_constraint": normalize_dynamic_fit_slope_constraint(
+                    str(
+                        getattr(
+                            base_cfg,
+                            "dynamic_fit_slope_constraint",
+                            "unconstrained",
+                        )
+                    )
+                ),
+                "dynamic_fit_min_slope": float(
+                    getattr(base_cfg, "dynamic_fit_min_slope", 0.0)
+                ),
+            }
+            slope_overrides, slope_err = (
+                parse_and_validate_dynamic_fit_slope_constraint_knobs(
+                    self._selected_dynamic_fit_slope_constraint(),
+                    self._dynamic_fit_min_slope_spin.value(),
+                )
+            )
+            if slope_overrides is not None and slope_err is None:
+                # Always stamp these two new fields so older base YAMLs receive
+                # explicit, auditable defaults in config_effective.yaml.
+                config_overrides.update(slope_overrides)
 
             default_dict = {
                 "window_sec": base_cfg.window_sec,
@@ -6566,6 +6650,12 @@ class MainWindow(QMainWindow):
 
         if is_isosbestic_active(self._mode_combo.currentText()):
             fit_mode = self._selected_dynamic_fit_mode()
+            _, slope_err = parse_and_validate_dynamic_fit_slope_constraint_knobs(
+                self._selected_dynamic_fit_slope_constraint(),
+                self._dynamic_fit_min_slope_spin.value(),
+            )
+            if slope_err:
+                return slope_err
             if is_rolling_dynamic_fit_mode(fit_mode):
                 default_dict = {
                     "window_sec": base_cfg.window_sec,
@@ -8073,6 +8163,37 @@ class MainWindow(QMainWindow):
         idx_bleach = self._bleach_correction_mode_combo.findData(bleach_mode)
         if idx_bleach >= 0:
             self._bleach_correction_mode_combo.setCurrentIndex(idx_bleach)
+        slope_constraint = normalize_dynamic_fit_slope_constraint(
+            self._settings.value(
+                "dynamic_fit_slope_constraint",
+                str(
+                    getattr(
+                        self._default_cfg,
+                        "dynamic_fit_slope_constraint",
+                        "unconstrained",
+                    )
+                ),
+                str,
+            )
+        )
+        idx_slope_constraint = self._dynamic_fit_slope_constraint_combo.findData(
+            slope_constraint
+        )
+        if idx_slope_constraint < 0:
+            idx_slope_constraint = self._dynamic_fit_slope_constraint_combo.findData(
+                "unconstrained"
+            )
+        if idx_slope_constraint >= 0:
+            self._dynamic_fit_slope_constraint_combo.setCurrentIndex(idx_slope_constraint)
+        self._dynamic_fit_min_slope_spin.setValue(
+            float(
+                self._settings.value(
+                    "dynamic_fit_min_slope",
+                    float(getattr(self._default_cfg, "dynamic_fit_min_slope", 0.0)),
+                    float,
+                )
+            )
+        )
         tonic_output_mode = normalize_tonic_output_mode(
             self._settings.value(
                 "tonic_output_mode",
@@ -8241,7 +8362,7 @@ class MainWindow(QMainWindow):
         overwrite = self._settings.value("overwrite", False, bool)
         self._overwrite_cb.setChecked(overwrite)
         self._settings.endGroup()
-        self._update_config_source_ui()
+        self._update_config_source_ui(sync_main_advanced=False)
 
     def _save_widgets_to_settings(self):
         """Persist current widget values to QSettings."""
@@ -8278,6 +8399,18 @@ class MainWindow(QMainWindow):
         self._settings.setValue("fixed_daily_anchor_clock", self._fixed_daily_anchor_time_edit.text().strip())
         self._settings.setValue("dynamic_fit_mode", self._selected_dynamic_fit_mode())
         self._settings.setValue("bleach_correction_mode", self._selected_bleach_correction_mode())
+        self._settings.setValue(
+            "dynamic_fit_slope_constraint",
+            self._selected_dynamic_fit_slope_constraint(),
+        )
+        self._settings.setValue(
+            "dynamic_fit_min_slope",
+            float(
+                getattr(self, "_dynamic_fit_min_slope_spin", None).value()
+                if hasattr(self, "_dynamic_fit_min_slope_spin")
+                else 0.0
+            ),
+        )
         self._settings.setValue(
             "baseline_subtract_before_fit",
             bool(getattr(self, "_baseline_subtract_before_fit_cb", None) and self._baseline_subtract_before_fit_cb.isChecked()),
@@ -8505,6 +8638,19 @@ class MainWindow(QMainWindow):
             str(getattr(self._default_cfg, "bleach_correction_mode", "none"))
         )
 
+    def _selected_dynamic_fit_slope_constraint(self) -> str:
+        combo = getattr(self, "_dynamic_fit_slope_constraint_combo", None)
+        if combo is not None:
+            data = combo.currentData()
+            if data:
+                return normalize_dynamic_fit_slope_constraint(str(data))
+            text = combo.currentText().strip()
+            if text:
+                return normalize_dynamic_fit_slope_constraint(text)
+        return normalize_dynamic_fit_slope_constraint(
+            str(getattr(self._default_cfg, "dynamic_fit_slope_constraint", "unconstrained"))
+        )
+
     def _selected_signal_excursion_polarity(self) -> str:
         combo = getattr(self, "_signal_excursion_polarity_combo", None)
         if combo is not None:
@@ -8584,6 +8730,11 @@ class MainWindow(QMainWindow):
     def _on_dynamic_fit_mode_changed(self) -> None:
         self._apply_dynamic_fit_mode_ui_state()
 
+    def _apply_dynamic_fit_slope_constraint_ui_state(self) -> None:
+        constrained = self._selected_dynamic_fit_slope_constraint() == "nonnegative"
+        if hasattr(self, "_dynamic_fit_min_slope_spin"):
+            self._dynamic_fit_min_slope_spin.setEnabled(constrained)
+
     def _apply_dynamic_fit_mode_ui_state(self) -> None:
         fit_mode = self._selected_dynamic_fit_mode()
         rolling = is_rolling_dynamic_fit_mode(fit_mode)
@@ -8648,6 +8799,7 @@ class MainWindow(QMainWindow):
                 "Rolling, robust event-rejection, and adaptive controls are inactive."
             )
         self._dynamic_fit_mode_note.setText(msg)
+        self._apply_dynamic_fit_slope_constraint_ui_state()
 
     def _on_correction_tuning_fit_mode_changed(self) -> None:
         self._apply_correction_tuning_fit_mode_ui_state()
@@ -8791,6 +8943,19 @@ class MainWindow(QMainWindow):
                 else "Bleach Correction: (inactive in tonic mode)"
             ),
             (
+                "UV/reference slope constraint: "
+                + dynamic_fit_slope_constraint_label(
+                    self._selected_dynamic_fit_slope_constraint()
+                )
+                + (
+                    f" (min={self._dynamic_fit_min_slope_spin.value():.6g})"
+                    if self._selected_dynamic_fit_slope_constraint() == "nonnegative"
+                    else ""
+                )
+                if phasic_active
+                else "UV/reference slope constraint: (inactive in tonic mode)"
+            ),
+            (
                 "Signal Excursion Polarity: "
                 + signal_excursion_polarity_label(self._selected_signal_excursion_polarity())
                 if phasic_active
@@ -8932,6 +9097,13 @@ class MainWindow(QMainWindow):
             self._dynamic_fit_mode_combo.setEnabled(phasic_active)
         if hasattr(self, "_bleach_correction_mode_combo"):
             self._bleach_correction_mode_combo.setEnabled(phasic_active)
+        if hasattr(self, "_dynamic_fit_slope_constraint_combo"):
+            self._dynamic_fit_slope_constraint_combo.setEnabled(phasic_active)
+        if hasattr(self, "_dynamic_fit_min_slope_spin"):
+            self._dynamic_fit_min_slope_spin.setEnabled(
+                phasic_active
+                and self._selected_dynamic_fit_slope_constraint() == "nonnegative"
+            )
         if hasattr(self, "_tonic_output_mode_combo"):
             self._tonic_output_mode_combo.setEnabled(tonic_active)
         if hasattr(self, "_tonic_timeline_mode_combo"):
@@ -9826,6 +9998,57 @@ class MainWindow(QMainWindow):
             self._bleach_correction_mode_combo.setCurrentIndex(idx_bleach_mode)
         self._bleach_correction_mode_combo.currentIndexChanged.connect(self._on_config_changed)
         iso_sampling_form.addRow("Bleach Correction:", self._bleach_correction_mode_combo)
+
+        self._dynamic_fit_slope_constraint_combo = QComboBox()
+        self._dynamic_fit_slope_constraint_combo.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        self._dynamic_fit_slope_constraint_combo.setToolTip(
+            _DYNAMIC_FIT_TOOLTIPS["dynamic_fit_slope_constraint"]
+        )
+        for constraint_name in ("unconstrained", "nonnegative"):
+            self._dynamic_fit_slope_constraint_combo.addItem(
+                dynamic_fit_slope_constraint_label(constraint_name),
+                constraint_name,
+            )
+        default_slope_constraint = normalize_dynamic_fit_slope_constraint(
+            str(getattr(self._default_cfg, "dynamic_fit_slope_constraint", "unconstrained"))
+        )
+        idx_slope_constraint = self._dynamic_fit_slope_constraint_combo.findData(
+            default_slope_constraint
+        )
+        if idx_slope_constraint < 0:
+            idx_slope_constraint = self._dynamic_fit_slope_constraint_combo.findData(
+                "unconstrained"
+            )
+        if idx_slope_constraint >= 0:
+            self._dynamic_fit_slope_constraint_combo.setCurrentIndex(idx_slope_constraint)
+        self._dynamic_fit_slope_constraint_combo.currentIndexChanged.connect(
+            self._apply_dynamic_fit_slope_constraint_ui_state
+        )
+        self._dynamic_fit_slope_constraint_combo.currentIndexChanged.connect(
+            self._on_config_changed
+        )
+        iso_sampling_form.addRow(
+            "UV/reference slope constraint:",
+            self._dynamic_fit_slope_constraint_combo,
+        )
+
+        self._dynamic_fit_min_slope_spin = QDoubleSpinBox()
+        self._dynamic_fit_min_slope_spin.setRange(-1_000_000.0, 1_000_000.0)
+        self._dynamic_fit_min_slope_spin.setDecimals(6)
+        self._dynamic_fit_min_slope_spin.setSingleStep(0.01)
+        self._dynamic_fit_min_slope_spin.setValue(
+            float(getattr(self._default_cfg, "dynamic_fit_min_slope", 0.0))
+        )
+        self._dynamic_fit_min_slope_spin.setToolTip(
+            _DYNAMIC_FIT_TOOLTIPS["dynamic_fit_min_slope"]
+        )
+        self._dynamic_fit_min_slope_spin.valueChanged.connect(self._on_config_changed)
+        iso_sampling_form.addRow(
+            "Minimum allowed slope:",
+            self._dynamic_fit_min_slope_spin,
+        )
 
         self._window_sec_edit = QLineEdit(str(self._default_cfg.window_sec))
         self._window_sec_edit.setToolTip(

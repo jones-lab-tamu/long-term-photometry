@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 import yaml
-from PySide6.QtCore import Qt, QPoint
+from PySide6.QtCore import Qt, QPoint, QSettings
 from PySide6.QtGui import QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QSizePolicy, QGroupBox, QScrollArea, QSplitter, QToolButton
@@ -23,11 +23,14 @@ def qapp():
 
 
 @pytest.fixture
-def window(qapp):
-    w = MainWindow()
+def window(qapp, tmp_path):
+    settings = QSettings(str(tmp_path / "gui_usability_settings.ini"), QSettings.IniFormat)
+    settings.clear()
+    w = MainWindow(settings=settings)
     yield w
     w.close()
     w.deleteLater()
+    settings.clear()
 
 
 def _set_minimally_valid_paths(w: MainWindow):
@@ -78,8 +81,8 @@ def test_effective_run_summary_updates(window):
     assert "Run Type: Full Run" in text0
     assert "Mode: both" in text0
     assert "Analysis: Full analysis" in text0
-    assert "Dynamic Fit Mode: Rolling regression (filtered→raw)" in text0
-    assert "Baseline subtract before fit: off" in text0
+    assert "Dynamic Fit Mode: Robust global fit + event rejection" in text0
+    assert "Baseline subtract before fit: inactive in robust global event-reject mode" in text0
     assert "Preview: off" in text0
     assert "Plotting Mode: Standard" in text0
     assert "Timeline Anchor: Civil clock" in text0
@@ -329,6 +332,9 @@ def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
     assert window._dynamic_fit_mode_combo.currentData() == "robust_global_event_reject"
     assert not window._baseline_subtract_before_fit_cb.isChecked()
     assert window._bleach_correction_mode_combo.currentData() == "none"
+    assert window._dynamic_fit_slope_constraint_combo.currentData() == "unconstrained"
+    assert window._dynamic_fit_min_slope_spin.value() == pytest.approx(0.0)
+    assert not window._dynamic_fit_min_slope_spin.isEnabled()
 
     visible_modes = [
         window._dynamic_fit_mode_combo.itemData(i)
@@ -346,6 +352,15 @@ def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
     assert spec_default.config_overrides.get("dynamic_fit_mode") is None
     assert "window_sec" not in spec_default.config_overrides
     assert "bleach_correction_mode" not in spec_default.config_overrides
+    assert spec_default.config_overrides.get("dynamic_fit_slope_constraint") == "unconstrained"
+    assert spec_default.config_overrides.get("dynamic_fit_min_slope") == pytest.approx(0.0)
+
+    run_dir_default = tempfile.mkdtemp(prefix="gui_dynamic_fit_slope_default_")
+    cfg_path_default = spec_default.generate_derived_config(run_dir_default)
+    with open(cfg_path_default, "r", encoding="utf-8") as f:
+        cfg_default = yaml.safe_load(f) or {}
+    assert cfg_default.get("dynamic_fit_slope_constraint") == "unconstrained"
+    assert cfg_default.get("dynamic_fit_min_slope") == pytest.approx(0.0)
 
     idx = window._dynamic_fit_mode_combo.findData("rolling_filtered_to_filtered")
     assert idx >= 0
@@ -395,6 +410,67 @@ def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
     assert spec_bleach_double.config_overrides.get("bleach_correction_mode") == "double_exponential"
 
 
+def test_gui_dynamic_fit_slope_constraint_plumbs_into_run_spec(window):
+    _set_minimally_valid_paths(window)
+
+    idx = window._dynamic_fit_slope_constraint_combo.findData("nonnegative")
+    assert idx >= 0
+    window._dynamic_fit_slope_constraint_combo.setCurrentIndex(idx)
+    window._dynamic_fit_min_slope_spin.setValue(0.0)
+
+    assert window._dynamic_fit_min_slope_spin.isEnabled()
+    assert window._validate_gui_inputs() is None
+    spec = window._build_run_spec(validate_only=True)
+    assert spec.config_overrides.get("dynamic_fit_slope_constraint") == "nonnegative"
+    assert spec.config_overrides.get("dynamic_fit_min_slope") == pytest.approx(0.0)
+
+    run_dir = tempfile.mkdtemp(prefix="gui_dynamic_fit_slope_nonnegative_")
+    cfg_path = spec.generate_derived_config(run_dir)
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    assert cfg.get("dynamic_fit_slope_constraint") == "nonnegative"
+    assert cfg.get("dynamic_fit_min_slope") == pytest.approx(0.0)
+
+
+def test_gui_dynamic_fit_slope_constraint_rejects_negative_min_when_nonnegative(window):
+    _set_minimally_valid_paths(window)
+
+    idx = window._dynamic_fit_slope_constraint_combo.findData("nonnegative")
+    assert idx >= 0
+    window._dynamic_fit_slope_constraint_combo.setCurrentIndex(idx)
+    window._dynamic_fit_min_slope_spin.setValue(-0.1)
+
+    err = window._validate_gui_inputs()
+    assert err is not None
+    assert "Minimum allowed slope must be >= 0" in err
+
+
+def test_gui_dynamic_fit_slope_constraint_settings_load_defaults_old_config(window):
+    window._settings.beginGroup("run_config")
+    window._settings.remove("dynamic_fit_slope_constraint")
+    window._settings.remove("dynamic_fit_min_slope")
+    window._settings.endGroup()
+    window._settings.sync()
+
+    window._load_settings_into_widgets()
+    assert window._dynamic_fit_slope_constraint_combo.currentData() == "unconstrained"
+    assert window._dynamic_fit_min_slope_spin.value() == pytest.approx(0.0)
+    assert not window._dynamic_fit_min_slope_spin.isEnabled()
+
+
+def test_gui_dynamic_fit_slope_constraint_settings_load_nonnegative(window):
+    window._settings.beginGroup("run_config")
+    window._settings.setValue("dynamic_fit_slope_constraint", "nonnegative")
+    window._settings.setValue("dynamic_fit_min_slope", 0.0)
+    window._settings.endGroup()
+    window._settings.sync()
+
+    window._load_settings_into_widgets()
+    assert window._dynamic_fit_slope_constraint_combo.currentData() == "nonnegative"
+    assert window._dynamic_fit_min_slope_spin.value() == pytest.approx(0.0)
+    assert window._dynamic_fit_min_slope_spin.isEnabled()
+
+
 def test_display_series_export_checkbox_plumbs_into_run_spec(window):
     _set_minimally_valid_paths(window)
     assert window._export_display_series_csv_cb.isChecked() is False
@@ -432,7 +508,7 @@ def test_gui_dynamic_fit_mode_robust_event_reject_plumbs_mode_specific_overrides
 
     spec = window._build_run_spec(validate_only=True)
     overrides = dict(spec.config_overrides)
-    assert overrides.get("dynamic_fit_mode") == "robust_global_event_reject"
+    assert overrides.get("dynamic_fit_mode") is None
     assert overrides.get("robust_event_reject_max_iters") == 4
     assert overrides.get("robust_event_reject_residual_z_thresh") == pytest.approx(3.1)
     assert overrides.get("robust_event_reject_local_var_window_sec") == pytest.approx(9.0)

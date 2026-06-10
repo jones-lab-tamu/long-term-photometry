@@ -29,6 +29,8 @@ GUI_KNOBS_ADVANCED: Set[str] = {
     "f0_min_value",
     # Dynammic Correction
     "dynamic_fit_mode",
+    "dynamic_fit_slope_constraint",
+    "dynamic_fit_min_slope",
     "bleach_correction_mode",
     "baseline_subtract_before_fit",
     "window_sec",
@@ -176,6 +178,21 @@ KNOB_META: Dict[str, dict] = {
     "dynamic_fit_mode": {
         "label": "Dynamic Fit Mode",
         "help": "Isosbestic fit engine selector for rolling, global linear, or robust global event-reject fitting.",
+    },
+    "dynamic_fit_slope_constraint": {
+        "label": "UV/reference slope constraint",
+        "help": (
+            "Optional slope guardrail for UV-to-signal dynamic fitting. "
+            "'nonnegative' prevents inverted UV/reference correction by clamping "
+            "negative fitted slopes before constructing the fitted reference."
+        ),
+    },
+    "dynamic_fit_min_slope": {
+        "label": "Minimum allowed slope",
+        "help": (
+            "Minimum slope used when UV/reference slope constraint is nonnegative. "
+            "Must be finite and >= 0 when the nonnegative constraint is enabled."
+        ),
     },
     "bleach_correction_mode": {
         "label": "Bleach Correction",

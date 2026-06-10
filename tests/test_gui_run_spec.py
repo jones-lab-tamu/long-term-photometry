@@ -88,6 +88,22 @@ class TestRunSpec(unittest.TestCase):
         self.assertEqual(loaded["peak_threshold_k"], 3.0)
         self.assertEqual(loaded["rwd_time_col"], "Time(s)")
 
+    def test_slope_constraint_overrides_are_allowlisted(self):
+        """GUI-originated slope-constraint overrides pass the registry boundary."""
+        run_dir = os.path.join(self.tmp_dir, "run_slope_constraint")
+        spec = RunSpec(
+            config_source_path=self.config_path,
+            config_overrides={
+                "dynamic_fit_slope_constraint": "nonnegative",
+                "dynamic_fit_min_slope": 0.0,
+            },
+        )
+        config_path = spec.generate_derived_config(run_dir)
+        with open(config_path, "r", encoding="utf-8") as f:
+            loaded = yaml.safe_load(f) or {}
+        self.assertEqual(loaded["dynamic_fit_slope_constraint"], "nonnegative")
+        self.assertEqual(loaded["dynamic_fit_min_slope"], 0.0)
+
     # ----------------------------------------------------------------
     # argv uses explicit --out <run_dir>
     # ----------------------------------------------------------------
