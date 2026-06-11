@@ -91,21 +91,37 @@ def _fit_with_residual_exclusion(
     robust: bool,
     min_samples: int,
     mad_z: float = 3.5,
+    return_diagnostics: bool = False,
 ) -> tuple[float, float, int, dict[str, Any]]:
     initial_slope, initial_intercept, initial_n, initial_status = _robust_linear_fit(
         x, y, robust
     )
+    finite = np.isfinite(x) & np.isfinite(y)
     meta: dict[str, Any] = {
         "baseline_ref_residual_exclusion_fraction": 0.0,
         "baseline_ref_residual_exclusion_threshold": None,
         "baseline_ref_initial_fit_status": initial_status,
         "baseline_ref_final_fit_status": initial_status,
         "baseline_ref_fit_stage": "initial_only",
+        "baseline_ref_initial_slope": (
+            float(initial_slope) if np.isfinite(initial_slope) else None
+        ),
+        "baseline_ref_initial_intercept": (
+            float(initial_intercept) if np.isfinite(initial_intercept) else None
+        ),
+        "baseline_ref_final_slope": (
+            float(initial_slope) if np.isfinite(initial_slope) else None
+        ),
+        "baseline_ref_final_intercept": (
+            float(initial_intercept) if np.isfinite(initial_intercept) else None
+        ),
     }
+    if return_diagnostics:
+        meta["baseline_ref_fit_included_mask"] = finite.copy()
+        meta["baseline_ref_fit_finite_mask"] = finite.copy()
     if not np.isfinite(initial_slope) or not np.isfinite(initial_intercept):
         return initial_slope, initial_intercept, initial_n, meta
 
-    finite = np.isfinite(x) & np.isfinite(y)
     if int(np.sum(finite)) < int(min_samples):
         meta["baseline_ref_fit_stage"] = "residual_refit_insufficient_samples"
         return initial_slope, initial_intercept, initial_n, meta
@@ -121,6 +137,10 @@ def _fit_with_residual_exclusion(
 
     threshold = float(mad_z * 1.4826 * mad)
     keep = np.abs(residual - med) <= threshold
+    full_keep = np.zeros_like(finite, dtype=bool)
+    full_keep[np.where(finite)[0]] = keep
+    if return_diagnostics:
+        meta["baseline_ref_fit_included_mask"] = full_keep
     meta["baseline_ref_residual_exclusion_threshold"] = threshold
     meta["baseline_ref_residual_exclusion_fraction"] = float(1.0 - (np.sum(keep) / keep.size))
     if int(np.sum(keep)) < int(min_samples) or float(np.nanstd(xx[keep])) <= 1e-12:
@@ -138,7 +158,33 @@ def _fit_with_residual_exclusion(
 
     meta["baseline_ref_fit_stage"] = "residual_refit"
     meta["baseline_ref_final_fit_status"] = final_status
+    meta["baseline_ref_final_slope"] = float(final_slope)
+    meta["baseline_ref_final_intercept"] = float(final_intercept)
     return final_slope, final_intercept, final_n, meta
+
+
+def classify_baseline_fit_relationship(
+    *,
+    slope: Any,
+    corr: Any,
+    slope_near_zero: float = 1e-9,
+    corr_threshold: float = 0.25,
+) -> str:
+    """Classify the baseline-candidate fit relationship for diagnostic plotting."""
+    try:
+        slope_f = float(slope)
+        corr_f = float(corr)
+    except Exception:
+        return "unknown"
+    if not np.isfinite(slope_f) or not np.isfinite(corr_f):
+        return "unknown"
+    if abs(slope_f) <= float(slope_near_zero) or abs(corr_f) < float(corr_threshold):
+        return "weak_reference_relationship"
+    if slope_f < 0.0:
+        return "negative_reference_relationship"
+    if slope_f > 0.0:
+        return "positive_reference_relationship"
+    return "mixed_or_unclear_reference_relationship"
 
 
 def _resolve_smoothing_window(
@@ -217,6 +263,7 @@ def compute_baseline_reference_candidate(
     large_window_fraction_warning: float = DEFAULT_BASELINE_REFERENCE_LARGE_WINDOW_FRACTION_WARNING,
     robust: bool = True,
     min_samples: int = 100,
+    return_diagnostics: bool = False,
 ) -> dict[str, Any]:
     """Construct an ultra-low-pass reference candidate in signal units."""
     sig = np.asarray(signal, dtype=float).reshape(-1)
@@ -291,23 +338,50 @@ def compute_baseline_reference_candidate(
         sig_slow,
         robust=robust,
         min_samples=int(min_samples),
+        return_diagnostics=return_diagnostics,
     )
     meta["baseline_ref_n_samples"] = int(n_used)
     meta.update(fit_meta)
     meta["baseline_ref_status"] = str(fit_meta.get("baseline_ref_final_fit_status") or "unavailable")
+    corr, corr_reason = _safe_corr(sig_slow, ref_slow)
+    meta["baseline_ref_smoothed_signal_reference_corr"] = corr
+    meta["baseline_ref_smoothed_signal_reference_corr_reason"] = corr_reason
     if not np.isfinite(slope) or not np.isfinite(intercept):
         meta["baseline_ref_warning"] = meta["baseline_ref_status"]
+        if return_diagnostics:
+            meta["baseline_ref_smoothed_signal"] = sig_slow
+            meta["baseline_ref_smoothed_reference"] = ref_slow
+            meta["baseline_fit_relationship_class"] = "unknown"
         return meta
 
     candidate = float(intercept) + float(slope) * ref_slow
+    relationship_class = classify_baseline_fit_relationship(
+        slope=slope,
+        corr=corr,
+    )
     meta.update(
         {
             "baseline_ref_candidate_available": True,
             "baseline_ref_slope": float(slope),
             "baseline_ref_intercept": float(intercept),
             "baseline_ref_candidate": candidate,
+            "baseline_fit_relationship_class": relationship_class,
         }
     )
+    if return_diagnostics:
+        initial_slope = fit_meta.get("baseline_ref_initial_slope")
+        initial_intercept = fit_meta.get("baseline_ref_initial_intercept")
+        if initial_slope is not None and initial_intercept is not None:
+            initial_candidate = float(initial_intercept) + float(initial_slope) * ref_slow
+        else:
+            initial_candidate = np.full_like(ref_slow, np.nan, dtype=float)
+        meta.update(
+            {
+                "baseline_ref_smoothed_signal": sig_slow,
+                "baseline_ref_smoothed_reference": ref_slow,
+                "baseline_ref_initial_candidate": initial_candidate,
+            }
+        )
     return meta
 
 

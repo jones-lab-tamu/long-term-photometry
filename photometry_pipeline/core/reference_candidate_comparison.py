@@ -18,6 +18,19 @@ COMPARISON_FLAG_BASELINE_LOW_OR_FLAT = "BASELINE_CANDIDATE_LOW_OR_FLAT"
 COMPARISON_FLAG_BASELINE_RESPONSE = "BASELINE_CANDIDATE_RESPONSE_SCALE_RICH"
 COMPARISON_FLAG_BASELINE_WINDOW_LARGE = "BASELINE_WINDOW_LARGE_FRACTION_OF_CHUNK"
 COMPARISON_FLAG_BASELINE_WINDOW_ADJUSTED = "BASELINE_WINDOW_ADJUSTED"
+COMPARISON_FLAG_BASELINE_POSITIVE_RELATIONSHIP = "BASELINE_POSITIVE_REFERENCE_RELATIONSHIP"
+COMPARISON_FLAG_BASELINE_NEGATIVE_RELATIONSHIP = "BASELINE_NEGATIVE_REFERENCE_RELATIONSHIP"
+COMPARISON_FLAG_BASELINE_WEAK_RELATIONSHIP = "BASELINE_WEAK_REFERENCE_RELATIONSHIP"
+COMPARISON_FLAG_BASELINE_MIXED_RELATIONSHIP = (
+    "BASELINE_MIXED_OR_UNCLEAR_REFERENCE_RELATIONSHIP"
+)
+COMPARISON_FLAG_BASELINE_UNKNOWN_RELATIONSHIP = "BASELINE_UNKNOWN_REFERENCE_RELATIONSHIP"
+
+BASELINE_POSITIVE_RELATIONSHIP = "positive_reference_relationship"
+BASELINE_NEGATIVE_RELATIONSHIP = "negative_reference_relationship"
+BASELINE_WEAK_RELATIONSHIP = "weak_reference_relationship"
+BASELINE_MIXED_RELATIONSHIP = "mixed_or_unclear_reference_relationship"
+BASELINE_UNKNOWN_RELATIONSHIP = "unknown"
 
 
 def _as_flag_set(value: Any) -> set[str]:
@@ -61,6 +74,11 @@ def _baseline_viability(baseline_record: dict[str, Any]) -> str:
     ):
         return "hard_inspect"
     if _as_bool(baseline_record.get("baseline_ref_response_scale_rich")):
+        return "contextual"
+    relationship = str(
+        baseline_record.get("baseline_fit_relationship_class", "") or ""
+    ).strip()
+    if relationship != BASELINE_POSITIVE_RELATIONSHIP:
         return "contextual"
     return "viable"
 
@@ -146,6 +164,9 @@ def classify_reference_candidates(
         baseline_record.get("baseline_ref_flat_or_uninformative")
     )
     baseline_response = _as_bool(baseline_record.get("baseline_ref_response_scale_rich"))
+    baseline_relationship = str(
+        baseline_record.get("baseline_fit_relationship_class", "") or ""
+    ).strip()
     baseline_window_adjusted = _as_bool(
         baseline_record.get("baseline_ref_smoothing_window_adjusted")
     )
@@ -171,6 +192,17 @@ def classify_reference_candidates(
         flags.append(COMPARISON_FLAG_BASELINE_LOW_OR_FLAT)
     if baseline_response:
         flags.append(COMPARISON_FLAG_BASELINE_RESPONSE)
+    if baseline_available:
+        if baseline_relationship == BASELINE_POSITIVE_RELATIONSHIP:
+            flags.append(COMPARISON_FLAG_BASELINE_POSITIVE_RELATIONSHIP)
+        elif baseline_relationship == BASELINE_NEGATIVE_RELATIONSHIP:
+            flags.append(COMPARISON_FLAG_BASELINE_NEGATIVE_RELATIONSHIP)
+        elif baseline_relationship == BASELINE_WEAK_RELATIONSHIP:
+            flags.append(COMPARISON_FLAG_BASELINE_WEAK_RELATIONSHIP)
+        elif baseline_relationship == BASELINE_MIXED_RELATIONSHIP:
+            flags.append(COMPARISON_FLAG_BASELINE_MIXED_RELATIONSHIP)
+        else:
+            flags.append(COMPARISON_FLAG_BASELINE_UNKNOWN_RELATIONSHIP)
     if baseline_window_large:
         flags.append(COMPARISON_FLAG_BASELINE_WINDOW_LARGE)
     if baseline_window_adjusted:
@@ -199,6 +231,7 @@ def classify_reference_candidates(
         "baseline_is_available": bool(baseline_available),
         "baseline_has_low_or_flat_reference": bool(baseline_low_or_flat),
         "baseline_has_response_scale_rich": bool(baseline_response),
+        "baseline_fit_relationship_class": baseline_relationship or BASELINE_UNKNOWN_RELATIONSHIP,
         "baseline_window_large_fraction_of_chunk": bool(baseline_window_large),
         "baseline_window_adjusted": bool(baseline_window_adjusted),
     }

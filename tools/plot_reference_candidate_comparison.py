@@ -22,6 +22,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from photometry_pipeline.core.baseline_reference_candidate import (  # noqa: E402
+    classify_baseline_fit_relationship,
     compute_baseline_reference_candidate,
 )
 from photometry_pipeline.io.hdf5_cache_reader import (  # noqa: E402
@@ -70,6 +71,11 @@ def parse_args() -> argparse.Namespace:
         "--include-reference-difference",
         action="store_true",
         help="Add a panel showing dynamic reference minus baseline candidate.",
+    )
+    parser.add_argument(
+        "--include-baseline-fit-diagnostics",
+        action="store_true",
+        help="Add panels showing baseline-candidate fit inputs and smoothed fit relationship.",
     )
     parser.add_argument(
         "--no-metadata-box",
@@ -244,6 +250,59 @@ def _recompute_baseline_candidate_trace(
     return np.asarray(trace, dtype=float).reshape(-1), "recomputed_from_metadata"
 
 
+def _compute_baseline_fit_diagnostics(
+    traces: dict[str, np.ndarray],
+    row: dict[str, Any],
+    plotted_baseline: np.ndarray | None = None,
+) -> dict[str, Any]:
+    t = np.asarray(traces["time_sec"], dtype=float)
+    if t.size >= 2:
+        dt = float(np.nanmedian(np.diff(t)))
+        fs = 1.0 / dt if np.isfinite(dt) and dt > 0.0 else 1.0
+    else:
+        fs = 1.0
+    actual_window = _float_from_row(row, "baseline_ref_actual_smoothing_window_sec", 300.0)
+    diagnostics = compute_baseline_reference_candidate(
+        signal=traces["sig_raw"],
+        reference=traces["uv_raw"],
+        fs=fs,
+        smoothing_window_sec=actual_window,
+        default_smoothing_window_sec=actual_window,
+        min_smoothing_window_sec=_float_from_row(
+            row,
+            "baseline_ref_min_smoothing_window_sec",
+            60.0,
+        ),
+        max_window_fraction_of_chunk=_float_from_row(
+            row,
+            "baseline_ref_max_window_fraction_of_chunk",
+            0.75,
+        ),
+        large_window_fraction_warning=_float_from_row(
+            row,
+            "baseline_ref_large_window_fraction_warning",
+            0.50,
+        ),
+        return_diagnostics=True,
+    )
+    diagnostics["baseline_fit_diagnostics_source"] = "recomputed_from_metadata"
+    recomputed = diagnostics.get("baseline_ref_candidate")
+    if plotted_baseline is not None and recomputed is not None:
+        plotted = np.asarray(plotted_baseline, dtype=float).reshape(-1)
+        recomputed_arr = np.asarray(recomputed, dtype=float).reshape(-1)
+        if plotted.shape == recomputed_arr.shape:
+            diff = plotted - recomputed_arr
+            finite = diff[np.isfinite(diff)]
+            rms = float(np.sqrt(np.mean(finite**2))) if finite.size else float("nan")
+            max_abs = float(np.max(np.abs(finite))) if finite.size else float("nan")
+            diagnostics["baseline_ref_recomputed_vs_plotted_rms"] = rms
+            diagnostics["baseline_ref_recomputed_vs_plotted_max_abs"] = max_abs
+            diagnostics["baseline_ref_recomputed_diff_warning"] = bool(
+                np.isfinite(rms) and rms > 1e-6
+            )
+    return diagnostics
+
+
 def _scaled_for_display(values: np.ndarray, target: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=float)
     target = np.asarray(target, dtype=float)
@@ -325,6 +384,8 @@ def _wrapped_metadata_text(
         f"baseline_window_sec={_compact_field(row, 'baseline_ref_actual_smoothing_window_sec')}",
         f"baseline_source={baseline_source}",
     ]
+    if row.get("baseline_fit_relationship_class"):
+        fields.append(f"fit_relationship={row.get('baseline_fit_relationship_class')}")
     warning = _compact_field(row, "baseline_ref_smoothing_window_warning")
     if warning:
         fields.append(f"window_warning={warning}")
@@ -344,10 +405,17 @@ def build_reference_candidate_comparison_figure(
     show_raw_reference: bool = False,
     include_normalized_overlay: bool = False,
     include_reference_difference: bool = False,
+    include_baseline_fit_diagnostics: bool = False,
+    baseline_fit_diagnostics: dict[str, Any] | None = None,
     metadata_box: bool = True,
     title_extra: str = "",
 ):
-    panels = 3 + int(bool(include_reference_difference)) + int(bool(include_normalized_overlay))
+    panels = (
+        3
+        + int(bool(include_baseline_fit_diagnostics)) * 2
+        + int(bool(include_reference_difference))
+        + int(bool(include_normalized_overlay))
+    )
     fig_height = 9.2 + 1.7 * max(0, panels - 3)
     fig, axes = plt.subplots(panels, 1, figsize=(11.5, fig_height), sharex=True)
     axes = np.asarray(axes, dtype=object).reshape(-1)
@@ -365,13 +433,21 @@ def build_reference_candidate_comparison_figure(
     residual_dynamic = sig - fit_ref
     residual_baseline = sig - baseline
     reference_difference = fit_ref - baseline
+    baseline_fit_diagnostics = (
+        baseline_fit_diagnostics if isinstance(baseline_fit_diagnostics, dict) else {}
+    )
+    metadata_row = dict(row)
+    if include_baseline_fit_diagnostics and baseline_fit_diagnostics:
+        metadata_row["baseline_fit_relationship_class"] = baseline_fit_diagnostics.get(
+            "baseline_fit_relationship_class", ""
+        )
 
     if metadata_box:
         fig.text(
             0.012,
             0.985,
             _wrapped_metadata_text(
-                row=row,
+                row=metadata_row,
                 roi=roi,
                 chunk_id=chunk_id,
                 baseline_source=baseline_source,
@@ -458,6 +534,172 @@ def build_reference_candidate_comparison_figure(
         ax_diff.grid(True, alpha=0.25)
         ax_diff.legend(loc="best", fontsize=8)
 
+    if include_baseline_fit_diagnostics:
+        ax_inputs = axes[next_axis]
+        next_axis += 1
+        smoothed_signal = np.asarray(
+            baseline_fit_diagnostics.get("baseline_ref_smoothed_signal", []),
+            dtype=float,
+        ).reshape(-1)
+        smoothed_reference = np.asarray(
+            baseline_fit_diagnostics.get("baseline_ref_smoothed_reference", []),
+            dtype=float,
+        ).reshape(-1)
+        recomputed_candidate = np.asarray(
+            baseline_fit_diagnostics.get("baseline_ref_candidate", baseline),
+            dtype=float,
+        ).reshape(-1)
+        if smoothed_signal.shape == sig.shape:
+            ax_inputs.plot(
+                t,
+                sig,
+                color="forestgreen",
+                linewidth=0.45,
+                alpha=0.25,
+                label="raw signal",
+            )
+            ax_inputs.plot(
+                t,
+                smoothed_signal,
+                color="forestgreen",
+                linewidth=0.95,
+                label="smoothed signal fit target",
+            )
+        if recomputed_candidate.shape == sig.shape:
+            ax_inputs.plot(
+                t,
+                recomputed_candidate,
+                color="#1f77b4",
+                linestyle=":",
+                linewidth=1.0,
+                label="recomputed baseline candidate",
+            )
+        if baseline.shape == sig.shape:
+            ax_inputs.plot(
+                t,
+                baseline,
+                color="black",
+                linestyle="--",
+                linewidth=0.8,
+                alpha=0.8,
+                label="plotted baseline candidate",
+            )
+        ax_inputs.set_title("Baseline-candidate fit inputs")
+        ax_inputs.set_ylabel("Signal units")
+        limits = _robust_limits(smoothed_signal, recomputed_candidate, baseline)
+        if limits is not None:
+            ax_inputs.set_ylim(*limits)
+        warning = bool(baseline_fit_diagnostics.get("baseline_ref_recomputed_diff_warning", False))
+        source_note = (
+            f"candidate trace source={baseline_source}; "
+            "fit diagnostics recomputed_from_metadata"
+        )
+        if warning:
+            source_note += "; WARNING: recomputed diagnostics differ from plotted candidate"
+        ax_inputs.text(
+            0.01,
+            0.97,
+            source_note,
+            transform=ax_inputs.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            bbox={"facecolor": "white", "alpha": 0.78, "edgecolor": "0.75"},
+        )
+        ax_inputs.grid(True, alpha=0.25)
+        ax_inputs.legend(loc="best", fontsize=8)
+
+        ax_relation = axes[next_axis]
+        next_axis += 1
+        finite = np.isfinite(smoothed_reference) & np.isfinite(smoothed_signal)
+        included = np.asarray(
+            baseline_fit_diagnostics.get("baseline_ref_fit_included_mask", finite),
+            dtype=bool,
+        ).reshape(-1)
+        if included.shape != finite.shape:
+            included = finite.copy()
+        excluded = finite & ~included
+        if np.any(included):
+            ax_relation.scatter(
+                smoothed_reference[included],
+                smoothed_signal[included],
+                s=8,
+                alpha=0.45,
+                color="steelblue",
+                label="included fit samples",
+            )
+        if np.any(excluded):
+            ax_relation.scatter(
+                smoothed_reference[excluded],
+                smoothed_signal[excluded],
+                s=10,
+                alpha=0.5,
+                color="crimson",
+                label="excluded residual samples",
+            )
+        x_finite = smoothed_reference[finite]
+        if x_finite.size:
+            x_line = np.linspace(float(np.nanmin(x_finite)), float(np.nanmax(x_finite)), 200)
+            initial_slope = baseline_fit_diagnostics.get("baseline_ref_initial_slope")
+            initial_intercept = baseline_fit_diagnostics.get("baseline_ref_initial_intercept")
+            final_slope = baseline_fit_diagnostics.get("baseline_ref_final_slope")
+            final_intercept = baseline_fit_diagnostics.get("baseline_ref_final_intercept")
+            try:
+                ax_relation.plot(
+                    x_line,
+                    float(initial_intercept) + float(initial_slope) * x_line,
+                    color="0.45",
+                    linestyle=":",
+                    linewidth=1.0,
+                    label="initial fit",
+                )
+            except Exception:
+                pass
+            try:
+                ax_relation.plot(
+                    x_line,
+                    float(final_intercept) + float(final_slope) * x_line,
+                    color="black",
+                    linestyle="-",
+                    linewidth=1.1,
+                    label="final fit",
+                )
+            except Exception:
+                pass
+        relationship = baseline_fit_diagnostics.get(
+            "baseline_fit_relationship_class",
+            classify_baseline_fit_relationship(
+                slope=baseline_fit_diagnostics.get("baseline_ref_final_slope"),
+                corr=baseline_fit_diagnostics.get(
+                    "baseline_ref_smoothed_signal_reference_corr"
+                ),
+            ),
+        )
+        annotation = (
+            f"slope={_compact_field(baseline_fit_diagnostics, 'baseline_ref_final_slope')} | "
+            f"intercept={_compact_field(baseline_fit_diagnostics, 'baseline_ref_final_intercept')} | "
+            f"corr={_compact_field(baseline_fit_diagnostics, 'baseline_ref_smoothed_signal_reference_corr')} | "
+            f"excluded={_compact_field(baseline_fit_diagnostics, 'baseline_ref_residual_exclusion_fraction')} | "
+            f"stage={_compact_field(baseline_fit_diagnostics, 'baseline_ref_fit_stage')} | "
+            f"status={_compact_field(baseline_fit_diagnostics, 'baseline_ref_status')} | "
+            f"class={relationship}"
+        )
+        ax_relation.text(
+            0.01,
+            0.97,
+            textwrap.fill(annotation, width=115),
+            transform=ax_relation.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            bbox={"facecolor": "white", "alpha": 0.78, "edgecolor": "0.75"},
+        )
+        ax_relation.set_title("Smoothed signal vs smoothed reference fit")
+        ax_relation.set_xlabel("Smoothed reference")
+        ax_relation.set_ylabel("Smoothed signal")
+        ax_relation.grid(True, alpha=0.25)
+        ax_relation.legend(loc="best", fontsize=8)
+
     if include_normalized_overlay:
         ax_norm = axes[next_axis]
         ax_norm.plot(t, _zscore(sig), color="forestgreen", linewidth=0.8, label="signal z")
@@ -483,6 +725,7 @@ def plot_one(
     show_raw_reference: bool = False,
     include_normalized_overlay: bool = False,
     include_reference_difference: bool = False,
+    include_baseline_fit_diagnostics: bool = False,
     metadata_box: bool = True,
     title_extra: str = "",
     dpi: int = 150,
@@ -491,6 +734,11 @@ def plot_one(
     row = _find_candidate_row(table, roi, int(chunk_id))
     traces = _load_chunk_traces(analysis_out, roi, int(chunk_id))
     baseline, baseline_source = _recompute_baseline_candidate_trace(traces, row)
+    baseline_fit_diagnostics = (
+        _compute_baseline_fit_diagnostics(traces, row, plotted_baseline=baseline)
+        if include_baseline_fit_diagnostics
+        else {}
+    )
     fig = build_reference_candidate_comparison_figure(
         traces=traces,
         baseline_candidate=baseline,
@@ -501,6 +749,8 @@ def plot_one(
         show_raw_reference=show_raw_reference,
         include_normalized_overlay=include_normalized_overlay,
         include_reference_difference=include_reference_difference,
+        include_baseline_fit_diagnostics=include_baseline_fit_diagnostics,
+        baseline_fit_diagnostics=baseline_fit_diagnostics,
         metadata_box=metadata_box,
         title_extra=title_extra,
     )
@@ -533,6 +783,7 @@ def main() -> int:
                     show_raw_reference=bool(args.show_raw_reference),
                     include_normalized_overlay=bool(args.include_normalized_overlay),
                     include_reference_difference=bool(args.include_reference_difference),
+                    include_baseline_fit_diagnostics=bool(args.include_baseline_fit_diagnostics),
                     metadata_box=not bool(args.no_metadata_box),
                     title_extra=args.title_extra,
                     dpi=int(args.dpi),

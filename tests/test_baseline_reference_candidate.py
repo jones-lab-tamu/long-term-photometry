@@ -3,6 +3,7 @@ import json
 import numpy as np
 
 from photometry_pipeline.core.baseline_reference_candidate import (
+    classify_baseline_fit_relationship,
     compute_baseline_reference_candidate,
     compute_baseline_reference_candidate_metrics,
     _nan_aware_moving_average,
@@ -218,3 +219,38 @@ def test_candidate_metadata_is_json_safe():
     text = json.dumps(_metadata_without_trace(candidate), allow_nan=False)
     assert "NaN" not in text
     assert "Infinity" not in text
+
+
+def test_candidate_diagnostics_return_fit_intermediates():
+    signal, reference, fs = _shared_slow_trace(duration_sec=300.0)
+
+    candidate = compute_baseline_reference_candidate(
+        signal,
+        reference,
+        fs,
+        smoothing_window_sec=60.0,
+        return_diagnostics=True,
+    )
+
+    assert candidate["baseline_ref_candidate_available"] is True
+    assert candidate["baseline_ref_smoothed_signal"].shape == signal.shape
+    assert candidate["baseline_ref_smoothed_reference"].shape == reference.shape
+    assert candidate["baseline_ref_candidate"].shape == signal.shape
+    assert candidate["baseline_ref_fit_included_mask"].shape == signal.shape
+    assert candidate["baseline_ref_final_slope"] is not None
+    assert candidate["baseline_ref_final_intercept"] is not None
+    assert candidate["baseline_ref_initial_slope"] is not None
+    assert candidate["baseline_ref_initial_intercept"] is not None
+    assert candidate["baseline_ref_residual_exclusion_fraction"] is not None
+
+
+def test_baseline_fit_relationship_class_negative_case():
+    result = classify_baseline_fit_relationship(slope=-1.0, corr=-0.8)
+
+    assert result == "negative_reference_relationship"
+
+
+def test_baseline_fit_relationship_class_weak_case():
+    result = classify_baseline_fit_relationship(slope=1.0, corr=0.05)
+
+    assert result == "weak_reference_relationship"

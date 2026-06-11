@@ -18,6 +18,7 @@ def _baseline(**overrides):
         "baseline_ref_low_range": False,
         "baseline_ref_flat_or_uninformative": False,
         "baseline_ref_response_scale_rich": False,
+        "baseline_fit_relationship_class": "positive_reference_relationship",
         "baseline_ref_smoothing_window_adjusted": False,
         "baseline_ref_smoothing_window_fraction_of_chunk": 0.25,
         "baseline_ref_large_window_fraction_warning": 0.5,
@@ -38,7 +39,43 @@ def test_dynamic_ok_baseline_hard_inspect():
     assert "BASELINE_CANDIDATE_LOW_OR_FLAT" in result["reference_comparison_flags"]
 
 
-def test_dynamic_context_negative_mixed_baseline_viable():
+def test_positive_baseline_relationship_remains_viable():
+    result = classify_reference_candidates(
+        dynamic_qc=_dynamic("ok"),
+        baseline_record=_baseline(
+            baseline_fit_relationship_class="positive_reference_relationship"
+        ),
+    )
+
+    assert result["baseline_reference_viability"] == "viable"
+    assert "BASELINE_POSITIVE_REFERENCE_RELATIONSHIP" in result["reference_comparison_flags"]
+
+
+def test_negative_baseline_relationship_becomes_contextual():
+    result = classify_reference_candidates(
+        dynamic_qc=_dynamic("ok"),
+        baseline_record=_baseline(
+            baseline_fit_relationship_class="negative_reference_relationship"
+        ),
+    )
+
+    assert result["baseline_reference_viability"] == "contextual"
+    assert "BASELINE_NEGATIVE_REFERENCE_RELATIONSHIP" in result["reference_comparison_flags"]
+
+
+def test_weak_baseline_relationship_becomes_contextual():
+    result = classify_reference_candidates(
+        dynamic_qc=_dynamic("ok"),
+        baseline_record=_baseline(
+            baseline_fit_relationship_class="weak_reference_relationship"
+        ),
+    )
+
+    assert result["baseline_reference_viability"] == "contextual"
+    assert "BASELINE_WEAK_REFERENCE_RELATIONSHIP" in result["reference_comparison_flags"]
+
+
+def test_dynamic_context_negative_mixed_baseline_positive_viable():
     result = classify_reference_candidates(
         dynamic_qc=_dynamic(
             "context",
@@ -53,7 +90,25 @@ def test_dynamic_context_negative_mixed_baseline_viable():
     assert "DYNAMIC_NEGATIVE_OR_MIXED_COUPLING" in result["reference_comparison_flags"]
 
 
-def test_dynamic_context_response_scale_rich_baseline_viable_is_not_failure_class():
+def test_dynamic_context_negative_mixed_baseline_negative_contextual():
+    result = classify_reference_candidates(
+        dynamic_qc=_dynamic(
+            "context",
+            soft_flags=["NEGATIVE_OR_MIXED_REFERENCE_COUPLING"],
+        ),
+        baseline_record=_baseline(
+            baseline_fit_relationship_class="negative_reference_relationship"
+        ),
+    )
+
+    assert result["dynamic_reference_viability"] == "contextual"
+    assert result["baseline_reference_viability"] == "contextual"
+    assert result["reference_comparison_class"] == "dynamic_context_baseline_contextual"
+    assert "DYNAMIC_NEGATIVE_OR_MIXED_COUPLING" in result["reference_comparison_flags"]
+    assert "BASELINE_NEGATIVE_REFERENCE_RELATIONSHIP" in result["reference_comparison_flags"]
+
+
+def test_dynamic_context_response_scale_rich_baseline_positive_viable_is_not_failure_class():
     result = classify_reference_candidates(
         dynamic_qc=_dynamic(
             "context",
@@ -102,3 +157,17 @@ def test_baseline_unavailable():
     assert result["baseline_reference_viability"] == "unavailable"
     assert result["reference_comparison_class"] == "baseline_unavailable"
     assert "BASELINE_CANDIDATE_UNAVAILABLE" in result["reference_comparison_flags"]
+
+
+def test_missing_baseline_relationship_class_is_contextual_not_viable():
+    baseline = _baseline()
+    baseline.pop("baseline_fit_relationship_class")
+
+    result = classify_reference_candidates(
+        dynamic_qc=_dynamic("ok"),
+        baseline_record=baseline,
+    )
+
+    assert result["baseline_reference_viability"] == "contextual"
+    assert result["baseline_reference_viability"] != "viable"
+    assert "BASELINE_UNKNOWN_REFERENCE_RELATIONSHIP" in result["reference_comparison_flags"]

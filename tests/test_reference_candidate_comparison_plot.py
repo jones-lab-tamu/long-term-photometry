@@ -206,6 +206,51 @@ def test_plot_one_supports_optional_reference_difference_and_normalized_overlay(
     assert out_png.stat().st_size > 0
 
 
+def test_baseline_fit_diagnostics_panels_are_optional(tmp_path):
+    traces, baseline, row, source = _figure_inputs(tmp_path)
+    diagnostics = plotter._compute_baseline_fit_diagnostics(
+        traces,
+        row,
+        plotted_baseline=baseline,
+    )
+
+    fig = plotter.build_reference_candidate_comparison_figure(
+        traces=traces,
+        baseline_candidate=baseline,
+        row=row,
+        roi="CH3",
+        chunk_id=31,
+        baseline_source=source,
+        include_baseline_fit_diagnostics=True,
+        baseline_fit_diagnostics=diagnostics,
+    )
+    try:
+        titles = [ax.get_title() for ax in fig.axes]
+        assert "Baseline-candidate fit inputs" in titles
+        assert "Smoothed signal vs smoothed reference fit" in titles
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+def test_plot_one_supports_baseline_fit_diagnostics_png(tmp_path):
+    analysis_out = _make_analysis_out(tmp_path)
+    out_png = tmp_path / "comparison_fit_diagnostics.png"
+
+    result = plotter.plot_one(
+        analysis_out=str(analysis_out),
+        roi="CH3",
+        chunk_id=31,
+        output_path=str(out_png),
+        include_baseline_fit_diagnostics=True,
+    )
+
+    assert result == str(out_png)
+    assert out_png.exists()
+    assert out_png.stat().st_size > 0
+
+
 def test_plotter_prefers_stored_hdf5_candidate_trace(tmp_path, monkeypatch):
     stored_trace = np.linspace(1.0, 2.0, 1000)
     analysis_out = _make_analysis_out(tmp_path, baseline_trace=stored_trace)
@@ -270,6 +315,26 @@ def test_recomputed_candidate_uses_recorded_smoothing_window_metadata(tmp_path, 
     assert captured["min_smoothing_window_sec"] == 10.0
     assert captured["max_window_fraction_of_chunk"] == 0.75
     assert captured["large_window_fraction_warning"] == 0.50
+
+
+def test_fit_diagnostics_recompute_does_not_replace_stored_main_candidate(tmp_path):
+    stored_trace = np.linspace(100.0, 101.0, 1000)
+    analysis_out = _make_analysis_out(tmp_path, baseline_trace=stored_trace)
+    table = plotter._load_candidate_table(str(analysis_out))
+    row = plotter._find_candidate_row(table, "CH3", 31)
+    traces = plotter._load_chunk_traces(str(analysis_out), "CH3", 31)
+
+    baseline, source = plotter._recompute_baseline_candidate_trace(traces, row)
+    diagnostics = plotter._compute_baseline_fit_diagnostics(
+        traces,
+        row,
+        plotted_baseline=baseline,
+    )
+
+    assert source == "stored_hdf5"
+    np.testing.assert_allclose(baseline, stored_trace)
+    assert diagnostics["baseline_fit_diagnostics_source"] == "recomputed_from_metadata"
+    assert diagnostics["baseline_ref_recomputed_diff_warning"] is True
 
 
 def test_stored_candidate_shape_mismatch_has_clear_error(tmp_path):

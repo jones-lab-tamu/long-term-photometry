@@ -58,6 +58,8 @@ The dynamic-vs-baseline comparison class is a diagnostic triage field. It combin
 
 Contextual flags, such as response-scale-rich fitted references or negative/mixed coupling, are not treated as automatic failures. The comparison outputs are diagnostic only and do not change dF/F calculation, event detection, or applied correction behavior.
 
+A baseline candidate is considered cleanly viable only when it is available, not low/flat, not response-scale-rich, and supported by a positive smoothed reference-to-signal relationship. Negative, weak, mixed/unclear, or unknown smoothed relationships are preserved as diagnostic findings but downgrade the baseline candidate to contextual review status. This affects diagnostic classification only and does not change correction, dF/F calculation, event detection, or baseline-candidate computation.
+
 ## Reference candidate comparison plots
 
 Reference candidate comparison plots are diagnostic-only overlays of the raw signal, raw reference, existing dynamic fitted reference, and baseline-only candidate. They separate raw/reference context, candidate reference traces, and residual traces into separate panels. Residual traces are plotted on their own y-axis so differences between dynamic-reference subtraction and baseline-candidate subtraction can be inspected without being compressed by fitted-reference amplitudes.
@@ -73,6 +75,23 @@ python tools/plot_reference_candidate_comparison.py ^
   --analysis-out C:\path\to\_analysis\phasic_out ^
   --roi CH3 ^
   --chunks 28,29,30,31,32,33
+```
+
+### Baseline-candidate fit diagnostics
+
+The optional baseline-candidate fit-diagnostics panels show the smoothed signal and smoothed reference used to fit the baseline candidate. They also show the smoothed signal versus smoothed reference relationship, including slope, correlation, fit stage/status, and residual-excluded points when available. These panels are intended to determine whether the baseline candidate is meaningfully reference-informed, negatively or inversely related to the reference, weakly reference-informed, or mostly behaving like a smoothed signal baseline.
+
+These diagnostics are not correction selection. They do not change dF/F calculation, event detection, or applied correction behavior.
+
+Example command:
+
+```powershell
+python tools/plot_reference_candidate_comparison.py ^
+  --analysis-out C:\path\to\_analysis\phasic_out ^
+  --roi CH3 ^
+  --chunks 28,29 ^
+  --include-reference-difference ^
+  --include-baseline-fit-diagnostics
 ```
 
 ## Retuning and safeguards
