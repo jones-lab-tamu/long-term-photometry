@@ -303,6 +303,51 @@ class Hdf5TraceCacheWriter:
                             'dynamic_fit_slope_constrained',
                             constraint_summary.get('constrained_slope_summary', {}),
                         )
+
+                    validity_by_roi = chunk.metadata.get('dynamic_fit_validity_qc', {})
+                    validity_meta = (
+                        validity_by_roi.get(str(roi), {})
+                        if isinstance(validity_by_roi, dict)
+                        else {}
+                    )
+                    if isinstance(validity_meta, dict) and validity_meta:
+                        grp.attrs['dynamic_fit_qc_available'] = True
+                        flags = validity_meta.get('dynamic_fit_qc_flags', [])
+                        if isinstance(flags, (list, tuple)):
+                            grp.attrs['dynamic_fit_qc_flags'] = ';'.join(str(x) for x in flags)
+                        elif flags is not None:
+                            grp.attrs['dynamic_fit_qc_flags'] = str(flags)
+                        for key in (
+                            'fitted_ref_to_signal_range_ratio',
+                            'fitted_ref_to_iso_range_ratio',
+                            'signal_iso_corr',
+                            'signal_fitted_ref_corr',
+                            'iso_fitted_ref_corr',
+                            'slope_fraction_negative',
+                            'unconstrained_slope_fraction_negative',
+                            'final_slope_fraction_negative',
+                            'fitted_ref_total_variance',
+                            'fitted_ref_baseline_scale_fraction',
+                            'fitted_ref_response_scale_fraction',
+                        ):
+                            value = validity_meta.get(key, None)
+                            if value is None:
+                                continue
+                            try:
+                                numeric = float(value)
+                            except Exception:
+                                continue
+                            if np.isfinite(numeric):
+                                grp.attrs[f'dynamic_fit_qc_{key}'] = numeric
+                        for key in (
+                            'dynamic_fit_reference_flat_or_uninformative',
+                            'dynamic_fit_reference_low_range',
+                            'dynamic_fit_negative_or_mixed_coupling',
+                            'dynamic_fit_response_scale_rich',
+                            'dynamic_fit_needs_inspection',
+                        ):
+                            if key in validity_meta:
+                                grp.attrs[f'dynamic_fit_qc_{key}'] = bool(validity_meta.get(key))
             
             # Required Time axis
             grp.create_dataset('time_sec', data=chunk.time_sec, **self._dataset_create_kwargs)

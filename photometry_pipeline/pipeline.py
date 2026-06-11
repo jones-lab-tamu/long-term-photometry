@@ -21,6 +21,7 @@ from .io.adapters import (
     resolve_continuous_source_metadata,
 )
 from .core import preprocessing, regression, normalization, feature_extraction, baseline
+from .core.dynamic_fit_qc import compute_dynamic_fit_validity_metrics
 from .core.utils import natural_sort_key
 from .core.reporting import generate_run_report, append_run_report_warnings
 # from .viz import plots # Moved to run() to avoid side effects
@@ -117,6 +118,24 @@ def _sanitize_metadata(obj):
         return obj
     return repr(obj)
 
+
+def _sanitize_strict_json(obj):
+    """Recursively convert metadata to JSON-safe primitives with no NaN/Infinity."""
+    if isinstance(obj, dict):
+        return {str(k): _sanitize_strict_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_strict_json(x) for x in obj]
+    if isinstance(obj, np.ndarray):
+        return _sanitize_strict_json(obj.tolist())
+    if isinstance(obj, np.generic):
+        return _sanitize_strict_json(obj.item())
+    if isinstance(obj, float):
+        return obj if np.isfinite(obj) else None
+    if isinstance(obj, (str, int, bool)) or obj is None:
+        return obj
+    return repr(obj)
+
+
 def _append_run_report_section(output_dir: str, section: str, payload) -> None:
     """Best-effort run_report.json updater for analysis provenance generated after Pass 1."""
     path = os.path.join(output_dir, "run_report.json")
@@ -160,6 +179,7 @@ class Pipeline:
         self.dynamic_fit_slope_records = []
         self.dynamic_fit_slope_warning_records = []
         self.dynamic_fit_slope_constraint_records = []
+        self.dynamic_fit_qc_records = []
         self.dynamic_fit_slope_warning_summary = {
             "roi_chunk_fits_with_any_negative_slope": 0,
             "roi_chunk_fits_by_warning_level": {
@@ -190,6 +210,90 @@ class Pipeline:
             "bounded_loader_fallback_count": 0,
             "phases": {},
         }
+
+    def _dynamic_fit_roi_metadata(self, chunk: Chunk, fit_mode: str, roi: str) -> dict:
+        if not hasattr(chunk, "metadata") or not isinstance(chunk.metadata, dict):
+            return {}
+        if fit_mode == "global_linear_regression":
+            by_roi = chunk.metadata.get("dynamic_fit_global_linear", {})
+        elif fit_mode == "robust_global_event_reject":
+            by_roi = chunk.metadata.get("dynamic_fit_event_reject", {})
+        elif fit_mode == "adaptive_event_gated_regression":
+            by_roi = chunk.metadata.get("dynamic_fit_adaptive_event_gated", {})
+        else:
+            by_roi = chunk.metadata.get("dynamic_fit_rolling_local", {})
+        if not isinstance(by_roi, dict):
+            return {}
+        payload = by_roi.get(str(roi), {})
+        return payload if isinstance(payload, dict) else {}
+
+    def _record_dynamic_fit_validity_metrics(self, chunk: Chunk, chunk_id: int, source_file: str) -> None:
+        if self.mode == "tonic" or chunk.uv_fit is None:
+            return
+        if not hasattr(chunk, "metadata") or not isinstance(chunk.metadata, dict):
+            return
+        fit_mode = str(chunk.metadata.get("dynamic_fit_mode_resolved", "") or "")
+        slope_constraint = str(getattr(self.config, "dynamic_fit_slope_constraint", "unconstrained"))
+        min_slope = float(getattr(self.config, "dynamic_fit_min_slope", 0.0))
+        acquisition_mode = str(getattr(self.config, "acquisition_mode", "intermittent"))
+        roi_metrics_by_name: dict[str, dict] = {}
+
+        for r_idx, roi in enumerate(chunk.channel_names):
+            roi_name = str(roi)
+            payload = self._dynamic_fit_roi_metadata(chunk, fit_mode, roi_name)
+            slope = payload.get("coef_slope")
+            if slope is None:
+                final_coef = payload.get("final_coef", {}) if isinstance(payload, dict) else {}
+                if isinstance(final_coef, dict) and "slope" in final_coef:
+                    slope = final_coef.get("slope")
+            slope_unconstrained = payload.get("coef_slope_unconstrained")
+            metrics = compute_dynamic_fit_validity_metrics(
+                signal=chunk.sig_raw[:, r_idx],
+                iso=chunk.uv_raw[:, r_idx],
+                fitted_ref=chunk.uv_fit[:, r_idx],
+                sample_rate_hz=float(chunk.fs_hz),
+                slope=slope,
+                local_slope_unconstrained=slope_unconstrained,
+                local_slope_final=payload.get("coef_slope"),
+                fit_mode=fit_mode,
+                slope_constraint=slope_constraint,
+                min_slope=min_slope,
+            )
+            record = {
+                "roi": roi_name,
+                "chunk_id": int(chunk_id),
+                "source_file": str(source_file),
+                "dynamic_fit_mode": fit_mode,
+                "slope_constraint": slope_constraint,
+                "acquisition_mode": acquisition_mode,
+                **_sanitize_metadata(metrics),
+            }
+            self.dynamic_fit_qc_records.append(record)
+            roi_metrics_by_name[roi_name] = record
+
+        if roi_metrics_by_name:
+            chunk.metadata.setdefault("dynamic_fit_validity_qc", {}).update(roi_metrics_by_name)
+
+    def _update_dynamic_fit_qc_summary(self) -> None:
+        records = list(self.dynamic_fit_qc_records)
+        flag_counts: dict[str, int] = {}
+        for rec in records:
+            flags = rec.get("dynamic_fit_qc_flags", [])
+            if isinstance(flags, str):
+                flags = [x for x in flags.split(";") if x]
+            if isinstance(flags, (list, tuple)):
+                for flag in flags:
+                    flag_s = str(flag)
+                    if flag_s:
+                        flag_counts[flag_s] = flag_counts.get(flag_s, 0) + 1
+        summary = {
+            "roi_chunk_fit_count": int(len(records)),
+            "roi_chunk_fits_needing_inspection": int(
+                sum(1 for rec in records if bool(rec.get("dynamic_fit_needs_inspection", False)))
+            ),
+            "flag_counts": {k: int(v) for k, v in sorted(flag_counts.items())},
+        }
+        self.qc_summary["dynamic_fit_validity_qc_summary"] = _sanitize_metadata(summary)
 
     def _record_dynamic_fit_slope_summaries(self, chunk: Chunk, chunk_id: int, source_file: str) -> None:
         if self.mode == "tonic" or not hasattr(chunk, "metadata") or not isinstance(chunk.metadata, dict):
@@ -1190,6 +1294,7 @@ class Pipeline:
                 # SHARED PROCESSING (single source of truth for filtering, regression, dff)
                 chunk = self._apply_standard_analysis(chunk, i)
                 self._record_dynamic_fit_slope_summaries(chunk, i, self._entry_source_file(fpath))
+                self._record_dynamic_fit_validity_metrics(chunk, i, self._entry_source_file(fpath))
                 
                 # Retain for representative plotting
                 if rep_idx is not None and i == rep_idx:
@@ -1242,6 +1347,28 @@ class Pipeline:
             full_feats.to_csv(os.path.join(feats_dir, 'features.csv'), index=False)
             pass2_features_csv_write_sec += (time.perf_counter() - t_feats_write)
 
+        if self.dynamic_fit_qc_records and self.mode != 'tonic':
+            qc_rows = []
+            for rec in self.dynamic_fit_qc_records:
+                row = dict(rec)
+                flags = row.get("dynamic_fit_qc_flags", [])
+                if isinstance(flags, (list, tuple)):
+                    row["dynamic_fit_qc_flags"] = ";".join(str(x) for x in flags)
+                elif flags is None:
+                    row["dynamic_fit_qc_flags"] = ""
+                qc_rows.append(row)
+            pd.DataFrame(qc_rows).to_csv(
+                os.path.join(output_dir, "qc", "dynamic_fit_qc_by_chunk.csv"),
+                index=False,
+            )
+            with open(os.path.join(output_dir, "qc", "dynamic_fit_qc_by_chunk.json"), "w") as f:
+                json.dump(
+                    _sanitize_strict_json(self.dynamic_fit_qc_records),
+                    f,
+                    indent=2,
+                    allow_nan=False,
+                )
+
         total_chunks = len(self.file_list)
         if total_chunks > 0:
             self.qc_summary['chunk_fail_fraction'] = len(self.qc_summary.get('failed_chunks', [])) / total_chunks
@@ -1257,6 +1384,7 @@ class Pipeline:
                 logging.warning(f"Baseline invalid for {len(bad_rois)} ROIs across {total_chunks} chunks ({total_affected} pairs).")
         self._update_dynamic_fit_slope_warning_summary()
         self._update_dynamic_fit_slope_constraint_summary()
+        self._update_dynamic_fit_qc_summary()
             
         if self.mode != 'tonic':
             t_qc_write = time.perf_counter()

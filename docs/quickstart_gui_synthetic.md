@@ -98,6 +98,7 @@ Inspect these outputs first:
 - `Tables` for event-rate, AUC, and trace-summary CSV outputs
 
 Correction-quality plots are important. They show whether the isosbestic/reference fit is plausible before interpreting event tables.
+Correction inspection outputs also include per-chunk dynamic-fit QC metrics under the phasic analysis `qc/` folder.
 
 ## 7. Export and reuse outputs
 

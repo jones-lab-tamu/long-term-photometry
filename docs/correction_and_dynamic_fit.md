@@ -32,6 +32,14 @@ Bleach correction metadata and diagnostics are written into run outputs and corr
 
 `baseline_subtract_before_fit` applies to rolling fit modes. It can reduce slow baseline influence on local fit estimation. It does not replace baseline/F0 handling used for dF/F calculation.
 
+## Dynamic-fit validity diagnostics
+
+Dynamic-fit validity diagnostics are per-chunk QC metrics that do not change correction behavior. They help identify chunks where the fitted reference is flat, uninformative, negative or mixed-sign in its coupling, or unusually rich in response-scale structure.
+
+Flags indicate chunks needing inspection, not automatic exclusion or automatic correction-mode selection. For sensors or regions with broad slow responses, response-scale-rich fitted references may indicate that the reference fit is modeling biological signal rather than artifact.
+
+The phasic output writes machine-readable diagnostics under `qc/dynamic_fit_qc_by_chunk.csv` and `qc/dynamic_fit_qc_by_chunk.json` when fitted references are available. Later workflows may use these metrics to compare full dynamic reference correction with baseline-only reference correction.
+
 ## Retuning and safeguards
 
 Correction retuning is for evaluating correction-sensitive settings on representative traces and writing retuned diagnostic outputs. Downstream event reanalysis changes event-facing thresholds/features after correction without recomputing upstream correction.

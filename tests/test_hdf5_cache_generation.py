@@ -184,3 +184,45 @@ def test_pipeline_integration_cache_production(tmp_path):
         grp = f[f'roi/{roi}/chunk_{chunk}']
         assert 'time_sec' in grp
         assert 'dff' in grp
+        found_dynamic_fit_qc_attrs = False
+        for roi_raw in rois:
+            roi_name = roi_raw.decode('utf-8') if isinstance(roi_raw, bytes) else str(roi_raw)
+            for chunk_id in f['meta/chunk_ids'][:]:
+                candidate = f[f'roi/{roi_name}/chunk_{int(chunk_id)}']
+                if bool(candidate.attrs.get("dynamic_fit_qc_available", False)):
+                    qc_attr_names = [
+                        str(name)
+                        for name in candidate.attrs.keys()
+                        if str(name).startswith("dynamic_fit_qc_")
+                    ]
+                    if (
+                        "dynamic_fit_qc_flags" in candidate.attrs
+                        or any(name != "dynamic_fit_qc_available" for name in qc_attr_names)
+                    ):
+                        found_dynamic_fit_qc_attrs = True
+                        break
+            if found_dynamic_fit_qc_attrs:
+                break
+        assert found_dynamic_fit_qc_attrs
+
+    qc_csv = out_dir / "_analysis" / "phasic_out" / "qc" / "dynamic_fit_qc_by_chunk.csv"
+    qc_json = out_dir / "_analysis" / "phasic_out" / "qc" / "dynamic_fit_qc_by_chunk.json"
+    assert qc_csv.exists()
+    assert qc_json.exists()
+    qc_json_text = qc_json.read_text(encoding="utf-8")
+    assert "NaN" not in qc_json_text
+    assert "Infinity" not in qc_json_text
+    qc_df = pd.read_csv(qc_csv)
+    assert len(qc_df) >= 1
+    for col in [
+        "roi",
+        "chunk_id",
+        "source_file",
+        "dynamic_fit_mode",
+        "slope_constraint",
+        "fitted_ref_to_signal_range_ratio",
+        "fitted_ref_response_scale_fraction",
+        "dynamic_fit_needs_inspection",
+        "dynamic_fit_qc_flags",
+    ]:
+        assert col in qc_df.columns
