@@ -318,7 +318,7 @@ def parse_and_validate_dynamic_fit_slope_constraint_knobs(
     if not math.isfinite(min_slope):
         return None, "Minimum allowed slope must be a finite number."
     if constraint == "nonnegative" and min_slope < 0.0:
-        return None, "Minimum allowed slope must be >= 0 when negative slopes are prevented."
+        return None, "Minimum allowed slope must be >= 0 when nonnegative reference coupling is required."
     return {
         "dynamic_fit_slope_constraint": constraint,
         "dynamic_fit_min_slope": min_slope,
@@ -403,7 +403,7 @@ _BLEACH_CORRECTION_MODE_LABELS = {
 }
 _DYNAMIC_FIT_SLOPE_CONSTRAINT_LABELS = {
     "unconstrained": "Unconstrained",
-    "nonnegative": "Prevent negative slopes",
+    "nonnegative": "Require nonnegative reference coupling (diagnostic)",
 }
 _SIGNAL_EXCURSION_POLARITY_LABELS = {
     "positive": "Positive only",
@@ -436,16 +436,14 @@ _DYNAMIC_FIT_TOOLTIPS = {
         "signal and isosbestic traces before dynamic fitting. Off by default."
     ),
     "dynamic_fit_slope_constraint": (
-        "Constrains the UV-to-signal fit slope to be nonnegative before constructing "
-        "the fitted reference. This prevents the fitted UV/reference trace from "
-        "flipping polarity relative to the UV channel. Use cautiously for recordings "
-        "where event-gated or local fitting estimates negative slopes around large "
-        "events. Constraint application is reported in QC/provenance."
+        "Diagnostic only. Requires nonnegative UV/reference-to-signal coupling. "
+        "May suppress dynamic fitting or cause fallback/flat fits when positive "
+        "coupling is unsupported. Not a general correction fix."
     ),
     "dynamic_fit_min_slope": (
-        "Minimum slope used when negative slopes are prevented. Default 0.0 clamps "
-        "negative fitted slopes to zero; use cautiously because stronger minimums can "
-        "bias UV/reference correction."
+        "Minimum slope for the nonnegative reference-coupling diagnostic. Default "
+        "0.0. Stronger minimums are advanced interventions and can bias "
+        "UV/reference correction."
     ),
     "regression_window_sec": (
         "Rolling modes only. Local regression window length in seconds. Larger values make the fit "
@@ -8956,6 +8954,8 @@ class MainWindow(QMainWindow):
         constrained = self._selected_dynamic_fit_slope_constraint() == "nonnegative"
         if hasattr(self, "_dynamic_fit_min_slope_spin"):
             self._dynamic_fit_min_slope_spin.setEnabled(constrained)
+        if hasattr(self, "_dynamic_fit_slope_constraint_warning"):
+            self._dynamic_fit_slope_constraint_warning.setVisible(constrained)
 
     def _apply_dynamic_fit_mode_ui_state(self) -> None:
         fit_mode = self._selected_dynamic_fit_mode()
@@ -9165,7 +9165,7 @@ class MainWindow(QMainWindow):
                 else "Bleach Correction: (inactive in tonic mode)"
             ),
             (
-                "UV/reference slope constraint: "
+                "Reference coupling diagnostic: "
                 + dynamic_fit_slope_constraint_label(
                     self._selected_dynamic_fit_slope_constraint()
                 )
@@ -9175,7 +9175,7 @@ class MainWindow(QMainWindow):
                     else ""
                 )
                 if phasic_active
-                else "UV/reference slope constraint: (inactive in tonic mode)"
+                else "Reference coupling diagnostic: (inactive in tonic mode)"
             ),
             (
                 "Signal Excursion Polarity: "
@@ -10252,9 +10252,20 @@ class MainWindow(QMainWindow):
             self._on_config_changed
         )
         iso_sampling_form.addRow(
-            "UV/reference slope constraint:",
+            "Reference coupling diagnostic:",
             self._dynamic_fit_slope_constraint_combo,
         )
+        self._dynamic_fit_slope_constraint_warning = QLabel(
+            "Nonnegative reference coupling is diagnostic. It may suppress dynamic "
+            "fitting when the signal/reference relationship is negative or mixed-sign. "
+            "Use this to test correction support, not as a default correction fix."
+        )
+        self._dynamic_fit_slope_constraint_warning.setWordWrap(True)
+        self._dynamic_fit_slope_constraint_warning.setToolTip(
+            _DYNAMIC_FIT_TOOLTIPS["dynamic_fit_slope_constraint"]
+        )
+        self._dynamic_fit_slope_constraint_warning.setVisible(False)
+        iso_sampling_form.addRow("", self._dynamic_fit_slope_constraint_warning)
 
         self._dynamic_fit_min_slope_spin = QDoubleSpinBox()
         self._dynamic_fit_min_slope_spin.setRange(-1_000_000.0, 1_000_000.0)

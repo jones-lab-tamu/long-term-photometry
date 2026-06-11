@@ -46,8 +46,10 @@ Safeguards against post hoc bias include:
 
 Once selected, settings should be applied consistently across the relevant dataset or reused through a saved configuration.
 
-## Optional nonnegative slope constraint
+## Advanced nonnegative slope diagnostic
 
-The optional negative-slope constraint prevents finite fitted UV/reference slopes from going below `dynamic_fit_min_slope` when `dynamic_fit_slope_constraint: nonnegative` is selected.
+The nonnegative slope constraint is an advanced diagnostic option. It asks whether the fitted reference remains supported when UV/reference-to-signal coupling is required to be nonnegative.
 
-Default behavior is `unconstrained`. Nonnegative mode is an explicit reported intervention. It can prevent reference-polarity inversion, but it does not prove that the corrected trace is biologically true.
+Default behavior is `unconstrained`. Nonnegative mode is an explicit reported intervention, not a default correction improvement, and does not prove that the corrected trace is biologically true. If enabling this option causes the fitted reference to collapse, flatten, or fall back, the recording should not be interpreted as successfully corrected under the constrained model. Instead, this indicates that isosbestic regression may be unsupported, negative, or mixed-sign for that chunk or dataset.
+
+Users should inspect correction-quality plots and slope diagnostics before using constrained results.

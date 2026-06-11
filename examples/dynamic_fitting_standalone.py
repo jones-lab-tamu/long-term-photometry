@@ -35,10 +35,11 @@ Example::
     fit_reference = result["iso_fit_signal_units"]
     delta_f = signal - fit_reference
 
-Set ``slope_constraint="nonnegative"`` to prevent finite negative
-UV/reference slopes from being used in the fitted reference. This is an
-explicit correction intervention; inspect ``result["slope_constraint_summary"]``
-and report how often clamping occurred.
+Set ``slope_constraint="nonnegative"`` only as an advanced diagnostic. It
+requires nonnegative UV/reference-to-signal coupling and reports whether the
+fitted reference remains supported under that assumption. Collapsed, flat, or
+fallback fits indicate unsupported negative or mixed-sign coupling rather than
+a general correction improvement.
 """
 
 from typing import Any, Dict, List, Optional

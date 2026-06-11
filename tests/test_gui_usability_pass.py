@@ -259,6 +259,7 @@ def test_advanced_tooltips_present(window):
         ("Dynamic Fit Mode:", window._dynamic_fit_mode_combo),
         ("Baseline subtract before fit:", window._baseline_subtract_before_fit_cb),
         ("Bleach Correction:", window._bleach_correction_mode_combo),
+        ("Reference coupling diagnostic:", window._dynamic_fit_slope_constraint_combo),
         ("Regression Window:", window._window_sec_edit),
         ("Min Samples per Window:", window._min_samples_per_window_spin),
         ("Lowpass Filter:", window._lowpass_hz_edit),
@@ -302,6 +303,18 @@ def test_advanced_tooltips_present(window):
     assert "displayed plotted series" in display_series_tip
     assert "external replotting" in display_series_tip
     assert "not canonical raw/full-resolution analysis" in display_series_tip
+    slope_label = window._dynamic_fit_slope_constraint_combo.itemText(
+        window._dynamic_fit_slope_constraint_combo.findData("nonnegative")
+    ).lower()
+    slope_tip = window._dynamic_fit_slope_constraint_combo.toolTip().lower()
+    assert "diagnostic" in slope_label
+    assert "nonnegative reference coupling" in slope_label
+    assert "diagnostic only" in slope_tip
+    assert "not a general correction fix" in slope_tip
+    assert "prevent negative slopes" not in slope_label
+    assert "prevent negative slopes" not in slope_tip
+    assert "diagnostic" in window._dynamic_fit_slope_constraint_warning.text().lower()
+    assert "not as a default correction fix" in window._dynamic_fit_slope_constraint_warning.text().lower()
     inline_anchor_help_lines = window._timeline_anchor_help_label.text().splitlines()
     assert inline_anchor_help_lines == [
         "Civil clock: real time-of-day",
@@ -335,6 +348,7 @@ def test_gui_dynamic_fit_mode_default_and_global_override_in_run_spec(window):
     assert window._dynamic_fit_slope_constraint_combo.currentData() == "unconstrained"
     assert window._dynamic_fit_min_slope_spin.value() == pytest.approx(0.0)
     assert not window._dynamic_fit_min_slope_spin.isEnabled()
+    assert window._dynamic_fit_slope_constraint_warning.isHidden()
 
     visible_modes = [
         window._dynamic_fit_mode_combo.itemData(i)
@@ -419,6 +433,7 @@ def test_gui_dynamic_fit_slope_constraint_plumbs_into_run_spec(window):
     window._dynamic_fit_min_slope_spin.setValue(0.0)
 
     assert window._dynamic_fit_min_slope_spin.isEnabled()
+    assert not window._dynamic_fit_slope_constraint_warning.isHidden()
     assert window._validate_gui_inputs() is None
     spec = window._build_run_spec(validate_only=True)
     assert spec.config_overrides.get("dynamic_fit_slope_constraint") == "nonnegative"
@@ -469,6 +484,7 @@ def test_gui_dynamic_fit_slope_constraint_settings_load_nonnegative(window):
     assert window._dynamic_fit_slope_constraint_combo.currentData() == "nonnegative"
     assert window._dynamic_fit_min_slope_spin.value() == pytest.approx(0.0)
     assert window._dynamic_fit_min_slope_spin.isEnabled()
+    assert not window._dynamic_fit_slope_constraint_warning.isHidden()
 
 
 def test_display_series_export_checkbox_plumbs_into_run_spec(window):

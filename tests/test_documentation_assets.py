@@ -69,6 +69,16 @@ def test_key_documentation_files_exist_and_reference_bundled_dataset():
     assert "not biological validation" in quickstart.lower()
 
 
+def test_nonnegative_slope_constraint_docs_are_diagnostic_not_correction_fix():
+    doc_text = "\n".join(path.read_text(encoding="utf-8") for path in DOC_PATHS)
+    lower = doc_text.lower()
+
+    assert "prevent negative slopes" not in lower
+    assert "advanced diagnostic" in lower
+    assert "not a general correction improvement" in lower
+    assert "unconstrained" in lower
+
+
 def test_readme_documentation_links_point_to_existing_local_paths():
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     for rel in README_LINKS:

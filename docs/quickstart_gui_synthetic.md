@@ -48,13 +48,13 @@ For the first run, use the config provided with the dataset.
 
 Key defaults in this tutorial config:
 - dynamic fit mode: `robust_global_event_reject`
-- negative-slope constraint: default package behavior is unconstrained unless changed in the GUI/config
+- nonnegative reference-coupling diagnostic: default package behavior is unconstrained unless changed in the GUI/config
 - bleach correction: not enabled in this tutorial config
 - event detection: conservative tutorial defaults using `mean_std`, `peak_threshold_k=2.5`, `peak_min_distance_sec=1.0`, `peak_min_prominence_k=2.0`, and `peak_min_width_sec=0.3`
 
 These event settings are intended to avoid obvious noise-floor over-detection in the bundled synthetic demo. They are not universally optimal for every sensor or dataset. Users can lower threshold or prominence settings for weaker events, but should apply the chosen settings consistently across comparable datasets and rely on saved configs/provenance.
 
-The optional `Prevent negative slopes` / nonnegative slope constraint can be useful when the fitted reference channel inverts polarity. Treat it as an explicit analysis intervention and report it if used. Do not enable it by default just because a warning appears; inspect correction-quality plots first.
+The nonnegative slope constraint is an advanced diagnostic option. It tests whether dynamic correction remains supported when UV/reference-to-signal coupling is required to be nonnegative. It is not a general correction improvement. If enabling it causes the fitted reference to collapse, flatten, or fall back, interpret that as evidence that positive reference coupling is unsupported for that chunk or dataset. Inspect correction-quality plots and diagnostics before using constrained results.
 
 ## 4. Validate before running
 
@@ -138,6 +138,6 @@ See `docs/batch_processing.md`.
 - Only part of a continuous trace is visible: this is expected for long recordings; use continuous summary and overview outputs.
 - Correction fit looks wrong: inspect signal/reference and dynamic-fit plots before changing event thresholds.
 - Large events distort fit: try robust/event-gated dynamic fit settings or correction retuning on representative traces.
-- Negative slope warning appears: inspect correction plots; nonnegative slope constraint is optional and should be reported if used.
+- Negative slope warning appears: inspect correction plots; the nonnegative reference-coupling diagnostic is optional, advanced, and should be reported if used.
 - Need logs/status: check `status.json`, `events.ndjson` when enabled, `MANIFEST.json`, and `run_report.json` in the run directory.
 - Batch row failed: open `batch_manifest.csv` / `batch_manifest.json` in the batch output root and inspect the failed row output folder.

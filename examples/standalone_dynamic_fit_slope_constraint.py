@@ -12,9 +12,11 @@ The package file photometry_pipeline/core/dynamic_fitting.py is package-oriented
 and imports slope_qc.py. For a single-file standalone copy, use
 examples/dynamic_fitting_standalone.py.
 
-The nonnegative slope constraint prevents fitted UV/reference polarity
-inversion, but it does not prove the corrected trace is biologically true.
-Report clamping as an explicit intervention.
+The nonnegative slope constraint is an advanced diagnostic. It tests
+whether the fitted reference remains supported when UV/reference-to-signal
+coupling is required to be nonnegative. Collapsed, flat, or fallback fits
+indicate unsupported negative or mixed-sign coupling, not a general correction
+improvement.
 """
 
 from __future__ import annotations

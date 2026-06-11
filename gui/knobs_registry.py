@@ -180,17 +180,18 @@ KNOB_META: Dict[str, dict] = {
         "help": "Isosbestic fit engine selector for rolling, global linear, or robust global event-reject fitting.",
     },
     "dynamic_fit_slope_constraint": {
-        "label": "UV/reference slope constraint",
+        "label": "Reference coupling diagnostic",
         "help": (
-            "Optional slope guardrail for UV-to-signal dynamic fitting. "
-            "'nonnegative' prevents inverted UV/reference correction by clamping "
-            "negative fitted slopes before constructing the fitted reference."
+            "Advanced diagnostic for UV/reference-to-signal coupling. "
+            "'nonnegative' tests whether dynamic correction remains supported when "
+            "reference coupling is required to be nonnegative. Not a general "
+            "correction improvement."
         ),
     },
     "dynamic_fit_min_slope": {
         "label": "Minimum allowed slope",
         "help": (
-            "Minimum slope used when UV/reference slope constraint is nonnegative. "
+            "Minimum slope used when the nonnegative reference-coupling diagnostic is enabled. "
             "Must be finite and >= 0 when the nonnegative constraint is enabled."
         ),
     },
