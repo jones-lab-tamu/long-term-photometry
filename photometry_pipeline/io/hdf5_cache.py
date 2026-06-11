@@ -312,11 +312,20 @@ class Hdf5TraceCacheWriter:
                     )
                     if isinstance(validity_meta, dict) and validity_meta:
                         grp.attrs['dynamic_fit_qc_available'] = True
-                        flags = validity_meta.get('dynamic_fit_qc_flags', [])
-                        if isinstance(flags, (list, tuple)):
-                            grp.attrs['dynamic_fit_qc_flags'] = ';'.join(str(x) for x in flags)
-                        elif flags is not None:
-                            grp.attrs['dynamic_fit_qc_flags'] = str(flags)
+                        for flag_key in (
+                            'dynamic_fit_qc_flags',
+                            'dynamic_fit_qc_hard_flags',
+                            'dynamic_fit_qc_soft_flags',
+                        ):
+                            flags = validity_meta.get(flag_key, [])
+                            if isinstance(flags, (list, tuple)):
+                                grp.attrs[flag_key] = ';'.join(str(x) for x in flags)
+                            elif flags is not None:
+                                grp.attrs[flag_key] = str(flags)
+                        if validity_meta.get('dynamic_fit_qc_severity') is not None:
+                            grp.attrs['dynamic_fit_qc_severity'] = str(
+                                validity_meta.get('dynamic_fit_qc_severity')
+                            )
                         for key in (
                             'fitted_ref_to_signal_range_ratio',
                             'fitted_ref_to_iso_range_ratio',
@@ -345,6 +354,8 @@ class Hdf5TraceCacheWriter:
                             'dynamic_fit_negative_or_mixed_coupling',
                             'dynamic_fit_response_scale_rich',
                             'dynamic_fit_needs_inspection',
+                            'dynamic_fit_has_hard_flags',
+                            'dynamic_fit_has_soft_flags',
                         ):
                             if key in validity_meta:
                                 grp.attrs[f'dynamic_fit_qc_{key}'] = bool(validity_meta.get(key))

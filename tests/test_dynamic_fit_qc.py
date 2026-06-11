@@ -18,25 +18,39 @@ def test_flat_fitted_reference_is_flagged():
     metrics = compute_dynamic_fit_validity_metrics(signal, iso, fitted_ref, fs)
 
     assert metrics["dynamic_fit_reference_flat_or_uninformative"] is True
+    assert metrics["dynamic_fit_reference_low_range"] is True
+    assert "FITTED_REFERENCE_LOW_RANGE" in metrics["dynamic_fit_qc_flags"]
+    assert "FITTED_REFERENCE_LOW_RANGE" in metrics["dynamic_fit_qc_hard_flags"]
     assert "FITTED_REFERENCE_FLAT_OR_UNINFORMATIVE" in metrics["dynamic_fit_qc_flags"]
+    assert "FITTED_REFERENCE_FLAT_OR_UNINFORMATIVE" in metrics["dynamic_fit_qc_hard_flags"]
+    assert metrics["dynamic_fit_qc_soft_flags"] == []
+    assert metrics["dynamic_fit_needs_inspection"] is True
+    assert metrics["dynamic_fit_qc_severity"] == "inspect"
     assert metrics["fitted_ref_to_signal_range_ratio"] < 0.05
 
 
-def test_informative_fitted_reference_is_not_flat():
+def test_reasonable_fitted_reference_has_ok_severity():
     fs = 10.0
-    t = np.arange(1200, dtype=float) / fs
-    signal = 2.0 + np.sin(2.0 * np.pi * 0.02 * t)
-    iso = 1.0 + 0.8 * np.sin(2.0 * np.pi * 0.02 * t + 0.1)
-    fitted_ref = 1.8 + 0.7 * np.sin(2.0 * np.pi * 0.02 * t + 0.05)
+    t = np.arange(3600, dtype=float) / fs
+    signal = 2.0 + np.sin(2.0 * np.pi * (1.0 / 300.0) * t)
+    iso = 1.0 + 0.8 * np.sin(2.0 * np.pi * (1.0 / 300.0) * t + 0.1)
+    fitted_ref = 1.8 + 0.7 * np.sin(2.0 * np.pi * (1.0 / 300.0) * t + 0.05)
 
     metrics = compute_dynamic_fit_validity_metrics(signal, iso, fitted_ref, fs)
 
     assert metrics["dynamic_fit_reference_flat_or_uninformative"] is False
+    assert metrics["dynamic_fit_qc_flags"] == []
+    assert metrics["dynamic_fit_qc_hard_flags"] == []
+    assert metrics["dynamic_fit_qc_soft_flags"] == []
+    assert metrics["dynamic_fit_has_hard_flags"] is False
+    assert metrics["dynamic_fit_has_soft_flags"] is False
+    assert metrics["dynamic_fit_needs_inspection"] is False
+    assert metrics["dynamic_fit_qc_severity"] == "ok"
     assert metrics["fitted_ref_to_signal_range_ratio"] > 0.2
     assert metrics["fitted_ref_to_iso_range_ratio"] > 0.2
 
 
-def test_negative_or_mixed_slope_is_flagged():
+def test_negative_or_mixed_slope_alone_is_contextual_not_inspection_failure():
     fs = 10.0
     t = np.arange(600, dtype=float) / fs
     signal = np.sin(2.0 * np.pi * 0.03 * t)
@@ -48,10 +62,16 @@ def test_negative_or_mixed_slope_is_flagged():
 
     assert metrics["dynamic_fit_negative_or_mixed_coupling"] is True
     assert "NEGATIVE_OR_MIXED_REFERENCE_COUPLING" in metrics["dynamic_fit_qc_flags"]
+    assert "NEGATIVE_OR_MIXED_REFERENCE_COUPLING" in metrics["dynamic_fit_qc_soft_flags"]
+    assert metrics["dynamic_fit_qc_hard_flags"] == []
+    assert metrics["dynamic_fit_has_hard_flags"] is False
+    assert metrics["dynamic_fit_has_soft_flags"] is True
+    assert metrics["dynamic_fit_needs_inspection"] is False
+    assert metrics["dynamic_fit_qc_severity"] == "context"
     assert metrics["slope_fraction_negative"] > 0.25
 
 
-def test_response_scale_power_is_flagged():
+def test_response_scale_power_alone_is_contextual_not_inspection_failure():
     fs = 10.0
     t = np.arange(3600, dtype=float) / fs
     fitted_ref = np.sin(2.0 * np.pi * (1.0 / 30.0) * t)
@@ -62,7 +82,49 @@ def test_response_scale_power_is_flagged():
 
     assert metrics["dynamic_fit_response_scale_rich"] is True
     assert "FITTED_REFERENCE_RESPONSE_SCALE_RICH" in metrics["dynamic_fit_qc_flags"]
+    assert "FITTED_REFERENCE_RESPONSE_SCALE_RICH" in metrics["dynamic_fit_qc_soft_flags"]
+    assert metrics["dynamic_fit_qc_hard_flags"] == []
+    assert metrics["dynamic_fit_has_hard_flags"] is False
+    assert metrics["dynamic_fit_has_soft_flags"] is True
+    assert metrics["dynamic_fit_needs_inspection"] is False
+    assert metrics["dynamic_fit_qc_severity"] == "context"
     assert metrics["fitted_ref_response_scale_fraction"] > 0.35
+
+
+def test_soft_plus_hard_flag_remains_inspect():
+    fs = 10.0
+    t = np.arange(3600, dtype=float) / fs
+    fitted_ref = 0.01 * np.sin(2.0 * np.pi * (1.0 / 30.0) * t)
+    signal = 2.0 * np.sin(2.0 * np.pi * (1.0 / 300.0) * t)
+    iso = 1.5 * np.sin(2.0 * np.pi * (1.0 / 300.0) * t + 0.2)
+    slope = np.r_[np.full(2000, -0.5), np.full(1600, 0.8)]
+
+    metrics = compute_dynamic_fit_validity_metrics(signal, iso, fitted_ref, fs, slope=slope)
+
+    assert metrics["dynamic_fit_response_scale_rich"] is True
+    assert "FITTED_REFERENCE_RESPONSE_SCALE_RICH" in metrics["dynamic_fit_qc_soft_flags"]
+    assert "NEGATIVE_OR_MIXED_REFERENCE_COUPLING" in metrics["dynamic_fit_qc_soft_flags"]
+    assert "FITTED_REFERENCE_LOW_RANGE" in metrics["dynamic_fit_qc_hard_flags"]
+    assert metrics["dynamic_fit_has_hard_flags"] is True
+    assert metrics["dynamic_fit_has_soft_flags"] is True
+    assert metrics["dynamic_fit_needs_inspection"] is True
+    assert metrics["dynamic_fit_qc_severity"] == "inspect"
+
+
+def test_low_range_remains_hard_inspection_flag():
+    fs = 10.0
+    t = np.arange(1200, dtype=float) / fs
+    signal = 2.0 + np.sin(2.0 * np.pi * 0.02 * t)
+    iso = 1.0 + 0.8 * np.sin(2.0 * np.pi * 0.02 * t + 0.1)
+    fitted_ref = 1.8 + 0.01 * np.sin(2.0 * np.pi * 0.02 * t + 0.05)
+
+    metrics = compute_dynamic_fit_validity_metrics(signal, iso, fitted_ref, fs)
+
+    assert metrics["dynamic_fit_reference_low_range"] is True
+    assert "FITTED_REFERENCE_LOW_RANGE" in metrics["dynamic_fit_qc_hard_flags"]
+    assert metrics["dynamic_fit_has_hard_flags"] is True
+    assert metrics["dynamic_fit_needs_inspection"] is True
+    assert metrics["dynamic_fit_qc_severity"] == "inspect"
 
 
 def test_baseline_scale_power_is_not_response_rich():

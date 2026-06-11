@@ -277,6 +277,9 @@ class Pipeline:
     def _update_dynamic_fit_qc_summary(self) -> None:
         records = list(self.dynamic_fit_qc_records)
         flag_counts: dict[str, int] = {}
+        severity_counts = {"ok": 0, "context": 0, "inspect": 0}
+        hard_flag_fit_count = 0
+        context_only_fit_count = 0
         for rec in records:
             flags = rec.get("dynamic_fit_qc_flags", [])
             if isinstance(flags, str):
@@ -286,12 +289,31 @@ class Pipeline:
                     flag_s = str(flag)
                     if flag_s:
                         flag_counts[flag_s] = flag_counts.get(flag_s, 0) + 1
+            hard_flags = rec.get("dynamic_fit_qc_hard_flags", [])
+            soft_flags = rec.get("dynamic_fit_qc_soft_flags", [])
+            if isinstance(hard_flags, str):
+                hard_flags = [x for x in hard_flags.split(";") if x]
+            if isinstance(soft_flags, str):
+                soft_flags = [x for x in soft_flags.split(";") if x]
+            has_hard = isinstance(hard_flags, (list, tuple)) and bool(hard_flags)
+            has_soft = isinstance(soft_flags, (list, tuple)) and bool(soft_flags)
+            severity = str(rec.get("dynamic_fit_qc_severity", "") or "").strip().lower()
+            if severity not in severity_counts:
+                severity = "inspect" if has_hard else ("context" if has_soft else "ok")
+            severity_counts[severity] += 1
+            if has_hard:
+                hard_flag_fit_count += 1
+            elif has_soft:
+                context_only_fit_count += 1
         summary = {
             "roi_chunk_fit_count": int(len(records)),
             "roi_chunk_fits_needing_inspection": int(
                 sum(1 for rec in records if bool(rec.get("dynamic_fit_needs_inspection", False)))
             ),
             "flag_counts": {k: int(v) for k, v in sorted(flag_counts.items())},
+            "severity_counts": {k: int(v) for k, v in sorted(severity_counts.items())},
+            "roi_chunk_fits_with_hard_flags": int(hard_flag_fit_count),
+            "roi_chunk_fits_with_context_only_flags": int(context_only_fit_count),
         }
         self.qc_summary["dynamic_fit_validity_qc_summary"] = _sanitize_metadata(summary)
 
@@ -1351,11 +1373,16 @@ class Pipeline:
             qc_rows = []
             for rec in self.dynamic_fit_qc_records:
                 row = dict(rec)
-                flags = row.get("dynamic_fit_qc_flags", [])
-                if isinstance(flags, (list, tuple)):
-                    row["dynamic_fit_qc_flags"] = ";".join(str(x) for x in flags)
-                elif flags is None:
-                    row["dynamic_fit_qc_flags"] = ""
+                for list_key in (
+                    "dynamic_fit_qc_flags",
+                    "dynamic_fit_qc_hard_flags",
+                    "dynamic_fit_qc_soft_flags",
+                ):
+                    flags = row.get(list_key, [])
+                    if isinstance(flags, (list, tuple)):
+                        row[list_key] = ";".join(str(x) for x in flags)
+                    elif flags is None:
+                        row[list_key] = ""
                 qc_rows.append(row)
             pd.DataFrame(qc_rows).to_csv(
                 os.path.join(output_dir, "qc", "dynamic_fit_qc_by_chunk.csv"),

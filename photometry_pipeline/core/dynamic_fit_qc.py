@@ -15,6 +15,14 @@ BASELINE_SCALE_MAX_HZ = 1.0 / 300.0
 RESPONSE_SCALE_MIN_HZ = 1.0 / 120.0
 RESPONSE_SCALE_MAX_HZ = 1.0 / 10.0
 DEFAULT_NEAR_ZERO_SLOPE_TOL = 1e-9
+HARD_DYNAMIC_FIT_QC_FLAGS = {
+    "FITTED_REFERENCE_LOW_RANGE",
+    "FITTED_REFERENCE_FLAT_OR_UNINFORMATIVE",
+}
+SOFT_DYNAMIC_FIT_QC_FLAGS = {
+    "FITTED_REFERENCE_RESPONSE_SCALE_RICH",
+    "NEGATIVE_OR_MIXED_REFERENCE_COUPLING",
+}
 
 
 def _json_float(value: Any) -> float:
@@ -262,18 +270,21 @@ def compute_dynamic_fit_validity_metrics(
     response_frac = _json_float(metrics.get("fitted_ref_response_scale_fraction", float("nan")))
     response_rich = bool(np.isfinite(response_frac) and response_frac > 0.35)
 
-    flags: list[str] = []
+    hard_flags: list[str] = []
+    soft_flags: list[str] = []
     if low_range:
-        flags.append("FITTED_REFERENCE_LOW_RANGE")
+        hard_flags.append("FITTED_REFERENCE_LOW_RANGE")
     if flat_or_uninformative:
-        flags.append("FITTED_REFERENCE_FLAT_OR_UNINFORMATIVE")
+        hard_flags.append("FITTED_REFERENCE_FLAT_OR_UNINFORMATIVE")
     if negative_or_mixed:
-        flags.append("NEGATIVE_OR_MIXED_REFERENCE_COUPLING")
+        soft_flags.append("NEGATIVE_OR_MIXED_REFERENCE_COUPLING")
     if response_rich:
-        flags.append("FITTED_REFERENCE_RESPONSE_SCALE_RICH")
-    needs_inspection = bool(flags)
+        soft_flags.append("FITTED_REFERENCE_RESPONSE_SCALE_RICH")
+    flags: list[str] = [*hard_flags, *soft_flags]
+    needs_inspection = bool(hard_flags)
     if needs_inspection:
         flags.append("DYNAMIC_FIT_NEEDS_INSPECTION")
+    severity = "inspect" if hard_flags else ("context" if soft_flags else "ok")
 
     metrics.update(
         {
@@ -283,6 +294,11 @@ def compute_dynamic_fit_validity_metrics(
             "dynamic_fit_response_scale_rich": bool(response_rich),
             "dynamic_fit_needs_inspection": bool(needs_inspection),
             "dynamic_fit_qc_flags": flags,
+            "dynamic_fit_qc_hard_flags": hard_flags,
+            "dynamic_fit_qc_soft_flags": soft_flags,
+            "dynamic_fit_qc_severity": severity,
+            "dynamic_fit_has_hard_flags": bool(hard_flags),
+            "dynamic_fit_has_soft_flags": bool(soft_flags),
         }
     )
     return metrics

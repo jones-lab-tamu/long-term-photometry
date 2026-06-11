@@ -34,9 +34,13 @@ Bleach correction metadata and diagnostics are written into run outputs and corr
 
 ## Dynamic-fit validity diagnostics
 
-Dynamic-fit validity diagnostics are per-chunk QC metrics that do not change correction behavior. They help identify chunks where the fitted reference is flat, uninformative, negative or mixed-sign in its coupling, or unusually rich in response-scale structure.
+Dynamic-fit validity diagnostics are per-chunk QC metrics that do not change correction behavior. They describe model-assumption concerns, not biological truth. They help identify chunks where the fitted reference is flat, uninformative, negative or mixed-sign in its coupling, or unusually rich in response-scale structure.
 
-Flags indicate chunks needing inspection, not automatic exclusion or automatic correction-mode selection. For sensors or regions with broad slow responses, response-scale-rich fitted references may indicate that the reference fit is modeling biological signal rather than artifact.
+Response-scale-rich fitted references are contextual QC flags. They do not automatically indicate a failed correction because legitimate shared artifact or reference structure can occur on similar timescales. They become more concerning when combined with negative or mixed coupling, low fitted-reference range, flat or uninformative fitted references, or visual evidence that the fitted reference follows biological signal rather than reference artifact.
+
+Negative or mixed reference coupling is also a contextual QC flag. It indicates that the reference channel is not acting as a uniformly positive predictor of the signal in that chunk. For some sensors, especially during large biological responses, reference-channel deflections may reflect sensor photophysics or real response structure rather than simple artifact. This flag should prompt inspection and may argue against full response-timescale isosbestic regression, but it does not by itself indicate failed acquisition or invalid biology.
+
+Flat/uninformative fitted references and low fitted-reference range are stronger warning signs because they indicate the fitted reference is not contributing meaningful correction structure. These hard flags mark chunks as needing inspection. Flags indicate chunks needing inspection, not automatic exclusion or automatic correction-mode selection.
 
 The phasic output writes machine-readable diagnostics under `qc/dynamic_fit_qc_by_chunk.csv` and `qc/dynamic_fit_qc_by_chunk.json` when fitted references are available. Later workflows may use these metrics to compare full dynamic reference correction with baseline-only reference correction.
 

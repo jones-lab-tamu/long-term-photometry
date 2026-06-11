@@ -224,5 +224,10 @@ def test_pipeline_integration_cache_production(tmp_path):
         "fitted_ref_response_scale_fraction",
         "dynamic_fit_needs_inspection",
         "dynamic_fit_qc_flags",
+        "dynamic_fit_qc_hard_flags",
+        "dynamic_fit_qc_soft_flags",
+        "dynamic_fit_qc_severity",
+        "dynamic_fit_has_hard_flags",
+        "dynamic_fit_has_soft_flags",
     ]:
         assert col in qc_df.columns
