@@ -188,6 +188,7 @@ def test_pipeline_integration_cache_production(tmp_path):
         assert 'time_sec' in grp
         assert 'dff' in grp
         found_dynamic_fit_qc_attrs = False
+        found_baseline_candidate_trace = False
         for roi_raw in rois:
             roi_name = roi_raw.decode('utf-8') if isinstance(roi_raw, bytes) else str(roi_raw)
             for chunk_id in f['meta/chunk_ids'][:]:
@@ -203,10 +204,21 @@ def test_pipeline_integration_cache_production(tmp_path):
                         or any(name != "dynamic_fit_qc_available" for name in qc_attr_names)
                     ):
                         found_dynamic_fit_qc_attrs = True
-                        break
-            if found_dynamic_fit_qc_attrs:
+                if "baseline_ref_candidate" in candidate:
+                    assert candidate["baseline_ref_candidate"].shape == candidate["sig_raw"].shape
+                    assert bool(candidate.attrs.get("baseline_ref_candidate_available", False))
+                    assert "baseline_ref_method" in candidate.attrs
+                    assert "baseline_ref_actual_smoothing_window_sec" in candidate.attrs
+                    assert "baseline_ref_requested_smoothing_window_sec" in candidate.attrs
+                    assert "baseline_ref_fit_stage" in candidate.attrs
+                    assert "baseline_ref_status" in candidate.attrs
+                    found_baseline_candidate_trace = True
+                if found_dynamic_fit_qc_attrs and found_baseline_candidate_trace:
+                    break
+            if found_dynamic_fit_qc_attrs and found_baseline_candidate_trace:
                 break
         assert found_dynamic_fit_qc_attrs
+        assert found_baseline_candidate_trace
 
     qc_csv = out_dir / "_analysis" / "phasic_out" / "qc" / "dynamic_fit_qc_by_chunk.csv"
     qc_json = out_dir / "_analysis" / "phasic_out" / "qc" / "dynamic_fit_qc_by_chunk.json"

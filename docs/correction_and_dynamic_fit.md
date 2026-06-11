@@ -58,6 +58,21 @@ The dynamic-vs-baseline comparison class is a diagnostic triage field. It combin
 
 Contextual flags, such as response-scale-rich fitted references or negative/mixed coupling, are not treated as automatic failures. The comparison outputs are diagnostic only and do not change dF/F calculation, event detection, or applied correction behavior.
 
+## Reference candidate comparison plots
+
+Reference candidate comparison plots are diagnostic-only overlays of the raw signal, raw reference, existing dynamic fitted reference, and baseline-only candidate. They are intended for review of chunks flagged by dynamic-fit QC or reference-candidate comparison. They do not select or apply a correction mode, and they do not change dF/F calculation or event detection.
+
+When available, baseline-reference candidate traces are stored in the phasic HDF5 cache at `/roi/<ROI>/chunk_<chunk_id>/baseline_ref_candidate` for diagnostic provenance. The comparison plotting tool uses this stored trace when present. For older runs without stored candidate traces, the plotting tool can recompute the candidate from recorded metadata. This storage is diagnostic-only and does not affect correction, dF/F calculation, or event detection.
+
+Example command for multiple chunks:
+
+```powershell
+python tools/plot_reference_candidate_comparison.py ^
+  --analysis-out C:\path\to\_analysis\phasic_out ^
+  --roi CH3 ^
+  --chunks 28,29,30,31,32,33
+```
+
 ## Retuning and safeguards
 
 Correction retuning is for evaluating correction-sensitive settings on representative traces and writing retuned diagnostic outputs. Downstream event reanalysis changes event-facing thresholds/features after correction without recomputing upstream correction.

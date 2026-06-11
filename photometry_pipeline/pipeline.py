@@ -361,6 +361,12 @@ class Pipeline:
             clean_record = _sanitize_metadata(record)
             self.baseline_reference_candidate_records.append(clean_record)
             records_by_roi[roi_name] = clean_record
+            if candidate.get("baseline_ref_candidate_available") and candidate_trace is not None:
+                trace_arr = np.asarray(candidate_trace, dtype=float).reshape(-1)
+                if trace_arr.shape == chunk.sig_raw[:, r_idx].shape and np.any(np.isfinite(trace_arr)):
+                    chunk.metadata.setdefault("baseline_reference_candidate_trace", {})[
+                        roi_name
+                    ] = trace_arr
 
         if records_by_roi:
             chunk.metadata.setdefault("baseline_reference_candidate_qc", {}).update(records_by_roi)

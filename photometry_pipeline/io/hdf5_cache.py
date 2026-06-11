@@ -359,6 +359,58 @@ class Hdf5TraceCacheWriter:
                         ):
                             if key in validity_meta:
                                 grp.attrs[f'dynamic_fit_qc_{key}'] = bool(validity_meta.get(key))
+
+                    baseline_by_roi = chunk.metadata.get('baseline_reference_candidate_qc', {})
+                    baseline_meta = (
+                        baseline_by_roi.get(str(roi), {})
+                        if isinstance(baseline_by_roi, dict)
+                        else {}
+                    )
+                    baseline_trace_by_roi = chunk.metadata.get(
+                        'baseline_reference_candidate_trace', {}
+                    )
+                    baseline_trace = (
+                        baseline_trace_by_roi.get(str(roi))
+                        if isinstance(baseline_trace_by_roi, dict)
+                        else None
+                    )
+                    if isinstance(baseline_meta, dict) and baseline_meta:
+                        grp.attrs['baseline_ref_candidate_available'] = bool(
+                            baseline_meta.get('baseline_ref_candidate_available', False)
+                        )
+                        for attr_name in (
+                            'baseline_ref_method',
+                            'baseline_ref_smoothing_window_warning',
+                            'baseline_ref_fit_stage',
+                            'baseline_ref_status',
+                        ):
+                            value = baseline_meta.get(attr_name)
+                            if value is not None:
+                                grp.attrs[attr_name] = str(value)
+                        for attr_name in (
+                            'baseline_ref_actual_smoothing_window_sec',
+                            'baseline_ref_requested_smoothing_window_sec',
+                        ):
+                            value = baseline_meta.get(attr_name)
+                            if value is None:
+                                continue
+                            try:
+                                numeric = float(value)
+                            except Exception:
+                                continue
+                            if np.isfinite(numeric):
+                                grp.attrs[attr_name] = numeric
+                    if baseline_trace is not None:
+                        trace_arr = np.asarray(baseline_trace, dtype=np.float64).reshape(-1)
+                        if (
+                            trace_arr.shape == np.asarray(chunk.sig_raw[:, r_idx]).reshape(-1).shape
+                            and np.any(np.isfinite(trace_arr))
+                        ):
+                            grp.create_dataset(
+                                'baseline_ref_candidate',
+                                data=trace_arr,
+                                **self._dataset_create_kwargs,
+                            )
             
             # Required Time axis
             grp.create_dataset('time_sec', data=chunk.time_sec, **self._dataset_create_kwargs)
