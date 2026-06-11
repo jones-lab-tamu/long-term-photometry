@@ -52,6 +52,12 @@ This candidate is useful for evaluating chunks where full dynamic isosbestic reg
 
 The phasic output writes candidate metrics under `qc/baseline_reference_candidate_by_chunk.csv` and `qc/baseline_reference_candidate_by_chunk.json` when fitted references are available.
 
+## Dynamic-vs-baseline candidate comparison
+
+The dynamic-vs-baseline comparison class is a diagnostic triage field. It combines existing dynamic-fit QC severity with baseline-candidate QC metrics to indicate whether dynamic fitting, baseline-only reference use, both, or neither appear viable for a chunk. This field does not select or apply a correction mode; it is intended to make review of candidate behavior more systematic.
+
+Contextual flags, such as response-scale-rich fitted references or negative/mixed coupling, are not treated as automatic failures. The comparison outputs are diagnostic only and do not change dF/F calculation, event detection, or applied correction behavior.
+
 ## Retuning and safeguards
 
 Correction retuning is for evaluating correction-sensitive settings on representative traces and writing retuned diagnostic outputs. Downstream event reanalysis changes event-facing thresholds/features after correction without recomputing upstream correction.

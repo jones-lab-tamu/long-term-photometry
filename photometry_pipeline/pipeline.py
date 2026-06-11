@@ -26,6 +26,7 @@ from .core.baseline_reference_candidate import (
     compute_baseline_reference_candidate_metrics,
 )
 from .core.dynamic_fit_qc import compute_dynamic_fit_validity_metrics
+from .core.reference_candidate_comparison import classify_reference_candidates
 from .core.utils import natural_sort_key
 from .core.reporting import generate_run_report, append_run_report_warnings
 # from .viz import plots # Moved to run() to avoid side effects
@@ -351,6 +352,12 @@ class Pipeline:
                 "dynamic_fit_qc_soft_flags": dynamic_qc.get("dynamic_fit_qc_soft_flags", []),
                 "dynamic_fit_qc_flags": dynamic_qc.get("dynamic_fit_qc_flags", []),
             }
+            record.update(
+                classify_reference_candidates(
+                    dynamic_qc=dynamic_qc,
+                    baseline_record=record,
+                )
+            )
             clean_record = _sanitize_metadata(record)
             self.baseline_reference_candidate_records.append(clean_record)
             records_by_roi[roi_name] = clean_record
@@ -447,6 +454,42 @@ class Pipeline:
             "dynamic_minus_baseline_ref_range": _quartiles("dynamic_minus_baseline_ref_range"),
         }
         self.qc_summary["baseline_reference_candidate_qc_summary"] = _sanitize_metadata(summary)
+
+    def _update_reference_candidate_comparison_summary(self) -> None:
+        records = list(self.baseline_reference_candidate_records)
+
+        def _count_values(key: str) -> dict[str, int]:
+            counts: dict[str, int] = {}
+            for rec in records:
+                val = str(rec.get(key, "") or "").strip()
+                if val:
+                    counts[val] = counts.get(val, 0) + 1
+            return {k: int(v) for k, v in sorted(counts.items())}
+
+        flag_counts: dict[str, int] = {}
+        for rec in records:
+            flags = rec.get("reference_comparison_flags", [])
+            if isinstance(flags, str):
+                flags = [x for x in flags.split(";") if x]
+            if isinstance(flags, (list, tuple)):
+                for flag in flags:
+                    flag_s = str(flag).strip()
+                    if flag_s:
+                        flag_counts[flag_s] = flag_counts.get(flag_s, 0) + 1
+
+        summary = {
+            "roi_chunk_comparison_count": int(len(records)),
+            "reference_comparison_class_counts": _count_values("reference_comparison_class"),
+            "dynamic_reference_viability_counts": _count_values("dynamic_reference_viability"),
+            "baseline_reference_viability_counts": _count_values("baseline_reference_viability"),
+            "reference_comparison_review_level_counts": _count_values(
+                "reference_comparison_review_level"
+            ),
+            "reference_comparison_flag_counts": {
+                k: int(v) for k, v in sorted(flag_counts.items())
+            },
+        }
+        self.qc_summary["reference_candidate_comparison_summary"] = _sanitize_metadata(summary)
 
     def _record_dynamic_fit_slope_summaries(self, chunk: Chunk, chunk_id: int, source_file: str) -> None:
         if self.mode == "tonic" or not hasattr(chunk, "metadata") or not isinstance(chunk.metadata, dict):
@@ -1509,6 +1552,7 @@ class Pipeline:
                     "dynamic_fit_qc_flags",
                     "dynamic_fit_qc_hard_flags",
                     "dynamic_fit_qc_soft_flags",
+                    "reference_comparison_flags",
                 ):
                     flags = row.get(list_key, [])
                     if isinstance(flags, (list, tuple)):
@@ -1575,6 +1619,7 @@ class Pipeline:
         self._update_dynamic_fit_slope_constraint_summary()
         self._update_dynamic_fit_qc_summary()
         self._update_baseline_reference_candidate_summary()
+        self._update_reference_candidate_comparison_summary()
             
         if self.mode != 'tonic':
             t_qc_write = time.perf_counter()

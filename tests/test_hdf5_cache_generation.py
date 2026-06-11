@@ -242,6 +242,9 @@ def test_pipeline_integration_cache_production(tmp_path):
     candidate_json_text = candidate_json.read_text(encoding="utf-8")
     assert "NaN" not in candidate_json_text
     assert "Infinity" not in candidate_json_text
+    candidate_json_payload = json.loads(candidate_json_text)
+    assert candidate_json_payload
+    assert isinstance(candidate_json_payload[0]["reference_comparison_flags"], list)
     candidate_df = pd.read_csv(candidate_csv)
     assert len(candidate_df) >= 1
     for col in [
@@ -270,6 +273,20 @@ def test_pipeline_integration_cache_production(tmp_path):
         "dynamic_minus_baseline_ref_rms",
         "dynamic_fit_qc_severity",
         "dynamic_fit_qc_flags",
+        "reference_comparison_class",
+        "dynamic_reference_viability",
+        "baseline_reference_viability",
+        "reference_comparison_review_level",
+        "reference_comparison_notes",
+        "reference_comparison_flags",
+        "dynamic_has_negative_or_mixed_coupling",
+        "dynamic_has_response_scale_rich",
+        "dynamic_has_low_or_flat_reference",
+        "baseline_is_available",
+        "baseline_has_low_or_flat_reference",
+        "baseline_has_response_scale_rich",
+        "baseline_window_large_fraction_of_chunk",
+        "baseline_window_adjusted",
     ]:
         assert col in candidate_df.columns
     assert set(candidate_df["baseline_ref_requested_smoothing_window_sec"].astype(float)) == {120.0}
@@ -282,3 +299,11 @@ def test_pipeline_integration_cache_production(tmp_path):
     candidate_summary = qc_summary["baseline_reference_candidate_qc_summary"]
     assert candidate_summary["roi_chunk_candidate_count"] >= 1
     assert candidate_summary["roi_chunk_candidate_available_count"] >= 1
+    assert "reference_candidate_comparison_summary" in qc_summary
+    comparison_summary = qc_summary["reference_candidate_comparison_summary"]
+    assert comparison_summary["roi_chunk_comparison_count"] >= 1
+    assert isinstance(comparison_summary["reference_comparison_class_counts"], dict)
+    assert isinstance(comparison_summary["dynamic_reference_viability_counts"], dict)
+    assert isinstance(comparison_summary["baseline_reference_viability_counts"], dict)
+    assert isinstance(comparison_summary["reference_comparison_review_level_counts"], dict)
+    assert isinstance(comparison_summary["reference_comparison_flag_counts"], dict)
