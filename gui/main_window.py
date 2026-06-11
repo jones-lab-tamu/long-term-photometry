@@ -1080,6 +1080,7 @@ class MainWindow(QMainWindow):
         self._lab_default_config_path = os.path.normpath(
             os.path.join(repo_root, "config", "qc_universal_config.yaml")
         )
+        self._last_custom_config_path = ""
 
         # Validate->Run reuse tracking (Fix B1)
         self._validated_run_dir = None
@@ -6102,11 +6103,32 @@ class MainWindow(QMainWindow):
     def _update_config_source_ui(self, *, sync_main_advanced: bool = True) -> None:
         """Enable custom config widgets only when advanced custom mode is active."""
         use_custom = self._is_custom_config_enabled()
+        current_config_text = self._config_path.text().strip()
+        current_config_norm = os.path.normpath(current_config_text) if current_config_text else ""
+        if use_custom:
+            if (
+                (not current_config_text or current_config_norm == self._lab_default_config_path)
+                and self._last_custom_config_path
+                and os.path.isfile(self._last_custom_config_path)
+            ):
+                self._config_path.blockSignals(True)
+                self._config_path.setText(self._last_custom_config_path)
+                self._config_path.blockSignals(False)
+                current_config_text = self._config_path.text().strip()
+                current_config_norm = os.path.normpath(current_config_text)
+        else:
+            if current_config_text and current_config_norm != self._lab_default_config_path:
+                self._last_custom_config_path = current_config_norm
+            if current_config_norm != self._lab_default_config_path:
+                self._config_path.blockSignals(True)
+                self._config_path.setText(self._lab_default_config_path)
+                self._config_path.blockSignals(False)
+                current_config_text = self._config_path.text().strip()
         self._config_path.setEnabled(use_custom)
         self._config_browse_btn.setEnabled(use_custom)
 
         if use_custom:
-            cfg = self._config_path.text().strip() or "(not set)"
+            cfg = current_config_text or "(not set)"
             self._active_config_source_label.setText(
                 f"Active baseline source: custom YAML ({cfg})"
             )
@@ -6118,7 +6140,7 @@ class MainWindow(QMainWindow):
             self._set_status_label_style(self._active_config_source_label, "ready")
         should_sync_main_advanced = bool(sync_main_advanced)
         if should_sync_main_advanced and use_custom:
-            cfg = self._config_path.text().strip()
+            cfg = current_config_text
             should_sync_main_advanced = bool(cfg and os.path.isfile(cfg))
         if should_sync_main_advanced:
             self._sync_main_advanced_controls_from_active_baseline()
@@ -8260,8 +8282,9 @@ class MainWindow(QMainWindow):
             or ""
         ).strip()
         if use_custom_config and custom_config_path and os.path.isfile(custom_config_path):
+            self._last_custom_config_path = os.path.normpath(custom_config_path)
             self._use_custom_config_cb.setChecked(True)
-            self._config_path.setText(os.path.normpath(custom_config_path))
+            self._config_path.setText(self._last_custom_config_path)
         else:
             self._use_custom_config_cb.setChecked(False)
             self._config_path.setText(self._lab_default_config_path)
@@ -8596,8 +8619,13 @@ class MainWindow(QMainWindow):
         if use_custom_config:
             self._settings.setValue("config_path", config_path)
             self._settings.setValue("last_custom_config_path", config_path)
+            self._last_custom_config_path = config_path
         else:
             self._settings.setValue("config_path", self._lab_default_config_path)
+            if self._last_custom_config_path:
+                self._settings.setValue(
+                    "last_custom_config_path", self._last_custom_config_path
+                )
         self._settings.setValue("format", self._format_combo.currentText())
         self._settings.setValue("run_profile", self._selected_run_profile())
         self._settings.setValue("sessions_per_hour", self._sph_edit.text().strip())

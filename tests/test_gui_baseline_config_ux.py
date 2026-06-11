@@ -222,6 +222,8 @@ def test_saved_config_path_without_custom_flag_falls_back_to_lab_default(qapp, t
     try:
         assert w._use_custom_config_cb.isChecked() is False
         assert w._config_path.text() == w._lab_default_config_path
+        assert "tutorial_config.yaml" not in w._config_path.text()
+        assert "test_dataset" not in w._config_path.text()
         assert w._active_config_source_path() == w._lab_default_config_path
         spec = w._build_run_spec(validate_only=True)
         assert spec.config_source_path == w._lab_default_config_path
@@ -251,6 +253,27 @@ def test_saved_existing_custom_config_is_restored_when_enabled(qapp, tmp_path):
         w.close()
         w.deleteLater()
         settings.clear()
+
+
+def test_rechecking_custom_config_restores_last_explicit_custom_path(window, tmp_path):
+    custom_cfg = tmp_path / "custom_config.yaml"
+    custom_cfg.write_text("lowpass_hz: 0.25\n", encoding="utf-8")
+
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(custom_cfg))
+    window._update_config_source_ui()
+    assert window._config_path.text() == str(custom_cfg)
+
+    window._use_custom_config_cb.setChecked(False)
+    window._update_config_source_ui()
+    assert window._config_path.text() == window._lab_default_config_path
+    assert str(custom_cfg) not in window._config_path.text()
+    assert window._active_config_source_path() == window._lab_default_config_path
+
+    window._use_custom_config_cb.setChecked(True)
+    window._update_config_source_ui()
+    assert window._config_path.text() == os.path.normpath(str(custom_cfg))
+    assert window._active_config_source_path() == os.path.normpath(str(custom_cfg))
 
 
 def test_saved_missing_custom_config_falls_back_to_lab_default(qapp, tmp_path):
