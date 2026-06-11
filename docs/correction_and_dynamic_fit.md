@@ -60,7 +60,9 @@ Contextual flags, such as response-scale-rich fitted references or negative/mixe
 
 ## Reference candidate comparison plots
 
-Reference candidate comparison plots are diagnostic-only overlays of the raw signal, raw reference, existing dynamic fitted reference, and baseline-only candidate. They are intended for review of chunks flagged by dynamic-fit QC or reference-candidate comparison. They do not select or apply a correction mode, and they do not change dF/F calculation or event detection.
+Reference candidate comparison plots are diagnostic-only overlays of the raw signal, raw reference, existing dynamic fitted reference, and baseline-only candidate. They separate raw/reference context, candidate reference traces, and residual traces into separate panels. Residual traces are plotted on their own y-axis so differences between dynamic-reference subtraction and baseline-candidate subtraction can be inspected without being compressed by fitted-reference amplitudes.
+
+The metadata box includes QC severity, comparison class, flags, smoothing window, and whether the baseline candidate came from stored HDF5 or recomputation. These plots are intended for review of chunks flagged by dynamic-fit QC or reference-candidate comparison. They do not select or apply a correction mode, and they do not change dF/F calculation or event detection.
 
 When available, baseline-reference candidate traces are stored in the phasic HDF5 cache at `/roi/<ROI>/chunk_<chunk_id>/baseline_ref_candidate` for diagnostic provenance. The comparison plotting tool uses this stored trace when present. For older runs without stored candidate traces, the plotting tool can recompute the candidate from recorded metadata. This storage is diagnostic-only and does not affect correction, dF/F calculation, or event detection.
 

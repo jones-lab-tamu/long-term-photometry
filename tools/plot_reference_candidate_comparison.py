@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,16 @@ def parse_args() -> argparse.Namespace:
         "--include-normalized-overlay",
         action="store_true",
         help="Add a normalized overlay panel for shape comparison.",
+    )
+    parser.add_argument(
+        "--include-reference-difference",
+        action="store_true",
+        help="Add a panel showing dynamic reference minus baseline candidate.",
+    )
+    parser.add_argument(
+        "--no-metadata-box",
+        action="store_true",
+        help="Suppress the wrapped metadata box above the panels.",
     )
     parser.add_argument("--title-extra", default="", help="Additional title text")
     return parser.parse_args()
@@ -260,11 +271,66 @@ def _zscore(values: np.ndarray) -> np.ndarray:
     return (values - float(np.nanmedian(finite))) / scale
 
 
+def _robust_limits(*series: np.ndarray) -> tuple[float, float] | None:
+    values = []
+    for arr in series:
+        flat = np.asarray(arr, dtype=float).reshape(-1)
+        finite = flat[np.isfinite(flat)]
+        if finite.size:
+            values.append(finite)
+    if not values:
+        return None
+    combined = np.concatenate(values)
+    if combined.size == 0:
+        return None
+    lo = float(np.percentile(combined, 1.0))
+    hi = float(np.percentile(combined, 99.0))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo = float(np.nanmin(combined))
+        hi = float(np.nanmax(combined))
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        return None
+    if hi <= lo:
+        center = float(lo)
+        span = max(abs(center) * 0.05, 1.0)
+        return center - span, center + span
+    margin = max((hi - lo) * 0.08, 1e-9)
+    return lo - margin, hi + margin
+
+
 def _compact_field(row: dict[str, Any], key: str) -> str:
     value = row.get(key, "")
     if value is None or (isinstance(value, float) and not np.isfinite(value)):
         return ""
     return str(value)
+
+
+def _wrapped_metadata_text(
+    *,
+    row: dict[str, Any],
+    roi: str,
+    chunk_id: int,
+    baseline_source: str,
+    title_extra: str = "",
+    width: int = 130,
+) -> str:
+    fields = [
+        f"ROI={roi}",
+        f"chunk={int(chunk_id)}",
+        f"dynamic_fit_qc_severity={_compact_field(row, 'dynamic_fit_qc_severity')}",
+        f"reference_comparison_class={_compact_field(row, 'reference_comparison_class')}",
+        f"soft_flags={_compact_field(row, 'dynamic_fit_qc_soft_flags')}",
+        f"hard_flags={_compact_field(row, 'dynamic_fit_qc_hard_flags')}",
+        f"comparison_flags={_compact_field(row, 'reference_comparison_flags')}",
+        f"baseline_window_sec={_compact_field(row, 'baseline_ref_actual_smoothing_window_sec')}",
+        f"baseline_source={baseline_source}",
+    ]
+    warning = _compact_field(row, "baseline_ref_smoothing_window_warning")
+    if warning:
+        fields.append(f"window_warning={warning}")
+    if title_extra:
+        fields.append(f"note={title_extra}")
+    return textwrap.fill(" | ".join(fields), width=width)
 
 
 def build_reference_candidate_comparison_figure(
@@ -277,15 +343,18 @@ def build_reference_candidate_comparison_figure(
     baseline_source: str = "",
     show_raw_reference: bool = False,
     include_normalized_overlay: bool = False,
+    include_reference_difference: bool = False,
+    metadata_box: bool = True,
     title_extra: str = "",
 ):
-    panels = 3 if include_normalized_overlay else 2
-    fig, axes = plt.subplots(panels, 1, figsize=(11, 7.5 if panels == 2 else 9.5), sharex=True)
-    if panels == 2:
-        ax1, ax2 = axes
-        ax3 = None
-    else:
-        ax1, ax2, ax3 = axes
+    panels = 3 + int(bool(include_reference_difference)) + int(bool(include_normalized_overlay))
+    fig_height = 9.2 + 1.7 * max(0, panels - 3)
+    fig, axes = plt.subplots(panels, 1, figsize=(11.5, fig_height), sharex=True)
+    axes = np.asarray(axes, dtype=object).reshape(-1)
+    ax1 = axes[0]
+    ax2 = axes[1]
+    ax3 = axes[2]
+    next_axis = 3
 
     t = traces["time_sec"]
     sig = traces["sig_raw"]
@@ -293,37 +362,26 @@ def build_reference_candidate_comparison_figure(
     fit_ref = traces["fit_ref"]
     baseline = np.asarray(baseline_candidate, dtype=float).reshape(-1)
     uv_scaled = _scaled_for_display(uv, sig)
+    residual_dynamic = sig - fit_ref
+    residual_baseline = sig - baseline
+    reference_difference = fit_ref - baseline
 
-    title_parts = [
-        f"ROI {roi}",
-        f"chunk {int(chunk_id)}",
-        f"dynamic severity={_compact_field(row, 'dynamic_fit_qc_severity')}",
-        f"class={_compact_field(row, 'reference_comparison_class')}",
-    ]
-    if title_extra:
-        title_parts.append(str(title_extra))
-    ax1.set_title(" | ".join(title_parts))
-    subtitle = (
-        f"soft={_compact_field(row, 'dynamic_fit_qc_soft_flags')} | "
-        f"hard={_compact_field(row, 'dynamic_fit_qc_hard_flags')} | "
-        f"comparison_flags={_compact_field(row, 'reference_comparison_flags')} | "
-        f"baseline_window={_compact_field(row, 'baseline_ref_actual_smoothing_window_sec')}s"
-    )
-    if baseline_source:
-        subtitle += f" | baseline_source={baseline_source}"
-    warning = _compact_field(row, "baseline_ref_smoothing_window_warning")
-    if warning:
-        subtitle += f" | window_warning={warning}"
-    ax1.text(
-        0.01,
-        0.98,
-        subtitle,
-        transform=ax1.transAxes,
-        va="top",
-        ha="left",
-        fontsize=8,
-        bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "0.75"},
-    )
+    if metadata_box:
+        fig.text(
+            0.012,
+            0.985,
+            _wrapped_metadata_text(
+                row=row,
+                roi=roi,
+                chunk_id=chunk_id,
+                baseline_source=baseline_source,
+                title_extra=title_extra,
+            ),
+            va="top",
+            ha="left",
+            fontsize=8,
+            bbox={"facecolor": "white", "alpha": 0.92, "edgecolor": "0.75"},
+        )
 
     ax1.plot(t, sig, color="forestgreen", linewidth=0.8, label="raw signal")
     ax1.plot(
@@ -336,9 +394,10 @@ def build_reference_candidate_comparison_figure(
     )
     ax1.plot(t, fit_ref, color="black", linestyle="--", linewidth=0.9, label="dynamic fitted reference")
     ax1.plot(t, baseline, color="#1f77b4", linestyle=":", linewidth=1.0, label="baseline-only candidate")
+    ax1.set_title("Raw traces and candidate references")
     ax1.set_ylabel("Signal frame")
     ax1.grid(True, alpha=0.25)
-    ax1.legend(loc="upper right", fontsize=8)
+    ax1.legend(loc="best", fontsize=8)
 
     if show_raw_reference:
         ax1b = ax1.twinx()
@@ -346,41 +405,72 @@ def build_reference_candidate_comparison_figure(
         ax1b.set_ylabel("Raw reference", color="purple")
         ax1b.tick_params(axis="y", colors="purple")
 
-    ax2.plot(t, fit_ref, color="black", linestyle="--", linewidth=0.9, label="dynamic fitted reference")
-    ax2.plot(t, baseline, color="#1f77b4", linestyle=":", linewidth=1.0, label="baseline-only candidate")
-    ax2.plot(
-        t,
-        sig - fit_ref,
-        color="darkorange",
-        linewidth=0.7,
-        alpha=0.75,
-        label="signal - dynamic ref (diagnostic)",
-    )
-    ax2.plot(
-        t,
-        sig - baseline,
-        color="teal",
-        linewidth=0.7,
-        alpha=0.75,
-        label="signal - baseline candidate (diagnostic)",
-    )
-    ax2.set_ylabel("Diagnostic traces")
+    ax2.plot(t, fit_ref, color="black", linestyle="--", linewidth=0.95, label="dynamic fitted reference")
+    ax2.plot(t, baseline, color="#1f77b4", linestyle=":", linewidth=1.05, label="baseline-only candidate")
+    ax2.set_title("Candidate reference traces")
+    ax2.set_ylabel("Reference frame")
+    limits = _robust_limits(fit_ref, baseline)
+    if limits is not None:
+        ax2.set_ylim(*limits)
     ax2.grid(True, alpha=0.25)
-    ax2.legend(loc="upper right", fontsize=8)
+    ax2.legend(loc="best", fontsize=8)
 
-    if ax3 is not None:
-        ax3.plot(t, _zscore(sig), color="forestgreen", linewidth=0.8, label="signal z")
-        ax3.plot(t, _zscore(uv), color="purple", linewidth=0.75, alpha=0.8, label="reference z")
-        ax3.plot(t, _zscore(fit_ref), color="black", linestyle="--", linewidth=0.9, label="dynamic ref z")
-        ax3.plot(t, _zscore(baseline), color="#1f77b4", linestyle=":", linewidth=1.0, label="baseline candidate z")
-        ax3.set_ylabel("Robust shape overlay")
-        ax3.grid(True, alpha=0.25)
-        ax3.legend(loc="upper right", fontsize=8)
-        ax3.set_xlabel("Time (s)")
-    else:
-        ax2.set_xlabel("Time (s)")
+    ax3.plot(
+        t,
+        residual_dynamic,
+        color="darkorange",
+        linewidth=0.8,
+        alpha=0.85,
+        label="signal - dynamic reference",
+    )
+    ax3.plot(
+        t,
+        residual_baseline,
+        color="teal",
+        linewidth=0.8,
+        alpha=0.85,
+        label="signal - baseline candidate",
+    )
+    ax3.set_title("Diagnostic residuals: signal minus candidate reference")
+    ax3.set_ylabel("Residual")
+    limits = _robust_limits(residual_dynamic, residual_baseline)
+    if limits is not None:
+        ax3.set_ylim(*limits)
+    ax3.grid(True, alpha=0.25)
+    ax3.legend(loc="best", fontsize=8)
 
-    fig.tight_layout()
+    if include_reference_difference:
+        ax_diff = axes[next_axis]
+        next_axis += 1
+        ax_diff.plot(
+            t,
+            reference_difference,
+            color="crimson",
+            linewidth=0.85,
+            label="dynamic reference - baseline candidate",
+        )
+        ax_diff.axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
+        ax_diff.set_title("Difference between candidate references")
+        ax_diff.set_ylabel("Difference")
+        limits = _robust_limits(reference_difference)
+        if limits is not None:
+            ax_diff.set_ylim(*limits)
+        ax_diff.grid(True, alpha=0.25)
+        ax_diff.legend(loc="best", fontsize=8)
+
+    if include_normalized_overlay:
+        ax_norm = axes[next_axis]
+        ax_norm.plot(t, _zscore(sig), color="forestgreen", linewidth=0.8, label="signal z")
+        ax_norm.plot(t, _zscore(uv), color="purple", linewidth=0.75, alpha=0.8, label="reference z")
+        ax_norm.plot(t, _zscore(fit_ref), color="black", linestyle="--", linewidth=0.9, label="dynamic ref z")
+        ax_norm.plot(t, _zscore(baseline), color="#1f77b4", linestyle=":", linewidth=1.0, label="baseline candidate z")
+        ax_norm.set_title("Normalized shape overlay")
+        ax_norm.set_ylabel("Z-score")
+        ax_norm.grid(True, alpha=0.25)
+        ax_norm.legend(loc="best", fontsize=8)
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90 if metadata_box else 0.98))
     return fig
 
 
@@ -392,6 +482,8 @@ def plot_one(
     output_path: str,
     show_raw_reference: bool = False,
     include_normalized_overlay: bool = False,
+    include_reference_difference: bool = False,
+    metadata_box: bool = True,
     title_extra: str = "",
     dpi: int = 150,
 ) -> str:
@@ -408,6 +500,8 @@ def plot_one(
         baseline_source=baseline_source,
         show_raw_reference=show_raw_reference,
         include_normalized_overlay=include_normalized_overlay,
+        include_reference_difference=include_reference_difference,
+        metadata_box=metadata_box,
         title_extra=title_extra,
     )
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -438,6 +532,8 @@ def main() -> int:
                     output_path=out_path,
                     show_raw_reference=bool(args.show_raw_reference),
                     include_normalized_overlay=bool(args.include_normalized_overlay),
+                    include_reference_difference=bool(args.include_reference_difference),
+                    metadata_box=not bool(args.no_metadata_box),
                     title_extra=args.title_extra,
                     dpi=int(args.dpi),
                 )

@@ -67,6 +67,15 @@ def _make_analysis_out(tmp_path, *, include_fit_ref=True, baseline_trace=None):
     return analysis_out
 
 
+def _figure_inputs(tmp_path):
+    analysis_out = _make_analysis_out(tmp_path)
+    table = plotter._load_candidate_table(str(analysis_out))
+    row = plotter._find_candidate_row(table, "CH3", 31)
+    traces = plotter._load_chunk_traces(str(analysis_out), "CH3", 31)
+    baseline, source = plotter._recompute_baseline_candidate_trace(traces, row)
+    return traces, baseline, row, source
+
+
 def test_plotter_creates_reference_candidate_png(tmp_path):
     analysis_out = _make_analysis_out(tmp_path)
     out_png = tmp_path / "comparison.png"
@@ -76,6 +85,120 @@ def test_plotter_creates_reference_candidate_png(tmp_path):
         roi="CH3",
         chunk_id=31,
         output_path=str(out_png),
+    )
+
+    assert result == str(out_png)
+    assert out_png.exists()
+    assert out_png.stat().st_size > 0
+
+
+def test_default_figure_uses_three_readability_panels(tmp_path):
+    traces, baseline, row, source = _figure_inputs(tmp_path)
+
+    fig = plotter.build_reference_candidate_comparison_figure(
+        traces=traces,
+        baseline_candidate=baseline,
+        row=row,
+        roi="CH3",
+        chunk_id=31,
+        baseline_source=source,
+    )
+    try:
+        assert len(fig.axes) == 3
+        assert fig.axes[0].get_title() == "Raw traces and candidate references"
+        assert fig.axes[1].get_title() == "Candidate reference traces"
+        assert fig.axes[2].get_title() == "Diagnostic residuals: signal minus candidate reference"
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+def test_normalized_overlay_remains_optional_extra_panel(tmp_path):
+    traces, baseline, row, source = _figure_inputs(tmp_path)
+
+    fig = plotter.build_reference_candidate_comparison_figure(
+        traces=traces,
+        baseline_candidate=baseline,
+        row=row,
+        roi="CH3",
+        chunk_id=31,
+        baseline_source=source,
+        include_normalized_overlay=True,
+    )
+    try:
+        assert len(fig.axes) == 4
+        assert fig.axes[-1].get_title() == "Normalized shape overlay"
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+def test_reference_difference_panel_is_optional(tmp_path):
+    traces, baseline, row, source = _figure_inputs(tmp_path)
+
+    fig = plotter.build_reference_candidate_comparison_figure(
+        traces=traces,
+        baseline_candidate=baseline,
+        row=row,
+        roi="CH3",
+        chunk_id=31,
+        baseline_source=source,
+        include_reference_difference=True,
+    )
+    try:
+        assert len(fig.axes) == 4
+        assert fig.axes[3].get_title() == "Difference between candidate references"
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+def test_metadata_box_wraps_long_flag_strings(tmp_path):
+    traces, baseline, row, source = _figure_inputs(tmp_path)
+    row["dynamic_fit_qc_soft_flags"] = ";".join([f"SOFT_FLAG_{idx}" for idx in range(20)])
+    row["reference_comparison_flags"] = ";".join([f"COMPARISON_FLAG_{idx}" for idx in range(20)])
+
+    text = plotter._wrapped_metadata_text(
+        row=row,
+        roi="CH3",
+        chunk_id=31,
+        baseline_source=source,
+        title_extra="long metadata test",
+        width=80,
+    )
+    fig = plotter.build_reference_candidate_comparison_figure(
+        traces=traces,
+        baseline_candidate=baseline,
+        row=row,
+        roi="CH3",
+        chunk_id=31,
+        baseline_source=source,
+        title_extra="long metadata test",
+    )
+    try:
+        assert "\n" in text
+        assert "baseline_source=recomputed_from_metadata" in text
+        assert fig.texts
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+def test_plot_one_supports_optional_reference_difference_and_normalized_overlay(tmp_path):
+    analysis_out = _make_analysis_out(tmp_path)
+    out_png = tmp_path / "comparison_extra.png"
+
+    result = plotter.plot_one(
+        analysis_out=str(analysis_out),
+        roi="CH3",
+        chunk_id=31,
+        output_path=str(out_png),
+        include_reference_difference=True,
+        include_normalized_overlay=True,
     )
 
     assert result == str(out_png)
