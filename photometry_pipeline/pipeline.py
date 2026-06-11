@@ -21,6 +21,10 @@ from .io.adapters import (
     resolve_continuous_source_metadata,
 )
 from .core import preprocessing, regression, normalization, feature_extraction, baseline
+from .core.baseline_reference_candidate import (
+    compute_baseline_reference_candidate,
+    compute_baseline_reference_candidate_metrics,
+)
 from .core.dynamic_fit_qc import compute_dynamic_fit_validity_metrics
 from .core.utils import natural_sort_key
 from .core.reporting import generate_run_report, append_run_report_warnings
@@ -180,6 +184,7 @@ class Pipeline:
         self.dynamic_fit_slope_warning_records = []
         self.dynamic_fit_slope_constraint_records = []
         self.dynamic_fit_qc_records = []
+        self.baseline_reference_candidate_records = []
         self.dynamic_fit_slope_warning_summary = {
             "roi_chunk_fits_with_any_negative_slope": 0,
             "roi_chunk_fits_by_warning_level": {
@@ -274,6 +279,85 @@ class Pipeline:
         if roi_metrics_by_name:
             chunk.metadata.setdefault("dynamic_fit_validity_qc", {}).update(roi_metrics_by_name)
 
+    def _record_baseline_reference_candidate_metrics(self, chunk: Chunk, chunk_id: int, source_file: str) -> None:
+        if self.mode == "tonic" or chunk.uv_fit is None:
+            return
+        if not bool(getattr(self.config, "baseline_reference_candidate_enabled", True)):
+            return
+        if not hasattr(chunk, "metadata") or not isinstance(chunk.metadata, dict):
+            return
+        fit_mode = str(chunk.metadata.get("dynamic_fit_mode_resolved", "") or "")
+        slope_constraint = str(getattr(self.config, "dynamic_fit_slope_constraint", "unconstrained"))
+        acquisition_mode = str(getattr(self.config, "acquisition_mode", "intermittent"))
+        dynamic_qc_by_roi = chunk.metadata.get("dynamic_fit_validity_qc", {})
+        if not isinstance(dynamic_qc_by_roi, dict):
+            dynamic_qc_by_roi = {}
+
+        records_by_roi: dict[str, dict] = {}
+        for r_idx, roi in enumerate(chunk.channel_names):
+            roi_name = str(roi)
+            dynamic_qc = dynamic_qc_by_roi.get(roi_name, {})
+            if not isinstance(dynamic_qc, dict):
+                dynamic_qc = {}
+            candidate = compute_baseline_reference_candidate(
+                signal=chunk.sig_raw[:, r_idx],
+                reference=chunk.uv_raw[:, r_idx],
+                fs=float(chunk.fs_hz),
+                smoothing_window_sec=float(
+                    getattr(self.config, "baseline_reference_smoothing_window_sec", 300.0)
+                ),
+                default_smoothing_window_sec=300.0,
+                min_smoothing_window_sec=float(
+                    getattr(self.config, "baseline_reference_min_smoothing_window_sec", 60.0)
+                ),
+                max_window_fraction_of_chunk=float(
+                    getattr(self.config, "baseline_reference_max_window_fraction_of_chunk", 0.75)
+                ),
+                large_window_fraction_warning=float(
+                    getattr(self.config, "baseline_reference_large_window_fraction_warning", 0.50)
+                ),
+            )
+            candidate_trace = candidate.get("baseline_ref_candidate")
+            candidate_meta = {
+                key: value
+                for key, value in candidate.items()
+                if key != "baseline_ref_candidate"
+            }
+            metrics: dict = {}
+            if candidate.get("baseline_ref_candidate_available") and candidate_trace is not None:
+                try:
+                    metrics = compute_baseline_reference_candidate_metrics(
+                        signal=chunk.sig_raw[:, r_idx],
+                        reference=chunk.uv_raw[:, r_idx],
+                        dynamic_fitted_ref=chunk.uv_fit[:, r_idx],
+                        baseline_candidate=np.asarray(candidate_trace, dtype=float),
+                        fs=float(chunk.fs_hz),
+                    )
+                except Exception as exc:
+                    candidate_meta["baseline_ref_candidate_available"] = False
+                    candidate_meta["baseline_ref_warning"] = f"metric_failure:{exc}"
+                    metrics = {}
+            record = {
+                "roi": roi_name,
+                "chunk_id": int(chunk_id),
+                "source_file": str(source_file),
+                "recording_mode": acquisition_mode,
+                "dynamic_fit_mode": fit_mode,
+                "slope_constraint": slope_constraint,
+                **candidate_meta,
+                **metrics,
+                "dynamic_fit_qc_severity": dynamic_qc.get("dynamic_fit_qc_severity", ""),
+                "dynamic_fit_qc_hard_flags": dynamic_qc.get("dynamic_fit_qc_hard_flags", []),
+                "dynamic_fit_qc_soft_flags": dynamic_qc.get("dynamic_fit_qc_soft_flags", []),
+                "dynamic_fit_qc_flags": dynamic_qc.get("dynamic_fit_qc_flags", []),
+            }
+            clean_record = _sanitize_metadata(record)
+            self.baseline_reference_candidate_records.append(clean_record)
+            records_by_roi[roi_name] = clean_record
+
+        if records_by_roi:
+            chunk.metadata.setdefault("baseline_reference_candidate_qc", {}).update(records_by_roi)
+
     def _update_dynamic_fit_qc_summary(self) -> None:
         records = list(self.dynamic_fit_qc_records)
         flag_counts: dict[str, int] = {}
@@ -316,6 +400,53 @@ class Pipeline:
             "roi_chunk_fits_with_context_only_flags": int(context_only_fit_count),
         }
         self.qc_summary["dynamic_fit_validity_qc_summary"] = _sanitize_metadata(summary)
+
+    def _update_baseline_reference_candidate_summary(self) -> None:
+        records = list(self.baseline_reference_candidate_records)
+
+        def _finite_values(key: str) -> list[float]:
+            out = []
+            for rec in records:
+                try:
+                    val = float(rec.get(key, float("nan")))
+                except Exception:
+                    continue
+                if np.isfinite(val):
+                    out.append(val)
+            return out
+
+        def _quartiles(key: str) -> dict[str, float | None]:
+            vals = np.asarray(_finite_values(key), dtype=float)
+            if vals.size == 0:
+                return {"median": None, "p25": None, "p75": None}
+            return {
+                "median": float(np.percentile(vals, 50.0)),
+                "p25": float(np.percentile(vals, 25.0)),
+                "p75": float(np.percentile(vals, 75.0)),
+            }
+
+        available = [
+            rec for rec in records if bool(rec.get("baseline_ref_candidate_available", False))
+        ]
+        summary = {
+            "roi_chunk_candidate_count": int(len(records)),
+            "roi_chunk_candidate_available_count": int(len(available)),
+            "roi_chunk_candidate_unavailable_count": int(len(records) - len(available)),
+            "baseline_ref_response_scale_rich_count": int(
+                sum(1 for rec in records if bool(rec.get("baseline_ref_response_scale_rich", False)))
+            ),
+            "baseline_ref_low_range_count": int(
+                sum(1 for rec in records if bool(rec.get("baseline_ref_low_range", False)))
+            ),
+            "baseline_ref_flat_or_uninformative_count": int(
+                sum(1 for rec in records if bool(rec.get("baseline_ref_flat_or_uninformative", False)))
+            ),
+            "baseline_ref_response_scale_fraction": _quartiles("baseline_ref_response_scale_fraction"),
+            "baseline_ref_baseline_scale_fraction": _quartiles("baseline_ref_baseline_scale_fraction"),
+            "dynamic_minus_baseline_ref_rms": _quartiles("dynamic_minus_baseline_ref_rms"),
+            "dynamic_minus_baseline_ref_range": _quartiles("dynamic_minus_baseline_ref_range"),
+        }
+        self.qc_summary["baseline_reference_candidate_qc_summary"] = _sanitize_metadata(summary)
 
     def _record_dynamic_fit_slope_summaries(self, chunk: Chunk, chunk_id: int, source_file: str) -> None:
         if self.mode == "tonic" or not hasattr(chunk, "metadata") or not isinstance(chunk.metadata, dict):
@@ -1317,6 +1448,7 @@ class Pipeline:
                 chunk = self._apply_standard_analysis(chunk, i)
                 self._record_dynamic_fit_slope_summaries(chunk, i, self._entry_source_file(fpath))
                 self._record_dynamic_fit_validity_metrics(chunk, i, self._entry_source_file(fpath))
+                self._record_baseline_reference_candidate_metrics(chunk, i, self._entry_source_file(fpath))
                 
                 # Retain for representative plotting
                 if rep_idx is not None and i == rep_idx:
@@ -1396,6 +1528,36 @@ class Pipeline:
                     allow_nan=False,
                 )
 
+        if self.baseline_reference_candidate_records and self.mode != 'tonic':
+            candidate_rows = []
+            for rec in self.baseline_reference_candidate_records:
+                row = dict(rec)
+                for list_key in (
+                    "dynamic_fit_qc_flags",
+                    "dynamic_fit_qc_hard_flags",
+                    "dynamic_fit_qc_soft_flags",
+                ):
+                    flags = row.get(list_key, [])
+                    if isinstance(flags, (list, tuple)):
+                        row[list_key] = ";".join(str(x) for x in flags)
+                    elif flags is None:
+                        row[list_key] = ""
+                candidate_rows.append(row)
+            pd.DataFrame(candidate_rows).to_csv(
+                os.path.join(output_dir, "qc", "baseline_reference_candidate_by_chunk.csv"),
+                index=False,
+            )
+            with open(
+                os.path.join(output_dir, "qc", "baseline_reference_candidate_by_chunk.json"),
+                "w",
+            ) as f:
+                json.dump(
+                    _sanitize_strict_json(self.baseline_reference_candidate_records),
+                    f,
+                    indent=2,
+                    allow_nan=False,
+                )
+
         total_chunks = len(self.file_list)
         if total_chunks > 0:
             self.qc_summary['chunk_fail_fraction'] = len(self.qc_summary.get('failed_chunks', [])) / total_chunks
@@ -1412,6 +1574,7 @@ class Pipeline:
         self._update_dynamic_fit_slope_warning_summary()
         self._update_dynamic_fit_slope_constraint_summary()
         self._update_dynamic_fit_qc_summary()
+        self._update_baseline_reference_candidate_summary()
             
         if self.mode != 'tonic':
             t_qc_write = time.perf_counter()

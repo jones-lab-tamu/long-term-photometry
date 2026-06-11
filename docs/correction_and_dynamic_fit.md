@@ -44,6 +44,14 @@ Flat/uninformative fitted references and low fitted-reference range are stronger
 
 The phasic output writes machine-readable diagnostics under `qc/dynamic_fit_qc_by_chunk.csv` and `qc/dynamic_fit_qc_by_chunk.json` when fitted references are available. Later workflows may use these metrics to compare full dynamic reference correction with baseline-only reference correction.
 
+## Baseline-only reference candidate diagnostics
+
+The baseline-only reference candidate is a diagnostic comparison trace computed from configurable ultra-low-pass smoothing of the reference structure. The default requested smoothing window is 300 s, but the requested and actual per-chunk smoothing windows are recorded in `baseline_reference_candidate_by_chunk.csv` and `.json`. If the requested window is too large for a chunk it is adjusted and reported; if the actual window is a large fraction of the chunk, the output should be interpreted cautiously. The `baseline_ref_lowpass_cutoff_hz` field records the baseline-scale boundary used for diagnostics, but this implementation uses reflected-window smoothing rather than an exact frequency-domain low-pass filter. It is intended to test whether the reference channel supports slow baseline correction without allowing the fitted reference to follow response-scale biological events.
+
+This candidate is useful for evaluating chunks where full dynamic isosbestic regression may be questionable, especially chunks with negative or mixed reference coupling, broad sensor responses, or fitted references that contain substantial response-scale structure. In this implementation, the candidate is written for review and comparison only; it does not change the applied correction, dF/F calculation, or event detection.
+
+The phasic output writes candidate metrics under `qc/baseline_reference_candidate_by_chunk.csv` and `qc/baseline_reference_candidate_by_chunk.json` when fitted references are available.
+
 ## Retuning and safeguards
 
 Correction retuning is for evaluating correction-sensitive settings on representative traces and writing retuned diagnostic outputs. Downstream event reanalysis changes event-facing thresholds/features after correction without recomputing upstream correction.

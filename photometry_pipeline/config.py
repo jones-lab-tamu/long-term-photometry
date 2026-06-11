@@ -60,6 +60,11 @@ class Config:
     adaptive_event_gate_smooth_window_sec: float = 60.0
     adaptive_event_gate_min_trust_fraction: float = 0.5
     adaptive_event_gate_freeze_interp_method: Literal['linear_hold'] = 'linear_hold'
+    baseline_reference_candidate_enabled: bool = True
+    baseline_reference_smoothing_window_sec: float = 300.0
+    baseline_reference_min_smoothing_window_sec: float = 60.0
+    baseline_reference_max_window_fraction_of_chunk: float = 0.75
+    baseline_reference_large_window_fraction_warning: float = 0.50
     
     # baseline
     baseline_method: Literal['uv_raw_percentile_session', 'uv_globalfit_percentile_session'] = 'uv_raw_percentile_session'
@@ -240,6 +245,11 @@ class Config:
                 raise ValueError(
                     "export_display_series_csv must be a boolean (true/false)"
                 )
+        if 'baseline_reference_candidate_enabled' in data:
+            if not isinstance(data['baseline_reference_candidate_enabled'], bool):
+                raise ValueError(
+                    "baseline_reference_candidate_enabled must be a boolean (true/false)"
+                )
         if 'acquisition_mode' in data:
             if data['acquisition_mode'] not in {'intermittent', 'continuous'}:
                 raise ValueError(
@@ -291,6 +301,28 @@ class Config:
             raise ValueError("adaptive_event_gate_min_trust_fraction must be in (0, 1]")
         if obj.adaptive_event_gate_freeze_interp_method not in {"linear_hold"}:
             raise ValueError("adaptive_event_gate_freeze_interp_method must be 'linear_hold'")
+        for field_name in (
+            "baseline_reference_smoothing_window_sec",
+            "baseline_reference_min_smoothing_window_sec",
+            "baseline_reference_max_window_fraction_of_chunk",
+            "baseline_reference_large_window_fraction_warning",
+        ):
+            try:
+                setattr(obj, field_name, float(getattr(obj, field_name)))
+            except Exception as exc:
+                raise ValueError(f"{field_name} must be a finite float") from exc
+            if not math.isfinite(float(getattr(obj, field_name))):
+                raise ValueError(f"{field_name} must be a finite float")
+        if obj.baseline_reference_min_smoothing_window_sec <= 0.0:
+            raise ValueError("baseline_reference_min_smoothing_window_sec must be > 0")
+        if not (0.0 < obj.baseline_reference_max_window_fraction_of_chunk <= 1.0):
+            raise ValueError(
+                "baseline_reference_max_window_fraction_of_chunk must be in (0, 1]"
+            )
+        if not (0.0 < obj.baseline_reference_large_window_fraction_warning <= 1.0):
+            raise ValueError(
+                "baseline_reference_large_window_fraction_warning must be in (0, 1]"
+            )
         if obj.dynamic_fit_slope_constraint not in {"unconstrained", "nonnegative"}:
             raise ValueError(
                 "dynamic_fit_slope_constraint must be one of {'unconstrained', 'nonnegative'}"

@@ -1,4 +1,5 @@
 import os
+import json
 import h5py
 import pytest
 import numpy as np
@@ -118,6 +119,8 @@ def test_pipeline_integration_cache_production(tmp_path):
     config_path = tmp_path / "config.yaml"
     import shutil
     shutil.copy2(os.path.join(os.path.dirname(__file__), "qc_universal_config.yaml"), config_path)
+    with open(config_path, "a", encoding="utf-8") as f:
+        f.write("\nbaseline_reference_smoothing_window_sec: 120.0\n")
     
     # 1. Generate minimal (10 min) synthetic data
     gen_cmd = [
@@ -231,3 +234,51 @@ def test_pipeline_integration_cache_production(tmp_path):
         "dynamic_fit_has_soft_flags",
     ]:
         assert col in qc_df.columns
+
+    candidate_csv = out_dir / "_analysis" / "phasic_out" / "qc" / "baseline_reference_candidate_by_chunk.csv"
+    candidate_json = out_dir / "_analysis" / "phasic_out" / "qc" / "baseline_reference_candidate_by_chunk.json"
+    assert candidate_csv.exists()
+    assert candidate_json.exists()
+    candidate_json_text = candidate_json.read_text(encoding="utf-8")
+    assert "NaN" not in candidate_json_text
+    assert "Infinity" not in candidate_json_text
+    candidate_df = pd.read_csv(candidate_csv)
+    assert len(candidate_df) >= 1
+    for col in [
+        "roi",
+        "chunk_id",
+        "source_file",
+        "recording_mode",
+        "dynamic_fit_mode",
+        "slope_constraint",
+        "baseline_ref_candidate_available",
+        "baseline_ref_method",
+        "baseline_ref_lowpass_cutoff_hz",
+        "baseline_ref_smoothing_window_sec",
+        "baseline_ref_requested_smoothing_window_sec",
+        "baseline_ref_actual_smoothing_window_sec",
+        "baseline_ref_default_smoothing_window_sec",
+        "baseline_ref_min_smoothing_window_sec",
+        "baseline_ref_chunk_duration_sec",
+        "baseline_ref_smoothing_window_fraction_of_chunk",
+        "baseline_ref_max_window_fraction_of_chunk",
+        "baseline_ref_large_window_fraction_warning",
+        "baseline_ref_smoothing_window_adjusted",
+        "baseline_ref_smoothing_window_warning",
+        "baseline_ref_to_signal_range_ratio",
+        "baseline_ref_response_scale_fraction",
+        "dynamic_minus_baseline_ref_rms",
+        "dynamic_fit_qc_severity",
+        "dynamic_fit_qc_flags",
+    ]:
+        assert col in candidate_df.columns
+    assert set(candidate_df["baseline_ref_requested_smoothing_window_sec"].astype(float)) == {120.0}
+    assert set(candidate_df["baseline_ref_actual_smoothing_window_sec"].astype(float)) == {120.0}
+
+    qc_summary_path = out_dir / "_analysis" / "phasic_out" / "qc" / "qc_summary.json"
+    with open(qc_summary_path, "r", encoding="utf-8") as f:
+        qc_summary = json.load(f)
+    assert "baseline_reference_candidate_qc_summary" in qc_summary
+    candidate_summary = qc_summary["baseline_reference_candidate_qc_summary"]
+    assert candidate_summary["roi_chunk_candidate_count"] >= 1
+    assert candidate_summary["roi_chunk_candidate_available_count"] >= 1
