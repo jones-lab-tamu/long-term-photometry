@@ -8,6 +8,7 @@ from statistics import median
 
 import pytest
 import yaml
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -204,6 +205,73 @@ def test_default_baseline_path_is_used_without_custom_yaml(window, tmp_path):
     spec = window._build_run_spec(validate_only=True)
     assert spec.config_source_path == window._lab_default_config_path
     assert "Baseline Config Source: Lab standard default:" in window._effective_summary_label.text()
+
+
+def test_saved_config_path_without_custom_flag_falls_back_to_lab_default(qapp, tmp_path):
+    settings = QSettings(str(tmp_path / "legacy_config_path.ini"), QSettings.IniFormat)
+    settings.clear()
+    tutorial_cfg = tmp_path / "test_dataset" / "tutorial_config.yaml"
+    tutorial_cfg.parent.mkdir(parents=True)
+    tutorial_cfg.write_text("lowpass_hz: 0.25\n", encoding="utf-8")
+    settings.beginGroup("run_config")
+    settings.setValue("config_path", str(tutorial_cfg))
+    settings.endGroup()
+    settings.sync()
+
+    w = MainWindow(settings=settings)
+    try:
+        assert w._use_custom_config_cb.isChecked() is False
+        assert w._config_path.text() == w._lab_default_config_path
+        assert w._active_config_source_path() == w._lab_default_config_path
+        spec = w._build_run_spec(validate_only=True)
+        assert spec.config_source_path == w._lab_default_config_path
+    finally:
+        w.close()
+        w.deleteLater()
+        settings.clear()
+
+
+def test_saved_existing_custom_config_is_restored_when_enabled(qapp, tmp_path):
+    settings = QSettings(str(tmp_path / "explicit_custom_config.ini"), QSettings.IniFormat)
+    settings.clear()
+    custom_cfg = tmp_path / "custom_config.yaml"
+    custom_cfg.write_text("lowpass_hz: 0.25\n", encoding="utf-8")
+    settings.beginGroup("run_config")
+    settings.setValue("use_custom_config", True)
+    settings.setValue("config_path", str(custom_cfg))
+    settings.endGroup()
+    settings.sync()
+
+    w = MainWindow(settings=settings)
+    try:
+        assert w._use_custom_config_cb.isChecked() is True
+        assert w._config_path.text() == os.path.normpath(str(custom_cfg))
+        assert w._active_config_source_path() == os.path.normpath(str(custom_cfg))
+    finally:
+        w.close()
+        w.deleteLater()
+        settings.clear()
+
+
+def test_saved_missing_custom_config_falls_back_to_lab_default(qapp, tmp_path):
+    settings = QSettings(str(tmp_path / "missing_custom_config.ini"), QSettings.IniFormat)
+    settings.clear()
+    missing_cfg = tmp_path / "missing_tutorial_config.yaml"
+    settings.beginGroup("run_config")
+    settings.setValue("use_custom_config", True)
+    settings.setValue("config_path", str(missing_cfg))
+    settings.endGroup()
+    settings.sync()
+
+    w = MainWindow(settings=settings)
+    try:
+        assert w._use_custom_config_cb.isChecked() is False
+        assert w._config_path.text() == w._lab_default_config_path
+        assert w._active_config_source_path() == w._lab_default_config_path
+    finally:
+        w.close()
+        w.deleteLater()
+        settings.clear()
 
 
 def test_custom_yaml_mode_is_optional_and_enforced(window, tmp_path):

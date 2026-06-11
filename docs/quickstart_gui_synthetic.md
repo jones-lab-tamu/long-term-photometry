@@ -35,6 +35,10 @@ Use these paths in the GUI:
 
 The input folder already contains data. You do not need to run the synthetic generator for this quickstart.
 
+Fresh GUI launches use the repository lab default config, `config/qc_universal_config.yaml`,
+unless `Use custom config YAML` is enabled. The bundled `tutorial_config.yaml` is
+specific to this tutorial dataset and should be selected explicitly for this quickstart.
+
 If you want to make a fresh copy without using the command line, use
 `Tools -> Generate Synthetic Demo Dataset` and choose `Fast quickstart demo`.
 That curated GUI preset copies the same bundled dataset to a folder you select.

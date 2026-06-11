@@ -8247,10 +8247,24 @@ class MainWindow(QMainWindow):
         self._settings.beginGroup(_SETTINGS_GROUP)
         self._input_dir.setText(self._settings.value("input_dir", "", str))
         self._output_dir.setText(self._settings.value("output_dir", "", str))
-        self._use_custom_config_cb.setChecked(
+        use_custom_config = bool(
             self._settings.value("use_custom_config", False, bool)
         )
-        self._config_path.setText(self._settings.value("config_path", "", str))
+        legacy_config_path = str(self._settings.value("config_path", "", str) or "").strip()
+        custom_config_path = str(
+            self._settings.value(
+                "last_custom_config_path",
+                legacy_config_path,
+                str,
+            )
+            or ""
+        ).strip()
+        if use_custom_config and custom_config_path and os.path.isfile(custom_config_path):
+            self._use_custom_config_cb.setChecked(True)
+            self._config_path.setText(os.path.normpath(custom_config_path))
+        else:
+            self._use_custom_config_cb.setChecked(False)
+            self._config_path.setText(self._lab_default_config_path)
 
         fmt = self._settings.value("format", "auto", str)
         idx = self._format_combo.findText(fmt)
@@ -8576,8 +8590,14 @@ class MainWindow(QMainWindow):
         self._settings.beginGroup(_SETTINGS_GROUP)
         self._settings.setValue("input_dir", self._input_dir.text().strip())
         self._settings.setValue("output_dir", self._output_dir.text().strip())
-        self._settings.setValue("use_custom_config", self._use_custom_config_cb.isChecked())
-        self._settings.setValue("config_path", self._config_path.text().strip())
+        use_custom_config = bool(self._use_custom_config_cb.isChecked())
+        self._settings.setValue("use_custom_config", use_custom_config)
+        config_path = self._config_path.text().strip()
+        if use_custom_config:
+            self._settings.setValue("config_path", config_path)
+            self._settings.setValue("last_custom_config_path", config_path)
+        else:
+            self._settings.setValue("config_path", self._lab_default_config_path)
         self._settings.setValue("format", self._format_combo.currentText())
         self._settings.setValue("run_profile", self._selected_run_profile())
         self._settings.setValue("sessions_per_hour", self._sph_edit.text().strip())
