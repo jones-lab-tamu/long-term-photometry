@@ -32,6 +32,11 @@ DEFAULTS = {
     "signal_only_f0_edge_extrapolation_mode": "hold_nearest_anchor",
     "signal_only_f0_max_edge_extrapolation_fraction": 0.50,
     "signal_only_f0_max_edge_extrapolation_sec": None,
+    "signal_only_f0_medium_extrapolation_fraction": 0.25,
+    "signal_only_f0_high_extrapolation_fraction": 0.50,
+    "signal_only_f0_low_anchor_support_fraction": 0.10,
+    "signal_only_f0_low_anchor_count": 5,
+    "signal_only_f0_confidence_cap_on_large_gap": True,
 }
 
 VIABILITY_VIABLE = "viable"
@@ -64,6 +69,12 @@ FLAG_INSUFFICIENT_LOW_SUPPORT = "SIGNAL_ONLY_F0_INSUFFICIENT_LOW_SUPPORT"
 FLAG_INSUFFICIENT_ANCHORS = "SIGNAL_ONLY_F0_INSUFFICIENT_ANCHORS"
 FLAG_LARGE_ANCHOR_GAP = "SIGNAL_ONLY_F0_LARGE_ANCHOR_GAP"
 FLAG_ROLLING_FALLBACK = "SIGNAL_ONLY_F0_ROLLING_FALLBACK_USED"
+FLAG_CONFIDENCE_CAPPED_EXTRAPOLATION = "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_EXTRAPOLATION"
+FLAG_CONFIDENCE_CAPPED_LOW_ANCHOR_SUPPORT = (
+    "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_LOW_ANCHOR_SUPPORT"
+)
+FLAG_CONFIDENCE_CAPPED_FEW_ANCHORS = "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_FEW_ANCHORS"
+FLAG_CONFIDENCE_CAPPED_LARGE_GAP = "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_LARGE_GAP"
 
 
 def _cfg(config: Mapping[str, Any] | None, key: str) -> Any:
@@ -255,6 +266,21 @@ def _base_result(config: Mapping[str, Any] | None) -> dict[str, Any]:
         ),
         "signal_only_f0_max_edge_extrapolation_sec": _cfg(
             config, "signal_only_f0_max_edge_extrapolation_sec"
+        ),
+        "signal_only_f0_medium_extrapolation_fraction": _as_float(
+            _cfg(config, "signal_only_f0_medium_extrapolation_fraction"), 0.25
+        ),
+        "signal_only_f0_high_extrapolation_fraction": _as_float(
+            _cfg(config, "signal_only_f0_high_extrapolation_fraction"), 0.50
+        ),
+        "signal_only_f0_low_anchor_support_fraction": _as_float(
+            _cfg(config, "signal_only_f0_low_anchor_support_fraction"), 0.10
+        ),
+        "signal_only_f0_low_anchor_count": _as_int(
+            _cfg(config, "signal_only_f0_low_anchor_count"), 5
+        ),
+        "signal_only_f0_confidence_cap_on_large_gap": _as_bool(
+            _cfg(config, "signal_only_f0_confidence_cap_on_large_gap"), True
         ),
         "signal_only_f0_anchor_count": 0,
         "signal_only_f0_low_support_fraction": 0.0,
@@ -557,6 +583,79 @@ def _build_state_aware_candidate(
     return candidate, meta, flags
 
 
+def _confidence_rank(confidence: str) -> int:
+    return {
+        CONFIDENCE_NONE: 0,
+        CONFIDENCE_LOW: 1,
+        CONFIDENCE_MEDIUM: 2,
+        CONFIDENCE_HIGH: 3,
+    }.get(str(confidence), 0)
+
+
+def _cap_confidence(confidence: str, cap: str) -> str:
+    return confidence if _confidence_rank(confidence) <= _confidence_rank(cap) else cap
+
+
+def _calibrate_candidate_confidence(
+    *,
+    result: Mapping[str, Any],
+    flags: list[str],
+    viability: str,
+    confidence: str,
+    has_state_context: bool,
+    large_anchor_gap: bool,
+) -> tuple[str, str, list[str]]:
+    if viability == VIABILITY_HARD_INSPECT:
+        return viability, CONFIDENCE_LOW, flags
+
+    calibrated_flags = list(flags)
+    extrapolated_fraction = float(result.get("signal_only_f0_extrapolated_fraction", 0.0) or 0.0)
+    medium_extrapolation = float(
+        result.get("signal_only_f0_medium_extrapolation_fraction", 0.25) or 0.25
+    )
+    high_extrapolation = float(
+        result.get("signal_only_f0_high_extrapolation_fraction", 0.50) or 0.50
+    )
+    anchor_support = float(result.get("signal_only_f0_anchor_support_fraction", 0.0) or 0.0)
+    low_anchor_support = float(
+        result.get("signal_only_f0_low_anchor_support_fraction", 0.10) or 0.10
+    )
+    anchor_count = int(result.get("signal_only_f0_anchor_count", 0) or 0)
+    low_anchor_count = int(result.get("signal_only_f0_low_anchor_count", 5) or 5)
+
+    if has_state_context:
+        confidence = _cap_confidence(confidence, CONFIDENCE_MEDIUM)
+        viability = VIABILITY_CONTEXTUAL
+        if extrapolated_fraction >= medium_extrapolation:
+            confidence = CONFIDENCE_LOW
+            calibrated_flags.append(FLAG_CONFIDENCE_CAPPED_EXTRAPOLATION)
+    else:
+        if extrapolated_fraction >= high_extrapolation:
+            viability = VIABILITY_CONTEXTUAL
+            confidence = CONFIDENCE_LOW
+            calibrated_flags.append(FLAG_CONFIDENCE_CAPPED_EXTRAPOLATION)
+        elif extrapolated_fraction >= medium_extrapolation:
+            confidence = _cap_confidence(confidence, CONFIDENCE_MEDIUM)
+            calibrated_flags.append(FLAG_CONFIDENCE_CAPPED_EXTRAPOLATION)
+
+    if anchor_count > 0 and anchor_support < low_anchor_support:
+        confidence = _cap_confidence(confidence, CONFIDENCE_MEDIUM)
+        calibrated_flags.append(FLAG_CONFIDENCE_CAPPED_LOW_ANCHOR_SUPPORT)
+    if anchor_count > 0 and anchor_count < low_anchor_count:
+        confidence = _cap_confidence(confidence, CONFIDENCE_MEDIUM)
+        calibrated_flags.append(FLAG_CONFIDENCE_CAPPED_FEW_ANCHORS)
+    if large_anchor_gap and bool(result.get("signal_only_f0_confidence_cap_on_large_gap", True)):
+        confidence = _cap_confidence(
+            confidence,
+            CONFIDENCE_LOW if has_state_context else CONFIDENCE_MEDIUM,
+        )
+        calibrated_flags.append(FLAG_CONFIDENCE_CAPPED_LARGE_GAP)
+        if not has_state_context and viability == VIABILITY_VIABLE:
+            viability = VIABILITY_CONTEXTUAL
+
+    return viability, confidence, calibrated_flags
+
+
 def compute_signal_only_f0_candidate(
     signal: np.ndarray,
     time: np.ndarray | None = None,
@@ -717,6 +816,9 @@ def compute_signal_only_f0_candidate(
     )
     excessive_above = above_fraction_pre_cap > float(result["signal_only_f0_max_above_signal_fraction"])
     large_anchor_gap = FLAG_LARGE_ANCHOR_GAP in flags
+    has_state_context = bool(
+        high_state_present or partial_high_state_present or edge_high_state_present
+    )
     insufficient_anchoring = (
         FLAG_INSUFFICIENT_LOW_SUPPORT in flags or FLAG_INSUFFICIENT_ANCHORS in flags
     )
@@ -744,30 +846,38 @@ def compute_signal_only_f0_candidate(
     if insufficient_anchoring and (high_state_present or partial_high_state_present or edge_high_state_present):
         viability = VIABILITY_HARD_INSPECT
         confidence = CONFIDENCE_LOW
-        flags.append(FLAG_HARD_INSPECT)
     elif low_support:
         viability = VIABILITY_HARD_INSPECT
         confidence = CONFIDENCE_LOW
-        flags.append(FLAG_HARD_INSPECT)
     elif excessive_above:
         viability = VIABILITY_HARD_INSPECT
         confidence = CONFIDENCE_LOW
-        flags.append(FLAG_HARD_INSPECT)
     elif excessive_tracking:
         viability = VIABILITY_CONTEXTUAL
         confidence = CONFIDENCE_LOW
-        flags.append(FLAG_CONTEXTUAL)
     elif large_anchor_gap or excessive_edge_extrapolation:
         viability = VIABILITY_CONTEXTUAL
         confidence = CONFIDENCE_LOW
-        flags.append(FLAG_CONTEXTUAL)
     elif high_state_present or partial_high_state_present or edge_high_state_present:
         viability = VIABILITY_CONTEXTUAL
         confidence = CONFIDENCE_MEDIUM if result["signal_only_f0_state_aware_used"] else CONFIDENCE_LOW
-        flags.append(FLAG_CONTEXTUAL)
     else:
         viability = VIABILITY_VIABLE
         confidence = CONFIDENCE_HIGH if support_fraction > 0.95 and not excessive_tracking else CONFIDENCE_MEDIUM
+
+    viability, confidence, flags = _calibrate_candidate_confidence(
+        result=result,
+        flags=flags,
+        viability=viability,
+        confidence=confidence,
+        has_state_context=has_state_context,
+        large_anchor_gap=large_anchor_gap,
+    )
+    if viability == VIABILITY_HARD_INSPECT:
+        flags.append(FLAG_HARD_INSPECT)
+    elif viability == VIABILITY_CONTEXTUAL:
+        flags.append(FLAG_CONTEXTUAL)
+    elif viability == VIABILITY_VIABLE:
         flags.append(FLAG_VIABLE)
 
     result.update(

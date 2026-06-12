@@ -356,6 +356,11 @@ class Pipeline:
             "signal_only_f0_edge_extrapolation_mode",
             "signal_only_f0_max_edge_extrapolation_fraction",
             "signal_only_f0_max_edge_extrapolation_sec",
+            "signal_only_f0_medium_extrapolation_fraction",
+            "signal_only_f0_high_extrapolation_fraction",
+            "signal_only_f0_low_anchor_support_fraction",
+            "signal_only_f0_low_anchor_count",
+            "signal_only_f0_confidence_cap_on_large_gap",
         )
         signal_only_f0_config = {
             key: getattr(self.config, key)

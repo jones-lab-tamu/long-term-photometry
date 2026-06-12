@@ -17,7 +17,11 @@ def _ordinary_signal(seed=1, n=1200):
 def test_ordinary_dynamic_signal_with_slow_drift_has_usable_lower_envelope():
     t, signal, slow = _ordinary_signal()
 
-    out = compute_signal_only_f0_candidate(signal, t)
+    out = compute_signal_only_f0_candidate(
+        signal,
+        t,
+        config={"signal_only_f0_max_anchor_gap_fraction": 1.0},
+    )
     candidate = out["signal_only_f0_candidate"]
 
     assert out["signal_only_f0_candidate_available"] is True
@@ -27,6 +31,34 @@ def test_ordinary_dynamic_signal_with_slow_drift_has_usable_lower_envelope():
     assert np.nanmedian(signal - candidate) > 0.0
     assert np.corrcoef(candidate[np.isfinite(candidate)], slow[np.isfinite(candidate)])[0, 1] > 0.5
     assert "SIGNAL_ONLY_F0_AVAILABLE" in out["signal_only_f0_flags"]
+    assert out["signal_only_f0_extrapolated_fraction"] < out[
+        "signal_only_f0_medium_extrapolation_fraction"
+    ]
+    assert out["signal_only_f0_candidate_viability"] == "viable"
+    assert out["signal_only_f0_candidate_confidence"] in {"high", "medium"}
+
+
+def test_ordinary_dynamic_high_extrapolation_caps_confidence_without_hard_reject():
+    t, signal, _slow = _ordinary_signal(seed=11)
+
+    out = compute_signal_only_f0_candidate(
+        signal,
+        t,
+        config={
+            "signal_only_f0_max_anchor_gap_fraction": 1.0,
+            "signal_only_f0_medium_extrapolation_fraction": 0.03,
+            "signal_only_f0_high_extrapolation_fraction": 0.05,
+        },
+    )
+
+    assert out["signal_only_f0_extrapolated_fraction"] >= out[
+        "signal_only_f0_high_extrapolation_fraction"
+    ]
+    assert out["signal_only_f0_candidate_viability"] == "contextual"
+    assert out["signal_only_f0_candidate_confidence"] == "low"
+    assert "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_EXTRAPOLATION" in out[
+        "signal_only_f0_flags"
+    ]
 
 
 def test_sustained_high_state_adds_context_and_does_not_chase_plateau():
@@ -67,8 +99,12 @@ def test_beginning_locked_high_uses_later_low_support_as_edge_anchor():
     assert out["signal_only_f0_anchor_status"] == "sufficient_anchors"
     assert "SIGNAL_ONLY_F0_EDGE_EXTRAPOLATED" in out["signal_only_f0_flags"]
     assert out["signal_only_f0_extrapolated_fraction"] > 0.0
+    assert "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_EXTRAPOLATION" in out[
+        "signal_only_f0_flags"
+    ]
     assert np.nanmedian(candidate[:250]) < np.nanmedian(signal[:250]) - 0.25
     assert out["signal_only_f0_candidate_viability"] == "contextual"
+    assert out["signal_only_f0_candidate_confidence"] == "low"
 
 
 def test_locked_high_without_low_support_is_not_viable():
@@ -94,6 +130,27 @@ def test_locked_high_without_low_support_is_not_viable():
     assert "SIGNAL_ONLY_F0_INSUFFICIENT_LOW_SUPPORT" in out["signal_only_f0_flags"]
     assert "SIGNAL_ONLY_F0_ROLLING_FALLBACK_USED" in out["signal_only_f0_flags"]
     assert out["signal_only_f0_candidate_viability"] == "hard_inspect"
+    assert out["signal_only_f0_candidate_confidence"] == "low"
+
+
+def test_few_anchor_count_caps_confidence_without_changing_candidate_viability():
+    t, signal, _slow = _ordinary_signal(seed=24)
+
+    out = compute_signal_only_f0_candidate(
+        signal,
+        t,
+        config={
+            "signal_only_f0_max_anchor_gap_fraction": 1.0,
+            "signal_only_f0_low_anchor_count": 99,
+        },
+    )
+
+    assert out["signal_only_f0_anchor_count"] < out["signal_only_f0_low_anchor_count"]
+    assert out["signal_only_f0_candidate_viability"] == "viable"
+    assert out["signal_only_f0_candidate_confidence"] == "medium"
+    assert "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_FEW_ANCHORS" in out[
+        "signal_only_f0_flags"
+    ]
 
 
 def test_partial_mixed_high_state_adds_contextual_flag():

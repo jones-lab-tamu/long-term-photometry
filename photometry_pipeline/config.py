@@ -114,6 +114,11 @@ class Config:
     ] = 'hold_nearest_anchor'
     signal_only_f0_max_edge_extrapolation_fraction: float = 0.50
     signal_only_f0_max_edge_extrapolation_sec: Optional[float] = None
+    signal_only_f0_medium_extrapolation_fraction: float = 0.25
+    signal_only_f0_high_extrapolation_fraction: float = 0.50
+    signal_only_f0_low_anchor_support_fraction: float = 0.10
+    signal_only_f0_low_anchor_count: int = 5
+    signal_only_f0_confidence_cap_on_large_gap: bool = True
     
     # baseline
     baseline_method: Literal['uv_raw_percentile_session', 'uv_globalfit_percentile_session'] = 'uv_raw_percentile_session'
