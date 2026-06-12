@@ -30,6 +30,10 @@ from .core.signal_state_diagnostics import (
     compute_signal_state_diagnostics,
     summarize_signal_state_diagnostics,
 )
+from .core.signal_only_f0_candidate import (
+    compute_signal_only_f0_candidate,
+    summarize_signal_only_f0_candidates,
+)
 from .core.correction_policy_proposal import (
     apply_correction_policy_proposals,
     summarize_correction_policy_proposals,
@@ -328,6 +332,25 @@ class Pipeline:
             for key in signal_state_config_keys
             if hasattr(self.config, key)
         }
+        signal_only_f0_config_keys = (
+            "signal_only_f0_window_fraction",
+            "signal_only_f0_window_sec",
+            "signal_only_f0_low_quantile",
+            "signal_only_f0_smoothing_window_fraction",
+            "signal_only_f0_smoothing_window_sec",
+            "signal_only_f0_min_window_samples",
+            "signal_only_f0_max_window_fraction",
+            "signal_only_f0_min_robust_range",
+            "signal_only_f0_max_above_signal_fraction",
+            "signal_only_f0_max_tracking_fraction",
+            "signal_only_f0_min_coverage_fraction",
+            "signal_only_f0_high_state_context_mode",
+        )
+        signal_only_f0_config = {
+            key: getattr(self.config, key)
+            for key in signal_only_f0_config_keys
+            if hasattr(self.config, key)
+        }
 
         records_by_roi: dict[str, dict] = {}
         for r_idx, roi in enumerate(chunk.channel_names):
@@ -394,6 +417,19 @@ class Pipeline:
                     config=signal_state_config,
                 )
             )
+            signal_only_f0 = compute_signal_only_f0_candidate(
+                signal=chunk.sig_raw[:, r_idx],
+                time=chunk.time_sec,
+                signal_state=record,
+                config=signal_only_f0_config,
+            )
+            signal_only_f0_trace = signal_only_f0.get("signal_only_f0_candidate")
+            signal_only_f0_meta = {
+                key: value
+                for key, value in signal_only_f0.items()
+                if key != "signal_only_f0_candidate"
+            }
+            record.update(signal_only_f0_meta)
             record.update(
                 classify_reference_candidates(
                     dynamic_qc=dynamic_qc,
@@ -410,9 +446,16 @@ class Pipeline:
                     chunk.metadata.setdefault("baseline_reference_candidate_trace", {})[
                         roi_name
                     ] = trace_arr
+            if signal_only_f0_trace is not None:
+                trace_arr = np.asarray(signal_only_f0_trace, dtype=float).reshape(-1)
+                if trace_arr.shape == chunk.sig_raw[:, r_idx].shape and np.any(np.isfinite(trace_arr)):
+                    chunk.metadata.setdefault("signal_only_f0_candidate_trace", {})[
+                        roi_name
+                    ] = trace_arr
 
         if records_by_roi:
             chunk.metadata.setdefault("baseline_reference_candidate_qc", {}).update(records_by_roi)
+            chunk.metadata.setdefault("signal_only_f0_candidate_qc", {}).update(records_by_roi)
 
     def _update_dynamic_fit_qc_summary(self) -> None:
         records = list(self.dynamic_fit_qc_records)
@@ -509,6 +552,12 @@ class Pipeline:
             list(self.baseline_reference_candidate_records)
         )
         self.qc_summary["signal_state_diagnostics_summary"] = _sanitize_metadata(summary)
+
+    def _update_signal_only_f0_candidate_summary(self) -> None:
+        summary = summarize_signal_only_f0_candidates(
+            list(self.baseline_reference_candidate_records)
+        )
+        self.qc_summary["signal_only_f0_candidate_summary"] = _sanitize_metadata(summary)
 
     def _update_reference_candidate_comparison_summary(self) -> None:
         records = list(self.baseline_reference_candidate_records)
@@ -1645,6 +1694,12 @@ class Pipeline:
                     "dynamic_fit_qc_flags",
                     "dynamic_fit_qc_hard_flags",
                     "dynamic_fit_qc_soft_flags",
+                    "reference_comparison_flags",
+                    "signal_state_flags",
+                    "signal_only_f0_flags",
+                    "proposal_flags_conservative",
+                    "proposal_flags_balanced",
+                    "proposal_flags_liberal",
                 ):
                     flags = row.get(list_key, [])
                     if isinstance(flags, (list, tuple)):
@@ -1685,6 +1740,7 @@ class Pipeline:
         self._update_dynamic_fit_qc_summary()
         self._update_baseline_reference_candidate_summary()
         self._update_signal_state_diagnostics_summary()
+        self._update_signal_only_f0_candidate_summary()
         self._update_reference_candidate_comparison_summary()
         self._update_correction_policy_proposal_summary()
             

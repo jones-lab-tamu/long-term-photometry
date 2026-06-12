@@ -76,7 +76,19 @@ Signal-state diagnostics describe whether the signal channel contains sustained 
 
 The diagnostics use the signal channel only. They report robust distribution, high-state occupancy, edge occupancy, local variability suppression, and step-like transition metrics using configurable relative thresholds and windows rather than one hard-coded sustained-duration rule. They do not prove artifact or biological signal.
 
-These diagnostics are provenance outputs only. They do not alter correction, dF/F calculation, event detection, correction modes, feature extraction, or correction-policy proposals. Future signal-only F0 fallback development may use these diagnostics, but this patch does not implement signal-only F0.
+These diagnostics are provenance outputs only. They do not alter correction, dF/F calculation, event detection, correction modes, feature extraction, or correction-policy proposals. The signal-only F0 candidate diagnostics below may use signal-state findings as context, but they still do not select or apply a correction.
+
+## Signal-only F0 candidate diagnostics
+
+The signal-only F0 candidate is a diagnostic-only lower-envelope estimate computed from the signal channel alone. It does not use the isosbestic/reference channel and does not replace the applied dynamic isosbestic correction.
+
+The candidate uses configurable rolling lower-quantile and smoothing windows to estimate a conservative baseline-like F0 trace from the signal. Its QC fields report support, lower-state coverage, relationship to the observed signal, above-signal fraction before and after conservative capping, tracking score, robust ranges, viability, confidence, and diagnostic flags. Signal-state diagnostics provide contextual flags for sustained, edge, or partial high-state behavior, but signal-only F0 candidate generation is not restricted to locked-high cases; ordinary chunks with untrustworthy dynamic reference correction can also be evaluated.
+
+This first-pass implementation uses scalar signal-state flags as contextual QC and can apply a contextual cap to avoid letting the diagnostic F0 candidate chase high-state plateaus. It does not perform epoch-level high-state exclusion or downweighting because high-state masks are not yet exported as provenance.
+
+This output is intended to evaluate whether a signal-derived fallback could be appropriate when dynamic isosbestic correction is untrustworthy or conceptually contraindicated. It does not alter correction, dF/F calculation, event detection, feature extraction, HDF5 applied traces, or correction-policy proposals.
+
+When available during normal phasic analysis, the diagnostic trace is stored in the phasic HDF5 cache at `/roi/<ROI>/chunk_<chunk_id>/signal_only_f0_candidate`. Scalar metrics are written to `qc/baseline_reference_candidate_by_chunk.csv`, `qc/baseline_reference_candidate_by_chunk.json`, and the `signal_only_f0_candidate_summary` block in `qc/qc_summary.json`.
 
 ### Recomputing policy proposals without rerunning analysis
 

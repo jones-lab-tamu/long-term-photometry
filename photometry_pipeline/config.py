@@ -85,6 +85,21 @@ class Config:
     signal_state_step_window_sec: Optional[float] = None
     signal_state_step_threshold_robust_z: float = 3.5
     signal_state_min_robust_range: float = 1e-6
+    signal_only_f0_window_fraction: float = 0.20
+    signal_only_f0_window_sec: Optional[float] = None
+    signal_only_f0_low_quantile: float = 0.10
+    signal_only_f0_smoothing_window_fraction: float = 0.10
+    signal_only_f0_smoothing_window_sec: Optional[float] = None
+    signal_only_f0_min_window_samples: int = 21
+    signal_only_f0_max_window_fraction: float = 0.50
+    signal_only_f0_min_robust_range: float = 1e-6
+    signal_only_f0_max_above_signal_fraction: float = 0.20
+    signal_only_f0_max_tracking_fraction: float = 0.85
+    signal_only_f0_min_coverage_fraction: float = 0.80
+    signal_only_f0_high_state_context_mode: Literal[
+        'none',
+        'contextual_cap',
+    ] = 'contextual_cap'
     
     # baseline
     baseline_method: Literal['uv_raw_percentile_session', 'uv_globalfit_percentile_session'] = 'uv_raw_percentile_session'
@@ -269,6 +284,29 @@ class Config:
             if not isinstance(data['baseline_reference_candidate_enabled'], bool):
                 raise ValueError(
                     "baseline_reference_candidate_enabled must be a boolean (true/false)"
+                )
+        if 'signal_only_f0_high_state_exclusion_mode' in data:
+            legacy_mode = data.pop('signal_only_f0_high_state_exclusion_mode')
+            if legacy_mode in {
+                'exclude_high_state_candidates',
+                'downweight_high_state_candidates',
+            }:
+                data.setdefault('signal_only_f0_high_state_context_mode', 'contextual_cap')
+            elif legacy_mode == 'none':
+                data.setdefault('signal_only_f0_high_state_context_mode', 'none')
+            else:
+                raise ValueError(
+                    "Invalid signal_only_f0_high_state_exclusion_mode: "
+                    f"{legacy_mode}. "
+                    "Allowed: {'none', 'exclude_high_state_candidates', "
+                    "'downweight_high_state_candidates'}"
+                )
+        if 'signal_only_f0_high_state_context_mode' in data:
+            if data['signal_only_f0_high_state_context_mode'] not in {'none', 'contextual_cap'}:
+                raise ValueError(
+                    "Invalid signal_only_f0_high_state_context_mode: "
+                    f"{data['signal_only_f0_high_state_context_mode']}. "
+                    "Allowed: {'none', 'contextual_cap'}"
                 )
         if 'acquisition_mode' in data:
             if data['acquisition_mode'] not in {'intermittent', 'continuous'}:

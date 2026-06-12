@@ -189,6 +189,7 @@ def test_pipeline_integration_cache_production(tmp_path):
         assert 'dff' in grp
         found_dynamic_fit_qc_attrs = False
         found_baseline_candidate_trace = False
+        found_signal_only_f0_trace = False
         for roi_raw in rois:
             roi_name = roi_raw.decode('utf-8') if isinstance(roi_raw, bytes) else str(roi_raw)
             for chunk_id in f['meta/chunk_ids'][:]:
@@ -213,12 +214,29 @@ def test_pipeline_integration_cache_production(tmp_path):
                     assert "baseline_ref_fit_stage" in candidate.attrs
                     assert "baseline_ref_status" in candidate.attrs
                     found_baseline_candidate_trace = True
-                if found_dynamic_fit_qc_attrs and found_baseline_candidate_trace:
+                if "signal_only_f0_candidate" in candidate:
+                    assert candidate["signal_only_f0_candidate"].shape == candidate["sig_raw"].shape
+                    assert bool(candidate.attrs.get("signal_only_f0_candidate_available", False))
+                    assert "signal_only_f0_method" in candidate.attrs
+                    assert "signal_only_f0_candidate_viability" in candidate.attrs
+                    assert "signal_only_f0_candidate_confidence" in candidate.attrs
+                    assert "signal_only_f0_high_state_context_mode" in candidate.attrs
+                    found_signal_only_f0_trace = True
+                if (
+                    found_dynamic_fit_qc_attrs
+                    and found_baseline_candidate_trace
+                    and found_signal_only_f0_trace
+                ):
                     break
-            if found_dynamic_fit_qc_attrs and found_baseline_candidate_trace:
+            if (
+                found_dynamic_fit_qc_attrs
+                and found_baseline_candidate_trace
+                and found_signal_only_f0_trace
+            ):
                 break
         assert found_dynamic_fit_qc_attrs
         assert found_baseline_candidate_trace
+        assert found_signal_only_f0_trace
 
     qc_csv = out_dir / "_analysis" / "phasic_out" / "qc" / "dynamic_fit_qc_by_chunk.csv"
     qc_json = out_dir / "_analysis" / "phasic_out" / "qc" / "dynamic_fit_qc_by_chunk.json"
@@ -313,6 +331,19 @@ def test_pipeline_integration_cache_production(tmp_path):
         "signal_edge_high_state_present",
         "signal_step_like_transition_present",
         "signal_state_flags",
+        "signal_only_f0_candidate_available",
+        "signal_only_f0_status",
+        "signal_only_f0_method",
+        "signal_only_f0_candidate_viability",
+        "signal_only_f0_candidate_confidence",
+        "signal_only_f0_support_fraction",
+        "signal_only_f0_to_signal_range_ratio",
+        "signal_only_f0_above_signal_fraction_pre_cap",
+        "signal_only_f0_above_signal_fraction",
+        "signal_only_f0_tracking_score",
+        "signal_only_f0_high_state_context_mode",
+        "signal_only_f0_high_state_context_applied",
+        "signal_only_f0_flags",
         "proposed_correction_mode_conservative",
         "proposal_confidence_conservative",
         "review_required_conservative",
@@ -365,6 +396,13 @@ def test_pipeline_integration_cache_production(tmp_path):
     assert isinstance(signal_summary["signal_edge_high_state_present_counts"], dict)
     assert isinstance(signal_summary["signal_step_like_transition_present_counts"], dict)
     assert isinstance(signal_summary["signal_state_flag_counts"], dict)
+    assert "signal_only_f0_candidate_summary" in qc_summary
+    f0_summary = qc_summary["signal_only_f0_candidate_summary"]
+    assert f0_summary["roi_chunk_signal_only_f0_count"] >= 1
+    assert isinstance(f0_summary["signal_only_f0_candidate_available_counts"], dict)
+    assert isinstance(f0_summary["signal_only_f0_candidate_viability_counts"], dict)
+    assert isinstance(f0_summary["signal_only_f0_candidate_confidence_counts"], dict)
+    assert isinstance(f0_summary["signal_only_f0_flag_counts"], dict)
     assert "correction_policy_proposal_summary" in qc_summary
     proposal_summary = qc_summary["correction_policy_proposal_summary"]
     assert set(proposal_summary) == {"balanced", "conservative", "liberal"}

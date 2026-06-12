@@ -411,6 +411,63 @@ class Hdf5TraceCacheWriter:
                                 data=trace_arr,
                                 **self._dataset_create_kwargs,
                             )
+                    f0_by_roi = chunk.metadata.get('signal_only_f0_candidate_qc', {})
+                    f0_meta = (
+                        f0_by_roi.get(str(roi), {})
+                        if isinstance(f0_by_roi, dict)
+                        else {}
+                    )
+                    f0_trace_by_roi = chunk.metadata.get(
+                        'signal_only_f0_candidate_trace', {}
+                    )
+                    f0_trace = (
+                        f0_trace_by_roi.get(str(roi))
+                        if isinstance(f0_trace_by_roi, dict)
+                        else None
+                    )
+                    if isinstance(f0_meta, dict) and f0_meta:
+                        grp.attrs['signal_only_f0_candidate_available'] = bool(
+                            f0_meta.get('signal_only_f0_candidate_available', False)
+                        )
+                        for attr_name in (
+                            'signal_only_f0_status',
+                            'signal_only_f0_warning',
+                            'signal_only_f0_method',
+                            'signal_only_f0_candidate_viability',
+                            'signal_only_f0_candidate_confidence',
+                            'signal_only_f0_high_state_context_mode',
+                        ):
+                            value = f0_meta.get(attr_name)
+                            if value is not None:
+                                grp.attrs[attr_name] = str(value)
+                        if 'signal_only_f0_high_state_context_applied' in f0_meta:
+                            grp.attrs['signal_only_f0_high_state_context_applied'] = bool(
+                                f0_meta.get('signal_only_f0_high_state_context_applied')
+                            )
+                        value = f0_meta.get('signal_only_f0_high_state_context_cap')
+                        if value is not None:
+                            try:
+                                numeric = float(value)
+                            except Exception:
+                                numeric = np.nan
+                            if np.isfinite(numeric):
+                                grp.attrs['signal_only_f0_high_state_context_cap'] = numeric
+                        flags = f0_meta.get('signal_only_f0_flags', [])
+                        if isinstance(flags, (list, tuple)):
+                            grp.attrs['signal_only_f0_flags'] = ';'.join(str(x) for x in flags)
+                        elif flags is not None:
+                            grp.attrs['signal_only_f0_flags'] = str(flags)
+                    if f0_trace is not None:
+                        trace_arr = np.asarray(f0_trace, dtype=np.float64).reshape(-1)
+                        if (
+                            trace_arr.shape == np.asarray(chunk.sig_raw[:, r_idx]).reshape(-1).shape
+                            and np.any(np.isfinite(trace_arr))
+                        ):
+                            grp.create_dataset(
+                                'signal_only_f0_candidate',
+                                data=trace_arr,
+                                **self._dataset_create_kwargs,
+                            )
             
             # Required Time axis
             grp.create_dataset('time_sec', data=chunk.time_sec, **self._dataset_create_kwargs)

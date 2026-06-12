@@ -1,0 +1,535 @@
+"""Diagnostic-only signal-derived F0 candidate metrics."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+import numpy as np
+
+
+DEFAULTS = {
+    "signal_only_f0_window_fraction": 0.20,
+    "signal_only_f0_window_sec": None,
+    "signal_only_f0_low_quantile": 0.10,
+    "signal_only_f0_smoothing_window_fraction": 0.10,
+    "signal_only_f0_smoothing_window_sec": None,
+    "signal_only_f0_min_window_samples": 21,
+    "signal_only_f0_max_window_fraction": 0.50,
+    "signal_only_f0_min_robust_range": 1e-6,
+    "signal_only_f0_max_above_signal_fraction": 0.20,
+    "signal_only_f0_max_tracking_fraction": 0.85,
+    "signal_only_f0_min_coverage_fraction": 0.80,
+    "signal_only_f0_high_state_context_mode": "contextual_cap",
+}
+
+VIABILITY_VIABLE = "viable"
+VIABILITY_CONTEXTUAL = "contextual"
+VIABILITY_HARD_INSPECT = "hard_inspect"
+VIABILITY_UNAVAILABLE = "unavailable"
+
+CONFIDENCE_HIGH = "high"
+CONFIDENCE_MEDIUM = "medium"
+CONFIDENCE_LOW = "low"
+CONFIDENCE_NONE = "none"
+
+FLAG_AVAILABLE = "SIGNAL_ONLY_F0_AVAILABLE"
+FLAG_VIABLE = "SIGNAL_ONLY_F0_VIABLE"
+FLAG_CONTEXTUAL = "SIGNAL_ONLY_F0_CONTEXTUAL"
+FLAG_HARD_INSPECT = "SIGNAL_ONLY_F0_HARD_INSPECT"
+FLAG_INSUFFICIENT_SAMPLES = "SIGNAL_ONLY_F0_INSUFFICIENT_SAMPLES"
+FLAG_INSUFFICIENT_RANGE = "SIGNAL_ONLY_F0_INSUFFICIENT_RANGE"
+FLAG_LOW_SUPPORT = "SIGNAL_ONLY_F0_LOW_SUPPORT"
+FLAG_EXCESSIVE_TRACKING = "SIGNAL_ONLY_F0_EXCESSIVE_TRACKING"
+FLAG_ABOVE_SIGNAL_EXCESSIVE = "SIGNAL_ONLY_F0_ABOVE_SIGNAL_EXCESSIVE"
+FLAG_HIGH_STATE = "SIGNAL_ONLY_F0_HIGH_STATE_PRESENT"
+FLAG_PARTIAL_HIGH_STATE = "SIGNAL_ONLY_F0_PARTIAL_HIGH_STATE_PRESENT"
+FLAG_EDGE_HIGH_STATE = "SIGNAL_ONLY_F0_EDGE_HIGH_STATE_PRESENT"
+
+
+def _cfg(config: Mapping[str, Any] | None, key: str) -> Any:
+    if isinstance(config, Mapping) and key in config:
+        return config[key]
+    if key == "signal_only_f0_high_state_context_mode" and isinstance(config, Mapping):
+        legacy = config.get("signal_only_f0_high_state_exclusion_mode")
+        if legacy in {"exclude_high_state_candidates", "downweight_high_state_candidates"}:
+            return "contextual_cap"
+        if legacy == "none":
+            return "none"
+    return DEFAULTS[key]
+
+
+def _as_float(value: Any, default: float) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return float(default)
+    return out if np.isfinite(out) else float(default)
+
+
+def _as_int(value: Any, default: int) -> int:
+    try:
+        out = int(round(float(value)))
+    except Exception:
+        return int(default)
+    return max(1, out)
+
+
+def _window_samples(
+    *,
+    n: int,
+    duration_sec: float | None,
+    sample_interval_sec: float | None,
+    fraction: float,
+    requested_sec: Any,
+    min_samples: int,
+    max_fraction: float,
+) -> tuple[int, float | None]:
+    if n <= 1:
+        return 1, None
+    sec = None
+    try:
+        if requested_sec is not None:
+            sec_val = float(requested_sec)
+            if np.isfinite(sec_val) and sec_val > 0:
+                sec = sec_val
+    except Exception:
+        sec = None
+    if sec is None and duration_sec is not None and np.isfinite(duration_sec) and duration_sec > 0:
+        sec = max(float(duration_sec) * float(fraction), 0.0)
+    if sec is not None and sample_interval_sec is not None and sample_interval_sec > 0:
+        samples = int(round(sec / sample_interval_sec))
+    else:
+        samples = int(round(max(1.0, float(n) * float(fraction))))
+    max_samples = max(1, int(round(float(n) * max(0.01, min(float(max_fraction), 1.0)))))
+    samples = max(int(min_samples), samples)
+    samples = max(1, min(int(samples), int(n), max_samples))
+    if samples % 2 == 0 and samples < n:
+        samples += 1
+        if samples > max_samples and samples > 1:
+            samples -= 2
+    samples = max(1, min(samples, n))
+    actual_sec = (
+        float(samples) * float(sample_interval_sec)
+        if sample_interval_sec is not None and sample_interval_sec > 0
+        else None
+    )
+    return samples, actual_sec
+
+
+def _moving_average_reflect(x: np.ndarray, window: int) -> np.ndarray:
+    arr = np.asarray(x, dtype=float).reshape(-1)
+    n = arr.size
+    if n == 0:
+        return arr.copy()
+    window = max(1, min(int(window), n))
+    if window <= 1:
+        return arr.copy()
+    pad_left = window // 2
+    pad_right = window - 1 - pad_left
+    values = np.where(np.isfinite(arr), arr, 0.0)
+    weights = np.isfinite(arr).astype(float)
+    if n == 1:
+        return arr.copy()
+    values_pad = np.pad(values, (pad_left, pad_right), mode="reflect")
+    weights_pad = np.pad(weights, (pad_left, pad_right), mode="reflect")
+    kernel = np.ones(window, dtype=float)
+    numerator = np.convolve(values_pad, kernel, mode="valid")
+    denominator = np.convolve(weights_pad, kernel, mode="valid")
+    out = np.full(n, np.nan, dtype=float)
+    ok = denominator > 0
+    out[ok] = numerator[ok] / denominator[ok]
+    return out
+
+
+def _base_result(config: Mapping[str, Any] | None) -> dict[str, Any]:
+    return {
+        "signal_only_f0_candidate_available": False,
+        "signal_only_f0_status": "unavailable",
+        "signal_only_f0_warning": "",
+        "signal_only_f0_method": "rolling_lower_quantile_envelope",
+        "signal_only_f0_window_fraction": _as_float(
+            _cfg(config, "signal_only_f0_window_fraction"), 0.20
+        ),
+        "signal_only_f0_window_sec_requested": _cfg(config, "signal_only_f0_window_sec"),
+        "signal_only_f0_window_samples": 0,
+        "signal_only_f0_window_sec_actual": None,
+        "signal_only_f0_low_quantile": _as_float(
+            _cfg(config, "signal_only_f0_low_quantile"), 0.10
+        ),
+        "signal_only_f0_smoothing_window_fraction": _as_float(
+            _cfg(config, "signal_only_f0_smoothing_window_fraction"), 0.10
+        ),
+        "signal_only_f0_smoothing_window_sec_requested": _cfg(
+            config, "signal_only_f0_smoothing_window_sec"
+        ),
+        "signal_only_f0_smoothing_window_samples": 0,
+        "signal_only_f0_smoothing_window_sec_actual": None,
+        "signal_only_f0_min_window_samples": _as_int(
+            _cfg(config, "signal_only_f0_min_window_samples"), 21
+        ),
+        "signal_only_f0_max_window_fraction": _as_float(
+            _cfg(config, "signal_only_f0_max_window_fraction"), 0.50
+        ),
+        "signal_only_f0_min_robust_range": _as_float(
+            _cfg(config, "signal_only_f0_min_robust_range"), 1e-6
+        ),
+        "signal_only_f0_max_above_signal_fraction": _as_float(
+            _cfg(config, "signal_only_f0_max_above_signal_fraction"), 0.20
+        ),
+        "signal_only_f0_max_tracking_fraction": _as_float(
+            _cfg(config, "signal_only_f0_max_tracking_fraction"), 0.85
+        ),
+        "signal_only_f0_min_coverage_fraction": _as_float(
+            _cfg(config, "signal_only_f0_min_coverage_fraction"), 0.80
+        ),
+        "signal_only_f0_high_state_context_mode": str(
+            _cfg(config, "signal_only_f0_high_state_context_mode")
+        ),
+        "signal_only_f0_high_state_context_cap": None,
+        "signal_only_f0_high_state_context_applied": False,
+        "signal_only_f0_candidate_viability": VIABILITY_UNAVAILABLE,
+        "signal_only_f0_candidate_confidence": CONFIDENCE_NONE,
+        "signal_only_f0_support_fraction": 0.0,
+        "signal_only_f0_low_state_support_fraction": 0.0,
+        "signal_only_f0_to_signal_corr": None,
+        "signal_only_f0_to_signal_range_ratio": None,
+        "signal_only_f0_below_signal_fraction": 0.0,
+        "signal_only_f0_above_signal_fraction_pre_cap": 0.0,
+        "signal_only_f0_above_signal_fraction": 0.0,
+        "signal_only_f0_tracking_score": None,
+        "signal_only_f0_residual_p05": None,
+        "signal_only_f0_residual_p50": None,
+        "signal_only_f0_residual_p95": None,
+        "signal_only_f0_p05": None,
+        "signal_only_f0_p50": None,
+        "signal_only_f0_p95": None,
+        "signal_only_f0_range_p95_p05": None,
+        "signal_only_f0_flags": [],
+        "signal_only_f0_candidate": None,
+    }
+
+
+def _duration_and_dt(signal: np.ndarray, time: np.ndarray | None) -> tuple[float | None, float | None]:
+    if time is None:
+        return None, None
+    t = np.asarray(time, dtype=float).reshape(-1)
+    if t.shape != signal.shape:
+        return None, None
+    finite = np.isfinite(t) & np.isfinite(signal)
+    finite_t = t[finite]
+    if finite_t.size < 2:
+        return None, None
+    diffs = np.diff(finite_t)
+    diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+    dt = float(np.median(diffs)) if diffs.size else None
+    duration = float(finite_t[-1] - finite_t[0] + (dt or 0.0))
+    return duration, dt
+
+
+def _lower_quantile_envelope(signal: np.ndarray, window: int, quantile: float) -> np.ndarray:
+    sig = np.asarray(signal, dtype=float).reshape(-1)
+    n = sig.size
+    if n == 0:
+        return sig.copy()
+    window = max(1, min(int(window), n))
+    step = max(1, window // 4)
+    half = window // 2
+    centers = list(range(0, n, step))
+    if centers[-1] != n - 1:
+        centers.append(n - 1)
+    values = []
+    valid_centers = []
+    q = min(max(float(quantile), 0.0), 0.5)
+    for center in centers:
+        start = max(0, int(center) - half)
+        end = min(n, int(center) + half + 1)
+        local = sig[start:end]
+        finite = local[np.isfinite(local)]
+        if finite.size == 0:
+            continue
+        valid_centers.append(float(center))
+        values.append(float(np.quantile(finite, q)))
+    if not values:
+        return np.full(n, np.nan, dtype=float)
+    x = np.arange(n, dtype=float)
+    out = np.interp(x, np.asarray(valid_centers), np.asarray(values))
+    return out
+
+
+def _state_flag_present(signal_state: Mapping[str, Any] | None, flag: str) -> bool:
+    if not isinstance(signal_state, Mapping):
+        return False
+    flags = signal_state.get("signal_state_flags", [])
+    if isinstance(flags, str):
+        flags = [x for x in flags.split(";") if x]
+    return isinstance(flags, (list, tuple)) and flag in {str(x) for x in flags}
+
+
+def compute_signal_only_f0_candidate(
+    signal: np.ndarray,
+    time: np.ndarray | None = None,
+    *,
+    signal_state: Mapping[str, Any] | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compute diagnostic-only signal-derived lower-envelope F0 candidate metrics."""
+    result = _base_result(config)
+    sig = np.asarray(signal, dtype=float).reshape(-1)
+    finite = np.isfinite(sig)
+    if sig.size < 10 or int(np.sum(finite)) < 10:
+        result.update(
+            {
+                "signal_only_f0_status": "insufficient",
+                "signal_only_f0_warning": "insufficient_finite_signal_samples",
+                "signal_only_f0_flags": [FLAG_INSUFFICIENT_SAMPLES],
+            }
+        )
+        return result
+
+    finite_sig = sig[finite]
+    p05, p50, p95 = [float(x) for x in np.percentile(finite_sig, [5.0, 50.0, 95.0])]
+    robust_range = float(p95 - p05)
+    if robust_range < float(result["signal_only_f0_min_robust_range"]):
+        result.update(
+            {
+                "signal_only_f0_status": "insufficient",
+                "signal_only_f0_warning": "insufficient_robust_signal_range",
+                "signal_only_f0_flags": [FLAG_INSUFFICIENT_RANGE],
+                "signal_only_f0_p05": p05,
+                "signal_only_f0_p50": p50,
+                "signal_only_f0_p95": p95,
+                "signal_only_f0_range_p95_p05": robust_range,
+            }
+        )
+        return result
+
+    duration, dt = _duration_and_dt(sig, time)
+    min_samples = int(result["signal_only_f0_min_window_samples"])
+    max_fraction = float(result["signal_only_f0_max_window_fraction"])
+    window, window_sec = _window_samples(
+        n=sig.size,
+        duration_sec=duration,
+        sample_interval_sec=dt,
+        fraction=float(result["signal_only_f0_window_fraction"]),
+        requested_sec=result["signal_only_f0_window_sec_requested"],
+        min_samples=min_samples,
+        max_fraction=max_fraction,
+    )
+    smooth_window, smooth_sec = _window_samples(
+        n=sig.size,
+        duration_sec=duration,
+        sample_interval_sec=dt,
+        fraction=float(result["signal_only_f0_smoothing_window_fraction"]),
+        requested_sec=result["signal_only_f0_smoothing_window_sec_requested"],
+        min_samples=max(3, min_samples // 2),
+        max_fraction=max_fraction,
+    )
+    result.update(
+        {
+            "signal_only_f0_window_samples": int(window),
+            "signal_only_f0_window_sec_actual": window_sec,
+            "signal_only_f0_smoothing_window_samples": int(smooth_window),
+            "signal_only_f0_smoothing_window_sec_actual": smooth_sec,
+        }
+    )
+    high_state_present = _state_flag_present(signal_state, "SIGNAL_HIGH_STATE_CANDIDATE")
+    partial_high_state_present = _state_flag_present(signal_state, "SIGNAL_PARTIAL_HIGH_STATE_CANDIDATE")
+    edge_high_state_present = _state_flag_present(signal_state, "SIGNAL_EDGE_HIGH_STATE_CANDIDATE")
+
+    candidate = _lower_quantile_envelope(
+        sig,
+        window=window,
+        quantile=float(result["signal_only_f0_low_quantile"]),
+    )
+    candidate = _moving_average_reflect(candidate, smooth_window)
+    pre_cap_finite = np.isfinite(candidate) & finite
+    above_fraction_pre_cap = (
+        float(
+            np.sum(candidate[pre_cap_finite] > sig[pre_cap_finite])
+            / max(1, np.sum(pre_cap_finite))
+        )
+        if np.any(pre_cap_finite)
+        else 0.0
+    )
+    # Conservative lower-envelope diagnostic: do not allow the candidate to sit
+    # above the observed signal at finite samples.
+    candidate = np.where(np.isfinite(sig) & np.isfinite(candidate), np.minimum(candidate, sig), candidate)
+    context_mode = str(result["signal_only_f0_high_state_context_mode"]).strip().lower()
+    if context_mode not in {"none", "contextual_cap"}:
+        context_mode = "contextual_cap"
+        result["signal_only_f0_high_state_context_mode"] = context_mode
+    context_cap = None
+    context_applied = False
+    if context_mode == "contextual_cap" and (
+        high_state_present or partial_high_state_present or edge_high_state_present
+    ):
+        # Without epoch masks, use scalar state diagnostics only as context and
+        # avoid allowing the diagnostic F0 candidate to simply chase high states.
+        context_cap = float(p05 + 0.50 * robust_range)
+        before_cap = candidate.copy()
+        candidate = np.where(np.isfinite(candidate), np.minimum(candidate, context_cap), candidate)
+        context_applied = bool(
+            np.any(np.isfinite(before_cap) & np.isfinite(candidate) & (candidate < before_cap))
+        )
+
+    cand_finite = np.isfinite(candidate) & finite
+    support_fraction = float(np.sum(cand_finite) / max(1, sig.size))
+    residual = sig[cand_finite] - candidate[cand_finite]
+    cand_vals = candidate[cand_finite]
+    sig_vals = sig[cand_finite]
+    low_state_support_fraction = float(np.sum(sig_vals <= p50) / max(1, sig.size)) if sig_vals.size else 0.0
+    above_fraction = float(np.sum(candidate[cand_finite] > sig[cand_finite]) / max(1, np.sum(cand_finite))) if np.any(cand_finite) else 0.0
+    below_fraction = float(np.sum(candidate[cand_finite] <= sig[cand_finite]) / max(1, np.sum(cand_finite))) if np.any(cand_finite) else 0.0
+    cand_p05, cand_p50, cand_p95 = [float(x) for x in np.percentile(cand_vals, [5.0, 50.0, 95.0])] if cand_vals.size else (None, None, None)
+    cand_range = float(cand_p95 - cand_p05) if cand_p05 is not None and cand_p95 is not None else None
+    range_ratio = float(cand_range / robust_range) if cand_range is not None and robust_range > 0 else None
+    corr = None
+    if cand_vals.size >= 3 and np.nanstd(cand_vals) > 0 and np.nanstd(sig_vals) > 0:
+        corr = float(np.corrcoef(cand_vals, sig_vals)[0, 1])
+    tracking_score = range_ratio
+    res_p05, res_p50, res_p95 = [float(x) for x in np.percentile(residual, [5.0, 50.0, 95.0])] if residual.size else (None, None, None)
+
+    flags = [FLAG_AVAILABLE]
+    if high_state_present:
+        flags.append(FLAG_HIGH_STATE)
+    if partial_high_state_present:
+        flags.append(FLAG_PARTIAL_HIGH_STATE)
+    if edge_high_state_present:
+        flags.append(FLAG_EDGE_HIGH_STATE)
+
+    low_support = support_fraction < float(result["signal_only_f0_min_coverage_fraction"])
+    excessive_tracking = bool(
+        tracking_score is not None
+        and tracking_score > float(result["signal_only_f0_max_tracking_fraction"])
+    )
+    excessive_above = above_fraction_pre_cap > float(result["signal_only_f0_max_above_signal_fraction"])
+    if low_support:
+        flags.append(FLAG_LOW_SUPPORT)
+    if excessive_tracking:
+        flags.append(FLAG_EXCESSIVE_TRACKING)
+    if excessive_above:
+        flags.append(FLAG_ABOVE_SIGNAL_EXCESSIVE)
+
+    if low_support:
+        viability = VIABILITY_HARD_INSPECT
+        confidence = CONFIDENCE_LOW
+        flags.append(FLAG_HARD_INSPECT)
+    elif excessive_above:
+        viability = VIABILITY_HARD_INSPECT
+        confidence = CONFIDENCE_LOW
+        flags.append(FLAG_HARD_INSPECT)
+    elif excessive_tracking:
+        viability = VIABILITY_CONTEXTUAL
+        confidence = CONFIDENCE_LOW
+        flags.append(FLAG_CONTEXTUAL)
+    elif high_state_present or partial_high_state_present or edge_high_state_present:
+        viability = VIABILITY_CONTEXTUAL
+        confidence = CONFIDENCE_MEDIUM
+        flags.append(FLAG_CONTEXTUAL)
+    else:
+        viability = VIABILITY_VIABLE
+        confidence = CONFIDENCE_HIGH if support_fraction > 0.95 and not excessive_tracking else CONFIDENCE_MEDIUM
+        flags.append(FLAG_VIABLE)
+
+    result.update(
+        {
+            "signal_only_f0_candidate_available": True,
+            "signal_only_f0_status": "ok",
+            "signal_only_f0_warning": "",
+            "signal_only_f0_candidate_viability": viability,
+            "signal_only_f0_candidate_confidence": confidence,
+            "signal_only_f0_support_fraction": support_fraction,
+            "signal_only_f0_low_state_support_fraction": low_state_support_fraction,
+            "signal_only_f0_high_state_context_cap": context_cap,
+            "signal_only_f0_high_state_context_applied": bool(context_applied),
+            "signal_only_f0_to_signal_corr": corr,
+            "signal_only_f0_to_signal_range_ratio": range_ratio,
+            "signal_only_f0_below_signal_fraction": below_fraction,
+            "signal_only_f0_above_signal_fraction_pre_cap": above_fraction_pre_cap,
+            "signal_only_f0_above_signal_fraction": above_fraction,
+            "signal_only_f0_tracking_score": tracking_score,
+            "signal_only_f0_residual_p05": res_p05,
+            "signal_only_f0_residual_p50": res_p50,
+            "signal_only_f0_residual_p95": res_p95,
+            "signal_only_f0_p05": cand_p05,
+            "signal_only_f0_p50": cand_p50,
+            "signal_only_f0_p95": cand_p95,
+            "signal_only_f0_range_p95_p05": cand_range,
+            "signal_only_f0_flags": list(dict.fromkeys(flags)),
+            "signal_only_f0_candidate": candidate,
+        }
+    )
+    return result
+
+
+def summarize_signal_only_f0_candidates(records: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Summarize signal-only F0 candidate diagnostics for qc_summary.json."""
+
+    def _count_values(key: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for rec in records:
+            val = rec.get(key)
+            if isinstance(val, bool):
+                text = str(bool(val)).lower()
+            else:
+                text = str(val or "").strip()
+            if text:
+                counts[text] = counts.get(text, 0) + 1
+        return {k: int(v) for k, v in sorted(counts.items())}
+
+    def _flag_counts() -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for rec in records:
+            flags = rec.get("signal_only_f0_flags", [])
+            if isinstance(flags, str):
+                flags = [x for x in flags.split(";") if x]
+            if isinstance(flags, (list, tuple)):
+                for flag in flags:
+                    flag_s = str(flag).strip()
+                    if flag_s:
+                        counts[flag_s] = counts.get(flag_s, 0) + 1
+        return {k: int(v) for k, v in sorted(counts.items())}
+
+    def _numeric_summary(key: str) -> dict[str, float | None]:
+        vals = []
+        for rec in records:
+            try:
+                val = float(rec.get(key, float("nan")))
+            except Exception:
+                continue
+            if np.isfinite(val):
+                vals.append(val)
+        if not vals:
+            return {"median": None, "p25": None, "p75": None}
+        arr = np.asarray(vals, dtype=float)
+        return {
+            "median": float(np.percentile(arr, 50.0)),
+            "p25": float(np.percentile(arr, 25.0)),
+            "p75": float(np.percentile(arr, 75.0)),
+        }
+
+    return {
+        "roi_chunk_signal_only_f0_count": int(len(records)),
+        "signal_only_f0_candidate_available_counts": _count_values(
+            "signal_only_f0_candidate_available"
+        ),
+        "signal_only_f0_candidate_viability_counts": _count_values(
+            "signal_only_f0_candidate_viability"
+        ),
+        "signal_only_f0_candidate_confidence_counts": _count_values(
+            "signal_only_f0_candidate_confidence"
+        ),
+        "signal_only_f0_flag_counts": _flag_counts(),
+        "signal_only_f0_support_fraction": _numeric_summary("signal_only_f0_support_fraction"),
+        "signal_only_f0_low_state_support_fraction": _numeric_summary(
+            "signal_only_f0_low_state_support_fraction"
+        ),
+        "signal_only_f0_to_signal_range_ratio": _numeric_summary(
+            "signal_only_f0_to_signal_range_ratio"
+        ),
+        "signal_only_f0_above_signal_fraction": _numeric_summary(
+            "signal_only_f0_above_signal_fraction"
+        ),
+        "signal_only_f0_tracking_score": _numeric_summary("signal_only_f0_tracking_score"),
+    }
