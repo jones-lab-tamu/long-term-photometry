@@ -10,6 +10,7 @@ SUPPORTED_CORRECTION_POLICIES = ("conservative", "balanced", "liberal")
 
 MODE_DYNAMIC_ISOSBESTIC = "dynamic_isosbestic"
 MODE_BASELINE_LEGACY = "baseline_reference_candidate"
+MODE_SIGNAL_ONLY_F0 = "signal_only_f0_candidate"
 MODE_NO_ISOSBESTIC = "no_isosbestic_candidate"
 MODE_NO_CLEAN_REFERENCE = "no_clean_reference_candidate"
 MODE_REVIEW = "review_required"
@@ -52,10 +53,40 @@ FLAG_BASELINE_POSITIVE = "BASELINE_POSITIVE_REFERENCE_RELATIONSHIP"
 FLAG_BASELINE_NEGATIVE = "BASELINE_NEGATIVE_REFERENCE_RELATIONSHIP"
 FLAG_BASELINE_WEAK = "BASELINE_WEAK_REFERENCE_RELATIONSHIP"
 FLAG_INVERTED = "INVERTED_REFERENCE_RELATIONSHIP"
+FLAG_SIGNAL_ONLY_F0_AVAILABLE = "SIGNAL_ONLY_F0_CANDIDATE_AVAILABLE"
+FLAG_SIGNAL_ONLY_F0_VIABLE = "SIGNAL_ONLY_F0_CANDIDATE_VIABLE"
+FLAG_SIGNAL_ONLY_F0_CONTEXTUAL = "SIGNAL_ONLY_F0_CANDIDATE_CONTEXTUAL"
+FLAG_SIGNAL_ONLY_F0_CONFIDENCE_HIGH = "SIGNAL_ONLY_F0_CANDIDATE_CONFIDENCE_HIGH"
+FLAG_SIGNAL_ONLY_F0_CONFIDENCE_MEDIUM = "SIGNAL_ONLY_F0_CANDIDATE_CONFIDENCE_MEDIUM"
+FLAG_SIGNAL_ONLY_F0_CONFIDENCE_LOW = "SIGNAL_ONLY_F0_CANDIDATE_CONFIDENCE_LOW"
+FLAG_SIGNAL_ONLY_F0_STATE_AWARE_ANCHORED = "SIGNAL_ONLY_F0_STATE_AWARE_ANCHORED"
+FLAG_SIGNAL_ONLY_F0_SUFFICIENT_ANCHORS = "SIGNAL_ONLY_F0_SUFFICIENT_ANCHORS"
+FLAG_SIGNAL_ONLY_F0_LOW_CONFIDENCE = "SIGNAL_ONLY_F0_LOW_CONFIDENCE"
+FLAG_SIGNAL_ONLY_F0_HARD = "SIGNAL_ONLY_F0_HARD_INSPECT"
+FLAG_SIGNAL_ONLY_F0_INSUFFICIENT_ANCHORS = "SIGNAL_ONLY_F0_INSUFFICIENT_ANCHORS"
+FLAG_SIGNAL_ONLY_F0_INSUFFICIENT_LOW_SUPPORT = "SIGNAL_ONLY_F0_INSUFFICIENT_LOW_SUPPORT"
+FLAG_SIGNAL_ONLY_F0_POLICY_CANDIDATE = "SIGNAL_ONLY_F0_POLICY_CANDIDATE"
+FLAG_SIGNAL_ONLY_F0_POLICY_REJECTED = "SIGNAL_ONLY_F0_POLICY_REJECTED"
+FLAG_SIGNAL_ONLY_F0_POLICY_REQUIRES_REVIEW = "SIGNAL_ONLY_F0_POLICY_REQUIRES_REVIEW"
 FLAG_BOTH_CONTEXTUAL = "BOTH_CANDIDATES_CONTEXTUAL"
 FLAG_BOTH_HARD_OR_UNAVAILABLE = "BOTH_CANDIDATES_HARD_OR_UNAVAILABLE"
 FLAG_REVIEW_BY_POLICY = "REVIEW_REQUIRED_BY_POLICY"
 FLAG_NO_CLEAN_REFERENCE = "NO_CLEAN_REFERENCE_CANDIDATE"
+
+SIGNAL_ONLY_F0_REJECT_FLAGS = {
+    "SIGNAL_ONLY_F0_HARD_INSPECT",
+    "SIGNAL_ONLY_F0_INSUFFICIENT_LOW_SUPPORT",
+    "SIGNAL_ONLY_F0_INSUFFICIENT_ANCHORS",
+    "SIGNAL_ONLY_F0_ABOVE_SIGNAL_EXCESSIVE",
+}
+
+SIGNAL_ONLY_F0_CAP_FLAGS = {
+    "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_EXTRAPOLATION",
+    "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_LOW_ANCHOR_SUPPORT",
+    "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_FEW_ANCHORS",
+    "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_LARGE_GAP",
+    "SIGNAL_ONLY_F0_LARGE_ANCHOR_GAP",
+}
 
 
 def policy_field_names() -> list[str]:
@@ -112,6 +143,170 @@ def _as_flag_set(value: Any) -> set[str]:
 def _text(value: Any, default: str = "unknown") -> str:
     text = str(value if value is not None else "").strip().lower()
     return text or default
+
+
+def _has_high_state_context(record: dict[str, Any]) -> bool:
+    f0_flags = _as_flag_set(record.get("signal_only_f0_flags"))
+    signal_flags = _as_flag_set(record.get("signal_state_flags"))
+    return bool(
+        {
+            "SIGNAL_ONLY_F0_HIGH_STATE_PRESENT",
+            "SIGNAL_ONLY_F0_PARTIAL_HIGH_STATE_PRESENT",
+            "SIGNAL_ONLY_F0_EDGE_HIGH_STATE_PRESENT",
+        }
+        & f0_flags
+        or {
+            "SIGNAL_HIGH_STATE_CANDIDATE",
+            "SIGNAL_PARTIAL_HIGH_STATE_CANDIDATE",
+            "SIGNAL_EDGE_HIGH_STATE_CANDIDATE",
+            "SIGNAL_STARTS_HIGH",
+            "SIGNAL_ENDS_HIGH",
+        }
+        & signal_flags
+    )
+
+
+def _signal_only_f0_evidence(record: dict[str, Any], *, allow_low: bool = False) -> dict[str, Any]:
+    f0_flags = _as_flag_set(record.get("signal_only_f0_flags"))
+    available = _boolish(record.get("signal_only_f0_candidate_available", False))
+    viability = _text(record.get("signal_only_f0_candidate_viability"))
+    confidence = _text(record.get("signal_only_f0_candidate_confidence"), CONFIDENCE_NONE)
+    anchor_status = _text(record.get("signal_only_f0_anchor_status"))
+    state_aware = _boolish(record.get("signal_only_f0_state_aware_used", False))
+    high_state_context = _has_high_state_context(record)
+
+    flags: list[str] = []
+    if available:
+        flags.append(FLAG_SIGNAL_ONLY_F0_AVAILABLE)
+    if viability == "viable":
+        flags.append(FLAG_SIGNAL_ONLY_F0_VIABLE)
+    elif viability == "contextual":
+        flags.append(FLAG_SIGNAL_ONLY_F0_CONTEXTUAL)
+    elif viability == "hard_inspect":
+        flags.append(FLAG_SIGNAL_ONLY_F0_HARD)
+    if confidence == CONFIDENCE_HIGH:
+        flags.append(FLAG_SIGNAL_ONLY_F0_CONFIDENCE_HIGH)
+    elif confidence == CONFIDENCE_MEDIUM:
+        flags.append(FLAG_SIGNAL_ONLY_F0_CONFIDENCE_MEDIUM)
+    elif confidence == CONFIDENCE_LOW:
+        flags.append(FLAG_SIGNAL_ONLY_F0_CONFIDENCE_LOW)
+        flags.append(FLAG_SIGNAL_ONLY_F0_LOW_CONFIDENCE)
+    if state_aware:
+        flags.append(FLAG_SIGNAL_ONLY_F0_STATE_AWARE_ANCHORED)
+    if anchor_status == "sufficient_anchors":
+        flags.append(FLAG_SIGNAL_ONLY_F0_SUFFICIENT_ANCHORS)
+    if "SIGNAL_ONLY_F0_INSUFFICIENT_ANCHORS" in f0_flags:
+        flags.append(FLAG_SIGNAL_ONLY_F0_INSUFFICIENT_ANCHORS)
+    if "SIGNAL_ONLY_F0_INSUFFICIENT_LOW_SUPPORT" in f0_flags:
+        flags.append(FLAG_SIGNAL_ONLY_F0_INSUFFICIENT_LOW_SUPPORT)
+
+    reject_reasons = []
+    if not available:
+        reject_reasons.append("unavailable")
+    if viability not in {"viable", "contextual"}:
+        reject_reasons.append("unusable_viability")
+    if confidence not in {"high", "medium"} and not (allow_low and confidence == "low"):
+        reject_reasons.append("insufficient_confidence")
+    if anchor_status != "sufficient_anchors":
+        reject_reasons.append("insufficient_anchors")
+    if not state_aware and str(record.get("signal_only_f0_anchor_status", "")) != "ordinary_dynamic_fallback":
+        reject_reasons.append("state_aware_not_documented")
+    if f0_flags & SIGNAL_ONLY_F0_REJECT_FLAGS:
+        reject_reasons.append("hard_signal_only_f0_flags")
+
+    if reject_reasons:
+        flags.append(FLAG_SIGNAL_ONLY_F0_POLICY_REJECTED)
+    else:
+        flags.append(FLAG_SIGNAL_ONLY_F0_POLICY_CANDIDATE)
+
+    confidence_caps = bool(f0_flags & SIGNAL_ONLY_F0_CAP_FLAGS)
+    return {
+        "candidate": not reject_reasons,
+        "flags": flags,
+        "reject_reasons": reject_reasons,
+        "available": available,
+        "viability": viability,
+        "confidence": confidence,
+        "anchor_status": anchor_status,
+        "state_aware": state_aware,
+        "high_state_context": high_state_context,
+        "confidence_caps": confidence_caps,
+        "f0_flags": f0_flags,
+    }
+
+
+def _signal_only_f0_proposal(
+    *,
+    policy: str,
+    record: dict[str, Any],
+    flags: list[str],
+    dynamic: str,
+    allow_low: bool = False,
+) -> dict[str, Any] | None:
+    evidence = _signal_only_f0_evidence(record, allow_low=allow_low)
+    if not evidence["candidate"]:
+        return None
+
+    high_state_context = bool(evidence["high_state_context"])
+    f0_viability = str(evidence["viability"])
+    f0_confidence = str(evidence["confidence"])
+    confidence_caps = bool(evidence["confidence_caps"])
+
+    if (
+        not high_state_context
+        and f0_viability == "viable"
+        and f0_confidence == CONFIDENCE_HIGH
+        and not confidence_caps
+    ):
+        confidence = CONFIDENCE_HIGH
+        warning = WARNING_NONE
+    elif f0_confidence in {CONFIDENCE_HIGH, CONFIDENCE_MEDIUM}:
+        confidence = CONFIDENCE_MEDIUM
+        warning = WARNING_CAUTION if high_state_context or dynamic == "hard_inspect" else WARNING_CONTEXTUAL
+    else:
+        confidence = CONFIDENCE_LOW
+        warning = WARNING_CAUTION
+    if dynamic == "hard_inspect":
+        warning = WARNING_CAUTION
+    elif dynamic == "contextual" and warning == WARNING_NONE:
+        warning = WARNING_CONTEXTUAL
+
+    review_required = False
+    review_queue = True
+    priority = PRIORITY_LOW
+    proposal_flags = [*flags, *evidence["flags"]]
+    if high_state_context:
+        proposal_flags.append(FLAG_SIGNAL_ONLY_F0_POLICY_REQUIRES_REVIEW)
+        priority = PRIORITY_MEDIUM
+    if dynamic == "hard_inspect":
+        priority = PRIORITY_MEDIUM if priority == PRIORITY_LOW else priority
+    if policy == "conservative":
+        review_required = bool(high_state_context or confidence != CONFIDENCE_HIGH)
+        priority = PRIORITY_HIGH if review_required else PRIORITY_MEDIUM
+    elif policy == "balanced":
+        review_required = bool(high_state_context or confidence == CONFIDENCE_LOW)
+        priority = PRIORITY_MEDIUM if review_required else priority
+    elif policy == "liberal":
+        review_required = False
+
+    if review_required:
+        proposal_flags.append(FLAG_REVIEW_BY_POLICY)
+    reason = (
+        "signal_only_f0_candidate_contextual_fallback"
+        if high_state_context
+        else "signal_only_f0_candidate_supported_fallback"
+    )
+    return _proposal(
+        policy=policy,
+        mode=MODE_SIGNAL_ONLY_F0,
+        confidence=confidence,
+        review_required=review_required,
+        review_queue_candidate=review_queue,
+        review_priority=priority,
+        warning_level=warning,
+        reason=reason,
+        flags=proposal_flags,
+    )
 
 
 def _base_flags(record: dict[str, Any], dynamic: str, baseline: str) -> list[str]:
@@ -191,6 +386,15 @@ def _balanced(record: dict[str, Any], flags: list[str], dynamic: str, baseline: 
             reason="dynamic_isosbestic_viable",
             flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
         )
+    if dynamic in {"hard_inspect", "contextual"}:
+        signal_only = _signal_only_f0_proposal(
+            policy="balanced",
+            record=record,
+            flags=flags,
+            dynamic=dynamic,
+        )
+        if signal_only is not None:
+            return signal_only
     if dynamic == "hard_inspect" and baseline == "viable" and baseline_clean_positive:
         return _proposal(
             policy="balanced",
@@ -290,6 +494,18 @@ def _conservative(record: dict[str, Any], flags: list[str], dynamic: str, baseli
             reason="dynamic_isosbestic_viable_under_conservative_policy",
             flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
         )
+    if dynamic in {"hard_inspect", "contextual"}:
+        signal_only = _signal_only_f0_proposal(
+            policy="conservative",
+            record=record,
+            flags=flags,
+            dynamic=dynamic,
+        )
+        if signal_only is not None and (
+            not _has_high_state_context(record)
+            or _text(record.get("signal_only_f0_candidate_confidence")) == CONFIDENCE_HIGH
+        ):
+            return signal_only
     if dynamic == "hard_inspect" and baseline == "viable" and baseline_clean_positive:
         return _proposal(
             policy="conservative",
@@ -335,6 +551,16 @@ def _liberal(record: dict[str, Any], flags: list[str], dynamic: str, baseline: s
             reason="dynamic_isosbestic_viable",
             flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
         )
+    if dynamic in {"hard_inspect", "contextual"}:
+        signal_only = _signal_only_f0_proposal(
+            policy="liberal",
+            record=record,
+            flags=flags,
+            dynamic=dynamic,
+            allow_low=True,
+        )
+        if signal_only is not None:
+            return signal_only
     if dynamic == "contextual" and baseline in {"viable", "contextual"}:
         return _proposal(
             policy="liberal",

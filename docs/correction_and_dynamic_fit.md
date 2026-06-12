@@ -68,7 +68,15 @@ Policy proposals separate correction-mode proposals from review-burden managemen
 
 Conservative policy requires review more often when evidence is contextual. Balanced policy accepts clean dynamic-isosbestic cases, logs many contextual cases as warning/audit candidates without mandatory review, and still requires review when no clean defensible reference candidate exists. Liberal policy proceeds more often for screening. None of the policies auto-select negative or inverted baseline candidates.
 
-The legacy baseline-reference candidate remains available as a diagnostic trace, but it is no longer treated as a correction-policy fallback. For sensors that can enter sustained high-output states, reference-derived baseline estimates can remove true signal. Future fallback development should use signal-derived F0 estimation rather than forcing the isosbestic channel to act as a baseline. This patch does not implement signal-only F0.
+The legacy baseline-reference candidate remains available as a diagnostic trace, but it is no longer treated as a correction-policy fallback. For sensors that can enter sustained high-output states, reference-derived baseline estimates can remove true signal. Signal-derived F0 diagnostics are used instead when considering fallback proposals.
+
+### Signal-only F0 candidate policy proposals
+
+`signal_only_f0_candidate` is a proposed correction mode only. It is not an applied correction mode and does not change dF/F calculation, event detection, feature extraction, HDF5 applied traces, or plotting outputs.
+
+The proposal can appear when dynamic/reference correction is not clean enough and signal-only F0 diagnostics indicate a sufficiently supported fallback candidate. The candidate uses the signal channel only and never uses the isosbestic/reference channel. High-state, edge-high-state, or partial-high-state context makes the proposal contextual and cautionary; it is not treated as a clean high-confidence fallback. Signal-only F0 candidates that are unavailable, hard-inspect, low-confidence under stricter policies, or insufficiently anchored are not proposed.
+
+The old `baseline_reference_candidate` remains a legacy diagnostic trace and is not reintroduced as a policy fallback.
 
 ## Signal-state diagnostics
 
@@ -76,7 +84,7 @@ Signal-state diagnostics describe whether the signal channel contains sustained 
 
 The diagnostics use the signal channel only. They report robust distribution, high-state occupancy, edge occupancy, local variability suppression, and step-like transition metrics using configurable relative thresholds and windows rather than one hard-coded sustained-duration rule. They do not prove artifact or biological signal.
 
-These diagnostics are provenance outputs only. They do not alter correction, dF/F calculation, event detection, correction modes, feature extraction, or correction-policy proposals. The signal-only F0 candidate diagnostics below may use signal-state findings as context, but they still do not select or apply a correction.
+These diagnostics are provenance outputs only. They do not alter correction, dF/F calculation, event detection, correction modes, feature extraction, or applied traces. The signal-only F0 candidate diagnostics below may use signal-state findings as context, and the policy proposal layer may use those diagnostics for proposal-only triage.
 
 ## Signal-only F0 candidate diagnostics
 
@@ -86,7 +94,7 @@ The candidate uses configurable rolling lower-quantile and smoothing windows to 
 
 This first-pass implementation uses scalar signal-state flags as contextual QC and can apply a contextual cap to avoid letting the diagnostic F0 candidate chase high-state plateaus. It does not perform epoch-level high-state exclusion or downweighting because high-state masks are not yet exported as provenance.
 
-This output is intended to evaluate whether a signal-derived fallback could be appropriate when dynamic isosbestic correction is untrustworthy or conceptually contraindicated. It does not alter correction, dF/F calculation, event detection, feature extraction, HDF5 applied traces, or correction-policy proposals.
+This output is intended to evaluate whether a signal-derived fallback could be appropriate when dynamic isosbestic correction is untrustworthy or conceptually contraindicated. It does not alter correction, dF/F calculation, event detection, feature extraction, or HDF5 applied traces. The correction-policy proposal layer may propose `signal_only_f0_candidate` from these diagnostics, but that proposal still does not apply signal-only correction.
 
 When available during normal phasic analysis, the diagnostic trace is stored in the phasic HDF5 cache at `/roi/<ROI>/chunk_<chunk_id>/signal_only_f0_candidate`. Scalar metrics are written to `qc/baseline_reference_candidate_by_chunk.csv`, `qc/baseline_reference_candidate_by_chunk.json`, and the `signal_only_f0_candidate_summary` block in `qc/qc_summary.json`.
 

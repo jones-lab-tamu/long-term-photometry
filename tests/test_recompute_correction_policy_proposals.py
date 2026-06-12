@@ -125,6 +125,44 @@ def test_json_flag_arrays_are_semicolon_serialized_in_csv(tmp_path):
     assert df.loc[0, "dynamic_fit_qc_flags"] == "HARD_A;SOFT_A"
 
 
+def test_recompute_uses_existing_signal_only_f0_fields_without_recomputing(tmp_path):
+    phasic_out = _make_phasic_out(tmp_path)
+    qc = phasic_out / "qc"
+    record = {
+        **_row(dynamic="hard_inspect", baseline="unavailable"),
+        "signal_only_f0_candidate_available": True,
+        "signal_only_f0_candidate_viability": "viable",
+        "signal_only_f0_candidate_confidence": "high",
+        "signal_only_f0_anchor_status": "sufficient_anchors",
+        "signal_only_f0_state_aware_used": True,
+        "signal_only_f0_flags": [
+            "SIGNAL_ONLY_F0_STATE_AWARE_USED",
+            "SIGNAL_ONLY_F0_LOW_SUPPORT_ANCHORED",
+        ],
+    }
+    (qc / "baseline_reference_candidate_by_chunk.json").write_text(
+        json.dumps([record]), encoding="utf-8"
+    )
+    (qc / "qc_summary.json").write_text("{}\n", encoding="utf-8")
+
+    recompute_policy_proposals(phasic_out, backup=False)
+
+    records = json.loads(
+        (qc / "baseline_reference_candidate_by_chunk.json").read_text(encoding="utf-8")
+    )
+    assert records[0]["proposed_correction_mode_balanced"] == "signal_only_f0_candidate"
+    assert records[0]["signal_only_f0_candidate_viability"] == "viable"
+    assert records[0]["signal_only_f0_anchor_status"] == "sufficient_anchors"
+    assert records[0]["signal_only_f0_flags"] == [
+        "SIGNAL_ONLY_F0_STATE_AWARE_USED",
+        "SIGNAL_ONLY_F0_LOW_SUPPORT_ANCHORED",
+    ]
+    summary = json.loads((qc / "qc_summary.json").read_text(encoding="utf-8"))
+    assert summary["correction_policy_proposal_summary"]["balanced"][
+        "proposed_correction_mode_counts"
+    ]["signal_only_f0_candidate"] == 1
+
+
 def test_backups_created_by_default(tmp_path):
     phasic_out = _make_phasic_out(tmp_path)
     qc = phasic_out / "qc"
