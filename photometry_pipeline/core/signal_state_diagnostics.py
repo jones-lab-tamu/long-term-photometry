@@ -20,6 +20,11 @@ DEFAULTS = {
     "signal_state_variability_window_sec": None,
     "signal_state_low_variability_quantile": 0.35,
     "signal_state_low_variability_ratio_threshold": 0.75,
+    "signal_state_partial_min_high_fraction": 0.10,
+    "signal_state_partial_min_longest_fraction": 0.075,
+    "signal_state_partial_max_variability_ratio": 0.60,
+    "signal_state_partial_min_variability_suppression": 0.35,
+    "signal_state_partial_requires_low_variability": True,
     "signal_state_step_window_fraction": 0.03,
     "signal_state_step_window_sec": None,
     "signal_state_step_threshold_robust_z": 3.5,
@@ -34,6 +39,7 @@ CLASS_UNCERTAIN = "uncertain_signal_state"
 CLASS_INSUFFICIENT = "insufficient_signal_state_information"
 
 FLAG_HIGH = "SIGNAL_HIGH_STATE_CANDIDATE"
+FLAG_PARTIAL_HIGH = "SIGNAL_PARTIAL_HIGH_STATE_CANDIDATE"
 FLAG_MIXED = "SIGNAL_MIXED_DYNAMIC_HIGH_STATE_CANDIDATE"
 FLAG_EDGE = "SIGNAL_EDGE_HIGH_STATE_CANDIDATE"
 FLAG_STARTS_HIGH = "SIGNAL_STARTS_HIGH"
@@ -58,6 +64,23 @@ def _as_float(value: Any, default: float) -> float:
     except Exception:
         return float(default)
     return out if np.isfinite(out) else float(default)
+
+
+def _as_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "1", "yes", "y", "on"}:
+            return True
+        if text in {"false", "0", "no", "n", "off"}:
+            return False
+    if value is None:
+        return bool(default)
+    try:
+        return bool(value)
+    except Exception:
+        return bool(default)
 
 
 def _window_samples(
@@ -176,6 +199,21 @@ def _base_result(config: Mapping[str, Any] | None) -> dict[str, Any]:
             _cfg(config, "signal_state_low_variability_ratio_threshold"),
             _as_float(_cfg(config, "signal_state_low_variability_quantile"), 0.75),
         ),
+        "signal_state_partial_min_high_fraction": _as_float(
+            _cfg(config, "signal_state_partial_min_high_fraction"), 0.10
+        ),
+        "signal_state_partial_min_longest_fraction": _as_float(
+            _cfg(config, "signal_state_partial_min_longest_fraction"), 0.075
+        ),
+        "signal_state_partial_max_variability_ratio": _as_float(
+            _cfg(config, "signal_state_partial_max_variability_ratio"), 0.60
+        ),
+        "signal_state_partial_min_variability_suppression": _as_float(
+            _cfg(config, "signal_state_partial_min_variability_suppression"), 0.35
+        ),
+        "signal_state_partial_requires_low_variability": _as_bool(
+            _cfg(config, "signal_state_partial_requires_low_variability"), True
+        ),
         "signal_state_step_threshold_robust_z": _as_float(
             _cfg(config, "signal_state_step_threshold_robust_z"), 3.5
         ),
@@ -187,6 +225,7 @@ def _base_result(config: Mapping[str, Any] | None) -> dict[str, Any]:
         "signal_longest_high_state_fraction": 0.0,
         "signal_longest_high_state_duration_sec": 0.0,
         "signal_high_state_episode_count": 0,
+        "signal_partial_high_state_candidate_present": False,
         "signal_edge_high_state_present": False,
         "signal_start_high_state_candidate": False,
         "signal_end_high_state_candidate": False,
@@ -339,6 +378,17 @@ def compute_signal_state_diagnostics(
         suppression = 0.0
     low_var_threshold = float(result["signal_state_low_variability_ratio_threshold"])
     low_var_candidate = bool(var_ratio is not None and var_ratio <= low_var_threshold)
+    partial_requires_low_var = bool(result["signal_state_partial_requires_low_variability"])
+    partial_low_var_ok = (not partial_requires_low_var) or low_var_candidate
+    partial_high_present = bool(
+        (not high_present)
+        and high_fraction >= float(result["signal_state_partial_min_high_fraction"])
+        and longest_fraction >= float(result["signal_state_partial_min_longest_fraction"])
+        and var_ratio is not None
+        and var_ratio <= float(result["signal_state_partial_max_variability_ratio"])
+        and suppression >= float(result["signal_state_partial_min_variability_suppression"])
+        and partial_low_var_ok
+    )
 
     if step_w >= 1 and smooth.size > step_w:
         delta = smooth[step_w:] - smooth[:-step_w]
@@ -378,6 +428,8 @@ def compute_signal_state_diagnostics(
         flags.append(FLAG_STEP_DOWN)
     if low_var_candidate:
         flags.append(FLAG_LOW_VAR)
+    if partial_high_present:
+        flags.append(FLAG_PARTIAL_HIGH)
 
     dynamic_portion_present = bool(np.sum(low_mask) / max(1, n) >= 0.10)
     if edge_present:
@@ -387,6 +439,12 @@ def compute_signal_state_diagnostics(
         flags.append(FLAG_MIXED)
     elif high_present and low_var_candidate:
         cls = CLASS_SUSTAINED
+    elif partial_high_present and dynamic_portion_present:
+        cls = CLASS_MIXED
+        flags.append(FLAG_MIXED)
+    elif partial_high_present:
+        cls = CLASS_UNCERTAIN
+        flags.append(FLAG_UNCERTAIN)
     elif high_present:
         cls = CLASS_UNCERTAIN
         flags.append(FLAG_UNCERTAIN)
@@ -404,6 +462,7 @@ def compute_signal_state_diagnostics(
             "signal_longest_high_state_fraction": longest_fraction,
             "signal_longest_high_state_duration_sec": longest_duration,
             "signal_high_state_episode_count": int(len(spans)),
+            "signal_partial_high_state_candidate_present": bool(partial_high_present),
             "signal_edge_high_state_present": bool(edge_present),
             "signal_start_high_state_candidate": bool(start_high),
             "signal_end_high_state_candidate": bool(end_high),

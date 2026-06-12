@@ -102,6 +102,68 @@ def test_low_variability_ratio_threshold_is_configurable():
     assert "SIGNAL_LOW_VARIABILITY_HIGH_STATE" not in strict["signal_state_flags"]
 
 
+def test_partial_mixed_high_state_is_detected_without_main_high_state():
+    rng = np.random.default_rng(5)
+    n = 1000
+    t = np.arange(n, dtype=float) / 20.0
+    signal = (
+        1.0
+        + 0.12 * np.sin(2.0 * np.pi * 0.23 * t)
+        + 0.05 * rng.normal(size=n)
+    )
+    signal[455:570] = 2.3 + 0.006 * rng.normal(size=115)
+
+    out = compute_signal_state_diagnostics(
+        signal,
+        t,
+        config={
+            "signal_state_smoothing_window_fraction": 0.025,
+            "signal_state_variability_window_fraction": 0.025,
+        },
+    )
+
+    assert out["signal_high_state_candidate_present"] is False
+    assert out["signal_partial_high_state_candidate_present"] is True
+    assert out["signal_longest_high_state_fraction"] < out["signal_state_min_episode_fraction"]
+    assert out["signal_high_state_fraction"] >= out["signal_state_partial_min_high_fraction"]
+    assert (
+        out["signal_longest_high_state_fraction"]
+        >= out["signal_state_partial_min_longest_fraction"]
+    )
+    assert (
+        out["signal_high_to_low_variability_ratio"]
+        <= out["signal_state_partial_max_variability_ratio"]
+    )
+    assert (
+        out["signal_variability_suppression_score"]
+        >= out["signal_state_partial_min_variability_suppression"]
+    )
+    assert out["signal_state_candidate_class"] == "candidate_mixed_dynamic_high_state"
+    assert "SIGNAL_PARTIAL_HIGH_STATE_CANDIDATE" in out["signal_state_flags"]
+    assert "SIGNAL_MIXED_DYNAMIC_HIGH_STATE_CANDIDATE" in out["signal_state_flags"]
+    assert "SIGNAL_HIGH_STATE_CANDIDATE" not in out["signal_state_flags"]
+
+
+def test_brief_dynamic_spikes_do_not_become_partial_high_state():
+    rng = np.random.default_rng(6)
+    n = 1000
+    t = np.arange(n, dtype=float) / 20.0
+    signal = (
+        1.0
+        + 0.15 * np.sin(2.0 * np.pi * 0.2 * t)
+        + 0.05 * rng.normal(size=n)
+    )
+    signal[200:205] += 1.5
+    signal[700:705] += 1.3
+
+    out = compute_signal_state_diagnostics(signal, t)
+
+    assert out["signal_high_state_candidate_present"] is False
+    assert out["signal_partial_high_state_candidate_present"] is False
+    assert out["signal_state_candidate_class"] == "ordinary_dynamic_candidate"
+    assert "SIGNAL_PARTIAL_HIGH_STATE_CANDIDATE" not in out["signal_state_flags"]
+
+
 def test_insufficient_or_flat_signal_reports_insufficient_information():
     flat = np.ones(100, dtype=float)
 

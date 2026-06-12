@@ -65,6 +65,26 @@ class Config:
     baseline_reference_min_smoothing_window_sec: float = 60.0
     baseline_reference_max_window_fraction_of_chunk: float = 0.75
     baseline_reference_large_window_fraction_warning: float = 0.50
+    signal_state_smoothing_window_fraction: float = 0.05
+    signal_state_smoothing_window_sec: Optional[float] = None
+    signal_state_high_quantile: float = 0.80
+    signal_state_low_quantile: float = 0.20
+    signal_state_min_episode_fraction: float = 0.20
+    signal_state_min_episode_sec: float = 0.0
+    signal_state_edge_fraction: float = 0.10
+    signal_state_variability_window_fraction: float = 0.05
+    signal_state_variability_window_sec: Optional[float] = None
+    signal_state_low_variability_quantile: float = 0.35
+    signal_state_low_variability_ratio_threshold: float = 0.75
+    signal_state_partial_min_high_fraction: float = 0.10
+    signal_state_partial_min_longest_fraction: float = 0.075
+    signal_state_partial_max_variability_ratio: float = 0.60
+    signal_state_partial_min_variability_suppression: float = 0.35
+    signal_state_partial_requires_low_variability: bool = True
+    signal_state_step_window_fraction: float = 0.03
+    signal_state_step_window_sec: Optional[float] = None
+    signal_state_step_threshold_robust_z: float = 3.5
+    signal_state_min_robust_range: float = 1e-6
     
     # baseline
     baseline_method: Literal['uv_raw_percentile_session', 'uv_globalfit_percentile_session'] = 'uv_raw_percentile_session'

@@ -98,7 +98,8 @@ def test_recompute_uses_completed_run_config_when_available(tmp_path):
     qc = phasic_out / "qc"
     (phasic_out / "config_used.yaml").write_text(
         "signal_state_high_quantile: 0.7\n"
-        "signal_state_low_variability_ratio_threshold: 0.25\n",
+        "signal_state_low_variability_ratio_threshold: 0.25\n"
+        "signal_state_partial_min_high_fraction: 0.12\n",
         encoding="utf-8",
     )
     (qc / "baseline_reference_candidate_by_chunk.json").write_text(
@@ -112,6 +113,7 @@ def test_recompute_uses_completed_run_config_when_available(tmp_path):
     records = json.loads((qc / "baseline_reference_candidate_by_chunk.json").read_text(encoding="utf-8"))
     assert records[0]["signal_state_high_quantile"] == 0.7
     assert records[0]["signal_state_low_variability_ratio_threshold"] == 0.25
+    assert records[0]["signal_state_partial_min_high_fraction"] == 0.12
     summary = json.loads((qc / "qc_summary.json").read_text(encoding="utf-8"))
     assert summary["signal_state_diagnostics_summary"]["using_default_signal_state_config"] is False
 
