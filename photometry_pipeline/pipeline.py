@@ -345,6 +345,17 @@ class Pipeline:
             "signal_only_f0_max_tracking_fraction",
             "signal_only_f0_min_coverage_fraction",
             "signal_only_f0_high_state_context_mode",
+            "signal_only_f0_state_aware_enabled",
+            "signal_only_f0_low_support_quantile",
+            "signal_only_f0_low_support_buffer_fraction",
+            "signal_only_f0_low_support_buffer_sec",
+            "signal_only_f0_min_low_support_fraction",
+            "signal_only_f0_min_anchor_count",
+            "signal_only_f0_max_anchor_gap_fraction",
+            "signal_only_f0_max_anchor_gap_sec",
+            "signal_only_f0_edge_extrapolation_mode",
+            "signal_only_f0_max_edge_extrapolation_fraction",
+            "signal_only_f0_max_edge_extrapolation_sec",
         )
         signal_only_f0_config = {
             key: getattr(self.config, key)

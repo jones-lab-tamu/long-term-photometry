@@ -75,6 +75,9 @@ def test_recompute_writes_signal_only_f0_fields_and_preserves_policy(tmp_path):
     assert report["records_processed"] == 1
     df = pd.read_csv(qc / "baseline_reference_candidate_by_chunk.csv")
     assert "signal_only_f0_candidate_available" in df.columns
+    assert "signal_only_f0_state_aware_used" in df.columns
+    assert "signal_only_f0_anchor_status" in df.columns
+    assert "signal_only_f0_anchor_count" in df.columns
     assert bool(df.loc[0, "signal_only_f0_candidate_available"])
     assert df.loc[0, "signal_only_f0_candidate_viability"] != "stale"
     assert df.loc[0, "proposed_correction_mode_balanced"] == "dynamic_isosbestic"
@@ -83,6 +86,9 @@ def test_recompute_writes_signal_only_f0_fields_and_preserves_policy(tmp_path):
 
     records = json.loads((qc / "baseline_reference_candidate_by_chunk.json").read_text(encoding="utf-8"))
     assert records[0]["signal_only_f0_candidate_available"] is True
+    assert "signal_only_f0_state_aware_used" in records[0]
+    assert "signal_only_f0_anchor_status" in records[0]
+    assert "signal_only_f0_anchor_count" in records[0]
     assert isinstance(records[0]["signal_only_f0_flags"], list)
     assert records[0]["proposal_flags_balanced"] == ["POLICY_CONTEXT"]
     assert "signal_only_f0_candidate" not in records[0]
@@ -92,6 +98,9 @@ def test_recompute_writes_signal_only_f0_fields_and_preserves_policy(tmp_path):
     assert summary["signal_state_diagnostics_summary"] == {"kept": True}
     f0_summary = summary["signal_only_f0_candidate_summary"]
     assert f0_summary["roi_chunk_signal_only_f0_count"] == 1
+    assert "signal_only_f0_state_aware_used_counts" in f0_summary
+    assert "signal_only_f0_anchor_status_counts" in f0_summary
+    assert "signal_only_f0_anchor_count" in f0_summary
     assert f0_summary["hdf5_trace_write_back"] == "deferred"
 
 

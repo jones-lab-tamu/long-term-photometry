@@ -21,6 +21,17 @@ DEFAULTS = {
     "signal_only_f0_max_tracking_fraction": 0.85,
     "signal_only_f0_min_coverage_fraction": 0.80,
     "signal_only_f0_high_state_context_mode": "contextual_cap",
+    "signal_only_f0_state_aware_enabled": True,
+    "signal_only_f0_low_support_quantile": 0.35,
+    "signal_only_f0_low_support_buffer_fraction": 0.02,
+    "signal_only_f0_low_support_buffer_sec": None,
+    "signal_only_f0_min_low_support_fraction": 0.10,
+    "signal_only_f0_min_anchor_count": 3,
+    "signal_only_f0_max_anchor_gap_fraction": 0.50,
+    "signal_only_f0_max_anchor_gap_sec": None,
+    "signal_only_f0_edge_extrapolation_mode": "hold_nearest_anchor",
+    "signal_only_f0_max_edge_extrapolation_fraction": 0.50,
+    "signal_only_f0_max_edge_extrapolation_sec": None,
 }
 
 VIABILITY_VIABLE = "viable"
@@ -45,6 +56,14 @@ FLAG_ABOVE_SIGNAL_EXCESSIVE = "SIGNAL_ONLY_F0_ABOVE_SIGNAL_EXCESSIVE"
 FLAG_HIGH_STATE = "SIGNAL_ONLY_F0_HIGH_STATE_PRESENT"
 FLAG_PARTIAL_HIGH_STATE = "SIGNAL_ONLY_F0_PARTIAL_HIGH_STATE_PRESENT"
 FLAG_EDGE_HIGH_STATE = "SIGNAL_ONLY_F0_EDGE_HIGH_STATE_PRESENT"
+FLAG_STATE_AWARE_USED = "SIGNAL_ONLY_F0_STATE_AWARE_USED"
+FLAG_LOW_SUPPORT_ANCHORED = "SIGNAL_ONLY_F0_LOW_SUPPORT_ANCHORED"
+FLAG_EDGE_EXTRAPOLATED = "SIGNAL_ONLY_F0_EDGE_EXTRAPOLATED"
+FLAG_INTERPOLATED_HIGH = "SIGNAL_ONLY_F0_INTERPOLATED_OVER_HIGH_STATE"
+FLAG_INSUFFICIENT_LOW_SUPPORT = "SIGNAL_ONLY_F0_INSUFFICIENT_LOW_SUPPORT"
+FLAG_INSUFFICIENT_ANCHORS = "SIGNAL_ONLY_F0_INSUFFICIENT_ANCHORS"
+FLAG_LARGE_ANCHOR_GAP = "SIGNAL_ONLY_F0_LARGE_ANCHOR_GAP"
+FLAG_ROLLING_FALLBACK = "SIGNAL_ONLY_F0_ROLLING_FALLBACK_USED"
 
 
 def _cfg(config: Mapping[str, Any] | None, key: str) -> Any:
@@ -73,6 +92,23 @@ def _as_int(value: Any, default: int) -> int:
     except Exception:
         return int(default)
     return max(1, out)
+
+
+def _as_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "1", "yes", "y", "on"}:
+            return True
+        if text in {"false", "0", "no", "n", "off"}:
+            return False
+    if value is None:
+        return bool(default)
+    try:
+        return bool(value)
+    except Exception:
+        return bool(default)
 
 
 def _window_samples(
@@ -188,6 +224,48 @@ def _base_result(config: Mapping[str, Any] | None) -> dict[str, Any]:
         ),
         "signal_only_f0_high_state_context_cap": None,
         "signal_only_f0_high_state_context_applied": False,
+        "signal_only_f0_state_aware_enabled": _as_bool(
+            _cfg(config, "signal_only_f0_state_aware_enabled"), True
+        ),
+        "signal_only_f0_state_aware_used": False,
+        "signal_only_f0_low_support_quantile": _as_float(
+            _cfg(config, "signal_only_f0_low_support_quantile"), 0.35
+        ),
+        "signal_only_f0_low_support_buffer_fraction": _as_float(
+            _cfg(config, "signal_only_f0_low_support_buffer_fraction"), 0.02
+        ),
+        "signal_only_f0_low_support_buffer_sec": _cfg(
+            config, "signal_only_f0_low_support_buffer_sec"
+        ),
+        "signal_only_f0_min_low_support_fraction": _as_float(
+            _cfg(config, "signal_only_f0_min_low_support_fraction"), 0.10
+        ),
+        "signal_only_f0_min_anchor_count": _as_int(
+            _cfg(config, "signal_only_f0_min_anchor_count"), 3
+        ),
+        "signal_only_f0_max_anchor_gap_fraction": _as_float(
+            _cfg(config, "signal_only_f0_max_anchor_gap_fraction"), 0.50
+        ),
+        "signal_only_f0_max_anchor_gap_sec": _cfg(config, "signal_only_f0_max_anchor_gap_sec"),
+        "signal_only_f0_edge_extrapolation_mode": str(
+            _cfg(config, "signal_only_f0_edge_extrapolation_mode")
+        ),
+        "signal_only_f0_max_edge_extrapolation_fraction": _as_float(
+            _cfg(config, "signal_only_f0_max_edge_extrapolation_fraction"), 0.50
+        ),
+        "signal_only_f0_max_edge_extrapolation_sec": _cfg(
+            config, "signal_only_f0_max_edge_extrapolation_sec"
+        ),
+        "signal_only_f0_anchor_count": 0,
+        "signal_only_f0_low_support_fraction": 0.0,
+        "signal_only_f0_anchor_support_fraction": 0.0,
+        "signal_only_f0_direct_support_fraction": 0.0,
+        "signal_only_f0_interpolated_fraction": 0.0,
+        "signal_only_f0_extrapolated_fraction": 0.0,
+        "signal_only_f0_edge_extrapolation_fraction": 0.0,
+        "signal_only_f0_max_anchor_gap_fraction_observed": None,
+        "signal_only_f0_max_anchor_gap_sec_observed": None,
+        "signal_only_f0_anchor_status": "unavailable",
         "signal_only_f0_candidate_viability": VIABILITY_UNAVAILABLE,
         "signal_only_f0_candidate_confidence": CONFIDENCE_NONE,
         "signal_only_f0_support_fraction": 0.0,
@@ -266,6 +344,219 @@ def _state_flag_present(signal_state: Mapping[str, Any] | None, flag: str) -> bo
     return isinstance(flags, (list, tuple)) and flag in {str(x) for x in flags}
 
 
+def _buffer_samples(
+    *,
+    n: int,
+    fraction: float,
+    requested_sec: Any,
+    sample_interval_sec: float | None,
+) -> int:
+    samples = int(round(max(0.0, float(fraction)) * max(1, int(n))))
+    try:
+        if requested_sec is not None and sample_interval_sec is not None and sample_interval_sec > 0:
+            sec_val = float(requested_sec)
+            if np.isfinite(sec_val) and sec_val > 0:
+                samples = int(round(sec_val / sample_interval_sec))
+    except Exception:
+        pass
+    return max(0, min(samples, max(0, int(n) - 1)))
+
+
+def _expand_mask(mask: np.ndarray, radius: int) -> np.ndarray:
+    arr = np.asarray(mask, dtype=bool).reshape(-1)
+    if radius <= 0 or arr.size == 0 or not np.any(arr):
+        return arr.copy()
+    kernel = np.ones(2 * int(radius) + 1, dtype=int)
+    return np.convolve(arr.astype(int), kernel, mode="same") > 0
+
+
+def _state_high_threshold(
+    *,
+    signal_state: Mapping[str, Any] | None,
+    p05: float,
+    robust_range: float,
+) -> float:
+    if isinstance(signal_state, Mapping):
+        try:
+            value = float(signal_state.get("signal_state_high_threshold"))
+            if np.isfinite(value):
+                return value
+        except Exception:
+            pass
+    return float(p05 + 0.80 * robust_range)
+
+
+def _build_state_aware_candidate(
+    *,
+    signal: np.ndarray,
+    raw_candidate: np.ndarray,
+    smoothed_signal: np.ndarray,
+    p05: float,
+    p50: float,
+    robust_range: float,
+    window: int,
+    low_quantile: float,
+    signal_state: Mapping[str, Any] | None,
+    high_state_present: bool,
+    partial_high_state_present: bool,
+    edge_high_state_present: bool,
+    result: dict[str, Any],
+    sample_interval_sec: float | None,
+) -> tuple[np.ndarray, dict[str, Any], list[str]]:
+    n = int(signal.size)
+    flags: list[str] = []
+    meta: dict[str, Any] = {
+        "signal_only_f0_state_aware_used": False,
+        "signal_only_f0_anchor_count": 0,
+        "signal_only_f0_low_support_fraction": 0.0,
+        "signal_only_f0_anchor_support_fraction": 0.0,
+        "signal_only_f0_direct_support_fraction": 0.0,
+        "signal_only_f0_interpolated_fraction": 0.0,
+        "signal_only_f0_extrapolated_fraction": 0.0,
+        "signal_only_f0_edge_extrapolation_fraction": 0.0,
+        "signal_only_f0_max_anchor_gap_fraction_observed": None,
+        "signal_only_f0_max_anchor_gap_sec_observed": None,
+        "signal_only_f0_anchor_status": "fallback_rolling_candidate",
+    }
+    if not bool(result["signal_only_f0_state_aware_enabled"]):
+        return raw_candidate, meta, flags
+
+    finite = np.isfinite(signal)
+    low_threshold = min(
+        float(p50),
+        float(p05 + float(result["signal_only_f0_low_support_quantile"]) * robust_range),
+    )
+    low_candidate_mask = finite & np.isfinite(smoothed_signal) & (smoothed_signal <= low_threshold)
+    has_state_context = bool(high_state_present or partial_high_state_present or edge_high_state_present)
+    high_like = np.zeros(n, dtype=bool)
+    if has_state_context:
+        high_threshold = _state_high_threshold(
+            signal_state=signal_state,
+            p05=p05,
+            robust_range=robust_range,
+        )
+        high_like = np.isfinite(smoothed_signal) & (smoothed_signal >= high_threshold)
+        buffer_n = _buffer_samples(
+            n=n,
+            fraction=float(result["signal_only_f0_low_support_buffer_fraction"]),
+            requested_sec=result["signal_only_f0_low_support_buffer_sec"],
+            sample_interval_sec=sample_interval_sec,
+        )
+        high_like = _expand_mask(high_like, buffer_n)
+    low_support_mask = low_candidate_mask & ~high_like
+    low_support_fraction = float(np.sum(low_support_mask) / max(1, n))
+    meta["signal_only_f0_low_support_fraction"] = low_support_fraction
+    meta["signal_only_f0_direct_support_fraction"] = low_support_fraction
+
+    if not np.any(low_support_mask):
+        meta["signal_only_f0_anchor_status"] = "no_low_support"
+        flags.extend([FLAG_INSUFFICIENT_LOW_SUPPORT, FLAG_ROLLING_FALLBACK])
+        return raw_candidate, meta, flags
+
+    min_anchor_count = int(result["signal_only_f0_min_anchor_count"])
+    step = max(1, int(window) // 4)
+    half = max(1, int(window) // 2)
+    anchor_x: list[float] = []
+    anchor_y: list[float] = []
+    anchor_support_samples = 0
+    min_local_support = max(3, min(half, int(round(0.05 * max(1, int(window))))))
+    for center in list(range(0, n, step)) + [n - 1]:
+        start = max(0, int(center) - half)
+        end = min(n, int(center) + half + 1)
+        local_mask = low_support_mask[start:end]
+        if int(np.sum(local_mask)) < min_local_support:
+            continue
+        local_idx = np.flatnonzero(local_mask) + start
+        local_vals = signal[local_idx]
+        finite_vals = local_vals[np.isfinite(local_vals)]
+        if finite_vals.size < min_local_support:
+            continue
+        anchor_x.append(float(np.median(local_idx)))
+        anchor_y.append(float(np.quantile(finite_vals, min(max(float(low_quantile), 0.0), 0.5))))
+        anchor_support_samples += int(finite_vals.size)
+    if anchor_x:
+        order = np.argsort(anchor_x)
+        anchor_x = [anchor_x[i] for i in order]
+        anchor_y = [anchor_y[i] for i in order]
+        dedup_x: list[float] = []
+        dedup_y: list[float] = []
+        for x_val, y_val in zip(anchor_x, anchor_y):
+            if dedup_x and abs(x_val - dedup_x[-1]) < 1e-9:
+                dedup_y[-1] = min(dedup_y[-1], y_val)
+            else:
+                dedup_x.append(x_val)
+                dedup_y.append(y_val)
+        anchor_x, anchor_y = dedup_x, dedup_y
+
+    anchor_count = len(anchor_x)
+    meta["signal_only_f0_anchor_count"] = int(anchor_count)
+    meta["signal_only_f0_anchor_support_fraction"] = float(anchor_support_samples / max(1, n))
+    if anchor_count < min_anchor_count:
+        meta["signal_only_f0_anchor_status"] = (
+            "no_low_support" if low_support_fraction <= 0.0 else "insufficient_anchors"
+        )
+        flags.append(FLAG_INSUFFICIENT_ANCHORS)
+        if low_support_fraction < float(result["signal_only_f0_min_low_support_fraction"]):
+            flags.append(FLAG_INSUFFICIENT_LOW_SUPPORT)
+        flags.append(FLAG_ROLLING_FALLBACK)
+        return raw_candidate, meta, flags
+
+    x_all = np.arange(n, dtype=float)
+    anchors_x_arr = np.asarray(anchor_x, dtype=float)
+    anchors_y_arr = np.asarray(anchor_y, dtype=float)
+    edge_mode = str(result["signal_only_f0_edge_extrapolation_mode"]).strip().lower()
+    if edge_mode not in {"hold_nearest_anchor", "interpolate_only"}:
+        edge_mode = "hold_nearest_anchor"
+        meta["signal_only_f0_edge_extrapolation_mode"] = edge_mode
+    candidate = np.interp(x_all, anchors_x_arr, anchors_y_arr)
+    if edge_mode == "interpolate_only":
+        candidate[x_all < anchors_x_arr[0]] = np.nan
+        candidate[x_all > anchors_x_arr[-1]] = np.nan
+
+    before_first = x_all < anchors_x_arr[0]
+    after_last = x_all > anchors_x_arr[-1]
+    extrapolated = (before_first | after_last) & np.isfinite(candidate)
+    direct = low_support_mask & np.isfinite(candidate)
+    interpolated = np.isfinite(candidate) & ~(direct | extrapolated)
+    meta["signal_only_f0_state_aware_used"] = True
+    meta["signal_only_f0_anchor_status"] = "sufficient_anchors"
+    meta["signal_only_f0_direct_support_fraction"] = float(np.sum(direct) / max(1, n))
+    meta["signal_only_f0_interpolated_fraction"] = float(np.sum(interpolated) / max(1, n))
+    meta["signal_only_f0_extrapolated_fraction"] = float(np.sum(extrapolated) / max(1, n))
+    meta["signal_only_f0_edge_extrapolation_fraction"] = meta[
+        "signal_only_f0_extrapolated_fraction"
+    ]
+    gaps = np.diff(anchors_x_arr)
+    if gaps.size:
+        max_gap = float(np.max(gaps))
+        meta["signal_only_f0_max_anchor_gap_fraction_observed"] = float(max_gap / max(1, n))
+        meta["signal_only_f0_max_anchor_gap_sec_observed"] = (
+            float(max_gap * sample_interval_sec)
+            if sample_interval_sec is not None and sample_interval_sec > 0
+            else None
+        )
+    flags.extend([FLAG_STATE_AWARE_USED, FLAG_LOW_SUPPORT_ANCHORED])
+    if np.any(extrapolated):
+        flags.append(FLAG_EDGE_EXTRAPOLATED)
+    if has_state_context and np.any(interpolated):
+        flags.append(FLAG_INTERPOLATED_HIGH)
+    max_gap_fraction = meta.get("signal_only_f0_max_anchor_gap_fraction_observed")
+    large_gap = bool(
+        max_gap_fraction is not None
+        and float(max_gap_fraction) > float(result["signal_only_f0_max_anchor_gap_fraction"])
+    )
+    try:
+        max_gap_sec_allowed = result["signal_only_f0_max_anchor_gap_sec"]
+        max_gap_sec_observed = meta.get("signal_only_f0_max_anchor_gap_sec_observed")
+        if max_gap_sec_allowed is not None and max_gap_sec_observed is not None:
+            large_gap = large_gap or float(max_gap_sec_observed) > float(max_gap_sec_allowed)
+    except Exception:
+        pass
+    if large_gap:
+        flags.append(FLAG_LARGE_ANCHOR_GAP)
+    return candidate, meta, flags
+
+
 def compute_signal_only_f0_candidate(
     signal: np.ndarray,
     time: np.ndarray | None = None,
@@ -337,12 +628,32 @@ def compute_signal_only_f0_candidate(
     partial_high_state_present = _state_flag_present(signal_state, "SIGNAL_PARTIAL_HIGH_STATE_CANDIDATE")
     edge_high_state_present = _state_flag_present(signal_state, "SIGNAL_EDGE_HIGH_STATE_CANDIDATE")
 
-    candidate = _lower_quantile_envelope(
+    rolling_candidate = _lower_quantile_envelope(
         sig,
         window=window,
         quantile=float(result["signal_only_f0_low_quantile"]),
     )
-    candidate = _moving_average_reflect(candidate, smooth_window)
+    rolling_candidate = _moving_average_reflect(rolling_candidate, smooth_window)
+    smoothed_signal = _moving_average_reflect(sig, smooth_window)
+    candidate, state_meta, state_flags = _build_state_aware_candidate(
+        signal=sig,
+        raw_candidate=rolling_candidate,
+        smoothed_signal=smoothed_signal,
+        p05=p05,
+        p50=p50,
+        robust_range=robust_range,
+        window=window,
+        low_quantile=float(result["signal_only_f0_low_quantile"]),
+        signal_state=signal_state,
+        high_state_present=high_state_present,
+        partial_high_state_present=partial_high_state_present,
+        edge_high_state_present=edge_high_state_present,
+        result=result,
+        sample_interval_sec=dt,
+    )
+    result.update(state_meta)
+    if result["signal_only_f0_state_aware_used"]:
+        result["signal_only_f0_method"] = "state_aware_lower_envelope"
     pre_cap_finite = np.isfinite(candidate) & finite
     above_fraction_pre_cap = (
         float(
@@ -391,6 +702,7 @@ def compute_signal_only_f0_candidate(
     res_p05, res_p50, res_p95 = [float(x) for x in np.percentile(residual, [5.0, 50.0, 95.0])] if residual.size else (None, None, None)
 
     flags = [FLAG_AVAILABLE]
+    flags.extend(state_flags)
     if high_state_present:
         flags.append(FLAG_HIGH_STATE)
     if partial_high_state_present:
@@ -404,6 +716,24 @@ def compute_signal_only_f0_candidate(
         and tracking_score > float(result["signal_only_f0_max_tracking_fraction"])
     )
     excessive_above = above_fraction_pre_cap > float(result["signal_only_f0_max_above_signal_fraction"])
+    large_anchor_gap = FLAG_LARGE_ANCHOR_GAP in flags
+    insufficient_anchoring = (
+        FLAG_INSUFFICIENT_LOW_SUPPORT in flags or FLAG_INSUFFICIENT_ANCHORS in flags
+    )
+    excessive_edge_extrapolation = bool(
+        result.get("signal_only_f0_extrapolated_fraction", 0.0)
+        > float(result["signal_only_f0_max_edge_extrapolation_fraction"])
+    )
+    try:
+        max_edge_sec = result.get("signal_only_f0_max_edge_extrapolation_sec")
+        if max_edge_sec is not None and dt is not None and dt > 0:
+            max_edge_samples = float(max_edge_sec) / float(dt)
+            edge_fraction_limit = max_edge_samples / max(1, sig.size)
+            excessive_edge_extrapolation = excessive_edge_extrapolation or (
+                result.get("signal_only_f0_extrapolated_fraction", 0.0) > edge_fraction_limit
+            )
+    except Exception:
+        pass
     if low_support:
         flags.append(FLAG_LOW_SUPPORT)
     if excessive_tracking:
@@ -411,7 +741,11 @@ def compute_signal_only_f0_candidate(
     if excessive_above:
         flags.append(FLAG_ABOVE_SIGNAL_EXCESSIVE)
 
-    if low_support:
+    if insufficient_anchoring and (high_state_present or partial_high_state_present or edge_high_state_present):
+        viability = VIABILITY_HARD_INSPECT
+        confidence = CONFIDENCE_LOW
+        flags.append(FLAG_HARD_INSPECT)
+    elif low_support:
         viability = VIABILITY_HARD_INSPECT
         confidence = CONFIDENCE_LOW
         flags.append(FLAG_HARD_INSPECT)
@@ -423,9 +757,13 @@ def compute_signal_only_f0_candidate(
         viability = VIABILITY_CONTEXTUAL
         confidence = CONFIDENCE_LOW
         flags.append(FLAG_CONTEXTUAL)
+    elif large_anchor_gap or excessive_edge_extrapolation:
+        viability = VIABILITY_CONTEXTUAL
+        confidence = CONFIDENCE_LOW
+        flags.append(FLAG_CONTEXTUAL)
     elif high_state_present or partial_high_state_present or edge_high_state_present:
         viability = VIABILITY_CONTEXTUAL
-        confidence = CONFIDENCE_MEDIUM
+        confidence = CONFIDENCE_MEDIUM if result["signal_only_f0_state_aware_used"] else CONFIDENCE_LOW
         flags.append(FLAG_CONTEXTUAL)
     else:
         viability = VIABILITY_VIABLE
@@ -521,6 +859,15 @@ def summarize_signal_only_f0_candidates(records: list[Mapping[str, Any]]) -> dic
             "signal_only_f0_candidate_confidence"
         ),
         "signal_only_f0_flag_counts": _flag_counts(),
+        "signal_only_f0_state_aware_used_counts": _count_values(
+            "signal_only_f0_state_aware_used"
+        ),
+        "signal_only_f0_anchor_status_counts": _count_values(
+            "signal_only_f0_anchor_status"
+        ),
+        "signal_only_f0_edge_extrapolation_mode_counts": _count_values(
+            "signal_only_f0_edge_extrapolation_mode"
+        ),
         "signal_only_f0_support_fraction": _numeric_summary("signal_only_f0_support_fraction"),
         "signal_only_f0_low_state_support_fraction": _numeric_summary(
             "signal_only_f0_low_state_support_fraction"
@@ -532,4 +879,20 @@ def summarize_signal_only_f0_candidates(records: list[Mapping[str, Any]]) -> dic
             "signal_only_f0_above_signal_fraction"
         ),
         "signal_only_f0_tracking_score": _numeric_summary("signal_only_f0_tracking_score"),
+        "signal_only_f0_anchor_count": _numeric_summary("signal_only_f0_anchor_count"),
+        "signal_only_f0_low_support_fraction": _numeric_summary(
+            "signal_only_f0_low_support_fraction"
+        ),
+        "signal_only_f0_direct_support_fraction": _numeric_summary(
+            "signal_only_f0_direct_support_fraction"
+        ),
+        "signal_only_f0_interpolated_fraction": _numeric_summary(
+            "signal_only_f0_interpolated_fraction"
+        ),
+        "signal_only_f0_extrapolated_fraction": _numeric_summary(
+            "signal_only_f0_extrapolated_fraction"
+        ),
+        "signal_only_f0_max_anchor_gap_fraction_observed": _numeric_summary(
+            "signal_only_f0_max_anchor_gap_fraction_observed"
+        ),
     }

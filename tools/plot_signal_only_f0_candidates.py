@@ -109,6 +109,11 @@ def _metadata_text(roi: str, chunk_id: int, record: dict[str, Any], diagnostics:
         f"signal_state_candidate_class: {record.get('signal_state_candidate_class', '')}",
         f"signal_only_f0_candidate_viability: {diagnostics.get('signal_only_f0_candidate_viability', '')}",
         f"signal_only_f0_candidate_confidence: {diagnostics.get('signal_only_f0_candidate_confidence', '')}",
+        f"signal_only_f0_state_aware_used: {diagnostics.get('signal_only_f0_state_aware_used', '')}",
+        f"signal_only_f0_anchor_status: {diagnostics.get('signal_only_f0_anchor_status', '')}",
+        f"signal_only_f0_anchor_count: {diagnostics.get('signal_only_f0_anchor_count', '')}",
+        f"signal_only_f0_low_support_fraction: {diagnostics.get('signal_only_f0_low_support_fraction', '')}",
+        f"signal_only_f0_extrapolated_fraction: {diagnostics.get('signal_only_f0_extrapolated_fraction', '')}",
         f"signal_only_f0_flags: {flags_text}",
     ]
     return "\n".join(textwrap.wrap(" | ".join(parts), width=115))

@@ -100,6 +100,20 @@ class Config:
         'none',
         'contextual_cap',
     ] = 'contextual_cap'
+    signal_only_f0_state_aware_enabled: bool = True
+    signal_only_f0_low_support_quantile: float = 0.35
+    signal_only_f0_low_support_buffer_fraction: float = 0.02
+    signal_only_f0_low_support_buffer_sec: Optional[float] = None
+    signal_only_f0_min_low_support_fraction: float = 0.10
+    signal_only_f0_min_anchor_count: int = 3
+    signal_only_f0_max_anchor_gap_fraction: float = 0.50
+    signal_only_f0_max_anchor_gap_sec: Optional[float] = None
+    signal_only_f0_edge_extrapolation_mode: Literal[
+        'hold_nearest_anchor',
+        'interpolate_only',
+    ] = 'hold_nearest_anchor'
+    signal_only_f0_max_edge_extrapolation_fraction: float = 0.50
+    signal_only_f0_max_edge_extrapolation_sec: Optional[float] = None
     
     # baseline
     baseline_method: Literal['uv_raw_percentile_session', 'uv_globalfit_percentile_session'] = 'uv_raw_percentile_session'
@@ -307,6 +321,16 @@ class Config:
                     "Invalid signal_only_f0_high_state_context_mode: "
                     f"{data['signal_only_f0_high_state_context_mode']}. "
                     "Allowed: {'none', 'contextual_cap'}"
+                )
+        if 'signal_only_f0_edge_extrapolation_mode' in data:
+            if data['signal_only_f0_edge_extrapolation_mode'] not in {
+                'hold_nearest_anchor',
+                'interpolate_only',
+            }:
+                raise ValueError(
+                    "Invalid signal_only_f0_edge_extrapolation_mode: "
+                    f"{data['signal_only_f0_edge_extrapolation_mode']}. "
+                    "Allowed: {'hold_nearest_anchor', 'interpolate_only'}"
                 )
         if 'acquisition_mode' in data:
             if data['acquisition_mode'] not in {'intermittent', 'continuous'}:

@@ -42,10 +42,58 @@ def test_sustained_high_state_adds_context_and_does_not_chase_plateau():
     assert "SIGNAL_ONLY_F0_HIGH_STATE_PRESENT" in out["signal_only_f0_flags"]
     assert out["signal_only_f0_high_state_context_mode"] == "contextual_cap"
     assert out["signal_only_f0_high_state_context_cap"] is not None
-    assert out["signal_only_f0_high_state_context_applied"] is True
+    assert out["signal_only_f0_state_aware_used"] is True
+    assert out["signal_only_f0_anchor_status"] == "sufficient_anchors"
+    assert out["signal_only_f0_anchor_count"] >= 3
+    assert "SIGNAL_ONLY_F0_STATE_AWARE_USED" in out["signal_only_f0_flags"]
+    assert "SIGNAL_ONLY_F0_LOW_SUPPORT_ANCHORED" in out["signal_only_f0_flags"]
     assert "signal_only_f0_high_state_exclusion_fraction" not in out
     assert out["signal_only_f0_candidate_viability"] == "contextual"
     assert np.nanmedian(candidate[700:]) < np.nanmedian(signal[700:]) - 0.25
+
+
+def test_beginning_locked_high_uses_later_low_support_as_edge_anchor():
+    rng = np.random.default_rng(22)
+    n = 1200
+    t = np.arange(n, dtype=float) / 20.0
+    signal = 1.05 + 0.10 * np.sin(2.0 * np.pi * 0.02 * t) + 0.02 * rng.normal(size=n)
+    signal[:450] = 2.4 + 0.004 * rng.normal(size=450)
+    signal_state = compute_signal_state_diagnostics(signal, t)
+
+    out = compute_signal_only_f0_candidate(signal, t, signal_state=signal_state)
+    candidate = out["signal_only_f0_candidate"]
+
+    assert out["signal_only_f0_state_aware_used"] is True
+    assert out["signal_only_f0_anchor_status"] == "sufficient_anchors"
+    assert "SIGNAL_ONLY_F0_EDGE_EXTRAPOLATED" in out["signal_only_f0_flags"]
+    assert out["signal_only_f0_extrapolated_fraction"] > 0.0
+    assert np.nanmedian(candidate[:250]) < np.nanmedian(signal[:250]) - 0.25
+    assert out["signal_only_f0_candidate_viability"] == "contextual"
+
+
+def test_locked_high_without_low_support_is_not_viable():
+    rng = np.random.default_rng(23)
+    n = 800
+    t = np.arange(n, dtype=float) / 20.0
+    signal = 2.5 + 0.01 * rng.normal(size=n)
+    signal_state = {
+        "signal_state_flags": ["SIGNAL_HIGH_STATE_CANDIDATE"],
+        "signal_state_candidate_class": "candidate_locked_high_state",
+        "signal_state_high_threshold": 2.0,
+    }
+
+    out = compute_signal_only_f0_candidate(
+        signal,
+        t,
+        signal_state=signal_state,
+        config={"signal_only_f0_min_robust_range": 1e-5},
+    )
+
+    assert out["signal_only_f0_state_aware_used"] is False
+    assert out["signal_only_f0_anchor_status"] == "no_low_support"
+    assert "SIGNAL_ONLY_F0_INSUFFICIENT_LOW_SUPPORT" in out["signal_only_f0_flags"]
+    assert "SIGNAL_ONLY_F0_ROLLING_FALLBACK_USED" in out["signal_only_f0_flags"]
+    assert out["signal_only_f0_candidate_viability"] == "hard_inspect"
 
 
 def test_partial_mixed_high_state_adds_contextual_flag():
@@ -67,6 +115,7 @@ def test_partial_mixed_high_state_adds_contextual_flag():
 
     assert out["signal_only_f0_candidate_available"] is True
     assert "SIGNAL_ONLY_F0_PARTIAL_HIGH_STATE_PRESENT" in out["signal_only_f0_flags"]
+    assert out["signal_only_f0_state_aware_used"] is True
     assert out["signal_only_f0_candidate_viability"] in {"viable", "contextual"}
 
 

@@ -221,6 +221,9 @@ def test_pipeline_integration_cache_production(tmp_path):
                     assert "signal_only_f0_candidate_viability" in candidate.attrs
                     assert "signal_only_f0_candidate_confidence" in candidate.attrs
                     assert "signal_only_f0_high_state_context_mode" in candidate.attrs
+                    assert "signal_only_f0_state_aware_used" in candidate.attrs
+                    assert "signal_only_f0_anchor_status" in candidate.attrs
+                    assert "signal_only_f0_anchor_count" in candidate.attrs
                     found_signal_only_f0_trace = True
                 if (
                     found_dynamic_fit_qc_attrs
@@ -343,6 +346,14 @@ def test_pipeline_integration_cache_production(tmp_path):
         "signal_only_f0_tracking_score",
         "signal_only_f0_high_state_context_mode",
         "signal_only_f0_high_state_context_applied",
+        "signal_only_f0_state_aware_enabled",
+        "signal_only_f0_state_aware_used",
+        "signal_only_f0_anchor_count",
+        "signal_only_f0_low_support_fraction",
+        "signal_only_f0_direct_support_fraction",
+        "signal_only_f0_interpolated_fraction",
+        "signal_only_f0_extrapolated_fraction",
+        "signal_only_f0_anchor_status",
         "signal_only_f0_flags",
         "proposed_correction_mode_conservative",
         "proposal_confidence_conservative",
@@ -403,6 +414,9 @@ def test_pipeline_integration_cache_production(tmp_path):
     assert isinstance(f0_summary["signal_only_f0_candidate_viability_counts"], dict)
     assert isinstance(f0_summary["signal_only_f0_candidate_confidence_counts"], dict)
     assert isinstance(f0_summary["signal_only_f0_flag_counts"], dict)
+    assert isinstance(f0_summary["signal_only_f0_state_aware_used_counts"], dict)
+    assert isinstance(f0_summary["signal_only_f0_anchor_status_counts"], dict)
+    assert isinstance(f0_summary["signal_only_f0_anchor_count"], dict)
     assert "correction_policy_proposal_summary" in qc_summary
     proposal_summary = qc_summary["correction_policy_proposal_summary"]
     assert set(proposal_summary) == {"balanced", "conservative", "liberal"}

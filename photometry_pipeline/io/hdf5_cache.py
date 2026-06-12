@@ -436,22 +436,40 @@ class Hdf5TraceCacheWriter:
                             'signal_only_f0_candidate_viability',
                             'signal_only_f0_candidate_confidence',
                             'signal_only_f0_high_state_context_mode',
+                            'signal_only_f0_anchor_status',
+                            'signal_only_f0_edge_extrapolation_mode',
                         ):
                             value = f0_meta.get(attr_name)
                             if value is not None:
                                 grp.attrs[attr_name] = str(value)
+                        if 'signal_only_f0_state_aware_used' in f0_meta:
+                            grp.attrs['signal_only_f0_state_aware_used'] = bool(
+                                f0_meta.get('signal_only_f0_state_aware_used')
+                            )
                         if 'signal_only_f0_high_state_context_applied' in f0_meta:
                             grp.attrs['signal_only_f0_high_state_context_applied'] = bool(
                                 f0_meta.get('signal_only_f0_high_state_context_applied')
                             )
-                        value = f0_meta.get('signal_only_f0_high_state_context_cap')
-                        if value is not None:
-                            try:
-                                numeric = float(value)
-                            except Exception:
-                                numeric = np.nan
-                            if np.isfinite(numeric):
-                                grp.attrs['signal_only_f0_high_state_context_cap'] = numeric
+                        for attr_name in (
+                            'signal_only_f0_high_state_context_cap',
+                            'signal_only_f0_anchor_count',
+                            'signal_only_f0_low_support_fraction',
+                            'signal_only_f0_anchor_support_fraction',
+                            'signal_only_f0_direct_support_fraction',
+                            'signal_only_f0_interpolated_fraction',
+                            'signal_only_f0_extrapolated_fraction',
+                            'signal_only_f0_edge_extrapolation_fraction',
+                            'signal_only_f0_max_anchor_gap_fraction_observed',
+                            'signal_only_f0_max_anchor_gap_sec_observed',
+                        ):
+                            value = f0_meta.get(attr_name)
+                            if value is not None:
+                                try:
+                                    numeric = float(value)
+                                except Exception:
+                                    numeric = np.nan
+                                if np.isfinite(numeric):
+                                    grp.attrs[attr_name] = numeric
                         flags = f0_meta.get('signal_only_f0_flags', [])
                         if isinstance(flags, (list, tuple)):
                             grp.attrs['signal_only_f0_flags'] = ';'.join(str(x) for x in flags)
