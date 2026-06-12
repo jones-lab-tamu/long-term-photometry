@@ -133,8 +133,84 @@ def test_contextual_negative_dynamic_can_use_signal_only_f0_viable_medium():
     assert balanced["proposed_correction_mode"] == "signal_only_f0_candidate"
     assert balanced["warning_level"] in {"contextual", "caution", "severe"}
     assert balanced["warning_level"] != "none"
+    assert (
+        "DYNAMIC_CONTEXT_SUPPORTS_SIGNAL_ONLY_F0_FALLBACK"
+        in balanced["proposal_flags"]
+    )
     assert liberal["proposed_correction_mode"] == "signal_only_f0_candidate"
     assert "INVERTED_REFERENCE_RELATIONSHIP" in balanced["proposal_flags"]
+
+
+def test_balanced_generic_contextual_dynamic_does_not_use_signal_only_f0_candidate():
+    record = _with_signal_only_f0(
+        _record(
+            dynamic="contextual",
+            baseline="contextual",
+            flags=[],
+            relationship="positive_reference_relationship",
+        ),
+        confidence="high",
+    )
+
+    balanced = propose_correction_policy(comparison_record=record, policy="balanced")
+    liberal = propose_correction_policy(comparison_record=record, policy="liberal")
+
+    assert balanced["proposed_correction_mode"] != "signal_only_f0_candidate"
+    assert balanced["proposed_correction_mode"] == "no_clean_reference_candidate"
+    assert (
+        "DYNAMIC_CONTEXT_DOES_NOT_SUPPORT_SIGNAL_ONLY_F0_FALLBACK"
+        in balanced["proposal_flags"]
+    )
+    assert liberal["proposed_correction_mode"] == "signal_only_f0_candidate"
+
+
+def test_balanced_contextual_gate_ignores_stale_prior_policy_flags():
+    record = _with_signal_only_f0(
+        {
+            **_record(
+                dynamic="contextual",
+                baseline="contextual",
+                flags=[],
+                relationship="positive_reference_relationship",
+            ),
+            "proposal_flags_balanced": [
+                "DYNAMIC_CONTEXT_SUPPORTS_SIGNAL_ONLY_F0_FALLBACK",
+                "INVERTED_REFERENCE_RELATIONSHIP",
+            ],
+        },
+        confidence="high",
+    )
+
+    balanced = propose_correction_policy(comparison_record=record, policy="balanced")
+
+    assert balanced["proposed_correction_mode"] != "signal_only_f0_candidate"
+    assert (
+        "DYNAMIC_CONTEXT_DOES_NOT_SUPPORT_SIGNAL_ONLY_F0_FALLBACK"
+        in balanced["proposal_flags"]
+    )
+
+
+def test_balanced_contextual_gate_accepts_real_upstream_reference_problem_flag():
+    record = _with_signal_only_f0(
+        {
+            **_record(
+                dynamic="contextual",
+                baseline="contextual",
+                flags=[],
+                relationship="positive_reference_relationship",
+            ),
+            "dynamic_fit_qc_flags": ["NEGATIVE_OR_MIXED_REFERENCE_COUPLING"],
+        },
+        confidence="medium",
+    )
+
+    balanced = propose_correction_policy(comparison_record=record, policy="balanced")
+
+    assert balanced["proposed_correction_mode"] == "signal_only_f0_candidate"
+    assert (
+        "DYNAMIC_CONTEXT_SUPPORTS_SIGNAL_ONLY_F0_FALLBACK"
+        in balanced["proposal_flags"]
+    )
 
 
 def test_signal_only_f0_insufficient_anchors_is_never_policy_candidate():

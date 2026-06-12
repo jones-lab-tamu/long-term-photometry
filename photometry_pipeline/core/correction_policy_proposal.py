@@ -68,6 +68,12 @@ FLAG_SIGNAL_ONLY_F0_INSUFFICIENT_LOW_SUPPORT = "SIGNAL_ONLY_F0_INSUFFICIENT_LOW_
 FLAG_SIGNAL_ONLY_F0_POLICY_CANDIDATE = "SIGNAL_ONLY_F0_POLICY_CANDIDATE"
 FLAG_SIGNAL_ONLY_F0_POLICY_REJECTED = "SIGNAL_ONLY_F0_POLICY_REJECTED"
 FLAG_SIGNAL_ONLY_F0_POLICY_REQUIRES_REVIEW = "SIGNAL_ONLY_F0_POLICY_REQUIRES_REVIEW"
+FLAG_DYNAMIC_CONTEXT_SUPPORTS_SIGNAL_ONLY_F0 = (
+    "DYNAMIC_CONTEXT_SUPPORTS_SIGNAL_ONLY_F0_FALLBACK"
+)
+FLAG_DYNAMIC_CONTEXT_DOES_NOT_SUPPORT_SIGNAL_ONLY_F0 = (
+    "DYNAMIC_CONTEXT_DOES_NOT_SUPPORT_SIGNAL_ONLY_F0_FALLBACK"
+)
 FLAG_BOTH_CONTEXTUAL = "BOTH_CANDIDATES_CONTEXTUAL"
 FLAG_BOTH_HARD_OR_UNAVAILABLE = "BOTH_CANDIDATES_HARD_OR_UNAVAILABLE"
 FLAG_REVIEW_BY_POLICY = "REVIEW_REQUIRED_BY_POLICY"
@@ -86,6 +92,20 @@ SIGNAL_ONLY_F0_CAP_FLAGS = {
     "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_FEW_ANCHORS",
     "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_LARGE_GAP",
     "SIGNAL_ONLY_F0_LARGE_ANCHOR_GAP",
+}
+
+DYNAMIC_CONTEXT_SIGNAL_ONLY_F0_TRIGGER_FLAGS = {
+    "DYNAMIC_NEGATIVE_OR_MIXED_COUPLING",
+    "NEGATIVE_OR_MIXED_REFERENCE_COUPLING",
+    "FITTED_REFERENCE_LOW_RANGE",
+    "FITTED_REFERENCE_FLAT_OR_UNINFORMATIVE",
+    "FITTED_REFERENCE_RESPONSE_SCALE_RICH",
+    "DYNAMIC_RESPONSE_SCALE_RICH",
+    "DYNAMIC_LOW_OR_FLAT_REFERENCE",
+    "BASELINE_NEGATIVE_REFERENCE_RELATIONSHIP",
+    "BASELINE_WEAK_REFERENCE_RELATIONSHIP",
+    "BASELINE_MIXED_OR_UNCLEAR_REFERENCE_RELATIONSHIP",
+    "INVERTED_REFERENCE_RELATIONSHIP",
 }
 
 
@@ -164,6 +184,38 @@ def _has_high_state_context(record: dict[str, Any]) -> bool:
         }
         & signal_flags
     )
+
+
+def _dynamic_context_supports_signal_only_f0_fallback(record: dict[str, Any]) -> bool:
+    flags: set[str] = set()
+    for key in (
+        "dynamic_fit_qc_flags",
+        "dynamic_fit_qc_hard_flags",
+        "dynamic_fit_qc_soft_flags",
+        "reference_comparison_flags",
+    ):
+        flags.update(_as_flag_set(record.get(key)))
+    if flags & DYNAMIC_CONTEXT_SIGNAL_ONLY_F0_TRIGGER_FLAGS:
+        return True
+    relationship = _baseline_relationship_class(record)
+    if relationship in {
+        "negative_reference_relationship",
+        "weak_reference_relationship",
+        "mixed_or_unclear_reference_relationship",
+    }:
+        return True
+    for key in (
+        "dynamic_fit_negative_or_mixed_coupling",
+        "dynamic_fit_reference_low_range",
+        "dynamic_fit_reference_flat_or_uninformative",
+        "dynamic_fit_response_scale_rich",
+        "dynamic_has_negative_or_mixed_coupling",
+        "dynamic_has_low_or_flat_reference",
+        "dynamic_has_response_scale_rich",
+    ):
+        if _boolish(record.get(key, False)):
+            return True
+    return False
 
 
 def _signal_only_f0_evidence(record: dict[str, Any], *, allow_low: bool = False) -> dict[str, Any]:
@@ -386,7 +438,7 @@ def _balanced(record: dict[str, Any], flags: list[str], dynamic: str, baseline: 
             reason="dynamic_isosbestic_viable",
             flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
         )
-    if dynamic in {"hard_inspect", "contextual"}:
+    if dynamic == "hard_inspect":
         signal_only = _signal_only_f0_proposal(
             policy="balanced",
             record=record,
@@ -395,6 +447,18 @@ def _balanced(record: dict[str, Any], flags: list[str], dynamic: str, baseline: 
         )
         if signal_only is not None:
             return signal_only
+    if dynamic == "contextual":
+        if _dynamic_context_supports_signal_only_f0_fallback(record):
+            signal_only = _signal_only_f0_proposal(
+                policy="balanced",
+                record=record,
+                flags=[*flags, FLAG_DYNAMIC_CONTEXT_SUPPORTS_SIGNAL_ONLY_F0],
+                dynamic=dynamic,
+            )
+            if signal_only is not None:
+                return signal_only
+        else:
+            flags = [*flags, FLAG_DYNAMIC_CONTEXT_DOES_NOT_SUPPORT_SIGNAL_ONLY_F0]
     if dynamic == "hard_inspect" and baseline == "viable" and baseline_clean_positive:
         return _proposal(
             policy="balanced",
