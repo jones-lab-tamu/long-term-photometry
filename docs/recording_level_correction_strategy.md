@@ -178,6 +178,21 @@ If applied strategy is `no_correction`:
 
 - chunk-level diagnostics still indicate why correction was not applied and where signal/reference behavior was problematic
 
+## Recording-Level Strategy Proposal Utility
+
+`tools/propose_recording_correction_strategy.py` aggregates existing per-chunk evidence into one proposal row per ROI recording. It reads chunk-level QC/proposal records from `_analysis/phasic_out/qc/baseline_reference_candidate_by_chunk.json` and writes:
+
+- `recording_correction_strategy_proposals.csv`
+- `recording_correction_strategy_proposals.json`
+
+The utility remains proposal-only. It does not apply correction, recompute dF/F, rerun event detection, modify HDF5 traces, or implement GUI auto mode. Its output is intended to guide future auto-selection design and manual review.
+
+Example:
+
+```powershell
+python tools/propose_recording_correction_strategy.py --phasic-out "<phasic_out>" --policy balanced
+```
+
 ## Not Implemented Yet
 
 This document describes planned architecture.
