@@ -420,3 +420,77 @@ def compute_signal_state_diagnostics(
         }
     )
     return result
+
+
+def summarize_signal_state_diagnostics(records: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Summarize signal-state diagnostic records for qc_summary.json."""
+
+    def _count_values(key: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for rec in records:
+            val = rec.get(key)
+            if isinstance(val, bool):
+                text = str(bool(val)).lower()
+            else:
+                text = str(val or "").strip()
+            if text:
+                counts[text] = counts.get(text, 0) + 1
+        return {k: int(v) for k, v in sorted(counts.items())}
+
+    def _flag_counts() -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for rec in records:
+            flags = rec.get("signal_state_flags", [])
+            if isinstance(flags, str):
+                flags = [x for x in flags.split(";") if x]
+            if isinstance(flags, (list, tuple)):
+                for flag in flags:
+                    flag_s = str(flag).strip()
+                    if flag_s:
+                        counts[flag_s] = counts.get(flag_s, 0) + 1
+        return {k: int(v) for k, v in sorted(counts.items())}
+
+    def _numeric_summary(key: str) -> dict[str, float | None]:
+        vals = []
+        for rec in records:
+            try:
+                val = float(rec.get(key, float("nan")))
+            except Exception:
+                continue
+            if np.isfinite(val):
+                vals.append(val)
+        if not vals:
+            return {"median": None, "p25": None, "p75": None}
+        arr = np.asarray(vals, dtype=float)
+        return {
+            "median": float(np.percentile(arr, 50.0)),
+            "p25": float(np.percentile(arr, 25.0)),
+            "p75": float(np.percentile(arr, 75.0)),
+        }
+
+    return {
+        "roi_chunk_signal_state_count": int(len(records)),
+        "signal_state_candidate_class_counts": _count_values(
+            "signal_state_candidate_class"
+        ),
+        "signal_high_state_candidate_present_counts": _count_values(
+            "signal_high_state_candidate_present"
+        ),
+        "signal_edge_high_state_present_counts": _count_values(
+            "signal_edge_high_state_present"
+        ),
+        "signal_step_like_transition_present_counts": _count_values(
+            "signal_step_like_transition_present"
+        ),
+        "signal_state_flag_counts": _flag_counts(),
+        "signal_high_state_fraction": _numeric_summary("signal_high_state_fraction"),
+        "signal_longest_high_state_fraction": _numeric_summary(
+            "signal_longest_high_state_fraction"
+        ),
+        "signal_step_transition_count": _numeric_summary(
+            "signal_step_transition_count"
+        ),
+        "signal_variability_suppression_score": _numeric_summary(
+            "signal_variability_suppression_score"
+        ),
+    }
