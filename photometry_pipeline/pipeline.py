@@ -26,6 +26,7 @@ from .core.baseline_reference_candidate import (
     compute_baseline_reference_candidate_metrics,
 )
 from .core.dynamic_fit_qc import compute_dynamic_fit_validity_metrics
+from .core.signal_state_diagnostics import compute_signal_state_diagnostics
 from .core.correction_policy_proposal import (
     apply_correction_policy_proposals,
     summarize_correction_policy_proposals,
@@ -297,6 +298,27 @@ class Pipeline:
         dynamic_qc_by_roi = chunk.metadata.get("dynamic_fit_validity_qc", {})
         if not isinstance(dynamic_qc_by_roi, dict):
             dynamic_qc_by_roi = {}
+        signal_state_config_keys = (
+            "signal_state_smoothing_window_fraction",
+            "signal_state_smoothing_window_sec",
+            "signal_state_high_quantile",
+            "signal_state_low_quantile",
+            "signal_state_min_episode_fraction",
+            "signal_state_min_episode_sec",
+            "signal_state_edge_fraction",
+            "signal_state_variability_window_fraction",
+            "signal_state_variability_window_sec",
+            "signal_state_low_variability_quantile",
+            "signal_state_step_window_fraction",
+            "signal_state_step_window_sec",
+            "signal_state_step_threshold_robust_z",
+            "signal_state_min_robust_range",
+        )
+        signal_state_config = {
+            key: getattr(self.config, key)
+            for key in signal_state_config_keys
+            if hasattr(self.config, key)
+        }
 
         records_by_roi: dict[str, dict] = {}
         for r_idx, roi in enumerate(chunk.channel_names):
@@ -356,6 +378,13 @@ class Pipeline:
                 "dynamic_fit_qc_soft_flags": dynamic_qc.get("dynamic_fit_qc_soft_flags", []),
                 "dynamic_fit_qc_flags": dynamic_qc.get("dynamic_fit_qc_flags", []),
             }
+            record.update(
+                compute_signal_state_diagnostics(
+                    signal=chunk.sig_raw[:, r_idx],
+                    time=chunk.time_sec,
+                    config=signal_state_config,
+                )
+            )
             record.update(
                 classify_reference_candidates(
                     dynamic_qc=dynamic_qc,
@@ -465,6 +494,80 @@ class Pipeline:
             "dynamic_minus_baseline_ref_range": _quartiles("dynamic_minus_baseline_ref_range"),
         }
         self.qc_summary["baseline_reference_candidate_qc_summary"] = _sanitize_metadata(summary)
+
+    def _update_signal_state_diagnostics_summary(self) -> None:
+        records = list(self.baseline_reference_candidate_records)
+
+        def _count_values(key: str) -> dict[str, int]:
+            counts: dict[str, int] = {}
+            for rec in records:
+                val = rec.get(key)
+                if isinstance(val, bool):
+                    text = str(bool(val)).lower()
+                else:
+                    text = str(val or "").strip()
+                if text:
+                    counts[text] = counts.get(text, 0) + 1
+            return {k: int(v) for k, v in sorted(counts.items())}
+
+        def _flag_counts() -> dict[str, int]:
+            counts: dict[str, int] = {}
+            for rec in records:
+                flags = rec.get("signal_state_flags", [])
+                if isinstance(flags, str):
+                    flags = [x for x in flags.split(";") if x]
+                if isinstance(flags, (list, tuple)):
+                    for flag in flags:
+                        flag_s = str(flag).strip()
+                        if flag_s:
+                            counts[flag_s] = counts.get(flag_s, 0) + 1
+            return {k: int(v) for k, v in sorted(counts.items())}
+
+        def _numeric_summary(key: str) -> dict[str, float | None]:
+            vals = []
+            for rec in records:
+                try:
+                    val = float(rec.get(key, float("nan")))
+                except Exception:
+                    continue
+                if np.isfinite(val):
+                    vals.append(val)
+            if not vals:
+                return {"median": None, "p25": None, "p75": None}
+            arr = np.asarray(vals, dtype=float)
+            return {
+                "median": float(np.percentile(arr, 50.0)),
+                "p25": float(np.percentile(arr, 25.0)),
+                "p75": float(np.percentile(arr, 75.0)),
+            }
+
+        summary = {
+            "roi_chunk_signal_state_count": int(len(records)),
+            "signal_state_candidate_class_counts": _count_values(
+                "signal_state_candidate_class"
+            ),
+            "signal_high_state_candidate_present_counts": _count_values(
+                "signal_high_state_candidate_present"
+            ),
+            "signal_edge_high_state_present_counts": _count_values(
+                "signal_edge_high_state_present"
+            ),
+            "signal_step_like_transition_present_counts": _count_values(
+                "signal_step_like_transition_present"
+            ),
+            "signal_state_flag_counts": _flag_counts(),
+            "signal_high_state_fraction": _numeric_summary("signal_high_state_fraction"),
+            "signal_longest_high_state_fraction": _numeric_summary(
+                "signal_longest_high_state_fraction"
+            ),
+            "signal_step_transition_count": _numeric_summary(
+                "signal_step_transition_count"
+            ),
+            "signal_variability_suppression_score": _numeric_summary(
+                "signal_variability_suppression_score"
+            ),
+        }
+        self.qc_summary["signal_state_diagnostics_summary"] = _sanitize_metadata(summary)
 
     def _update_reference_candidate_comparison_summary(self) -> None:
         records = list(self.baseline_reference_candidate_records)
@@ -1570,6 +1673,7 @@ class Pipeline:
                     "dynamic_fit_qc_hard_flags",
                     "dynamic_fit_qc_soft_flags",
                     "reference_comparison_flags",
+                    "signal_state_flags",
                     "proposal_flags_conservative",
                     "proposal_flags_balanced",
                     "proposal_flags_liberal",
@@ -1639,6 +1743,7 @@ class Pipeline:
         self._update_dynamic_fit_slope_constraint_summary()
         self._update_dynamic_fit_qc_summary()
         self._update_baseline_reference_candidate_summary()
+        self._update_signal_state_diagnostics_summary()
         self._update_reference_candidate_comparison_summary()
         self._update_correction_policy_proposal_summary()
             

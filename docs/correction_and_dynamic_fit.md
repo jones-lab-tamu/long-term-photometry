@@ -70,6 +70,14 @@ Conservative policy requires review more often when evidence is contextual. Bala
 
 The legacy baseline-reference candidate remains available as a diagnostic trace, but it is no longer treated as a correction-policy fallback. For sensors that can enter sustained high-output states, reference-derived baseline estimates can remove true signal. Future fallback development should use signal-derived F0 estimation rather than forcing the isosbestic channel to act as a baseline. This patch does not implement signal-only F0.
 
+## Signal-state diagnostics
+
+Signal-state diagnostics describe whether the signal channel contains sustained high-state, mixed dynamic/high-state, edge high-state, or ordinary dynamic candidate behavior. These fields are intended to capture sensor-state regimes that may make reference-based correction conceptually questionable.
+
+The diagnostics use the signal channel only. They report robust distribution, high-state occupancy, edge occupancy, local variability suppression, and step-like transition metrics using configurable relative thresholds and windows rather than one hard-coded sustained-duration rule. They do not prove artifact or biological signal.
+
+These diagnostics are provenance outputs only. They do not alter correction, dF/F calculation, event detection, correction modes, feature extraction, or correction-policy proposals. Future signal-only F0 fallback development may use these diagnostics, but this patch does not implement signal-only F0.
+
 ### Recomputing policy proposals without rerunning analysis
 
 When policy rules change after a long run has already completed, diagnostic policy proposal fields can be refreshed without rerunning correction, dF/F calculation, event detection, trace generation, or plotting:

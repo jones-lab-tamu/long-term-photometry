@@ -306,6 +306,13 @@ def test_pipeline_integration_cache_production(tmp_path):
         "baseline_has_response_scale_rich",
         "baseline_window_large_fraction_of_chunk",
         "baseline_window_adjusted",
+        "signal_state_diagnostics_available",
+        "signal_state_candidate_class",
+        "signal_high_state_candidate_present",
+        "signal_high_state_fraction",
+        "signal_edge_high_state_present",
+        "signal_step_like_transition_present",
+        "signal_state_flags",
         "proposed_correction_mode_conservative",
         "proposal_confidence_conservative",
         "review_required_conservative",
@@ -350,6 +357,14 @@ def test_pipeline_integration_cache_production(tmp_path):
     assert isinstance(comparison_summary["baseline_reference_viability_counts"], dict)
     assert isinstance(comparison_summary["reference_comparison_review_level_counts"], dict)
     assert isinstance(comparison_summary["reference_comparison_flag_counts"], dict)
+    assert "signal_state_diagnostics_summary" in qc_summary
+    signal_summary = qc_summary["signal_state_diagnostics_summary"]
+    assert signal_summary["roi_chunk_signal_state_count"] >= 1
+    assert isinstance(signal_summary["signal_state_candidate_class_counts"], dict)
+    assert isinstance(signal_summary["signal_high_state_candidate_present_counts"], dict)
+    assert isinstance(signal_summary["signal_edge_high_state_present_counts"], dict)
+    assert isinstance(signal_summary["signal_step_like_transition_present_counts"], dict)
+    assert isinstance(signal_summary["signal_state_flag_counts"], dict)
     assert "correction_policy_proposal_summary" in qc_summary
     proposal_summary = qc_summary["correction_policy_proposal_summary"]
     assert set(proposal_summary) == {"balanced", "conservative", "liberal"}
