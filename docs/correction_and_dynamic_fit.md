@@ -78,6 +78,10 @@ The proposal can appear when dynamic/reference correction is not clean enough an
 
 The old `baseline_reference_candidate` remains a legacy diagnostic trace and is not reintroduced as a policy fallback.
 
+### Recording-level correction strategy
+
+Per-chunk proposals are QC evidence, not final applied correction decisions. Applied correction should be selected once per ROI recording rather than as a default chunkwise mosaic of correction modes. See [recording_level_correction_strategy.md](recording_level_correction_strategy.md) for the planned architecture.
+
 ## Signal-state diagnostics
 
 Signal-state diagnostics describe whether the signal channel contains sustained high-state, mixed dynamic/high-state, edge high-state, or ordinary dynamic candidate behavior. These fields are intended to capture sensor-state regimes that may make reference-based correction conceptually questionable.
