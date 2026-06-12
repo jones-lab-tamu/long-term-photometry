@@ -213,6 +213,58 @@ def test_balanced_contextual_gate_accepts_real_upstream_reference_problem_flag()
     )
 
 
+def test_balanced_response_scale_rich_only_does_not_trigger_signal_only_f0_candidate():
+    record = _with_signal_only_f0(
+        {
+            **_record(
+                dynamic="contextual",
+                baseline="contextual",
+                flags=["DYNAMIC_RESPONSE_SCALE_RICH"],
+                relationship="positive_reference_relationship",
+            ),
+            "dynamic_fit_qc_flags": ["FITTED_REFERENCE_RESPONSE_SCALE_RICH"],
+            "dynamic_fit_response_scale_rich": True,
+            "dynamic_has_response_scale_rich": True,
+        },
+        confidence="high",
+    )
+
+    balanced = propose_correction_policy(comparison_record=record, policy="balanced")
+    liberal = propose_correction_policy(comparison_record=record, policy="liberal")
+
+    assert balanced["proposed_correction_mode"] != "signal_only_f0_candidate"
+    assert balanced["proposed_correction_mode"] == "no_clean_reference_candidate"
+    assert (
+        "DYNAMIC_CONTEXT_DOES_NOT_SUPPORT_SIGNAL_ONLY_F0_FALLBACK"
+        in balanced["proposal_flags"]
+    )
+    assert liberal["proposed_correction_mode"] == "signal_only_f0_candidate"
+
+
+def test_balanced_low_flat_reference_context_still_triggers_signal_only_f0_candidate():
+    record = _with_signal_only_f0(
+        {
+            **_record(
+                dynamic="contextual",
+                baseline="contextual",
+                flags=[],
+                relationship="positive_reference_relationship",
+            ),
+            "dynamic_fit_qc_flags": ["FITTED_REFERENCE_LOW_RANGE"],
+            "dynamic_fit_reference_low_range": True,
+        },
+        confidence="medium",
+    )
+
+    balanced = propose_correction_policy(comparison_record=record, policy="balanced")
+
+    assert balanced["proposed_correction_mode"] == "signal_only_f0_candidate"
+    assert (
+        "DYNAMIC_CONTEXT_SUPPORTS_SIGNAL_ONLY_F0_FALLBACK"
+        in balanced["proposal_flags"]
+    )
+
+
 def test_signal_only_f0_insufficient_anchors_is_never_policy_candidate():
     record = _with_signal_only_f0(
         _record(dynamic="hard_inspect", baseline="unavailable"),

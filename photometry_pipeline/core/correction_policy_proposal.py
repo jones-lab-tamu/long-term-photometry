@@ -99,11 +99,8 @@ DYNAMIC_CONTEXT_SIGNAL_ONLY_F0_TRIGGER_FLAGS = {
     "NEGATIVE_OR_MIXED_REFERENCE_COUPLING",
     "FITTED_REFERENCE_LOW_RANGE",
     "FITTED_REFERENCE_FLAT_OR_UNINFORMATIVE",
-    "FITTED_REFERENCE_RESPONSE_SCALE_RICH",
-    "DYNAMIC_RESPONSE_SCALE_RICH",
     "DYNAMIC_LOW_OR_FLAT_REFERENCE",
     "BASELINE_NEGATIVE_REFERENCE_RELATIONSHIP",
-    "BASELINE_WEAK_REFERENCE_RELATIONSHIP",
     "BASELINE_MIXED_OR_UNCLEAR_REFERENCE_RELATIONSHIP",
     "INVERTED_REFERENCE_RELATIONSHIP",
 }
@@ -200,7 +197,6 @@ def _dynamic_context_supports_signal_only_f0_fallback(record: dict[str, Any]) ->
     relationship = _baseline_relationship_class(record)
     if relationship in {
         "negative_reference_relationship",
-        "weak_reference_relationship",
         "mixed_or_unclear_reference_relationship",
     }:
         return True
@@ -208,10 +204,8 @@ def _dynamic_context_supports_signal_only_f0_fallback(record: dict[str, Any]) ->
         "dynamic_fit_negative_or_mixed_coupling",
         "dynamic_fit_reference_low_range",
         "dynamic_fit_reference_flat_or_uninformative",
-        "dynamic_fit_response_scale_rich",
         "dynamic_has_negative_or_mixed_coupling",
         "dynamic_has_low_or_flat_reference",
-        "dynamic_has_response_scale_rich",
     ):
         if _boolish(record.get(key, False)):
             return True
