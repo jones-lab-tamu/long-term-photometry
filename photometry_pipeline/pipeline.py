@@ -375,7 +375,11 @@ class Pipeline:
                     "proposal_confidence"
                 ]
                 record[f"review_required_{suffix}"] = proposal["review_required"]
+                record[f"review_queue_candidate_{suffix}"] = proposal[
+                    "review_queue_candidate"
+                ]
                 record[f"review_priority_{suffix}"] = proposal["review_priority"]
+                record[f"warning_level_{suffix}"] = proposal["warning_level"]
                 record[f"proposal_reason_{suffix}"] = proposal["proposal_reason"]
                 record[f"proposal_flags_{suffix}"] = proposal["proposal_flags"]
             clean_record = _sanitize_metadata(record)
@@ -547,6 +551,30 @@ class Pipeline:
                             flag_counts[flag_s] = flag_counts.get(flag_s, 0) + 1
             out[policy] = {
                 "roi_chunk_proposal_count": int(len(records)),
+                "mandatory_review_fraction": (
+                    float(
+                        sum(
+                            1
+                            for rec in records
+                            if bool(rec.get(f"review_required_{policy}", False))
+                        )
+                    )
+                    / float(len(records))
+                    if records
+                    else 0.0
+                ),
+                "review_queue_candidate_fraction": (
+                    float(
+                        sum(
+                            1
+                            for rec in records
+                            if bool(rec.get(f"review_queue_candidate_{policy}", False))
+                        )
+                    )
+                    / float(len(records))
+                    if records
+                    else 0.0
+                ),
                 "proposed_correction_mode_counts": _count_values(
                     f"proposed_correction_mode_{policy}"
                 ),
@@ -554,7 +582,11 @@ class Pipeline:
                     f"proposal_confidence_{policy}"
                 ),
                 "review_required_counts": _count_values(f"review_required_{policy}"),
+                "review_queue_candidate_counts": _count_values(
+                    f"review_queue_candidate_{policy}"
+                ),
                 "review_priority_counts": _count_values(f"review_priority_{policy}"),
+                "warning_level_counts": _count_values(f"warning_level_{policy}"),
                 "proposal_flag_counts": {
                     k: int(v) for k, v in sorted(flag_counts.items())
                 },

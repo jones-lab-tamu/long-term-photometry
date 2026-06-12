@@ -309,19 +309,25 @@ def test_pipeline_integration_cache_production(tmp_path):
         "proposed_correction_mode_conservative",
         "proposal_confidence_conservative",
         "review_required_conservative",
+        "review_queue_candidate_conservative",
         "review_priority_conservative",
+        "warning_level_conservative",
         "proposal_reason_conservative",
         "proposal_flags_conservative",
         "proposed_correction_mode_balanced",
         "proposal_confidence_balanced",
         "review_required_balanced",
+        "review_queue_candidate_balanced",
         "review_priority_balanced",
+        "warning_level_balanced",
         "proposal_reason_balanced",
         "proposal_flags_balanced",
         "proposed_correction_mode_liberal",
         "proposal_confidence_liberal",
         "review_required_liberal",
+        "review_queue_candidate_liberal",
         "review_priority_liberal",
+        "warning_level_liberal",
         "proposal_reason_liberal",
         "proposal_flags_liberal",
     ]:
@@ -352,5 +358,9 @@ def test_pipeline_integration_cache_production(tmp_path):
         assert isinstance(proposal_summary[policy]["proposed_correction_mode_counts"], dict)
         assert isinstance(proposal_summary[policy]["proposal_confidence_counts"], dict)
         assert isinstance(proposal_summary[policy]["review_required_counts"], dict)
+        assert isinstance(proposal_summary[policy]["review_queue_candidate_counts"], dict)
         assert isinstance(proposal_summary[policy]["review_priority_counts"], dict)
+        assert isinstance(proposal_summary[policy]["warning_level_counts"], dict)
         assert isinstance(proposal_summary[policy]["proposal_flag_counts"], dict)
+        assert isinstance(proposal_summary[policy]["mandatory_review_fraction"], float)
+        assert isinstance(proposal_summary[policy]["review_queue_candidate_fraction"], float)

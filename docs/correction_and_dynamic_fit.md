@@ -62,9 +62,11 @@ A baseline candidate is considered cleanly viable only when it is available, not
 
 ## Diagnostic correction policy proposals
 
-The correction policy proposal layer converts dynamic-fit QC, baseline-candidate QC, and baseline fit relationship diagnostics into policy-specific triage fields. These fields indicate what the software would propose under conservative, balanced, or liberal review settings. They are provenance outputs only and do not determine the correction used for dF/F or event detection.
+The correction policy proposal layer converts dynamic-fit QC, baseline-candidate QC, and baseline fit relationship diagnostics into policy-specific triage fields. These fields indicate what the software would propose under conservative, balanced, or liberal review settings. They are provenance outputs only and do not determine the correction used for dF/F, event detection, or feature extraction.
 
-Conservative policy favors review when evidence is contextual. Balanced policy accepts clean dynamic cases, proposes baseline candidates only for clean positive-reference baseline rescue cases, and flags ambiguous cases. Liberal policy is more willing to proceed with dynamic or positive-reference baseline candidates for screening, but it still does not auto-select negative or inverted baseline candidates. The purpose is to estimate review burden and prioritize chunks, not to hide uncertainty.
+Policy proposals separate correction-mode proposals from review-burden management. `review_required` means mandatory manual review. `review_queue_candidate` means the chunk is useful for representative audit or a review queue but is not necessarily mandatory. `warning_level` separates logged diagnostic severity from manual review burden. This distinction is important for long-duration recordings, where reviewing every contextual chunk would defeat the purpose of automated analysis.
+
+Conservative policy requires review more often when evidence is contextual. Balanced policy accepts clean dynamic cases, logs many contextual cases as warning/audit candidates without mandatory review, proposes baseline candidates only for clean positive-reference baseline rescue cases, and still requires review when no clean defensible reference candidate exists. Liberal policy proceeds more often for screening. None of the policies auto-select negative or inverted baseline candidates.
 
 ## Reference candidate comparison plots
 

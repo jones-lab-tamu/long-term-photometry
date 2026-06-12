@@ -23,10 +23,12 @@ def test_balanced_dynamic_viable_accepts_dynamic_without_review():
     assert result["proposed_correction_mode"] == "dynamic"
     assert result["proposal_confidence"] == "high"
     assert result["review_required"] is False
+    assert result["review_queue_candidate"] is False
     assert result["review_priority"] == "none"
+    assert result["warning_level"] == "none"
 
 
-def test_balanced_dynamic_hard_baseline_viable_proposes_reviewed_baseline():
+def test_balanced_dynamic_hard_baseline_viable_proposes_audit_baseline():
     result = propose_correction_policy(
         comparison_record=_record(dynamic="hard_inspect", baseline="viable"),
         policy="balanced",
@@ -34,11 +36,13 @@ def test_balanced_dynamic_hard_baseline_viable_proposes_reviewed_baseline():
 
     assert result["proposed_correction_mode"] == "baseline_reference_candidate"
     assert result["proposal_confidence"] == "medium"
-    assert result["review_required"] is True
+    assert result["review_required"] is False
+    assert result["review_queue_candidate"] is True
     assert result["review_priority"] == "medium"
+    assert result["warning_level"] == "caution"
 
 
-def test_balanced_contextual_negative_baseline_requires_review():
+def test_balanced_contextual_negative_baseline_is_audit_candidate_not_mandatory_review():
     result = propose_correction_policy(
         comparison_record=_record(
             dynamic="contextual",
@@ -52,10 +56,27 @@ def test_balanced_contextual_negative_baseline_requires_review():
         policy="balanced",
     )
 
-    assert result["proposed_correction_mode"] == "review_required"
-    assert result["review_required"] is True
-    assert result["review_priority"] == "medium"
+    assert result["proposed_correction_mode"] == "dynamic"
+    assert result["proposal_confidence"] == "low"
+    assert result["review_required"] is False
+    assert result["review_queue_candidate"] is True
+    assert result["review_priority"] == "low"
+    assert result["warning_level"] == "contextual"
     assert "INVERTED_REFERENCE_RELATIONSHIP" in result["proposal_flags"]
+
+
+def test_balanced_dynamic_contextual_baseline_viable_is_caution_audit_candidate():
+    result = propose_correction_policy(
+        comparison_record=_record(dynamic="contextual", baseline="viable"),
+        policy="balanced",
+    )
+
+    assert result["proposed_correction_mode"] == "dynamic"
+    assert result["proposal_confidence"] == "low"
+    assert result["review_required"] is False
+    assert result["review_queue_candidate"] is True
+    assert result["review_priority"] == "medium"
+    assert result["warning_level"] == "caution"
 
 
 def test_balanced_dynamic_hard_baseline_contextual_is_high_priority_review():
@@ -66,7 +87,23 @@ def test_balanced_dynamic_hard_baseline_contextual_is_high_priority_review():
 
     assert result["proposed_correction_mode"] == "review_required"
     assert result["review_required"] is True
+    assert result["review_queue_candidate"] is True
     assert result["review_priority"] == "high"
+    assert result["warning_level"] == "severe"
+
+
+def test_balanced_dynamic_hard_baseline_hard_or_unavailable_is_severe_review():
+    for baseline in ("hard_inspect", "unavailable"):
+        result = propose_correction_policy(
+            comparison_record=_record(dynamic="hard_inspect", baseline=baseline),
+            policy="balanced",
+        )
+
+        assert result["proposed_correction_mode"] == "review_required"
+        assert result["review_required"] is True
+        assert result["review_queue_candidate"] is True
+        assert result["review_priority"] == "high"
+        assert result["warning_level"] == "severe"
 
 
 def test_conservative_dynamic_contextual_requires_review():
@@ -77,6 +114,7 @@ def test_conservative_dynamic_contextual_requires_review():
 
     assert result["proposed_correction_mode"] == "review_required"
     assert result["review_required"] is True
+    assert result["review_queue_candidate"] is True
 
 
 def test_conservative_dynamic_hard_baseline_viable_is_high_priority_reviewed_baseline():
@@ -99,7 +137,9 @@ def test_liberal_contextual_candidates_propose_dynamic_for_screening():
     assert result["proposed_correction_mode"] == "dynamic"
     assert result["proposal_confidence"] == "low"
     assert result["review_required"] is False
+    assert result["review_queue_candidate"] is True
     assert result["review_priority"] == "low"
+    assert result["warning_level"] == "contextual"
 
 
 def test_liberal_dynamic_hard_baseline_viable_proposes_baseline_for_screening():
@@ -164,15 +204,21 @@ def test_positive_viable_baseline_relationship_can_still_be_proposed_as_baseline
 
     balanced = propose_correction_policy(comparison_record=record, policy="balanced")
     assert balanced["proposed_correction_mode"] == "baseline_reference_candidate"
-    assert balanced["review_required"] is True
+    assert balanced["review_required"] is False
+    assert balanced["review_queue_candidate"] is True
+    assert balanced["warning_level"] == "caution"
 
     liberal = propose_correction_policy(comparison_record=record, policy="liberal")
     assert liberal["proposed_correction_mode"] == "baseline_reference_candidate"
     assert liberal["review_required"] is False
+    assert liberal["review_queue_candidate"] is True
+    assert liberal["warning_level"] == "caution"
 
     conservative = propose_correction_policy(comparison_record=record, policy="conservative")
     assert conservative["proposed_correction_mode"] == "baseline_reference_candidate"
     assert conservative["review_required"] is True
+    assert conservative["review_queue_candidate"] is True
+    assert conservative["warning_level"] == "caution"
 
 
 def test_policy_flags_csv_and_json_serialization_shapes():

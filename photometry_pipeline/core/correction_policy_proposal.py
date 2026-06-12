@@ -22,6 +22,11 @@ PRIORITY_LOW = "low"
 PRIORITY_MEDIUM = "medium"
 PRIORITY_HIGH = "high"
 
+WARNING_NONE = "none"
+WARNING_CONTEXTUAL = "contextual"
+WARNING_CAUTION = "caution"
+WARNING_SEVERE = "severe"
+
 FLAG_DYNAMIC_ACCEPTED = "DYNAMIC_ACCEPTED"
 FLAG_BASELINE_ACCEPTED = "BASELINE_REFERENCE_CANDIDATE_ACCEPTED"
 FLAG_DYNAMIC_HARD = "DYNAMIC_HARD_INSPECT"
@@ -111,7 +116,9 @@ def _proposal(
     mode: str,
     confidence: str,
     review_required: bool,
+    review_queue_candidate: bool,
     review_priority: str,
+    warning_level: str,
     reason: str,
     flags: list[str],
 ) -> dict[str, Any]:
@@ -120,7 +127,9 @@ def _proposal(
         "proposed_correction_mode": mode,
         "proposal_confidence": confidence,
         "review_required": bool(review_required),
+        "review_queue_candidate": bool(review_queue_candidate),
         "review_priority": review_priority,
+        "warning_level": warning_level,
         "proposal_reason": reason,
         "proposal_flags": list(dict.fromkeys(flags)),
     }
@@ -134,7 +143,9 @@ def _balanced(record: dict[str, Any], flags: list[str], dynamic: str, baseline: 
             mode=MODE_DYNAMIC,
             confidence=CONFIDENCE_HIGH,
             review_required=False,
+            review_queue_candidate=False,
             review_priority=PRIORITY_NONE,
+            warning_level=WARNING_NONE,
             reason="dynamic_reference_viable",
             flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
         )
@@ -143,10 +154,12 @@ def _balanced(record: dict[str, Any], flags: list[str], dynamic: str, baseline: 
             policy="balanced",
             mode=MODE_BASELINE,
             confidence=CONFIDENCE_MEDIUM,
-            review_required=True,
+            review_required=False,
+            review_queue_candidate=True,
             review_priority=PRIORITY_MEDIUM,
+            warning_level=WARNING_CAUTION,
             reason="dynamic_hard_inspect_baseline_viable_positive_relationship",
-            flags=[*flags, FLAG_BASELINE_ACCEPTED, FLAG_REVIEW_BY_POLICY],
+            flags=[*flags, FLAG_BASELINE_ACCEPTED],
         )
     if dynamic == "hard_inspect" and baseline == "viable":
         return _proposal(
@@ -154,19 +167,35 @@ def _balanced(record: dict[str, Any], flags: list[str], dynamic: str, baseline: 
             mode=MODE_REVIEW,
             confidence=CONFIDENCE_LOW,
             review_required=True,
+            review_queue_candidate=True,
             review_priority=PRIORITY_HIGH,
+            warning_level=WARNING_SEVERE,
             reason="dynamic_hard_inspect_baseline_viable_without_clean_positive_relationship",
             flags=[*flags, FLAG_REVIEW_BY_POLICY, FLAG_NO_CLEAN_REFERENCE],
         )
-    if dynamic == "contextual" and baseline in {"viable", "contextual"}:
+    if dynamic == "contextual" and baseline == "viable":
         return _proposal(
             policy="balanced",
-            mode=MODE_REVIEW,
+            mode=MODE_DYNAMIC,
             confidence=CONFIDENCE_LOW,
-            review_required=True,
+            review_required=False,
+            review_queue_candidate=True,
             review_priority=PRIORITY_MEDIUM,
-            reason="contextual_candidate_evidence_requires_review",
-            flags=[*flags, FLAG_REVIEW_BY_POLICY],
+            warning_level=WARNING_CAUTION,
+            reason="contextual_dynamic_with_alternative_baseline_candidate",
+            flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
+        )
+    if dynamic == "contextual" and baseline == "contextual":
+        return _proposal(
+            policy="balanced",
+            mode=MODE_DYNAMIC,
+            confidence=CONFIDENCE_LOW,
+            review_required=False,
+            review_queue_candidate=True,
+            review_priority=PRIORITY_LOW,
+            warning_level=WARNING_CONTEXTUAL,
+            reason="contextual_candidate_evidence_logged_for_audit",
+            flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
         )
     if dynamic == "hard_inspect" and baseline == "contextual":
         return _proposal(
@@ -174,7 +203,9 @@ def _balanced(record: dict[str, Any], flags: list[str], dynamic: str, baseline: 
             mode=MODE_REVIEW,
             confidence=CONFIDENCE_LOW,
             review_required=True,
+            review_queue_candidate=True,
             review_priority=PRIORITY_HIGH,
+            warning_level=WARNING_SEVERE,
             reason="dynamic_hard_inspect_baseline_contextual",
             flags=[*flags, FLAG_REVIEW_BY_POLICY, FLAG_NO_CLEAN_REFERENCE],
         )
@@ -184,7 +215,9 @@ def _balanced(record: dict[str, Any], flags: list[str], dynamic: str, baseline: 
             mode=MODE_REVIEW,
             confidence=CONFIDENCE_NONE,
             review_required=True,
+            review_queue_candidate=True,
             review_priority=PRIORITY_HIGH,
+            warning_level=WARNING_SEVERE,
             reason="both_candidates_hard_inspect_or_unavailable",
             flags=[*flags, FLAG_REVIEW_BY_POLICY, FLAG_NO_CLEAN_REFERENCE],
         )
@@ -193,7 +226,9 @@ def _balanced(record: dict[str, Any], flags: list[str], dynamic: str, baseline: 
         mode=MODE_REVIEW,
         confidence=CONFIDENCE_NONE,
         review_required=True,
+        review_queue_candidate=True,
         review_priority=PRIORITY_HIGH,
+        warning_level=WARNING_SEVERE,
         reason="unknown_dynamic_or_baseline_viability",
         flags=[*flags, FLAG_REVIEW_BY_POLICY, FLAG_NO_CLEAN_REFERENCE],
     )
@@ -207,7 +242,9 @@ def _conservative(record: dict[str, Any], flags: list[str], dynamic: str, baseli
             mode=MODE_DYNAMIC,
             confidence=CONFIDENCE_HIGH,
             review_required=False,
+            review_queue_candidate=False,
             review_priority=PRIORITY_NONE,
+            warning_level=WARNING_NONE,
             reason="dynamic_reference_viable_under_conservative_policy",
             flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
         )
@@ -217,7 +254,9 @@ def _conservative(record: dict[str, Any], flags: list[str], dynamic: str, baseli
             mode=MODE_BASELINE,
             confidence=CONFIDENCE_MEDIUM,
             review_required=True,
+            review_queue_candidate=True,
             review_priority=PRIORITY_HIGH,
+            warning_level=WARNING_CAUTION,
             reason="baseline_rescue_candidate_requires_high_priority_review",
             flags=[*flags, FLAG_BASELINE_ACCEPTED, FLAG_REVIEW_BY_POLICY],
         )
@@ -227,7 +266,9 @@ def _conservative(record: dict[str, Any], flags: list[str], dynamic: str, baseli
         mode=MODE_REVIEW,
         confidence=CONFIDENCE_LOW if dynamic == "contextual" else CONFIDENCE_NONE,
         review_required=True,
+        review_queue_candidate=True,
         review_priority=priority,
+        warning_level=WARNING_CAUTION if dynamic == "contextual" else WARNING_SEVERE,
         reason="conservative_policy_requires_review_for_contextual_or_unclean_evidence",
         flags=[*flags, FLAG_REVIEW_BY_POLICY],
     )
@@ -241,7 +282,9 @@ def _liberal(record: dict[str, Any], flags: list[str], dynamic: str, baseline: s
             mode=MODE_DYNAMIC,
             confidence=CONFIDENCE_HIGH,
             review_required=False,
+            review_queue_candidate=False,
             review_priority=PRIORITY_NONE,
+            warning_level=WARNING_NONE,
             reason="dynamic_reference_viable",
             flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
         )
@@ -251,7 +294,9 @@ def _liberal(record: dict[str, Any], flags: list[str], dynamic: str, baseline: s
             mode=MODE_DYNAMIC,
             confidence=CONFIDENCE_LOW,
             review_required=False,
+            review_queue_candidate=True,
             review_priority=PRIORITY_LOW,
+            warning_level=WARNING_CONTEXTUAL,
             reason="liberal_policy_allows_contextual_dynamic_for_screening",
             flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
         )
@@ -261,7 +306,9 @@ def _liberal(record: dict[str, Any], flags: list[str], dynamic: str, baseline: s
             mode=MODE_BASELINE,
             confidence=CONFIDENCE_MEDIUM,
             review_required=False,
+            review_queue_candidate=True,
             review_priority=PRIORITY_LOW,
+            warning_level=WARNING_CAUTION,
             reason="liberal_policy_allows_positive_baseline_rescue_for_screening",
             flags=[*flags, FLAG_BASELINE_ACCEPTED],
         )
@@ -271,7 +318,9 @@ def _liberal(record: dict[str, Any], flags: list[str], dynamic: str, baseline: s
             mode=MODE_REVIEW,
             confidence=CONFIDENCE_LOW,
             review_required=True,
+            review_queue_candidate=True,
             review_priority=PRIORITY_HIGH,
+            warning_level=WARNING_SEVERE,
             reason="dynamic_hard_inspect_baseline_contextual",
             flags=[*flags, FLAG_REVIEW_BY_POLICY, FLAG_NO_CLEAN_REFERENCE],
         )
@@ -280,7 +329,9 @@ def _liberal(record: dict[str, Any], flags: list[str], dynamic: str, baseline: s
         mode=MODE_REVIEW,
         confidence=CONFIDENCE_NONE,
         review_required=True,
+        review_queue_candidate=True,
         review_priority=PRIORITY_HIGH,
+        warning_level=WARNING_SEVERE,
         reason="no_clean_reference_candidate",
         flags=[*flags, FLAG_REVIEW_BY_POLICY, FLAG_NO_CLEAN_REFERENCE],
     )
