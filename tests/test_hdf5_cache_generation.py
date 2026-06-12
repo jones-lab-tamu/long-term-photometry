@@ -306,6 +306,24 @@ def test_pipeline_integration_cache_production(tmp_path):
         "baseline_has_response_scale_rich",
         "baseline_window_large_fraction_of_chunk",
         "baseline_window_adjusted",
+        "proposed_correction_mode_conservative",
+        "proposal_confidence_conservative",
+        "review_required_conservative",
+        "review_priority_conservative",
+        "proposal_reason_conservative",
+        "proposal_flags_conservative",
+        "proposed_correction_mode_balanced",
+        "proposal_confidence_balanced",
+        "review_required_balanced",
+        "review_priority_balanced",
+        "proposal_reason_balanced",
+        "proposal_flags_balanced",
+        "proposed_correction_mode_liberal",
+        "proposal_confidence_liberal",
+        "review_required_liberal",
+        "review_priority_liberal",
+        "proposal_reason_liberal",
+        "proposal_flags_liberal",
     ]:
         assert col in candidate_df.columns
     assert set(candidate_df["baseline_ref_requested_smoothing_window_sec"].astype(float)) == {120.0}
@@ -326,3 +344,13 @@ def test_pipeline_integration_cache_production(tmp_path):
     assert isinstance(comparison_summary["baseline_reference_viability_counts"], dict)
     assert isinstance(comparison_summary["reference_comparison_review_level_counts"], dict)
     assert isinstance(comparison_summary["reference_comparison_flag_counts"], dict)
+    assert "correction_policy_proposal_summary" in qc_summary
+    proposal_summary = qc_summary["correction_policy_proposal_summary"]
+    assert set(proposal_summary) == {"balanced", "conservative", "liberal"}
+    for policy in ("conservative", "balanced", "liberal"):
+        assert proposal_summary[policy]["roi_chunk_proposal_count"] >= 1
+        assert isinstance(proposal_summary[policy]["proposed_correction_mode_counts"], dict)
+        assert isinstance(proposal_summary[policy]["proposal_confidence_counts"], dict)
+        assert isinstance(proposal_summary[policy]["review_required_counts"], dict)
+        assert isinstance(proposal_summary[policy]["review_priority_counts"], dict)
+        assert isinstance(proposal_summary[policy]["proposal_flag_counts"], dict)

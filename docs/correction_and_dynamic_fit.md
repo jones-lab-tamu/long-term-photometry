@@ -60,6 +60,12 @@ Contextual flags, such as response-scale-rich fitted references or negative/mixe
 
 A baseline candidate is considered cleanly viable only when it is available, not low/flat, not response-scale-rich, and supported by a positive smoothed reference-to-signal relationship. Negative, weak, mixed/unclear, or unknown smoothed relationships are preserved as diagnostic findings but downgrade the baseline candidate to contextual review status. This affects diagnostic classification only and does not change correction, dF/F calculation, event detection, or baseline-candidate computation.
 
+## Diagnostic correction policy proposals
+
+The correction policy proposal layer converts dynamic-fit QC, baseline-candidate QC, and baseline fit relationship diagnostics into policy-specific triage fields. These fields indicate what the software would propose under conservative, balanced, or liberal review settings. They are provenance outputs only and do not determine the correction used for dF/F or event detection.
+
+Conservative policy favors review when evidence is contextual. Balanced policy accepts clean dynamic cases, proposes baseline candidates only for clean positive-reference baseline rescue cases, and flags ambiguous cases. Liberal policy is more willing to proceed with dynamic or positive-reference baseline candidates for screening, but it still does not auto-select negative or inverted baseline candidates. The purpose is to estimate review burden and prioritize chunks, not to hide uncertainty.
+
 ## Reference candidate comparison plots
 
 Reference candidate comparison plots are diagnostic-only overlays of the raw signal, raw reference, existing dynamic fitted reference, and baseline-only candidate. They separate raw/reference context, candidate reference traces, and residual traces into separate panels. Residual traces are plotted on their own y-axis so differences between dynamic-reference subtraction and baseline-candidate subtraction can be inspected without being compressed by fitted-reference amplitudes.
