@@ -356,6 +356,10 @@ def test_pipeline_integration_cache_production(tmp_path):
     for policy in ("conservative", "balanced", "liberal"):
         assert proposal_summary[policy]["roi_chunk_proposal_count"] >= 1
         assert isinstance(proposal_summary[policy]["proposed_correction_mode_counts"], dict)
+        assert (
+            "baseline_reference_candidate"
+            not in proposal_summary[policy]["proposed_correction_mode_counts"]
+        )
         assert isinstance(proposal_summary[policy]["proposal_confidence_counts"], dict)
         assert isinstance(proposal_summary[policy]["review_required_counts"], dict)
         assert isinstance(proposal_summary[policy]["review_queue_candidate_counts"], dict)

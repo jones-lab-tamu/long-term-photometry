@@ -7,9 +7,10 @@ from typing import Any
 
 SUPPORTED_CORRECTION_POLICIES = ("conservative", "balanced", "liberal")
 
-MODE_DYNAMIC = "dynamic"
-MODE_BASELINE = "baseline_reference_candidate"
+MODE_DYNAMIC_ISOSBESTIC = "dynamic_isosbestic"
+MODE_BASELINE_LEGACY = "baseline_reference_candidate"
 MODE_NO_ISOSBESTIC = "no_isosbestic_candidate"
+MODE_NO_CLEAN_REFERENCE = "no_clean_reference_candidate"
 MODE_REVIEW = "review_required"
 
 CONFIDENCE_HIGH = "high"
@@ -28,7 +29,9 @@ WARNING_CAUTION = "caution"
 WARNING_SEVERE = "severe"
 
 FLAG_DYNAMIC_ACCEPTED = "DYNAMIC_ACCEPTED"
-FLAG_BASELINE_ACCEPTED = "BASELINE_REFERENCE_CANDIDATE_ACCEPTED"
+FLAG_LEGACY_BASELINE_DIAGNOSTIC_PRESENT = "LEGACY_REFERENCE_BASELINE_DIAGNOSTIC_PRESENT"
+FLAG_LEGACY_BASELINE_VIABLE_DIAGNOSTIC = "LEGACY_REFERENCE_BASELINE_WAS_VIABLE_DIAGNOSTIC"
+FLAG_SIGNAL_ONLY_F0_NOT_AVAILABLE = "SIGNAL_ONLY_F0_FALLBACK_NOT_YET_AVAILABLE"
 FLAG_DYNAMIC_HARD = "DYNAMIC_HARD_INSPECT"
 FLAG_DYNAMIC_CONTEXTUAL = "DYNAMIC_CONTEXTUAL"
 FLAG_BASELINE_CONTEXTUAL = "BASELINE_CONTEXTUAL"
@@ -88,6 +91,10 @@ def _base_flags(record: dict[str, Any], dynamic: str, baseline: str) -> list[str
         out.append(FLAG_BASELINE_HARD)
     elif baseline == "contextual":
         out.append(FLAG_BASELINE_CONTEXTUAL)
+    elif baseline == "viable":
+        out.append(FLAG_LEGACY_BASELINE_VIABLE_DIAGNOSTIC)
+    if baseline in {"viable", "contextual", "hard_inspect"}:
+        out.append(FLAG_LEGACY_BASELINE_DIAGNOSTIC_PRESENT)
     if (
         "BASELINE_POSITIVE_REFERENCE_RELATIONSHIP" in comparison_flags
         or relationship == "positive_reference_relationship"
@@ -140,62 +147,62 @@ def _balanced(record: dict[str, Any], flags: list[str], dynamic: str, baseline: 
     if dynamic == "viable":
         return _proposal(
             policy="balanced",
-            mode=MODE_DYNAMIC,
+            mode=MODE_DYNAMIC_ISOSBESTIC,
             confidence=CONFIDENCE_HIGH,
             review_required=False,
             review_queue_candidate=False,
             review_priority=PRIORITY_NONE,
             warning_level=WARNING_NONE,
-            reason="dynamic_reference_viable",
+            reason="dynamic_isosbestic_viable",
             flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
         )
     if dynamic == "hard_inspect" and baseline == "viable" and baseline_clean_positive:
         return _proposal(
             policy="balanced",
-            mode=MODE_BASELINE,
-            confidence=CONFIDENCE_MEDIUM,
+            mode=MODE_NO_CLEAN_REFERENCE,
+            confidence=CONFIDENCE_LOW,
             review_required=False,
             review_queue_candidate=True,
             review_priority=PRIORITY_MEDIUM,
             warning_level=WARNING_CAUTION,
-            reason="dynamic_hard_inspect_baseline_viable_positive_relationship",
-            flags=[*flags, FLAG_BASELINE_ACCEPTED],
+            reason="dynamic_hard_inspect_legacy_reference_baseline_candidate_not_policy_fallback",
+            flags=[*flags, FLAG_NO_CLEAN_REFERENCE, FLAG_SIGNAL_ONLY_F0_NOT_AVAILABLE],
         )
     if dynamic == "hard_inspect" and baseline == "viable":
         return _proposal(
             policy="balanced",
-            mode=MODE_REVIEW,
-            confidence=CONFIDENCE_LOW,
-            review_required=True,
-            review_queue_candidate=True,
-            review_priority=PRIORITY_HIGH,
-            warning_level=WARNING_SEVERE,
-            reason="dynamic_hard_inspect_baseline_viable_without_clean_positive_relationship",
-            flags=[*flags, FLAG_REVIEW_BY_POLICY, FLAG_NO_CLEAN_REFERENCE],
-        )
-    if dynamic == "contextual" and baseline == "viable":
-        return _proposal(
-            policy="balanced",
-            mode=MODE_DYNAMIC,
+            mode=MODE_NO_CLEAN_REFERENCE,
             confidence=CONFIDENCE_LOW,
             review_required=False,
             review_queue_candidate=True,
             review_priority=PRIORITY_MEDIUM,
             warning_level=WARNING_CAUTION,
-            reason="contextual_dynamic_with_alternative_baseline_candidate",
-            flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
+            reason="dynamic_hard_inspect_baseline_viable_without_clean_positive_relationship",
+            flags=[*flags, FLAG_NO_CLEAN_REFERENCE, FLAG_SIGNAL_ONLY_F0_NOT_AVAILABLE],
+        )
+    if dynamic == "contextual" and baseline == "viable":
+        return _proposal(
+            policy="balanced",
+            mode=MODE_NO_CLEAN_REFERENCE,
+            confidence=CONFIDENCE_LOW,
+            review_required=False,
+            review_queue_candidate=True,
+            review_priority=PRIORITY_MEDIUM,
+            warning_level=WARNING_CAUTION,
+            reason="contextual_dynamic_with_legacy_reference_baseline_candidate",
+            flags=[*flags, FLAG_NO_CLEAN_REFERENCE, FLAG_SIGNAL_ONLY_F0_NOT_AVAILABLE],
         )
     if dynamic == "contextual" and baseline == "contextual":
         return _proposal(
             policy="balanced",
-            mode=MODE_DYNAMIC,
+            mode=MODE_NO_CLEAN_REFERENCE,
             confidence=CONFIDENCE_LOW,
             review_required=False,
             review_queue_candidate=True,
             review_priority=PRIORITY_LOW,
             warning_level=WARNING_CONTEXTUAL,
-            reason="contextual_candidate_evidence_logged_for_audit",
-            flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
+            reason="contextual_reference_evidence_no_clean_reference_candidate",
+            flags=[*flags, FLAG_NO_CLEAN_REFERENCE],
         )
     if dynamic == "hard_inspect" and baseline == "contextual":
         return _proposal(
@@ -206,7 +213,7 @@ def _balanced(record: dict[str, Any], flags: list[str], dynamic: str, baseline: 
             review_queue_candidate=True,
             review_priority=PRIORITY_HIGH,
             warning_level=WARNING_SEVERE,
-            reason="dynamic_hard_inspect_baseline_contextual",
+            reason="dynamic_hard_inspect_no_clean_reference_candidate",
             flags=[*flags, FLAG_REVIEW_BY_POLICY, FLAG_NO_CLEAN_REFERENCE],
         )
     if dynamic == "hard_inspect" and baseline in {"hard_inspect", "unavailable"}:
@@ -218,7 +225,7 @@ def _balanced(record: dict[str, Any], flags: list[str], dynamic: str, baseline: 
             review_queue_candidate=True,
             review_priority=PRIORITY_HIGH,
             warning_level=WARNING_SEVERE,
-            reason="both_candidates_hard_inspect_or_unavailable",
+            reason="both_reference_candidates_hard_or_unavailable",
             flags=[*flags, FLAG_REVIEW_BY_POLICY, FLAG_NO_CLEAN_REFERENCE],
         )
     return _proposal(
@@ -229,7 +236,7 @@ def _balanced(record: dict[str, Any], flags: list[str], dynamic: str, baseline: 
         review_queue_candidate=True,
         review_priority=PRIORITY_HIGH,
         warning_level=WARNING_SEVERE,
-        reason="unknown_dynamic_or_baseline_viability",
+        reason="unknown_reference_policy_state",
         flags=[*flags, FLAG_REVIEW_BY_POLICY, FLAG_NO_CLEAN_REFERENCE],
     )
 
@@ -239,26 +246,31 @@ def _conservative(record: dict[str, Any], flags: list[str], dynamic: str, baseli
     if dynamic == "viable":
         return _proposal(
             policy="conservative",
-            mode=MODE_DYNAMIC,
+            mode=MODE_DYNAMIC_ISOSBESTIC,
             confidence=CONFIDENCE_HIGH,
             review_required=False,
             review_queue_candidate=False,
             review_priority=PRIORITY_NONE,
             warning_level=WARNING_NONE,
-            reason="dynamic_reference_viable_under_conservative_policy",
+            reason="dynamic_isosbestic_viable_under_conservative_policy",
             flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
         )
     if dynamic == "hard_inspect" and baseline == "viable" and baseline_clean_positive:
         return _proposal(
             policy="conservative",
-            mode=MODE_BASELINE,
-            confidence=CONFIDENCE_MEDIUM,
+            mode=MODE_NO_CLEAN_REFERENCE,
+            confidence=CONFIDENCE_LOW,
             review_required=True,
             review_queue_candidate=True,
             review_priority=PRIORITY_HIGH,
             warning_level=WARNING_CAUTION,
-            reason="baseline_rescue_candidate_requires_high_priority_review",
-            flags=[*flags, FLAG_BASELINE_ACCEPTED, FLAG_REVIEW_BY_POLICY],
+            reason="legacy_reference_baseline_candidate_not_policy_fallback",
+            flags=[
+                *flags,
+                FLAG_REVIEW_BY_POLICY,
+                FLAG_NO_CLEAN_REFERENCE,
+                FLAG_SIGNAL_ONLY_F0_NOT_AVAILABLE,
+            ],
         )
     priority = PRIORITY_HIGH if dynamic == "hard_inspect" or baseline != "viable" else PRIORITY_MEDIUM
     return _proposal(
@@ -279,38 +291,38 @@ def _liberal(record: dict[str, Any], flags: list[str], dynamic: str, baseline: s
     if dynamic == "viable":
         return _proposal(
             policy="liberal",
-            mode=MODE_DYNAMIC,
+            mode=MODE_DYNAMIC_ISOSBESTIC,
             confidence=CONFIDENCE_HIGH,
             review_required=False,
             review_queue_candidate=False,
             review_priority=PRIORITY_NONE,
             warning_level=WARNING_NONE,
-            reason="dynamic_reference_viable",
+            reason="dynamic_isosbestic_viable",
             flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
         )
     if dynamic == "contextual" and baseline in {"viable", "contextual"}:
         return _proposal(
             policy="liberal",
-            mode=MODE_DYNAMIC,
+            mode=MODE_NO_CLEAN_REFERENCE,
             confidence=CONFIDENCE_LOW,
             review_required=False,
             review_queue_candidate=True,
             review_priority=PRIORITY_LOW,
             warning_level=WARNING_CONTEXTUAL,
-            reason="liberal_policy_allows_contextual_dynamic_for_screening",
-            flags=[*flags, FLAG_DYNAMIC_ACCEPTED],
+            reason="liberal_policy_logs_contextual_reference_conflict_for_screening",
+            flags=[*flags, FLAG_NO_CLEAN_REFERENCE],
         )
     if dynamic == "hard_inspect" and baseline == "viable" and baseline_clean_positive:
         return _proposal(
             policy="liberal",
-            mode=MODE_BASELINE,
-            confidence=CONFIDENCE_MEDIUM,
+            mode=MODE_NO_CLEAN_REFERENCE,
+            confidence=CONFIDENCE_LOW,
             review_required=False,
             review_queue_candidate=True,
-            review_priority=PRIORITY_LOW,
+            review_priority=PRIORITY_MEDIUM,
             warning_level=WARNING_CAUTION,
-            reason="liberal_policy_allows_positive_baseline_rescue_for_screening",
-            flags=[*flags, FLAG_BASELINE_ACCEPTED],
+            reason="liberal_policy_legacy_reference_baseline_candidate_not_policy_fallback",
+            flags=[*flags, FLAG_NO_CLEAN_REFERENCE, FLAG_SIGNAL_ONLY_F0_NOT_AVAILABLE],
         )
     if dynamic == "hard_inspect" and baseline == "contextual":
         return _proposal(

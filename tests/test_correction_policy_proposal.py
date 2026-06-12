@@ -20,7 +20,7 @@ def test_balanced_dynamic_viable_accepts_dynamic_without_review():
         policy="balanced",
     )
 
-    assert result["proposed_correction_mode"] == "dynamic"
+    assert result["proposed_correction_mode"] == "dynamic_isosbestic"
     assert result["proposal_confidence"] == "high"
     assert result["review_required"] is False
     assert result["review_queue_candidate"] is False
@@ -28,18 +28,20 @@ def test_balanced_dynamic_viable_accepts_dynamic_without_review():
     assert result["warning_level"] == "none"
 
 
-def test_balanced_dynamic_hard_baseline_viable_proposes_audit_baseline():
+def test_balanced_dynamic_hard_baseline_viable_is_no_clean_reference_audit_candidate():
     result = propose_correction_policy(
         comparison_record=_record(dynamic="hard_inspect", baseline="viable"),
         policy="balanced",
     )
 
-    assert result["proposed_correction_mode"] == "baseline_reference_candidate"
-    assert result["proposal_confidence"] == "medium"
+    assert result["proposed_correction_mode"] == "no_clean_reference_candidate"
+    assert result["proposal_confidence"] == "low"
     assert result["review_required"] is False
     assert result["review_queue_candidate"] is True
     assert result["review_priority"] == "medium"
     assert result["warning_level"] == "caution"
+    assert "BASELINE_REFERENCE_CANDIDATE_ACCEPTED" not in result["proposal_flags"]
+    assert "NO_CLEAN_REFERENCE_CANDIDATE" in result["proposal_flags"]
 
 
 def test_balanced_contextual_negative_baseline_is_audit_candidate_not_mandatory_review():
@@ -56,7 +58,7 @@ def test_balanced_contextual_negative_baseline_is_audit_candidate_not_mandatory_
         policy="balanced",
     )
 
-    assert result["proposed_correction_mode"] == "dynamic"
+    assert result["proposed_correction_mode"] == "no_clean_reference_candidate"
     assert result["proposal_confidence"] == "low"
     assert result["review_required"] is False
     assert result["review_queue_candidate"] is True
@@ -71,7 +73,7 @@ def test_balanced_dynamic_contextual_baseline_viable_is_caution_audit_candidate(
         policy="balanced",
     )
 
-    assert result["proposed_correction_mode"] == "dynamic"
+    assert result["proposed_correction_mode"] == "no_clean_reference_candidate"
     assert result["proposal_confidence"] == "low"
     assert result["review_required"] is False
     assert result["review_queue_candidate"] is True
@@ -117,15 +119,17 @@ def test_conservative_dynamic_contextual_requires_review():
     assert result["review_queue_candidate"] is True
 
 
-def test_conservative_dynamic_hard_baseline_viable_is_high_priority_reviewed_baseline():
+def test_conservative_dynamic_hard_baseline_viable_is_reviewed_no_clean_reference():
     result = propose_correction_policy(
         comparison_record=_record(dynamic="hard_inspect", baseline="viable"),
         policy="conservative",
     )
 
-    assert result["proposed_correction_mode"] == "baseline_reference_candidate"
+    assert result["proposed_correction_mode"] == "no_clean_reference_candidate"
     assert result["review_required"] is True
+    assert result["review_queue_candidate"] is True
     assert result["review_priority"] == "high"
+    assert "BASELINE_REFERENCE_CANDIDATE_ACCEPTED" not in result["proposal_flags"]
 
 
 def test_liberal_contextual_candidates_propose_dynamic_for_screening():
@@ -134,7 +138,7 @@ def test_liberal_contextual_candidates_propose_dynamic_for_screening():
         policy="liberal",
     )
 
-    assert result["proposed_correction_mode"] == "dynamic"
+    assert result["proposed_correction_mode"] == "no_clean_reference_candidate"
     assert result["proposal_confidence"] == "low"
     assert result["review_required"] is False
     assert result["review_queue_candidate"] is True
@@ -142,16 +146,17 @@ def test_liberal_contextual_candidates_propose_dynamic_for_screening():
     assert result["warning_level"] == "contextual"
 
 
-def test_liberal_dynamic_hard_baseline_viable_proposes_baseline_for_screening():
+def test_liberal_dynamic_hard_baseline_viable_is_no_clean_reference_for_screening():
     result = propose_correction_policy(
         comparison_record=_record(dynamic="hard_inspect", baseline="viable"),
         policy="liberal",
     )
 
-    assert result["proposed_correction_mode"] == "baseline_reference_candidate"
-    assert result["proposal_confidence"] == "medium"
+    assert result["proposed_correction_mode"] == "no_clean_reference_candidate"
+    assert result["proposal_confidence"] == "low"
     assert result["review_required"] is False
-    assert result["review_priority"] == "low"
+    assert result["review_priority"] == "medium"
+    assert "BASELINE_REFERENCE_CANDIDATE_ACCEPTED" not in result["proposal_flags"]
 
 
 def test_negative_baseline_relationship_is_never_auto_proposed_as_baseline():
@@ -178,7 +183,7 @@ def test_inconsistent_viable_negative_baseline_relationship_is_not_proposed_as_b
     for policy in ("conservative", "balanced", "liberal"):
         result = propose_correction_policy(comparison_record=record, policy=policy)
         assert result["proposed_correction_mode"] != "baseline_reference_candidate"
-        assert result["review_required"] is True
+        assert result["review_queue_candidate"] is True
 
 
 def test_missing_baseline_relationship_class_is_not_proposed_as_baseline():
@@ -191,10 +196,10 @@ def test_missing_baseline_relationship_class_is_not_proposed_as_baseline():
     for policy in ("conservative", "balanced", "liberal"):
         result = propose_correction_policy(comparison_record=record, policy=policy)
         assert result["proposed_correction_mode"] != "baseline_reference_candidate"
-        assert result["review_required"] is True
+        assert result["review_queue_candidate"] is True
 
 
-def test_positive_viable_baseline_relationship_can_still_be_proposed_as_baseline():
+def test_positive_viable_legacy_baseline_relationship_is_not_policy_fallback():
     record = _record(
         dynamic="hard_inspect",
         baseline="viable",
@@ -203,22 +208,44 @@ def test_positive_viable_baseline_relationship_can_still_be_proposed_as_baseline
     )
 
     balanced = propose_correction_policy(comparison_record=record, policy="balanced")
-    assert balanced["proposed_correction_mode"] == "baseline_reference_candidate"
+    assert balanced["proposed_correction_mode"] == "no_clean_reference_candidate"
     assert balanced["review_required"] is False
     assert balanced["review_queue_candidate"] is True
     assert balanced["warning_level"] == "caution"
 
     liberal = propose_correction_policy(comparison_record=record, policy="liberal")
-    assert liberal["proposed_correction_mode"] == "baseline_reference_candidate"
+    assert liberal["proposed_correction_mode"] == "no_clean_reference_candidate"
     assert liberal["review_required"] is False
     assert liberal["review_queue_candidate"] is True
     assert liberal["warning_level"] == "caution"
 
     conservative = propose_correction_policy(comparison_record=record, policy="conservative")
-    assert conservative["proposed_correction_mode"] == "baseline_reference_candidate"
+    assert conservative["proposed_correction_mode"] == "no_clean_reference_candidate"
     assert conservative["review_required"] is True
     assert conservative["review_queue_candidate"] is True
     assert conservative["warning_level"] == "caution"
+
+
+def test_no_policy_emits_legacy_baseline_reference_candidate_mode():
+    records = [
+        _record(dynamic="viable", baseline="hard_inspect"),
+        _record(dynamic="contextual", baseline="contextual"),
+        _record(dynamic="contextual", baseline="viable"),
+        _record(dynamic="hard_inspect", baseline="viable"),
+        _record(dynamic="hard_inspect", baseline="contextual"),
+        _record(dynamic="hard_inspect", baseline="hard_inspect"),
+        {
+            "dynamic_reference_viability": "hard_inspect",
+            "baseline_reference_viability": "viable",
+            "reference_comparison_flags": ["BASELINE_NEGATIVE_REFERENCE_RELATIONSHIP"],
+            "baseline_fit_relationship_class": "negative_reference_relationship",
+        },
+    ]
+
+    for record in records:
+        for policy in ("conservative", "balanced", "liberal"):
+            result = propose_correction_policy(comparison_record=record, policy=policy)
+            assert result["proposed_correction_mode"] != "baseline_reference_candidate"
 
 
 def test_policy_flags_csv_and_json_serialization_shapes():

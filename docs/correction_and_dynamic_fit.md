@@ -66,7 +66,9 @@ The correction policy proposal layer converts dynamic-fit QC, baseline-candidate
 
 Policy proposals separate correction-mode proposals from review-burden management. `review_required` means mandatory manual review. `review_queue_candidate` means the chunk is useful for representative audit or a review queue but is not necessarily mandatory. `warning_level` separates logged diagnostic severity from manual review burden. This distinction is important for long-duration recordings, where reviewing every contextual chunk would defeat the purpose of automated analysis.
 
-Conservative policy requires review more often when evidence is contextual. Balanced policy accepts clean dynamic cases, logs many contextual cases as warning/audit candidates without mandatory review, proposes baseline candidates only for clean positive-reference baseline rescue cases, and still requires review when no clean defensible reference candidate exists. Liberal policy proceeds more often for screening. None of the policies auto-select negative or inverted baseline candidates.
+Conservative policy requires review more often when evidence is contextual. Balanced policy accepts clean dynamic-isosbestic cases, logs many contextual cases as warning/audit candidates without mandatory review, and still requires review when no clean defensible reference candidate exists. Liberal policy proceeds more often for screening. None of the policies auto-select negative or inverted baseline candidates.
+
+The legacy baseline-reference candidate remains available as a diagnostic trace, but it is no longer treated as a correction-policy fallback. For sensors that can enter sustained high-output states, reference-derived baseline estimates can remove true signal. Future fallback development should use signal-derived F0 estimation rather than forcing the isosbestic channel to act as a baseline. This patch does not implement signal-only F0.
 
 ## Reference candidate comparison plots
 
