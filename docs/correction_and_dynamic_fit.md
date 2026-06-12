@@ -70,6 +70,16 @@ Conservative policy requires review more often when evidence is contextual. Bala
 
 The legacy baseline-reference candidate remains available as a diagnostic trace, but it is no longer treated as a correction-policy fallback. For sensors that can enter sustained high-output states, reference-derived baseline estimates can remove true signal. Future fallback development should use signal-derived F0 estimation rather than forcing the isosbestic channel to act as a baseline. This patch does not implement signal-only F0.
 
+### Recomputing policy proposals without rerunning analysis
+
+When policy rules change after a long run has already completed, diagnostic policy proposal fields can be refreshed without rerunning correction, dF/F calculation, event detection, trace generation, or plotting:
+
+```powershell
+python tools/recompute_correction_policy_proposals.py --phasic-out "C:\path\to\_analysis\phasic_out"
+```
+
+This updates only `qc/baseline_reference_candidate_by_chunk.csv`, `qc/baseline_reference_candidate_by_chunk.json`, and the `correction_policy_proposal_summary` block in `qc/qc_summary.json`. Existing baseline-reference candidate metrics remain legacy diagnostics.
+
 ## Reference candidate comparison plots
 
 Reference candidate comparison plots are diagnostic-only overlays of the raw signal, raw reference, existing dynamic fitted reference, and baseline-only candidate. They separate raw/reference context, candidate reference traces, and residual traces into separate panels. Residual traces are plotted on their own y-axis so differences between dynamic-reference subtraction and baseline-candidate subtraction can be inspected without being compressed by fitted-reference amplitudes.

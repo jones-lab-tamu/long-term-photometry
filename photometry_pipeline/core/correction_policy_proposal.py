@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from typing import Any
 
 
@@ -12,6 +13,17 @@ MODE_BASELINE_LEGACY = "baseline_reference_candidate"
 MODE_NO_ISOSBESTIC = "no_isosbestic_candidate"
 MODE_NO_CLEAN_REFERENCE = "no_clean_reference_candidate"
 MODE_REVIEW = "review_required"
+
+POLICY_FIELD_STEMS = (
+    "proposed_correction_mode",
+    "proposal_confidence",
+    "review_required",
+    "review_queue_candidate",
+    "review_priority",
+    "warning_level",
+    "proposal_reason",
+    "proposal_flags",
+)
 
 CONFIDENCE_HIGH = "high"
 CONFIDENCE_MEDIUM = "medium"
@@ -46,6 +58,36 @@ FLAG_REVIEW_BY_POLICY = "REVIEW_REQUIRED_BY_POLICY"
 FLAG_NO_CLEAN_REFERENCE = "NO_CLEAN_REFERENCE_CANDIDATE"
 
 
+def policy_field_names() -> list[str]:
+    """Return all per-policy proposal field names in stable output order."""
+    return [
+        f"{stem}_{policy}"
+        for policy in SUPPORTED_CORRECTION_POLICIES
+        for stem in POLICY_FIELD_STEMS
+    ]
+
+
+def normalize_policy_flags(value: Any) -> list[str]:
+    """Normalize proposal/comparison flag values from JSON, CSV, or repr strings."""
+    if value is None:
+        return []
+    if isinstance(value, float) and value != value:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(part).strip() for part in value if str(part).strip()]
+    text = str(value).strip()
+    if not text:
+        return []
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = ast.literal_eval(text)
+            if isinstance(parsed, (list, tuple, set)):
+                return [str(part).strip() for part in parsed if str(part).strip()]
+        except Exception:
+            pass
+    return [part.strip() for part in text.split(";") if part.strip()]
+
+
 def _baseline_relationship_class(record: dict[str, Any]) -> str:
     relationship = _text(record.get("baseline_fit_relationship_class"))
     if relationship in {
@@ -64,14 +106,7 @@ def _baseline_relationship_is_clean_positive(record: dict[str, Any]) -> bool:
 
 
 def _as_flag_set(value: Any) -> set[str]:
-    if value is None:
-        return set()
-    if isinstance(value, str):
-        return {part.strip() for part in value.split(";") if part.strip()}
-    if isinstance(value, (list, tuple, set)):
-        return {str(part).strip() for part in value if str(part).strip()}
-    text = str(value).strip()
-    return {text} if text else set()
+    return set(normalize_policy_flags(value))
 
 
 def _text(value: Any, default: str = "unknown") -> str:
@@ -367,3 +402,85 @@ def propose_correction_policy(
     if policy_norm == "liberal":
         return _liberal(record, flags, dynamic, baseline)
     return _balanced(record, flags, dynamic, baseline)
+
+
+def apply_correction_policy_proposals(record: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of one record with refreshed per-policy proposal fields."""
+    out = dict(record if isinstance(record, dict) else {})
+    for policy in SUPPORTED_CORRECTION_POLICIES:
+        proposal = propose_correction_policy(comparison_record=out, policy=policy)
+        suffix = str(policy)
+        out[f"proposed_correction_mode_{suffix}"] = proposal["proposed_correction_mode"]
+        out[f"proposal_confidence_{suffix}"] = proposal["proposal_confidence"]
+        out[f"review_required_{suffix}"] = proposal["review_required"]
+        out[f"review_queue_candidate_{suffix}"] = proposal["review_queue_candidate"]
+        out[f"review_priority_{suffix}"] = proposal["review_priority"]
+        out[f"warning_level_{suffix}"] = proposal["warning_level"]
+        out[f"proposal_reason_{suffix}"] = proposal["proposal_reason"]
+        out[f"proposal_flags_{suffix}"] = proposal["proposal_flags"]
+    return out
+
+
+def _count_values(records: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for rec in records:
+        val = rec.get(key)
+        if isinstance(val, bool):
+            text = str(bool(val)).lower()
+        else:
+            text = str(val or "").strip()
+        if text:
+            counts[text] = counts.get(text, 0) + 1
+    return {k: int(v) for k, v in sorted(counts.items())}
+
+
+def _boolish(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"true", "1", "yes", "y"}
+
+
+def summarize_correction_policy_proposals(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize refreshed correction-policy proposal fields for qc_summary.json."""
+    records = list(records or [])
+    out: dict[str, Any] = {}
+    for policy in SUPPORTED_CORRECTION_POLICIES:
+        flag_counts: dict[str, int] = {}
+        flag_key = f"proposal_flags_{policy}"
+        for rec in records:
+            for flag in normalize_policy_flags(rec.get(flag_key, [])):
+                flag_counts[flag] = flag_counts.get(flag, 0) + 1
+        n_records = len(records)
+        n_required = sum(
+            1 for rec in records if _boolish(rec.get(f"review_required_{policy}", False))
+        )
+        n_queue = sum(
+            1
+            for rec in records
+            if _boolish(rec.get(f"review_queue_candidate_{policy}", False))
+        )
+        out[policy] = {
+            "roi_chunk_proposal_count": int(n_records),
+            "mandatory_review_fraction": (
+                float(n_required) / float(n_records) if n_records else 0.0
+            ),
+            "review_queue_candidate_fraction": (
+                float(n_queue) / float(n_records) if n_records else 0.0
+            ),
+            "proposed_correction_mode_counts": _count_values(
+                records, f"proposed_correction_mode_{policy}"
+            ),
+            "proposal_confidence_counts": _count_values(
+                records, f"proposal_confidence_{policy}"
+            ),
+            "review_required_counts": _count_values(records, f"review_required_{policy}"),
+            "review_queue_candidate_counts": _count_values(
+                records, f"review_queue_candidate_{policy}"
+            ),
+            "review_priority_counts": _count_values(records, f"review_priority_{policy}"),
+            "warning_level_counts": _count_values(records, f"warning_level_{policy}"),
+            "proposal_flag_counts": {k: int(v) for k, v in sorted(flag_counts.items())},
+        }
+    return out

@@ -27,8 +27,8 @@ from .core.baseline_reference_candidate import (
 )
 from .core.dynamic_fit_qc import compute_dynamic_fit_validity_metrics
 from .core.correction_policy_proposal import (
-    SUPPORTED_CORRECTION_POLICIES,
-    propose_correction_policy,
+    apply_correction_policy_proposals,
+    summarize_correction_policy_proposals,
 )
 from .core.reference_candidate_comparison import classify_reference_candidates
 from .core.utils import natural_sort_key
@@ -362,26 +362,7 @@ class Pipeline:
                     baseline_record=record,
                 )
             )
-            for policy in SUPPORTED_CORRECTION_POLICIES:
-                proposal = propose_correction_policy(
-                    comparison_record=record,
-                    policy=policy,
-                )
-                suffix = str(policy)
-                record[f"proposed_correction_mode_{suffix}"] = proposal[
-                    "proposed_correction_mode"
-                ]
-                record[f"proposal_confidence_{suffix}"] = proposal[
-                    "proposal_confidence"
-                ]
-                record[f"review_required_{suffix}"] = proposal["review_required"]
-                record[f"review_queue_candidate_{suffix}"] = proposal[
-                    "review_queue_candidate"
-                ]
-                record[f"review_priority_{suffix}"] = proposal["review_priority"]
-                record[f"warning_level_{suffix}"] = proposal["warning_level"]
-                record[f"proposal_reason_{suffix}"] = proposal["proposal_reason"]
-                record[f"proposal_flags_{suffix}"] = proposal["proposal_flags"]
+            record = apply_correction_policy_proposals(record)
             clean_record = _sanitize_metadata(record)
             self.baseline_reference_candidate_records.append(clean_record)
             records_by_roi[roi_name] = clean_record
@@ -522,75 +503,9 @@ class Pipeline:
         self.qc_summary["reference_candidate_comparison_summary"] = _sanitize_metadata(summary)
 
     def _update_correction_policy_proposal_summary(self) -> None:
-        records = list(self.baseline_reference_candidate_records)
-
-        def _count_values(key: str) -> dict[str, int]:
-            counts: dict[str, int] = {}
-            for rec in records:
-                val = rec.get(key)
-                if isinstance(val, bool):
-                    text = str(bool(val)).lower()
-                else:
-                    text = str(val or "").strip()
-                if text:
-                    counts[text] = counts.get(text, 0) + 1
-            return {k: int(v) for k, v in sorted(counts.items())}
-
-        out = {}
-        for policy in SUPPORTED_CORRECTION_POLICIES:
-            flag_counts: dict[str, int] = {}
-            flag_key = f"proposal_flags_{policy}"
-            for rec in records:
-                flags = rec.get(flag_key, [])
-                if isinstance(flags, str):
-                    flags = [x for x in flags.split(";") if x]
-                if isinstance(flags, (list, tuple)):
-                    for flag in flags:
-                        flag_s = str(flag).strip()
-                        if flag_s:
-                            flag_counts[flag_s] = flag_counts.get(flag_s, 0) + 1
-            out[policy] = {
-                "roi_chunk_proposal_count": int(len(records)),
-                "mandatory_review_fraction": (
-                    float(
-                        sum(
-                            1
-                            for rec in records
-                            if bool(rec.get(f"review_required_{policy}", False))
-                        )
-                    )
-                    / float(len(records))
-                    if records
-                    else 0.0
-                ),
-                "review_queue_candidate_fraction": (
-                    float(
-                        sum(
-                            1
-                            for rec in records
-                            if bool(rec.get(f"review_queue_candidate_{policy}", False))
-                        )
-                    )
-                    / float(len(records))
-                    if records
-                    else 0.0
-                ),
-                "proposed_correction_mode_counts": _count_values(
-                    f"proposed_correction_mode_{policy}"
-                ),
-                "proposal_confidence_counts": _count_values(
-                    f"proposal_confidence_{policy}"
-                ),
-                "review_required_counts": _count_values(f"review_required_{policy}"),
-                "review_queue_candidate_counts": _count_values(
-                    f"review_queue_candidate_{policy}"
-                ),
-                "review_priority_counts": _count_values(f"review_priority_{policy}"),
-                "warning_level_counts": _count_values(f"warning_level_{policy}"),
-                "proposal_flag_counts": {
-                    k: int(v) for k, v in sorted(flag_counts.items())
-                },
-            }
+        out = summarize_correction_policy_proposals(
+            list(self.baseline_reference_candidate_records)
+        )
         self.qc_summary["correction_policy_proposal_summary"] = _sanitize_metadata(out)
 
     def _record_dynamic_fit_slope_summaries(self, chunk: Chunk, chunk_id: int, source_file: str) -> None:
