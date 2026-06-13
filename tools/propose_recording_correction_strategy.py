@@ -33,6 +33,10 @@ REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO = 0.10
 HARD_INSPECT_MAX_FRACTION_FOR_DYNAMIC = 0.10
 SIGNAL_ONLY_BAD_MAX_FRACTION = 0.20
 HIGH_RISK_WIDESPREAD_FRACTION = 0.25
+SIGNAL_ONLY_USABLE_MIN_FRACTION = 0.75
+DYNAMIC_PROBLEM_HIGH_FRACTION = 0.60
+SIGNAL_ONLY_BAD_MAX_FRACTION_FOR_BEST_AVAILABLE = 0.35
+SIGNAL_ONLY_MEDIUM_HIGH_MIN_FOR_MEDIUM_CONFIDENCE = 0.40
 
 MODE_DYNAMIC = "dynamic_isosbestic"
 MODE_SIGNAL_ONLY = "signal_only_f0_candidate"
@@ -62,6 +66,11 @@ OUTPUT_FIELDS = [
     "fraction_signal_only_f0_candidate",
     "fraction_no_clean_reference_candidate",
     "fraction_review_required",
+    "fraction_dynamic_problem",
+    "fraction_signal_only_f0_usable",
+    "fraction_signal_only_f0_medium_or_high_confidence",
+    "fraction_signal_only_f0_bad",
+    "fraction_dynamic_hard_inspect",
     "n_dynamic_hard_inspect",
     "n_dynamic_contextual",
     "n_dynamic_viable",
@@ -290,6 +299,12 @@ def _summarize_group(
     signal_bad = [rec for rec in records if _signal_only_bad(rec)]
     signal_candidates = [rec for rec in records if _text(rec, mode_key) == MODE_SIGNAL_ONLY]
     signal_supported = [rec for rec in signal_candidates if _signal_only_high_or_medium(rec)]
+    signal_usable = [
+        rec
+        for rec in records
+        if _text(rec, "signal_only_f0_candidate_viability") in {"viable", "contextual"}
+    ]
+    signal_medium_high = [rec for rec in records if _signal_only_high_or_medium(rec)]
     review_records = [rec for rec in records if _review_required(rec, policy)]
     caution_records = [rec for rec in records if _warning_is_caution(rec, policy)]
     high_state = [rec for rec in records if _high_state_or_edge(rec)]
@@ -307,6 +322,8 @@ def _summarize_group(
     dynamic_hard_fraction = _fraction(len(dynamic_hard), n)
     dynamic_problem_fraction = _fraction(len(dynamic_problem), n)
     signal_bad_fraction = _fraction(len(signal_bad), n)
+    signal_usable_fraction = _fraction(len(signal_usable), n)
+    signal_medium_high_fraction = _fraction(len(signal_medium_high), n)
     signal_supported_fraction = _fraction(len(signal_supported), max(1, n_signal))
 
     flags: list[str] = []
@@ -348,6 +365,20 @@ def _summarize_group(
         confidence = "medium"
         reason = "signal_only_f0_candidate_supported_dynamic_problem"
         flags.append("RECORDING_SIGNAL_ONLY_F0_SUPPORTED_REFERENCE_PROBLEM")
+    elif (
+        dynamic_problem_fraction >= DYNAMIC_PROBLEM_HIGH_FRACTION
+        and signal_usable_fraction >= SIGNAL_ONLY_USABLE_MIN_FRACTION
+        and signal_bad_fraction <= SIGNAL_ONLY_BAD_MAX_FRACTION_FOR_BEST_AVAILABLE
+    ):
+        strategy = "signal_only_f0"
+        confidence = (
+            "medium"
+            if signal_medium_high_fraction
+            >= SIGNAL_ONLY_MEDIUM_HIGH_MIN_FOR_MEDIUM_CONFIDENCE
+            else "low"
+        )
+        reason = "signal_only_f0_best_available_dynamic_problem_widespread"
+        flags.append("RECORDING_SIGNAL_ONLY_F0_BEST_AVAILABLE")
     else:
         strategy = "no_correction"
         confidence = "low"
@@ -374,8 +405,10 @@ def _summarize_group(
         caution_ids = _ids(dynamic_contextual)
     elif strategy == "signal_only_f0":
         signal_review = signal_bad + review_records
-        signal_caution = gap_or_extrap + high_state + low_conf_signal
+        signal_caution = gap_or_extrap + high_state + low_conf_signal + dynamic_problem
         auto_review = bool(
+            reason == "signal_only_f0_best_available_dynamic_problem_widespread"
+            or
             review_fraction > REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO
             or mandatory_review_fraction > REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO
             or confidence == "low"
@@ -414,6 +447,11 @@ def _summarize_group(
         "fraction_signal_only_f0_candidate": signal_fraction,
         "fraction_no_clean_reference_candidate": _fraction(n_no_clean, n),
         "fraction_review_required": review_fraction,
+        "fraction_dynamic_problem": dynamic_problem_fraction,
+        "fraction_signal_only_f0_usable": signal_usable_fraction,
+        "fraction_signal_only_f0_medium_or_high_confidence": signal_medium_high_fraction,
+        "fraction_signal_only_f0_bad": signal_bad_fraction,
+        "fraction_dynamic_hard_inspect": dynamic_hard_fraction,
         "n_dynamic_hard_inspect": len(dynamic_hard),
         "n_dynamic_contextual": len(dynamic_contextual),
         "n_dynamic_viable": sum(1 for rec in records if _text(rec, "dynamic_reference_viability") == "viable"),

@@ -162,6 +162,14 @@ Auto should generally select `no_correction` or require manual review when:
 - high-risk chunks are widespread
 - no single global strategy is defensible
 
+## Practical Best-Available Auto-Selection
+
+Auto is allowed to choose a best available global strategy even when many chunks are not clean. Long-duration recordings often contain mixed local evidence; mixed evidence alone should not force `no_correction` or manual refusal to choose.
+
+Chunk-level QC carries the warning burden. Recording-level `auto_selection_review_required` means the proposed global strategy should be inspected and interpreted with its review regions, not that auto must refuse to propose a strategy.
+
+`signal_only_f0_best_available_dynamic_problem_widespread` means dynamic/reference correction appears broadly problematic while signal-only F0 diagnostics are broadly usable. In that case, the recording-level proposal may select `signal_only_f0` globally with warnings, even if many individual chunks were not strict per-chunk `signal_only_f0_candidate` proposals.
+
 ## Chunk-Level QC Under A Chosen Strategy
 
 Chunk-level QC remains useful after a global strategy is chosen.

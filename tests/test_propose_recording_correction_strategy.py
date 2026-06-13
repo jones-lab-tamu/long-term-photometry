@@ -73,6 +73,60 @@ def test_dynamic_dominant_recording_proposes_dynamic_fit(tmp_path):
     assert "auto_selected_dynamic_fit" not in row.values()
 
 
+def test_clean_dynamic_still_wins_when_signal_only_is_available(tmp_path):
+    records = [
+        _record(
+            "s1.csv",
+            "R0",
+            i,
+            "dynamic_isosbestic",
+            dynamic="viable",
+            f0_viability="viable",
+            f0_confidence="high",
+        )
+        for i in range(10)
+    ]
+    phasic_out = _make_phasic_out(tmp_path, records)
+
+    report = propose_recording_correction_strategy(phasic_out)
+
+    row = report["rows"][0]
+    assert row["applied_correction_strategy_proposed"] == "dynamic_fit"
+    assert row["auto_selection_confidence"] == "high"
+    assert row["auto_selection_reason"] == "dynamic_fit_dominant_clean"
+    assert row["auto_selection_review_required"] is False
+
+
+def test_best_available_signal_only_f0_for_widespread_dynamic_problem(tmp_path):
+    records = [
+        _record(
+            "s1.csv",
+            "R0",
+            i,
+            "signal_only_f0_candidate" if i < 3 else "no_clean_reference_candidate",
+            dynamic="contextual",
+            f0_viability="contextual" if i % 2 else "viable",
+            f0_confidence="medium" if i < 5 else "low",
+            proposal_flags=["DYNAMIC_CONTEXTUAL"],
+        )
+        for i in range(10)
+    ]
+    phasic_out = _make_phasic_out(tmp_path, records)
+
+    report = propose_recording_correction_strategy(phasic_out)
+
+    row = report["rows"][0]
+    assert row["fraction_signal_only_f0_candidate"] < 0.40
+    assert row["fraction_dynamic_problem"] >= 0.60
+    assert row["fraction_signal_only_f0_usable"] >= 0.75
+    assert row["applied_correction_strategy_proposed"] == "signal_only_f0"
+    assert row["auto_selection_reason"] == (
+        "signal_only_f0_best_available_dynamic_problem_widespread"
+    )
+    assert row["auto_selection_review_required"] is True
+    assert "RECORDING_SIGNAL_ONLY_F0_BEST_AVAILABLE" in row["auto_selection_flags"]
+
+
 def test_signal_only_dominant_recording_proposes_signal_only_f0(tmp_path):
     records = [
         _record(
@@ -121,6 +175,29 @@ def test_no_defensible_strategy_requires_review(tmp_path):
     assert row["applied_correction_strategy_proposed"] == "no_correction"
     assert row["auto_selection_review_required"] is True
     assert "RECORDING_NO_SINGLE_STRATEGY_DEFENSIBLE" in row["auto_selection_flags"]
+
+
+def test_bad_signal_only_fraction_blocks_best_available_signal_only(tmp_path):
+    records = [
+        _record(
+            "s1.csv",
+            "R0",
+            i,
+            "no_clean_reference_candidate",
+            dynamic="contextual",
+            f0_viability="hard_inspect" if i < 5 else "viable",
+            f0_flags=["SIGNAL_ONLY_F0_INSUFFICIENT_ANCHORS"] if i < 5 else [],
+        )
+        for i in range(10)
+    ]
+    phasic_out = _make_phasic_out(tmp_path, records)
+
+    report = propose_recording_correction_strategy(phasic_out)
+
+    row = report["rows"][0]
+    assert row["fraction_signal_only_f0_bad"] > 0.35
+    assert row["applied_correction_strategy_proposed"] != "signal_only_f0"
+    assert row["applied_correction_strategy_proposed"] == "no_correction"
 
 
 def test_grouping_keeps_sources_and_rois_separate(tmp_path):
