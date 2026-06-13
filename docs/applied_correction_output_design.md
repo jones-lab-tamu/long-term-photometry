@@ -216,6 +216,20 @@ Exact paths may be adjusted during implementation, but the separation between `d
 
 Auto should not be the first applied-correction implementation step. Manual `signal_only_f0` should be inspectable before auto applies it.
 
+## Stage 2 Diagnostic Export
+
+`tools/export_signal_only_f0_dff_diagnostics.py` computes `signal_only_f0_dff` for inspection only.
+
+This utility:
+
+- does not create `applied_dff`
+- does not alter dynamic-fit outputs
+- does not route feature/event detection to signal-only F0
+- does not modify HDF5
+- writes diagnostic summaries and plots under `qc/signal_only_f0_dff_diagnostics/`
+
+The purpose is to visually audit the future signal-only-F0 applied trace before implementation. These outputs are diagnostic-only and should not be interpreted as applied correction outputs.
+
 ## Open Design Questions
 
 1. Should feature detection run automatically on `signal_only_f0_dff` when `signal_only_f0` is the applied strategy?
