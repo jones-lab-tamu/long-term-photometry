@@ -203,6 +203,23 @@ Example:
 python tools/propose_recording_correction_strategy.py --phasic-out "<phasic_out>" --policy balanced
 ```
 
+## Compact Strategy Report
+
+`tools/export_recording_correction_strategy_report.py` converts the recording-level proposal table into compact Markdown and CSV reports:
+
+- `recording_correction_strategy_report.md`
+- `recording_correction_strategy_compact.csv`
+
+The exporter reads `recording_correction_strategy_proposals.csv` or `recording_correction_strategy_proposals.json`. It is read-only with respect to correction outputs: it does not apply correction, recompute dF/F, rerun event detection, modify HDF5 traces, or edit the source proposal/QC files.
+
+The report is intended for human inspection, student review, and future GUI design. It summarizes one global strategy per ROI recording plus chunk-level review/caution previews. These previews identify chunks requiring inspection under the proposed global strategy; they do not indicate chunkwise switching of correction modes.
+
+Example:
+
+```powershell
+python tools/export_recording_correction_strategy_report.py --phasic-out "<phasic_out>"
+```
+
 ## Not Implemented Yet
 
 This document describes planned architecture.
