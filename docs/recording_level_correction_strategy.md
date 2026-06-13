@@ -369,6 +369,8 @@ Before writing future `applied_dff` outputs, the pipeline must record:
 
 Applied correction outputs should not be interpreted without knowing both the applied strategy and the configuration that generated the strategy evidence.
 
+See `docs/applied_correction_output_design.md` for the planned applied trace, provenance, feature-detection, and review-mask output contract.
+
 ## Not Implemented Yet
 
 This document describes planned architecture.
@@ -380,10 +382,15 @@ The current codebase has:
 - per-chunk signal-only F0 candidate diagnostics
 - per-chunk correction-policy proposals
 - review-set export utilities
+- proposal-only recording-level strategy selection
+- compact recording-level strategy report export
+
+Current recording-level strategy outputs are proposals/reports only; they do not create applied traces or change downstream feature/event detection.
 
 The current codebase does not yet implement:
 
 - applied `signal_only_f0` correction
-- recording-level auto strategy selection
-- GUI controls for `requested_correction_strategy`
-- recording-level applied strategy provenance fields
+- use of recording-level auto selection to generate `applied_dff`
+- manual or GUI controls for `requested_correction_strategy`
+- applied-trace strategy provenance fields
+- routing feature/event detection through `applied_dff`
