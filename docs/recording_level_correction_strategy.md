@@ -220,6 +220,70 @@ Example:
 python tools/export_recording_correction_strategy_report.py --phasic-out "<phasic_out>"
 ```
 
+## Interpreting Recording-Level Strategy Outputs
+
+The recording-level selector proposes one global strategy per ROI recording. It does not choose correction modes independently for each chunk.
+
+`applied_correction_strategy_proposed`
+
+The proposed global correction strategy for the ROI recording. Current values include:
+
+- `dynamic_fit`
+- `signal_only_f0`
+- `no_correction`
+
+`auto_selection_confidence`
+
+Confidence in the recording-level proposal:
+
+- `high`: globally clean or strong evidence
+- `medium`: best available strategy with substantial supporting evidence
+- `low`: usable but weak/messy evidence, or no confident strategy
+
+`auto_selection_review_required`
+
+A warning/review flag for the proposed global strategy. It does not necessarily mean auto failed. It does not necessarily mean the recording should be excluded. It means the proposed strategy carries enough local warnings that the user should inspect the report, review chunk previews, or inspect plots.
+
+`auto_selection_reason`
+
+The main rule or reason that produced the proposal.
+
+`review_chunk_ids`
+
+Chunks that require closer inspection under the proposed strategy.
+
+`caution_chunk_ids`
+
+Chunks that provide cautionary context but are not necessarily fatal.
+
+Examples:
+
+`dynamic_fit`, high confidence, `review_required = false`
+
+Dynamic isosbestic correction appears globally clean and is proposed as the recording-level strategy. Chunk-level warnings are minimal.
+
+`signal_only_f0`, medium confidence, `review_required = true`, `reason = signal_only_f0_best_available_dynamic_problem_widespread`
+
+Dynamic/reference correction is broadly problematic across the ROI recording. Signal-only F0 diagnostics are broadly usable, so `signal_only_f0` is proposed as the best global strategy. Review is required because the recording is messy, not because auto failed to choose.
+
+`signal_only_f0`, low confidence, `review_required = true`
+
+Signal-only F0 is still the best available global strategy, but the evidence is weaker or more heterogeneous. Inspect review/caution chunks before trusting downstream summaries.
+
+`no_correction`, low confidence, `review_required = true`
+
+No global correction strategy was selected confidently. This should be treated as a high-risk recording-level outcome requiring inspection before proceeding.
+
+Plain-language summary:
+
+`review_required` means "inspect this proposed global strategy," not "stop" and not "switch methods chunk-by-chunk."
+
+Misinterpretation warnings:
+
+- Do not interpret a `signal_only_f0` proposal as evidence that dynamic fitting failed in every chunk.
+- Do not interpret `review_required` as evidence that the entire ROI is unusable.
+- Do not interpret per-chunk proposals as applied chunkwise correction modes.
+
 ## Not Implemented Yet
 
 This document describes planned architecture.

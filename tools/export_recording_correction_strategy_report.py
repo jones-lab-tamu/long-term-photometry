@@ -261,9 +261,9 @@ def _build_markdown(
         f"- confidence counts: {dict(sorted(confidence_counts.items()))}",
         f"- review_required counts: {dict(sorted(review_counts.items()))}",
         "",
-        "This report summarizes recording-level correction strategy proposals. Each row represents one ROI recording. The proposed strategy is global for that ROI recording. Chunk-level QC warnings identify regions requiring caution or review. The report does not indicate chunkwise switching of correction modes.",
+        "This report summarizes recording-level correction strategy proposals. Each row represents one ROI recording. The proposed strategy is global for that ROI recording. Chunk-level QC warnings identify regions requiring caution or review. These warnings are review regions under the proposed global strategy, not chunkwise correction modes. The report does not indicate chunkwise switching of correction modes.",
         "",
-        "`review_required = true` does not mean the selector refused to choose a strategy. It means the proposed global strategy carries warnings and should be inspected.",
+        "`review_required = true` means inspect warnings under the proposed global strategy. It does not mean auto failed to choose, does not necessarily mean the ROI is unusable, and does not mean methods should be switched chunk-by-chunk.",
         "",
         "## Summary",
         "",
@@ -309,6 +309,9 @@ def _build_markdown(
             "- `dynamic_fit`, high confidence, review false: Dynamic isosbestic correction appears globally clean.",
             "- `signal_only_f0`, medium/low confidence, review true: Dynamic/reference correction appears broadly problematic, while signal-only F0 is broadly usable. Signal-only F0 is proposed as the best global strategy with warnings.",
             "- `no_correction`, low confidence, review true: No global correction strategy was selected confidently. Inspect before proceeding.",
+            "- Do not interpret a `signal_only_f0` proposal as evidence that dynamic fitting failed in every chunk.",
+            "- Do not interpret `review_required` as evidence that the entire ROI is unusable.",
+            "- Do not interpret per-chunk proposals as applied chunkwise correction modes.",
             "",
         ]
     )

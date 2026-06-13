@@ -86,7 +86,11 @@ def test_markdown_contains_required_human_context(tmp_path):
 
     assert "# Recording-Level Correction Strategy Report" in markdown
     assert "proposed strategy is global for that ROI recording" in markdown
+    assert "review regions under the proposed global strategy" in markdown
     assert "does not indicate chunkwise switching" in markdown
+    assert "does not mean auto failed to choose" in markdown
+    assert "does not necessarily mean the ROI is unusable" in markdown
+    assert "Do not interpret per-chunk proposals as applied chunkwise correction modes" in markdown
     assert "## ROI CH1" in markdown
     assert "## ROI CH2" in markdown
     assert "## Interpretation guide" in markdown
