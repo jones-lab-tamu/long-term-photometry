@@ -265,6 +265,8 @@ def _build_markdown(
         "",
         "`review_required = true` means inspect warnings under the proposed global strategy. It does not mean auto failed to choose, does not necessarily mean the ROI is unusable, and does not mean methods should be switched chunk-by-chunk.",
         "",
+        "Strategy proposals are configuration-specific. If correction-analysis settings change, regenerate the per-chunk QC, recording-level proposals, and this report.",
+        "",
         "## Summary",
         "",
         _markdown_table(rows),

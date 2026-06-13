@@ -90,6 +90,8 @@ def test_markdown_contains_required_human_context(tmp_path):
     assert "does not indicate chunkwise switching" in markdown
     assert "does not mean auto failed to choose" in markdown
     assert "does not necessarily mean the ROI is unusable" in markdown
+    assert "Strategy proposals are configuration-specific" in markdown
+    assert "regenerate the per-chunk QC, recording-level proposals, and this report" in markdown
     assert "Do not interpret per-chunk proposals as applied chunkwise correction modes" in markdown
     assert "## ROI CH1" in markdown
     assert "## ROI CH2" in markdown

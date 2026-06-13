@@ -284,6 +284,91 @@ Misinterpretation warnings:
 - Do not interpret `review_required` as evidence that the entire ROI is unusable.
 - Do not interpret per-chunk proposals as applied chunkwise correction modes.
 
+## Configuration-Specific Strategy Proposals
+
+A recording-level strategy proposal is valid only for the correction-analysis configuration that generated the per-chunk evidence.
+
+Auto chooses among `dynamic_fit`, `signal_only_f0`, and `no_correction` using the evidence from the current correction-analysis configuration. It does not silently retune dynamic fitting, compare all dynamic-fit modes, or choose settings behind the user's back.
+
+The proposal is conditional on the current run configuration. It is not a permanent statement that an ROI should always use a given correction strategy.
+
+For example:
+
+- If `dynamic_fit_mode = global_linear_regression`, auto may propose `signal_only_f0`.
+- If the user reruns the same ROI with `dynamic_fit_mode = adaptive_event_gated_regression`, the dynamic-fit QC may change and auto may propose `dynamic_fit`.
+- These are not contradictions. They are configuration-specific proposals.
+
+### Correction-analysis configuration includes
+
+Correction-analysis configuration includes settings and categories that may affect the evidence used by the selector, including but not limited to:
+
+- dynamic fit mode
+- rolling/global/robust/adaptive dynamic-fit parameters
+- bleach correction mode
+- baseline subtraction before fit
+- slope constraint settings
+- signal-only F0 diagnostic settings
+- signal-state diagnostic settings
+- correction-policy thresholds
+- recording-level strategy selector thresholds
+- any preprocessing settings that affect the signal/reference traces used for correction QC
+
+### Staleness rule
+
+If any correction-analysis setting changes, existing per-chunk QC, recording-level proposals, and compact reports should be treated as stale until regenerated.
+
+Examples:
+
+- changing `dynamic_fit_mode` stales the proposal
+- changing rolling-window or robust/adaptive fit parameters stales the proposal
+- changing bleach correction stales the proposal
+- changing baseline subtraction before fit stales the proposal
+- changing slope-constraint settings stales the proposal
+- changing signal-only F0 settings stales the proposal
+- changing policy/selector thresholds stales the proposal
+
+Stale does not necessarily mean wrong. It means the proposal no longer corresponds to the current settings and should not be used as current evidence.
+
+### Future provenance fields
+
+Future implementation should record configuration-specific strategy provenance fields such as:
+
+- `correction_analysis_config_hash`
+- `correction_analysis_config_summary`
+- `correction_analysis_config_path`
+- `strategy_evidence_generated_at`
+- `strategy_evidence_source`
+- `strategy_evidence_policy`
+- `strategy_evidence_grouping_mode`
+- `strategy_proposal_stale`
+- `strategy_proposal_stale_reason`
+
+`correction_analysis_config_hash` should identify the correction-analysis configuration used to generate the evidence. `correction_analysis_config_summary` should be human-readable. `strategy_proposal_stale` should become true when the current configuration differs from the evidence configuration. `strategy_proposal_stale_reason` should explain which settings changed, if known.
+
+### What auto does not do
+
+- Auto does not silently try every dynamic-fit mode.
+- Auto does not retune dynamic-fit parameters behind the user's back.
+- Auto does not compare multiple correction-analysis configurations unless the user explicitly runs a future comparison workflow.
+- Auto does not switch correction methods chunk-by-chunk.
+- Auto selects one global strategy per ROI recording using the evidence from the current configuration.
+
+A future "compare correction configurations" workflow may be useful, but it should be explicit and separately reported, not hidden inside ordinary auto-selection.
+
+### Implications for applied correction
+
+Before writing future `applied_dff` outputs, the pipeline must record:
+
+- `requested_correction_strategy`
+- `applied_correction_strategy`
+- `correction_strategy_selection`
+- `correction_analysis_config_hash`
+- `correction_analysis_config_summary`
+- `strategy_evidence_policy`
+- `strategy_evidence_generated_at`
+
+Applied correction outputs should not be interpreted without knowing both the applied strategy and the configuration that generated the strategy evidence.
+
 ## Not Implemented Yet
 
 This document describes planned architecture.
