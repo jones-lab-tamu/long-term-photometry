@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import shutil
 import sys
 from collections import Counter, defaultdict
@@ -39,10 +40,13 @@ MODE_NO_CLEAN = "no_clean_reference_candidate"
 MODE_REVIEW = "review_required"
 
 OUTPUT_FIELDS = [
-    "source_file",
+    "recording_key",
     "roi",
     "policy",
+    "grouping_mode",
     "n_chunks",
+    "source_file_count",
+    "source_files",
     "requested_correction_strategy",
     "applied_correction_strategy_proposed",
     "correction_strategy_selection",
@@ -77,6 +81,9 @@ OUTPUT_FIELDS = [
     "signal_only_f0_candidate_chunk_ids",
     "dynamic_problem_chunk_ids",
 ]
+
+GROUPING_MODES = ("auto", "source_file", "parent", "grandparent")
+TIMESTAMP_FOLDER_RE = re.compile(r"^\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2}$")
 
 
 def _load_json_records(path: Path) -> list[dict[str, Any]]:
@@ -120,13 +127,49 @@ def _flags(record: dict[str, Any], *keys: str) -> set[str]:
     return out
 
 
-def _group_key(record: dict[str, Any]) -> tuple[str, str]:
-    source = (
-        _text(record, "source_file")
-        or _text(record, "recording_id")
-        or _text(record, "session_id")
-        or "unknown_source"
-    )
+def _looks_like_timestamp_folder(name: str) -> bool:
+    return bool(TIMESTAMP_FOLDER_RE.match(str(name or "")))
+
+
+def _source_path_key(source_file: str, grouping_mode: str) -> str:
+    source = str(source_file or "").strip()
+    if not source:
+        return "unknown_source"
+    path = Path(source)
+    mode = str(grouping_mode or "auto").strip().lower()
+    if mode == "source_file":
+        return source
+    if mode == "parent":
+        return str(path.parent) if str(path.parent) not in {"", "."} else source
+    if mode == "grandparent":
+        parent = path.parent
+        grandparent = parent.parent
+        return str(grandparent) if str(grandparent) not in {"", "."} else str(parent)
+    if (
+        path.name.lower() == "fluorescence.csv"
+        and _looks_like_timestamp_folder(path.parent.name)
+        and _looks_like_timestamp_folder(path.parent.parent.name)
+    ):
+        return str(path.parent.parent)
+    parent = path.parent
+    return str(parent) if str(parent) not in {"", "."} else source
+
+
+def _recording_key(record: dict[str, Any], grouping_mode: str = "auto") -> str:
+    recording_id = _text(record, "recording_id")
+    if recording_id:
+        return recording_id
+    source_file = _text(record, "source_file")
+    session_id = _text(record, "session_id")
+    if session_id and str(grouping_mode).lower() != "source_file":
+        source_stem = Path(source_file).stem if source_file else ""
+        if session_id != source_stem:
+            return session_id
+    return _source_path_key(source_file, grouping_mode)
+
+
+def _group_key(record: dict[str, Any], grouping_mode: str = "auto") -> tuple[str, str]:
+    source = _recording_key(record, grouping_mode)
     roi = _text(record, "roi") or "unknown_roi"
     return source, roi
 
@@ -226,7 +269,13 @@ def _warning_is_caution(record: dict[str, Any], policy: str) -> bool:
     return _text(record, f"warning_level_{policy}").lower() in {"contextual", "caution", "severe"}
 
 
-def _summarize_group(source: str, roi: str, records: list[dict[str, Any]], policy: str) -> dict[str, Any]:
+def _summarize_group(
+    source: str,
+    roi: str,
+    records: list[dict[str, Any]],
+    policy: str,
+    grouping_mode: str,
+) -> dict[str, Any]:
     n = len(records)
     mode_key = f"proposed_correction_mode_{policy}"
     modes = Counter(_text(rec, mode_key) for rec in records)
@@ -246,20 +295,24 @@ def _summarize_group(source: str, roi: str, records: list[dict[str, Any]], polic
     high_state = [rec for rec in records if _high_state_or_edge(rec)]
     partial_high = [rec for rec in records if _partial_high(rec)]
     gap_or_extrap = [rec for rec in records if _large_gap_or_high_extrapolation(rec)]
+    low_conf_signal = [
+        rec for rec in records if _text(rec, "signal_only_f0_candidate_confidence") == "low"
+    ]
+    source_files = sorted({_text(rec, "source_file") for rec in records if _text(rec, "source_file")})
 
     dynamic_fraction = _fraction(n_dynamic, n)
     signal_fraction = _fraction(n_signal, n)
     review_fraction = _fraction(n_review, n)
+    mandatory_review_fraction = _fraction(len(review_records), n)
     dynamic_hard_fraction = _fraction(len(dynamic_hard), n)
     dynamic_problem_fraction = _fraction(len(dynamic_problem), n)
     signal_bad_fraction = _fraction(len(signal_bad), n)
     signal_supported_fraction = _fraction(len(signal_supported), max(1, n_signal))
-    high_risk_fraction = _fraction(len(review_records) + len(signal_bad) + len(gap_or_extrap), n)
 
     flags: list[str] = []
     if (
         dynamic_fraction >= DYNAMIC_STRONG_FRACTION
-        and review_fraction <= REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO
+        and mandatory_review_fraction <= REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO
         and dynamic_hard_fraction <= HARD_INSPECT_MAX_FRACTION_FOR_DYNAMIC
     ):
         strategy = "dynamic_fit"
@@ -269,7 +322,7 @@ def _summarize_group(source: str, roi: str, records: list[dict[str, Any]], polic
     elif (
         dynamic_fraction >= DYNAMIC_MIN_FRACTION
         and signal_fraction < SIGNAL_ONLY_STRONG_FRACTION
-        and review_fraction <= REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO
+        and mandatory_review_fraction <= REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO
     ):
         strategy = "dynamic_fit"
         confidence = "medium"
@@ -289,7 +342,7 @@ def _summarize_group(source: str, roi: str, records: list[dict[str, Any]], polic
         signal_fraction >= SIGNAL_ONLY_MIN_FRACTION
         and dynamic_problem_fraction >= DYNAMIC_MIN_FRACTION
         and signal_bad_fraction <= SIGNAL_ONLY_BAD_MAX_FRACTION
-        and review_fraction <= REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO
+        and mandatory_review_fraction <= REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO
     ):
         strategy = "signal_only_f0"
         confidence = "medium"
@@ -310,21 +363,42 @@ def _summarize_group(source: str, roi: str, records: list[dict[str, Any]], polic
     if gap_or_extrap:
         flags.append("RECORDING_HAS_LARGE_GAP_OR_HIGH_EXTRAPOLATION_CHUNKS")
 
-    auto_review = bool(
-        review_fraction > REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO
-        or confidence == "low"
-        or strategy == "no_correction"
-        or signal_bad_fraction > SIGNAL_ONLY_BAD_MAX_FRACTION
-        or high_risk_fraction > HIGH_RISK_WIDESPREAD_FRACTION
-    )
+    if strategy == "dynamic_fit":
+        auto_review = bool(
+            review_fraction > REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO
+            or mandatory_review_fraction > REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO
+            or confidence == "low"
+            or dynamic_hard_fraction > HARD_INSPECT_MAX_FRACTION_FOR_DYNAMIC
+        )
+        review_ids = _ids(review_records + dynamic_hard)
+        caution_ids = _ids(dynamic_contextual)
+    elif strategy == "signal_only_f0":
+        signal_review = signal_bad + review_records
+        signal_caution = gap_or_extrap + high_state + low_conf_signal
+        auto_review = bool(
+            review_fraction > REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO
+            or mandatory_review_fraction > REVIEW_REQUIRED_MAX_FRACTION_FOR_AUTO
+            or confidence == "low"
+            or signal_bad_fraction > SIGNAL_ONLY_BAD_MAX_FRACTION
+            or _fraction(len(signal_caution), n) > HIGH_RISK_WIDESPREAD_FRACTION
+        )
+        review_ids = _ids(signal_review)
+        caution_ids = _ids(signal_caution)
+    else:
+        auto_review = True
+        review_ids = _ids(review_records + dynamic_problem + signal_bad)
+        caution_ids = _ids(caution_records + gap_or_extrap + high_state)
     if auto_review:
         flags.append("RECORDING_REVIEW_REQUIRED")
 
     return {
-        "source_file": source,
+        "recording_key": source,
         "roi": roi,
         "policy": policy,
+        "grouping_mode": grouping_mode,
         "n_chunks": n,
+        "source_file_count": len(source_files),
+        "source_files": source_files,
         "requested_correction_strategy": "auto",
         "applied_correction_strategy_proposed": strategy,
         "correction_strategy_selection": "auto",
@@ -354,8 +428,8 @@ def _summarize_group(source: str, roi: str, records: list[dict[str, Any]], polic
         "n_signal_only_f0_insufficient_anchors": sum(1 for rec in records if "SIGNAL_ONLY_F0_INSUFFICIENT_ANCHORS" in _flags(rec, "signal_only_f0_flags")),
         "n_signal_only_f0_insufficient_low_support": sum(1 for rec in records if "SIGNAL_ONLY_F0_INSUFFICIENT_LOW_SUPPORT" in _flags(rec, "signal_only_f0_flags")),
         "n_signal_only_f0_high_extrapolation_or_large_gap": len(gap_or_extrap),
-        "review_chunk_ids": _ids(review_records if strategy != "dynamic_fit" else review_records + dynamic_hard),
-        "caution_chunk_ids": _ids(caution_records if strategy != "signal_only_f0" else caution_records + gap_or_extrap + high_state),
+        "review_chunk_ids": review_ids,
+        "caution_chunk_ids": caution_ids,
         "signal_only_f0_candidate_chunk_ids": _ids(signal_candidates),
         "dynamic_problem_chunk_ids": _ids(dynamic_problem),
     }
@@ -394,12 +468,18 @@ def propose_recording_correction_strategy(
     output_json: str | os.PathLike[str] | None = None,
     roi: str | None = None,
     source_file: str | None = None,
+    grouping_mode: str = "auto",
     dry_run: bool = False,
     backup: bool = False,
 ) -> dict[str, Any]:
     policy_norm = str(policy or "").strip().lower()
     if policy_norm not in SUPPORTED_CORRECTION_POLICIES:
         raise ValueError(f"Unsupported policy: {policy}")
+    grouping_mode_norm = str(grouping_mode or "auto").strip().lower()
+    if grouping_mode_norm not in GROUPING_MODES:
+        raise ValueError(
+            f"Unsupported grouping_mode: {grouping_mode}. Allowed: {', '.join(GROUPING_MODES)}"
+        )
     phasic_path = Path(phasic_out).resolve()
     qc_dir = phasic_path / "qc"
     records_path = qc_dir / "baseline_reference_candidate_by_chunk.json"
@@ -410,14 +490,25 @@ def propose_recording_correction_strategy(
     if roi is not None:
         records = [rec for rec in records if _text(rec, "roi") == str(roi)]
     if source_file is not None:
-        records = [rec for rec in records if (_group_key(rec)[0] == str(source_file))]
+        records = [
+            rec
+            for rec in records
+            if _text(rec, "source_file") == str(source_file)
+            or _recording_key(rec, grouping_mode_norm) == str(source_file)
+        ]
 
     groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for rec in records:
-        groups[_group_key(rec)].append(rec)
+        groups[_group_key(rec, grouping_mode_norm)].append(rec)
 
     rows = [
-        _summarize_group(source, group_roi, sorted(group_records, key=_chunk_id), policy_norm)
+        _summarize_group(
+            source,
+            group_roi,
+            sorted(group_records, key=_chunk_id),
+            policy_norm,
+            grouping_mode_norm,
+        )
         for (source, group_roi), group_records in sorted(groups.items())
     ]
     csv_path = (
@@ -452,6 +543,7 @@ def propose_recording_correction_strategy(
     return {
         "phasic_out": str(phasic_path),
         "policy": policy_norm,
+        "grouping_mode": grouping_mode_norm,
         "records_scanned": len(records),
         "recordings_found": len(rows),
         "output_csv": str(csv_path),
@@ -468,6 +560,7 @@ def propose_recording_correction_strategy(
 def _print_report(report: dict[str, Any]) -> None:
     print(f"phasic_out: {report['phasic_out']}")
     print(f"policy: {report['policy']}")
+    print(f"grouping_mode: {report['grouping_mode']}")
     print(f"records_scanned: {report['records_scanned']}")
     print(f"recordings_found: {report['recordings_found']}")
     print(f"output_csv: {report['output_csv']}")
@@ -494,6 +587,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-json", default=None)
     parser.add_argument("--roi", default=None)
     parser.add_argument("--source-file", default=None)
+    parser.add_argument("--grouping-mode", default="auto", choices=GROUPING_MODES)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--backup", action="store_true", help="Back up existing output files before writing")
     return parser
@@ -509,6 +603,7 @@ def main(argv: list[str] | None = None) -> int:
             output_json=args.output_json,
             roi=args.roi,
             source_file=args.source_file,
+            grouping_mode=args.grouping_mode,
             dry_run=bool(args.dry_run),
             backup=bool(args.backup),
         )

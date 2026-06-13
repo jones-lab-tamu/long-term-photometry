@@ -187,6 +187,8 @@ If applied strategy is `no_correction`:
 
 The utility remains proposal-only. It does not apply correction, recompute dF/F, rerun event detection, modify HDF5 traces, or implement GUI auto mode. Its output is intended to guide future auto-selection design and manual review.
 
+Recording-level grouping may use a derived `recording_key`. Full `source_file` paths can represent individual chunk/session files rather than the broader recording. The proposal utility aggregates by `recording_key` x ROI, not necessarily by full `source_file` x ROI. The `grouping_mode` used for this derivation is recorded in the output provenance, and full input source paths are preserved in `source_files`.
+
 Example:
 
 ```powershell

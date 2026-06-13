@@ -133,8 +133,85 @@ def test_grouping_keeps_sources_and_rois_separate(tmp_path):
 
     report = propose_recording_correction_strategy(phasic_out)
 
-    keys = {(row["source_file"], row["roi"]) for row in report["rows"]}
+    keys = {(row["recording_key"], row["roi"]) for row in report["rows"]}
     assert keys == {("s1.csv", "R0"), ("s2.csv", "R0"), ("s1.csv", "R1")}
+
+
+def test_nested_timestamp_source_files_group_to_recording_key(tmp_path):
+    root = tmp_path / "root"
+    sources = [
+        root / "2026_05_20-09_01_19" / "2026_05_20-09_01_19" / "fluorescence.csv",
+        root / "2026_05_20-09_01_19" / "2026_05_20-09_31_20" / "fluorescence.csv",
+        root / "2026_05_20-09_01_19" / "2026_05_20-10_01_20" / "fluorescence.csv",
+    ]
+    records = [
+        _record(str(source), "CH1", idx, "dynamic_isosbestic")
+        for idx, source in enumerate(sources)
+    ]
+    phasic_out = _make_phasic_out(tmp_path, records)
+
+    report = propose_recording_correction_strategy(phasic_out)
+
+    assert report["recordings_found"] == 1
+    row = report["rows"][0]
+    assert row["n_chunks"] == 3
+    assert row["source_file_count"] == 3
+    assert row["recording_key"].endswith(str(root / "2026_05_20-09_01_19"))
+    assert row["grouping_mode"] == "auto"
+
+
+def test_different_top_level_recordings_stay_separate(tmp_path):
+    root = tmp_path / "root"
+    records = [
+        _record(str(root / "recordingA" / "chunk1" / "fluorescence.csv"), "CH1", 0, "dynamic_isosbestic"),
+        _record(str(root / "recordingB" / "chunk1" / "fluorescence.csv"), "CH1", 1, "dynamic_isosbestic"),
+    ]
+    phasic_out = _make_phasic_out(tmp_path, records)
+
+    report = propose_recording_correction_strategy(phasic_out, grouping_mode="grandparent")
+
+    assert report["recordings_found"] == 2
+
+
+def test_different_rois_same_recording_stay_separate(tmp_path):
+    source = str(
+        tmp_path
+        / "root"
+        / "2026_05_20-09_01_19"
+        / "2026_05_20-09_31_20"
+        / "fluorescence.csv"
+    )
+    records = [
+        _record(source, "CH1", 0, "dynamic_isosbestic"),
+        _record(source, "CH2", 0, "dynamic_isosbestic"),
+    ]
+    phasic_out = _make_phasic_out(tmp_path, records)
+
+    report = propose_recording_correction_strategy(phasic_out)
+
+    assert {(row["recording_key"], row["roi"]) for row in report["rows"]} == {
+        (str(Path(source).parent.parent), "CH1"),
+        (str(Path(source).parent.parent), "CH2"),
+    }
+
+
+def test_grouping_mode_source_file_preserves_one_row_per_full_source_file(tmp_path):
+    root = tmp_path / "root"
+    sources = [
+        root / "2026_05_20-09_01_19" / "2026_05_20-09_01_19" / "fluorescence.csv",
+        root / "2026_05_20-09_01_19" / "2026_05_20-09_31_20" / "fluorescence.csv",
+        root / "2026_05_20-09_01_19" / "2026_05_20-10_01_20" / "fluorescence.csv",
+    ]
+    records = [
+        _record(str(source), "CH1", idx, "dynamic_isosbestic")
+        for idx, source in enumerate(sources)
+    ]
+    phasic_out = _make_phasic_out(tmp_path, records)
+
+    report = propose_recording_correction_strategy(phasic_out, grouping_mode="source_file")
+
+    assert report["recordings_found"] == 3
+    assert {row["n_chunks"] for row in report["rows"]} == {1}
 
 
 def test_read_only_inputs_and_json_csv_consistency(tmp_path):
@@ -184,5 +261,53 @@ def test_roi_and_source_filters(tmp_path):
         phasic_out, source_file="s2.csv", dry_run=True
     )
 
-    assert {(row["source_file"], row["roi"]) for row in roi_report["rows"]} == {("s1.csv", "R1")}
-    assert {(row["source_file"], row["roi"]) for row in source_report["rows"]} == {("s2.csv", "R0")}
+    assert {(row["recording_key"], row["roi"]) for row in roi_report["rows"]} == {("s1.csv", "R1")}
+    assert {(row["recording_key"], row["roi"]) for row in source_report["rows"]} == {("s2.csv", "R0")}
+
+
+def test_dynamic_fit_not_reviewed_due_only_to_signal_only_large_gap(tmp_path):
+    records = [
+        _record(
+            "s1.csv",
+            "R0",
+            i,
+            "dynamic_isosbestic",
+            dynamic="viable",
+            f0_flags=["SIGNAL_ONLY_F0_LARGE_ANCHOR_GAP"],
+        )
+        for i in range(10)
+    ]
+    phasic_out = _make_phasic_out(tmp_path, records)
+
+    report = propose_recording_correction_strategy(phasic_out)
+
+    row = report["rows"][0]
+    assert row["applied_correction_strategy_proposed"] == "dynamic_fit"
+    assert row["auto_selection_review_required"] is False
+
+
+def test_signal_only_strategy_reviews_signal_only_badness(tmp_path):
+    records = [
+        _record(
+            "s1.csv",
+            "R0",
+            i,
+            "signal_only_f0_candidate",
+            dynamic="contextual",
+            proposal_flags=["DYNAMIC_CONTEXTUAL"],
+        )
+        for i in range(8)
+    ]
+    records[0]["signal_only_f0_flags"] = ["SIGNAL_ONLY_F0_INSUFFICIENT_ANCHORS"]
+    records[1]["signal_only_f0_flags"] = ["SIGNAL_ONLY_F0_LARGE_ANCHOR_GAP"]
+    records[2]["review_required_balanced"] = True
+    phasic_out = _make_phasic_out(tmp_path, records)
+
+    report = propose_recording_correction_strategy(phasic_out)
+
+    row = report["rows"][0]
+    assert row["applied_correction_strategy_proposed"] == "signal_only_f0"
+    assert row["auto_selection_review_required"] is True
+    assert 0 in row["review_chunk_ids"]
+    assert 2 in row["review_chunk_ids"]
+    assert 1 in row["caution_chunk_ids"]
