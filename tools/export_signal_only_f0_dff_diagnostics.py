@@ -72,6 +72,10 @@ SUMMARY_FIELDS = [
     "f0_min",
     "f0_max",
     "f0_median",
+    "f0_source_for_dff",
+    "hdf5_signal_only_f0_candidate_available",
+    "hdf5_candidate_used_for_dff",
+    "f0_candidate_hdf5_capped_or_unknown",
     "f0_floor_applied",
     "f0_floor_value",
     "dff_available",
@@ -310,22 +314,47 @@ def _chunk_has_dataset(cache, roi: str, chunk_id: int, name: str) -> bool:
     return grp is not None and name in grp
 
 
-def _load_or_compute_f0(cache, roi: str, chunk_id: int, signal: np.ndarray, time_sec: np.ndarray, record: dict[str, Any], config: dict[str, Any]) -> tuple[np.ndarray | None, dict[str, Any], str]:
+def _load_or_compute_f0(
+    cache,
+    roi: str,
+    chunk_id: int,
+    signal: np.ndarray,
+    time_sec: np.ndarray,
+    record: dict[str, Any],
+    config: dict[str, Any],
+) -> tuple[np.ndarray | None, dict[str, Any], str, bool, np.ndarray | None]:
+    hdf5_candidate = None
+    hdf5_available = False
     for field in ("signal_only_f0_candidate", "signal_only_f0"):
         if _chunk_has_dataset(cache, roi, chunk_id, field):
             (candidate,) = load_cache_chunk_fields(cache, roi, chunk_id, [field])
-            return np.asarray(candidate, dtype=float).reshape(-1), dict(record), f"hdf5:{field}"
+            hdf5_candidate = np.asarray(candidate, dtype=float).reshape(-1)
+            hdf5_available = True
+            break
     diagnostics = compute_signal_only_f0_candidate(
         signal=np.asarray(signal, dtype=float),
         time=np.asarray(time_sec, dtype=float),
         signal_state=record,
         config=config,
+        return_uncapped_candidate=True,
     )
-    candidate = diagnostics.get("signal_only_f0_candidate")
-    if candidate is None:
-        return None, {**record, **{k: v for k, v in diagnostics.items() if k != "signal_only_f0_candidate"}}, "recomputed_unavailable"
     merged = {**record, **{k: v for k, v in diagnostics.items() if k != "signal_only_f0_candidate"}}
-    return np.asarray(candidate, dtype=float).reshape(-1), merged, "recomputed_in_memory"
+    candidate = diagnostics.get("signal_only_f0_candidate_uncapped")
+    if candidate is None or np.asarray(candidate).reshape(-1).shape != np.asarray(signal).reshape(-1).shape:
+        return (
+            None,
+            merged,
+            "recomputed_unavailable",
+            hdf5_available,
+            hdf5_candidate,
+        )
+    return (
+        np.asarray(candidate, dtype=float).reshape(-1),
+        merged,
+        "uncapped_core_state_aware_recompute",
+        hdf5_available,
+        hdf5_candidate,
+    )
 
 
 def _base_row(roi: str, chunk_id: int) -> dict[str, Any]:
@@ -337,6 +366,10 @@ def _base_row(roi: str, chunk_id: int) -> dict[str, Any]:
             "available": False,
             "reason_if_unavailable": "",
             "f0_available": False,
+            "f0_source_for_dff": "uncapped_core_state_aware_recompute",
+            "hdf5_signal_only_f0_candidate_available": False,
+            "hdf5_candidate_used_for_dff": False,
+            "f0_candidate_hdf5_capped_or_unknown": "unknown",
             "f0_floor_applied": False,
             "f0_floor_value": F0_FLOOR_EPS,
             "dff_available": False,
@@ -348,7 +381,19 @@ def _base_row(roi: str, chunk_id: int) -> dict[str, Any]:
     return row
 
 
-def _plot_diagnostic(out_path: Path, *, roi: str, chunk_id: int, time_sec: np.ndarray, signal: np.ndarray, f0: np.ndarray, dff: np.ndarray, row: dict[str, Any], dpi: int) -> None:
+def _plot_diagnostic(
+    out_path: Path,
+    *,
+    roi: str,
+    chunk_id: int,
+    time_sec: np.ndarray,
+    signal: np.ndarray,
+    f0: np.ndarray,
+    dff: np.ndarray,
+    row: dict[str, Any],
+    dpi: int,
+    hdf5_candidate: np.ndarray | None = None,
+) -> None:
     t = np.asarray(time_sec, dtype=float).reshape(-1)
     sig = np.asarray(signal, dtype=float).reshape(-1)
     base = np.asarray(f0, dtype=float).reshape(-1)
@@ -363,13 +408,47 @@ def _plot_diagnostic(out_path: Path, *, roi: str, chunk_id: int, time_sec: np.nd
 
     fig, axes = plt.subplots(3, 1, figsize=(11, 8), sharex=False, gridspec_kw={"height_ratios": [2, 2, 1]})
     axes[0].plot(t_plot, sig, color="forestgreen", linewidth=0.8, label="sig_raw")
-    axes[0].plot(t_plot, base, color="black", linestyle="--", linewidth=0.9, label="signal_only_f0")
+    axes[0].plot(
+        t_plot,
+        base,
+        color="black",
+        linestyle="--",
+        linewidth=0.9,
+        label="signal_only_f0_uncapped_for_dff",
+    )
+    if hdf5_candidate is not None:
+        h5_base = np.asarray(hdf5_candidate, dtype=float).reshape(-1)
+        if h5_base.shape == sig.shape:
+            axes[0].plot(
+                t_plot,
+                h5_base,
+                color="dodgerblue",
+                linestyle=":",
+                linewidth=0.8,
+                alpha=0.85,
+                label="signal_only_f0_candidate_hdf5",
+            )
     axes[0].set_ylabel("Signal / F0")
     axes[0].legend(loc="best")
     axes[0].grid(True, alpha=0.25)
 
     axes[1].plot(t_plot, trace, color="darkorange", linewidth=0.8, label="signal_only_f0_dff diagnostic")
     axes[1].axhline(0.0, color="black", linewidth=0.5, alpha=0.5)
+    finite_trace = trace[np.isfinite(trace)]
+    if finite_trace.size:
+        ymin = min(
+            float(np.percentile(finite_trace, 1.0)),
+            float(np.min(finite_trace)),
+            0.0,
+        )
+        ymax = max(
+            float(np.percentile(finite_trace, 99.0)),
+            float(np.max(finite_trace)),
+            0.0,
+        )
+        span = ymax - ymin
+        pad = max(0.05 * span, 1e-6)
+        axes[1].set_ylim(ymin - pad, ymax + pad)
     axes[1].set_ylabel("Diagnostic dF/F")
     axes[1].set_xlabel(xlabel)
     axes[1].legend(loc="best")
@@ -464,7 +543,13 @@ def export_signal_only_f0_dff_diagnostics(
                     time_arr = np.asarray(time_sec, dtype=float).reshape(-1)
                     row["signal_n_samples"] = int(signal.size)
                     row.update(_finite_stats(signal, "signal"))
-                    f0, diag_record, f0_source = _load_or_compute_f0(
+                    (
+                        f0,
+                        diag_record,
+                        f0_source,
+                        hdf5_candidate_available,
+                        hdf5_candidate,
+                    ) = _load_or_compute_f0(
                         cache,
                         str(roi_name),
                         int(chunk_id),
@@ -472,6 +557,14 @@ def export_signal_only_f0_dff_diagnostics(
                         time_arr,
                         record,
                         config,
+                    )
+                    row["f0_source_for_dff"] = f0_source
+                    row["hdf5_signal_only_f0_candidate_available"] = bool(
+                        hdf5_candidate_available
+                    )
+                    row["hdf5_candidate_used_for_dff"] = False
+                    row["f0_candidate_hdf5_capped_or_unknown"] = (
+                        "unknown" if hdf5_candidate_available else False
                     )
                     row["signal_only_f0_candidate_viability"] = diag_record.get("signal_only_f0_candidate_viability")
                     row["signal_only_f0_candidate_confidence"] = diag_record.get("signal_only_f0_candidate_confidence")
@@ -514,6 +607,7 @@ def export_signal_only_f0_dff_diagnostics(
                                 dff=np.asarray(dff, dtype=float),
                                 row=row,
                                 dpi=int(dpi),
+                                hdf5_candidate=hdf5_candidate,
                             )
                         plots_written.append(str(out_path))
                 except CacheReadError as exc:

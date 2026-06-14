@@ -227,6 +227,72 @@ def test_above_signal_qc_uses_pre_cap_fraction():
     assert out["signal_only_f0_candidate_viability"] == "hard_inspect"
 
 
+def test_uncapped_candidate_is_opt_in_and_default_output_unchanged():
+    t, signal, _slow = _ordinary_signal(seed=8)
+
+    default = compute_signal_only_f0_candidate(
+        signal,
+        t,
+        config={
+            "signal_only_f0_low_quantile": 0.5,
+            "signal_only_f0_window_fraction": 0.02,
+            "signal_only_f0_smoothing_window_fraction": 0.10,
+            "signal_only_f0_max_above_signal_fraction": 0.05,
+        },
+    )
+    with_uncapped = compute_signal_only_f0_candidate(
+        signal,
+        t,
+        config={
+            "signal_only_f0_low_quantile": 0.5,
+            "signal_only_f0_window_fraction": 0.02,
+            "signal_only_f0_smoothing_window_fraction": 0.10,
+            "signal_only_f0_max_above_signal_fraction": 0.05,
+        },
+        return_uncapped_candidate=True,
+    )
+
+    assert "signal_only_f0_candidate_uncapped" not in default
+    assert "signal_only_f0_candidate" in with_uncapped
+    assert "signal_only_f0_candidate_uncapped" in with_uncapped
+    assert with_uncapped["signal_only_f0_candidate_uncapped"].shape == signal.shape
+    np.testing.assert_allclose(
+        default["signal_only_f0_candidate"],
+        with_uncapped["signal_only_f0_candidate"],
+        equal_nan=True,
+    )
+    assert default["signal_only_f0_candidate_viability"] == with_uncapped[
+        "signal_only_f0_candidate_viability"
+    ]
+
+
+def test_uncapped_candidate_can_exceed_signal_while_capped_candidate_does_not():
+    rng = np.random.default_rng(9)
+    n = 1200
+    t = np.arange(n, dtype=float) / 20.0
+    slow = 1.0 + 0.2 * np.sin(2.0 * np.pi * 0.01 * t)
+    signal = slow + 0.25 * np.sin(2.0 * np.pi * 0.45 * t) + 0.005 * rng.normal(size=n)
+
+    out = compute_signal_only_f0_candidate(
+        signal,
+        t,
+        config={
+            "signal_only_f0_low_quantile": 0.5,
+            "signal_only_f0_window_fraction": 0.02,
+            "signal_only_f0_smoothing_window_fraction": 0.10,
+            "signal_only_f0_max_above_signal_fraction": 0.05,
+        },
+        return_uncapped_candidate=True,
+    )
+
+    capped = out["signal_only_f0_candidate"]
+    uncapped = out["signal_only_f0_candidate_uncapped"]
+    finite = np.isfinite(signal) & np.isfinite(capped) & np.isfinite(uncapped)
+    assert np.any(uncapped[finite] > signal[finite])
+    assert np.all(capped[finite] <= signal[finite] + 1e-12)
+    assert out["signal_only_f0_above_signal_fraction_pre_cap"] > 0.0
+
+
 def test_configurable_windows_and_quantiles_are_recorded_and_affect_candidate():
     t, signal, _slow = _ordinary_signal(seed=5)
 

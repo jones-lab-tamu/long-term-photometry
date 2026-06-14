@@ -662,6 +662,7 @@ def compute_signal_only_f0_candidate(
     *,
     signal_state: Mapping[str, Any] | None = None,
     config: Mapping[str, Any] | None = None,
+    return_uncapped_candidate: bool = False,
 ) -> dict[str, Any]:
     """Compute diagnostic-only signal-derived lower-envelope F0 candidate metrics."""
     result = _base_result(config)
@@ -762,6 +763,7 @@ def compute_signal_only_f0_candidate(
         if np.any(pre_cap_finite)
         else 0.0
     )
+    candidate_uncapped = candidate.copy()
     # Conservative lower-envelope diagnostic: do not allow the candidate to sit
     # above the observed signal at finite samples.
     candidate = np.where(np.isfinite(sig) & np.isfinite(candidate), np.minimum(candidate, sig), candidate)
@@ -779,6 +781,11 @@ def compute_signal_only_f0_candidate(
         context_cap = float(p05 + 0.50 * robust_range)
         before_cap = candidate.copy()
         candidate = np.where(np.isfinite(candidate), np.minimum(candidate, context_cap), candidate)
+        candidate_uncapped = np.where(
+            np.isfinite(candidate_uncapped),
+            np.minimum(candidate_uncapped, context_cap),
+            candidate_uncapped,
+        )
         context_applied = bool(
             np.any(np.isfinite(before_cap) & np.isfinite(candidate) & (candidate < before_cap))
         )
@@ -908,6 +915,8 @@ def compute_signal_only_f0_candidate(
             "signal_only_f0_candidate": candidate,
         }
     )
+    if return_uncapped_candidate:
+        result["signal_only_f0_candidate_uncapped"] = candidate_uncapped
     return result
 
 
