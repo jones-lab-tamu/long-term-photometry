@@ -99,7 +99,79 @@ Verifies:
 - Source phasic cache, applied cache, legacy feature outputs, and applied feature
   outputs are unchanged by verification.
 
-## 5. Current Real-Data Status
+## 5. Explicit End-To-End Orchestrator
+
+Tool:
+
+```text
+tools/run_applied_dff_pipeline.py
+```
+
+Purpose:
+
+- Provides a one-command explicit production chain for one ROI and one explicit
+  strategy.
+- Runs the four existing stages in order:
+
+```text
+write applied cache
+verify applied cache
+run applied features
+verify feature outputs
+```
+
+- Owns sequencing and pipeline-level reporting only.
+- The underlying tools still own correction, cache verification, feature
+  extraction, and semantic verification.
+
+Supported explicit strategies:
+
+```text
+dynamic_fit
+signal_only_f0
+```
+
+Output layout:
+
+```text
+<output-root>/<ROI>_<strategy>/applied/
+<output-root>/<ROI>_<strategy>/features/
+<output-root>/<ROI>_<strategy>/pipeline/
+```
+
+Pipeline summary and provenance:
+
+```text
+applied_dff_pipeline_summary.json
+applied_dff_pipeline_summary.csv
+applied_dff_pipeline_provenance.json
+```
+
+Key guarantees:
+
+- Fails immediately if any stage fails.
+- Does not continue to downstream stages after upstream failure.
+- Does not modify source `phasic_trace_cache.h5`.
+- Does not modify legacy `<phasic_out>/features/features.csv`.
+- Uses separate output-root outputs.
+- Uses only explicit `dynamic_fit` or `signal_only_f0`.
+- Rejects unsafe ROI output path components before overwrite deletion.
+- Confines overwrite deletion to the resolved pipeline output directory inside
+  `output_root`.
+- Does not add auto-selection, GUI controls, production `no_correction` output,
+  or global routing.
+
+Recommended manual production entry point:
+
+```text
+python tools/run_applied_dff_pipeline.py --phasic-out ... --roi ... --strategy dynamic_fit|signal_only_f0 --output-root ... --overwrite
+```
+
+The four underlying tools remain the contract layers and are still useful for
+debugging and stage-specific verification. The orchestrator is the safest manual
+entry point for explicit one-ROI, one-strategy production runs.
+
+## 6. Current Real-Data Status
 
 CH8 `signal_only_f0`:
 
@@ -121,7 +193,7 @@ CH9 `dynamic_fit`:
 - Expected detector rows: 581.
 - One row per chunk: true and matches detector.
 
-## 6. Intentionally Unsupported
+## 7. Intentionally Unsupported
 
 The current chain does not implement:
 
@@ -134,22 +206,19 @@ The current chain does not implement:
 - Feature routing from an unverified applied cache.
 - Partial-cache feature extraction by default.
 
-## 7. Current Safety Rule
+## 8. Current Safety Rule
 
 All production downstream applied_dff analysis must be explicit-strategy,
 verified-cache, separate-output only.
 
-## 8. Recommended Next Step
+## 9. Recommended Next Step
 
-Add a higher-level orchestrator or command wrapper that runs the four existing
-stages in order for one ROI and one explicit strategy:
+Add a manual strategy decision/audit report to help choose between `dynamic_fit`
+and `signal_only_f0` for each ROI.
 
-```text
-write applied cache
-verify applied cache
-run applied features
-verify feature outputs
-```
+This should be advisory only. It should not choose or run a strategy
+automatically, add GUI controls, or add global routing. Its purpose should be to
+help the user decide which explicit strategy to pass to the orchestrator.
 
-Do not add auto-selection, GUI controls, or global routing until this explicit
-end-to-end command is stable.
+Do not add auto-selection, GUI controls, production `no_correction` output, or
+global routing before the manual explicit-strategy chain remains stable.
