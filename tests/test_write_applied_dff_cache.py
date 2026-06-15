@@ -19,6 +19,7 @@ def _make_phasic_out(
     roi: str = "CH1",
     include_dff: bool = True,
     include_time: bool = True,
+    include_signal: bool = True,
     nonfinite: bool = False,
     length_mismatch: bool = False,
 ) -> Path:
@@ -37,7 +38,9 @@ def _make_phasic_out(
             if include_time:
                 n_time = 4 if not (length_mismatch and chunk_id == 1) else 3
                 grp.create_dataset("time_sec", data=np.arange(n_time, dtype=float))
-            grp.create_dataset("sig_raw", data=np.ones(4, dtype=float) + chunk_id)
+            if include_signal:
+                signal = np.asarray([0.8, 1.0, 1.2, 0.9], dtype=float) + chunk_id
+                grp.create_dataset("sig_raw", data=signal)
             if include_dff:
                 dff = np.asarray([0.1, 0.2, 0.3, 0.4], dtype=float) + chunk_id
                 if nonfinite and chunk_id == 1:
@@ -61,6 +64,30 @@ def _read_summary_csv(path: str | Path) -> dict:
         rows = list(csv.DictReader(f))
     assert len(rows) == 1
     return rows[0]
+
+
+def _patch_core_f0(monkeypatch, *, f0=None, flags=None, confidence="high", viability="viable"):
+    import tools.write_applied_dff_cache as writer
+
+    def _fake_candidate(signal, time=None, *, return_uncapped_candidate=False, **_kwargs):
+        assert return_uncapped_candidate is True
+        signal_arr = np.asarray(signal, dtype=float).reshape(-1)
+        if f0 is None:
+            f0_arr = np.ones_like(signal_arr)
+        elif callable(f0):
+            f0_arr = np.asarray(f0(signal_arr), dtype=float).reshape(-1)
+        else:
+            f0_arr = np.asarray(f0, dtype=float).reshape(-1)
+        capped = np.minimum(f0_arr, signal_arr) if f0_arr.shape == signal_arr.shape else f0_arr
+        return {
+            "signal_only_f0_candidate": capped,
+            "signal_only_f0_candidate_uncapped": f0_arr,
+            "signal_only_f0_candidate_viability": viability,
+            "signal_only_f0_candidate_confidence": confidence,
+            "signal_only_f0_flags": list(flags or []),
+        }
+
+    monkeypatch.setattr(writer.signal_f0_core, "compute_signal_only_f0_candidate", _fake_candidate)
 
 
 def test_dynamic_fit_writes_applied_cache_from_synthetic_phasic_cache(tmp_path):
@@ -92,6 +119,203 @@ def test_dynamic_fit_writes_applied_cache_from_synthetic_phasic_cache(tmp_path):
             assert "signal_only_f0_uncapped_for_dff" not in out_grp
             assert "signal_only_f0_dff" not in out_grp
             assert "denominator_trace" not in out_grp
+
+
+def test_signal_only_f0_writes_applied_cache_from_synthetic_phasic_cache(tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out(tmp_path)
+    _patch_core_f0(monkeypatch, f0=lambda signal: np.ones_like(signal))
+
+    report = write_applied_dff_cache(
+        phasic_out,
+        roi="CH1",
+        requested_correction_strategy="signal_only_f0",
+        overwrite=True,
+    )
+
+    with h5py.File(phasic_out / "phasic_trace_cache.h5", "r") as src, h5py.File(report["applied_trace_cache_path"], "r") as out:
+        for chunk_id in (0, 1):
+            src_grp = src[f"roi/CH1/chunk_{chunk_id}"]
+            out_grp = out[f"roi/CH1/chunk_{chunk_id}"]
+            sig = src_grp["sig_raw"][()]
+            f0 = out_grp["signal_only_f0_uncapped_for_dff"][()]
+            expected = (sig - f0) / f0
+            np.testing.assert_array_equal(out_grp["time_sec"][()], src_grp["time_sec"][()])
+            np.testing.assert_array_equal(out_grp["signal_raw_for_dff"][()], sig)
+            np.testing.assert_allclose(out_grp["applied_dff"][()], expected)
+            np.testing.assert_allclose(out_grp["signal_only_f0_dff"][()], expected)
+            assert "dynamic_fit_dff" not in out_grp
+            assert "denominator_trace" not in out_grp
+
+
+def test_signal_only_f0_summary_fields_are_correct(tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out(tmp_path)
+    source = phasic_out / "phasic_trace_cache.h5"
+    before = _sha256(source)
+    _patch_core_f0(monkeypatch)
+
+    report = write_applied_dff_cache(
+        phasic_out,
+        roi="CH1",
+        requested_correction_strategy="signal_only_f0",
+        overwrite=True,
+    )
+
+    assert _sha256(source) == before
+    summary = report["summary"]
+    assert summary["requested_correction_strategy"] == "signal_only_f0"
+    assert summary["applied_correction_strategy"] == "signal_only_f0"
+    assert summary["applied_trace_source"] == "signal_only_f0_dff"
+    assert summary["applied_trace_units"] == "dff"
+    assert summary["applied_trace_available"] is True
+    assert summary["applied_trace_complete"] is True
+    assert summary["feature_detection_input"] is False
+    assert summary["hdf5_modified_source_phasic_cache"] is False
+    assert summary["applied_trace_cache_sha256"]
+    assert summary["applied_trace_cache_sha256_location"] == "external_summary_after_cache_finalization"
+    assert summary["f0_source_for_signal_only_f0"] == "core_uncapped_signal_only_f0_candidate"
+    assert summary["signal_only_f0_denominator_source"] == "signal_only_f0_candidate_uncapped"
+    assert summary["signal_only_f0_negative_dff_preserved"] is True
+
+
+def test_signal_only_f0_preserves_negative_dff(tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out(tmp_path)
+    _patch_core_f0(monkeypatch, f0=lambda signal: np.ones_like(signal))
+
+    report = write_applied_dff_cache(
+        phasic_out,
+        roi="CH1",
+        requested_correction_strategy="signal_only_f0",
+        overwrite=True,
+    )
+
+    with h5py.File(report["applied_trace_cache_path"], "r") as h5:
+        values = h5["roi/CH1/chunk_0/applied_dff"][()]
+    assert float(np.nanmin(values)) < 0.0
+
+
+def test_signal_only_f0_invalid_denominator_fails_clearly(tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out(tmp_path)
+    _patch_core_f0(monkeypatch, f0=lambda signal: np.zeros_like(signal))
+    output_dir = tmp_path / "out"
+
+    with pytest.raises(AppliedDffCacheWriteError, match="non-positive"):
+        write_applied_dff_cache(
+            phasic_out,
+            roi="CH1",
+            requested_correction_strategy="signal_only_f0",
+            output_dir=output_dir,
+            overwrite=True,
+        )
+    assert not (output_dir / "applied_trace_cache.h5").exists()
+
+
+def test_signal_only_f0_missing_sig_raw_records_incomplete_output(tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out(tmp_path)
+    with h5py.File(phasic_out / "phasic_trace_cache.h5", "a") as h5:
+        del h5["roi/CH1/chunk_1/sig_raw"]
+    _patch_core_f0(monkeypatch)
+
+    report = write_applied_dff_cache(
+        phasic_out,
+        roi="CH1",
+        requested_correction_strategy="signal_only_f0",
+        overwrite=True,
+    )
+
+    summary = report["summary"]
+    assert summary["applied_trace_available"] is True
+    assert summary["applied_trace_complete"] is False
+    assert summary["n_chunks_available"] == 1
+    assert summary["n_chunks_unavailable"] == 1
+    assert "APPLIED_TRACE_PARTIAL" in summary["applied_trace_flags"]
+
+
+def test_signal_only_f0_denominator_length_mismatch_fails(tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out(tmp_path)
+    _patch_core_f0(monkeypatch, f0=np.asarray([1.0, 1.0]))
+    output_dir = tmp_path / "out"
+
+    with pytest.raises(AppliedDffCacheWriteError, match="denominator has"):
+        write_applied_dff_cache(
+            phasic_out,
+            roi="CH1",
+            requested_correction_strategy="signal_only_f0",
+            output_dir=output_dir,
+            overwrite=True,
+        )
+    assert not (output_dir / "applied_trace_cache.h5").exists()
+
+
+def test_signal_only_f0_warning_flags_propagate(tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out(tmp_path)
+    _patch_core_f0(
+        monkeypatch,
+        flags=["SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_EXTRAPOLATION"],
+        confidence="low",
+        viability="contextual",
+    )
+
+    report = write_applied_dff_cache(
+        phasic_out,
+        roi="CH1",
+        requested_correction_strategy="signal_only_f0",
+        overwrite=True,
+    )
+
+    summary = report["summary"]
+    assert "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_EXTRAPOLATION" in summary["applied_trace_flags"]
+    assert summary["applied_trace_review_required"] is True
+    assert summary["applied_trace_warning_level"] == "caution"
+    chunks = pd.read_csv(report["chunks_csv"])
+    assert set(chunks["warning_level"]) == {"caution"}
+    assert chunks["review_required"].astype(str).str.lower().eq("true").all()
+
+
+def test_signal_only_f0_unusable_viability_marks_chunk_unavailable_and_partial(tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out(tmp_path)
+
+    import tools.write_applied_dff_cache as writer
+
+    def _fake_candidate(signal, time=None, *, return_uncapped_candidate=False, **_kwargs):
+        assert return_uncapped_candidate is True
+        signal_arr = np.asarray(signal, dtype=float).reshape(-1)
+        return {
+            "signal_only_f0_candidate": np.ones_like(signal_arr),
+            "signal_only_f0_candidate_uncapped": np.ones_like(signal_arr),
+            "signal_only_f0_candidate_viability": "unusable" if signal_arr[0] > 1.5 else "viable",
+            "signal_only_f0_candidate_confidence": "high",
+            "signal_only_f0_flags": [],
+        }
+
+    monkeypatch.setattr(writer.signal_f0_core, "compute_signal_only_f0_candidate", _fake_candidate)
+
+    report = write_applied_dff_cache(
+        phasic_out,
+        roi="CH1",
+        requested_correction_strategy="signal_only_f0",
+        overwrite=True,
+    )
+
+    summary = report["summary"]
+    assert summary["applied_trace_available"] is True
+    assert summary["applied_trace_complete"] is False
+    assert summary["n_chunks_available"] == 1
+    assert summary["n_chunks_unavailable"] == 1
+    assert summary["applied_trace_review_required"] is True
+    assert summary["applied_trace_warning_level"] == "severe"
+    assert "APPLIED_TRACE_PARTIAL" in summary["applied_trace_flags"]
+    assert "SIGNAL_ONLY_F0_UNUSABLE" in summary["applied_trace_flags"]
+
+    chunks = pd.read_csv(report["chunks_csv"])
+    unavailable = chunks.loc[chunks["chunk_id"] == 1].iloc[0]
+    assert str(unavailable["available"]).lower() == "false"
+    assert unavailable["warning_level"] == "severe"
+    assert str(unavailable["review_required"]).lower() == "true"
+    assert "SIGNAL_ONLY_F0_UNUSABLE" in unavailable["flags"]
+
+    with h5py.File(report["applied_trace_cache_path"], "r") as h5:
+        assert "applied_dff" in h5["roi/CH1/chunk_0"]
+        assert "applied_dff" not in h5["roi/CH1/chunk_1"]
 
 
 def test_source_phasic_cache_is_not_modified(tmp_path):
@@ -190,7 +414,6 @@ def test_missing_roi_fails_clearly_and_writes_no_applied_cache(tmp_path):
 @pytest.mark.parametrize(
     ("strategy", "message"),
     [
-        ("signal_only_f0", "signal_only_f0 production applied cache writing is not implemented yet"),
         ("no_correction", "no_correction production applied cache writing is not implemented yet"),
         ("auto", "auto strategy selection is not implemented"),
     ],

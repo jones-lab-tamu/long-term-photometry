@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write production applied_dff cache outputs for explicit dynamic_fit."""
+"""Write production applied_dff cache outputs for explicit applied strategies."""
 
 from __future__ import annotations
 
@@ -29,15 +29,19 @@ from photometry_pipeline.io.hdf5_cache_reader import (  # noqa: E402
     load_cache_chunk_fields,
     open_phasic_cache,
 )
+from photometry_pipeline.core import signal_only_f0_candidate as signal_f0_core  # noqa: E402
 
 SCHEMA_VERSION = "1.0"
 CONTRACT_NAME = "applied_dff_production_output_contract"
 CONTRACT_VERSION = "1.0"
 TOOL_NAME = "write_applied_dff_cache"
 DEFAULT_DIR_NAME = "applied_dff"
-SUPPORTED_STRATEGY = "dynamic_fit"
+SUPPORTED_STRATEGIES = {"dynamic_fit", "signal_only_f0"}
 FLAG_PARTIAL = "APPLIED_TRACE_PARTIAL"
 FLAG_NONFINITE = "NONFINITE_APPLIED_DFF_VALUES"
+FLAG_SIGNAL_ONLY_UNUSABLE = "SIGNAL_ONLY_F0_UNUSABLE"
+F0_SOURCE_SIGNAL_ONLY = "core_uncapped_signal_only_f0_candidate"
+SIGNAL_ONLY_DENOMINATOR_SOURCE = "signal_only_f0_candidate_uncapped"
 
 OUTPUT_FILENAMES = (
     "applied_trace_cache.h5",
@@ -69,6 +73,9 @@ SUMMARY_FIELDS = [
     "applied_trace_cache_path",
     "applied_trace_cache_sha256",
     "applied_trace_cache_sha256_location",
+    "f0_source_for_signal_only_f0",
+    "signal_only_f0_denominator_source",
+    "signal_only_f0_negative_dff_preserved",
     "hdf5_modified_source_phasic_cache",
     "feature_detection_input",
     "created_at_utc",
@@ -130,12 +137,8 @@ def _find_phasic_cache(phasic_out: Path) -> Path:
 
 
 def _check_supported_strategy(strategy: str) -> None:
-    if strategy == SUPPORTED_STRATEGY:
+    if strategy in SUPPORTED_STRATEGIES:
         return
-    if strategy == "signal_only_f0":
-        raise AppliedDffCacheWriteError(
-            "signal_only_f0 production applied cache writing is not implemented yet"
-        )
     if strategy == "no_correction":
         raise AppliedDffCacheWriteError(
             "no_correction production applied cache writing is not implemented yet"
@@ -145,6 +148,13 @@ def _check_supported_strategy(strategy: str) -> None:
             "auto strategy selection is not implemented for production applied cache writing"
         )
     raise AppliedDffCacheWriteError(f"unsupported requested_correction_strategy: {strategy}")
+
+
+def _trace_source_for_strategy(strategy: str) -> str:
+    return {
+        "dynamic_fit": "dynamic_fit_dff",
+        "signal_only_f0": "signal_only_f0_dff",
+    }[strategy]
 
 
 def _source_file_for_chunk(source_files: list[str], chunk_ids: list[int], chunk_id: int) -> str:
@@ -316,6 +326,162 @@ def _load_dynamic_fit_chunks(
     return data_rows, chunk_rows
 
 
+def _as_flag_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [x.strip() for x in value.split(";") if x.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(x).strip() for x in value if str(x).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _signal_only_viability_is_unusable(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"unusable", "nonviable", "not_viable", "invalid", "severe", "unavailable"}
+
+
+def _load_signal_only_f0_chunks(
+    cache: h5py.File,
+    *,
+    roi: str,
+    chunk_ids: list[int],
+    source_files: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    data_rows: list[dict[str, Any]] = []
+    chunk_rows: list[dict[str, Any]] = []
+    for chunk_id in chunk_ids:
+        row: dict[str, Any] = {
+            "roi": roi,
+            "chunk_id": int(chunk_id),
+            "source_file": _source_file_for_chunk(source_files, chunk_ids, int(chunk_id)),
+            "available": False,
+            "applied_trace_source": "signal_only_f0_dff",
+            "applied_trace_units": "dff",
+            "n_samples": 0,
+            "warning_level": "none",
+            "review_required": False,
+            "flags": "",
+            "reason_if_unavailable": "",
+        }
+        try:
+            time_sec, signal = load_cache_chunk_fields(cache, roi, int(chunk_id), ["time_sec", "sig_raw"])
+            time_arr = np.asarray(time_sec).reshape(-1)
+            signal_arr = np.asarray(signal, dtype=float).reshape(-1)
+        except CacheReadError as exc:
+            row.update(
+                {
+                    "reason_if_unavailable": str(exc),
+                    "warning_level": "severe",
+                    "review_required": True,
+                    "flags": "SIGNAL_ONLY_F0_SOURCE_UNAVAILABLE",
+                }
+            )
+            chunk_rows.append(row)
+            continue
+
+        if time_arr.shape != signal_arr.shape:
+            raise AppliedDffCacheWriteError(
+                f"length mismatch for ROI {roi} chunk {int(chunk_id)}: "
+                f"time_sec has {time_arr.size} samples, sig_raw has {signal_arr.size} samples"
+            )
+        if signal_arr.size == 0:
+            row.update(
+                {
+                    "reason_if_unavailable": "signal_only_f0_signal_empty",
+                    "warning_level": "severe",
+                    "review_required": True,
+                    "flags": "SIGNAL_ONLY_F0_SOURCE_UNAVAILABLE",
+                }
+            )
+            chunk_rows.append(row)
+            continue
+
+        diagnostics = signal_f0_core.compute_signal_only_f0_candidate(
+            signal_arr,
+            time_arr,
+            return_uncapped_candidate=True,
+        )
+        denominator = diagnostics.get("signal_only_f0_candidate_uncapped")
+        if denominator is None:
+            raise AppliedDffCacheWriteError(
+                f"signal_only_f0 denominator missing for ROI {roi} chunk {int(chunk_id)}"
+            )
+        f0_arr = np.asarray(denominator, dtype=float).reshape(-1)
+        if f0_arr.shape != signal_arr.shape:
+            raise AppliedDffCacheWriteError(
+                f"length mismatch for ROI {roi} chunk {int(chunk_id)}: "
+                f"sig_raw has {signal_arr.size} samples, signal_only_f0 denominator has {f0_arr.size} samples"
+            )
+        if not np.all(np.isfinite(f0_arr)):
+            raise AppliedDffCacheWriteError(
+                f"invalid signal_only_f0 denominator for ROI {roi} chunk {int(chunk_id)}: non-finite values"
+            )
+        if np.any(f0_arr <= 0):
+            raise AppliedDffCacheWriteError(
+                f"invalid signal_only_f0 denominator for ROI {roi} chunk {int(chunk_id)}: non-positive values"
+            )
+        try:
+            dff_arr = (signal_arr - f0_arr) / f0_arr
+        except Exception as exc:
+            raise AppliedDffCacheWriteError(
+                f"failed to compute signal_only_f0 applied_dff for ROI {roi} chunk {int(chunk_id)}: {exc}"
+            ) from exc
+        if dff_arr.shape != signal_arr.shape:
+            raise AppliedDffCacheWriteError(
+                f"computed signal_only_f0 applied_dff length mismatch for ROI {roi} chunk {int(chunk_id)}"
+            )
+
+        flags = _as_flag_list(diagnostics.get("signal_only_f0_flags"))
+        warning_level = "none"
+        review_required = False
+        viability = str(diagnostics.get("signal_only_f0_candidate_viability") or "").strip().lower()
+        confidence = str(diagnostics.get("signal_only_f0_candidate_confidence") or "").strip().lower()
+        if _signal_only_viability_is_unusable(viability):
+            flags.append(FLAG_SIGNAL_ONLY_UNUSABLE)
+            row.update(
+                {
+                    "reason_if_unavailable": f"signal_only_f0_candidate_viability_{viability or 'unusable'}",
+                    "warning_level": "severe",
+                    "review_required": True,
+                    "flags": _flags_text(flags),
+                }
+            )
+            chunk_rows.append(row)
+            continue
+        if confidence == "low" or viability in {"contextual", "hard_inspect"} or flags:
+            warning_level = _warning_at_least(warning_level, "caution")
+            review_required = True
+        if not np.all(np.isfinite(dff_arr)):
+            flags.append(FLAG_NONFINITE)
+            warning_level = _warning_at_least(warning_level, "caution")
+            review_required = True
+
+        row.update(
+            {
+                "available": True,
+                "n_samples": int(dff_arr.size),
+                "warning_level": warning_level,
+                "review_required": review_required,
+                "flags": _flags_text(flags),
+            }
+        )
+        data_rows.append(
+            {
+                "chunk_id": int(chunk_id),
+                "source_file": row["source_file"],
+                "time_sec": time_arr,
+                "signal_raw_for_dff": signal_arr,
+                "signal_only_f0_uncapped_for_dff": f0_arr,
+                "signal_only_f0_dff": dff_arr,
+                "chunk_row": row,
+            }
+        )
+        chunk_rows.append(row)
+    return data_rows, chunk_rows
+
+
 def _summary_from_chunks(
     *,
     roi: str,
@@ -327,6 +493,7 @@ def _summary_from_chunks(
     cache_path: Path,
     created_at_utc: str,
     chunk_rows: list[dict[str, Any]],
+    strategy: str,
 ) -> dict[str, Any]:
     available_count = sum(1 for row in chunk_rows if bool(row.get("available")))
     unavailable_count = len(chunk_rows) - available_count
@@ -362,8 +529,8 @@ def _summary_from_chunks(
         "recording_key": recording_key,
         "requested_correction_strategy": requested_strategy,
         "correction_strategy_selection": "explicit",
-        "applied_correction_strategy": SUPPORTED_STRATEGY,
-        "applied_trace_source": "dynamic_fit_dff",
+        "applied_correction_strategy": strategy,
+        "applied_trace_source": _trace_source_for_strategy(strategy),
         "applied_trace_units": "dff",
         "applied_trace_available": bool(available_count > 0),
         "applied_trace_complete": complete,
@@ -379,6 +546,9 @@ def _summary_from_chunks(
         "applied_trace_cache_path": str(cache_path),
         "applied_trace_cache_sha256": "",
         "applied_trace_cache_sha256_location": "external_summary_after_cache_finalization",
+        "f0_source_for_signal_only_f0": F0_SOURCE_SIGNAL_ONLY if strategy == "signal_only_f0" else "",
+        "signal_only_f0_denominator_source": SIGNAL_ONLY_DENOMINATOR_SOURCE if strategy == "signal_only_f0" else "",
+        "signal_only_f0_negative_dff_preserved": bool(strategy == "signal_only_f0"),
         "hdf5_modified_source_phasic_cache": False,
         "feature_detection_input": False,
         "created_at_utc": created_at_utc,
@@ -399,6 +569,7 @@ def _write_hdf5_cache(
     roi: str,
     chunk_ids: list[int],
     source_files: list[str],
+    strategy: str,
 ) -> None:
     dt = _string_dtype()
     with h5py.File(path, "w") as h5:
@@ -431,9 +602,18 @@ def _write_hdf5_cache(
             data = data_by_chunk.get(int(chunk_id))
             if data is not None:
                 grp.create_dataset("time_sec", data=np.asarray(data["time_sec"]))
-                grp.create_dataset("applied_dff", data=np.asarray(data["dff"]))
-                grp.create_dataset("dynamic_fit_dff", data=np.asarray(data["dff"]))
-            _write_scalar_string(grp, "applied_trace_source", "dynamic_fit_dff")
+                if strategy == "dynamic_fit":
+                    grp.create_dataset("applied_dff", data=np.asarray(data["dff"]))
+                    grp.create_dataset("dynamic_fit_dff", data=np.asarray(data["dff"]))
+                elif strategy == "signal_only_f0":
+                    grp.create_dataset("applied_dff", data=np.asarray(data["signal_only_f0_dff"]))
+                    grp.create_dataset("signal_raw_for_dff", data=np.asarray(data["signal_raw_for_dff"]))
+                    grp.create_dataset(
+                        "signal_only_f0_uncapped_for_dff",
+                        data=np.asarray(data["signal_only_f0_uncapped_for_dff"]),
+                    )
+                    grp.create_dataset("signal_only_f0_dff", data=np.asarray(data["signal_only_f0_dff"]))
+            _write_scalar_string(grp, "applied_trace_source", _trace_source_for_strategy(strategy))
             _write_scalar_string(grp, "source_file", chunk_row.get("source_file", ""))
             _write_scalar_bool(grp, "available", bool(chunk_row.get("available")))
             _write_scalar_string(grp, "warning_level", chunk_row.get("warning_level", "none"))
@@ -494,12 +674,20 @@ def write_applied_dff_cache(
             raise AppliedDffCacheWriteError(f"requested ROI '{roi}' not found in source phasic cache")
         chunk_ids = list_cache_chunk_ids(cache)
         source_files = list_cache_source_files(cache)
-        data_rows, chunk_rows = _load_dynamic_fit_chunks(
-            cache,
-            roi=roi,
-            chunk_ids=chunk_ids,
-            source_files=source_files,
-        )
+        if strategy == "dynamic_fit":
+            data_rows, chunk_rows = _load_dynamic_fit_chunks(
+                cache,
+                roi=roi,
+                chunk_ids=chunk_ids,
+                source_files=source_files,
+            )
+        elif strategy == "signal_only_f0":
+            data_rows, chunk_rows = _load_signal_only_f0_chunks(
+                cache,
+                roi=roi,
+                chunk_ids=chunk_ids,
+                source_files=source_files,
+            )
 
     source_hash_after_read = _file_sha256(source_cache)
     if source_hash_before != source_hash_after_read:
@@ -515,6 +703,7 @@ def write_applied_dff_cache(
         cache_path=cache_path,
         created_at_utc=created_at_utc,
         chunk_rows=chunk_rows,
+        strategy=strategy,
     )
 
     _write_hdf5_cache(
@@ -525,6 +714,7 @@ def write_applied_dff_cache(
         roi=roi,
         chunk_ids=chunk_ids,
         source_files=source_files,
+        strategy=strategy,
     )
     applied_hash = _file_sha256(cache_path)
     source_hash_after = _file_sha256(source_cache)
