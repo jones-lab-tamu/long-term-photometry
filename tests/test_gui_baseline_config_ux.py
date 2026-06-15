@@ -119,6 +119,18 @@ def _set_last_timestamp_value(csv_path, value: float) -> None:
         writer.writerows(rows)
 
 
+def _rewrite_timestamps_regular(csv_path, *, dt: float) -> None:
+    with open(csv_path, "r", encoding="utf-8", newline="") as f:
+        rows = list(csv.reader(f))
+    header = rows[1]
+    time_idx = header.index("TimeStamp")
+    for idx, row in enumerate(rows[2:]):
+        row[time_idx] = f"{idx * float(dt):.6f}".rstrip("0").rstrip(".")
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerows(rows)
+
+
 def _write_vendor_style_npm_dataset(
     root_dir,
     *,
@@ -1155,6 +1167,128 @@ def test_rwd_contract_inference_accepts_small_duration_variation_around_nominal(
     overrides = window._infer_rwd_dataset_contract_overrides("rwd")
     assert overrides["chunk_duration_sec"] == pytest.approx(600.0, abs=1e-6)
     assert window._rwd_contract_cache["duration_warnings"] == []
+
+
+def test_rwd_contract_inference_uses_metadata_effective_fs_when_available(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_metadata_fs_nominal"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        metadata_fps=40.0,
+        metadata_continuous_time_sec=600.0,
+        led410_enable=True,
+        led470_enable=True,
+        led560_enable=False,
+    )
+    csv_path = dataset_root / "2025_01_01-00_00_00" / "fluorescence.csv"
+    _rewrite_timestamps_regular(csv_path, dt=49.999)
+
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    overrides = window._infer_rwd_dataset_contract_overrides("rwd")
+    contract = window._infer_rwd_chunk_contract(str(csv_path))
+    assert contract["fs_hz"] == pytest.approx(20.000400008, abs=1e-9)
+    assert overrides["target_fs_hz"] == pytest.approx(20.0, abs=1e-9)
+    assert window._rwd_contract_cache["fs_nominal_source"] == "metadata_effective_fps"
+
+
+def test_rwd_contract_inference_warns_on_small_timestamp_derived_fs_variation(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_fs_warning"
+    chunk_names = ["2025_01_01-00_00_00", "2025_01_01-00_10_00"]
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=chunk_names,
+        metadata_fps=40.0,
+        metadata_continuous_time_sec=600.0,
+        led410_enable=True,
+        led470_enable=True,
+        led560_enable=False,
+    )
+    _rewrite_timestamps_regular(dataset_root / chunk_names[1] / "fluorescence.csv", dt=49.899)
+
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    overrides = window._infer_rwd_dataset_contract_overrides("rwd")
+    warnings = window._rwd_contract_cache["fs_warnings"]
+    assert overrides["target_fs_hz"] == pytest.approx(20.0, abs=1e-9)
+    assert len(warnings) == 1
+    assert warnings[0]["chunk_index"] == 1
+    assert warnings[0]["inferred_fs_hz"] == pytest.approx(20.040481773, abs=1e-9)
+
+
+def test_rwd_contract_inference_rejects_large_fs_mismatch(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_large_fs_mismatch"
+    chunk_names = ["2025_01_01-00_00_00", "2025_01_01-00_10_00"]
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=chunk_names,
+        metadata_fps=40.0,
+        metadata_continuous_time_sec=600.0,
+        led410_enable=True,
+        led470_enable=True,
+        led560_enable=False,
+    )
+    _rewrite_timestamps_regular(dataset_root / chunk_names[1] / "fluorescence.csv", dt=40.0)
+
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    with pytest.raises(ValueError, match="incompatible with metadata FPS"):
+        window._infer_rwd_dataset_contract_overrides("rwd")
+
+
+def test_rwd_contract_inference_no_metadata_still_rejects_incompatible_fs(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_no_metadata_fs_safe"
+    chunk_names = ["2025_01_01-00_00_00", "2025_01_01-00_10_00"]
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=chunk_names,
+        include_metadata_fps=False,
+    )
+    _rewrite_timestamps_regular(dataset_root / chunk_names[1] / "fluorescence.csv", dt=40.0)
+
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    with pytest.raises(ValueError, match="fs mismatch"):
+        window._infer_rwd_dataset_contract_overrides("rwd")
 
 
 def test_rwd_contract_inference_records_mild_short_chunk_warning(window, tmp_path):

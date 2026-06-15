@@ -5546,6 +5546,17 @@ class MainWindow(QMainWindow):
         return enabled_count
 
     @staticmethod
+    def _effective_rwd_metadata_fs(metadata_fps: float | None, enabled_excitation_count: int | None) -> float | None:
+        if metadata_fps is None or metadata_fps <= 0:
+            return None
+        multiplier = (
+            enabled_excitation_count
+            if (enabled_excitation_count is not None and enabled_excitation_count > 1)
+            else 1
+        )
+        return float(metadata_fps) / float(multiplier)
+
+    @staticmethod
     def _resolve_timestamp_unit_and_fs(
         median_dt: float,
         metadata_fps: float | None,
@@ -5711,9 +5722,11 @@ class MainWindow(QMainWindow):
             "sig_suffix": sig_suffix,
             "timestamp_unit": unit,
             "fs_hz": float(inferred_fs),
+            "median_dt": float(median_dt),
             "sample_count": int(sample_count),
             "chunk_duration_sec": float(chunk_duration_sec),
             "timestamp_duration_sec": float(timestamp_duration_sec),
+            "metadata_effective_fs_hz": self._effective_rwd_metadata_fs(metadata_fps, enabled_excitation_count),
             "metadata_continuous_time_sec": (
                 float(metadata_continuous_time_sec)
                 if metadata_continuous_time_sec is not None
@@ -5783,7 +5796,20 @@ class MainWindow(QMainWindow):
         contracts = [self._infer_rwd_chunk_contract(path) for path in csv_paths]
         self._timing_end("rwd_contract_scan_chunks", t_chunks)
         base = contracts[0]
-        fs_tol = max(1e-6, base["fs_hz"] * 1e-4)
+        metadata_fs_values = [
+            float(c["metadata_effective_fs_hz"])
+            for c in contracts
+            if c.get("metadata_effective_fs_hz") is not None
+        ]
+        if metadata_fs_values:
+            nominal_fs = float(median(metadata_fs_values))
+            nominal_fs_source = "metadata_effective_fps"
+        else:
+            nominal_fs = float(base["fs_hz"])
+            nominal_fs_source = "first_chunk_median_timestamp_delta"
+        fs_tol = max(1e-6, nominal_fs * 1e-4)
+        fs_warning_tol = max(fs_tol, nominal_fs * 1e-3)
+        fs_hard_tol = max(fs_warning_tol, nominal_fs * 5e-3)
         nominal_values = [
             float(c["metadata_continuous_time_sec"])
             for c in contracts
@@ -5798,6 +5824,7 @@ class MainWindow(QMainWindow):
         endpoint_sample_tolerance = 1
         warning_duration_tol_sec = 0.5
         hard_duration_tol_sec = max(5.0, 0.01 * max(nominal_duration, 1.0))
+        fs_warnings: list[dict[str, object]] = []
         duration_warnings: list[dict[str, object]] = []
         t_cross = self._timing_start("rwd_contract_cross_chunk_validation")
         for idx, contract in enumerate(contracts):
@@ -5815,11 +5842,24 @@ class MainWindow(QMainWindow):
                     f"Expected ({base['uv_suffix']}, {base['sig_suffix']}), "
                     f"got ({contract['uv_suffix']}, {contract['sig_suffix']})."
                 )
-            if not math.isclose(contract["fs_hz"], base["fs_hz"], rel_tol=0.0, abs_tol=fs_tol):
+            fs_delta = abs(float(contract["fs_hz"]) - nominal_fs)
+            if fs_delta > fs_hard_tol:
                 raise ValueError(
                     "Inconsistent RWD contract across chunks: "
                     f"fs mismatch at chunk {idx} ({path}). "
-                    f"Expected {base['fs_hz']:.9f}, got {contract['fs_hz']:.9f}."
+                    f"Expected nominal {nominal_fs:.9f} ({nominal_fs_source}), "
+                    f"got {contract['fs_hz']:.9f}; hard tolerance {fs_hard_tol:.9f}."
+                )
+            if fs_delta > fs_warning_tol:
+                fs_warnings.append(
+                    {
+                        "chunk_index": int(idx),
+                        "csv_path": str(path),
+                        "nominal_fs_hz": float(nominal_fs),
+                        "inferred_fs_hz": float(contract["fs_hz"]),
+                        "fs_delta_hz": float(fs_delta),
+                        "median_dt": float(contract["median_dt"]),
+                    }
                 )
 
             if not nominal_values:
@@ -5860,7 +5900,7 @@ class MainWindow(QMainWindow):
         self._timing_end("rwd_contract_cross_chunk_validation", t_cross)
 
         out = {
-            "target_fs_hz": float(round(base["fs_hz"], 9)),
+            "target_fs_hz": float(round(nominal_fs, 9)),
             "chunk_duration_sec": float(round(nominal_duration, 9)),
             "rwd_time_col": str(base["time_col"]),
             "uv_suffix": str(base["uv_suffix"]),
@@ -5871,6 +5911,8 @@ class MainWindow(QMainWindow):
             "format": fmt_text,
             "signature": signature,
             "overrides": dict(out),
+            "fs_warnings": fs_warnings,
+            "fs_nominal_source": nominal_fs_source,
             "duration_warnings": duration_warnings,
             "duration_nominal_source": nominal_source,
         }
