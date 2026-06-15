@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import os
@@ -30,6 +31,26 @@ from photometry_pipeline.core.feature_extraction import (  # noqa: E402
 )
 
 FLAG_PARTIAL_INPUT = "FEATURE_PREVIEW_PARTIAL_APPLIED_TRACE_INPUT"
+PEAK_DETECTOR_NAME = "existing_phasic_peak_detector"
+PEAK_DETECTOR_SOURCE_FUNCTION = "get_peak_indices_for_trace"
+PEAK_DETECTOR_MODULE = "photometry_pipeline.core.feature_extraction"
+PEAK_DETECTOR_MODE = "peak_only_no_event_segmentation"
+PEAK_DETECTION_CONFIG_SOURCE = "preview_default_Config_event_signal_dff"
+PEAK_DETECTION_SAMPLING_RATE_SOURCE = "inferred_from_time_sec_per_chunk"
+PEAK_DETECTION_CONFIG_FIELDS = [
+    "event_signal",
+    "peak_threshold_method",
+    "peak_threshold_k",
+    "peak_threshold_percentile",
+    "peak_threshold_abs",
+    "peak_min_distance_sec",
+    "peak_min_prominence_k",
+    "peak_min_width_sec",
+    "peak_pre_filter",
+    "signal_excursion_polarity",
+    "lowpass_hz",
+    "filter_order",
+]
 
 SUMMARY_FIELDS = [
     "roi",
@@ -60,6 +81,16 @@ SUMMARY_FIELDS = [
     "feature_preview_review_required",
     "feature_preview_warning_level",
     "feature_preview_warning_flags",
+    "peak_detector_name",
+    "peak_detector_source_function",
+    "peak_detector_module",
+    "peak_detector_mode",
+    "peak_detection_config_source",
+    "peak_detection_event_signal",
+    "peak_detection_sampling_rate_source",
+    "peak_detection_config_json",
+    "peak_detection_config_hash",
+    "peak_detection_config_review_required",
     "hdf5_modified",
     "replaces_existing_feature_outputs",
     "output_dir",
@@ -87,6 +118,10 @@ EVENT_FIELDS = [
     "detection_preview",
     "event_boundary_mode",
     "event_metrics_available",
+    "peak_detector_name",
+    "peak_detector_source_function",
+    "peak_detector_mode",
+    "peak_detection_config_hash",
 ]
 
 
@@ -263,7 +298,20 @@ def _infer_fs_hz(time_sec: np.ndarray) -> float:
     return float(Config().target_fs_hz)
 
 
-def _detect_events(df: pd.DataFrame, summary: dict[str, Any], config: Config) -> list[dict[str, Any]]:
+def _peak_detection_config_snapshot(config: Config) -> tuple[dict[str, Any], str, str]:
+    snapshot = {field: getattr(config, field) for field in PEAK_DETECTION_CONFIG_FIELDS}
+    config_json = json.dumps(_json_safe(snapshot), sort_keys=True, separators=(",", ":"))
+    config_hash = hashlib.sha256(config_json.encode("utf-8")).hexdigest()
+    return snapshot, config_json, config_hash
+
+
+def _detect_events(
+    df: pd.DataFrame,
+    summary: dict[str, Any],
+    config: Config,
+    *,
+    peak_detection_config_hash: str,
+) -> list[dict[str, Any]]:
     """Detect peaks from applied_dff without inventing event segmentation bounds."""
     events: list[dict[str, Any]] = []
     event_id = 0
@@ -299,6 +347,10 @@ def _detect_events(df: pd.DataFrame, summary: dict[str, Any], config: Config) ->
                     "detection_preview": True,
                     "event_boundary_mode": "peak_only_no_event_segmentation",
                     "event_metrics_available": False,
+                    "peak_detector_name": PEAK_DETECTOR_NAME,
+                    "peak_detector_source_function": PEAK_DETECTOR_SOURCE_FUNCTION,
+                    "peak_detector_mode": PEAK_DETECTOR_MODE,
+                    "peak_detection_config_hash": peak_detection_config_hash,
                 }
             )
     return events
@@ -390,7 +442,13 @@ def run_applied_dff_feature_preview(
     plot_path = selected_output / "applied_dff_feature_preview_plot.png"
 
     cfg = Config(event_signal="dff")
-    events = _detect_events(trace_df, applied_summary, cfg)
+    _config_snapshot, config_json, config_hash = _peak_detection_config_snapshot(cfg)
+    events = _detect_events(
+        trace_df,
+        applied_summary,
+        cfg,
+        peak_detection_config_hash=config_hash,
+    )
     flags = _as_flag_list(applied_summary.get("applied_trace_flags"))
     feature_warning = str(applied_summary.get("applied_trace_warning_level") or "none")
     feature_review = _as_bool(applied_summary.get("applied_trace_review_required"))
@@ -432,6 +490,16 @@ def run_applied_dff_feature_preview(
         "feature_preview_review_required": feature_review,
         "feature_preview_warning_level": feature_warning,
         "feature_preview_warning_flags": ";".join(flags),
+        "peak_detector_name": PEAK_DETECTOR_NAME,
+        "peak_detector_source_function": PEAK_DETECTOR_SOURCE_FUNCTION,
+        "peak_detector_module": PEAK_DETECTOR_MODULE,
+        "peak_detector_mode": PEAK_DETECTOR_MODE,
+        "peak_detection_config_source": PEAK_DETECTION_CONFIG_SOURCE,
+        "peak_detection_event_signal": getattr(cfg, "event_signal", "dff"),
+        "peak_detection_sampling_rate_source": PEAK_DETECTION_SAMPLING_RATE_SOURCE,
+        "peak_detection_config_json": config_json,
+        "peak_detection_config_hash": config_hash,
+        "peak_detection_config_review_required": False,
         "hdf5_modified": False,
         "replaces_existing_feature_outputs": False,
         "output_dir": str(selected_output),

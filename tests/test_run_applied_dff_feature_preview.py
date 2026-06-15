@@ -101,6 +101,17 @@ def test_reads_explicit_applied_trace_and_writes_feature_preview(tmp_path):
     assert summary["feature_detection_preview"] is True
     assert summary["hdf5_modified"] is False
     assert summary["replaces_existing_feature_outputs"] is False
+    assert summary["peak_detector_name"] == "existing_phasic_peak_detector"
+    assert summary["peak_detector_source_function"] == "get_peak_indices_for_trace"
+    assert summary["peak_detector_module"] == "photometry_pipeline.core.feature_extraction"
+    assert summary["peak_detector_mode"] == "peak_only_no_event_segmentation"
+    assert summary["peak_detection_config_source"] == "preview_default_Config_event_signal_dff"
+    assert summary["peak_detection_event_signal"] == "dff"
+    assert summary["peak_detection_sampling_rate_source"] == "inferred_from_time_sec_per_chunk"
+    assert summary["peak_detection_config_hash"]
+    assert summary["peak_detection_config_review_required"] is False
+    config_snapshot = json.loads(summary["peak_detection_config_json"])
+    assert config_snapshot["event_signal"] == "dff"
     events = pd.read_csv(report["events_csv"])
     assert len(events) > 0
     assert set(
@@ -112,15 +123,47 @@ def test_reads_explicit_applied_trace_and_writes_feature_preview(tmp_path):
             "detection_preview",
             "event_boundary_mode",
             "event_metrics_available",
+            "peak_detector_name",
+            "peak_detector_source_function",
+            "peak_detector_mode",
+            "peak_detection_config_hash",
         ]
     ).issubset(events.columns)
     assert set(events["detection_input_trace"]) == {"applied_dff"}
+    assert set(events["peak_detection_config_hash"]) == {summary["peak_detection_config_hash"]}
     assert set(events["event_boundary_mode"]) == {"peak_only_no_event_segmentation"}
     assert set(events["event_metrics_available"].astype(str).str.lower()) == {"false"}
     assert events["event_start_sample"].isna().all()
     assert events["event_end_sample"].isna().all()
     assert events["event_auc"].isna().all()
     assert events["event_duration_sec"].isna().all()
+
+
+def test_config_json_is_valid_and_hash_stable_across_repeated_runs(tmp_path):
+    applied_dir = _write_applied_preview(tmp_path / "applied")
+
+    first = run_applied_dff_feature_preview(
+        applied_dir,
+        output_dir=tmp_path / "out1",
+        overwrite=True,
+    )
+    second = run_applied_dff_feature_preview(
+        applied_dir,
+        output_dir=tmp_path / "out2",
+        overwrite=True,
+    )
+
+    first_summary = first["summary"]
+    second_summary = second["summary"]
+    config_snapshot = json.loads(first_summary["peak_detection_config_json"])
+    assert config_snapshot == json.loads(second_summary["peak_detection_config_json"])
+    assert config_snapshot["event_signal"] == "dff"
+    assert config_snapshot["peak_threshold_method"] == "mean_std"
+    assert "peak_min_distance_sec" in config_snapshot
+    assert "peak_min_prominence_k" in config_snapshot
+    assert "peak_min_width_sec" in config_snapshot
+    assert first_summary["peak_detection_config_hash"] == second_summary["peak_detection_config_hash"]
+    assert first_summary["n_events"] == second_summary["n_events"]
 
 
 def test_positive_baseline_multi_peak_trace_does_not_emit_broad_duplicate_windows(tmp_path):
@@ -137,6 +180,7 @@ def test_positive_baseline_multi_peak_trace_does_not_emit_broad_duplicate_window
     assert events["event_auc"].isna().all()
     assert events["event_duration_sec"].isna().all()
     assert set(events["event_boundary_mode"]) == {"peak_only_no_event_segmentation"}
+    assert set(events["event_metrics_available"].astype(str).str.lower()) == {"false"}
 
 
 def test_provenance_is_carried_through(tmp_path):
@@ -246,6 +290,9 @@ def test_dry_run_writes_no_outputs(tmp_path):
 
     assert report["dry_run"] is True
     assert report["summary"]["feature_detection_input_trace"] == "applied_dff"
+    assert report["summary"]["peak_detector_source_function"] == "get_peak_indices_for_trace"
+    assert json.loads(report["summary"]["peak_detection_config_json"])["event_signal"] == "dff"
+    assert report["summary"]["peak_detection_config_hash"]
     assert not Path(report["summary_csv"]).exists()
     assert not Path(report["events_csv"]).exists()
     assert not Path(report["preview_plot"]).exists()
