@@ -5497,6 +5497,28 @@ class MainWindow(QMainWindow):
         return fps
 
     @staticmethod
+    def _extract_metadata_continuous_time_from_row(row: list[str]) -> float | None:
+        if not row:
+            return None
+        meta_text = ",".join(str(cell).strip() for cell in row if str(cell).strip())
+        if not meta_text:
+            return None
+        m = re.search(
+            r'"?continuous_time"?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)',
+            meta_text,
+            flags=re.IGNORECASE,
+        )
+        if not m:
+            return None
+        try:
+            duration = float(m.group(1))
+        except Exception:
+            return None
+        if duration <= 0:
+            return None
+        return duration
+
+    @staticmethod
     def _extract_enabled_excitation_count_from_row(row: list[str]) -> int | None:
         if not row:
             return None
@@ -5625,9 +5647,11 @@ class MainWindow(QMainWindow):
 
         metadata_fps = None
         enabled_excitation_count = None
+        metadata_continuous_time_sec = None
         if header_row_idx > 0:
             meta_row = self._normalize_csv_cells(rows[header_row_idx - 1])
             metadata_fps = self._extract_metadata_fps_from_row(meta_row)
+            metadata_continuous_time_sec = self._extract_metadata_continuous_time_from_row(meta_row)
             enabled_excitation_count = self._extract_enabled_excitation_count_from_row(meta_row)
 
         cols = self._normalize_csv_cells(rows[header_row_idx])
@@ -5665,6 +5689,8 @@ class MainWindow(QMainWindow):
             raise ValueError(f"Inferred non-positive fs in RWD file: {csv_path}")
 
         sample_count = len(t_vals)
+        unit_scale = 1000.0 if unit == "milliseconds" else 1.0
+        timestamp_duration_sec = (float(t_vals[-1]) - float(t_vals[0])) / unit_scale
         # Align with strict reader semantics:
         # n_target = round(chunk_duration_sec * target_fs_hz), grid = arange(n_target)/fs.
         # Setting chunk_duration_sec = sample_count / fs guarantees n_target equals
@@ -5687,6 +5713,12 @@ class MainWindow(QMainWindow):
             "fs_hz": float(inferred_fs),
             "sample_count": int(sample_count),
             "chunk_duration_sec": float(chunk_duration_sec),
+            "timestamp_duration_sec": float(timestamp_duration_sec),
+            "metadata_continuous_time_sec": (
+                float(metadata_continuous_time_sec)
+                if metadata_continuous_time_sec is not None
+                else None
+            ),
         }
         self._timing_end(
             "rwd_chunk_contract",
@@ -5752,10 +5784,23 @@ class MainWindow(QMainWindow):
         self._timing_end("rwd_contract_scan_chunks", t_chunks)
         base = contracts[0]
         fs_tol = max(1e-6, base["fs_hz"] * 1e-4)
-        dur_tol = max(1e-6, base["chunk_duration_sec"] * 1e-4)
+        nominal_values = [
+            float(c["metadata_continuous_time_sec"])
+            for c in contracts
+            if c.get("metadata_continuous_time_sec") is not None
+        ]
+        if nominal_values:
+            nominal_duration = float(median(nominal_values))
+            nominal_source = "metadata_continuous_time"
+        else:
+            nominal_duration = float(base["chunk_duration_sec"])
+            nominal_source = "first_chunk_sample_count_over_fs"
         endpoint_sample_tolerance = 1
+        warning_duration_tol_sec = 0.5
+        hard_duration_tol_sec = max(5.0, 0.01 * max(nominal_duration, 1.0))
+        duration_warnings: list[dict[str, object]] = []
         t_cross = self._timing_start("rwd_contract_cross_chunk_validation")
-        for idx, contract in enumerate(contracts[1:], start=1):
+        for idx, contract in enumerate(contracts):
             path = contract["csv_path"]
             if contract["time_col"] != base["time_col"]:
                 raise ValueError(
@@ -5777,34 +5822,46 @@ class MainWindow(QMainWindow):
                     f"Expected {base['fs_hz']:.9f}, got {contract['fs_hz']:.9f}."
                 )
 
-            sample_delta = abs(int(contract["sample_count"]) - int(base["sample_count"]))
-            if sample_delta > endpoint_sample_tolerance:
-                raise ValueError(
-                    "Inconsistent RWD contract across chunks: "
-                    f"sample_count mismatch exceeds endpoint tolerance at chunk {idx} ({path}). "
-                    f"Expected {base['sample_count']}, got {contract['sample_count']} "
-                    f"(allowed delta <= {endpoint_sample_tolerance})."
-                )
+            if not nominal_values:
+                sample_delta = abs(int(contract["sample_count"]) - int(base["sample_count"]))
+                if sample_delta > endpoint_sample_tolerance:
+                    raise ValueError(
+                        "Inconsistent RWD contract across chunks: "
+                        f"sample_count mismatch exceeds endpoint tolerance at chunk {idx} ({path}). "
+                        f"Expected {base['sample_count']}, got {contract['sample_count']} "
+                        f"(allowed delta <= {endpoint_sample_tolerance})."
+                    )
 
-            fs_ref = max(1e-9, 0.5 * (float(base["fs_hz"]) + float(contract["fs_hz"])))
-            endpoint_duration_tol = 1.05 / fs_ref
-            duration_abs_tol = max(dur_tol, endpoint_duration_tol)
-            if not math.isclose(
-                contract["chunk_duration_sec"],
-                base["chunk_duration_sec"],
-                rel_tol=0.0,
-                abs_tol=duration_abs_tol,
-            ):
+            duration_delta = abs(float(contract["chunk_duration_sec"]) - nominal_duration)
+            timestamp_duration_delta = abs(float(contract["timestamp_duration_sec"]) - nominal_duration)
+            duration_for_policy = max(duration_delta, timestamp_duration_delta)
+            if duration_for_policy > hard_duration_tol_sec:
                 raise ValueError(
                     "Inconsistent RWD contract across chunks: "
                     f"chunk_duration mismatch at chunk {idx} ({path}). "
-                    f"Expected {base['chunk_duration_sec']:.9f}, got {contract['chunk_duration_sec']:.9f}."
+                    f"Expected nominal {nominal_duration:.9f} ({nominal_source}), "
+                    f"got sample_count/fs {contract['chunk_duration_sec']:.9f} "
+                    f"and timestamp span {contract['timestamp_duration_sec']:.9f}; "
+                    f"hard tolerance {hard_duration_tol_sec:.3f}s."
+                )
+            if duration_for_policy > warning_duration_tol_sec:
+                duration_warnings.append(
+                    {
+                        "chunk_index": int(idx),
+                        "csv_path": str(path),
+                        "nominal_duration_sec": float(nominal_duration),
+                        "sample_count_over_fs_duration_sec": float(contract["chunk_duration_sec"]),
+                        "timestamp_duration_sec": float(contract["timestamp_duration_sec"]),
+                        "duration_delta_sec": float(duration_for_policy),
+                        "sample_count_over_fs_delta_sec": float(duration_delta),
+                        "timestamp_duration_delta_sec": float(timestamp_duration_delta),
+                    }
                 )
         self._timing_end("rwd_contract_cross_chunk_validation", t_cross)
 
         out = {
             "target_fs_hz": float(round(base["fs_hz"], 9)),
-            "chunk_duration_sec": float(round(base["chunk_duration_sec"], 9)),
+            "chunk_duration_sec": float(round(nominal_duration, 9)),
             "rwd_time_col": str(base["time_col"]),
             "uv_suffix": str(base["uv_suffix"]),
             "sig_suffix": str(base["sig_suffix"]),
@@ -5814,6 +5871,8 @@ class MainWindow(QMainWindow):
             "format": fmt_text,
             "signature": signature,
             "overrides": dict(out),
+            "duration_warnings": duration_warnings,
+            "duration_nominal_source": nominal_source,
         }
         self._timing_end("rwd_contract_inference_total", t_total)
         return out
