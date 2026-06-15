@@ -69,6 +69,25 @@ def _write_applied_preview(
     return base
 
 
+def _replace_trace_with_positive_baseline_multi_peak(applied_dir: Path) -> None:
+    trace_path = applied_dir / "CH1_signal_only_f0_applied_trace.csv"
+    fs = 20.0
+    t = np.arange(0.0, 80.0, 1.0 / fs)
+    rng = np.random.default_rng(7)
+    y = 0.2 + 0.015 * np.sin(0.9 * t) + 0.01 * rng.standard_normal(t.size)
+    for center in (15.0, 35.0, 55.0):
+        y += 1.1 * np.exp(-0.5 * ((t - center) / 0.28) ** 2)
+    pd.DataFrame(
+        {
+            "roi": "CH1",
+            "chunk_id": 0,
+            "sample_index": np.arange(t.size),
+            "time_sec": t,
+            "applied_dff": y,
+        }
+    ).to_csv(trace_path, index=False)
+
+
 def test_reads_explicit_applied_trace_and_writes_feature_preview(tmp_path):
     applied_dir = _write_applied_preview(tmp_path / "applied")
 
@@ -91,9 +110,33 @@ def test_reads_explicit_applied_trace_and_writes_feature_preview(tmp_path):
             "event_end_sample",
             "detection_input_trace",
             "detection_preview",
+            "event_boundary_mode",
+            "event_metrics_available",
         ]
     ).issubset(events.columns)
     assert set(events["detection_input_trace"]) == {"applied_dff"}
+    assert set(events["event_boundary_mode"]) == {"peak_only_no_event_segmentation"}
+    assert set(events["event_metrics_available"].astype(str).str.lower()) == {"false"}
+    assert events["event_start_sample"].isna().all()
+    assert events["event_end_sample"].isna().all()
+    assert events["event_auc"].isna().all()
+    assert events["event_duration_sec"].isna().all()
+
+
+def test_positive_baseline_multi_peak_trace_does_not_emit_broad_duplicate_windows(tmp_path):
+    applied_dir = _write_applied_preview(tmp_path / "applied")
+    _replace_trace_with_positive_baseline_multi_peak(applied_dir)
+
+    report = run_applied_dff_feature_preview(applied_dir, overwrite=True)
+    events = pd.read_csv(report["events_csv"])
+
+    assert len(events) >= 2
+    assert events["event_peak_sample"].nunique() == len(events)
+    assert events["event_start_sample"].isna().all()
+    assert events["event_end_sample"].isna().all()
+    assert events["event_auc"].isna().all()
+    assert events["event_duration_sec"].isna().all()
+    assert set(events["event_boundary_mode"]) == {"peak_only_no_event_segmentation"}
 
 
 def test_provenance_is_carried_through(tmp_path):

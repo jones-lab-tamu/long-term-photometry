@@ -26,7 +26,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from photometry_pipeline.config import Config  # noqa: E402
 from photometry_pipeline.core.feature_extraction import (  # noqa: E402
-    compute_auc_above_threshold,
     get_peak_indices_for_trace,
 )
 
@@ -86,6 +85,8 @@ EVENT_FIELDS = [
     "detection_input_strategy",
     "detection_input_source",
     "detection_preview",
+    "event_boundary_mode",
+    "event_metrics_available",
 ]
 
 
@@ -262,19 +263,8 @@ def _infer_fs_hz(time_sec: np.ndarray) -> float:
     return float(Config().target_fs_hz)
 
 
-def _event_bounds(trace: np.ndarray, peak_idx: int) -> tuple[int, int]:
-    y = np.asarray(trace, dtype=float).reshape(-1)
-    n = y.size
-    start = int(peak_idx)
-    while start > 0 and np.isfinite(y[start - 1]) and y[start - 1] > 0:
-        start -= 1
-    end = int(peak_idx)
-    while end < n - 1 and np.isfinite(y[end + 1]) and y[end + 1] > 0:
-        end += 1
-    return start, end
-
-
 def _detect_events(df: pd.DataFrame, summary: dict[str, Any], config: Config) -> list[dict[str, Any]]:
+    """Detect peaks from applied_dff without inventing event segmentation bounds."""
     events: list[dict[str, Any]] = []
     event_id = 0
     strategy = str(summary.get("applied_correction_strategy") or "")
@@ -286,39 +276,29 @@ def _detect_events(df: pd.DataFrame, summary: dict[str, Any], config: Config) ->
         fs_hz = _infer_fs_hz(t)
         peaks = get_peak_indices_for_trace(y, fs_hz, config)
         for peak_idx in peaks.astype(int).tolist():
-            start_idx, end_idx = _event_bounds(y, peak_idx)
-            seg_y = y[start_idx : end_idx + 1]
-            seg_t = t[start_idx : end_idx + 1]
-            if seg_y.size < 2:
-                auc = 0.0
-            else:
-                try:
-                    auc = compute_auc_above_threshold(seg_y, 0.0, time_s=seg_t)
-                except Exception:
-                    auc = 0.0
-            start_t = float(t[start_idx]) if start_idx < t.size and np.isfinite(t[start_idx]) else math.nan
             peak_t = float(t[peak_idx]) if peak_idx < t.size and np.isfinite(t[peak_idx]) else math.nan
-            end_t = float(t[end_idx]) if end_idx < t.size and np.isfinite(t[end_idx]) else math.nan
             event_id += 1
             events.append(
                 {
                     "roi": str(chunk_sorted["roi"].iloc[0]),
                     "chunk_id": int(chunk_id),
                     "event_id": int(event_id),
-                    "event_start_sample": int(start_idx),
+                    "event_start_sample": "",
                     "event_peak_sample": int(peak_idx),
-                    "event_end_sample": int(end_idx),
-                    "event_start_time_sec": start_t,
+                    "event_end_sample": "",
+                    "event_start_time_sec": "",
                     "event_peak_time_sec": peak_t,
-                    "event_end_time_sec": end_t,
+                    "event_end_time_sec": "",
                     "event_peak_value": float(y[peak_idx]) if np.isfinite(y[peak_idx]) else math.nan,
                     "event_amplitude": float(y[peak_idx]) if np.isfinite(y[peak_idx]) else math.nan,
-                    "event_auc": float(auc),
-                    "event_duration_sec": float(end_t - start_t) if np.isfinite(start_t) and np.isfinite(end_t) else math.nan,
+                    "event_auc": "",
+                    "event_duration_sec": "",
                     "detection_input_trace": "applied_dff",
                     "detection_input_strategy": strategy,
                     "detection_input_source": source,
                     "detection_preview": True,
+                    "event_boundary_mode": "peak_only_no_event_segmentation",
+                    "event_metrics_available": False,
                 }
             )
     return events
