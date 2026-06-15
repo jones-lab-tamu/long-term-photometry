@@ -159,8 +159,8 @@ def _assert_inside_output_root(base: Path, output_root: Path) -> None:
         raise AppliedDffPipelineError("pipeline output path must be strictly inside output_root")
 
 
-def _paths(output_root: Path, roi: str, strategy: str) -> dict[str, Path]:
-    base = output_root / f"{roi}_{strategy}"
+def _paths(output_root: Path, roi: str, strategy: str, output_name: str | None = None) -> dict[str, Path]:
+    base = output_root / (output_name if output_name is not None else f"{roi}_{strategy}")
     return {
         "base": base,
         "applied": base / "applied",
@@ -266,6 +266,7 @@ def run_applied_dff_pipeline(
     roi: str,
     strategy: str,
     output_root: str | os.PathLike[str],
+    output_name: str | None = None,
     feature_config: str | os.PathLike[str] | None = None,
     overwrite: bool = False,
     dry_run: bool = False,
@@ -278,7 +279,11 @@ def run_applied_dff_pipeline(
     phasic_path = Path(phasic_out).resolve()
     output_root_path = Path(output_root).resolve()
     feature_config_path = Path(feature_config).resolve() if feature_config is not None else None
-    paths = _paths(output_root_path, roi, strategy)
+    paths = (
+        _paths(output_root_path, roi, strategy)
+        if output_name is None
+        else _paths(output_root_path, roi, strategy, output_name=output_name)
+    )
     source_cache = phasic_path / "phasic_trace_cache.h5"
 
     if dry_run:
