@@ -229,15 +229,10 @@ Key guarantees:
 - Does not add auto-selection, GUI controls, production `no_correction` output,
   or global routing.
 
-Recommended manual production workflow:
+One-ROI manual production entry point:
 
-1. Run the advisory candidate audit.
-2. Manually choose `dynamic_fit` or `signal_only_f0` for each ROI.
-3. Run the explicit pipeline orchestrator for the chosen ROI/strategy.
-
-```text
-python tools/audit_applied_dff_strategy_candidates.py --phasic-out ... --output-dir ... --overwrite
-```
+After a strategy has been manually chosen for one ROI, the one-ROI orchestrator
+can be run directly:
 
 ```text
 python tools/run_applied_dff_pipeline.py --phasic-out ... --roi ... --strategy dynamic_fit|signal_only_f0 --output-root ... --overwrite
@@ -245,11 +240,127 @@ python tools/run_applied_dff_pipeline.py --phasic-out ... --roi ... --strategy d
 
 The four underlying tools remain the contract layers and are still useful for
 debugging and stage-specific verification. The advisory audit is the recommended
-pre-orchestrator decision-support step. The orchestrator is the safest manual
-entry point after the user manually chooses an explicit one-ROI, one-strategy
-production run.
+pre-choice decision-support step. The orchestrator remains the
+contract-preserving production unit after the user manually chooses an explicit
+one-ROI, one-strategy production run.
 
-## 7. Current Real-Data Status
+## 7. Explicit Manifest Batch Runner
+
+Tool:
+
+```text
+tools/run_applied_dff_batch.py
+```
+
+Purpose:
+
+- Runs applied_dff production for multiple explicitly specified ROI/strategy
+  pairs.
+- Reads a user-provided manifest.
+- Calls the existing one-ROI orchestrator for each manifest row.
+- Writes combined batch summary and provenance.
+- Does not infer, recommend, choose, or select strategies.
+
+Supported manifest strategies:
+
+```text
+dynamic_fit
+signal_only_f0
+```
+
+Rejected strategies:
+
+```text
+auto
+no_correction
+```
+
+Manifest format:
+
+```csv
+roi,strategy
+CH8,signal_only_f0
+CH9,dynamic_fit
+```
+
+Optional manifest columns:
+
+```text
+output_name
+feature_config
+```
+
+Batch outputs:
+
+```text
+<output-root>/batch/applied_dff_batch_summary.csv
+<output-root>/batch/applied_dff_batch_summary.json
+<output-root>/batch/applied_dff_batch_provenance.json
+```
+
+Per-row outputs remain under:
+
+```text
+<output-root>/<output_name>/
+```
+
+The default `output_name` is:
+
+```text
+<ROI>_<strategy>
+```
+
+Key guarantees:
+
+- Explicit manifest only.
+- No auto-selection.
+- No automatic strategy choice from advisory audit.
+- No `recommended_strategy`, `chosen_strategy`, `selected_strategy`, or
+  `best_strategy` fields.
+- Does not duplicate correction, cache writing, feature extraction, or
+  verification logic.
+- Calls `tools/run_applied_dff_pipeline.py` for each explicit row.
+- Does not add GUI controls.
+- Does not add global routing.
+- Does not implement production `no_correction`.
+- Does not replace legacy features.
+- Hashes source `phasic_trace_cache.h5` before and after.
+- Hashes legacy `<phasic_out>/features/features.csv` before and after when it
+  exists.
+- Refuses unsafe `output_root` and unsafe `output_name` values that could delete
+  source cache or legacy features.
+- Supports dry-run.
+- Stops on first failed row by default.
+- Supports `--continue-on-error` as an explicit option.
+
+Recommended manual production workflow:
+
+1. Run advisory candidate audit.
+2. Manually choose `dynamic_fit` or `signal_only_f0` for each ROI.
+3. Write an explicit ROI/strategy manifest.
+4. Run the explicit batch runner.
+5. Let the batch runner call the explicit one-ROI orchestrator for each row.
+
+```text
+python tools/audit_applied_dff_strategy_candidates.py --phasic-out ... --output-dir ... --overwrite
+```
+
+```text
+python tools/run_applied_dff_batch.py --phasic-out ... --manifest ... --output-root ... --overwrite
+```
+
+```text
+python tools/run_applied_dff_pipeline.py --phasic-out ... --roi ... --strategy dynamic_fit|signal_only_f0 --output-root ... --overwrite
+```
+
+The advisory audit is the recommended pre-choice decision-support step. The user
+manually chooses strategies. The batch runner is the recommended convenience
+layer once ROI/strategy choices are explicit in a manifest. The one-ROI
+orchestrator remains the contract-preserving production unit. The four
+underlying tools remain the contract layers for debugging and stage-specific
+verification.
+
+## 8. Current Real-Data Status
 
 CH8 `signal_only_f0`:
 
@@ -271,11 +382,29 @@ CH9 `dynamic_fit`:
 - Expected detector rows: 581.
 - One row per chunk: true and matches detector.
 
-## 8. Intentionally Unsupported
+Explicit batch runner manual verification:
+
+- Batch rows: CH8 `signal_only_f0`, CH9 `dynamic_fit`.
+- `batch_passed`: true.
+- Rows completed: 2.
+- Rows failed: 0.
+- CH8 applied trace source: `signal_only_f0_dff`.
+- CH9 applied trace source: `dynamic_fit_dff`.
+- `semantic_status`: pass for both rows.
+- `feature_output_granularity`: `chunk_summary` for both rows.
+- `n_chunks_processed`: 581 for both rows.
+- `n_features`: 581 for both rows.
+- `one_feature_row_per_chunk_matches_detector`: true for both rows.
+- Source phasic cache unchanged.
+- Legacy features unchanged.
+- No auto-selection, no strategy chosen, and no inference.
+
+## 9. Intentionally Unsupported
 
 The current chain does not implement:
 
 - Auto strategy selection.
+- Automatic strategy choice from the advisory audit.
 - Production `no_correction` outputs.
 - GUI controls.
 - Global pipeline routing.
@@ -283,20 +412,19 @@ The current chain does not implement:
 - Chunkwise strategy switching.
 - Feature routing from an unverified applied cache.
 - Partial-cache feature extraction by default.
-- Automatic strategy choice from the advisory audit.
 
-## 9. Current Safety Rule
+## 10. Current Safety Rule
 
 All production downstream applied_dff analysis must be explicit-strategy,
 verified-cache, separate-output only.
 
-## 10. Recommended Next Step
+## 11. Recommended Next Step
 
-Add a batch runner for manually specified ROI/strategy pairs.
+Use the advisory-audit plus explicit-manifest batch workflow on representative
+recordings before adding any broader routing.
 
-The batch runner should consume an explicit user-provided mapping of ROI to
-strategy. It should not infer, recommend, or choose strategies. It should call
-the existing explicit orchestrator for each ROI/strategy pair.
+Do not add auto-selection yet. Do not add GUI controls yet. Do not add global
+routing yet. Do not allow the advisory audit to choose strategies automatically.
 
-Do not add auto-selection, GUI controls, production `no_correction` output, or
-global routing before the manual explicit-strategy chain remains stable.
+The next implementation step, if needed later, should be limited to improving
+reporting or manifest ergonomics, not changing strategy selection behavior.
