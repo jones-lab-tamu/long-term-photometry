@@ -86,6 +86,7 @@ SUMMARY_FIELDS = [
     "peak_detector_module",
     "peak_detector_mode",
     "peak_detection_config_source",
+    "peak_detection_config_path",
     "peak_detection_event_signal",
     "peak_detection_sampling_rate_source",
     "peak_detection_config_json",
@@ -298,6 +299,31 @@ def _infer_fs_hz(time_sec: np.ndarray) -> float:
     return float(Config().target_fs_hz)
 
 
+def _load_peak_config_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise AppliedFeaturePreviewError(f"peak config JSON not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise AppliedFeaturePreviewError(f"failed to read peak config JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise AppliedFeaturePreviewError("peak config JSON must be a JSON object")
+    unknown = sorted(set(str(k) for k in payload) - set(PEAK_DETECTION_CONFIG_FIELDS))
+    if unknown:
+        raise AppliedFeaturePreviewError(f"unsupported peak config fields: {unknown}")
+    if "event_signal" in payload and str(payload.get("event_signal")) != "dff":
+        raise AppliedFeaturePreviewError("applied_dff peak preview requires event_signal=dff")
+    return dict(payload)
+
+
+def _build_peak_detection_config(
+    peak_config_json: dict[str, Any] | None,
+) -> Config:
+    values = dict(peak_config_json or {})
+    values["event_signal"] = "dff"
+    return Config(**values)
+
+
 def _peak_detection_config_snapshot(config: Config) -> tuple[dict[str, Any], str, str]:
     snapshot = {field: getattr(config, field) for field in PEAK_DETECTION_CONFIG_FIELDS}
     config_json = json.dumps(_json_safe(snapshot), sort_keys=True, separators=(",", ":"))
@@ -418,6 +444,7 @@ def run_applied_dff_feature_preview(
     output_dir: str | os.PathLike[str] | None = None,
     summary_csv: str | os.PathLike[str] | None = None,
     trace_csv: str | os.PathLike[str] | None = None,
+    peak_config_json: str | os.PathLike[str] | None = None,
     dry_run: bool = False,
     overwrite: bool = False,
     max_preview_events: int | None = None,
@@ -433,6 +460,12 @@ def run_applied_dff_feature_preview(
     )
     trace_path = _resolve_trace_path(applied_dir, applied_summary, trace_csv)
     trace_df = _load_trace(trace_path)
+    peak_config_path = Path(peak_config_json).resolve() if peak_config_json is not None else None
+    supplied_peak_config = (
+        _load_peak_config_json(peak_config_path)
+        if peak_config_path is not None
+        else None
+    )
 
     output_base = Path(output_dir).resolve() if output_dir is not None else applied_dir / "feature_event_preview"
     selected_output = _select_output_dir(output_base, overwrite=overwrite, dry_run=dry_run)
@@ -441,7 +474,7 @@ def run_applied_dff_feature_preview(
     summary_out_json = selected_output / "applied_dff_feature_preview_summary.json"
     plot_path = selected_output / "applied_dff_feature_preview_plot.png"
 
-    cfg = Config(event_signal="dff")
+    cfg = _build_peak_detection_config(supplied_peak_config)
     _config_snapshot, config_json, config_hash = _peak_detection_config_snapshot(cfg)
     events = _detect_events(
         trace_df,
@@ -494,7 +527,12 @@ def run_applied_dff_feature_preview(
         "peak_detector_source_function": PEAK_DETECTOR_SOURCE_FUNCTION,
         "peak_detector_module": PEAK_DETECTOR_MODULE,
         "peak_detector_mode": PEAK_DETECTOR_MODE,
-        "peak_detection_config_source": PEAK_DETECTION_CONFIG_SOURCE,
+        "peak_detection_config_source": (
+            "supplied_peak_config_json"
+            if peak_config_path is not None
+            else PEAK_DETECTION_CONFIG_SOURCE
+        ),
+        "peak_detection_config_path": str(peak_config_path) if peak_config_path is not None else "",
         "peak_detection_event_signal": getattr(cfg, "event_signal", "dff"),
         "peak_detection_sampling_rate_source": PEAK_DETECTION_SAMPLING_RATE_SOURCE,
         "peak_detection_config_json": config_json,
@@ -560,6 +598,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--summary-csv", default=None)
     parser.add_argument("--trace-csv", default=None)
+    parser.add_argument("--peak-config-json", default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--max-preview-events", type=int, default=None)
@@ -577,6 +616,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output_dir,
             summary_csv=args.summary_csv,
             trace_csv=args.trace_csv,
+            peak_config_json=args.peak_config_json,
             dry_run=bool(args.dry_run),
             overwrite=bool(args.overwrite),
             max_preview_events=args.max_preview_events,

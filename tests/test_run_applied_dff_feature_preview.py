@@ -106,6 +106,7 @@ def test_reads_explicit_applied_trace_and_writes_feature_preview(tmp_path):
     assert summary["peak_detector_module"] == "photometry_pipeline.core.feature_extraction"
     assert summary["peak_detector_mode"] == "peak_only_no_event_segmentation"
     assert summary["peak_detection_config_source"] == "preview_default_Config_event_signal_dff"
+    assert summary["peak_detection_config_path"] == ""
     assert summary["peak_detection_event_signal"] == "dff"
     assert summary["peak_detection_sampling_rate_source"] == "inferred_from_time_sec_per_chunk"
     assert summary["peak_detection_config_hash"]
@@ -166,6 +167,79 @@ def test_config_json_is_valid_and_hash_stable_across_repeated_runs(tmp_path):
     assert first_summary["n_events"] == second_summary["n_events"]
 
 
+def test_supplied_peak_config_is_loaded_recorded_and_linked_to_events(tmp_path):
+    applied_dir = _write_applied_preview(tmp_path / "applied")
+    default = run_applied_dff_feature_preview(
+        applied_dir,
+        output_dir=tmp_path / "default",
+        overwrite=True,
+    )
+    config_path = tmp_path / "peak_config.json"
+    config_path.write_text(json.dumps({"event_signal": "dff", "peak_threshold_k": 1.5}), encoding="utf-8")
+
+    supplied = run_applied_dff_feature_preview(
+        applied_dir,
+        output_dir=tmp_path / "supplied",
+        peak_config_json=config_path,
+        overwrite=True,
+    )
+
+    summary = supplied["summary"]
+    config_snapshot = json.loads(summary["peak_detection_config_json"])
+    assert summary["peak_detection_config_source"] == "supplied_peak_config_json"
+    assert summary["peak_detection_config_path"] == str(config_path.resolve())
+    assert config_snapshot["event_signal"] == "dff"
+    assert config_snapshot["peak_threshold_k"] == 1.5
+    assert summary["peak_detection_config_hash"] != default["summary"]["peak_detection_config_hash"]
+    events = pd.read_csv(supplied["events_csv"])
+    assert set(events["peak_detection_config_hash"]) == {summary["peak_detection_config_hash"]}
+    assert events["event_start_sample"].isna().all()
+    assert events["event_end_sample"].isna().all()
+    assert events["event_auc"].isna().all()
+    assert events["event_duration_sec"].isna().all()
+    assert set(events["event_boundary_mode"]) == {"peak_only_no_event_segmentation"}
+    assert set(events["event_metrics_available"].astype(str).str.lower()) == {"false"}
+
+
+def test_supplied_peak_config_json_must_be_object(tmp_path):
+    applied_dir = _write_applied_preview(tmp_path / "applied")
+    config_path = tmp_path / "bad_list.json"
+    config_path.write_text(json.dumps(["peak_threshold_k", 1.5]), encoding="utf-8")
+
+    with pytest.raises(AppliedFeaturePreviewError, match="must be a JSON object"):
+        run_applied_dff_feature_preview(
+            applied_dir,
+            peak_config_json=config_path,
+            overwrite=True,
+        )
+
+
+def test_unknown_peak_config_key_fails_clearly(tmp_path):
+    applied_dir = _write_applied_preview(tmp_path / "applied")
+    config_path = tmp_path / "bad_unknown.json"
+    config_path.write_text(json.dumps({"not_a_real_peak_config_field": 123}), encoding="utf-8")
+
+    with pytest.raises(AppliedFeaturePreviewError, match="unsupported peak config fields"):
+        run_applied_dff_feature_preview(
+            applied_dir,
+            peak_config_json=config_path,
+            overwrite=True,
+        )
+
+
+def test_supplied_event_signal_other_than_dff_fails(tmp_path):
+    applied_dir = _write_applied_preview(tmp_path / "applied")
+    config_path = tmp_path / "bad_signal.json"
+    config_path.write_text(json.dumps({"event_signal": "raw"}), encoding="utf-8")
+
+    with pytest.raises(AppliedFeaturePreviewError, match="requires event_signal=dff"):
+        run_applied_dff_feature_preview(
+            applied_dir,
+            peak_config_json=config_path,
+            overwrite=True,
+        )
+
+
 def test_positive_baseline_multi_peak_trace_does_not_emit_broad_duplicate_windows(tmp_path):
     applied_dir = _write_applied_preview(tmp_path / "applied")
     _replace_trace_with_positive_baseline_multi_peak(applied_dir)
@@ -218,7 +292,11 @@ def test_refuses_no_correction(tmp_path):
     )
 
     with pytest.raises(AppliedFeaturePreviewError, match="no_correction has no corrected applied_dff"):
-        run_applied_dff_feature_preview(applied_dir, overwrite=True)
+        run_applied_dff_feature_preview(
+            applied_dir,
+            peak_config_json=tmp_path / "missing_peak_config.json",
+            overwrite=True,
+        )
 
     assert not (applied_dir / "feature_event_preview" / "applied_dff_feature_events.csv").exists()
 
@@ -233,7 +311,11 @@ def test_refuses_incomplete_applied_trace_by_default(tmp_path):
     )
 
     with pytest.raises(AppliedFeaturePreviewError, match="applied_trace_complete is false"):
-        run_applied_dff_feature_preview(applied_dir, overwrite=True)
+        run_applied_dff_feature_preview(
+            applied_dir,
+            peak_config_json=tmp_path / "missing_peak_config.json",
+            overwrite=True,
+        )
 
 
 def test_allows_partial_only_with_explicit_flag(tmp_path):
@@ -285,13 +367,22 @@ def test_does_not_replace_existing_feature_outputs(tmp_path):
 
 def test_dry_run_writes_no_outputs(tmp_path):
     applied_dir = _write_applied_preview(tmp_path / "applied")
+    config_path = tmp_path / "peak_config.json"
+    config_path.write_text(json.dumps({"event_signal": "dff", "peak_threshold_k": 1.25}), encoding="utf-8")
 
-    report = run_applied_dff_feature_preview(applied_dir, dry_run=True)
+    report = run_applied_dff_feature_preview(
+        applied_dir,
+        peak_config_json=config_path,
+        dry_run=True,
+    )
 
     assert report["dry_run"] is True
     assert report["summary"]["feature_detection_input_trace"] == "applied_dff"
     assert report["summary"]["peak_detector_source_function"] == "get_peak_indices_for_trace"
     assert json.loads(report["summary"]["peak_detection_config_json"])["event_signal"] == "dff"
+    assert json.loads(report["summary"]["peak_detection_config_json"])["peak_threshold_k"] == 1.25
+    assert report["summary"]["peak_detection_config_source"] == "supplied_peak_config_json"
+    assert report["summary"]["peak_detection_config_path"] == str(config_path.resolve())
     assert report["summary"]["peak_detection_config_hash"]
     assert not Path(report["summary_csv"]).exists()
     assert not Path(report["events_csv"]).exists()
