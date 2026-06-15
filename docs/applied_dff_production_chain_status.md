@@ -99,7 +99,75 @@ Verifies:
 - Source phasic cache, applied cache, legacy feature outputs, and applied feature
   outputs are unchanged by verification.
 
-## 5. Explicit End-To-End Orchestrator
+## 5. Advisory Strategy Candidate Audit
+
+Tool:
+
+```text
+tools/audit_applied_dff_strategy_candidates.py
+```
+
+Purpose:
+
+- Provides a read-only advisory audit of explicit applied_dff strategy
+  candidates.
+- Helps the user manually decide whether to run `dynamic_fit` or
+  `signal_only_f0` for each ROI.
+- Summarizes evidence for manual review.
+- Does not choose a strategy.
+- Does not run the production pipeline.
+- Does not write production applied outputs.
+- Does not write feature outputs.
+
+Supported candidate strategies audited:
+
+```text
+dynamic_fit
+signal_only_f0
+```
+
+Outputs:
+
+```text
+applied_dff_strategy_candidate_audit.csv
+applied_dff_strategy_candidate_audit.json
+applied_dff_strategy_candidate_audit_summary.json
+applied_dff_strategy_candidate_audit_provenance.json
+```
+
+Key guarantees:
+
+- Advisory only.
+- No `recommended_strategy`, `chosen_strategy`, `selected_strategy`, or
+  `best_strategy` fields.
+- Does not modify source `phasic_trace_cache.h5`.
+- Does not modify legacy `<phasic_out>/features/features.csv`.
+- Refuses unsafe audit output directories that could delete source cache or
+  legacy features.
+- Does not run `tools/run_applied_dff_pipeline.py`.
+- Does not add auto-selection, GUI controls, production `no_correction`, or
+  global routing.
+
+Candidate evidence summarized for `dynamic_fit`:
+
+- Required `dff` and `time_sec` coverage.
+- Length checks.
+- Non-finite counts.
+- Summary statistics.
+- Blocking issues and cautions.
+
+Candidate evidence summarized for `signal_only_f0`:
+
+- Required `sig_raw` and `time_sec` coverage.
+- In-memory core F0 candidate computation.
+- Viability counts.
+- Confidence counts.
+- Flag counts.
+- Negative candidate dF/F presence.
+- Summary statistics.
+- Blocking issues and cautions.
+
+## 6. Explicit End-To-End Orchestrator
 
 Tool:
 
@@ -161,17 +229,27 @@ Key guarantees:
 - Does not add auto-selection, GUI controls, production `no_correction` output,
   or global routing.
 
-Recommended manual production entry point:
+Recommended manual production workflow:
+
+1. Run the advisory candidate audit.
+2. Manually choose `dynamic_fit` or `signal_only_f0` for each ROI.
+3. Run the explicit pipeline orchestrator for the chosen ROI/strategy.
+
+```text
+python tools/audit_applied_dff_strategy_candidates.py --phasic-out ... --output-dir ... --overwrite
+```
 
 ```text
 python tools/run_applied_dff_pipeline.py --phasic-out ... --roi ... --strategy dynamic_fit|signal_only_f0 --output-root ... --overwrite
 ```
 
 The four underlying tools remain the contract layers and are still useful for
-debugging and stage-specific verification. The orchestrator is the safest manual
-entry point for explicit one-ROI, one-strategy production runs.
+debugging and stage-specific verification. The advisory audit is the recommended
+pre-orchestrator decision-support step. The orchestrator is the safest manual
+entry point after the user manually chooses an explicit one-ROI, one-strategy
+production run.
 
-## 6. Current Real-Data Status
+## 7. Current Real-Data Status
 
 CH8 `signal_only_f0`:
 
@@ -193,7 +271,7 @@ CH9 `dynamic_fit`:
 - Expected detector rows: 581.
 - One row per chunk: true and matches detector.
 
-## 7. Intentionally Unsupported
+## 8. Intentionally Unsupported
 
 The current chain does not implement:
 
@@ -205,20 +283,20 @@ The current chain does not implement:
 - Chunkwise strategy switching.
 - Feature routing from an unverified applied cache.
 - Partial-cache feature extraction by default.
+- Automatic strategy choice from the advisory audit.
 
-## 8. Current Safety Rule
+## 9. Current Safety Rule
 
 All production downstream applied_dff analysis must be explicit-strategy,
 verified-cache, separate-output only.
 
-## 9. Recommended Next Step
+## 10. Recommended Next Step
 
-Add a manual strategy decision/audit report to help choose between `dynamic_fit`
-and `signal_only_f0` for each ROI.
+Add a batch runner for manually specified ROI/strategy pairs.
 
-This should be advisory only. It should not choose or run a strategy
-automatically, add GUI controls, or add global routing. Its purpose should be to
-help the user decide which explicit strategy to pass to the orchestrator.
+The batch runner should consume an explicit user-provided mapping of ROI to
+strategy. It should not infer, recommend, or choose strategies. It should call
+the existing explicit orchestrator for each ROI/strategy pair.
 
 Do not add auto-selection, GUI controls, production `no_correction` output, or
 global routing before the manual explicit-strategy chain remains stable.
