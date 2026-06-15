@@ -33,6 +33,25 @@ def _make_phasic_out(tmp_path: Path, rois=("CH1",)) -> Path:
     return phasic_out
 
 
+def _make_phasic_out_with_chunks(tmp_path: Path, *, n_chunks: int, roi: str = "CH1") -> Path:
+    phasic_out = tmp_path / "_analysis" / "phasic_out"
+    phasic_out.mkdir(parents=True)
+    with h5py.File(phasic_out / "phasic_trace_cache.h5", "w") as h5:
+        meta = h5.create_group("meta")
+        meta.attrs["mode"] = "phasic"
+        meta.attrs["schema_version"] = "1.0"
+        meta.create_dataset("rois", data=np.asarray([roi.encode("utf-8")]))
+        meta.create_dataset("chunk_ids", data=np.arange(n_chunks, dtype=int))
+        meta.create_dataset("source_files", data=np.asarray([f"chunk{x}.csv".encode("utf-8") for x in range(n_chunks)]))
+        roi_group = h5.create_group(f"roi/{roi}")
+        for chunk_id in range(n_chunks):
+            grp = roi_group.create_group(f"chunk_{chunk_id}")
+            grp.create_dataset("time_sec", data=np.arange(4, dtype=float))
+            grp.create_dataset("sig_raw", data=np.asarray([0.8, 1.0, 1.2, 0.9], dtype=float) + chunk_id)
+            grp.create_dataset("dff", data=np.asarray([0.1, 0.2, 0.3, 0.4], dtype=float) + chunk_id)
+    return phasic_out
+
+
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -54,6 +73,26 @@ def _patch_core_f0(monkeypatch, *, flags=None, confidence="high", viability="via
             "signal_only_f0_candidate_viability": viability,
             "signal_only_f0_candidate_confidence": confidence,
             "signal_only_f0_flags": list(flags or []),
+        }
+
+    monkeypatch.setattr(audit.signal_f0_core, "compute_signal_only_f0_candidate", _fake_candidate)
+
+
+def _patch_core_f0_by_chunk(monkeypatch, diagnostics_by_chunk):
+    import tools.audit_applied_dff_strategy_candidates as audit
+
+    def _fake_candidate(signal, time=None, *, return_uncapped_candidate=False, **_kwargs):
+        assert return_uncapped_candidate is True
+        signal_arr = np.asarray(signal, dtype=float).reshape(-1)
+        chunk_id = int(round(float(signal_arr[0] - 0.8)))
+        values = diagnostics_by_chunk.get(chunk_id, {})
+        f0_arr = np.ones_like(signal_arr)
+        return {
+            "signal_only_f0_candidate": np.minimum(f0_arr, signal_arr),
+            "signal_only_f0_candidate_uncapped": f0_arr,
+            "signal_only_f0_candidate_viability": values.get("viability", "viable"),
+            "signal_only_f0_candidate_confidence": values.get("confidence", "high"),
+            "signal_only_f0_flags": list(values.get("flags", [])),
         }
 
     monkeypatch.setattr(audit.signal_f0_core, "compute_signal_only_f0_candidate", _fake_candidate)
@@ -263,3 +302,118 @@ def test_candidate_warnings_and_cautions_are_counted(tmp_path, monkeypatch):
     assert row["review_required"] is True
     assert row["n_candidate_cautions"] > 0
     assert report["summary"]["n_candidates_with_cautions"] > 0
+
+
+def test_compact_signal_only_f0_summaries_are_populated(tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out_with_chunks(tmp_path, n_chunks=4)
+    _patch_core_f0_by_chunk(
+        monkeypatch,
+        {
+            0: {"viability": "viable", "confidence": "high", "flags": []},
+            1: {"viability": "contextual", "confidence": "medium", "flags": ["SIGNAL_ONLY_F0_LARGE_ANCHOR_GAP"]},
+            2: {"viability": "hard_inspect", "confidence": "low", "flags": ["SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_FEW_ANCHORS"]},
+            3: {"viability": "viable", "confidence": "low", "flags": ["SIGNAL_ONLY_F0_ABOVE_SIGNAL_EXCESSIVE"]},
+        },
+    )
+
+    report = audit_applied_dff_strategy_candidates(phasic_out, roi="CH1", output_dir=tmp_path / "audit", overwrite=True)
+
+    row = _row(report, "signal_only_f0")
+    assert row["viability_count_summary"] == "contextual=1; hard_inspect=1; viable=2"
+    assert row["confidence_count_summary"] == "high=1; low=2; medium=1"
+    assert "SIGNAL_ONLY_F0_LARGE_ANCHOR_GAP=1" in row["top_flag_counts"]
+    assert row["n_viable_chunks"] == 2
+    assert row["n_contextual_chunks"] == 1
+    assert row["n_hard_inspect_chunks"] == 1
+    assert row["n_low_confidence_chunks"] == 2
+    assert row["n_medium_confidence_chunks"] == 1
+    assert row["n_high_confidence_chunks"] == 1
+    assert row["n_chunks_with_large_anchor_gap"] == 1
+    assert row["n_chunks_with_few_anchors"] == 1
+    assert row["n_chunks_with_above_signal_excessive"] == 1
+    assert row["example_problem_chunks"] == "1,2,3"
+    csv_row = pd.read_csv(report["audit_csv"]).query("strategy_candidate == 'signal_only_f0'").iloc[0]
+    assert csv_row["viability_count_summary"] == row["viability_count_summary"]
+    json_rows = json.loads(Path(report["audit_json"]).read_text(encoding="utf-8"))["rows"]
+    json_row = [item for item in json_rows if item["strategy_candidate"] == "signal_only_f0"][0]
+    assert json_row["top_flag_counts"] == row["top_flag_counts"]
+
+
+def test_top_flag_counts_are_limited_to_eight_entries(tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out_with_chunks(tmp_path, n_chunks=1)
+    _patch_core_f0_by_chunk(
+        monkeypatch,
+        {
+            0: {
+                "viability": "contextual",
+                "confidence": "medium",
+                "flags": [f"FLAG_{idx}" for idx in range(10)],
+            }
+        },
+    )
+
+    report = audit_applied_dff_strategy_candidates(phasic_out, roi="CH1", output_dir=tmp_path / "audit", overwrite=True)
+
+    entries = [x for x in _row(report, "signal_only_f0")["top_flag_counts"].split("; ") if x]
+    assert len(entries) == 8
+
+
+def test_few_anchor_chunk_count_is_unique_per_chunk(tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out_with_chunks(tmp_path, n_chunks=1)
+    _patch_core_f0_by_chunk(
+        monkeypatch,
+        {
+            0: {
+                "viability": "contextual",
+                "confidence": "medium",
+                "flags": [
+                    "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_FEW_ANCHORS",
+                    "SIGNAL_ONLY_F0_INSUFFICIENT_ANCHORS",
+                ],
+            }
+        },
+    )
+
+    report = audit_applied_dff_strategy_candidates(phasic_out, roi="CH1", output_dir=tmp_path / "audit", overwrite=True)
+
+    row = _row(report, "signal_only_f0")
+    assert row["flag_counts"]["SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_FEW_ANCHORS"] == 1
+    assert row["flag_counts"]["SIGNAL_ONLY_F0_INSUFFICIENT_ANCHORS"] == 1
+    assert row["n_chunks_with_few_anchors"] == 1
+
+
+def test_example_problem_chunks_are_bounded(tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out_with_chunks(tmp_path, n_chunks=25)
+    _patch_core_f0_by_chunk(
+        monkeypatch,
+        {
+            chunk_id: {
+                "viability": "hard_inspect",
+                "confidence": "low",
+                "flags": ["SIGNAL_ONLY_F0_LARGE_ANCHOR_GAP"],
+            }
+            for chunk_id in range(25)
+        },
+    )
+
+    report = audit_applied_dff_strategy_candidates(phasic_out, roi="CH1", output_dir=tmp_path / "audit", overwrite=True)
+
+    chunks = [int(x) for x in _row(report, "signal_only_f0")["example_problem_chunks"].split(",") if x]
+    assert len(chunks) == 20
+    assert chunks == list(range(20))
+
+
+def test_dynamic_fit_rows_have_blank_signal_only_f0_compact_summaries(tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out(tmp_path)
+    _patch_core_f0(monkeypatch)
+
+    report = audit_applied_dff_strategy_candidates(phasic_out, roi="CH1", output_dir=tmp_path / "audit", overwrite=True)
+
+    row = _row(report, "dynamic_fit")
+    assert row["viability_count_summary"] == ""
+    assert row["confidence_count_summary"] == ""
+    assert row["top_flag_counts"] == ""
+    assert row["example_problem_chunks"] == ""
+    assert row["n_viable_chunks"] == 0
+    assert row["n_low_confidence_chunks"] == 0
+    assert row["n_chunks_with_large_anchor_gap"] == 0

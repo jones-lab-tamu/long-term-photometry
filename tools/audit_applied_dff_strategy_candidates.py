@@ -68,6 +68,20 @@ FIELDS = [
     "viability_counts",
     "confidence_counts",
     "flag_counts",
+    "viability_count_summary",
+    "confidence_count_summary",
+    "top_flag_counts",
+    "n_viable_chunks",
+    "n_contextual_chunks",
+    "n_hard_inspect_chunks",
+    "n_low_confidence_chunks",
+    "n_medium_confidence_chunks",
+    "n_high_confidence_chunks",
+    "n_chunks_with_large_anchor_gap",
+    "n_chunks_with_few_anchors",
+    "n_chunks_with_capped_extrapolation",
+    "n_chunks_with_above_signal_excessive",
+    "example_problem_chunks",
     "hdf5_modified_source_phasic_cache",
     "legacy_features_modified",
 ]
@@ -199,6 +213,15 @@ def _flags(value: Any) -> list[str]:
     return [text] if text else []
 
 
+def _format_counter_summary(counter: Counter[str]) -> str:
+    return "; ".join(f"{key}={counter[key]}" for key in sorted(counter) if counter[key])
+
+
+def _format_top_flag_counts(counter: Counter[str], max_items: int = 8) -> str:
+    items = sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:max_items]
+    return "; ".join(f"{key}={value}" for key, value in items if value)
+
+
 def _stats(values: list[np.ndarray]) -> dict[str, Any]:
     if not values:
         return {
@@ -249,6 +272,20 @@ def _base_row(roi: str, strategy: str, cache_path: Path, source_hash: str, n_chu
         "viability_counts": {},
         "confidence_counts": {},
         "flag_counts": {},
+        "viability_count_summary": "",
+        "confidence_count_summary": "",
+        "top_flag_counts": "",
+        "n_viable_chunks": 0,
+        "n_contextual_chunks": 0,
+        "n_hard_inspect_chunks": 0,
+        "n_low_confidence_chunks": 0,
+        "n_medium_confidence_chunks": 0,
+        "n_high_confidence_chunks": 0,
+        "n_chunks_with_large_anchor_gap": 0,
+        "n_chunks_with_few_anchors": 0,
+        "n_chunks_with_capped_extrapolation": 0,
+        "n_chunks_with_above_signal_excessive": 0,
+        "example_problem_chunks": "",
         "hdf5_modified_source_phasic_cache": False,
         "legacy_features_modified": False,
     }
@@ -322,6 +359,8 @@ def _audit_signal_only_f0(cache: h5py.File, roi: str, chunk_ids: list[int], cach
     viability = Counter()
     confidence = Counter()
     flags = Counter()
+    problem_chunk_ids: list[int] = []
+    few_anchor_chunks = 0
     negative = False
     computed = 0
     for chunk_id in chunk_ids:
@@ -376,6 +415,20 @@ def _audit_signal_only_f0(cache: h5py.File, roi: str, chunk_ids: list[int], cach
         confidence[c] += 1
         chunk_flags = _flags(diagnostic.get("signal_only_f0_flags"))
         flags.update(chunk_flags)
+        has_few_anchor_flag = (
+            "SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_FEW_ANCHORS" in chunk_flags
+            or "SIGNAL_ONLY_F0_INSUFFICIENT_ANCHORS" in chunk_flags
+        )
+        if has_few_anchor_flag:
+            few_anchor_chunks += 1
+        if (
+            v.lower() == "hard_inspect"
+            or c.lower() == "low"
+            or "SIGNAL_ONLY_F0_ABOVE_SIGNAL_EXCESSIVE" in chunk_flags
+            or "SIGNAL_ONLY_F0_LARGE_ANCHOR_GAP" in chunk_flags
+            or has_few_anchor_flag
+        ):
+            problem_chunk_ids.append(int(chunk_id))
         if v.lower() not in {"viable", "ok", "acceptable"} or c.lower() == "low" or chunk_flags:
             cautions.append(f"chunk {chunk_id}: viability={v}, confidence={c}, flags={','.join(chunk_flags)}")
     stats = _stats(values)
@@ -387,6 +440,20 @@ def _audit_signal_only_f0(cache: h5py.File, roi: str, chunk_ids: list[int], cach
     row["viability_counts"] = dict(viability)
     row["confidence_counts"] = dict(confidence)
     row["flag_counts"] = dict(flags)
+    row["viability_count_summary"] = _format_counter_summary(viability)
+    row["confidence_count_summary"] = _format_counter_summary(confidence)
+    row["top_flag_counts"] = _format_top_flag_counts(flags)
+    row["n_viable_chunks"] = int(viability.get("viable", 0))
+    row["n_contextual_chunks"] = int(viability.get("contextual", 0))
+    row["n_hard_inspect_chunks"] = int(viability.get("hard_inspect", 0))
+    row["n_low_confidence_chunks"] = int(confidence.get("low", 0))
+    row["n_medium_confidence_chunks"] = int(confidence.get("medium", 0))
+    row["n_high_confidence_chunks"] = int(confidence.get("high", 0))
+    row["n_chunks_with_large_anchor_gap"] = int(flags.get("SIGNAL_ONLY_F0_LARGE_ANCHOR_GAP", 0))
+    row["n_chunks_with_few_anchors"] = int(few_anchor_chunks)
+    row["n_chunks_with_capped_extrapolation"] = int(flags.get("SIGNAL_ONLY_F0_CONFIDENCE_CAPPED_EXTRAPOLATION", 0))
+    row["n_chunks_with_above_signal_excessive"] = int(flags.get("SIGNAL_ONLY_F0_ABOVE_SIGNAL_EXCESSIVE", 0))
+    row["example_problem_chunks"] = ",".join(str(x) for x in problem_chunk_ids[:20])
     row["n_candidate_warnings"] = len(cautions)
     row["n_candidate_cautions"] = len(cautions)
     if blockers:
