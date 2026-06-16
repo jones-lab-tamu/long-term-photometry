@@ -51,6 +51,15 @@ def _combo_texts(combo):
     return [combo.itemText(i) for i in range(combo.count())]
 
 
+def _strategy_combo(window, row: int):
+    return window._applied_dff_table.cellWidget(row, 4)
+
+
+def _table_text(window, row: int, col: int) -> str:
+    item = window._applied_dff_table.item(row, col)
+    return item.text() if item is not None else ""
+
+
 def test_applied_dff_loads_actual_phasic_cache_rois(window, tmp_path):
     phasic_out = _make_phasic_out(tmp_path / "run", ["ROI_A", "Z9"])
 
@@ -58,7 +67,8 @@ def test_applied_dff_loads_actual_phasic_cache_rois(window, tmp_path):
     window._on_applied_dff_load_rois()
 
     assert window._applied_dff_table.rowCount() == 2
-    assert [window._applied_dff_table.item(i, 0).text() for i in range(2)] == ["ROI_A", "Z9"]
+    assert [window._applied_dff_table.item(i, 1).text() for i in range(2)] == ["ROI_A", "Z9"]
+    assert [window._applied_dff_row_included(i) for i in range(2)] == [True, True]
 
 
 def test_applied_dff_missing_phasic_cache_refuses(window, tmp_path):
@@ -77,8 +87,8 @@ def test_applied_dff_manifest_generation_requires_explicit_supported_strategies(
     window._applied_dff_output_root_edit.setText(str(output_root))
     window._on_applied_dff_load_rois()
 
-    first_combo = window._applied_dff_table.cellWidget(0, 3)
-    second_combo = window._applied_dff_table.cellWidget(1, 3)
+    first_combo = _strategy_combo(window, 0)
+    second_combo = _strategy_combo(window, 1)
     assert "auto" not in _combo_texts(first_combo)
     first_combo.setCurrentText("dynamic_fit")
     second_combo.setCurrentText("signal_only_f0")
@@ -103,6 +113,77 @@ def test_applied_dff_blank_strategy_refuses_before_batch(window, tmp_path):
         window._applied_dff_selected_manifest_rows()
 
 
+def test_applied_dff_manifest_includes_only_checked_rois(window, tmp_path):
+    phasic_out = _make_phasic_out(tmp_path / "run", ["R1", "R2", "R3"])
+    output_root = tmp_path / "out"
+    window._applied_dff_phasic_out_edit.setText(str(phasic_out))
+    window._applied_dff_output_root_edit.setText(str(output_root))
+    window._on_applied_dff_load_rois()
+
+    window._set_applied_dff_row_included(0, False)
+    _strategy_combo(window, 1).setCurrentText("dynamic_fit")
+    _strategy_combo(window, 2).setCurrentText("signal_only_f0")
+
+    manifest = Path(window._write_applied_dff_manifest())
+    rows = list(csv.DictReader(manifest.open("r", encoding="utf-8")))
+
+    assert rows == [
+        {"roi": "R2", "strategy": "dynamic_fit"},
+        {"roi": "R3", "strategy": "signal_only_f0"},
+    ]
+    assert _table_text(window, 0, 6) == "omitted"
+
+
+def test_applied_dff_unchecked_rows_do_not_require_strategy(window, tmp_path):
+    phasic_out = _make_phasic_out(tmp_path / "run", ["R1", "R2"])
+    output_root = tmp_path / "out"
+    window._applied_dff_phasic_out_edit.setText(str(phasic_out))
+    window._applied_dff_output_root_edit.setText(str(output_root))
+    window._on_applied_dff_load_rois()
+
+    window._set_applied_dff_row_included(0, False)
+    _strategy_combo(window, 1).setCurrentText("dynamic_fit")
+
+    rows = window._applied_dff_selected_manifest_rows()
+
+    assert rows == [{"roi": "R2", "strategy": "dynamic_fit"}]
+    assert _table_text(window, 0, 6) == "omitted"
+
+
+def test_applied_dff_checked_row_without_strategy_refuses(window, tmp_path):
+    phasic_out = _make_phasic_out(tmp_path / "run", ["R1", "R2"])
+    window._applied_dff_phasic_out_edit.setText(str(phasic_out))
+    window._applied_dff_output_root_edit.setText(str(tmp_path / "out"))
+    window._on_applied_dff_load_rois()
+    window._set_applied_dff_row_included(0, False)
+
+    with pytest.raises(ValueError, match="Select dynamic_fit or signal_only_f0 for ROI R2"):
+        window._applied_dff_selected_manifest_rows()
+
+
+def test_applied_dff_no_included_rows_refuses(window, tmp_path):
+    phasic_out = _make_phasic_out(tmp_path / "run", ["R1", "R2"])
+    window._applied_dff_phasic_out_edit.setText(str(phasic_out))
+    window._applied_dff_output_root_edit.setText(str(tmp_path / "out"))
+    window._on_applied_dff_load_rois()
+    window._on_applied_dff_exclude_all()
+
+    with pytest.raises(ValueError, match="Include at least one ROI"):
+        window._applied_dff_selected_manifest_rows()
+
+
+def test_applied_dff_set_all_dynamic_fit_affects_checked_rows_only(window, tmp_path):
+    phasic_out = _make_phasic_out(tmp_path / "run", ["R1", "R2"])
+    window._applied_dff_phasic_out_edit.setText(str(phasic_out))
+    window._on_applied_dff_load_rois()
+    window._set_applied_dff_row_included(1, False)
+
+    window._on_applied_dff_set_all_dynamic_fit()
+
+    assert _strategy_combo(window, 0).currentText() == "dynamic_fit"
+    assert _strategy_combo(window, 1).currentText() == ""
+
+
 @pytest.mark.parametrize(
     "relative_output",
     [
@@ -120,7 +201,7 @@ def test_applied_dff_unsafe_output_root_refuses_before_manifest_write(window, tm
     window._applied_dff_phasic_out_edit.setText(str(phasic_out))
     window._applied_dff_output_root_edit.setText(str(output_root))
     window._on_applied_dff_load_rois()
-    window._applied_dff_table.cellWidget(0, 3).setCurrentText("dynamic_fit")
+    _strategy_combo(window, 0).setCurrentText("dynamic_fit")
 
     with pytest.raises(ValueError, match="separate from the source phasic_out"):
         window._write_applied_dff_manifest()
@@ -160,7 +241,7 @@ def test_applied_dff_dry_run_calls_existing_batch_runner(window, tmp_path, monke
     window._applied_dff_phasic_out_edit.setText(str(phasic_out))
     window._applied_dff_output_root_edit.setText(str(output_root))
     window._on_applied_dff_load_rois()
-    window._applied_dff_table.cellWidget(0, 3).setCurrentText("dynamic_fit")
+    _strategy_combo(window, 0).setCurrentText("dynamic_fit")
 
     window._on_applied_dff_dry_run()
 
@@ -170,7 +251,44 @@ def test_applied_dff_dry_run_calls_existing_batch_runner(window, tmp_path, monke
     assert Path(calls[0]["manifest"]).exists()
     assert (output_root / "gui_manifest" / "explicit_applied_dff_manifest.csv").exists()
     assert (output_root / "applied_dff_gui_provenance.json").exists()
-    assert window._applied_dff_table.item(0, 5).text() == "dry-run planned"
+    assert window._applied_dff_table.item(0, 6).text() == "dry-run planned"
+
+
+def test_applied_dff_dry_run_uses_only_included_rows(window, tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out(tmp_path / "run", ["R1", "R2", "R3"])
+    output_root = tmp_path / "out"
+    manifests = []
+
+    def _fake_batch(phasic, *, manifest, output_root, dry_run=False, **kwargs):
+        manifests.append(list(csv.DictReader(open(manifest, "r", encoding="utf-8"))))
+        return {
+            "dry_run": True,
+            "n_manifest_rows": 2,
+            "planned_rows": [
+                {"roi": "R1", "strategy": "dynamic_fit"},
+                {"roi": "R3", "strategy": "signal_only_f0"},
+            ],
+        }
+
+    monkeypatch.setattr("gui.main_window.run_applied_dff_batch", _fake_batch)
+    window._applied_dff_phasic_out_edit.setText(str(phasic_out))
+    window._applied_dff_output_root_edit.setText(str(output_root))
+    window._on_applied_dff_load_rois()
+    _strategy_combo(window, 0).setCurrentText("dynamic_fit")
+    window._set_applied_dff_row_included(1, False)
+    _strategy_combo(window, 2).setCurrentText("signal_only_f0")
+
+    window._on_applied_dff_dry_run()
+
+    assert manifests == [
+        [
+            {"roi": "R1", "strategy": "dynamic_fit"},
+            {"roi": "R3", "strategy": "signal_only_f0"},
+        ]
+    ]
+    assert _table_text(window, 1, 6) == "omitted"
+    assert _table_text(window, 0, 6) == "dry-run planned"
+    assert _table_text(window, 2, 6) == "dry-run planned"
 
 
 def test_applied_dff_batch_calls_existing_runner_and_parses_results(window, tmp_path, monkeypatch):
@@ -228,14 +346,14 @@ def test_applied_dff_batch_calls_existing_runner_and_parses_results(window, tmp_
     window._applied_dff_phasic_out_edit.setText(str(phasic_out))
     window._applied_dff_output_root_edit.setText(str(output_root))
     window._on_applied_dff_load_rois()
-    window._applied_dff_table.cellWidget(0, 3).setCurrentText("dynamic_fit")
+    _strategy_combo(window, 0).setCurrentText("dynamic_fit")
 
     window._on_applied_dff_dry_run()
     window._on_applied_dff_run_batch()
 
     assert calls == [{"dry_run": True, "overwrite": False}, {"dry_run": False, "overwrite": True}]
-    assert window._applied_dff_table.item(0, 4).text() == "dynamic_fit"
-    status = window._applied_dff_table.item(0, 5).text()
+    assert window._applied_dff_table.item(0, 5).text() == "dynamic_fit"
+    status = window._applied_dff_table.item(0, 6).text()
     assert "semantic=pass" in status
     assert "chunks=2" in status
     assert "warning=none" in status
@@ -249,10 +367,39 @@ def test_applied_dff_strategy_selection_resets_when_phasic_out_changes(window, t
     second = _make_phasic_out(tmp_path / "run2", ["R2"])
     window._applied_dff_phasic_out_edit.setText(str(first))
     window._on_applied_dff_load_rois()
-    window._applied_dff_table.cellWidget(0, 3).setCurrentText("dynamic_fit")
+    _strategy_combo(window, 0).setCurrentText("dynamic_fit")
     assert window._applied_dff_table.rowCount() == 1
 
     window._applied_dff_phasic_out_edit.setText(str(second))
 
     assert window._applied_dff_table.rowCount() == 0
     assert window._applied_dff_dry_run_ok is False
+
+
+def test_applied_dff_include_change_invalidates_successful_dry_run(window, tmp_path, monkeypatch):
+    phasic_out = _make_phasic_out(tmp_path / "run", ["R1", "R2"])
+    output_root = tmp_path / "out"
+
+    def _fake_batch(phasic, *, manifest, output_root, dry_run=False, **kwargs):
+        return {
+            "dry_run": True,
+            "n_manifest_rows": 2,
+            "planned_rows": [
+                {"roi": "R1", "strategy": "dynamic_fit"},
+                {"roi": "R2", "strategy": "dynamic_fit"},
+            ],
+        }
+
+    monkeypatch.setattr("gui.main_window.run_applied_dff_batch", _fake_batch)
+    window._applied_dff_phasic_out_edit.setText(str(phasic_out))
+    window._applied_dff_output_root_edit.setText(str(output_root))
+    window._on_applied_dff_load_rois()
+    _strategy_combo(window, 0).setCurrentText("dynamic_fit")
+    _strategy_combo(window, 1).setCurrentText("dynamic_fit")
+    window._on_applied_dff_dry_run()
+    assert window._applied_dff_dry_run_ok is True
+
+    window._set_applied_dff_row_included(1, False)
+
+    assert window._applied_dff_dry_run_ok is False
+    assert _table_text(window, 1, 6) == "omitted"

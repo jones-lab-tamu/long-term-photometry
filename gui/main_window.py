@@ -1178,6 +1178,7 @@ class MainWindow(QMainWindow):
         self._applied_dff_output_root = ""
         self._applied_dff_dry_run_ok = False
         self._applied_dff_last_report: dict | None = None
+        self._applied_dff_table_signal_connected = False
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(250)
         self._elapsed_timer.timeout.connect(self._on_elapsed_timer_tick)
@@ -5089,38 +5090,88 @@ class MainWindow(QMainWindow):
 
     def _populate_applied_dff_roi_table(self, rois: list[str]) -> None:
         self._applied_dff_rois = list(rois)
+        was_blocked = self._applied_dff_table.blockSignals(True)
         self._applied_dff_table.setRowCount(len(rois))
         for row, roi in enumerate(rois):
-            for col, text in enumerate([roi, "", "manual only", "", "", "not run"]):
+            for col, text in enumerate(["", roi, "", "manual only", "", "", "not run"]):
                 item = QTableWidgetItem(text)
                 if col == 0:
+                    item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    item.setCheckState(Qt.Checked)
+                if col == 1:
                     item.setData(Qt.UserRole, roi)
                 self._applied_dff_table.setItem(row, col, item)
             combo = QComboBox()
             combo.addItem("")
             combo.addItem("dynamic_fit")
             combo.addItem("signal_only_f0")
-            combo.currentIndexChanged.connect(lambda _idx: self._mark_applied_dff_manifest_dirty())
-            self._applied_dff_table.setCellWidget(row, 3, combo)
+            combo.currentIndexChanged.connect(
+                lambda _idx, row=row: self._on_applied_dff_strategy_changed(row)
+            )
+            self._applied_dff_table.setCellWidget(row, 4, combo)
+        self._applied_dff_table.blockSignals(was_blocked)
         self._applied_dff_manifest_path = ""
         self._applied_dff_manifest_label.setText("(manifest not saved)")
+        if not self._applied_dff_table_signal_connected:
+            self._applied_dff_table.itemChanged.connect(self._on_applied_dff_table_item_changed)
+            self._applied_dff_table_signal_connected = True
         self._mark_applied_dff_manifest_dirty()
 
     def _on_applied_dff_set_all_dynamic_fit(self) -> None:
         for row in range(self._applied_dff_table.rowCount()):
-            combo = self._applied_dff_table.cellWidget(row, 3)
-            if isinstance(combo, QComboBox):
+            combo = self._applied_dff_table.cellWidget(row, 4)
+            if isinstance(combo, QComboBox) and self._applied_dff_row_included(row):
                 combo.setCurrentText("dynamic_fit")
         self._mark_applied_dff_manifest_dirty()
 
     def _on_applied_dff_clear_strategies(self) -> None:
         for row in range(self._applied_dff_table.rowCount()):
-            combo = self._applied_dff_table.cellWidget(row, 3)
+            combo = self._applied_dff_table.cellWidget(row, 4)
             if isinstance(combo, QComboBox):
                 combo.setCurrentText("")
-            self._set_applied_dff_table_text(row, 4, "")
-            self._set_applied_dff_table_text(row, 5, "not run")
+            self._set_applied_dff_table_text(row, 5, "")
+            self._set_applied_dff_table_text(row, 6, "not run")
         self._mark_applied_dff_manifest_dirty()
+
+    def _on_applied_dff_include_all(self) -> None:
+        for row in range(self._applied_dff_table.rowCount()):
+            self._set_applied_dff_row_included(row, True)
+        self._mark_applied_dff_manifest_dirty()
+
+    def _on_applied_dff_exclude_all(self) -> None:
+        for row in range(self._applied_dff_table.rowCount()):
+            self._set_applied_dff_row_included(row, False)
+        self._mark_applied_dff_manifest_dirty()
+
+    def _on_applied_dff_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() != 0:
+            return
+        row = item.row()
+        if self._applied_dff_row_included(row):
+            self._set_applied_dff_table_text(row, 5, "")
+            self._set_applied_dff_table_text(row, 6, "not run")
+        else:
+            self._set_applied_dff_table_text(row, 5, "")
+            self._set_applied_dff_table_text(row, 6, "omitted")
+        self._mark_applied_dff_manifest_dirty()
+
+    def _on_applied_dff_strategy_changed(self, row: int) -> None:
+        if self._applied_dff_row_included(row):
+            self._set_applied_dff_table_text(row, 5, "")
+            self._set_applied_dff_table_text(row, 6, "not run")
+        else:
+            self._set_applied_dff_table_text(row, 5, "")
+            self._set_applied_dff_table_text(row, 6, "omitted")
+        self._mark_applied_dff_manifest_dirty()
+
+    def _applied_dff_row_included(self, row: int) -> bool:
+        item = self._applied_dff_table.item(row, 0)
+        return item is not None and item.checkState() == Qt.Checked
+
+    def _set_applied_dff_row_included(self, row: int, included: bool) -> None:
+        item = self._applied_dff_table.item(row, 0)
+        if item is not None:
+            item.setCheckState(Qt.Checked if included else Qt.Unchecked)
 
     def _set_applied_dff_table_text(self, row: int, col: int, text: str) -> None:
         item = self._applied_dff_table.item(row, col)
@@ -5134,15 +5185,21 @@ class MainWindow(QMainWindow):
         if self._applied_dff_table.rowCount() == 0:
             raise ValueError("Load ROIs before creating an applied-dF/F manifest.")
         for row in range(self._applied_dff_table.rowCount()):
-            roi_item = self._applied_dff_table.item(row, 0)
+            if not self._applied_dff_row_included(row):
+                self._set_applied_dff_table_text(row, 5, "")
+                self._set_applied_dff_table_text(row, 6, "omitted")
+                continue
+            roi_item = self._applied_dff_table.item(row, 1)
             roi = str(roi_item.text()).strip() if roi_item is not None else ""
-            combo = self._applied_dff_table.cellWidget(row, 3)
+            combo = self._applied_dff_table.cellWidget(row, 4)
             strategy = combo.currentText().strip() if isinstance(combo, QComboBox) else ""
             if not roi:
                 raise ValueError(f"Missing ROI in row {row + 1}.")
             if strategy not in {"dynamic_fit", "signal_only_f0"}:
                 raise ValueError(f"Select dynamic_fit or signal_only_f0 for ROI {roi} before running.")
             rows.append({"roi": roi, "strategy": strategy})
+        if not rows:
+            raise ValueError("Include at least one ROI before running applied-dF/F.")
         return rows
 
     def _applied_dff_output_root_path(self) -> str:
@@ -5294,12 +5351,12 @@ class MainWindow(QMainWindow):
             strategy = str(planned_row.get("strategy", ""))
             row = self._applied_dff_row_for_roi(roi)
             if row is not None:
-                self._set_applied_dff_table_text(row, 4, strategy)
-                self._set_applied_dff_table_text(row, 5, "dry-run planned")
+                self._set_applied_dff_table_text(row, 5, strategy)
+                self._set_applied_dff_table_text(row, 6, "dry-run planned")
 
     def _applied_dff_row_for_roi(self, roi: str) -> int | None:
         for row in range(self._applied_dff_table.rowCount()):
-            item = self._applied_dff_table.item(row, 0)
+            item = self._applied_dff_table.item(row, 1)
             if item is not None and item.text() == roi:
                 return row
         return None
@@ -5324,8 +5381,8 @@ class MainWindow(QMainWindow):
                 review_required = applied_summary.get("applied_trace_review_required", "")
                 flags = applied_summary.get("applied_trace_flags", "")
                 detail = f"{detail}; warning={warning_level}; review={review_required}; flags={flags}"
-            self._set_applied_dff_table_text(table_row, 4, strategy)
-            self._set_applied_dff_table_text(table_row, 5, detail)
+            self._set_applied_dff_table_text(table_row, 5, strategy)
+            self._set_applied_dff_table_text(table_row, 6, detail)
 
         batch_passed = bool(summary.get("batch_passed"))
         completed = summary.get("n_rows_completed", 0)
@@ -10867,9 +10924,10 @@ class MainWindow(QMainWindow):
         button_row.addStretch()
         layout.addLayout(button_row)
 
-        self._applied_dff_table = QTableWidget(0, 6)
+        self._applied_dff_table = QTableWidget(0, 7)
         self._applied_dff_table.setHorizontalHeaderLabels(
             [
+                "Include?",
                 "ROI",
                 "Audit status",
                 "Proposed strategy",
@@ -10890,6 +10948,12 @@ class MainWindow(QMainWindow):
         self._applied_dff_set_dynamic_btn = QPushButton("Set all to dynamic_fit")
         self._applied_dff_set_dynamic_btn.clicked.connect(self._on_applied_dff_set_all_dynamic_fit)
         strategy_row.addWidget(self._applied_dff_set_dynamic_btn)
+        self._applied_dff_include_all_btn = QPushButton("Include all")
+        self._applied_dff_include_all_btn.clicked.connect(self._on_applied_dff_include_all)
+        strategy_row.addWidget(self._applied_dff_include_all_btn)
+        self._applied_dff_exclude_all_btn = QPushButton("Exclude all")
+        self._applied_dff_exclude_all_btn.clicked.connect(self._on_applied_dff_exclude_all)
+        strategy_row.addWidget(self._applied_dff_exclude_all_btn)
         self._applied_dff_clear_btn = QPushButton("Clear strategies")
         self._applied_dff_clear_btn.clicked.connect(self._on_applied_dff_clear_strategies)
         strategy_row.addWidget(self._applied_dff_clear_btn)
