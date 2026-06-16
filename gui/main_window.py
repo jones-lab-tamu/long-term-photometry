@@ -5743,6 +5743,61 @@ class MainWindow(QMainWindow):
         )
         return out
 
+    @staticmethod
+    def _format_rwd_incomplete_failure_details(failure: dict) -> str:
+        lines = [
+            f"  chunk index: {int(failure['chunk_index'])}",
+            f"  file: {failure['csv_path']}",
+        ]
+        if "required_strict_grid_end_s" in failure:
+            lines.extend(
+                [
+                    f"  required strict grid end: {float(failure['required_strict_grid_end_s']):.4f} s",
+                    f"  observed raw end: {float(failure['observed_raw_end_s']):.4f} s",
+                    f"  missing coverage: {float(failure['missing_coverage_s']):.4f} s",
+                ]
+            )
+        if "nominal_duration_sec" in failure:
+            lines.extend(
+                [
+                    f"  nominal required duration: {float(failure['nominal_duration_sec']):.4f} s",
+                    "  observed sample_count/fs duration: "
+                    f"{float(failure['observed_sample_count_over_fs_duration_sec']):.4f} s",
+                    f"  observed timestamp span: {float(failure['observed_timestamp_span_sec']):.4f} s",
+                    f"  missing duration: {float(failure['missing_duration_s']):.4f} s",
+                ]
+            )
+        return "\n".join(lines)
+
+    @classmethod
+    def _format_rwd_final_incomplete_failure(cls, failure: dict) -> str:
+        return (
+            "RWD contract validation failed on the final chronological chunk.\n\n"
+            "Failed chunk:\n"
+            f"{cls._format_rwd_incomplete_failure_details(failure)}\n\n"
+            "This appears to be an incomplete final acquisition window.\n"
+            "No files were excluded because:\n"
+            "  exclude_incomplete_final_rwd_chunk = false\n\n"
+            "To exclude only this final partial chunk and continue, enable "
+            "'Exclude incomplete final RWD chunk' in the RWD validation options, "
+            "then rerun validation/analysis.\n"
+            "Config key for provenance/debugging:\n"
+            "  exclude_incomplete_final_rwd_chunk = true\n\n"
+            "All raw files remain unmodified."
+        )
+
+    @classmethod
+    def _format_rwd_nonfinal_incomplete_failure(cls, failure: dict) -> str:
+        return (
+            "RWD contract validation failed on a non-final chunk.\n\n"
+            "Failed chunk:\n"
+            f"{cls._format_rwd_incomplete_failure_details(failure)}\n\n"
+            "This chunk is not the final chronological chunk, so it cannot be "
+            "automatically excluded.\n"
+            "Please inspect, remove/quarantine the bad file, or rerun acquisition/export.\n\n"
+            "All raw files remain unmodified."
+        )
+
     def _infer_rwd_dataset_contract_overrides(self, fmt_text: str) -> dict:
         """
         Infer RWD acquisition contract from selected input data.
@@ -5826,6 +5881,7 @@ class MainWindow(QMainWindow):
         hard_duration_tol_sec = max(5.0, 0.01 * max(nominal_duration, 1.0))
         fs_warnings: list[dict[str, object]] = []
         duration_warnings: list[dict[str, object]] = []
+        incomplete_acquisition_failures: list[dict[str, object]] = []
         t_cross = self._timing_start("rwd_contract_cross_chunk_validation")
         for idx, contract in enumerate(contracts):
             path = contract["csv_path"]
@@ -5876,14 +5932,33 @@ class MainWindow(QMainWindow):
             timestamp_duration_delta = abs(float(contract["timestamp_duration_sec"]) - nominal_duration)
             duration_for_policy = max(duration_delta, timestamp_duration_delta)
             if duration_for_policy > hard_duration_tol_sec:
-                raise ValueError(
-                    "Inconsistent RWD contract across chunks: "
-                    f"chunk_duration mismatch at chunk {idx} ({path}). "
-                    f"Expected nominal {nominal_duration:.9f} ({nominal_source}), "
-                    f"got sample_count/fs {contract['chunk_duration_sec']:.9f} "
-                    f"and timestamp span {contract['timestamp_duration_sec']:.9f}; "
-                    f"hard tolerance {hard_duration_tol_sec:.3f}s."
+                observed_sample_duration = float(contract["chunk_duration_sec"])
+                observed_timestamp_duration = float(contract["timestamp_duration_sec"])
+                duration_shortfall = nominal_duration - max(
+                    observed_sample_duration,
+                    observed_timestamp_duration,
                 )
+                if observed_sample_duration < nominal_duration and observed_timestamp_duration < nominal_duration:
+                    incomplete_acquisition_failures.append(
+                        {
+                            "chunk_index": int(idx),
+                            "csv_path": str(path),
+                            "reason": "chunk_duration_shortfall",
+                            "nominal_duration_sec": float(nominal_duration),
+                            "observed_sample_count_over_fs_duration_sec": observed_sample_duration,
+                            "observed_timestamp_span_sec": observed_timestamp_duration,
+                            "missing_duration_s": float(max(duration_shortfall, 0.0)),
+                        }
+                    )
+                else:
+                    raise ValueError(
+                        "Inconsistent RWD contract across chunks: "
+                        f"chunk_duration mismatch at chunk {idx} ({path}). "
+                        f"Expected nominal {nominal_duration:.9f} ({nominal_source}), "
+                        f"got sample_count/fs {contract['chunk_duration_sec']:.9f} "
+                        f"and timestamp span {contract['timestamp_duration_sec']:.9f}; "
+                        f"hard tolerance {hard_duration_tol_sec:.3f}s."
+                    )
             if duration_for_policy > warning_duration_tol_sec:
                 duration_warnings.append(
                     {
@@ -5915,15 +5990,108 @@ class MainWindow(QMainWindow):
                 strict_end_threshold = strict_grid_end - strict_tol
             if raw_end + 1e-9 < strict_end_threshold:
                 missing_sec = strict_grid_end - raw_end
-                raise ValueError(
-                    "Inconsistent RWD contract across chunks: "
-                    f"strict end coverage failure at chunk {idx} ({path}). "
-                    f"raw_end {raw_end:.4f}s < required grid_end {strict_grid_end:.4f}s; "
-                    f"missing {missing_sec:.4f}s. Current strict RWD policy requires full "
-                    f"chunk coverage for target_fs_hz={nominal_fs:.9f}, "
-                    f"chunk_duration_sec={nominal_duration:.9f}."
+                incomplete_acquisition_failures.append(
+                    {
+                        "chunk_index": int(idx),
+                        "csv_path": str(path),
+                        "reason": "strict_grid_coverage_shortfall",
+                        "required_strict_grid_end_s": float(strict_grid_end),
+                        "observed_raw_end_s": float(raw_end),
+                        "missing_coverage_s": float(missing_sec),
+                    }
                 )
         self._timing_end("rwd_contract_cross_chunk_validation", t_cross)
+
+        exclude_final = bool(
+            (
+                getattr(self, "_exclude_incomplete_final_rwd_chunk_cb", None)
+                and self._exclude_incomplete_final_rwd_chunk_cb.isChecked()
+            )
+            or getattr(
+                self._active_baseline_config(),
+                "exclude_incomplete_final_rwd_chunk",
+                False,
+            )
+        )
+        excluded_chunks: list[dict[str, object]] = []
+        final_chunk_index = len(contracts) - 1
+        non_final_chunks_all_passed = not any(
+            int(x["chunk_index"]) != final_chunk_index for x in incomplete_acquisition_failures
+        )
+        if incomplete_acquisition_failures:
+            failed_indices = {int(x["chunk_index"]) for x in incomplete_acquisition_failures}
+            first_failure = incomplete_acquisition_failures[0]
+            if failed_indices != {final_chunk_index}:
+                non_final_failure = next(
+                    (
+                        x
+                        for x in incomplete_acquisition_failures
+                        if int(x["chunk_index"]) != final_chunk_index
+                    ),
+                    first_failure,
+                )
+                raise ValueError(self._format_rwd_nonfinal_incomplete_failure(non_final_failure))
+            if not exclude_final:
+                raise ValueError(self._format_rwd_final_incomplete_failure(first_failure))
+            coverage_failure = next(
+                (
+                    x
+                    for x in incomplete_acquisition_failures
+                    if str(x.get("reason")) == "strict_grid_coverage_shortfall"
+                ),
+                None,
+            )
+            duration_failure = next(
+                (
+                    x
+                    for x in incomplete_acquisition_failures
+                    if str(x.get("reason")) == "chunk_duration_shortfall"
+                ),
+                None,
+            )
+            reason_details = coverage_failure or duration_failure or first_failure
+            excluded_chunks = [
+                {
+                    "chunk_index": int(reason_details["chunk_index"]),
+                    "file": str(reason_details["csv_path"]),
+                    "reason": "incomplete_final_rwd_chunk",
+                    "required_strict_grid_end_s": (
+                        float(coverage_failure["required_strict_grid_end_s"])
+                        if coverage_failure is not None
+                        else None
+                    ),
+                    "observed_raw_end_s": (
+                        float(coverage_failure["observed_raw_end_s"])
+                        if coverage_failure is not None
+                        else None
+                    ),
+                    "missing_coverage_s": (
+                        float(coverage_failure["missing_coverage_s"])
+                        if coverage_failure is not None
+                        else None
+                    ),
+                    "nominal_duration_sec": (
+                        float(duration_failure["nominal_duration_sec"])
+                        if duration_failure is not None
+                        else None
+                    ),
+                    "observed_sample_count_over_fs_duration_sec": (
+                        float(duration_failure["observed_sample_count_over_fs_duration_sec"])
+                        if duration_failure is not None
+                        else None
+                    ),
+                    "observed_timestamp_span_sec": (
+                        float(duration_failure["observed_timestamp_span_sec"])
+                        if duration_failure is not None
+                        else None
+                    ),
+                    "missing_duration_s": (
+                        float(duration_failure["missing_duration_s"])
+                        if duration_failure is not None
+                        else None
+                    ),
+                }
+            ]
 
         out = {
             "target_fs_hz": float(round(nominal_fs, 9)),
@@ -5931,7 +6099,27 @@ class MainWindow(QMainWindow):
             "rwd_time_col": str(base["time_col"]),
             "uv_suffix": str(base["uv_suffix"]),
             "sig_suffix": str(base["sig_suffix"]),
+            "exclude_incomplete_final_rwd_chunk": bool(exclude_final),
+            "rwd_contract_validation": {
+                "status": (
+                    "completed_with_excluded_final_chunk"
+                    if excluded_chunks
+                    else "passed"
+                ),
+                "strict_contract_enforced": True,
+                "exclude_incomplete_final_rwd_chunk": bool(exclude_final),
+                "excluded_chunks": excluded_chunks,
+                "non_final_chunks_all_passed": bool(non_final_chunks_all_passed),
+            },
         }
+        if excluded_chunks:
+            out["rwd_excluded_source_files"] = [str(x["file"]) for x in excluded_chunks]
+            warning = (
+                "WARNING: Excluded incomplete final RWD chunk by explicit policy. "
+                f"Analysis used {len(contracts) - 1} valid chunks. "
+                "1 final chunk was excluded. See provenance/status output for details."
+            )
+            self._append_run_log(warning)
         self._rwd_contract_cache = {
             "input_path": input_path,
             "format": fmt_text,
@@ -5941,6 +6129,13 @@ class MainWindow(QMainWindow):
             "fs_nominal_source": nominal_fs_source,
             "duration_warnings": duration_warnings,
             "duration_nominal_source": nominal_source,
+            "strict_coverage_failures": [
+                x
+                for x in incomplete_acquisition_failures
+                if str(x.get("reason")) == "strict_grid_coverage_shortfall"
+            ],
+            "incomplete_acquisition_failures": incomplete_acquisition_failures,
+            "excluded_chunks": excluded_chunks,
         }
         self._timing_end("rwd_contract_inference_total", t_total)
         return out
@@ -6625,6 +6820,13 @@ class MainWindow(QMainWindow):
         )
         if selected_export_display_series_csv != default_export_display_series_csv:
             config_overrides["export_display_series_csv"] = selected_export_display_series_csv
+
+        exclude_incomplete_final_rwd_chunk = bool(
+            getattr(self, "_exclude_incomplete_final_rwd_chunk_cb", None)
+            and self._exclude_incomplete_final_rwd_chunk_cb.isChecked()
+        )
+        if exclude_incomplete_final_rwd_chunk:
+            config_overrides["exclude_incomplete_final_rwd_chunk"] = True
 
         # Ensure effective config tracks the selected RWD dataset contract.
         # This prevents stale/default baseline config values (e.g., fs/suffix/time-col)
@@ -8420,7 +8622,6 @@ class MainWindow(QMainWindow):
         idx = self._format_combo.findText(fmt)
         if idx >= 0:
             self._format_combo.setCurrentIndex(idx)
-
         run_profile = self._settings.value("run_profile", "full", str).strip().lower()
         idx_profile = self._run_profile_combo.findData(run_profile)
         if idx_profile < 0:
@@ -9900,6 +10101,25 @@ class MainWindow(QMainWindow):
         )
         self._format_combo.currentIndexChanged.connect(self._on_config_changed)
         form.addRow("Format:", self._format_combo)
+
+        self._exclude_incomplete_final_rwd_chunk_cb = QCheckBox("")
+        self._exclude_incomplete_final_rwd_chunk_cb.setChecked(False)
+        self._exclude_incomplete_final_rwd_chunk_cb.setToolTip(
+            "When enabled, a single incomplete final chronological RWD chunk can be "
+            "excluded if all earlier chunks pass strict validation. Non-final failed "
+            "chunks still stop the run. Raw files are not modified."
+        )
+        self._exclude_incomplete_final_rwd_chunk_cb.stateChanged.connect(self._on_config_changed)
+        self._exclude_incomplete_final_rwd_chunk_label = QLabel(
+            "Exclude incomplete final RWD chunk:"
+        )
+        self._exclude_incomplete_final_rwd_chunk_label.setToolTip(
+            self._exclude_incomplete_final_rwd_chunk_cb.toolTip()
+        )
+        form.addRow(
+            self._exclude_incomplete_final_rwd_chunk_label,
+            self._exclude_incomplete_final_rwd_chunk_cb,
+        )
 
         self._sph_edit = QLineEdit()
         self._sph_edit.setPlaceholderText("(optional, integer >= 1)")

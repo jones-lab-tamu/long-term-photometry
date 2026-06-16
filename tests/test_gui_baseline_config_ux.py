@@ -14,6 +14,9 @@ from PySide6.QtWidgets import QApplication
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from gui.main_window import MainWindow, normalize_dynamic_fit_mode
+from photometry_pipeline.config import Config
+from photometry_pipeline.io.adapters import discover_rwd_chunks
+from photometry_pipeline.pipeline import Pipeline
 
 
 @pytest.fixture(scope="module")
@@ -197,6 +200,26 @@ def _write_stale_baseline_config(path):
     path.write_text(yaml.safe_dump(stale_cfg, sort_keys=True), encoding="utf-8")
 
 
+def _write_rwd_final_exclusion_config(path):
+    path.write_text(
+        yaml.safe_dump(
+            {"exclude_incomplete_final_rwd_chunk": True},
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _enable_rwd_final_exclusion(window, cfg_path):
+    _write_rwd_final_exclusion_config(cfg_path)
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(cfg_path))
+
+
+def _norm_abs(path) -> str:
+    return os.path.normcase(os.path.abspath(os.path.normpath(str(path))))
+
+
 def _write_custom_sync_config(path):
     custom_cfg = {
         "dynamic_fit_mode": "rolling_filtered_to_filtered",
@@ -253,6 +276,25 @@ def test_saved_config_path_without_custom_flag_falls_back_to_lab_default(qapp, t
         assert w._active_config_source_path() == w._lab_default_config_path
         spec = w._build_run_spec(validate_only=True)
         assert spec.config_source_path == w._lab_default_config_path
+    finally:
+        w.close()
+        w.deleteLater()
+        settings.clear()
+
+
+def test_rwd_final_exclusion_is_not_restored_from_qsettings(qapp, tmp_path):
+    settings = QSettings(str(tmp_path / "stale_rwd_final_exclusion.ini"), QSettings.IniFormat)
+    settings.clear()
+    settings.beginGroup("run_config")
+    settings.setValue("exclude_incomplete_final_rwd_chunk", True)
+    settings.endGroup()
+    settings.sync()
+
+    w = MainWindow(settings=settings)
+    try:
+        assert w._exclude_incomplete_final_rwd_chunk_cb.isChecked() is False
+        spec = w._build_run_spec(validate_only=True)
+        assert spec.config_overrides.get("exclude_incomplete_final_rwd_chunk") is None
     finally:
         w.close()
         w.deleteLater()
@@ -1139,7 +1181,80 @@ def test_rwd_contract_inference_accepts_exact_equal_metadata_duration_chunks(win
     overrides = window._infer_rwd_dataset_contract_overrides("rwd")
     assert overrides["target_fs_hz"] == pytest.approx(20.0, abs=1e-6)
     assert overrides["chunk_duration_sec"] == pytest.approx(600.0, abs=1e-6)
+    assert overrides["exclude_incomplete_final_rwd_chunk"] is False
+    assert overrides["rwd_contract_validation"]["status"] == "passed"
+    assert overrides["rwd_contract_validation"]["excluded_chunks"] == []
     assert window._rwd_contract_cache["duration_warnings"] == []
+
+
+def test_rwd_final_exclusion_gui_control_defaults_off(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    assert window._exclude_incomplete_final_rwd_chunk_cb.isChecked() is False
+    spec = window._build_run_spec(validate_only=True)
+    assert spec.config_overrides.get("exclude_incomplete_final_rwd_chunk") is None
+
+
+def test_rwd_final_exclusion_gui_control_sets_contract_option(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_gui_exclusion_enabled_clean"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=["2025_01_01-00_00_00", "2025_01_01-00_10_00"],
+        metadata_fps=20.0,
+        metadata_continuous_time_sec=600.0,
+    )
+
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+    window._exclude_incomplete_final_rwd_chunk_cb.setChecked(True)
+
+    overrides = window._infer_rwd_dataset_contract_overrides("rwd")
+    spec = window._build_run_spec(validate_only=True)
+    assert overrides["exclude_incomplete_final_rwd_chunk"] is True
+    assert spec.config_overrides["exclude_incomplete_final_rwd_chunk"] is True
+
+    cfg_path = spec.generate_derived_config(spec.run_dir)
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        effective = yaml.safe_load(f) or {}
+    assert effective["exclude_incomplete_final_rwd_chunk"] is True
+
+
+def test_rwd_contract_inference_clean_dataset_with_final_exclusion_enabled_is_unchanged(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+    _enable_rwd_final_exclusion(window, tmp_path / "exclude_final.yaml")
+
+    dataset_root = tmp_path / "vendor_rwd_clean_exclusion_enabled"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=["2025_01_01-00_00_00", "2025_01_01-00_10_00"],
+        metadata_fps=20.0,
+        metadata_continuous_time_sec=600.0,
+    )
+
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    overrides = window._infer_rwd_dataset_contract_overrides("rwd")
+    assert overrides["exclude_incomplete_final_rwd_chunk"] is True
+    assert overrides["rwd_contract_validation"]["status"] == "passed"
+    assert overrides["rwd_contract_validation"]["excluded_chunks"] == []
+    assert "rwd_excluded_source_files" not in overrides
 
 
 def test_rwd_contract_inference_accepts_small_duration_variation_around_nominal(window, tmp_path):
@@ -1292,7 +1407,7 @@ def test_rwd_contract_inference_no_metadata_still_rejects_incompatible_fs(window
         window._infer_rwd_dataset_contract_overrides("rwd")
 
 
-def test_rwd_contract_inference_rejects_short_chunk_that_cannot_cover_strict_grid(window, tmp_path):
+def test_rwd_contract_inference_rejects_final_short_chunk_without_explicit_exclusion(window, tmp_path):
     _set_valid_dirs(window, tmp_path)
 
     dataset_root = tmp_path / "vendor_rwd_strict_short_duration"
@@ -1318,11 +1433,345 @@ def test_rwd_contract_inference_rejects_short_chunk_that_cannot_cover_strict_gri
     with pytest.raises(ValueError) as excinfo:
         window._infer_rwd_dataset_contract_overrides("rwd")
     message = str(excinfo.value)
-    assert "strict end coverage failure" in message
+    assert "RWD contract validation failed on the final chronological chunk" in message
     assert str(dataset_root / short_chunk / "fluorescence.csv") in message
-    assert "raw_end" in message
-    assert "required grid_end" in message
-    assert "missing" in message
+    assert "required strict grid end" in message
+    assert "observed raw end" in message
+    assert "missing coverage" in message
+    assert "Exclude incomplete final RWD chunk" in message
+    assert "RWD validation options" in message
+    assert "exclude_incomplete_final_rwd_chunk = true" in message
+
+
+def test_rwd_contract_inference_excludes_only_incomplete_final_chunk_when_enabled(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_exclude_final_short_duration"
+    final_chunk = "2025_01_01-00_10_00"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=["2025_01_01-00_00_00", final_chunk],
+        metadata_fps=20.0,
+        metadata_continuous_time_sec=600.0,
+        sample_count_by_chunk={final_chunk: 11981},
+    )
+
+    final_path = dataset_root / final_chunk / "fluorescence.csv"
+    before = final_path.read_bytes()
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+    window._exclude_incomplete_final_rwd_chunk_cb.setChecked(True)
+
+    overrides = window._infer_rwd_dataset_contract_overrides("rwd")
+    validation = overrides["rwd_contract_validation"]
+    assert validation["status"] == "completed_with_excluded_final_chunk"
+    assert validation["exclude_incomplete_final_rwd_chunk"] is True
+    assert validation["non_final_chunks_all_passed"] is True
+    assert len(validation["excluded_chunks"]) == 1
+    assert validation["excluded_chunks"][0]["file"] == str(final_path)
+    assert overrides["rwd_excluded_source_files"] == [str(final_path)]
+    assert final_path.read_bytes() == before
+    discovered = discover_rwd_chunks(str(dataset_root))
+    assert _norm_abs(overrides["rwd_excluded_source_files"][0]) in {
+        _norm_abs(path) for path in discovered
+    }
+
+    cfg = Config()
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+    pipeline = Pipeline(cfg)
+    pipeline.discover_files(str(dataset_root), force_format="rwd")
+    assert len(pipeline.file_list) == 1
+    assert _norm_abs(final_path) not in {_norm_abs(path) for path in pipeline.file_list}
+
+
+def test_rwd_contract_inference_final_duration_shortfall_without_exclusion_uses_gui_diagnostic(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_final_duration_shortfall"
+    final_chunk = "2025_01_01-00_10_00"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=["2025_01_01-00_00_00", final_chunk],
+        metadata_fps=20.0,
+        metadata_continuous_time_sec=600.0,
+        sample_count_by_chunk={final_chunk: 1754},
+    )
+
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    with pytest.raises(ValueError) as excinfo:
+        window._infer_rwd_dataset_contract_overrides("rwd")
+    message = str(excinfo.value)
+    assert "RWD contract validation failed on the final chronological chunk" in message
+    assert "chunk_duration mismatch at chunk" not in message
+    assert str(dataset_root / final_chunk / "fluorescence.csv") in message
+    assert "nominal required duration" in message
+    assert "observed sample_count/fs duration" in message
+    assert "observed timestamp span" in message
+    assert "missing duration" in message
+    assert "Exclude incomplete final RWD chunk" in message
+
+
+def test_rwd_contract_inference_final_duration_shortfall_excluded_when_enabled(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_final_duration_shortfall_excluded"
+    final_chunk = "2025_01_01-00_10_00"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=["2025_01_01-00_00_00", final_chunk],
+        metadata_fps=20.0,
+        metadata_continuous_time_sec=600.0,
+        sample_count_by_chunk={final_chunk: 1754},
+    )
+    final_path = dataset_root / final_chunk / "fluorescence.csv"
+
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+    window._exclude_incomplete_final_rwd_chunk_cb.setChecked(True)
+
+    overrides = window._infer_rwd_dataset_contract_overrides("rwd")
+    validation = overrides["rwd_contract_validation"]
+    assert validation["status"] == "completed_with_excluded_final_chunk"
+    assert validation["excluded_chunks"][0]["file"] == str(final_path)
+    assert validation["excluded_chunks"][0]["nominal_duration_sec"] == pytest.approx(600.0)
+    assert validation["excluded_chunks"][0]["observed_sample_count_over_fs_duration_sec"] == pytest.approx(
+        87.7,
+        abs=0.1,
+    )
+
+    cfg = Config()
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+    pipeline = Pipeline(cfg)
+    pipeline.discover_files(str(dataset_root), force_format="rwd")
+    assert len(pipeline.file_list) == 1
+    assert _norm_abs(final_path) not in {_norm_abs(path) for path in pipeline.file_list}
+
+
+def test_rwd_contract_inference_nonfinal_duration_shortfall_still_fails_when_enabled(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_nonfinal_duration_shortfall"
+    short_chunk = "2025_01_01-00_10_00"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=["2025_01_01-00_00_00", short_chunk, "2025_01_01-00_20_00"],
+        metadata_fps=20.0,
+        metadata_continuous_time_sec=600.0,
+        sample_count_by_chunk={short_chunk: 1754},
+    )
+
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+    window._exclude_incomplete_final_rwd_chunk_cb.setChecked(True)
+
+    with pytest.raises(ValueError) as excinfo:
+        window._infer_rwd_dataset_contract_overrides("rwd")
+    message = str(excinfo.value)
+    assert "RWD contract validation failed on a non-final chunk" in message
+    assert str(dataset_root / short_chunk / "fluorescence.csv") in message
+    assert "nominal required duration" in message
+
+
+def test_rwd_pipeline_rejects_recorded_final_exclusion_that_does_not_match_discovery(tmp_path):
+    dataset_root = tmp_path / "vendor_rwd_exclusion_mismatch"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=["2025_01_01-00_00_00", "2025_01_01-00_10_00"],
+        metadata_fps=20.0,
+        metadata_continuous_time_sec=600.0,
+    )
+    cfg = Config()
+    cfg.rwd_excluded_source_files = [str(dataset_root / "missing" / "fluorescence.csv")]
+    cfg.rwd_contract_validation = {
+        "status": "completed_with_excluded_final_chunk",
+        "strict_contract_enforced": True,
+        "exclude_incomplete_final_rwd_chunk": True,
+        "excluded_chunks": [
+            {
+                "chunk_index": 1,
+                "file": cfg.rwd_excluded_source_files[0],
+                "reason": "incomplete_final_rwd_chunk",
+            }
+        ],
+        "non_final_chunks_all_passed": True,
+    }
+
+    pipeline = Pipeline(cfg)
+    with pytest.raises(ValueError) as excinfo:
+        pipeline.discover_files(str(dataset_root), force_format="rwd")
+    message = str(excinfo.value)
+    assert "Recorded RWD final-chunk exclusion did not match discovered source files" in message
+    assert "analysis will not continue" in message
+
+
+def test_rwd_contract_inference_rejects_nonfinal_short_chunk_even_when_exclusion_enabled(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+    _enable_rwd_final_exclusion(window, tmp_path / "exclude_final.yaml")
+
+    dataset_root = tmp_path / "vendor_rwd_nonfinal_short_duration"
+    short_chunk = "2025_01_01-00_10_00"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=["2025_01_01-00_00_00", short_chunk, "2025_01_01-00_20_00"],
+        metadata_fps=20.0,
+        metadata_continuous_time_sec=600.0,
+        sample_count_by_chunk={short_chunk: 11981},
+    )
+
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    with pytest.raises(ValueError) as excinfo:
+        window._infer_rwd_dataset_contract_overrides("rwd")
+    message = str(excinfo.value)
+    assert "RWD contract validation failed on a non-final chunk" in message
+    assert str(dataset_root / short_chunk / "fluorescence.csv") in message
+    assert "cannot be automatically excluded" in message
+
+
+def test_rwd_contract_inference_rejects_nonfinal_short_chunk_with_exclusion_disabled(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+
+    dataset_root = tmp_path / "vendor_rwd_nonfinal_short_duration_disabled"
+    short_chunk = "2025_01_01-00_10_00"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=["2025_01_01-00_00_00", short_chunk, "2025_01_01-00_20_00"],
+        metadata_fps=20.0,
+        metadata_continuous_time_sec=600.0,
+        sample_count_by_chunk={short_chunk: 11981},
+    )
+
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    with pytest.raises(ValueError) as excinfo:
+        window._infer_rwd_dataset_contract_overrides("rwd")
+    message = str(excinfo.value)
+    assert "RWD contract validation failed on a non-final chunk" in message
+    assert str(dataset_root / short_chunk / "fluorescence.csv") in message
+
+
+def test_rwd_contract_inference_rejects_nonfinal_and_final_short_chunks_when_enabled(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+    _enable_rwd_final_exclusion(window, tmp_path / "exclude_final.yaml")
+
+    dataset_root = tmp_path / "vendor_rwd_nonfinal_and_final_short"
+    middle_chunk = "2025_01_01-00_10_00"
+    final_chunk = "2025_01_01-00_20_00"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=["2025_01_01-00_00_00", middle_chunk, final_chunk],
+        metadata_fps=20.0,
+        metadata_continuous_time_sec=600.0,
+        sample_count_by_chunk={middle_chunk: 11981, final_chunk: 11981},
+    )
+
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    with pytest.raises(ValueError) as excinfo:
+        window._infer_rwd_dataset_contract_overrides("rwd")
+    assert "RWD contract validation failed on a non-final chunk" in str(excinfo.value)
+
+
+def test_rwd_contract_inference_rejects_final_malformed_chunk_when_exclusion_enabled(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+    _enable_rwd_final_exclusion(window, tmp_path / "exclude_final.yaml")
+
+    dataset_root = tmp_path / "vendor_rwd_final_malformed"
+    final_chunk = "2025_01_01-00_10_00"
+    _write_vendor_style_rwd_dataset(
+        dataset_root,
+        fs_hz=20.0,
+        chunk_duration_sec=600.0,
+        n_rois=2,
+        time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        timestamp_unit="milliseconds",
+        chunk_names=["2025_01_01-00_00_00", final_chunk],
+        metadata_fps=20.0,
+        metadata_continuous_time_sec=600.0,
+    )
+    final_path = dataset_root / final_chunk / "fluorescence.csv"
+    with final_path.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.reader(f))
+    rows[1][0] = "BadTime"
+    with final_path.open("w", encoding="utf-8", newline="") as f:
+        csv.writer(f).writerows(rows)
+
+    window._input_dir.setText(str(dataset_root))
+    window._format_combo.setCurrentText("rwd")
+
+    with pytest.raises(ValueError) as excinfo:
+        window._infer_rwd_dataset_contract_overrides("rwd")
+    message = str(excinfo.value)
+    assert (
+        "required time column" in message
+        or "No usable RWD time column" in message
+        or "No recognizable RWD header row" in message
+    )
 
 
 def test_rwd_contract_inference_rejects_large_duration_mismatch(window, tmp_path):
@@ -1347,8 +1796,12 @@ def test_rwd_contract_inference_rejects_large_duration_mismatch(window, tmp_path
     window._input_dir.setText(str(dataset_root))
     window._format_combo.setCurrentText("rwd")
 
-    with pytest.raises(ValueError, match="chunk_duration mismatch"):
+    with pytest.raises(ValueError) as excinfo:
         window._infer_rwd_dataset_contract_overrides("rwd")
+    message = str(excinfo.value)
+    assert "RWD contract validation failed on the final chronological chunk" in message
+    assert "nominal required duration" in message
+    assert "missing duration" in message
 
 
 def test_rwd_contract_inference_rejects_bad_timestamp_span_even_when_sample_count_duration_matches(window, tmp_path):

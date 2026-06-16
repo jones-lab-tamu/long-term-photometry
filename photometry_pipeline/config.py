@@ -15,7 +15,15 @@ class Config:
     seed: int = 0
     
     # Config Parameters Used by Strict Mode
-    allow_partial_final_chunk: bool = False # If False, enforces strict grid coverage & reciprocity
+    # General/legacy strict-mode setting: if False, adapters enforce full strict
+    # grid coverage and reciprocity. This is separate from the RWD-specific
+    # final-source exclusion policy below.
+    allow_partial_final_chunk: bool = False
+    # RWD-specific opt-in policy: exclude one incomplete final source file before
+    # downstream analysis. It does not relax loader strictness for processed files.
+    exclude_incomplete_final_rwd_chunk: bool = False
+    rwd_excluded_source_files: List[str] = field(default_factory=list)
+    rwd_contract_validation: Dict[str, object] = field(default_factory=dict)
     # chunk_duration_sec : Defines strict grid length
     # target_fs_hz       : Defines strict grid spacing
     # npm_*              : Used for strict time axis parsing

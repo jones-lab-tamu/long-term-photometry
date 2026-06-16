@@ -176,6 +176,9 @@ class Pipeline:
         self._continuous_window_map = {}
         self._continuous_source_cache = {}
         self._continuous_plan_summary = None
+        self._rwd_contract_validation = dict(
+            getattr(config, "rwd_contract_validation", {}) or {}
+        )
         self.stats = SessionStats()
         self.stats.tonic_fit_params = {} # ROI -> {slope, intercept} (Ad-hoc extension)
         self.stats.tonic_global_fit_provenance = {}
@@ -921,6 +924,58 @@ class Pipeline:
             self.file_list = sort_npm_files(self.file_list)
         else:
             self.file_list.sort(key=natural_sort_key)
+
+        def _normalized_abs_path(path: str) -> str:
+            return os.path.normcase(os.path.abspath(os.path.normpath(str(path))))
+
+        raw_excluded_source_files = [
+            str(path)
+            for path in (getattr(self.config, "rwd_excluded_source_files", []) or [])
+            if str(path).strip()
+        ]
+        excluded_source_files = {
+            _normalized_abs_path(path) for path in raw_excluded_source_files
+        }
+        if self._rwd_contract_validation:
+            self.qc_summary["rwd_contract_validation"] = _sanitize_metadata(
+                self._rwd_contract_validation
+            )
+
+        if excluded_source_files:
+            if len(raw_excluded_source_files) != 1 or len(excluded_source_files) != 1:
+                raise ValueError(
+                    "Recorded RWD final-chunk exclusion did not match discovered source files; "
+                    "analysis will not continue. Expected exactly one recorded "
+                    f"rwd_excluded_source_files entry, got {len(raw_excluded_source_files)}."
+                )
+            before_count = len(self.file_list)
+            before_files = list(self.file_list)
+            self.file_list = [
+                path
+                for path in self.file_list
+                if _normalized_abs_path(path) not in excluded_source_files
+            ]
+            excluded_count = before_count - len(self.file_list)
+            if excluded_count != 1:
+                raise ValueError(
+                    "Recorded RWD final-chunk exclusion did not match discovered source files; "
+                    "analysis will not continue. Expected exactly one discovered "
+                    f"file to be removed, removed {excluded_count}. "
+                    f"Recorded exclusions: {raw_excluded_source_files}. "
+                    f"Discovered source files: {before_files}."
+                )
+            if not self.file_list:
+                raise ValueError(
+                    "RWD final-chunk exclusion removed all discovered source files; "
+                    "no validated chunks remain for analysis."
+                )
+            print(
+                "WARNING: Excluded incomplete final RWD chunk by explicit policy. "
+                f"Analysis used {len(self.file_list)} valid chunks. "
+                f"{excluded_count} final chunk was excluded. "
+                "See provenance/status output for details.",
+                flush=True,
+            )
             
         print(f"Found {len(self.file_list)} files.")
 
@@ -1785,6 +1840,7 @@ class Pipeline:
             'invalid_baseline_rois': self.qc_summary.get('invalid_baseline_rois', []),
             'dynamic_fit_slope_warning_summary': self.dynamic_fit_slope_warning_summary,
             'dynamic_fit_slope_constraint_summary': self.dynamic_fit_slope_constraint_summary,
+            'rwd_contract_validation': _sanitize_metadata(self._rwd_contract_validation),
         }
         if self.mode != 'tonic':
             run_meta['dynamic_fit_slope_warning_records'] = self.dynamic_fit_slope_warning_records
