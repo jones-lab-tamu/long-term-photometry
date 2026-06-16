@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox, QPushButton, QPlainTextEdit, QScrollArea,
     QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem, QToolButton, QStackedWidget,
     QProgressBar, QLayout, QSplitter, QGridLayout, QStyle, QToolTip,
+    QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView,
 )
 
 from gui.process_runner import PipelineRunner, RunnerState
@@ -65,10 +66,12 @@ from photometry_pipeline.core.tonic_timeline import (
     TONIC_TIMELINE_MODE_REAL_ELAPSED,
 )
 from photometry_pipeline.io.hdf5_cache_reader import (
+    list_cache_rois,
     open_phasic_cache,
 )
 from photometry_pipeline.tuning.cache_downstream_retune import run_cache_downstream_retune
 from photometry_pipeline.tuning.cache_correction_retune import run_cache_correction_retune
+from tools.run_applied_dff_batch import AppliedDffBatchError, run_applied_dff_batch
 import dataclasses
 from typing import get_args
 
@@ -1170,6 +1173,11 @@ class MainWindow(QMainWindow):
         self._timing_click_monotonic = None
         self._elapsed_first_tick_logged = False
         self._rwd_contract_cache = None
+        self._applied_dff_rois: list[str] = []
+        self._applied_dff_manifest_path = ""
+        self._applied_dff_output_root = ""
+        self._applied_dff_dry_run_ok = False
+        self._applied_dff_last_report: dict | None = None
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(250)
         self._elapsed_timer.timeout.connect(self._on_elapsed_timer_tick)
@@ -4990,6 +4998,410 @@ class MainWindow(QMainWindow):
                 "Saved",
                 f"Saved tuned settings to:\n{save_path}",
             )
+
+    # ==================================================================
+    # Explicit applied-dF/F batch workflow
+    # ==================================================================
+
+    def _applied_dff_cache_path(self) -> str:
+        return os.path.join(self._applied_dff_phasic_out_edit.text().strip(), "phasic_trace_cache.h5")
+
+    def _default_applied_dff_output_root(self, phasic_out: str) -> str:
+        base_output = self._output_dir.text().strip()
+        if not base_output:
+            base_output = os.path.join(os.getcwd(), "scratch", "gui_applied_dff")
+        phasic_name = os.path.basename(os.path.dirname(os.path.dirname(phasic_out))) or "phasic_out"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return os.path.abspath(os.path.join(base_output, "applied_dff_gui", f"{phasic_name}_{stamp}"))
+
+    def _set_applied_dff_status(self, message: str, severity: str = "info") -> None:
+        self._applied_dff_status_label.setText(message)
+        self._set_status_label_style(self._applied_dff_status_label, severity)
+
+    def _mark_applied_dff_manifest_dirty(self) -> None:
+        self._applied_dff_dry_run_ok = False
+        self._applied_dff_last_report = None
+
+    def _on_applied_dff_phasic_out_changed(self) -> None:
+        self._applied_dff_rois = []
+        self._applied_dff_manifest_path = ""
+        self._applied_dff_manifest_label.setText("(manifest not saved)")
+        self._applied_dff_table.setRowCount(0)
+        self._mark_applied_dff_manifest_dirty()
+        self._set_applied_dff_status("Load ROIs from the selected phasic_out.", "info")
+
+    def _on_browse_applied_dff_phasic_out(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Completed phasic_out Directory",
+            self._applied_dff_phasic_out_edit.text().strip() or self._current_phasic_out_dir(),
+        )
+        if path:
+            self._applied_dff_phasic_out_edit.setText(path)
+
+    def _on_browse_applied_dff_output_root(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Applied dF/F Output Root",
+            self._applied_dff_output_root_edit.text().strip() or self._output_dir.text().strip(),
+        )
+        if path:
+            self._applied_dff_output_root_edit.setText(path)
+
+    def _on_applied_dff_use_current_run(self) -> None:
+        phasic_out = self._current_phasic_out_dir()
+        if not os.path.exists(os.path.join(phasic_out, "phasic_trace_cache.h5")):
+            QMessageBox.warning(
+                self,
+                "No Completed phasic_out",
+                "The current run does not have _analysis/phasic_out/phasic_trace_cache.h5.",
+            )
+            return
+        self._applied_dff_phasic_out_edit.setText(phasic_out)
+        if not self._applied_dff_output_root_edit.text().strip():
+            self._applied_dff_output_root_edit.setText(self._default_applied_dff_output_root(phasic_out))
+
+    def _validate_applied_dff_phasic_out(self) -> str:
+        phasic_out = self._applied_dff_phasic_out_edit.text().strip()
+        if not phasic_out:
+            raise ValueError("Select a completed phasic_out directory first.")
+        cache_path = os.path.join(phasic_out, "phasic_trace_cache.h5")
+        if not os.path.exists(cache_path):
+            raise ValueError(f"Missing required phasic cache: {cache_path}")
+        return os.path.abspath(phasic_out)
+
+    def _on_applied_dff_load_rois(self) -> None:
+        try:
+            phasic_out = self._validate_applied_dff_phasic_out()
+            with open_phasic_cache(os.path.join(phasic_out, "phasic_trace_cache.h5")) as cache:
+                rois = list_cache_rois(cache)
+            if not rois:
+                raise ValueError("No ROIs found in phasic cache metadata.")
+            self._populate_applied_dff_roi_table(rois)
+            if not self._applied_dff_output_root_edit.text().strip():
+                self._applied_dff_output_root_edit.setText(self._default_applied_dff_output_root(phasic_out))
+            self._set_applied_dff_status(f"Loaded {len(rois)} ROI(s). Select explicit strategies.", "ready")
+        except Exception as exc:
+            self._applied_dff_table.setRowCount(0)
+            self._applied_dff_rois = []
+            self._set_applied_dff_status(str(exc), "error")
+            QMessageBox.critical(self, "Applied dF/F ROI Load Failed", str(exc))
+
+    def _populate_applied_dff_roi_table(self, rois: list[str]) -> None:
+        self._applied_dff_rois = list(rois)
+        self._applied_dff_table.setRowCount(len(rois))
+        for row, roi in enumerate(rois):
+            for col, text in enumerate([roi, "", "manual only", "", "", "not run"]):
+                item = QTableWidgetItem(text)
+                if col == 0:
+                    item.setData(Qt.UserRole, roi)
+                self._applied_dff_table.setItem(row, col, item)
+            combo = QComboBox()
+            combo.addItem("")
+            combo.addItem("dynamic_fit")
+            combo.addItem("signal_only_f0")
+            combo.currentIndexChanged.connect(lambda _idx: self._mark_applied_dff_manifest_dirty())
+            self._applied_dff_table.setCellWidget(row, 3, combo)
+        self._applied_dff_manifest_path = ""
+        self._applied_dff_manifest_label.setText("(manifest not saved)")
+        self._mark_applied_dff_manifest_dirty()
+
+    def _on_applied_dff_set_all_dynamic_fit(self) -> None:
+        for row in range(self._applied_dff_table.rowCount()):
+            combo = self._applied_dff_table.cellWidget(row, 3)
+            if isinstance(combo, QComboBox):
+                combo.setCurrentText("dynamic_fit")
+        self._mark_applied_dff_manifest_dirty()
+
+    def _on_applied_dff_clear_strategies(self) -> None:
+        for row in range(self._applied_dff_table.rowCount()):
+            combo = self._applied_dff_table.cellWidget(row, 3)
+            if isinstance(combo, QComboBox):
+                combo.setCurrentText("")
+            self._set_applied_dff_table_text(row, 4, "")
+            self._set_applied_dff_table_text(row, 5, "not run")
+        self._mark_applied_dff_manifest_dirty()
+
+    def _set_applied_dff_table_text(self, row: int, col: int, text: str) -> None:
+        item = self._applied_dff_table.item(row, col)
+        if item is None:
+            item = QTableWidgetItem("")
+            self._applied_dff_table.setItem(row, col, item)
+        item.setText(str(text))
+
+    def _applied_dff_selected_manifest_rows(self) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        if self._applied_dff_table.rowCount() == 0:
+            raise ValueError("Load ROIs before creating an applied-dF/F manifest.")
+        for row in range(self._applied_dff_table.rowCount()):
+            roi_item = self._applied_dff_table.item(row, 0)
+            roi = str(roi_item.text()).strip() if roi_item is not None else ""
+            combo = self._applied_dff_table.cellWidget(row, 3)
+            strategy = combo.currentText().strip() if isinstance(combo, QComboBox) else ""
+            if not roi:
+                raise ValueError(f"Missing ROI in row {row + 1}.")
+            if strategy not in {"dynamic_fit", "signal_only_f0"}:
+                raise ValueError(f"Select dynamic_fit or signal_only_f0 for ROI {roi} before running.")
+            rows.append({"roi": roi, "strategy": strategy})
+        return rows
+
+    def _applied_dff_output_root_path(self) -> str:
+        output_root = self._applied_dff_output_root_edit.text().strip()
+        if not output_root:
+            phasic_out = self._validate_applied_dff_phasic_out()
+            output_root = self._default_applied_dff_output_root(phasic_out)
+            self._applied_dff_output_root_edit.setText(output_root)
+        phasic_out = self._validate_applied_dff_phasic_out()
+        return self._validate_applied_dff_output_root(output_root, phasic_out)
+
+    def _normalized_abs_path(self, path_text: str) -> str:
+        return os.path.normcase(os.path.abspath(os.path.normpath(str(path_text))))
+
+    def _path_equal_or_inside(self, child: str, parent: str) -> bool:
+        child_norm = self._normalized_abs_path(child)
+        parent_norm = self._normalized_abs_path(parent)
+        try:
+            common = os.path.commonpath([child_norm, parent_norm])
+        except ValueError:
+            return False
+        return common == parent_norm
+
+    def _validate_applied_dff_output_root(self, output_root: str, phasic_out: str) -> str:
+        text = str(output_root or "").strip()
+        if not text:
+            raise ValueError("Applied dF/F output root is required.")
+        output_path = os.path.abspath(os.path.normpath(text))
+        phasic_path = os.path.abspath(os.path.normpath(phasic_out))
+        cache_path = os.path.join(phasic_path, "phasic_trace_cache.h5")
+        features_path = os.path.join(phasic_path, "features")
+        message = (
+            "Applied dF/F output root must be separate from the source phasic_out "
+            "and legacy features directory."
+        )
+        if os.path.exists(output_path) and not os.path.isdir(output_path):
+            raise ValueError(f"{message} Selected path is a file: {output_path}")
+        if self._normalized_abs_path(output_path) == self._normalized_abs_path(cache_path):
+            raise ValueError(f"{message} Selected path resolves to phasic_trace_cache.h5.")
+        if self._path_equal_or_inside(output_path, phasic_path):
+            raise ValueError(message)
+        if self._path_equal_or_inside(output_path, features_path):
+            raise ValueError(message)
+        return output_path
+
+    def _write_applied_dff_manifest(self) -> str:
+        phasic_out = self._validate_applied_dff_phasic_out()
+        rows = self._applied_dff_selected_manifest_rows()
+        output_root = self._applied_dff_output_root_path()
+        manifest_dir = os.path.join(output_root, "gui_manifest")
+        os.makedirs(manifest_dir, exist_ok=True)
+        manifest_path = os.path.join(manifest_dir, "explicit_applied_dff_manifest.csv")
+        with open(manifest_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["roi", "strategy"])
+            writer.writeheader()
+            writer.writerows(rows)
+        self._applied_dff_manifest_path = manifest_path
+        self._applied_dff_manifest_label.setText(manifest_path)
+        self._write_applied_dff_gui_provenance(
+            event="manifest_saved",
+            phasic_out=phasic_out,
+            manifest_path=manifest_path,
+            output_root=output_root,
+            selected_rows=rows,
+        )
+        return manifest_path
+
+    def _on_applied_dff_save_manifest(self) -> None:
+        try:
+            manifest_path = self._write_applied_dff_manifest()
+            self._applied_dff_dry_run_ok = False
+            self._set_applied_dff_status(f"Manifest saved: {manifest_path}", "ready")
+        except Exception as exc:
+            self._set_applied_dff_status(str(exc), "error")
+            QMessageBox.critical(self, "Applied dF/F Manifest Failed", str(exc))
+
+    def _on_applied_dff_dry_run(self) -> None:
+        try:
+            manifest_path = self._write_applied_dff_manifest()
+            phasic_out = self._validate_applied_dff_phasic_out()
+            output_root = self._applied_dff_output_root_path()
+            with self._busy_cursor_scope():
+                report = run_applied_dff_batch(
+                    phasic_out,
+                    manifest=manifest_path,
+                    output_root=output_root,
+                    dry_run=True,
+                )
+            self._applied_dff_dry_run_ok = True
+            self._applied_dff_last_report = report
+            self._display_applied_dff_dry_run_report(report)
+            self._write_applied_dff_gui_provenance(
+                event="dry_run_passed",
+                phasic_out=phasic_out,
+                manifest_path=manifest_path,
+                output_root=output_root,
+                selected_rows=self._applied_dff_selected_manifest_rows(),
+                dry_run_report=report,
+            )
+            self._set_applied_dff_status(
+                f"Dry-run passed for {report.get('n_manifest_rows', 0)} manifest row(s).",
+                "ready",
+            )
+        except Exception as exc:
+            self._applied_dff_dry_run_ok = False
+            self._set_applied_dff_status(str(exc), "error")
+            QMessageBox.critical(self, "Applied dF/F Dry Run Failed", str(exc))
+
+    def _on_applied_dff_run_batch(self) -> None:
+        if not self._applied_dff_dry_run_ok:
+            msg = "Run a successful applied-dF/F dry-run before batch execution."
+            self._set_applied_dff_status(msg, "warn")
+            QMessageBox.warning(self, "Dry Run Required", msg)
+            return
+        try:
+            manifest_path = self._write_applied_dff_manifest()
+            phasic_out = self._validate_applied_dff_phasic_out()
+            output_root = self._applied_dff_output_root_path()
+            with self._busy_cursor_scope():
+                report = run_applied_dff_batch(
+                    phasic_out,
+                    manifest=manifest_path,
+                    output_root=output_root,
+                    overwrite=True,
+                )
+            self._applied_dff_last_report = report
+            self._display_applied_dff_batch_report(report)
+            self._write_applied_dff_gui_provenance(
+                event="batch_completed",
+                phasic_out=phasic_out,
+                manifest_path=manifest_path,
+                output_root=output_root,
+                selected_rows=self._applied_dff_selected_manifest_rows(),
+                batch_report=report,
+            )
+        except AppliedDffBatchError as exc:
+            report = getattr(exc, "report", None)
+            if report:
+                self._display_applied_dff_batch_report(report)
+            self._set_applied_dff_status(str(exc), "error")
+            QMessageBox.critical(self, "Applied dF/F Batch Failed", str(exc))
+        except Exception as exc:
+            self._set_applied_dff_status(str(exc), "error")
+            QMessageBox.critical(self, "Applied dF/F Batch Failed", str(exc))
+
+    def _display_applied_dff_dry_run_report(self, report: dict) -> None:
+        for planned_row in report.get("planned_rows") or []:
+            roi = str(planned_row.get("roi", ""))
+            strategy = str(planned_row.get("strategy", ""))
+            row = self._applied_dff_row_for_roi(roi)
+            if row is not None:
+                self._set_applied_dff_table_text(row, 4, strategy)
+                self._set_applied_dff_table_text(row, 5, "dry-run planned")
+
+    def _applied_dff_row_for_roi(self, roi: str) -> int | None:
+        for row in range(self._applied_dff_table.rowCount()):
+            item = self._applied_dff_table.item(row, 0)
+            if item is not None and item.text() == roi:
+                return row
+        return None
+
+    def _display_applied_dff_batch_report(self, report: dict) -> None:
+        summary = dict(report.get("summary") or {})
+        for row_data in summary.get("rows") or []:
+            roi = str(row_data.get("roi", ""))
+            table_row = self._applied_dff_row_for_roi(roi)
+            if table_row is None:
+                continue
+            strategy = str(row_data.get("strategy", ""))
+            semantic = str(row_data.get("semantic_status") or "")
+            chunks = row_data.get("n_chunks_processed", "")
+            status = str(row_data.get("status") or "")
+            detail = f"{status}; semantic={semantic}; chunks={chunks}"
+            if row_data.get("error_message"):
+                detail = f"{detail}; error={row_data.get('error_message')}"
+            applied_summary = self._load_applied_dff_row_applied_summary(row_data)
+            if applied_summary:
+                warning_level = applied_summary.get("applied_trace_warning_level", "")
+                review_required = applied_summary.get("applied_trace_review_required", "")
+                flags = applied_summary.get("applied_trace_flags", "")
+                detail = f"{detail}; warning={warning_level}; review={review_required}; flags={flags}"
+            self._set_applied_dff_table_text(table_row, 4, strategy)
+            self._set_applied_dff_table_text(table_row, 5, detail)
+
+        batch_passed = bool(summary.get("batch_passed"))
+        completed = summary.get("n_rows_completed", 0)
+        failed = summary.get("n_rows_failed", 0)
+        hdf5_modified = summary.get("hdf5_modified_source_phasic_cache")
+        legacy_modified = summary.get("legacy_features_modified")
+        self._set_applied_dff_status(
+            "Batch {state}: completed={completed}, failed={failed}, "
+            "source_phasic_cache_unchanged={source_ok}, legacy_features_unchanged={legacy_ok}. "
+            "Summary: {summary_path}".format(
+                state="passed" if batch_passed else "failed",
+                completed=completed,
+                failed=failed,
+                source_ok=(hdf5_modified is False),
+                legacy_ok=(legacy_modified is False),
+                summary_path=report.get("summary_json", ""),
+            ),
+            "ready" if batch_passed else "error",
+        )
+
+    def _load_applied_dff_row_applied_summary(self, row_data: dict) -> dict:
+        output_dir = row_data.get("output_dir")
+        if not output_dir:
+            return {}
+        path = os.path.join(str(output_dir), "applied", "applied_correction_summary.json")
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _write_applied_dff_gui_provenance(
+        self,
+        *,
+        event: str,
+        phasic_out: str,
+        manifest_path: str,
+        output_root: str,
+        selected_rows: list[dict[str, str]],
+        dry_run_report: dict | None = None,
+        batch_report: dict | None = None,
+    ) -> None:
+        os.makedirs(output_root, exist_ok=True)
+        manifest_hash = ""
+        manifest_contents = ""
+        if manifest_path and os.path.exists(manifest_path):
+            with open(manifest_path, "rb") as f:
+                data = f.read()
+            manifest_hash = hashlib.sha256(data).hexdigest()
+            manifest_contents = data.decode("utf-8", errors="replace")
+        payload = {
+            "tool_name": "gui_explicit_applied_dff_workflow",
+            "backend_tool": "tools/run_applied_dff_batch.py",
+            "event": event,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "phasic_out": phasic_out,
+            "source_phasic_cache_path": os.path.join(phasic_out, "phasic_trace_cache.h5"),
+            "manifest_path": manifest_path,
+            "manifest_sha256": manifest_hash,
+            "manifest_contents": manifest_contents,
+            "output_root": output_root,
+            "selected_strategies": selected_rows,
+            "final_executed_strategies": [
+                {"roi": row.get("roi", ""), "strategy": row.get("strategy", "")}
+                for row in (batch_report or {}).get("summary", {}).get("rows", [])
+            ],
+            "dry_run_result": dry_run_report or {},
+            "batch_result": (batch_report or {}).get("summary", {}) if batch_report else {},
+            "no_auto_selection": True,
+            "no_strategy_inference": True,
+        }
+        path = os.path.join(output_root, "applied_dff_gui_provenance.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -9925,13 +10337,20 @@ class MainWindow(QMainWindow):
         outer.addWidget(intro)
 
         self._run_config_group = self._build_run_configuration_group()
+        self._applied_dff_group = self._build_applied_dff_workflow_group()
         self._plotting_group = self._build_plotting_group()
         self._advanced_group = self._build_advanced_group()
-        for section in (self._run_config_group, self._plotting_group, self._advanced_group):
+        for section in (
+            self._run_config_group,
+            self._applied_dff_group,
+            self._plotting_group,
+            self._advanced_group,
+        ):
             section.setProperty("workflowSection", True)
             section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             section.setMinimumWidth(0)
         outer.addWidget(self._run_config_group)
+        outer.addWidget(self._applied_dff_group)
         outer.addWidget(self._plotting_group)
         outer.addWidget(self._advanced_group)
         # Demoted controls are kept for behavior compatibility but hidden from idle layout.
@@ -10383,6 +10802,118 @@ class MainWindow(QMainWindow):
         self._run_reason_label.setMinimumWidth(0)
         self._set_status_label_style(self._run_reason_label, "warn")
         layout.addWidget(self._run_reason_label)
+        return group
+
+    def _build_applied_dff_workflow_group(self) -> QGroupBox:
+        group = QGroupBox("Applied dF/F Explicit Batch")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        note = QLabel(
+            "Runs the existing explicit applied-dF/F manifest batch workflow. "
+            "Strategies are manual only; this does not change the main pipeline route."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("resultsSummaryHint")
+        layout.addWidget(note)
+
+        form = QFormLayout()
+        self._configure_sidebar_form_layout(form)
+
+        phasic_row = QHBoxLayout()
+        self._applied_dff_phasic_out_edit = QLineEdit()
+        self._applied_dff_phasic_out_edit.setToolTip(
+            "Completed phasic_out directory containing phasic_trace_cache.h5."
+        )
+        self._applied_dff_phasic_out_edit.textChanged.connect(
+            self._on_applied_dff_phasic_out_changed
+        )
+        phasic_row.addWidget(self._applied_dff_phasic_out_edit)
+        phasic_browse = QPushButton("Browse...")
+        phasic_browse.clicked.connect(self._on_browse_applied_dff_phasic_out)
+        phasic_row.addWidget(phasic_browse)
+        form.addRow("phasic_out:", phasic_row)
+
+        output_row = QHBoxLayout()
+        self._applied_dff_output_root_edit = QLineEdit()
+        self._applied_dff_output_root_edit.setToolTip(
+            "Separate output root for applied-dF/F batch outputs. Do not use source phasic_out or legacy features."
+        )
+        self._applied_dff_output_root_edit.textChanged.connect(self._mark_applied_dff_manifest_dirty)
+        output_row.addWidget(self._applied_dff_output_root_edit)
+        output_browse = QPushButton("Browse...")
+        output_browse.clicked.connect(self._on_browse_applied_dff_output_root)
+        output_row.addWidget(output_browse)
+        form.addRow("Output root:", output_row)
+
+        self._applied_dff_manifest_label = QLabel("(manifest not saved)")
+        self._applied_dff_manifest_label.setWordWrap(True)
+        self._applied_dff_manifest_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form.addRow("Manifest:", self._applied_dff_manifest_label)
+        layout.addLayout(form)
+
+        button_row = QHBoxLayout()
+        self._applied_dff_use_current_btn = QPushButton("Use Current Run")
+        self._applied_dff_use_current_btn.setToolTip(
+            "Use the completed run's _analysis/phasic_out when available."
+        )
+        self._applied_dff_use_current_btn.clicked.connect(self._on_applied_dff_use_current_run)
+        button_row.addWidget(self._applied_dff_use_current_btn)
+
+        self._applied_dff_load_rois_btn = QPushButton("Load ROIs")
+        self._applied_dff_load_rois_btn.clicked.connect(self._on_applied_dff_load_rois)
+        button_row.addWidget(self._applied_dff_load_rois_btn)
+        button_row.addStretch()
+        layout.addLayout(button_row)
+
+        self._applied_dff_table = QTableWidget(0, 6)
+        self._applied_dff_table.setHorizontalHeaderLabels(
+            [
+                "ROI",
+                "Audit status",
+                "Proposed strategy",
+                "User-selected strategy",
+                "Final executed strategy",
+                "Status",
+            ]
+        )
+        self._applied_dff_table.verticalHeader().setVisible(False)
+        self._applied_dff_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._applied_dff_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._applied_dff_table.setMaximumHeight(220)
+        self._applied_dff_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self._applied_dff_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self._applied_dff_table)
+
+        strategy_row = QHBoxLayout()
+        self._applied_dff_set_dynamic_btn = QPushButton("Set all to dynamic_fit")
+        self._applied_dff_set_dynamic_btn.clicked.connect(self._on_applied_dff_set_all_dynamic_fit)
+        strategy_row.addWidget(self._applied_dff_set_dynamic_btn)
+        self._applied_dff_clear_btn = QPushButton("Clear strategies")
+        self._applied_dff_clear_btn.clicked.connect(self._on_applied_dff_clear_strategies)
+        strategy_row.addWidget(self._applied_dff_clear_btn)
+        strategy_row.addStretch()
+        layout.addLayout(strategy_row)
+
+        action_row = QHBoxLayout()
+        self._applied_dff_save_manifest_btn = QPushButton("Save Manifest")
+        self._applied_dff_save_manifest_btn.clicked.connect(self._on_applied_dff_save_manifest)
+        action_row.addWidget(self._applied_dff_save_manifest_btn)
+        self._applied_dff_dry_run_btn = QPushButton("Dry Run")
+        self._applied_dff_dry_run_btn.clicked.connect(self._on_applied_dff_dry_run)
+        action_row.addWidget(self._applied_dff_dry_run_btn)
+        self._applied_dff_run_batch_btn = QPushButton("Run Batch")
+        self._applied_dff_run_batch_btn.setStyleSheet("font-weight: bold;")
+        self._applied_dff_run_batch_btn.clicked.connect(self._on_applied_dff_run_batch)
+        action_row.addWidget(self._applied_dff_run_batch_btn)
+        layout.addLayout(action_row)
+
+        self._applied_dff_status_label = QLabel("Load a completed phasic_out to begin.")
+        self._applied_dff_status_label.setWordWrap(True)
+        self._set_status_label_style(self._applied_dff_status_label, "info")
+        layout.addWidget(self._applied_dff_status_label)
+
         return group
 
     def _build_plotting_group(self) -> QGroupBox:
