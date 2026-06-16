@@ -1221,6 +1221,7 @@ def test_rwd_contract_inference_warns_on_small_timestamp_derived_fs_variation(wi
         led410_enable=True,
         led470_enable=True,
         led560_enable=False,
+        sample_count_by_chunk={chunk_names[1]: 12025},
     )
     _rewrite_timestamps_regular(dataset_root / chunk_names[1] / "fluorescence.csv", dt=49.899)
 
@@ -1291,10 +1292,11 @@ def test_rwd_contract_inference_no_metadata_still_rejects_incompatible_fs(window
         window._infer_rwd_dataset_contract_overrides("rwd")
 
 
-def test_rwd_contract_inference_records_mild_short_chunk_warning(window, tmp_path):
+def test_rwd_contract_inference_rejects_short_chunk_that_cannot_cover_strict_grid(window, tmp_path):
     _set_valid_dirs(window, tmp_path)
 
-    dataset_root = tmp_path / "vendor_rwd_mild_short_duration"
+    dataset_root = tmp_path / "vendor_rwd_strict_short_duration"
+    short_chunk = "2025_01_01-00_10_00"
     _write_vendor_style_rwd_dataset(
         dataset_root,
         fs_hz=20.0,
@@ -1304,21 +1306,23 @@ def test_rwd_contract_inference_records_mild_short_chunk_warning(window, tmp_pat
         uv_suffix="-410",
         sig_suffix="-470",
         timestamp_unit="milliseconds",
-        chunk_names=["2025_01_01-00_00_00", "2025_01_01-00_10_00"],
+        chunk_names=["2025_01_01-00_00_00", short_chunk],
         metadata_fps=20.0,
         metadata_continuous_time_sec=600.0,
-        sample_count_by_chunk={"2025_01_01-00_10_00": 11980},
+        sample_count_by_chunk={short_chunk: 11981},
     )
 
     window._input_dir.setText(str(dataset_root))
     window._format_combo.setCurrentText("rwd")
 
-    overrides = window._infer_rwd_dataset_contract_overrides("rwd")
-    warnings = window._rwd_contract_cache["duration_warnings"]
-    assert overrides["chunk_duration_sec"] == pytest.approx(600.0, abs=1e-6)
-    assert len(warnings) == 1
-    assert warnings[0]["chunk_index"] == 1
-    assert warnings[0]["duration_delta_sec"] == pytest.approx(1.0, abs=0.051)
+    with pytest.raises(ValueError) as excinfo:
+        window._infer_rwd_dataset_contract_overrides("rwd")
+    message = str(excinfo.value)
+    assert "strict end coverage failure" in message
+    assert str(dataset_root / short_chunk / "fluorescence.csv") in message
+    assert "raw_end" in message
+    assert "required grid_end" in message
+    assert "missing" in message
 
 
 def test_rwd_contract_inference_rejects_large_duration_mismatch(window, tmp_path):

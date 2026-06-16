@@ -5897,6 +5897,32 @@ class MainWindow(QMainWindow):
                         "timestamp_duration_delta_sec": float(timestamp_duration_delta),
                     }
                 )
+            strict_n_target = int(round(float(nominal_duration) * float(nominal_fs)))
+            if strict_n_target <= 0:
+                raise ValueError(
+                    "Inconsistent RWD contract across chunks: "
+                    f"non-positive strict target sample count at chunk {idx} ({path}). "
+                    f"chunk_duration_sec={nominal_duration:.9f}, target_fs_hz={nominal_fs:.9f}."
+                )
+            raw_end = float(contract["timestamp_duration_sec"])
+            strict_tol = 1.0 / float(nominal_fs)
+            strict_grid_end = (strict_n_target - 1) / float(nominal_fs)
+            strict_end_threshold = strict_grid_end - strict_tol
+            strict_shortfall_samples = (strict_end_threshold - raw_end) * float(nominal_fs)
+            if strict_n_target >= 3 and 0.0 < strict_shortfall_samples <= 0.25:
+                strict_n_target -= 1
+                strict_grid_end = (strict_n_target - 1) / float(nominal_fs)
+                strict_end_threshold = strict_grid_end - strict_tol
+            if raw_end + 1e-9 < strict_end_threshold:
+                missing_sec = strict_grid_end - raw_end
+                raise ValueError(
+                    "Inconsistent RWD contract across chunks: "
+                    f"strict end coverage failure at chunk {idx} ({path}). "
+                    f"raw_end {raw_end:.4f}s < required grid_end {strict_grid_end:.4f}s; "
+                    f"missing {missing_sec:.4f}s. Current strict RWD policy requires full "
+                    f"chunk coverage for target_fs_hz={nominal_fs:.9f}, "
+                    f"chunk_duration_sec={nominal_duration:.9f}."
+                )
         self._timing_end("rwd_contract_cross_chunk_validation", t_cross)
 
         out = {
