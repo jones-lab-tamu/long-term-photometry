@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from statistics import median
 
-from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, Signal
+from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, Signal, QSignalBlocker
 from PySide6.QtGui import QAction, QColor, QFont, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -1320,8 +1320,8 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.setObjectName("workflowModeTabs")
         self._workflow_mode_tabs = tabs
-        self._guided_workflow_tab = self._build_guided_workflow_shell()
         self._full_control_tab = self._build_full_control_body()
+        self._guided_workflow_tab = self._build_guided_workflow_shell()
         tabs.addTab(self._guided_workflow_tab, "Guided Workflow")
         tabs.addTab(self._full_control_tab, "Full Control")
         return tabs
@@ -1515,25 +1515,413 @@ class MainWindow(QMainWindow):
         return scroll
 
     def _build_guided_select_data_step(self) -> QWidget:
+        controls = QWidget()
+        controls.setObjectName("guidedSelectDataControls")
+        form = QFormLayout(controls)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+
+        self._guided_input_dir_edit = QLineEdit()
+        self._guided_input_dir_edit.setObjectName("guidedInputDirectory")
+        self._guided_input_dir_edit.setToolTip(self._input_dir.toolTip())
+        input_row = QHBoxLayout()
+        input_row.addWidget(self._guided_input_dir_edit)
+        input_browse = QPushButton("Browse...")
+        input_browse.setObjectName("guidedInputDirectoryBrowse")
+        input_browse.clicked.connect(
+            lambda: self._browse_dir(self._guided_input_dir_edit, "Select Input Directory")
+        )
+        input_row.addWidget(input_browse)
+        form.addRow("Input folder:", input_row)
+
+        self._guided_output_dir_edit = QLineEdit()
+        self._guided_output_dir_edit.setObjectName("guidedOutputDirectory")
+        self._guided_output_dir_edit.setToolTip(self._output_dir.toolTip())
+        output_row = QHBoxLayout()
+        output_row.addWidget(self._guided_output_dir_edit)
+        output_browse = QPushButton("Browse...")
+        output_browse.setObjectName("guidedOutputDirectoryBrowse")
+        output_browse.clicked.connect(
+            lambda: self._browse_dir(self._guided_output_dir_edit, "Select Output Base Directory")
+        )
+        output_row.addWidget(output_browse)
+        form.addRow("Output folder:", output_row)
+
+        self._guided_format_combo = QComboBox()
+        self._guided_format_combo.setObjectName("guidedFormatCombo")
+        self._guided_format_combo.addItems(list(FORMAT_CHOICES))
+        self._guided_format_combo.setToolTip(self._format_combo.toolTip())
+        form.addRow("Format:", self._guided_format_combo)
+
+        self._guided_resolved_format_label = QLabel("Resolved format will appear after discovery/validation.")
+        self._guided_resolved_format_label.setObjectName("guidedResolvedFormatLabel")
+        self._guided_resolved_format_label.setProperty("guidedMutedText", True)
+        self._guided_resolved_format_label.setWordWrap(True)
+        form.addRow("Resolved format:", self._guided_resolved_format_label)
+
+        roi_group = QGroupBox("ROI discovery and selection")
+        roi_group.setObjectName("guidedRoiDiscoveryGroup")
+        roi_layout = QVBoxLayout(roi_group)
+        roi_layout.setContentsMargins(10, 10, 10, 10)
+        roi_layout.setSpacing(8)
+        roi_row = QHBoxLayout()
+        self._guided_discover_rois_btn = QPushButton("Select ROIs...")
+        self._guided_discover_rois_btn.setObjectName("guidedDiscoverRoisButton")
+        self._guided_discover_rois_btn.setToolTip(self._discover_btn.toolTip())
+        self._guided_discover_rois_btn.clicked.connect(self._on_guided_discover_rois)
+        roi_row.addWidget(self._guided_discover_rois_btn)
+        roi_row.addStretch()
+        roi_layout.addLayout(roi_row)
+
+        self._guided_discovery_summary_label = QLabel(
+            "ROI choices use the same discovery state as Full Control."
+        )
+        self._guided_discovery_summary_label.setObjectName("guidedDiscoverySummaryLabel")
+        self._guided_discovery_summary_label.setProperty("guidedSecondaryText", True)
+        self._guided_discovery_summary_label.setWordWrap(True)
+        roi_layout.addWidget(self._guided_discovery_summary_label)
+
+        self._guided_roi_list = QListWidget()
+        self._guided_roi_list.setObjectName("guidedRoiList")
+        self._guided_roi_list.setMaximumHeight(140)
+        self._guided_roi_list.setToolTip(self._roi_list.toolTip())
+        self._guided_roi_list.itemChanged.connect(self._on_guided_roi_item_changed)
+        roi_layout.addWidget(self._guided_roi_list)
+        form.addRow("", roi_group)
+
+        self._connect_guided_setup_sync()
+        self._sync_guided_setup_from_full()
         return self._build_guided_step_scroll(
             "guidedStepSelectData",
             "Select data",
             [
-                "Future stage: select input folder, output root, data format or resolved format, ROI discovery, and ROI include/exclude.",
-                "Stage 1 does not mirror or mutate the current run setup. Use Full Control for real validation and runs.",
+                "These controls mirror the existing setup state used by Full Control. They do not run analysis.",
+                "ROI discovery uses the existing discovery path and shared ROI inclusion state.",
             ],
+            controls,
         )
 
     def _build_guided_recording_structure_step(self) -> QWidget:
+        controls = QWidget()
+        controls.setObjectName("guidedRecordingStructureControls")
+        form = QFormLayout(controls)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+
+        self._guided_acquisition_mode_combo = QComboBox()
+        self._guided_acquisition_mode_combo.setObjectName("guidedAcquisitionModeCombo")
+        for idx in range(self._acquisition_mode_combo.count()):
+            self._guided_acquisition_mode_combo.addItem(
+                self._acquisition_mode_combo.itemText(idx),
+                self._acquisition_mode_combo.itemData(idx),
+            )
+        self._guided_acquisition_mode_combo.setToolTip(self._acquisition_mode_combo.toolTip())
+        form.addRow("Acquisition mode:", self._guided_acquisition_mode_combo)
+
+        self._guided_sessions_per_hour_edit = QLineEdit()
+        self._guided_sessions_per_hour_edit.setObjectName("guidedSessionsPerHour")
+        self._guided_sessions_per_hour_edit.setPlaceholderText(self._sph_edit.placeholderText())
+        self._guided_sessions_per_hour_edit.setToolTip(self._sph_edit.toolTip())
+        form.addRow("Sessions/hour:", self._guided_sessions_per_hour_edit)
+
+        self._guided_session_duration_edit = QLineEdit()
+        self._guided_session_duration_edit.setObjectName("guidedSessionDuration")
+        self._guided_session_duration_edit.setPlaceholderText(self._duration_edit.placeholderText())
+        self._guided_session_duration_edit.setToolTip(self._duration_edit.toolTip())
+        form.addRow("Session duration (s):", self._guided_session_duration_edit)
+
+        self._guided_continuous_window_sec_spin = QDoubleSpinBox()
+        self._guided_continuous_window_sec_spin.setObjectName("guidedContinuousWindowSec")
+        self._guided_continuous_window_sec_spin.setRange(
+            self._continuous_window_sec_spin.minimum(),
+            self._continuous_window_sec_spin.maximum(),
+        )
+        self._guided_continuous_window_sec_spin.setDecimals(self._continuous_window_sec_spin.decimals())
+        self._guided_continuous_window_sec_spin.setSingleStep(self._continuous_window_sec_spin.singleStep())
+        self._guided_continuous_window_sec_spin.setToolTip(self._continuous_window_sec_spin.toolTip())
+        form.addRow("Continuous window (s):", self._guided_continuous_window_sec_spin)
+
+        self._guided_allow_partial_final_window_cb = QCheckBox("")
+        self._guided_allow_partial_final_window_cb.setObjectName("guidedAllowPartialFinalWindow")
+        self._guided_allow_partial_final_window_cb.setToolTip(self._allow_partial_final_window_cb.toolTip())
+        form.addRow("Allow partial final window:", self._guided_allow_partial_final_window_cb)
+
+        self._guided_exclude_incomplete_final_rwd_chunk_cb = QCheckBox("")
+        self._guided_exclude_incomplete_final_rwd_chunk_cb.setObjectName(
+            "guidedExcludeIncompleteFinalRwdChunk"
+        )
+        self._guided_exclude_incomplete_final_rwd_chunk_cb.setToolTip(
+            self._exclude_incomplete_final_rwd_chunk_cb.toolTip()
+        )
+        form.addRow(
+            "Exclude incomplete final RWD chunk:",
+            self._guided_exclude_incomplete_final_rwd_chunk_cb,
+        )
+
+        self._guided_recording_structure_help_label = QLabel("")
+        self._guided_recording_structure_help_label.setObjectName("guidedRecordingStructureHelp")
+        self._guided_recording_structure_help_label.setProperty("guidedSecondaryText", True)
+        self._guided_recording_structure_help_label.setWordWrap(True)
+        form.addRow("", self._guided_recording_structure_help_label)
+
+        self._connect_guided_setup_sync()
+        self._sync_guided_setup_from_full()
         return self._build_guided_step_scroll(
             "guidedStepRecordingStructure",
             "Recording structure",
             [
-                "Future stage: configure intermittent versus continuous recording setup.",
-                "Intermittent data will expose sessions/hour and session duration. Continuous data will expose the continuous analysis window.",
-                "Stage 1 is placeholder-only and does not write config overrides.",
+                "These controls mirror the acquisition and timing state used by Full Control.",
+                "Guided Workflow uses non-overlapping continuous windows; the continuous step remains derived from the window length.",
             ],
+            controls,
         )
+
+    def _connect_guided_setup_sync(self) -> None:
+        """Connect Guided setup controls to the existing Full Control setup widgets."""
+        if getattr(self, "_guided_setup_sync_connected", False):
+            return
+        required = (
+            "_guided_input_dir_edit",
+            "_guided_output_dir_edit",
+            "_guided_format_combo",
+            "_guided_acquisition_mode_combo",
+            "_guided_sessions_per_hour_edit",
+            "_guided_session_duration_edit",
+            "_guided_continuous_window_sec_spin",
+            "_guided_allow_partial_final_window_cb",
+            "_guided_exclude_incomplete_final_rwd_chunk_cb",
+        )
+        if not all(hasattr(self, name) for name in required):
+            return
+
+        self._guided_setup_syncing = False
+
+        self._guided_input_dir_edit.textChanged.connect(
+            lambda text: self._sync_line_edit_value(self._input_dir, text)
+        )
+        self._guided_output_dir_edit.textChanged.connect(
+            lambda text: self._sync_line_edit_value(self._output_dir, text)
+        )
+        self._guided_format_combo.currentIndexChanged.connect(
+            lambda _idx: self._sync_combo_text_value(
+                self._format_combo,
+                self._guided_format_combo.currentText(),
+            )
+        )
+        self._guided_acquisition_mode_combo.currentIndexChanged.connect(
+            lambda _idx: self._sync_combo_data_value(
+                self._acquisition_mode_combo,
+                self._guided_acquisition_mode_combo.currentData(),
+            )
+        )
+        self._guided_sessions_per_hour_edit.textChanged.connect(
+            lambda text: self._sync_line_edit_value(self._sph_edit, text)
+        )
+        self._guided_session_duration_edit.textChanged.connect(
+            lambda text: self._sync_line_edit_value(self._duration_edit, text)
+        )
+        self._guided_continuous_window_sec_spin.valueChanged.connect(
+            lambda value: self._sync_spin_value(self._continuous_window_sec_spin, value)
+        )
+        self._guided_allow_partial_final_window_cb.stateChanged.connect(
+            lambda _state: self._sync_checkbox_value(
+                self._allow_partial_final_window_cb,
+                self._guided_allow_partial_final_window_cb.isChecked(),
+            )
+        )
+        self._guided_exclude_incomplete_final_rwd_chunk_cb.stateChanged.connect(
+            lambda _state: self._sync_checkbox_value(
+                self._exclude_incomplete_final_rwd_chunk_cb,
+                self._guided_exclude_incomplete_final_rwd_chunk_cb.isChecked(),
+            )
+        )
+
+        self._input_dir.textChanged.connect(lambda _text: self._sync_guided_setup_from_full())
+        self._output_dir.textChanged.connect(lambda _text: self._sync_guided_setup_from_full())
+        self._format_combo.currentIndexChanged.connect(lambda _idx: self._sync_guided_setup_from_full())
+        self._acquisition_mode_combo.currentIndexChanged.connect(
+            lambda _idx: self._sync_guided_setup_from_full()
+        )
+        self._sph_edit.textChanged.connect(lambda _text: self._sync_guided_setup_from_full())
+        self._duration_edit.textChanged.connect(lambda _text: self._sync_guided_setup_from_full())
+        self._continuous_window_sec_spin.valueChanged.connect(
+            lambda _value: self._sync_guided_setup_from_full()
+        )
+        self._allow_partial_final_window_cb.stateChanged.connect(
+            lambda _state: self._sync_guided_setup_from_full()
+        )
+        self._exclude_incomplete_final_rwd_chunk_cb.stateChanged.connect(
+            lambda _state: self._sync_guided_setup_from_full()
+        )
+        self._guided_setup_sync_connected = True
+
+    def _sync_line_edit_value(self, target: QLineEdit, text: str) -> None:
+        if getattr(self, "_guided_setup_syncing", False):
+            return
+        if target.text() == text:
+            return
+        target.setText(text)
+
+    def _sync_combo_text_value(self, target: QComboBox, text: str) -> None:
+        if getattr(self, "_guided_setup_syncing", False):
+            return
+        idx = target.findText(text)
+        if idx >= 0 and target.currentIndex() != idx:
+            target.setCurrentIndex(idx)
+
+    def _sync_combo_data_value(self, target: QComboBox, data: object) -> None:
+        if getattr(self, "_guided_setup_syncing", False):
+            return
+        idx = target.findData(data)
+        if idx >= 0 and target.currentIndex() != idx:
+            target.setCurrentIndex(idx)
+
+    def _sync_spin_value(self, target: QDoubleSpinBox, value: float) -> None:
+        if getattr(self, "_guided_setup_syncing", False):
+            return
+        if abs(float(target.value()) - float(value)) <= 1e-9:
+            return
+        target.setValue(float(value))
+
+    def _sync_checkbox_value(self, target: QCheckBox, checked: bool) -> None:
+        if getattr(self, "_guided_setup_syncing", False):
+            return
+        if target.isChecked() == bool(checked):
+            return
+        target.setChecked(bool(checked))
+
+    def _set_combo_data_without_signals(self, combo: QComboBox, data: object) -> None:
+        idx = combo.findData(data)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _sync_guided_setup_from_full(self) -> None:
+        """Refresh Guided setup controls from the existing Full Control widgets."""
+        if getattr(self, "_guided_setup_syncing", False):
+            return
+        required = (
+            "_guided_input_dir_edit",
+            "_guided_output_dir_edit",
+            "_guided_format_combo",
+            "_guided_acquisition_mode_combo",
+            "_guided_sessions_per_hour_edit",
+            "_guided_session_duration_edit",
+            "_guided_continuous_window_sec_spin",
+            "_guided_allow_partial_final_window_cb",
+            "_guided_exclude_incomplete_final_rwd_chunk_cb",
+        )
+        if not all(hasattr(self, name) for name in required):
+            return
+        self._guided_setup_syncing = True
+        try:
+            blockers = [
+                QSignalBlocker(self._guided_input_dir_edit),
+                QSignalBlocker(self._guided_output_dir_edit),
+                QSignalBlocker(self._guided_format_combo),
+                QSignalBlocker(self._guided_acquisition_mode_combo),
+                QSignalBlocker(self._guided_sessions_per_hour_edit),
+                QSignalBlocker(self._guided_session_duration_edit),
+                QSignalBlocker(self._guided_continuous_window_sec_spin),
+                QSignalBlocker(self._guided_allow_partial_final_window_cb),
+                QSignalBlocker(self._guided_exclude_incomplete_final_rwd_chunk_cb),
+            ]
+            self._guided_input_dir_edit.setText(self._input_dir.text())
+            self._guided_output_dir_edit.setText(self._output_dir.text())
+            fmt_idx = self._guided_format_combo.findText(self._format_combo.currentText())
+            if fmt_idx >= 0:
+                self._guided_format_combo.setCurrentIndex(fmt_idx)
+            self._set_combo_data_without_signals(
+                self._guided_acquisition_mode_combo,
+                self._selected_acquisition_mode(),
+            )
+            self._guided_sessions_per_hour_edit.setText(self._sph_edit.text())
+            self._guided_session_duration_edit.setText(self._duration_edit.text())
+            self._guided_continuous_window_sec_spin.setValue(float(self._continuous_window_sec_spin.value()))
+            self._guided_allow_partial_final_window_cb.setChecked(
+                bool(self._allow_partial_final_window_cb.isChecked())
+            )
+            self._guided_exclude_incomplete_final_rwd_chunk_cb.setChecked(
+                bool(self._exclude_incomplete_final_rwd_chunk_cb.isChecked())
+            )
+            del blockers
+        finally:
+            self._guided_setup_syncing = False
+        self._sync_guided_recording_visibility()
+
+    def _sync_guided_recording_visibility(self) -> None:
+        if not hasattr(self, "_guided_recording_structure_help_label"):
+            return
+        continuous = self._selected_acquisition_mode() == "continuous"
+        for widget in (
+            getattr(self, "_guided_sessions_per_hour_edit", None),
+            getattr(self, "_guided_session_duration_edit", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(not continuous)
+        for widget in (
+            getattr(self, "_guided_continuous_window_sec_spin", None),
+            getattr(self, "_guided_allow_partial_final_window_cb", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(continuous)
+        if continuous:
+            self._guided_recording_structure_help_label.setText(
+                "Continuous mode uses one uninterrupted recording split into non-overlapping analysis windows."
+            )
+        else:
+            self._guided_recording_structure_help_label.setText(
+                "Intermittent mode uses session/chunk timing. Sessions/hour and session duration are optional unless required by the input format."
+            )
+
+    def _on_guided_discover_rois(self) -> None:
+        """Run the existing ROI discovery path and mirror its shared ROI state."""
+        self._on_discover()
+        self._sync_guided_discovery_from_full()
+
+    def _sync_guided_discovery_from_full(self) -> None:
+        if not hasattr(self, "_guided_roi_list"):
+            return
+        blockers = [QSignalBlocker(self._guided_roi_list)]
+        self._guided_roi_list.clear()
+        for idx in range(self._roi_list.count()):
+            src = self._roi_list.item(idx)
+            item = QListWidgetItem(src.text())
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(src.checkState())
+            self._guided_roi_list.addItem(item)
+        del blockers
+        if hasattr(self, "_guided_discovery_summary_label"):
+            if self._discovery_cache is None:
+                self._guided_discovery_summary_label.setText(
+                    "ROI choices use the same discovery state as Full Control."
+                )
+            else:
+                self._guided_discovery_summary_label.setText(self._discovery_summary.text())
+        if hasattr(self, "_guided_resolved_format_label"):
+            if self._discovery_cache is None:
+                self._guided_resolved_format_label.setText(
+                    "Resolved format will appear after discovery/validation."
+                )
+            else:
+                self._guided_resolved_format_label.setText(
+                    str(self._discovery_cache.get("resolved_format", "?"))
+                )
+
+    def _on_guided_roi_item_changed(self, item: QListWidgetItem) -> None:
+        if getattr(self, "_guided_setup_syncing", False):
+            return
+        row = self._guided_roi_list.row(item)
+        if row < 0 or row >= self._roi_list.count():
+            return
+        full_item = self._roi_list.item(row)
+        if full_item.checkState() != item.checkState():
+            full_item.setCheckState(item.checkState())
+
+    def _on_full_control_roi_item_changed(self, _item: QListWidgetItem) -> None:
+        self._on_config_changed()
+        self._sync_guided_discovery_from_full()
 
     def _build_guided_correction_approach_step(self) -> QWidget:
         cards = QWidget()
@@ -8127,16 +8515,19 @@ class MainWindow(QMainWindow):
 
         # Discovery outcome changes run intent; force readiness/summary refresh.
         self._on_config_changed()
+        self._sync_guided_discovery_from_full()
 
     def _on_roi_select_all(self):
         """Check all ROI items in the checklist."""
         for i in range(self._roi_list.count()):
             self._roi_list.item(i).setCheckState(Qt.Checked)
+        self._sync_guided_discovery_from_full()
 
     def _on_roi_select_none(self):
         """Uncheck all ROI items in the checklist."""
         for i in range(self._roi_list.count()):
             self._roi_list.item(i).setCheckState(Qt.Unchecked)
+        self._sync_guided_discovery_from_full()
 
     def _on_validate(self):
         self._timing_action = "validate"
@@ -10508,6 +10899,7 @@ class MainWindow(QMainWindow):
                     "Intermittent mode uses acquisition sessions/chunks and session-based timing controls."
                 )
                 self._set_status_label_style(self._acquisition_mode_help_label, "ready")
+        self._sync_guided_recording_visibility()
         if hasattr(self, "_dynamic_fit_mode_combo"):
             self._dynamic_fit_mode_combo.setEnabled(phasic_active)
         if hasattr(self, "_bleach_correction_mode_combo"):
@@ -11118,7 +11510,7 @@ class MainWindow(QMainWindow):
         self._roi_list.setToolTip(
             "Select which ROIs to include in this run. Checked means included."
         )
-        self._roi_list.itemChanged.connect(lambda _item: self._on_config_changed())
+        self._roi_list.itemChanged.connect(self._on_full_control_roi_item_changed)
         roi_selection_layout.addWidget(self._roi_list)
         roi_layout.addWidget(self._roi_selection_container)
 
