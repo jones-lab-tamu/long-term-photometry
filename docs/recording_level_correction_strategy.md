@@ -2,6 +2,25 @@
 
 This document describes planned architecture for choosing applied correction strategies at the ROI-recording level. It is design documentation only.
 
+## Current Implementation Status
+
+This document includes proposal-era architecture for future recording-level
+strategy selection. Current production applied-dFF execution is narrower:
+
+- Production tools execute only explicit `dynamic_fit` and explicit
+  `signal_only_f0`.
+- Production `no_correction` output is not implemented.
+- Executable production `auto` is not implemented.
+- GUI applied-dFF support is manual and explicit: the user includes/excludes
+  ROIs and assigns `dynamic_fit` or `signal_only_f0` to included ROIs.
+- `tools/audit_applied_dff_auto_strategy_candidates.py` may emit provisional
+  read-only `auto_strategy_decision` labels (`dynamic_fit`,
+  `signal_only_f0`, `needs_review`), but those labels are evidence only and are
+  not runnable production strategies.
+- `needs_review` is an audit label only.
+- No current production tool automatically fills manifests, silently falls back
+  between strategies, or switches strategies chunk-by-chunk.
+
 Core rule:
 
 Per-chunk policy outputs are evidence, QC, and proposal labels. They are not final applied correction decisions.

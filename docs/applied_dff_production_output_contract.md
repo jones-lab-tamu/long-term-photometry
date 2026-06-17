@@ -8,6 +8,36 @@ The contract is for a future production implementation that turns an explicit
 recording-level correction strategy into an auditable `applied_dff` trace and,
 only when requested, routes downstream feature extraction to that trace.
 
+## Current Implementation Status
+
+The current production implementation is explicit-strategy only.
+
+- Production applied-dFF execution supports explicit `dynamic_fit` and explicit
+  `signal_only_f0`.
+- `dynamic_fit` is the default manual production choice when the correction
+  reference is usable.
+- `signal_only_f0` is a rescue strategy for diagnosed correction-reference
+  failure, not a default replacement for `dynamic_fit`.
+- Production `no_correction` outputs are not implemented.
+- Executable production `auto` is not implemented.
+- `needs_review` is an audit label only, not a production strategy.
+- `auto_strategy_decision` is a provisional read-only audit label only, not a
+  runnable strategy.
+- No current production tool performs silent fallback, automatic strategy
+  inference, automatic manifest population, or chunkwise strategy switching.
+
+Current GUI support is manual and explicit. The GUI can load ROIs from
+`phasic_trace_cache.h5`, let the user include or exclude ROIs, assign explicit
+`dynamic_fit` or `signal_only_f0` strategies to included ROIs, require dry-run
+before batch execution, and write a manifest under a validated separate output
+root. It does not choose strategies.
+
+Current read-only audit support is evidence-only. Audit tools may write
+candidate evidence, provisional labels, and hash provenance under a separate
+audit output directory, but they do not write production applied caches, feature
+outputs, manifests, or route downstream analysis. Audit output directories must
+be separate from source `phasic_out` and legacy features.
+
 ## Current Preview Stack
 
 The current preview stack is intentionally non-production.
@@ -269,6 +299,10 @@ set it to `true`, but production feature tables must not inherit that value.
 
 ## Strategy-Specific Behavior
 
+The current production strategy set is limited to explicit `dynamic_fit` and
+explicit `signal_only_f0`. `needs_review` is a read-only audit label. `auto` is
+not an executable production strategy.
+
 `dynamic_fit`:
 
 - `applied_trace_source = dynamic_fit_dff`.
@@ -502,11 +536,16 @@ Production implementation must refuse or block these cases:
    under `<phasic_out>/applied_dff/features/`.
 9. Update run reports/status artifacts to point to applied output artifacts and
    record whether production feature extraction used `applied_dff`.
-10. Only after the manual production path is stable, add auto-selection as a
-    provenance-producing selector that chooses one strategy per ROI recording.
-11. Only after backend provenance is stable, add GUI controls and display
-    affordances.
-12. Consider a later migration that either updates legacy feature locations or
+10. Validate read-only auto-strategy candidate audits across synthetic and
+    real datasets before considering any executable auto behavior.
+11. Consider read-only GUI display of auto-audit evidence without altering
+    user-selected explicit strategies.
+12. Consider a later user-confirmed apply-to-manifest workflow that still writes
+    explicit `dynamic_fit` or `signal_only_f0` manifest rows, not executable
+    `auto` rows.
+13. Only after a separate validated production-auto contract exists, consider
+    true batch auto execution.
+14. Consider a later migration that either updates legacy feature locations or
     makes applied features the default. That migration needs its own contract.
 
 ## Open Questions

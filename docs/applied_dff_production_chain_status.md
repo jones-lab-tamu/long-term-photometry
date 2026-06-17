@@ -4,6 +4,47 @@ This checkpoint summarizes the current explicit applied_dff production chain.
 It is documentation only and does not change code, tests, schemas, HDF5 outputs,
 or runtime behavior.
 
+## Current Status Boundary
+
+The production-supported workflow is explicit-manifest only:
+
+- `dynamic_fit` and `signal_only_f0` are the only supported production
+  strategies.
+- `dynamic_fit` is appropriate when the correction reference is usable and is
+  the default manual production choice for ordinary dynamic/reference-supported
+  recordings.
+- `signal_only_f0` is a rescue strategy for diagnosed correction-reference
+  failure. It is not a default replacement for `dynamic_fit`.
+- Source `phasic_trace_cache.h5` and legacy
+  `<phasic_out>/features/features.csv` remain unchanged.
+- Production outputs are written under the chosen applied-dFF output root.
+
+The GUI-supported workflow is manual and explicit:
+
+- The GUI loads ROIs from `phasic_trace_cache.h5`.
+- The user includes or excludes ROIs.
+- The user assigns an explicit `dynamic_fit` or `signal_only_f0` strategy to
+  each included ROI.
+- Unchecked ROIs are omitted from the manifest.
+- Dry-run is required before batch execution.
+- The GUI does not infer, recommend, choose, or auto-select strategies.
+
+The read-only audit workflow is evidence-only:
+
+- `tools/audit_applied_dff_strategy_candidates.py` audits explicit
+  `dynamic_fit` and `signal_only_f0` candidates for manual review.
+- `tools/audit_applied_dff_auto_strategy_candidates.py` emits provisional
+  `auto_strategy_decision` labels (`dynamic_fit`, `signal_only_f0`,
+  `needs_review`) with evidence JSON for future auto-contract validation.
+- `needs_review` is an audit label only. It is not a production strategy.
+- `auto_strategy_decision` is a provisional read-only audit label only. It is
+  not executed by production tools and must not be copied into a manifest as a
+  runnable strategy.
+
+The current chain does not support executable `auto`, production
+`no_correction`, automatic strategy inference, automatic manifest population,
+silent fallback, or chunkwise strategy switching.
+
 ## 1. Production Applied Cache Writing
 
 Tool:
@@ -145,8 +186,7 @@ Key guarantees:
 - Refuses unsafe audit output directories that could delete source cache or
   legacy features.
 - Does not run `tools/run_applied_dff_pipeline.py`.
-- Does not add auto-selection, GUI controls, production `no_correction`, or
-  global routing.
+- Does not add auto-selection, production `no_correction`, or global routing.
 
 Candidate evidence summarized for `dynamic_fit`:
 
@@ -167,7 +207,68 @@ Candidate evidence summarized for `signal_only_f0`:
 - Summary statistics.
 - Blocking issues and cautions.
 
-## 6. Explicit End-To-End Orchestrator
+## 6. Read-Only Auto-Strategy Candidate Audit
+
+Tool:
+
+```text
+tools/audit_applied_dff_auto_strategy_candidates.py
+```
+
+Purpose:
+
+- Provides a read-only evidence aggregation layer for a future auditable
+  `auto` contract.
+- Emits provisional decision labels only:
+
+```text
+dynamic_fit
+signal_only_f0
+needs_review
+```
+
+- Writes audit reports and evidence JSON under a separate audit output
+  directory.
+- Records source phasic cache and legacy feature hashes before and after audit.
+- Does not run the production pipeline.
+- Does not write production applied caches.
+- Does not write feature outputs.
+- Does not write manifests.
+- Does not modify source `phasic_trace_cache.h5`.
+- Does not modify legacy `<phasic_out>/features/features.csv`.
+
+Output-safety boundary:
+
+- The audit output directory must be separate from source `phasic_out` and the
+  legacy features directory.
+- Unsafe output directories inside source analysis namespaces are refused before
+  overwrite cleanup or report writing.
+- `--overwrite` may clear only the validated audit output directory.
+
+Current interpretation:
+
+- `dynamic_fit` means the evidence supports dynamic/reference correction as the
+  provisional future auto label.
+- `signal_only_f0` means the evidence supports a signal-only F0 rescue as the
+  provisional future auto label.
+- `needs_review` means the evidence is mixed, incomplete, caution-heavy, or
+  outside validated thresholds.
+
+These labels are not production strategies for current tools. Current
+production execution still requires explicit `dynamic_fit` or `signal_only_f0`
+manifest rows chosen by the user.
+
+Current threshold-review validation:
+
+- Normal real-data audit: 8 `dynamic_fit`, 0 `signal_only_f0`, 0
+  `needs_review`.
+- Weird/pathological real-data audit: 1 `dynamic_fit`, 0 `signal_only_f0`, 7
+  `needs_review`.
+- Weird CH8 remains `needs_review` with signal-only rescue evidence because the
+  current validated thresholds are intentionally conservative.
+- Weird CH9 audits as `dynamic_fit`.
+
+## 7. Explicit End-To-End Orchestrator
 
 Tool:
 
@@ -226,8 +327,8 @@ Key guarantees:
 - Rejects unsafe ROI output path components before overwrite deletion.
 - Confines overwrite deletion to the resolved pipeline output directory inside
   `output_root`.
-- Does not add auto-selection, GUI controls, production `no_correction` output,
-  or global routing.
+- Does not add auto-selection, production `no_correction` output, or global
+  routing.
 
 One-ROI manual production entry point:
 
@@ -244,7 +345,7 @@ pre-choice decision-support step. The orchestrator remains the
 contract-preserving production unit after the user manually chooses an explicit
 one-ROI, one-strategy production run.
 
-## 7. Explicit Manifest Batch Runner
+## 8. Explicit Manifest Batch Runner
 
 Tool:
 
@@ -320,7 +421,6 @@ Key guarantees:
 - Does not duplicate correction, cache writing, feature extraction, or
   verification logic.
 - Calls `tools/run_applied_dff_pipeline.py` for each explicit row.
-- Does not add GUI controls.
 - Does not add global routing.
 - Does not implement production `no_correction`.
 - Does not replace legacy features.
@@ -360,7 +460,32 @@ orchestrator remains the contract-preserving production unit. The four
 underlying tools remain the contract layers for debugging and stage-specific
 verification.
 
-## 8. Current Real-Data Status
+## 9. GUI Explicit Workflow
+
+The GUI is an explicit manual manifest workflow, not an auto-selection workflow.
+
+Current GUI behavior:
+
+- Loads ROIs from the selected source `phasic_trace_cache.h5`.
+- Lets the user include or exclude ROIs.
+- Omits unchecked ROIs from the manifest.
+- Lets the user assign only explicit `dynamic_fit` or `signal_only_f0`
+  strategies to included ROIs.
+- Requires dry-run before batch execution.
+- Writes GUI manifest and GUI provenance only under a validated applied-dFF
+  output root that is separate from source `phasic_out` and legacy features.
+- Calls the explicit batch runner after dry-run succeeds.
+
+The GUI does not:
+
+- infer a strategy from candidate evidence
+- choose a best strategy
+- apply provisional `auto_strategy_decision` labels
+- automatically populate manifest rows from audit output
+- execute `auto`
+- execute production `no_correction`
+
+## 10. Current Real-Data Status
 
 CH8 `signal_only_f0`:
 
@@ -399,32 +524,39 @@ Explicit batch runner manual verification:
 - Legacy features unchanged.
 - No auto-selection, no strategy chosen, and no inference.
 
-## 9. Intentionally Unsupported
+## 11. Intentionally Unsupported
 
 The current chain does not implement:
 
-- Auto strategy selection.
+- Executable `auto` strategy selection.
 - Automatic strategy choice from the advisory audit.
+- Automatic strategy choice from the read-only auto audit.
+- Automatic manifest population from audit output.
 - Production `no_correction` outputs.
-- GUI controls.
+- GUI auto-selection controls.
 - Global pipeline routing.
 - Overwriting or replacing legacy feature outputs.
 - Chunkwise strategy switching.
 - Feature routing from an unverified applied cache.
 - Partial-cache feature extraction by default.
 
-## 10. Current Safety Rule
+## 12. Current Safety Rule
 
 All production downstream applied_dff analysis must be explicit-strategy,
 verified-cache, separate-output only.
 
-## 11. Recommended Next Step
+## 13. Recommended Next Step
 
 Use the advisory-audit plus explicit-manifest batch workflow on representative
 recordings before adding any broader routing.
 
-Do not add auto-selection yet. Do not add GUI controls yet. Do not add global
-routing yet. Do not allow the advisory audit to choose strategies automatically.
+Do not add executable auto-selection yet. Do not add GUI auto-selection controls
+yet. Do not add global routing yet. Do not allow either audit tool to choose
+strategies automatically.
 
-The next implementation step, if needed later, should be limited to improving
-reporting or manifest ergonomics, not changing strategy selection behavior.
+The next implementation step, if needed later, should be limited to read-only
+display of auto-audit evidence or manual manifest ergonomics. A later
+user-confirmed "apply proposed strategies to manifest" workflow would still need
+to write explicit `dynamic_fit` or `signal_only_f0` manifest rows and must not
+introduce an executable `auto` strategy. True production auto execution requires
+a separate validated contract.

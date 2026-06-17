@@ -2,6 +2,24 @@
 
 This document defines the planned output contract for future applied correction support. It is design documentation only. It does not implement applied `signal_only_f0`, change dynamic-fit correction, change dF/F calculation, change feature/event detection, or modify HDF5 outputs.
 
+## Current Implementation Status
+
+This design document predates the current explicit applied-dFF production chain.
+Current production behavior is:
+
+- Explicit `dynamic_fit` and explicit `signal_only_f0` production runs are
+  supported.
+- `dynamic_fit` is the ordinary manual production choice when the correction
+  reference is usable.
+- `signal_only_f0` is a rescue strategy for diagnosed correction-reference
+  failure, not a default replacement for `dynamic_fit`.
+- Production `no_correction` output is not implemented.
+- Executable production `auto` is not implemented.
+- Read-only auto-strategy audit labels, including `needs_review`, are evidence
+  only and are not production strategies.
+- GUI applied-dFF support is explicit manual selection plus ROI include/exclude,
+  dry-run, and batch execution. It does not choose strategies.
+
 ## Core Principle
 
 Applied correction is selected once per ROI recording. The selected strategy is applied consistently to the ROI recording. The pipeline must not create a default mosaic trace that switches correction modes chunk-by-chunk.
