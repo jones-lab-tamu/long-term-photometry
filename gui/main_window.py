@@ -1447,6 +1447,14 @@ class MainWindow(QMainWindow):
                 color: #6b7280;
                 font-size: 11px;
             }
+            QLabel[guidedStatusPill="true"] {
+                background: #f1f5f9;
+                border: 1px solid #d8e0e8;
+                border-radius: 4px;
+                color: #334155;
+                font-weight: bold;
+                padding: 4px 6px;
+            }
             """
         )
 
@@ -1476,6 +1484,7 @@ class MainWindow(QMainWindow):
 
         self._guided_workflow_stack = QStackedWidget()
         self._guided_workflow_stack.setObjectName("guidedWorkflowStepStack")
+        self._guided_diagnostics_status = "not_generated"
         for widget in (
             self._build_guided_select_data_step(),
             self._build_guided_recording_structure_step(),
@@ -1851,8 +1860,10 @@ class MainWindow(QMainWindow):
             f"Reference correction method: {state['reference_correction_label']} "
             f"({state['reference_correction_method']})",
             f"Guided correction intent: {state['guided_correction_intent']}",
+            f"Diagnostics: {getattr(self, '_guided_diagnostics_status', 'not_generated')}",
         ]
         self._guided_setup_summary_label.setText("\n".join(lines))
+        self._refresh_guided_diagnostics_panel()
 
     def _sync_line_edit_value(self, target: QLineEdit, text: str) -> None:
         if getattr(self, "_guided_setup_syncing", False):
@@ -2145,12 +2156,14 @@ class MainWindow(QMainWindow):
         if idx >= 0 and self._dynamic_fit_mode_combo.currentIndex() != idx:
             self._dynamic_fit_mode_combo.setCurrentIndex(idx)
         self._guided_correction_intent = card_title
+        self._guided_diagnostics_status = "not_generated"
         self._sync_guided_correction_from_full()
         self._refresh_guided_setup_summary()
 
     def _select_guided_signal_only_f0_intent(self) -> None:
         """Signal-Only F0 is explicit future intent, not a Dynamic Fit Mode fallback."""
         self._guided_correction_intent = GUIDED_SIGNAL_ONLY_F0_CARD
+        self._guided_diagnostics_status = "not_generated"
         self._sync_guided_correction_from_full()
         self._refresh_guided_setup_summary()
 
@@ -2165,6 +2178,7 @@ class MainWindow(QMainWindow):
                 break
         if self._guided_correction_intent != GUIDED_SIGNAL_ONLY_F0_CARD:
             self._guided_correction_intent = selected_reference_card
+            self._guided_diagnostics_status = "not_generated"
         for title, card in self._guided_correction_cards.items():
             is_selected = title == self._guided_correction_intent
             card.setProperty("guidedCorrectionSelected", bool(is_selected))
@@ -2181,14 +2195,106 @@ class MainWindow(QMainWindow):
         self._refresh_guided_setup_summary()
 
     def _build_guided_diagnostics_step(self) -> QWidget:
+        diagnostics = QWidget()
+        diagnostics.setObjectName("guidedDiagnosticsContent")
+        layout = QVBoxLayout(diagnostics)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        status_group = QGroupBox("Diagnostics status")
+        status_group.setObjectName("guidedDiagnosticsStatusPanel")
+        status_layout = QVBoxLayout(status_group)
+        status_layout.setContentsMargins(10, 10, 10, 10)
+        status_layout.setSpacing(6)
+        self._guided_diagnostics_status_label = QLabel("Diagnostics: not generated / not wired yet")
+        self._guided_diagnostics_status_label.setObjectName("guidedDiagnosticsStatusLabel")
+        self._guided_diagnostics_status_label.setProperty("guidedStatusPill", True)
+        self._guided_diagnostics_status_label.setWordWrap(True)
+        status_layout.addWidget(self._guided_diagnostics_status_label)
+        status_note = QLabel(
+            "Diagnostics are read-only evidence. Stage 4A does not generate previews, "
+            "run correction tuning, validate, or execute analysis."
+        )
+        status_note.setObjectName("guidedDiagnosticsStatusNote")
+        status_note.setProperty("guidedSecondaryText", True)
+        status_note.setWordWrap(True)
+        status_layout.addWidget(status_note)
+        layout.addWidget(status_group)
+
+        context_group = QGroupBox("Current correction context")
+        context_group.setObjectName("guidedDiagnosticsCorrectionContextPanel")
+        context_layout = QVBoxLayout(context_group)
+        context_layout.setContentsMargins(10, 10, 10, 10)
+        self._guided_diagnostics_context_label = QLabel("")
+        self._guided_diagnostics_context_label.setObjectName("guidedDiagnosticsCorrectionContext")
+        self._guided_diagnostics_context_label.setProperty("guidedSecondaryText", True)
+        self._guided_diagnostics_context_label.setWordWrap(True)
+        self._guided_diagnostics_context_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        context_layout.addWidget(self._guided_diagnostics_context_label)
+        layout.addWidget(context_group)
+
+        slots_group = QGroupBox("Planned diagnostic evidence slots")
+        slots_group.setObjectName("guidedDiagnosticsSlotsPanel")
+        slots_layout = QGridLayout(slots_group)
+        slots_layout.setContentsMargins(10, 10, 10, 10)
+        slots_layout.setSpacing(8)
+        self._guided_diagnostics_slot_labels = {}
+        slots = [
+            "Global linear baseline comparison",
+            "Robust global event-reject fit summary",
+            "Adaptive event-gated fit summary",
+            "Fit stability",
+            "Correction impact",
+            "Reference coupling warnings",
+            "Signal-Only F0 evidence",
+            "needs_review flags",
+            "Decision-Support Audit evidence",
+        ]
+        for idx, slot in enumerate(slots):
+            label = QLabel(f"{slot}: not generated")
+            safe_name = re.sub(r"[^A-Za-z0-9]+", "", slot)
+            label.setObjectName(f"guidedDiagnosticSlot{safe_name}")
+            label.setProperty("guidedMutedText", True)
+            label.setWordWrap(True)
+            self._guided_diagnostics_slot_labels[slot] = label
+            slots_layout.addWidget(label, idx // 3, idx % 3)
+        layout.addWidget(slots_group)
+        self._refresh_guided_diagnostics_panel()
         return self._build_guided_step_scroll(
             "guidedStepDiagnostics",
             "Diagnostics",
             [
-                "Future stage: correction previews, fit stability summaries, correction impact views, warning/review states, needs_review flags, and read-only Decision-Support Audit evidence.",
-                "Stage 1 does not launch previews or read diagnostic outputs.",
+                "This step is a read-only diagnostics/status surface. It does not generate diagnostics or run analysis.",
+                "Future stages will attach correction previews, fit stability, correction impact, warning, and read-only Decision-Support Audit evidence.",
             ],
+            diagnostics,
         )
+
+    def _refresh_guided_diagnostics_panel(self) -> None:
+        if not hasattr(self, "_guided_diagnostics_status_label"):
+            return
+        status_text = {
+            "not_generated": "Diagnostics: not generated / not wired yet",
+            "stale": "Diagnostics: stale",
+            "unavailable": "Diagnostics: unavailable",
+            "available": "Diagnostics: available from existing artifacts",
+        }.get(getattr(self, "_guided_diagnostics_status", "not_generated"), "Diagnostics: not generated / not wired yet")
+        self._guided_diagnostics_status_label.setText(status_text)
+        if hasattr(self, "_guided_diagnostics_context_label"):
+            state = self._guided_setup_summary_state()
+            signal_only = state["guided_correction_intent"] == GUIDED_SIGNAL_ONLY_F0_CARD
+            lines = [
+                f"Reference correction method: {state['reference_correction_label']} ({state['reference_correction_method']})",
+                f"Guided correction intent: {state['guided_correction_intent']}",
+                f"Signal-Only F0 intent: {'selected for later explicit confirmation' if signal_only else 'not selected'}",
+                "Decision-Support Audit: coming later / read-only evidence",
+                "No Correction: not available in Guided Workflow",
+            ]
+            self._guided_diagnostics_context_label.setText("\n".join(lines))
+        if hasattr(self, "_guided_diagnostics_slot_labels"):
+            for slot, label in self._guided_diagnostics_slot_labels.items():
+                suffix = "coming later / read-only evidence" if "Decision-Support Audit" in slot else "not generated"
+                label.setText(f"{slot}: {suffix}")
 
     def _build_guided_confirm_strategy_step(self) -> QWidget:
         return self._build_guided_step_scroll(
@@ -8548,6 +8654,8 @@ class MainWindow(QMainWindow):
         """Any config widget change invalidates prior validation."""
         self._validation_passed = False
         self._validated_run_signature = None
+        if hasattr(self, "_guided_diagnostics_status"):
+            self._guided_diagnostics_status = "not_generated"
         self._refresh_splitter_workspace_policy()
         self._update_button_states()
         self._refresh_guided_setup_summary()

@@ -482,3 +482,56 @@ def test_guided_setup_summary_reports_correction_state_without_validation_claim(
     assert "Reference correction method:" in text
     assert "adaptive_event_gated_regression" in text
     assert "Guided correction intent: Adaptive Event-Gated Fit" in text
+
+
+def test_guided_diagnostics_step_has_status_context_and_slots(window):
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Diagnostics"))
+
+    assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepDiagnostics"
+    assert window._guided_diagnostics_status_label.text() == "Diagnostics: not generated / not wired yet"
+    assert "Reference correction method:" in window._guided_diagnostics_context_label.text()
+    assert "Decision-Support Audit: coming later / read-only evidence" in window._guided_diagnostics_context_label.text()
+    assert "No Correction: not available in Guided Workflow" in window._guided_diagnostics_context_label.text()
+    assert "Global linear baseline comparison" in window._guided_diagnostics_slot_labels
+    assert "Decision-Support Audit evidence" in window._guided_diagnostics_slot_labels
+    assert "not generated" in window._guided_diagnostics_slot_labels["Fit stability"].text()
+
+
+@pytest.mark.parametrize("card_title,mode", GUIDED_CARD_TO_DYNAMIC_MODE.items())
+def test_guided_diagnostics_context_tracks_reference_correction_cards(window, card_title, mode):
+    window._guided_correction_select_buttons[card_title].click()
+    context = window._guided_diagnostics_context_label.text()
+
+    assert mode in context
+    assert f"Guided correction intent: {card_title}" in context
+    assert window._guided_diagnostics_status_label.text() == "Diagnostics: not generated / not wired yet"
+
+
+def test_guided_diagnostics_context_tracks_signal_only_intent(window):
+    window._guided_correction_select_buttons["Signal-Only F0"].click()
+    context = window._guided_diagnostics_context_label.text()
+
+    assert "Guided correction intent: Signal-Only F0" in context
+    assert "Signal-Only F0 intent: selected for later explicit confirmation" in context
+    assert window._guided_diagnostics_status_label.text() == "Diagnostics: not generated / not wired yet"
+
+
+def test_guided_diagnostics_step_has_no_generation_or_execution_buttons(window):
+    forbidden = {
+        "Run diagnostics",
+        "Generate previews",
+        "Compare fits",
+        "Run correction tuning",
+        "Apply diagnostics",
+        "Auto choose strategy",
+        "Validate Only",
+        "Run Pipeline",
+        "Save Manifest",
+        "Run Batch",
+    }
+    button_texts = {
+        button.text()
+        for button in window._guided_workflow_tab.findChildren(QPushButton)
+        if button.text()
+    }
+    assert button_texts.isdisjoint(forbidden)
