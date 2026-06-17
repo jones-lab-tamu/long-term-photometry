@@ -1,9 +1,12 @@
 import json
 
+import h5py
+import numpy as np
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton
 
+import gui.main_window as main_window_module
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
 
 
@@ -48,6 +51,48 @@ def _populate_fake_discovery(window: MainWindow) -> None:
     }
     window._discovery_cache = discovery
     window._populate_discovery_ui(discovery)
+
+
+def _make_preview_completed_run(tmp_path):
+    run_dir = tmp_path / "completed_preview"
+    phasic_out = run_dir / "_analysis" / "phasic_out"
+    phasic_out.mkdir(parents=True)
+    (run_dir / "run_report.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    (run_dir / "status.json").write_text(
+        json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
+        encoding="utf-8",
+    )
+    (run_dir / "MANIFEST.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    (run_dir / "CH1" / "summary").mkdir(parents=True)
+    (phasic_out / "config_used.yaml").write_text(
+        "target_fs_hz: 20.0\nlowpass_hz: 1.0\nfilter_order: 3\n"
+        "dynamic_fit_mode: robust_global_event_reject\n",
+        encoding="utf-8",
+    )
+    t = np.arange(400, dtype=float) / 20.0
+    uv = 1.0 + 0.02 * np.sin(t * 0.7)
+    sig = 1.2 * uv + 0.05 * np.exp(-0.5 * ((t - 8.0) / 0.5) ** 2)
+    with h5py.File(phasic_out / "phasic_trace_cache.h5", "w") as h5:
+        meta = h5.create_group("meta")
+        meta.attrs["mode"] = "phasic"
+        meta.attrs["schema_version"] = "1.0"
+        meta.create_dataset("rois", data=np.asarray([b"CH1", b"CH2"]))
+        meta.create_dataset("chunk_ids", data=np.asarray([0, 1], dtype=int))
+        meta.create_dataset("source_files", data=np.asarray([b"mock0.csv", b"mock1.csv"]))
+        for roi in ("CH1", "CH2"):
+            roi_group = h5.create_group(f"roi/{roi}")
+            for chunk_id in (0, 1):
+                grp = roi_group.create_group(f"chunk_{chunk_id}")
+                grp.create_dataset("time_sec", data=t)
+                grp.create_dataset("sig_raw", data=sig + chunk_id)
+                grp.create_dataset("uv_raw", data=uv + 0.1 * chunk_id)
+    return run_dir
+
+
+def _load_preview_completed_run(window, run_dir, monkeypatch):
+    window._current_run_dir = str(run_dir)
+    monkeypatch.setattr(window._report_viewer, "has_loaded_results", lambda: True)
+    window._refresh_guided_diagnostics_panel()
 
 
 def _state_for_equivalence(window: MainWindow) -> dict[str, object]:
@@ -498,6 +543,123 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
     assert "Decision-Support Audit evidence" in window._guided_diagnostics_slot_labels
     assert "not generated" in window._guided_diagnostics_slot_labels["Fit stability"].text()
     assert "No completed run is loaded" in window._guided_diagnostics_completed_run_label.text()
+    assert "Load a completed run to generate preview-only correction comparisons" in window._guided_preview_source_status_label.text()
+    assert window._guided_preview_generate_btn.text() == "Generate preview comparison"
+    assert window._guided_preview_generate_btn.isEnabled() is False
+    assert window._guided_preview_result_label.text() == ""
+
+
+def test_guided_correction_preview_panel_populates_from_loaded_completed_run(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+
+    assert "Preview is generated from the loaded completed run" in window._guided_preview_source_status_label.text()
+    assert str(run_dir) in window._guided_preview_source_status_label.text()
+    assert [window._guided_preview_roi_combo.itemText(i) for i in range(window._guided_preview_roi_combo.count())] == [
+        "CH1",
+        "CH2",
+    ]
+    assert [window._guided_preview_chunk_combo.itemData(i) for i in range(window._guided_preview_chunk_combo.count())] == [
+        0,
+        1,
+    ]
+    assert set(window._guided_preview_method_checkboxes) == {
+        "robust_global_event_reject",
+        "adaptive_event_gated_regression",
+        "global_linear_regression",
+    }
+    assert all(cb.isChecked() for cb in window._guided_preview_method_checkboxes.values())
+    assert window._guided_preview_generate_btn.isEnabled() is True
+    method_text = " ".join(cb.text() for cb in window._guided_preview_method_checkboxes.values())
+    assert "Signal-Only F0" not in method_text
+    assert "Decision-Support Audit" not in method_text
+    assert "No Correction" not in method_text
+
+
+def test_guided_correction_preview_button_generates_backend_preview_read_only(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+
+    window._guided_preview_generate_btn.click()
+
+    assert "Preview comparison status: success" in window._guided_preview_status_label.text()
+    text = window._guided_preview_result_label.text()
+    assert "Preview status: success" in text
+    assert "Preview directory:" in text
+    assert "Summary:" in text
+    assert "Provenance:" in text
+    assert "global_linear_regression" in text
+    assert "Strategy recommendation: none" in text
+    preview_dir = run_dir / "_guided_workflow" / "previews"
+    assert preview_dir.exists()
+    assert list(preview_dir.glob("*/preview_summary.json"))
+    assert list(preview_dir.glob("*/preview_provenance.json"))
+    assert not (preview_dir / "MANIFEST.json").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
+
+
+def test_guided_correction_preview_does_not_auto_generate(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    calls = {"count": 0}
+
+    def _fake_backend(*_args, **_kwargs):
+        calls["count"] += 1
+        return {
+            "ok": True,
+            "status": "success",
+            "preview_output_dir": "preview",
+            "preview_summary_path": "summary",
+            "preview_provenance_path": "provenance",
+            "method_statuses": {},
+            "warnings": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(main_window_module, "run_guided_correction_preview_comparison", _fake_backend)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Diagnostics"))
+    assert calls["count"] == 0
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    assert calls["count"] == 0
+    window._guided_preview_roi_combo.setCurrentIndex(1)
+    window._guided_preview_chunk_combo.setCurrentIndex(1)
+    window._guided_preview_method_checkboxes["global_linear_regression"].setChecked(False)
+    window._guided_correction_select_buttons["Adaptive Event-Gated Fit"].click()
+    assert calls["count"] == 0
+
+    window._guided_preview_generate_btn.click()
+    assert calls["count"] == 1
+
+
+def test_guided_correction_preview_result_marks_stale_on_selection_change(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+
+    window._guided_preview_generate_btn.click()
+    assert "Preview comparison status: success" in window._guided_preview_status_label.text()
+
+    window._guided_preview_chunk_combo.setCurrentIndex(1)
+
+    assert "Displayed preview is stale because the preview selection changed" in window._guided_preview_status_label.text()
+
+
+def test_guided_correction_preview_refresh_preserves_non_default_selection_with_result(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_preview_roi_combo.setCurrentIndex(window._guided_preview_roi_combo.findData("CH2"))
+    window._guided_preview_chunk_combo.setCurrentIndex(window._guided_preview_chunk_combo.findData(1))
+    window._guided_preview_has_result = True
+    window._guided_preview_result_stale = False
+    window._guided_preview_status_label.setText("Preview comparison status: success")
+    window._guided_preview_result_label.setText("Preview status: success")
+
+    window._refresh_guided_diagnostics_panel()
+
+    assert window._guided_preview_roi_combo.currentData() == "CH2"
+    assert window._guided_preview_chunk_combo.currentData() == 1
+    assert "Preview comparison status: success" in window._guided_preview_status_label.text()
+    assert window._guided_preview_result_stale is False
 
 
 def test_guided_diagnostics_reports_existing_completed_run_artifacts_read_only(window, tmp_path):

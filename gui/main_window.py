@@ -66,8 +66,16 @@ from photometry_pipeline.core.tonic_timeline import (
     TONIC_TIMELINE_MODE_REAL_ELAPSED,
 )
 from photometry_pipeline.io.hdf5_cache_reader import (
+    list_cache_chunk_ids,
     list_cache_rois,
     open_phasic_cache,
+)
+from photometry_pipeline.preview.correction_preview import (
+    GUIDED_REFERENCE_PREVIEW_METHODS,
+    PREVIEW_PROVENANCE_FILENAME,
+    PREVIEW_SUMMARY_FILENAME,
+    resolve_completed_run_preview_source,
+    run_guided_correction_preview_comparison,
 )
 from photometry_pipeline.tuning.cache_downstream_retune import run_cache_downstream_retune
 from photometry_pipeline.tuning.cache_correction_retune import run_cache_correction_retune
@@ -106,6 +114,11 @@ GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE = {
     "Robust Global Event-Reject Fit": "robust_global_event_reject",
     "Adaptive Event-Gated Fit": "adaptive_event_gated_regression",
     "Global Linear Regression": "global_linear_regression",
+}
+GUIDED_CORRECTION_PREVIEW_METHOD_LABELS = {
+    "robust_global_event_reject": "Robust Global Event-Reject Fit",
+    "adaptive_event_gated_regression": "Adaptive Event-Gated Fit",
+    "global_linear_regression": "Global Linear Regression",
 }
 GUIDED_SIGNAL_ONLY_F0_CARD = "Signal-Only F0"
 
@@ -2246,6 +2259,75 @@ class MainWindow(QMainWindow):
         completed_layout.addWidget(self._guided_diagnostics_completed_run_label)
         layout.addWidget(completed_group)
 
+        preview_group = QGroupBox("Correction preview comparison")
+        preview_group.setObjectName("guidedCorrectionPreviewPanel")
+        preview_layout = QVBoxLayout(preview_group)
+        preview_layout.setContentsMargins(10, 10, 10, 10)
+        preview_layout.setSpacing(8)
+
+        self._guided_preview_source_status_label = QLabel(
+            "Load a completed run to generate preview-only correction comparisons."
+        )
+        self._guided_preview_source_status_label.setObjectName("guidedCorrectionPreviewSourceStatus")
+        self._guided_preview_source_status_label.setProperty("guidedSecondaryText", True)
+        self._guided_preview_source_status_label.setWordWrap(True)
+        self._guided_preview_source_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        preview_layout.addWidget(self._guided_preview_source_status_label)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        self._guided_preview_roi_combo = QComboBox()
+        self._guided_preview_roi_combo.setObjectName("guidedCorrectionPreviewRoiCombo")
+        self._guided_preview_roi_combo.currentIndexChanged.connect(self._on_guided_preview_selection_changed)
+        form.addRow("ROI", self._guided_preview_roi_combo)
+        self._guided_preview_chunk_combo = QComboBox()
+        self._guided_preview_chunk_combo.setObjectName("guidedCorrectionPreviewChunkCombo")
+        self._guided_preview_chunk_combo.currentIndexChanged.connect(self._on_guided_preview_selection_changed)
+        form.addRow("Chunk", self._guided_preview_chunk_combo)
+        preview_layout.addLayout(form)
+
+        self._guided_preview_method_checkboxes: dict[str, QCheckBox] = {}
+        method_row = QHBoxLayout()
+        for method in GUIDED_REFERENCE_PREVIEW_METHODS:
+            cb = QCheckBox(GUIDED_CORRECTION_PREVIEW_METHOD_LABELS[method])
+            cb.setObjectName(f"guidedCorrectionPreviewMethod{re.sub(r'[^A-Za-z0-9]+', '', method)}")
+            cb.setChecked(True)
+            cb.stateChanged.connect(self._on_guided_preview_selection_changed)
+            self._guided_preview_method_checkboxes[method] = cb
+            method_row.addWidget(cb)
+        method_row.addStretch(1)
+        preview_layout.addLayout(method_row)
+
+        preview_note = QLabel(
+            "This creates preview-only correction comparison artifacts from the loaded completed run. "
+            "It does not validate the dataset, run the analysis pipeline, choose a strategy, write a "
+            "manifest, route applied-dF/F, or modify source/completed-run outputs."
+        )
+        preview_note.setObjectName("guidedCorrectionPreviewSafetyNote")
+        preview_note.setProperty("guidedSecondaryText", True)
+        preview_note.setWordWrap(True)
+        preview_layout.addWidget(preview_note)
+
+        self._guided_preview_generate_btn = QPushButton("Generate preview comparison")
+        self._guided_preview_generate_btn.setObjectName("guidedCorrectionPreviewGenerateButton")
+        self._guided_preview_generate_btn.clicked.connect(self._on_generate_guided_correction_preview)
+        preview_layout.addWidget(self._guided_preview_generate_btn, alignment=Qt.AlignLeft)
+
+        self._guided_preview_status_label = QLabel("")
+        self._guided_preview_status_label.setObjectName("guidedCorrectionPreviewStatus")
+        self._guided_preview_status_label.setProperty("guidedSecondaryText", True)
+        self._guided_preview_status_label.setWordWrap(True)
+        self._guided_preview_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        preview_layout.addWidget(self._guided_preview_status_label)
+
+        self._guided_preview_result_label = QLabel("")
+        self._guided_preview_result_label.setObjectName("guidedCorrectionPreviewResult")
+        self._guided_preview_result_label.setProperty("guidedSecondaryText", True)
+        self._guided_preview_result_label.setWordWrap(True)
+        self._guided_preview_result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        preview_layout.addWidget(self._guided_preview_result_label)
+        layout.addWidget(preview_group)
+
         slots_group = QGroupBox("Planned diagnostic evidence slots")
         slots_group.setObjectName("guidedDiagnosticsSlotsPanel")
         slots_layout = QGridLayout(slots_group)
@@ -2329,6 +2411,223 @@ class MainWindow(QMainWindow):
             "evidence": evidence,
         }
 
+    def _selected_guided_preview_methods(self) -> list[str]:
+        boxes = getattr(self, "_guided_preview_method_checkboxes", {})
+        return [method for method, cb in boxes.items() if cb.isChecked()]
+
+    def _selected_guided_preview_roi(self) -> str:
+        combo = getattr(self, "_guided_preview_roi_combo", None)
+        return str(combo.currentData() or combo.currentText() or "").strip() if combo is not None else ""
+
+    def _selected_guided_preview_chunk(self) -> int | None:
+        combo = getattr(self, "_guided_preview_chunk_combo", None)
+        if combo is None:
+            return None
+        value = combo.currentData()
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _guided_preview_mark_stale(self, reason: str = "Displayed preview is stale because the preview selection changed.") -> None:
+        if not getattr(self, "_guided_preview_has_result", False):
+            return
+        self._guided_preview_result_stale = True
+        if hasattr(self, "_guided_preview_status_label"):
+            self._guided_preview_status_label.setText(reason)
+
+    def _on_guided_preview_selection_changed(self, *_args) -> None:
+        self._guided_preview_mark_stale()
+        self._refresh_guided_preview_enablement()
+
+    def _refresh_guided_preview_enablement(self) -> None:
+        if not hasattr(self, "_guided_preview_generate_btn"):
+            return
+        source_ok = bool(getattr(self, "_guided_preview_source_ok", False))
+        roi = self._selected_guided_preview_roi()
+        chunk = self._selected_guided_preview_chunk()
+        methods = self._selected_guided_preview_methods()
+        enabled = bool(source_ok and roi and chunk is not None and methods)
+        self._guided_preview_generate_btn.setEnabled(enabled)
+        if hasattr(self, "_guided_preview_status_label") and not getattr(self, "_guided_preview_has_result", False):
+            if not source_ok:
+                message = getattr(
+                    self,
+                    "_guided_preview_source_reason",
+                    "Load a completed run to generate preview-only correction comparisons.",
+                )
+            elif not roi:
+                message = "Select an ROI for preview comparison."
+            elif chunk is None:
+                message = "Select a chunk for preview comparison."
+            elif not methods:
+                message = "Select at least one reference preview method."
+            else:
+                message = "Preview comparison ready."
+            self._guided_preview_status_label.setText(message)
+
+    def _refresh_guided_correction_preview_panel(self, artifact_state: dict[str, object]) -> None:
+        if not hasattr(self, "_guided_preview_source_status_label"):
+            return
+        previous_source = getattr(self, "_guided_preview_loaded_run_dir", "")
+        previous_roi = self._selected_guided_preview_roi()
+        previous_chunk = self._selected_guided_preview_chunk()
+        run_dir = str(artifact_state.get("run_dir") or "")
+        self._guided_preview_source_ok = False
+        self._guided_preview_source_reason = "Load a completed run to generate preview-only correction comparisons."
+        self._guided_preview_loaded_run_dir = run_dir
+        if previous_source and run_dir != previous_source:
+            self._guided_preview_mark_stale("Displayed preview is stale because the loaded completed run changed.")
+
+        with QSignalBlocker(self._guided_preview_roi_combo), QSignalBlocker(self._guided_preview_chunk_combo):
+            self._guided_preview_roi_combo.clear()
+            self._guided_preview_chunk_combo.clear()
+            restored_roi = False
+            restored_chunk = False
+
+        if artifact_state.get("status") == "not_generated" or not run_dir:
+            self._guided_preview_source_status_label.setText(
+                "Load a completed run to generate preview-only correction comparisons."
+            )
+            self._refresh_guided_preview_enablement()
+            return
+
+        source = resolve_completed_run_preview_source(run_dir)
+        if not source.ok:
+            self._guided_preview_source_reason = source.reason
+            self._guided_preview_source_status_label.setText(
+                "Loaded completed run is not available for correction preview:\n"
+                f"{source.reason}"
+            )
+            self._refresh_guided_preview_enablement()
+            return
+
+        try:
+            with open_phasic_cache(source.phasic_trace_cache_path) as cache:
+                rois = list_cache_rois(cache)
+                chunk_ids = list_cache_chunk_ids(cache)
+        except Exception as exc:
+            self._guided_preview_source_reason = str(exc)
+            self._guided_preview_source_status_label.setText(
+                "Unable to read completed-run phasic cache for correction preview:\n"
+                f"{exc}"
+            )
+            self._refresh_guided_preview_enablement()
+            return
+
+        with QSignalBlocker(self._guided_preview_roi_combo), QSignalBlocker(self._guided_preview_chunk_combo):
+            for roi in rois:
+                self._guided_preview_roi_combo.addItem(str(roi), str(roi))
+            for chunk_id in chunk_ids:
+                self._guided_preview_chunk_combo.addItem(str(chunk_id), int(chunk_id))
+            if previous_roi:
+                idx = self._guided_preview_roi_combo.findData(previous_roi)
+                if idx >= 0:
+                    self._guided_preview_roi_combo.setCurrentIndex(idx)
+                    restored_roi = True
+            if previous_chunk is not None:
+                idx = self._guided_preview_chunk_combo.findData(int(previous_chunk))
+                if idx >= 0:
+                    self._guided_preview_chunk_combo.setCurrentIndex(idx)
+                    restored_chunk = True
+        if getattr(self, "_guided_preview_has_result", False) and run_dir == previous_source:
+            if previous_roi and not restored_roi:
+                self._guided_preview_mark_stale(
+                    "Displayed preview is stale because the previous preview ROI is no longer available."
+                )
+            elif previous_chunk is not None and not restored_chunk:
+                self._guided_preview_mark_stale(
+                    "Displayed preview is stale because the previous preview chunk is no longer available."
+                )
+        self._guided_preview_source_ok = bool(rois and chunk_ids)
+        self._guided_preview_source_reason = (
+            "Preview comparison ready."
+            if self._guided_preview_source_ok
+            else "Completed-run phasic cache has no ROI/chunk entries for preview."
+        )
+        self._guided_preview_source_status_label.setText(
+            "Preview is generated from the loaded completed run, separate from the active editable setup:\n"
+            f"{run_dir}"
+        )
+        self._refresh_guided_preview_enablement()
+
+    def _format_guided_preview_result(self, result: dict[str, object]) -> str:
+        lines = [
+            f"Preview status: {result.get('status', 'failed')}",
+            f"Preview directory: {result.get('preview_output_dir', '')}",
+            f"Summary: {result.get('preview_summary_path', '')}",
+            f"Provenance: {result.get('preview_provenance_path', '')}",
+        ]
+        method_statuses = result.get("method_statuses", {})
+        if isinstance(method_statuses, dict):
+            lines.append("Method statuses:")
+            for method, status in method_statuses.items():
+                if not isinstance(status, dict):
+                    continue
+                lines.append(f"- {method}: {status.get('status', '')}")
+                if status.get("diagnostics_json"):
+                    lines.append(f"  diagnostics: {status.get('diagnostics_json')}")
+                if status.get("trace_csv"):
+                    lines.append(f"  trace: {status.get('trace_csv')}")
+                errs = status.get("errors") or []
+                if errs:
+                    lines.append(f"  errors: {'; '.join(str(x) for x in errs)}")
+        warnings = result.get("warnings") or []
+        errors = result.get("errors") or []
+        if warnings:
+            lines.append(f"Warnings: {'; '.join(str(x) for x in warnings)}")
+        if errors:
+            lines.append(f"Errors: {'; '.join(str(x) for x in errors)}")
+        summary_path = str(result.get("preview_summary_path", "") or "")
+        if summary_path and os.path.isfile(summary_path):
+            try:
+                with open(summary_path, "r", encoding="utf-8") as f:
+                    summary = json.load(f)
+                plot_info = summary.get("comparison_plot")
+                if isinstance(plot_info, dict) and plot_info.get("implemented") is False:
+                    lines.append(f"Comparison plot: deferred ({plot_info.get('reason', '')})")
+            except Exception:
+                pass
+        lines.append("Strategy recommendation: none")
+        return "\n".join(lines)
+
+    def _on_generate_guided_correction_preview(self) -> None:
+        run_dir = str(getattr(self, "_guided_preview_loaded_run_dir", "") or "")
+        roi = self._selected_guided_preview_roi()
+        chunk = self._selected_guided_preview_chunk()
+        methods = self._selected_guided_preview_methods()
+        if not run_dir or not roi or chunk is None or not methods:
+            self._refresh_guided_preview_enablement()
+            return
+        try:
+            result = run_guided_correction_preview_comparison(
+                run_dir,
+                roi=roi,
+                chunk_index=chunk,
+                methods=methods,
+                source_type="completed_run",
+                overwrite=False,
+            )
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "status": "failed",
+                "preview_output_dir": "",
+                "preview_summary_path": "",
+                "preview_provenance_path": "",
+                "method_statuses": {},
+                "warnings": [],
+                "errors": [str(exc)],
+            }
+        self._guided_preview_has_result = True
+        self._guided_preview_result_stale = False
+        self._guided_preview_last_result = result
+        if hasattr(self, "_guided_preview_status_label"):
+            self._guided_preview_status_label.setText(f"Preview comparison status: {result.get('status', 'failed')}")
+        if hasattr(self, "_guided_preview_result_label"):
+            self._guided_preview_result_label.setText(self._format_guided_preview_result(result))
+        self._refresh_guided_preview_enablement()
+
     def _refresh_guided_diagnostics_panel(self) -> None:
         if not hasattr(self, "_guided_diagnostics_status_label"):
             return
@@ -2373,6 +2672,7 @@ class MainWindow(QMainWindow):
                 for category, name, path in artifacts:
                     lines.append(f"- {category}: {name} ({path})")
                 self._guided_diagnostics_completed_run_label.setText("\n".join(lines))
+        self._refresh_guided_correction_preview_panel(artifact_state)
         if hasattr(self, "_guided_diagnostics_slot_labels"):
             for slot, label in self._guided_diagnostics_slot_labels.items():
                 suffix = "coming later / read-only evidence" if "Decision-Support Audit" in slot else "not generated"
