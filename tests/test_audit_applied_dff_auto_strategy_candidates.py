@@ -205,9 +205,27 @@ def test_reference_failure_with_viable_signal_only_does_not_decide_dynamic_fit(t
     )
 
     row = _read_row(report)
-    assert row["auto_strategy_decision"] in {"signal_only_f0", "needs_review"}
-    assert row["auto_strategy_decision"] != "dynamic_fit"
+    assert row["auto_strategy_decision"] == "signal_only_f0"
+    assert row["auto_strategy_confidence"] == "high"
     assert "CORRECTION_REFERENCE_FAILURE_EVIDENCE" in row["auto_strategy_flags"]
+    assert "SIGNAL_ONLY_F0_RESCUE_EVIDENCE_CLEAN" in row["auto_strategy_flags"]
+
+
+def test_reference_failure_with_caution_heavy_signal_only_decides_needs_review(tmp_path):
+    phasic_out = _make_phasic_out(tmp_path, mode="qc_failure_signal_weak")
+
+    report = audit_applied_dff_auto_strategy_candidates(
+        phasic_out,
+        roi="CH1",
+        output_dir=tmp_path / "audit",
+        overwrite=True,
+    )
+
+    row = _read_row(report)
+    assert row["auto_strategy_decision"] == "needs_review"
+    assert row["auto_strategy_decision_status"] == "needs_review"
+    assert "CORRECTION_REFERENCE_FAILURE_EVIDENCE" in row["auto_strategy_flags"]
+    assert "SIGNAL_ONLY_F0_RESCUE_CANDIDATE" in row["auto_strategy_flags"]
 
 
 def test_ambiguous_mixed_evidence_decides_needs_review(tmp_path):

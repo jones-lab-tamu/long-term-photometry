@@ -58,6 +58,18 @@ MAX_SIGNAL_ONLY_LOW_CONFIDENCE_FRACTION_FOR_RESCUE = 0.65
 MAX_SIGNAL_ONLY_LARGE_ANCHOR_GAP_FRACTION = 0.10
 MAX_SIGNAL_ONLY_FEW_ANCHOR_FRACTION = 0.10
 
+# A provisional signal_only_f0 label is intentionally stricter than "rescue
+# candidate" evidence. Caution-heavy correction-reference failures should remain
+# needs_review until manually validated.
+MIN_SIGNAL_ONLY_VIABLE_FRACTION_FOR_DECISION = 0.95
+MAX_SIGNAL_ONLY_CONTEXTUAL_FRACTION_FOR_DECISION = 0.05
+MAX_SIGNAL_ONLY_HARD_INSPECT_FRACTION_FOR_DECISION = 0.0
+MIN_SIGNAL_ONLY_HIGH_CONFIDENCE_FRACTION_FOR_DECISION = 0.90
+MAX_SIGNAL_ONLY_LOW_CONFIDENCE_FRACTION_FOR_DECISION = 0.05
+MAX_SIGNAL_ONLY_EDGE_EXTRAPOLATION_MEDIAN_FOR_DECISION = 0.25
+MAX_SIGNAL_ONLY_LARGE_ANCHOR_GAP_FRACTION_FOR_DECISION = 0.0
+MAX_SIGNAL_ONLY_FEW_ANCHOR_FRACTION_FOR_DECISION = 0.0
+
 REQUIRED_DATASETS = ("time_sec", "sig_raw", "uv_raw", "fit_ref", "dff")
 OPTIONAL_DATASETS = ("signal_only_f0_candidate", "baseline_ref_candidate")
 NONFINITE_DATASETS = ("dff", "sig_raw", "uv_raw", "fit_ref")
@@ -194,6 +206,14 @@ def _thresholds() -> dict[str, Any]:
         "max_signal_only_low_confidence_fraction_for_rescue": MAX_SIGNAL_ONLY_LOW_CONFIDENCE_FRACTION_FOR_RESCUE,
         "max_signal_only_large_anchor_gap_fraction": MAX_SIGNAL_ONLY_LARGE_ANCHOR_GAP_FRACTION,
         "max_signal_only_few_anchor_fraction": MAX_SIGNAL_ONLY_FEW_ANCHOR_FRACTION,
+        "min_signal_only_viable_fraction_for_decision": MIN_SIGNAL_ONLY_VIABLE_FRACTION_FOR_DECISION,
+        "max_signal_only_contextual_fraction_for_decision": MAX_SIGNAL_ONLY_CONTEXTUAL_FRACTION_FOR_DECISION,
+        "max_signal_only_hard_inspect_fraction_for_decision": MAX_SIGNAL_ONLY_HARD_INSPECT_FRACTION_FOR_DECISION,
+        "min_signal_only_high_confidence_fraction_for_decision": MIN_SIGNAL_ONLY_HIGH_CONFIDENCE_FRACTION_FOR_DECISION,
+        "max_signal_only_low_confidence_fraction_for_decision": MAX_SIGNAL_ONLY_LOW_CONFIDENCE_FRACTION_FOR_DECISION,
+        "max_signal_only_edge_extrapolation_median_for_decision": MAX_SIGNAL_ONLY_EDGE_EXTRAPOLATION_MEDIAN_FOR_DECISION,
+        "max_signal_only_large_anchor_gap_fraction_for_decision": MAX_SIGNAL_ONLY_LARGE_ANCHOR_GAP_FRACTION_FOR_DECISION,
+        "max_signal_only_few_anchor_fraction_for_decision": MAX_SIGNAL_ONLY_FEW_ANCHOR_FRACTION_FOR_DECISION,
     }
 
 
@@ -625,6 +645,21 @@ def _audit_roi(cache: h5py.File, roi: str, chunk_ids: list[int], cache_path: Pat
         and large_anchor_gap_fraction <= MAX_SIGNAL_ONLY_LARGE_ANCHOR_GAP_FRACTION
         and few_anchor_fraction <= MAX_SIGNAL_ONLY_FEW_ANCHOR_FRACTION
     )
+    signal_rescue_clean_for_decision = (
+        signal_required == n_chunks
+        and available_fraction >= MIN_SIGNAL_ONLY_AVAILABLE_FRACTION
+        and viable_fraction >= MIN_SIGNAL_ONLY_VIABLE_FRACTION_FOR_DECISION
+        and contextual_fraction <= MAX_SIGNAL_ONLY_CONTEXTUAL_FRACTION_FOR_DECISION
+        and hard_inspect_fraction <= MAX_SIGNAL_ONLY_HARD_INSPECT_FRACTION_FOR_DECISION
+        and high_conf_fraction >= MIN_SIGNAL_ONLY_HIGH_CONFIDENCE_FRACTION_FOR_DECISION
+        and low_conf_fraction <= MAX_SIGNAL_ONLY_LOW_CONFIDENCE_FRACTION_FOR_DECISION
+        and (
+            not math.isfinite(edge_extrap_median)
+            or edge_extrap_median <= MAX_SIGNAL_ONLY_EDGE_EXTRAPOLATION_MEDIAN_FOR_DECISION
+        )
+        and large_anchor_gap_fraction <= MAX_SIGNAL_ONLY_LARGE_ANCHOR_GAP_FRACTION_FOR_DECISION
+        and few_anchor_fraction <= MAX_SIGNAL_ONLY_FEW_ANCHOR_FRACTION_FOR_DECISION
+    )
 
     if soft_fraction:
         cautions.append(f"dynamic-fit soft flag fraction {soft_fraction:.3f}")
@@ -647,12 +682,12 @@ def _audit_roi(cache: h5py.File, roi: str, chunk_ids: list[int], cache_path: Pat
         status = "decided"
         warning_level = "none" if not cautions else "caution"
         rationale = "Dynamic-fit QC is clean enough and no strong correction-reference failure pattern is present."
-    elif strong_reference_failure and signal_rescue_viable and not dynamic_clean:
+    elif strong_reference_failure and signal_rescue_clean_for_decision and not dynamic_clean:
         decision = "signal_only_f0"
-        confidence = "medium"
+        confidence = "high"
         status = "decided"
         warning_level = "caution"
-        rationale = "Correction-reference failure evidence is strong and signal-only F0 rescue evidence is viable within conservative audit limits."
+        rationale = "Correction-reference failure evidence is strong and signal-only F0 rescue evidence is clean enough for a provisional high-confidence rescue label."
     else:
         decision = "needs_review"
         confidence = "low"
@@ -661,7 +696,12 @@ def _audit_roi(cache: h5py.File, roi: str, chunk_ids: list[int], cache_path: Pat
         rationale = "Evidence is mixed, caution-heavy, missing a validated threshold, or outside conservative first-pass decision limits."
         if strong_reference_failure:
             flags.add("SIGNAL_ONLY_F0_RESCUE_CANDIDATE")
-            cautions.append("strong correction-reference failure evidence present")
+            if signal_rescue_viable:
+                cautions.append(
+                    "strong correction-reference failure evidence present; signal-only F0 may be appropriate after manual review but is too caution-heavy for a provisional signal_only_f0 label"
+                )
+            else:
+                cautions.append("strong correction-reference failure evidence present")
         elif not dynamic_clean:
             flags.add("DYNAMIC_FIT_NOT_CLEAN")
             cautions.append("dynamic-fit evidence is not clean enough for automatic dynamic_fit")
@@ -670,6 +710,8 @@ def _audit_roi(cache: h5py.File, roi: str, chunk_ids: list[int], cache_path: Pat
         flags.add("CORRECTION_REFERENCE_FAILURE_EVIDENCE")
     if signal_rescue_viable:
         flags.add("SIGNAL_ONLY_F0_RESCUE_EVIDENCE_VIABLE")
+    if signal_rescue_clean_for_decision:
+        flags.add("SIGNAL_ONLY_F0_RESCUE_EVIDENCE_CLEAN")
     if dynamic_clean:
         flags.add("DYNAMIC_FIT_EVIDENCE_CLEAN")
 
@@ -702,6 +744,7 @@ def _audit_roi(cache: h5py.File, roi: str, chunk_ids: list[int], cache_path: Pat
         "missing_attr_counts": dict(signal_missing_attrs),
         "numeric_medians": {key: _median(values) for key, values in signal_numeric.items()},
         "signal_rescue_viable": bool(signal_rescue_viable),
+        "signal_rescue_clean_for_decision": bool(signal_rescue_clean_for_decision),
     }
     correction_failure = {
         "strong_reference_failure": bool(strong_reference_failure),
