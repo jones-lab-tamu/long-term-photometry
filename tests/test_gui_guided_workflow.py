@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton
@@ -488,13 +490,84 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Diagnostics"))
 
     assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepDiagnostics"
-    assert window._guided_diagnostics_status_label.text() == "Diagnostics: not generated / not wired yet"
+    assert window._guided_diagnostics_status_label.text() == "Diagnostics: not generated; no completed run loaded"
     assert "Reference correction method:" in window._guided_diagnostics_context_label.text()
     assert "Decision-Support Audit: coming later / read-only evidence" in window._guided_diagnostics_context_label.text()
     assert "No Correction: not available in Guided Workflow" in window._guided_diagnostics_context_label.text()
     assert "Global linear baseline comparison" in window._guided_diagnostics_slot_labels
     assert "Decision-Support Audit evidence" in window._guided_diagnostics_slot_labels
     assert "not generated" in window._guided_diagnostics_slot_labels["Fit stability"].text()
+    assert "No completed run is loaded" in window._guided_diagnostics_completed_run_label.text()
+
+
+def test_guided_diagnostics_reports_existing_completed_run_artifacts_read_only(window, tmp_path):
+    run_dir = tmp_path / "completed"
+    run_dir.mkdir()
+    (run_dir / "run_report.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    (run_dir / "status.json").write_text(
+        json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
+        encoding="utf-8",
+    )
+    (run_dir / "MANIFEST.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    (run_dir / "config_effective.yaml").write_text("event_signal: dff\n", encoding="utf-8")
+    (run_dir / "gui_run_spec.json").write_text(json.dumps({"run": "spec"}), encoding="utf-8")
+    (run_dir / "command_invoked.txt").write_text("python main.py\n", encoding="utf-8")
+    summary_dir = run_dir / "CH1" / "summary"
+    summary_dir.mkdir(parents=True)
+    before = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+
+    window._current_run_dir = str(run_dir)
+    assert window._report_viewer.load_report(str(run_dir)) is True
+    window._refresh_guided_diagnostics_panel()
+
+    assert window._guided_diagnostics_status == "available"
+    assert window._guided_diagnostics_status_label.text() == "Diagnostics: available from loaded completed-run artifacts"
+    text = window._guided_diagnostics_completed_run_label.text()
+    assert "Loaded completed run artifacts; separate from the active editable setup" in text
+    assert "Run summary/report: run_report.json" in text
+    assert "Status: status.json" in text
+    assert "Manifest/provenance: MANIFEST.json" in text
+    assert "Effective config: config_effective.yaml" in text
+    assert "GUI run spec: gui_run_spec.json" in text
+    assert "Command log: command_invoked.txt" in text
+    assert "Region deliverable: Summary: CH1" in text
+    after = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    assert after == before
+
+
+def test_guided_diagnostics_loaded_run_without_recognized_artifacts_is_unavailable(window, tmp_path, monkeypatch):
+    run_dir = tmp_path / "empty_loaded_run"
+    run_dir.mkdir()
+
+    window._current_run_dir = str(run_dir)
+    monkeypatch.setattr(window._report_viewer, "has_loaded_results", lambda: True)
+    window._refresh_guided_diagnostics_panel()
+
+    assert window._guided_diagnostics_status == "unavailable"
+    assert "Diagnostics: unavailable" in window._guided_diagnostics_status_label.text()
+    text = window._guided_diagnostics_completed_run_label.text()
+    assert str(run_dir) in text
+    assert "No recognized completed-run diagnostic artifacts were found" in text
+
+
+def test_guided_diagnostics_scope_loaded_artifacts_as_separate_from_active_setup(window, tmp_path):
+    run_dir = tmp_path / "completed"
+    run_dir.mkdir()
+    (run_dir / "run_report.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    input_dir = tmp_path / "active_input"
+    input_dir.mkdir()
+
+    window._current_run_dir = str(run_dir)
+    (run_dir / "CH1" / "summary").mkdir(parents=True)
+    assert window._report_viewer.load_report(str(run_dir)) is True
+    window._guided_input_dir_edit.setText(str(input_dir))
+    window._refresh_guided_diagnostics_panel()
+
+    assert window._guided_diagnostics_status == "available"
+    text = window._guided_diagnostics_completed_run_label.text()
+    assert "Loaded completed run artifacts; separate from the active editable setup" in text
+    assert str(run_dir) in text
+    assert str(input_dir) not in text
 
 
 @pytest.mark.parametrize("card_title,mode", GUIDED_CARD_TO_DYNAMIC_MODE.items())
@@ -504,7 +577,7 @@ def test_guided_diagnostics_context_tracks_reference_correction_cards(window, ca
 
     assert mode in context
     assert f"Guided correction intent: {card_title}" in context
-    assert window._guided_diagnostics_status_label.text() == "Diagnostics: not generated / not wired yet"
+    assert window._guided_diagnostics_status_label.text() == "Diagnostics: not generated; no completed run loaded"
 
 
 def test_guided_diagnostics_context_tracks_signal_only_intent(window):
@@ -513,7 +586,7 @@ def test_guided_diagnostics_context_tracks_signal_only_intent(window):
 
     assert "Guided correction intent: Signal-Only F0" in context
     assert "Signal-Only F0 intent: selected for later explicit confirmation" in context
-    assert window._guided_diagnostics_status_label.text() == "Diagnostics: not generated / not wired yet"
+    assert window._guided_diagnostics_status_label.text() == "Diagnostics: not generated; no completed run loaded"
 
 
 def test_guided_diagnostics_step_has_no_generation_or_execution_buttons(window):

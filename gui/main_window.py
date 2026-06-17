@@ -1835,6 +1835,8 @@ class MainWindow(QMainWindow):
     def _refresh_guided_setup_summary(self) -> None:
         if not hasattr(self, "_guided_setup_summary_label"):
             return
+        if hasattr(self, "_guided_diagnostics_status_label"):
+            self._refresh_guided_diagnostics_panel()
         state = self._guided_setup_summary_state()
         resolved = state["resolved_format"] or "not discovered"
         roi_text = (
@@ -1863,7 +1865,6 @@ class MainWindow(QMainWindow):
             f"Diagnostics: {getattr(self, '_guided_diagnostics_status', 'not_generated')}",
         ]
         self._guided_setup_summary_label.setText("\n".join(lines))
-        self._refresh_guided_diagnostics_panel()
 
     def _sync_line_edit_value(self, target: QLineEdit, text: str) -> None:
         if getattr(self, "_guided_setup_syncing", False):
@@ -2233,6 +2234,18 @@ class MainWindow(QMainWindow):
         context_layout.addWidget(self._guided_diagnostics_context_label)
         layout.addWidget(context_group)
 
+        completed_group = QGroupBox("Loaded completed-run diagnostic artifacts")
+        completed_group.setObjectName("guidedDiagnosticsCompletedRunPanel")
+        completed_layout = QVBoxLayout(completed_group)
+        completed_layout.setContentsMargins(10, 10, 10, 10)
+        self._guided_diagnostics_completed_run_label = QLabel("")
+        self._guided_diagnostics_completed_run_label.setObjectName("guidedDiagnosticsCompletedRunArtifacts")
+        self._guided_diagnostics_completed_run_label.setProperty("guidedSecondaryText", True)
+        self._guided_diagnostics_completed_run_label.setWordWrap(True)
+        self._guided_diagnostics_completed_run_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        completed_layout.addWidget(self._guided_diagnostics_completed_run_label)
+        layout.addWidget(completed_group)
+
         slots_group = QGroupBox("Planned diagnostic evidence slots")
         slots_group.setObjectName("guidedDiagnosticsSlotsPanel")
         slots_layout = QGridLayout(slots_group)
@@ -2270,14 +2283,62 @@ class MainWindow(QMainWindow):
             diagnostics,
         )
 
+    def _guided_completed_run_diagnostic_artifacts(self) -> dict[str, object]:
+        run_dir = os.path.realpath((self._current_run_dir or "").strip())
+        has_loaded_results = (
+            hasattr(self, "_report_viewer")
+            and bool(self._report_viewer.has_loaded_results())
+        )
+        if not has_loaded_results or not run_dir or not os.path.isdir(run_dir):
+            return {"status": "not_generated", "run_dir": "", "artifacts": []}
+
+        completed, evidence = is_successful_completed_run_dir(run_dir)
+        if not completed:
+            return {
+                "status": "unavailable",
+                "run_dir": run_dir,
+                "artifacts": [],
+                "evidence": evidence,
+            }
+
+        artifacts: list[tuple[str, str, str]] = []
+        known_files = [
+            ("Run summary/report", "run_report.json"),
+            ("Status", "status.json"),
+            ("Manifest/provenance", "MANIFEST.json"),
+            ("Effective config", "config_effective.yaml"),
+            ("GUI run spec", "gui_run_spec.json"),
+            ("Command log", "command_invoked.txt"),
+        ]
+        for category, filename in known_files:
+            path = os.path.join(run_dir, filename)
+            if os.path.isfile(path):
+                artifacts.append((category, filename, path))
+
+        regions = resolve_region_deliverables(run_dir)
+        for region in regions:
+            region_name = str(region.get("name", "") or "(unnamed region)")
+            for label, path, _status in region.get("subfolders", []):
+                if os.path.isdir(path):
+                    artifacts.append((f"Region deliverable: {label}", region_name, path))
+
+        return {
+            "status": "available" if artifacts else "unavailable",
+            "run_dir": run_dir,
+            "artifacts": artifacts,
+            "evidence": evidence,
+        }
+
     def _refresh_guided_diagnostics_panel(self) -> None:
         if not hasattr(self, "_guided_diagnostics_status_label"):
             return
+        artifact_state = self._guided_completed_run_diagnostic_artifacts()
+        self._guided_diagnostics_status = str(artifact_state["status"])
         status_text = {
-            "not_generated": "Diagnostics: not generated / not wired yet",
+            "not_generated": "Diagnostics: not generated; no completed run loaded",
             "stale": "Diagnostics: stale",
-            "unavailable": "Diagnostics: unavailable",
-            "available": "Diagnostics: available from existing artifacts",
+            "unavailable": "Diagnostics: unavailable; loaded completed run has no recognized diagnostic artifacts",
+            "available": "Diagnostics: available from loaded completed-run artifacts",
         }.get(getattr(self, "_guided_diagnostics_status", "not_generated"), "Diagnostics: not generated / not wired yet")
         self._guided_diagnostics_status_label.setText(status_text)
         if hasattr(self, "_guided_diagnostics_context_label"):
@@ -2291,6 +2352,27 @@ class MainWindow(QMainWindow):
                 "No Correction: not available in Guided Workflow",
             ]
             self._guided_diagnostics_context_label.setText("\n".join(lines))
+        if hasattr(self, "_guided_diagnostics_completed_run_label"):
+            artifacts = list(artifact_state.get("artifacts") or [])
+            run_dir = str(artifact_state.get("run_dir") or "")
+            if artifact_state["status"] == "not_generated":
+                self._guided_diagnostics_completed_run_label.setText(
+                    "No completed run is loaded. This step does not generate diagnostics."
+                )
+            elif artifact_state["status"] == "unavailable":
+                self._guided_diagnostics_completed_run_label.setText(
+                    "Loaded completed run:\n"
+                    f"{run_dir}\n"
+                    "No recognized completed-run diagnostic artifacts were found."
+                )
+            else:
+                lines = [
+                    "Loaded completed run artifacts; separate from the active editable setup:",
+                    run_dir,
+                ]
+                for category, name, path in artifacts:
+                    lines.append(f"- {category}: {name} ({path})")
+                self._guided_diagnostics_completed_run_label.setText("\n".join(lines))
         if hasattr(self, "_guided_diagnostics_slot_labels"):
             for slot, label in self._guided_diagnostics_slot_labels.items():
                 suffix = "coming later / read-only evidence" if "Decision-Support Audit" in slot else "not generated"
