@@ -27,6 +27,50 @@ def _label_texts(widget) -> list[str]:
     return [label.text() for label in widget.findChildren(QLabel)]
 
 
+def _make_window(qapp) -> MainWindow:
+    return MainWindow()
+
+
+def _close_window(window: MainWindow) -> None:
+    window.close()
+    window.deleteLater()
+
+
+def _populate_fake_discovery(window: MainWindow) -> None:
+    discovery = {
+        "resolved_format": "rwd",
+        "n_total_discovered": 2,
+        "n_preview": 2,
+        "sessions": [{"session_id": "s1"}, {"session_id": "s2"}],
+        "rois": [{"roi_id": "CH1"}, {"roi_id": "CH2"}, {"roi_id": "CH3"}],
+    }
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+
+
+def _state_for_equivalence(window: MainWindow) -> dict[str, object]:
+    state = dict(window._guided_setup_summary_state())
+    return {
+        key: state[key]
+        for key in (
+            "input_dir",
+            "output_dir",
+            "format",
+            "resolved_format",
+            "acquisition_mode",
+            "sessions_per_hour",
+            "session_duration_s",
+            "continuous_window_sec",
+            "continuous_step_sec",
+            "allow_partial_final_window",
+            "exclude_incomplete_final_rwd_chunk",
+            "selected_roi_count",
+            "total_roi_count",
+            "selected_rois",
+        )
+    }
+
+
 def test_guided_workflow_and_full_control_tabs_are_accessible(window):
     assert _tab_labels(window) == ["Guided Workflow", "Full Control"]
     assert window._guided_workflow_tab.objectName() == "guidedWorkflowShell"
@@ -90,8 +134,8 @@ def test_full_control_preserves_existing_applied_dff_controls(window):
     assert window._applied_dff_run_batch_btn.text() == "Run Batch"
 
 
-def test_guided_stage1_has_no_run_or_manifest_action_buttons(window):
-    forbidden = {"Run Pipeline", "Save Manifest", "Dry Run", "Run Batch"}
+def test_guided_workflow_has_no_run_validate_or_manifest_action_buttons(window):
+    forbidden = {"Run Pipeline", "Validate Only", "Save Manifest", "Dry Run", "Run Batch"}
     guided_button_texts = {
         button.text()
         for button in window._guided_workflow_tab.findChildren(QPushButton)
@@ -253,3 +297,118 @@ def test_guided_setup_values_are_run_spec_relevant_state_equivalent(window, tmp_
     assert window._selected_acquisition_mode() == "continuous"
     assert float(window._continuous_window_sec_spin.value()) == 750.0
     assert float(window._continuous_step_sec_spin.value()) == 750.0
+
+
+def test_guided_setup_summary_is_read_only_and_tracks_current_state(window, tmp_path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+
+    window._guided_input_dir_edit.setText(str(input_dir))
+    window._guided_output_dir_edit.setText(str(output_dir))
+    window._guided_format_combo.setCurrentText("custom_tabular")
+    window._guided_sessions_per_hour_edit.setText("8")
+
+    text = window._guided_setup_summary_label.text()
+    assert "Status: not validated" in text
+    assert str(input_dir) in text
+    assert str(output_dir) in text
+    assert "custom_tabular" in text
+    assert "sessions/hour=8" in text
+
+
+def test_guided_and_full_control_intermittent_setup_summary_equivalence(qapp, tmp_path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+
+    guided = _make_window(qapp)
+    full = _make_window(qapp)
+    try:
+        guided._guided_input_dir_edit.setText(str(input_dir))
+        guided._guided_output_dir_edit.setText(str(output_dir))
+        guided._guided_format_combo.setCurrentText("custom_tabular")
+        guided._guided_acquisition_mode_combo.setCurrentIndex(
+            guided._guided_acquisition_mode_combo.findData("intermittent")
+        )
+        guided._guided_sessions_per_hour_edit.setText("4")
+        guided._guided_session_duration_edit.setText("600")
+
+        full._input_dir.setText(str(input_dir))
+        full._output_dir.setText(str(output_dir))
+        full._format_combo.setCurrentText("custom_tabular")
+        full._acquisition_mode_combo.setCurrentIndex(
+            full._acquisition_mode_combo.findData("intermittent")
+        )
+        full._sph_edit.setText("4")
+        full._duration_edit.setText("600")
+
+        assert _state_for_equivalence(guided) == _state_for_equivalence(full)
+    finally:
+        _close_window(guided)
+        _close_window(full)
+
+
+def test_guided_and_full_control_continuous_setup_summary_equivalence(qapp, tmp_path):
+    input_dir = tmp_path / "continuous_input"
+    output_dir = tmp_path / "continuous_output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+
+    guided = _make_window(qapp)
+    full = _make_window(qapp)
+    try:
+        guided._guided_input_dir_edit.setText(str(input_dir))
+        guided._guided_output_dir_edit.setText(str(output_dir))
+        guided._guided_format_combo.setCurrentText("auto")
+        guided._guided_acquisition_mode_combo.setCurrentIndex(
+            guided._guided_acquisition_mode_combo.findData("continuous")
+        )
+        guided._guided_continuous_window_sec_spin.setValue(900.0)
+        guided._guided_allow_partial_final_window_cb.setChecked(True)
+
+        full._input_dir.setText(str(input_dir))
+        full._output_dir.setText(str(output_dir))
+        full._format_combo.setCurrentText("auto")
+        full._acquisition_mode_combo.setCurrentIndex(
+            full._acquisition_mode_combo.findData("continuous")
+        )
+        full._continuous_window_sec_spin.setValue(900.0)
+        full._allow_partial_final_window_cb.setChecked(True)
+
+        assert _state_for_equivalence(guided) == _state_for_equivalence(full)
+    finally:
+        _close_window(guided)
+        _close_window(full)
+
+
+def test_guided_and_full_control_roi_selection_summary_equivalence(qapp):
+    guided = _make_window(qapp)
+    full = _make_window(qapp)
+    try:
+        _populate_fake_discovery(guided)
+        _populate_fake_discovery(full)
+
+        guided._guided_roi_list.item(1).setCheckState(Qt.Unchecked)
+        full._roi_list.item(1).setCheckState(Qt.Unchecked)
+
+        assert _state_for_equivalence(guided) == _state_for_equivalence(full)
+    finally:
+        _close_window(guided)
+        _close_window(full)
+
+
+def test_guided_and_full_control_rwd_final_chunk_option_equivalence(qapp):
+    guided = _make_window(qapp)
+    full = _make_window(qapp)
+    try:
+        guided._guided_exclude_incomplete_final_rwd_chunk_cb.setChecked(True)
+        full._exclude_incomplete_final_rwd_chunk_cb.setChecked(True)
+
+        assert _state_for_equivalence(guided) == _state_for_equivalence(full)
+        assert guided._exclude_incomplete_final_rwd_chunk_cb.isChecked() is True
+    finally:
+        _close_window(guided)
+        _close_window(full)

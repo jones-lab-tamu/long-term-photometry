@@ -1369,6 +1369,7 @@ class MainWindow(QMainWindow):
                 background: #f7f8fa;
             }
             QGroupBox#guidedWorkflowStepperGroup,
+            QGroupBox#guidedSetupSummaryPanel,
             QGroupBox#guidedWorkflowPlannedStages,
             QGroupBox[guidedCorrectionCard="true"] {
                 background: #ffffff;
@@ -1377,6 +1378,7 @@ class MainWindow(QMainWindow):
                 margin-top: 12px;
             }
             QGroupBox#guidedWorkflowStepperGroup::title,
+            QGroupBox#guidedSetupSummaryPanel::title,
             QGroupBox#guidedWorkflowPlannedStages::title,
             QGroupBox[guidedCorrectionCard="true"]::title {
                 subcontrol-origin: margin;
@@ -1483,11 +1485,28 @@ class MainWindow(QMainWindow):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(10)
         content_layout.addWidget(self._guided_workflow_stack, 1)
+        content_layout.addWidget(self._build_guided_setup_summary_panel(), 0)
         content_layout.addWidget(self._build_guided_planned_stages_panel(), 0)
 
         outer.addWidget(stepper_group, 0)
         outer.addWidget(content_wrap, 1)
         return shell
+
+    def _build_guided_setup_summary_panel(self) -> QGroupBox:
+        """Read-only Stage 2B setup preview; it does not validate, run, or write artifacts."""
+        group = QGroupBox("Current setup summary")
+        group.setObjectName("guidedSetupSummaryPanel")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(4)
+        self._guided_setup_summary_label = QLabel("")
+        self._guided_setup_summary_label.setObjectName("guidedSetupSummaryLabel")
+        self._guided_setup_summary_label.setProperty("guidedMutedText", True)
+        self._guided_setup_summary_label.setWordWrap(True)
+        self._guided_setup_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self._guided_setup_summary_label)
+        self._refresh_guided_setup_summary()
+        return group
 
     def _build_guided_step_scroll(self, object_name: str, title: str, paragraphs: list[str], extra: QWidget | None = None) -> QScrollArea:
         scroll = QScrollArea()
@@ -1757,6 +1776,67 @@ class MainWindow(QMainWindow):
         )
         self._guided_setup_sync_connected = True
 
+    def _guided_setup_summary_state(self) -> dict[str, object]:
+        """Collect run-spec/config-relevant setup state without writing artifacts."""
+        selected_rois: list[str] = []
+        all_rois: list[str] = []
+        if getattr(self, "_discovery_cache", None) is not None:
+            for idx in range(self._roi_list.count()):
+                item = self._roi_list.item(idx)
+                if item is None:
+                    continue
+                all_rois.append(item.text())
+                if item.checkState() == Qt.Checked:
+                    selected_rois.append(item.text())
+        resolved_format = ""
+        if getattr(self, "_discovery_cache", None) is not None:
+            resolved_format = str(self._discovery_cache.get("resolved_format", "") or "")
+        return {
+            "input_dir": self._input_dir.text().strip(),
+            "output_dir": self._output_dir.text().strip(),
+            "format": self._format_combo.currentText(),
+            "resolved_format": resolved_format,
+            "acquisition_mode": self._selected_acquisition_mode(),
+            "sessions_per_hour": self._sph_edit.text().strip(),
+            "session_duration_s": self._duration_edit.text().strip(),
+            "continuous_window_sec": float(self._continuous_window_sec_spin.value()),
+            "continuous_step_sec": float(self._continuous_window_sec_spin.value()),
+            "allow_partial_final_window": bool(self._allow_partial_final_window_cb.isChecked()),
+            "exclude_incomplete_final_rwd_chunk": bool(
+                self._exclude_incomplete_final_rwd_chunk_cb.isChecked()
+            ),
+            "selected_roi_count": len(selected_rois),
+            "total_roi_count": len(all_rois),
+            "selected_rois": selected_rois,
+        }
+
+    def _refresh_guided_setup_summary(self) -> None:
+        if not hasattr(self, "_guided_setup_summary_label"):
+            return
+        state = self._guided_setup_summary_state()
+        resolved = state["resolved_format"] or "not discovered"
+        roi_text = (
+            "not discovered"
+            if int(state["total_roi_count"]) == 0
+            else f"{state['selected_roi_count']}/{state['total_roi_count']} selected: "
+            + ", ".join(state["selected_rois"])
+        )
+        lines = [
+            "Status: not validated. Use Full Control for real validation/runs.",
+            f"Input: {state['input_dir'] or '(not set)'}",
+            f"Output: {state['output_dir'] or '(not set)'}",
+            f"Format: {state['format']} | Resolved: {resolved}",
+            f"Acquisition: {state['acquisition_mode']}",
+            f"Intermittent timing: sessions/hour={state['sessions_per_hour'] or '(blank)'}, "
+            f"session duration={state['session_duration_s'] or '(blank)'}",
+            f"Continuous window: {state['continuous_window_sec']:.1f}s, "
+            f"allow partial final window={'on' if state['allow_partial_final_window'] else 'off'}",
+            "RWD incomplete final chunk exclusion: "
+            f"{'on' if state['exclude_incomplete_final_rwd_chunk'] else 'off'}",
+            f"ROIs: {roi_text}",
+        ]
+        self._guided_setup_summary_label.setText("\n".join(lines))
+
     def _sync_line_edit_value(self, target: QLineEdit, text: str) -> None:
         if getattr(self, "_guided_setup_syncing", False):
             return
@@ -1849,6 +1929,7 @@ class MainWindow(QMainWindow):
         finally:
             self._guided_setup_syncing = False
         self._sync_guided_recording_visibility()
+        self._refresh_guided_setup_summary()
 
     def _sync_guided_recording_visibility(self) -> None:
         if not hasattr(self, "_guided_recording_structure_help_label"):
@@ -1908,6 +1989,7 @@ class MainWindow(QMainWindow):
                 self._guided_resolved_format_label.setText(
                     str(self._discovery_cache.get("resolved_format", "?"))
                 )
+        self._refresh_guided_setup_summary()
 
     def _on_guided_roi_item_changed(self, item: QListWidgetItem) -> None:
         if getattr(self, "_guided_setup_syncing", False):
@@ -8377,6 +8459,7 @@ class MainWindow(QMainWindow):
         self._validated_run_signature = None
         self._refresh_splitter_workspace_policy()
         self._update_button_states()
+        self._refresh_guided_setup_summary()
 
     # ==================================================================
     # Button handlers
