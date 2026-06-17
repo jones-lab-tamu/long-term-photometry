@@ -1,22 +1,43 @@
 """Guided Workflow correction-preview backend contract helpers.
 
-Stage 4C1 is intentionally non-executing. These helpers validate preview
-namespaces, source availability, allowed reference-preview methods, and
-preview-only provenance dictionaries. They do not create directories, load HDF5
-chunks, run correction fitting, write manifests, route applied-dF/F, run feature
-extraction, validate GUI setup, or launch the pipeline.
+Stage 4C preview is backend-only. The helpers validate preview namespaces,
+source availability, allowed reference-preview methods, and preview-only
+provenance dictionaries. The preview runner reads completed-run/phasic-cache
+sources read-only, runs allowed reference correction methods in memory, and
+writes only preview artifacts into a validated preview namespace. It does not
+write manifests, route applied-dF/F, run feature extraction, validate GUI setup,
+or launch the pipeline.
 """
 
 from __future__ import annotations
 
+import csv
+import dataclasses
 import hashlib
+import json
 import os
 import re
 import secrets
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+import h5py
+import numpy as np
+
+from photometry_pipeline.config import Config
+from photometry_pipeline.core import preprocessing, regression
+from photometry_pipeline.core.types import Chunk
+from photometry_pipeline.io.hdf5_cache_reader import (
+    CacheReadError,
+    list_cache_chunk_ids,
+    list_cache_rois,
+    list_cache_source_files,
+    load_cache_chunk_attrs,
+    open_phasic_cache,
+)
 
 
 PREVIEW_PROVENANCE_FILENAME = "preview_provenance.json"
@@ -48,6 +69,7 @@ REJECTED_GUIDED_PREVIEW_METHODS = {
     "rolling_filtered_to_filtered",
 }
 VALID_PREVIEW_SOURCE_TYPES = {"completed_run", "phasic_cache"}
+REQUIRED_PREVIEW_CHUNK_FIELDS = ("time_sec", "sig_raw", "uv_raw")
 
 
 @dataclass(frozen=True)
@@ -80,6 +102,10 @@ class PreviewSourceValidationResult:
     reason: str = ""
 
 
+class GuidedCorrectionPreviewError(RuntimeError):
+    """Raised for explicit backend preview failures."""
+
+
 def _resolve_path(path: str | os.PathLike[str] | None) -> str:
     if path is None:
         return ""
@@ -109,6 +135,20 @@ def _is_equal_or_inside(path: str, root: str) -> bool:
 
 def _is_strictly_inside(path: str, root: str) -> bool:
     return _is_equal_or_inside(path, root) and _norm(path) != _norm(root)
+
+
+def _is_preview_scoped_leaf(path: str | os.PathLike[str], preview_id: str) -> bool:
+    resolved = _resolve_path(path)
+    if not resolved or not _safe_preview_id_component(preview_id):
+        return False
+    parts = Path(resolved).parts
+    if len(parts) < 3:
+        return False
+    return (
+        parts[-1] == preview_id
+        and parts[-2] == "previews"
+        and parts[-3] == "_guided_workflow"
+    )
 
 
 def _reject(
@@ -329,6 +369,59 @@ def _file_sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        result = float(value)
+        return result if np.isfinite(result) else None
+    if isinstance(value, np.ndarray):
+        if value.size > 100:
+            return {
+                "omitted": True,
+                "reason": "array omitted from preview diagnostics",
+                "shape": list(value.shape),
+            }
+        return [_json_safe(x) for x in value.tolist()]
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(x) for x in value]
+    return str(value)
+
+
+def _write_json(path: str | os.PathLike[str], payload: dict[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(_json_safe(payload), f, indent=2, sort_keys=True)
+
+
+def _result_failed(
+    *,
+    preview_id: str,
+    preview_output_dir: str = "",
+    errors: Iterable[str],
+    warnings: Iterable[str] | None = None,
+    method_statuses: dict[str, Any] | None = None,
+    preview_provenance_path: str = "",
+    preview_summary_path: str = "",
+    generated_artifacts: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "preview_id": preview_id,
+        "status": "failed",
+        "preview_output_dir": preview_output_dir,
+        "preview_provenance_path": preview_provenance_path,
+        "preview_summary_path": preview_summary_path,
+        "generated_artifacts": dict(generated_artifacts or {}),
+        "method_statuses": dict(method_statuses or {}),
+        "warnings": [str(x) for x in (warnings or [])],
+        "errors": [str(x) for x in errors],
+    }
+
+
 def _read_json_dict(path: str) -> tuple[dict[str, Any], str | None]:
     if not os.path.isfile(path):
         return {}, f"File missing at {path}"
@@ -531,6 +624,327 @@ def resolve_phasic_cache_preview_source(
     )
 
 
+def _resolve_preview_source(
+    source: str | os.PathLike[str] | None,
+    source_type: str | None,
+) -> PreviewSourceValidationResult:
+    requested = str(source_type or "").strip().lower()
+    if requested and requested not in VALID_PREVIEW_SOURCE_TYPES:
+        return PreviewSourceValidationResult(
+            ok=False,
+            source_type=requested,
+            code="unsupported_source_type",
+            reason="Stage 4C2 supports only completed_run and phasic_cache sources.",
+        )
+    if requested == "completed_run":
+        return resolve_completed_run_preview_source(source)
+    if requested == "phasic_cache":
+        return resolve_phasic_cache_preview_source(source)
+
+    completed = resolve_completed_run_preview_source(source)
+    if completed.ok:
+        return completed
+    phasic = resolve_phasic_cache_preview_source(source)
+    if phasic.ok:
+        return phasic
+    return PreviewSourceValidationResult(
+        ok=False,
+        source_type="",
+        code="source_not_recognized",
+        reason=(
+            "Source is neither a successful completed run nor a phasic_out cache source. "
+            f"completed_run: {completed.code}: {completed.reason} | "
+            f"phasic_cache: {phasic.code}: {phasic.reason}"
+        ),
+    )
+
+
+def _compute_chunk_fs_hz(time_sec: np.ndarray, fallback: float) -> float:
+    if len(time_sec) < 2:
+        return float(fallback)
+    dt = np.diff(np.asarray(time_sec, dtype=float).reshape(-1))
+    finite = dt[np.isfinite(dt) & (dt > 0)]
+    if len(finite) == 0:
+        return float(fallback)
+    return float(1.0 / np.median(finite))
+
+
+def _source_file_for_chunk(source_files: list[str], chunk_ids: list[int], chunk_id: int) -> str:
+    if len(source_files) == len(chunk_ids):
+        try:
+            idx = chunk_ids.index(int(chunk_id))
+            return str(source_files[idx])
+        except ValueError:
+            pass
+    return f"chunk_{int(chunk_id)}"
+
+
+def _normalize_window(window: Any) -> tuple[float, float] | None:
+    if window is None:
+        return None
+    if isinstance(window, dict):
+        start = window.get("start_sec", window.get("start"))
+        end = window.get("end_sec", window.get("end"))
+    elif isinstance(window, (list, tuple)) and len(window) == 2:
+        start, end = window
+    else:
+        raise GuidedCorrectionPreviewError(
+            "window must be None, a two-item (start_sec, end_sec) sequence, or a mapping."
+        )
+    start_f = float(start)
+    end_f = float(end)
+    if not np.isfinite(start_f) or not np.isfinite(end_f) or end_f <= start_f:
+        raise GuidedCorrectionPreviewError(
+            f"Invalid preview window: start_sec={start_f}, end_sec={end_f}."
+        )
+    return start_f, end_f
+
+
+def _load_preview_chunk_record(
+    cache: h5py.File,
+    *,
+    roi: str,
+    chunk_index: int | None,
+    window: Any,
+    cfg: Config,
+) -> dict[str, Any]:
+    rois = list_cache_rois(cache)
+    if roi not in rois:
+        raise GuidedCorrectionPreviewError(f"Requested ROI '{roi}' not found in phasic cache.")
+    chunk_ids = list_cache_chunk_ids(cache)
+    if not chunk_ids:
+        raise GuidedCorrectionPreviewError("No chunks are available in phasic cache.")
+    chunk_id = int(chunk_ids[0] if chunk_index is None else chunk_index)
+    if chunk_id not in chunk_ids:
+        raise GuidedCorrectionPreviewError(f"Requested chunk {chunk_id} not found in phasic cache.")
+
+    grp = cache.get(f"roi/{roi}/chunk_{chunk_id}")
+    if grp is None:
+        raise GuidedCorrectionPreviewError(f"Missing cache group roi/{roi}/chunk_{chunk_id}.")
+    missing = [name for name in REQUIRED_PREVIEW_CHUNK_FIELDS if name not in grp]
+    if missing:
+        raise GuidedCorrectionPreviewError(
+            f"Cache chunk missing required preview dataset(s): roi={roi} chunk={chunk_id} missing={missing}"
+        )
+
+    time_sec = np.asarray(grp["time_sec"][()], dtype=float).reshape(-1)
+    sig_raw = np.asarray(grp["sig_raw"][()], dtype=float).reshape(-1)
+    uv_raw = np.asarray(grp["uv_raw"][()], dtype=float).reshape(-1)
+    if time_sec.size == 0:
+        raise GuidedCorrectionPreviewError(f"Cache chunk is empty: roi={roi} chunk={chunk_id}.")
+    if time_sec.shape != sig_raw.shape or time_sec.shape != uv_raw.shape:
+        raise GuidedCorrectionPreviewError(
+            f"Cache chunk length mismatch for roi={roi} chunk={chunk_id}: "
+            f"time_sec={time_sec.size}, sig_raw={sig_raw.size}, uv_raw={uv_raw.size}."
+        )
+
+    selected_window = _normalize_window(window)
+    if selected_window is not None:
+        start_sec, end_sec = selected_window
+        mask = (time_sec >= start_sec) & (time_sec <= end_sec)
+        if int(np.count_nonzero(mask)) < 3:
+            raise GuidedCorrectionPreviewError(
+                f"Preview window selects too few samples for roi={roi} chunk={chunk_id}: "
+                f"start_sec={start_sec}, end_sec={end_sec}."
+            )
+        base_time = time_sec[mask]
+        offset = float(base_time[0])
+        time_sec = base_time - offset
+        sig_raw = sig_raw[mask]
+        uv_raw = uv_raw[mask]
+
+    source_files = list_cache_source_files(cache)
+    fs_hz = _compute_chunk_fs_hz(time_sec, cfg.target_fs_hz)
+    try:
+        attrs = load_cache_chunk_attrs(cache, roi, chunk_id)
+    except CacheReadError:
+        attrs = {}
+    return {
+        "roi": roi,
+        "chunk_id": chunk_id,
+        "source_file": _source_file_for_chunk(source_files, chunk_ids, chunk_id),
+        "time_sec": time_sec,
+        "sig_raw": sig_raw,
+        "uv_raw": uv_raw,
+        "fs_hz": fs_hz,
+        "window": selected_window,
+        "metadata": attrs,
+    }
+
+
+def _make_preview_chunk(record: dict[str, Any], roi: str) -> Chunk:
+    return Chunk(
+        chunk_id=int(record["chunk_id"]),
+        source_file=str(record["source_file"]),
+        format="cache_preview",
+        time_sec=np.asarray(record["time_sec"], dtype=float).copy(),
+        uv_raw=np.asarray(record["uv_raw"], dtype=float).reshape(-1, 1).copy(),
+        sig_raw=np.asarray(record["sig_raw"], dtype=float).reshape(-1, 1).copy(),
+        fs_hz=float(record["fs_hz"]),
+        channel_names=[roi],
+        metadata=dict(record.get("metadata", {})),
+    )
+
+
+def _config_for_method(base_cfg: Config, method: str) -> Config:
+    cfg_data = dataclasses.asdict(base_cfg)
+    cfg_data["dynamic_fit_mode"] = method
+    return Config(**cfg_data)
+
+
+def _numeric_summary(values: np.ndarray | None) -> dict[str, Any]:
+    if values is None:
+        return {"available": False}
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    finite = arr[np.isfinite(arr)]
+    out: dict[str, Any] = {
+        "available": True,
+        "n_samples": int(arr.size),
+        "n_finite": int(finite.size),
+    }
+    if finite.size:
+        out.update(
+            {
+                "min": float(np.min(finite)),
+                "max": float(np.max(finite)),
+                "mean": float(np.mean(finite)),
+                "median": float(np.median(finite)),
+            }
+        )
+    return out
+
+
+def _method_metadata_for_roi(chunk: Chunk, roi: str) -> dict[str, Any]:
+    metadata = dict(chunk.metadata or {})
+    selected: dict[str, Any] = {}
+    for key in (
+        "dynamic_fit_mode_requested",
+        "dynamic_fit_mode_resolved",
+        "dynamic_fit_mode_alias_applied",
+        "baseline_subtract_before_fit_requested",
+        "baseline_subtract_before_fit_applied",
+        "bleach_correction_mode_requested",
+        "bleach_correction_mode_resolved",
+        "bleach_correction_applied",
+        "dynamic_fit_engine_info",
+    ):
+        if key in metadata:
+            selected[key] = metadata[key]
+    for key in (
+        "dynamic_fit_event_reject",
+        "dynamic_fit_adaptive_event_gated",
+        "dynamic_fit_global_linear",
+        "dynamic_fit_rolling_local",
+        "bleach_correction",
+    ):
+        value = metadata.get(key)
+        if isinstance(value, dict):
+            selected[key] = value.get(roi, value)
+    return selected
+
+
+def _write_method_trace_csv(
+    path: str,
+    *,
+    method: str,
+    record: dict[str, Any],
+    chunk: Chunk,
+) -> None:
+    time_sec = np.asarray(record["time_sec"], dtype=float).reshape(-1)
+    sig_raw = np.asarray(record["sig_raw"], dtype=float).reshape(-1)
+    uv_raw = np.asarray(record["uv_raw"], dtype=float).reshape(-1)
+    fit_ref = (
+        np.asarray(chunk.uv_fit[:, 0], dtype=float).reshape(-1)
+        if chunk.uv_fit is not None
+        else np.full_like(time_sec, np.nan)
+    )
+    delta_f = (
+        np.asarray(chunk.delta_f[:, 0], dtype=float).reshape(-1)
+        if chunk.delta_f is not None
+        else np.full_like(time_sec, np.nan)
+    )
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "preview_only",
+                "method",
+                "time_sec",
+                "sig_raw",
+                "uv_raw",
+                "fit_ref",
+                "delta_f",
+            ],
+        )
+        writer.writeheader()
+        for idx in range(len(time_sec)):
+            writer.writerow(
+                {
+                    "preview_only": True,
+                    "method": method,
+                    "time_sec": float(time_sec[idx]),
+                    "sig_raw": float(sig_raw[idx]),
+                    "uv_raw": float(uv_raw[idx]),
+                    "fit_ref": float(fit_ref[idx]) if np.isfinite(fit_ref[idx]) else "",
+                    "delta_f": float(delta_f[idx]) if np.isfinite(delta_f[idx]) else "",
+                }
+            )
+
+
+def _run_preview_method(
+    *,
+    method: str,
+    base_cfg: Config,
+    record: dict[str, Any],
+    roi: str,
+    preview_dir: str,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    diagnostics_path = os.path.join(
+        preview_dir,
+        METHOD_DIAGNOSTICS_FILENAME_TEMPLATE.format(method=method),
+    )
+    trace_path = os.path.join(preview_dir, METHOD_TRACE_FILENAME_TEMPLATE.format(method=method))
+    artifacts: dict[str, str] = {"diagnostics_json": diagnostics_path}
+    diagnostics: dict[str, Any] = {
+        "preview_only": True,
+        "strategy_recommendation": None,
+        "method": method,
+        "status": "failed",
+        "warnings": [],
+        "errors": [],
+    }
+    try:
+        cfg = _config_for_method(base_cfg, method)
+        chunk = _make_preview_chunk(record, roi)
+        chunk.uv_filt, _ = preprocessing.lowpass_filter_with_meta(chunk.uv_raw, chunk.fs_hz, cfg)
+        chunk.sig_filt, _ = preprocessing.lowpass_filter_with_meta(chunk.sig_raw, chunk.fs_hz, cfg)
+        uv_fit, delta_f = regression.fit_chunk_dynamic(chunk, cfg, mode="phasic")
+        if uv_fit is None or delta_f is None:
+            raise GuidedCorrectionPreviewError(f"{method} did not produce fit_ref and delta_f.")
+        chunk.uv_fit = uv_fit
+        chunk.delta_f = delta_f
+        _write_method_trace_csv(trace_path, method=method, record=record, chunk=chunk)
+        artifacts["trace_csv"] = trace_path
+        diagnostics.update(
+            {
+                "status": "success",
+                "dynamic_fit_mode": method,
+                "n_samples": int(len(chunk.time_sec)),
+                "sig_raw_summary": _numeric_summary(chunk.sig_raw[:, 0]),
+                "uv_raw_summary": _numeric_summary(chunk.uv_raw[:, 0]),
+                "fit_ref_summary": _numeric_summary(chunk.uv_fit[:, 0]),
+                "delta_f_summary": _numeric_summary(chunk.delta_f[:, 0]),
+                "dff_summary": {"available": False, "reason": "dff normalization not run in Stage 4C2 preview"},
+                "dynamic_fit_metadata": _method_metadata_for_roi(chunk, roi),
+                "artifact_paths": dict(artifacts),
+            }
+        )
+    except Exception as exc:
+        diagnostics["errors"] = [str(exc)]
+    _write_json(diagnostics_path, diagnostics)
+    return diagnostics, artifacts
+
+
 def build_preview_provenance(
     *,
     preview_id: str,
@@ -612,8 +1026,208 @@ def build_preview_summary(
     }
 
 
-def run_guided_correction_preview_comparison(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-    """Stage 4C2 placeholder; Stage 4C1 must not run correction recomputation."""
-    raise NotImplementedError(
-        "Guided correction preview comparison generation is not implemented in Stage 4C1."
+def run_guided_correction_preview_comparison(
+    source: str | os.PathLike[str],
+    preview_output_dir: str | os.PathLike[str] | None = None,
+    *,
+    roi: str,
+    chunk_index: int | None = None,
+    window: Any = None,
+    methods: Iterable[str] | None = None,
+    preview_id: str | None = None,
+    source_type: str | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Generate preview-only correction comparison artifacts for one ROI/chunk.
+
+    Supported sources are a successful completed-run directory or a direct
+    ``phasic_out`` directory. The source cache/config are opened read-only, the
+    requested methods are run on cloned in-memory chunks, and only preview
+    artifacts are written under a validated preview namespace.
+    """
+    pid = preview_id or make_guided_preview_id("correction_preview")
+    if not _safe_preview_id_component(pid):
+        return _result_failed(preview_id=str(pid), errors=[f"Unsafe preview_id: {pid!r}"])
+
+    source_result = _resolve_preview_source(source, source_type)
+    if not source_result.ok:
+        return _result_failed(preview_id=pid, errors=[source_result.reason])
+
+    method_result = validate_preview_methods(methods or GUIDED_REFERENCE_PREVIEW_METHODS)
+    if not method_result.ok:
+        return _result_failed(preview_id=pid, errors=[method_result.reason])
+
+    if preview_output_dir is None:
+        if source_result.source_type != "completed_run" or not source_result.completed_run_dir:
+            return _result_failed(
+                preview_id=pid,
+                errors=["preview_output_dir is required for direct phasic-cache preview sources."],
+            )
+        preview_dir = os.path.join(
+            source_result.completed_run_dir,
+            "_guided_workflow",
+            "previews",
+            pid,
+        )
+    else:
+        preview_dir = _resolve_path(preview_output_dir)
+
+    applied_root = os.path.join(source_result.phasic_out, "applied_dff")
+    output_result = validate_guided_preview_output_dir(
+        preview_dir,
+        completed_run_dir=source_result.completed_run_dir or None,
+        phasic_out=source_result.phasic_out,
+        applied_dff_roots=[applied_root],
     )
+    if not output_result.ok:
+        return _result_failed(preview_id=pid, preview_output_dir=preview_dir, errors=[output_result.reason])
+    preview_dir = output_result.resolved_path
+
+    if os.path.exists(preview_dir) and not overwrite:
+        return _result_failed(
+            preview_id=pid,
+            preview_output_dir=preview_dir,
+            errors=["Preview output directory already exists. Pass overwrite=True to replace it."],
+        )
+    if os.path.exists(preview_dir) and overwrite and not _is_preview_scoped_leaf(preview_dir, pid):
+        return _result_failed(
+            preview_id=pid,
+            preview_output_dir=preview_dir,
+            errors=[
+                (
+                    "Existing preview output directories may only be overwritten when they are "
+                    "the exact safe leaf <root>/_guided_workflow/previews/<preview_id>."
+                )
+            ],
+        )
+
+    try:
+        base_cfg = Config.from_yaml(source_result.config_path)
+    except Exception as exc:
+        return _result_failed(preview_id=pid, preview_output_dir=preview_dir, errors=[str(exc)])
+
+    try:
+        with open_phasic_cache(source_result.phasic_trace_cache_path) as cache:
+            record = _load_preview_chunk_record(
+                cache,
+                roi=str(roi),
+                chunk_index=chunk_index,
+                window=window,
+                cfg=base_cfg,
+            )
+    except Exception as exc:
+        return _result_failed(preview_id=pid, preview_output_dir=preview_dir, errors=[str(exc)])
+
+    if os.path.exists(preview_dir):
+        shutil.rmtree(preview_dir)
+    os.makedirs(preview_dir, exist_ok=False)
+
+    generated_artifacts: dict[str, str] = {}
+    method_statuses: dict[str, Any] = {}
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    for method in method_result.methods:
+        diagnostics, artifacts = _run_preview_method(
+            method=method,
+            base_cfg=base_cfg,
+            record=record,
+            roi=str(roi),
+            preview_dir=preview_dir,
+        )
+        method_statuses[method] = {
+            "status": diagnostics.get("status", "failed"),
+            "errors": diagnostics.get("errors", []),
+            "warnings": diagnostics.get("warnings", []),
+            "diagnostics_json": artifacts.get("diagnostics_json", ""),
+            "trace_csv": artifacts.get("trace_csv", ""),
+            "strategy_recommendation": None,
+        }
+        generated_artifacts[f"{method}_diagnostics_json"] = artifacts.get("diagnostics_json", "")
+        if artifacts.get("trace_csv"):
+            generated_artifacts[f"{method}_trace_csv"] = artifacts["trace_csv"]
+        if diagnostics.get("status") != "success":
+            errors.extend(str(x) for x in diagnostics.get("errors", []))
+
+    success_count = sum(1 for status in method_statuses.values() if status.get("status") == "success")
+    if success_count == len(method_statuses) and method_statuses:
+        status = "success"
+        ok = True
+    elif success_count > 0:
+        status = "partial"
+        ok = False
+    else:
+        status = "failed"
+        ok = False
+
+    if window is None:
+        selected_window = ""
+    else:
+        normalized_window = _normalize_window(window)
+        selected_window = (
+            ""
+            if normalized_window is None
+            else f"{normalized_window[0]:.9g}-{normalized_window[1]:.9g}"
+        )
+    source_hashes = {
+        "phasic_trace_cache.h5": _file_sha256(source_result.phasic_trace_cache_path),
+        "config_used.yaml": _file_sha256(source_result.config_path),
+    }
+    provenance = build_preview_provenance(
+        preview_id=pid,
+        source_type=source_result.source_type,
+        completed_run_dir=source_result.completed_run_dir,
+        phasic_out=source_result.phasic_out,
+        phasic_trace_cache_path=source_result.phasic_trace_cache_path,
+        preview_output_dir=preview_dir,
+        selected_roi=str(roi),
+        selected_chunk=int(record["chunk_id"]),
+        selected_window=selected_window,
+        correction_methods_compared=method_result.methods,
+        backend_method_values={method: {"dynamic_fit_mode": method} for method in method_result.methods},
+        config_values={
+            "dynamic_fit_mode": base_cfg.dynamic_fit_mode,
+            "lowpass_hz": base_cfg.lowpass_hz,
+            "filter_order": base_cfg.filter_order,
+            "target_fs_hz": base_cfg.target_fs_hz,
+            "baseline_subtract_before_fit": base_cfg.baseline_subtract_before_fit,
+            "bleach_correction_mode": base_cfg.bleach_correction_mode,
+        },
+        config_source_path=source_result.config_path,
+        source_paths=[source],
+        source_artifact_hashes=source_hashes,
+    )
+    provenance["source_file"] = str(record["source_file"])
+    provenance["selected_window_tuple"] = _json_safe(record.get("window"))
+    provenance_path = os.path.join(preview_dir, PREVIEW_PROVENANCE_FILENAME)
+    _write_json(provenance_path, provenance)
+    generated_artifacts["preview_provenance_json"] = provenance_path
+
+    summary = build_preview_summary(
+        preview_id=pid,
+        status=status,
+        method_statuses=method_statuses,
+        warnings=warnings,
+        errors=errors,
+        generated_artifact_paths=generated_artifacts,
+        stale=False,
+    )
+    summary["preview_only"] = True
+    summary["strategy_recommendation"] = None
+    summary["comparison_plot"] = {"implemented": False, "reason": "comparison plot deferred in Stage 4C2"}
+    summary_path = os.path.join(preview_dir, PREVIEW_SUMMARY_FILENAME)
+    _write_json(summary_path, summary)
+    generated_artifacts["preview_summary_json"] = summary_path
+
+    return {
+        "ok": ok,
+        "preview_id": pid,
+        "status": status,
+        "preview_output_dir": preview_dir,
+        "preview_provenance_path": provenance_path,
+        "preview_summary_path": summary_path,
+        "generated_artifacts": generated_artifacts,
+        "method_statuses": method_statuses,
+        "warnings": warnings,
+        "errors": errors,
+    }
