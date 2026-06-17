@@ -628,13 +628,31 @@ def test_guided_correction_preview_button_generates_backend_preview_read_only(wi
 
     window._guided_preview_generate_btn.click()
 
-    assert "Preview comparison status: success" in window._guided_preview_status_label.text()
+    assert "Preview comparison generated: success." in window._guided_preview_status_label.text()
+    artifacts_text = window._guided_preview_artifacts_label.text()
+    assert "Preview directory:" in artifacts_text
+    assert "Summary:" in artifacts_text
+    assert "Provenance:" in artifacts_text
+    table = window._guided_preview_method_table
+    assert table.rowCount() == 3
+    table_text = " ".join(
+        table.item(row, col).text()
+        for row in range(table.rowCount())
+        for col in range(table.columnCount())
+        if table.item(row, col) is not None
+    )
+    assert "Robust Global Event-Reject Fit" in table_text
+    assert "Adaptive Event-Gated Fit" in table_text
+    assert "Global Linear Regression" in table_text
+    assert "method_global_linear_regression_diagnostics.json" in table_text
+    assert "method_global_linear_regression_trace.csv" in table_text
+    assert "Signal-Only F0" not in table_text
+    assert "Decision-Support Audit" not in table_text
+    assert "No Correction" not in table_text
+    assert "auto" not in table_text
+    assert "needs_review" not in table_text
+    assert "Errors/warnings: none reported" in window._guided_preview_messages_label.text()
     text = window._guided_preview_result_label.text()
-    assert "Preview status: success" in text
-    assert "Preview directory:" in text
-    assert "Summary:" in text
-    assert "Provenance:" in text
-    assert "global_linear_regression" in text
     assert "Strategy recommendation: none" in text
     preview_dir = run_dir / "_guided_workflow" / "previews"
     assert preview_dir.exists()
@@ -682,7 +700,7 @@ def test_guided_correction_preview_result_marks_stale_on_selection_change(window
     _load_preview_completed_run(window, run_dir, monkeypatch)
 
     window._guided_preview_generate_btn.click()
-    assert "Preview comparison status: success" in window._guided_preview_status_label.text()
+    assert "Preview comparison generated: success." in window._guided_preview_status_label.text()
 
     window._guided_preview_chunk_combo.setCurrentIndex(1)
 
@@ -696,14 +714,14 @@ def test_guided_correction_preview_refresh_preserves_non_default_selection_with_
     window._guided_preview_chunk_combo.setCurrentIndex(window._guided_preview_chunk_combo.findData(1))
     window._guided_preview_has_result = True
     window._guided_preview_result_stale = False
-    window._guided_preview_status_label.setText("Preview comparison status: success")
+    window._guided_preview_status_label.setText("Preview comparison generated: success.")
     window._guided_preview_result_label.setText("Preview status: success")
 
     window._refresh_guided_diagnostics_panel()
 
     assert window._guided_preview_roi_combo.currentData() == "CH2"
     assert window._guided_preview_chunk_combo.currentData() == 1
-    assert "Preview comparison status: success" in window._guided_preview_status_label.text()
+    assert "Preview comparison generated: success." in window._guided_preview_status_label.text()
     assert window._guided_preview_result_stale is False
 
 
@@ -815,3 +833,4 @@ def test_guided_diagnostics_step_has_no_generation_or_execution_buttons(window):
         if button.text()
     }
     assert button_texts.isdisjoint(forbidden)
+    assert "Generate preview comparison" in button_texts

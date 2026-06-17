@@ -2330,6 +2330,40 @@ class MainWindow(QMainWindow):
         self._guided_preview_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         preview_layout.addWidget(self._guided_preview_status_label)
 
+        artifacts_group = QGroupBox("Preview artifact paths")
+        artifacts_group.setObjectName("guidedCorrectionPreviewArtifactsPanel")
+        artifacts_layout = QVBoxLayout(artifacts_group)
+        artifacts_layout.setContentsMargins(8, 8, 8, 8)
+        artifacts_layout.setSpacing(4)
+        self._guided_preview_artifacts_label = QLabel("No preview artifacts generated.")
+        self._guided_preview_artifacts_label.setObjectName("guidedCorrectionPreviewArtifacts")
+        self._guided_preview_artifacts_label.setProperty("guidedSecondaryText", True)
+        self._guided_preview_artifacts_label.setWordWrap(True)
+        self._guided_preview_artifacts_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        artifacts_layout.addWidget(self._guided_preview_artifacts_label)
+        preview_layout.addWidget(artifacts_group)
+
+        self._guided_preview_method_table = QTableWidget(0, 5)
+        self._guided_preview_method_table.setObjectName("guidedCorrectionPreviewMethodTable")
+        self._guided_preview_method_table.setHorizontalHeaderLabels(
+            ["Method", "Status", "Diagnostics JSON", "Trace CSV", "Errors"]
+        )
+        self._guided_preview_method_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._guided_preview_method_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._guided_preview_method_table.setWordWrap(True)
+        self._guided_preview_method_table.verticalHeader().setVisible(False)
+        self._guided_preview_method_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self._guided_preview_method_table.horizontalHeader().setStretchLastSection(True)
+        self._guided_preview_method_table.setMinimumHeight(120)
+        preview_layout.addWidget(self._guided_preview_method_table)
+
+        self._guided_preview_messages_label = QLabel("")
+        self._guided_preview_messages_label.setObjectName("guidedCorrectionPreviewMessages")
+        self._guided_preview_messages_label.setProperty("guidedSecondaryText", True)
+        self._guided_preview_messages_label.setWordWrap(True)
+        self._guided_preview_messages_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        preview_layout.addWidget(self._guided_preview_messages_label)
+
         self._guided_preview_result_label = QLabel("")
         self._guided_preview_result_label.setObjectName("guidedCorrectionPreviewResult")
         self._guided_preview_result_label.setProperty("guidedSecondaryText", True)
@@ -2499,6 +2533,8 @@ class MainWindow(QMainWindow):
             self._guided_preview_source_status_label.setText(
                 "Load a completed run to generate preview-only correction comparisons."
             )
+            if not getattr(self, "_guided_preview_has_result", False):
+                self._clear_guided_preview_result_widgets()
             self._refresh_guided_preview_enablement()
             return
 
@@ -2562,6 +2598,79 @@ class MainWindow(QMainWindow):
         self._refresh_guided_preview_enablement()
 
     def _format_guided_preview_result(self, result: dict[str, object]) -> str:
+        lines = ["Preview-only correction comparison. Strategy recommendation: none."]
+        summary_path = str(result.get("preview_summary_path", "") or "")
+        if summary_path and os.path.isfile(summary_path):
+            try:
+                with open(summary_path, "r", encoding="utf-8") as f:
+                    summary = json.load(f)
+                plot_info = summary.get("comparison_plot")
+                if isinstance(plot_info, dict) and plot_info.get("implemented") is False:
+                    lines.append(f"Comparison plot: deferred ({plot_info.get('reason', '')})")
+            except Exception:
+                pass
+        return "\n".join(lines)
+
+    def _guided_preview_method_label(self, method: str) -> str:
+        return GUIDED_CORRECTION_PREVIEW_METHOD_LABELS.get(str(method), str(method))
+
+    def _set_table_item(self, row: int, column: int, text: str, tooltip: str = "") -> None:
+        item = QTableWidgetItem(str(text or ""))
+        item.setToolTip(str(tooltip or text or ""))
+        self._guided_preview_method_table.setItem(row, column, item)
+
+    def _populate_guided_preview_result_widgets(self, result: dict[str, object]) -> None:
+        if hasattr(self, "_guided_preview_artifacts_label"):
+            self._guided_preview_artifacts_label.setText(
+                "\n".join(
+                    [
+                        f"Preview directory: {result.get('preview_output_dir', '')}",
+                        f"Summary: {result.get('preview_summary_path', '')}",
+                        f"Provenance: {result.get('preview_provenance_path', '')}",
+                    ]
+                )
+            )
+        method_statuses = result.get("method_statuses", {})
+        if hasattr(self, "_guided_preview_method_table"):
+            self._guided_preview_method_table.setRowCount(0)
+            if isinstance(method_statuses, dict):
+                for row, (method, status) in enumerate(method_statuses.items()):
+                    if not isinstance(status, dict):
+                        continue
+                    self._guided_preview_method_table.insertRow(row)
+                    label = self._guided_preview_method_label(str(method))
+                    self._set_table_item(row, 0, label, str(method))
+                    self._set_table_item(row, 1, str(status.get("status", "")))
+                    self._set_table_item(row, 2, str(status.get("diagnostics_json", "")))
+                    self._set_table_item(row, 3, str(status.get("trace_csv", "")))
+                    errors = "; ".join(str(x) for x in (status.get("errors") or []))
+                    self._set_table_item(row, 4, errors)
+            self._guided_preview_method_table.resizeRowsToContents()
+        if hasattr(self, "_guided_preview_messages_label"):
+            lines: list[str] = []
+            warnings = result.get("warnings") or []
+            errors = result.get("errors") or []
+            if warnings:
+                lines.append(f"Warnings: {'; '.join(str(x) for x in warnings)}")
+            if errors:
+                lines.append(f"Errors: {'; '.join(str(x) for x in errors)}")
+            if not lines:
+                lines.append("Errors/warnings: none reported by preview backend.")
+            self._guided_preview_messages_label.setText("\n".join(lines))
+        if hasattr(self, "_guided_preview_result_label"):
+            self._guided_preview_result_label.setText(self._format_guided_preview_result(result))
+
+    def _clear_guided_preview_result_widgets(self) -> None:
+        if hasattr(self, "_guided_preview_artifacts_label"):
+            self._guided_preview_artifacts_label.setText("No preview artifacts generated.")
+        if hasattr(self, "_guided_preview_method_table"):
+            self._guided_preview_method_table.setRowCount(0)
+        if hasattr(self, "_guided_preview_messages_label"):
+            self._guided_preview_messages_label.setText("")
+        if hasattr(self, "_guided_preview_result_label"):
+            self._guided_preview_result_label.setText("")
+
+    def _legacy_guided_preview_result_text(self, result: dict[str, object]) -> str:
         lines = [
             f"Preview status: {result.get('status', 'failed')}",
             f"Preview directory: {result.get('preview_output_dir', '')}",
@@ -2633,9 +2742,12 @@ class MainWindow(QMainWindow):
         self._guided_preview_result_stale = False
         self._guided_preview_last_result = result
         if hasattr(self, "_guided_preview_status_label"):
-            self._guided_preview_status_label.setText(f"Preview comparison status: {result.get('status', 'failed')}")
-        if hasattr(self, "_guided_preview_result_label"):
-            self._guided_preview_result_label.setText(self._format_guided_preview_result(result))
+            status = str(result.get("status", "failed"))
+            if status in {"success", "partial"}:
+                self._guided_preview_status_label.setText(f"Preview comparison generated: {status}.")
+            else:
+                self._guided_preview_status_label.setText("Preview comparison failed.")
+        self._populate_guided_preview_result_widgets(result)
         self._refresh_guided_preview_enablement()
 
     def _refresh_guided_diagnostics_panel(self) -> None:
