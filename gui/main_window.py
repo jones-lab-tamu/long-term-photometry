@@ -1528,15 +1528,25 @@ class MainWindow(QMainWindow):
         """Read-only Stage 2B setup preview; it does not validate, run, or write artifacts."""
         group = QGroupBox("Current setup summary")
         group.setObjectName("guidedSetupSummaryPanel")
+        group.setCheckable(True)
+        group.setChecked(False)
         layout = QVBoxLayout(group)
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(4)
+        self._guided_setup_summary_content = QWidget()
+        self._guided_setup_summary_content.setObjectName("guidedSetupSummaryContent")
+        content_layout = QVBoxLayout(self._guided_setup_summary_content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(4)
         self._guided_setup_summary_label = QLabel("")
         self._guided_setup_summary_label.setObjectName("guidedSetupSummaryLabel")
         self._guided_setup_summary_label.setProperty("guidedMutedText", True)
         self._guided_setup_summary_label.setWordWrap(True)
         self._guided_setup_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self._guided_setup_summary_label)
+        content_layout.addWidget(self._guided_setup_summary_label)
+        layout.addWidget(self._guided_setup_summary_content)
+        self._guided_setup_summary_content.setVisible(False)
+        group.toggled.connect(self._guided_setup_summary_content.setVisible)
         self._refresh_guided_setup_summary()
         return group
 
@@ -2712,10 +2722,17 @@ class MainWindow(QMainWindow):
     def _build_guided_planned_stages_panel(self) -> QGroupBox:
         group = QGroupBox("Planned stages / not yet wired")
         group.setObjectName("guidedWorkflowPlannedStages")
+        group.setCheckable(True)
+        group.setChecked(False)
         group.setMaximumHeight(170)
         layout = QVBoxLayout(group)
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(3)
+        self._guided_planned_stages_content = QWidget()
+        self._guided_planned_stages_content.setObjectName("guidedWorkflowPlannedStagesContent")
+        content_layout = QVBoxLayout(self._guided_planned_stages_content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(3)
         planned = [
             "Stage 2: mirror data/format/ROI/run-spec setup",
             "Stage 3: map correction cards to existing dynamic-fit modes",
@@ -2729,7 +2746,10 @@ class MainWindow(QMainWindow):
             label.setObjectName(f"guidedWorkflowPlannedStage{idx + 2}")
             label.setProperty("guidedMutedText", True)
             label.setWordWrap(True)
-            layout.addWidget(label)
+            content_layout.addWidget(label)
+        layout.addWidget(self._guided_planned_stages_content)
+        self._guided_planned_stages_content.setVisible(False)
+        group.toggled.connect(self._guided_planned_stages_content.setVisible)
         return group
 
     def _lock_main_splitter_handle(self) -> None:

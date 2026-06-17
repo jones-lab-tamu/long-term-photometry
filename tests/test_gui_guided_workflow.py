@@ -376,6 +376,51 @@ def test_guided_setup_summary_is_read_only_and_tracks_current_state(window, tmp_
     assert "sessions/hour=8" in text
 
 
+def test_guided_summary_and_planned_sections_are_collapsible(window, tmp_path, monkeypatch):
+    summary_group = window._guided_workflow_tab.findChild(QGroupBox, "guidedSetupSummaryPanel")
+    planned_group = window._guided_workflow_tab.findChild(QGroupBox, "guidedWorkflowPlannedStages")
+    assert summary_group is not None
+    assert planned_group is not None
+    assert summary_group.isCheckable() is True
+    assert planned_group.isCheckable() is True
+    assert summary_group.isChecked() is False
+    assert planned_group.isChecked() is False
+    assert window._guided_setup_summary_content.isHidden() is True
+    assert window._guided_planned_stages_content.isHidden() is True
+
+    state_before = _state_for_equivalence(window)
+    calls = {"preview": 0}
+
+    def _fake_preview_backend(*_args, **_kwargs):
+        calls["preview"] += 1
+        return {}
+
+    monkeypatch.setattr(main_window_module, "run_guided_correction_preview_comparison", _fake_preview_backend)
+    summary_group.setChecked(True)
+    planned_group.setChecked(True)
+    assert window._guided_setup_summary_content.isHidden() is False
+    assert window._guided_planned_stages_content.isHidden() is False
+    summary_group.setChecked(False)
+    planned_group.setChecked(False)
+    assert window._guided_setup_summary_content.isHidden() is True
+    assert window._guided_planned_stages_content.isHidden() is True
+    assert _state_for_equivalence(window) == state_before
+    assert calls["preview"] == 0
+
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    window._guided_input_dir_edit.setText(str(input_dir))
+    window._guided_output_dir_edit.setText(str(output_dir))
+    window._guided_format_combo.setCurrentText("custom_tabular")
+    assert window._guided_setup_summary_content.isHidden() is True
+    text = window._guided_setup_summary_label.text()
+    assert str(input_dir) in text
+    assert str(output_dir) in text
+    assert "custom_tabular" in text
+
+
 def test_guided_and_full_control_intermittent_setup_summary_equivalence(qapp, tmp_path):
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
