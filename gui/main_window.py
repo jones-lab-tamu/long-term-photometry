@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox, QPushButton, QPlainTextEdit, QScrollArea,
     QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem, QToolButton, QStackedWidget,
     QProgressBar, QLayout, QSplitter, QGridLayout, QStyle, QToolTip,
-    QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView,
+    QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QTabWidget,
 )
 
 from gui.process_runner import PipelineRunner, RunnerState
@@ -93,6 +93,15 @@ _CONSERVATIVE_EVENT_DEFAULTS = {
     "peak_min_prominence_k": 2.0,
     "peak_min_width_sec": 0.3,
 }
+GUIDED_WORKFLOW_STEPS = (
+    "Select data",
+    "Recording structure",
+    "Correction approach",
+    "Diagnostics",
+    "Confirm strategy",
+    "Run",
+    "Review",
+)
 
 
 def _generate_run_id():
@@ -1307,8 +1316,20 @@ class MainWindow(QMainWindow):
         return strip
 
     def _build_main_body(self) -> QWidget:
-        """Fixed major panes: upper-left controls, lower-left log, right results."""
+        """Top-level development shell: non-executing Guided Workflow plus existing Full Control."""
+        tabs = QTabWidget()
+        tabs.setObjectName("workflowModeTabs")
+        self._workflow_mode_tabs = tabs
+        self._guided_workflow_tab = self._build_guided_workflow_shell()
+        self._full_control_tab = self._build_full_control_body()
+        tabs.addTab(self._guided_workflow_tab, "Guided Workflow")
+        tabs.addTab(self._full_control_tab, "Full Control")
+        return tabs
+
+    def _build_full_control_body(self) -> QWidget:
+        """Existing fixed major panes: upper-left controls, lower-left log, right results."""
         body = QWidget()
+        body.setObjectName("fullControlShell")
         row = QVBoxLayout(body)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(0)
@@ -1334,6 +1355,250 @@ class MainWindow(QMainWindow):
         self._apply_splitter_setup_mode()
         row.addWidget(splitter, 1)
         return body
+
+    def _build_guided_workflow_shell(self) -> QWidget:
+        """Stage 1 Guided Workflow shell. It is display-only and non-executing."""
+        shell = QWidget()
+        shell.setObjectName("guidedWorkflowShell")
+        outer = QHBoxLayout(shell)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(12)
+
+        stepper_group = QGroupBox("Guided Workflow")
+        stepper_group.setObjectName("guidedWorkflowStepperGroup")
+        stepper_group.setMaximumWidth(260)
+        stepper_layout = QVBoxLayout(stepper_group)
+        stepper_layout.setContentsMargins(10, 10, 10, 10)
+        stepper_layout.setSpacing(8)
+
+        intro = QLabel(
+            "Stage 1 shell only. These steps do not run analysis, write manifests, "
+            "or route applied-dF/F."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("guidedWorkflowStageNotice")
+        stepper_layout.addWidget(intro)
+
+        self._guided_workflow_stepper = QListWidget()
+        self._guided_workflow_stepper.setObjectName("guidedWorkflowStepper")
+        for step in GUIDED_WORKFLOW_STEPS:
+            self._guided_workflow_stepper.addItem(QListWidgetItem(step))
+        self._guided_workflow_stepper.setCurrentRow(0)
+        stepper_layout.addWidget(self._guided_workflow_stepper, 1)
+
+        self._guided_workflow_stack = QStackedWidget()
+        self._guided_workflow_stack.setObjectName("guidedWorkflowStepStack")
+        for widget in (
+            self._build_guided_select_data_step(),
+            self._build_guided_recording_structure_step(),
+            self._build_guided_correction_approach_step(),
+            self._build_guided_diagnostics_step(),
+            self._build_guided_confirm_strategy_step(),
+            self._build_guided_run_step(),
+            self._build_guided_review_step(),
+        ):
+            self._guided_workflow_stack.addWidget(widget)
+        self._guided_workflow_stepper.currentRowChanged.connect(
+            self._guided_workflow_stack.setCurrentIndex
+        )
+
+        content_wrap = QWidget()
+        content_layout = QVBoxLayout(content_wrap)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(10)
+        content_layout.addWidget(self._guided_workflow_stack, 1)
+        content_layout.addWidget(self._build_guided_planned_stages_panel(), 0)
+
+        outer.addWidget(stepper_group, 0)
+        outer.addWidget(content_wrap, 1)
+        return shell
+
+    def _build_guided_step_scroll(self, object_name: str, title: str, paragraphs: list[str], extra: QWidget | None = None) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setObjectName(object_name)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        title_label = QLabel(title)
+        title_label.setObjectName("guidedWorkflowStepTitle")
+        title_label.setStyleSheet("font-weight: bold; font-size: 16px;")
+        layout.addWidget(title_label)
+        for idx, text in enumerate(paragraphs):
+            label = QLabel(text)
+            label.setObjectName(f"{object_name}Text{idx}")
+            label.setWordWrap(True)
+            layout.addWidget(label)
+        if extra is not None:
+            layout.addWidget(extra)
+        layout.addStretch(1)
+        scroll.setWidget(panel)
+        return scroll
+
+    def _build_guided_select_data_step(self) -> QWidget:
+        return self._build_guided_step_scroll(
+            "guidedStepSelectData",
+            "Select data",
+            [
+                "Future stage: select input folder, output root, data format or resolved format, ROI discovery, and ROI include/exclude.",
+                "Stage 1 does not mirror or mutate the current run setup. Use Full Control for real validation and runs.",
+            ],
+        )
+
+    def _build_guided_recording_structure_step(self) -> QWidget:
+        return self._build_guided_step_scroll(
+            "guidedStepRecordingStructure",
+            "Recording structure",
+            [
+                "Future stage: configure intermittent versus continuous recording setup.",
+                "Intermittent data will expose sessions/hour and session duration. Continuous data will expose the continuous analysis window.",
+                "Stage 1 is placeholder-only and does not write config overrides.",
+            ],
+        )
+
+    def _build_guided_correction_approach_step(self) -> QWidget:
+        cards = QWidget()
+        cards.setObjectName("guidedCorrectionCards")
+        grid = QGridLayout(cards)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(10)
+        card_defs = [
+            (
+                "Robust Global Event-Reject Fit",
+                "Default / recommended starting point",
+                "Default guided correction candidate. Fits the reference relationship while excluding event-like periods that can contaminate the fit.",
+                True,
+            ),
+            (
+                "Adaptive Event-Gated Fit",
+                "Candidate",
+                "Candidate for recordings where the signal-reference relationship may change over time. Preview diagnostics should be inspected before use.",
+                True,
+            ),
+            (
+                "Global Linear Regression",
+                "Baseline comparison, not recommended for most long-duration recordings.",
+                "Included because many users expect this field-standard baseline. It can fail when reference coupling changes or event-rich periods contaminate the fit.",
+                True,
+            ),
+            (
+                "Signal-Only F0",
+                "Explicit strategy",
+                "Use when reference-based correction is unavailable, inappropriate, failed diagnostic checks, or intentionally not used. This is an explicit user-selected strategy, not an automatic fallback.",
+                True,
+            ),
+            (
+                "Decision-Support Audit",
+                "Coming later / read-only evidence.",
+                "Future advisory report that may summarize evidence for candidate strategies. It will not run analysis, silently choose a strategy, or write manifests automatically.",
+                False,
+            ),
+        ]
+        self._guided_correction_cards = {}
+        for idx, (title, badge, helper, enabled) in enumerate(card_defs):
+            card = self._build_guided_correction_card(title, badge, helper, enabled=enabled)
+            self._guided_correction_cards[title] = card
+            grid.addWidget(card, idx // 2, idx % 2)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        return self._build_guided_step_scroll(
+            "guidedStepCorrectionApproach",
+            "Correction approach",
+            [
+                "Stage 1 correction cards are static and non-executing. They do not change config, run diagnostics, write manifests, or route analysis.",
+                "Correction preview is encouraged in the future guided path, but is not required or wired in Stage 1.",
+            ],
+            cards,
+        )
+
+    def _build_guided_correction_card(self, title: str, badge: str, helper: str, *, enabled: bool) -> QGroupBox:
+        safe_name = re.sub(r"[^A-Za-z0-9]+", "", title)
+        card = QGroupBox(title)
+        card.setObjectName(f"guidedCorrectionCard{safe_name}")
+        card.setProperty("guidedCorrectionCardTitle", title)
+        # Stage 1 cards are deliberately non-executing; no clicked/changed signals are connected here.
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+        badge_label = QLabel(badge)
+        badge_label.setObjectName(f"guidedCorrectionCard{safe_name}Badge")
+        badge_label.setStyleSheet("font-weight: bold; color: #444;")
+        badge_label.setWordWrap(True)
+        layout.addWidget(badge_label)
+        helper_label = QLabel(helper)
+        helper_label.setObjectName(f"guidedCorrectionCard{safe_name}Helper")
+        helper_label.setWordWrap(True)
+        layout.addWidget(helper_label)
+        stage_label = QLabel("Stage 1: not wired to execution.")
+        stage_label.setObjectName(f"guidedCorrectionCard{safe_name}Stage")
+        stage_label.setWordWrap(True)
+        layout.addWidget(stage_label)
+        card.setEnabled(bool(enabled))
+        return card
+
+    def _build_guided_diagnostics_step(self) -> QWidget:
+        return self._build_guided_step_scroll(
+            "guidedStepDiagnostics",
+            "Diagnostics",
+            [
+                "Future stage: correction previews, fit stability summaries, correction impact views, warning/review states, needs_review flags, and read-only Decision-Support Audit evidence.",
+                "Stage 1 does not launch previews or read diagnostic outputs.",
+            ],
+        )
+
+    def _build_guided_confirm_strategy_step(self) -> QWidget:
+        return self._build_guided_step_scroll(
+            "guidedStepConfirmStrategy",
+            "Confirm strategy",
+            [
+                "Future stage: explicitly confirm runnable strategies before applied-dF/F production.",
+                "Runnable production strategies are explicit dynamic_fit and signal_only_f0. auto, no_correction, and needs_review are not runnable strategies.",
+                "Stage 1 does not write manifests or populate applied-dF/F batch rows.",
+            ],
+        )
+
+    def _build_guided_run_step(self) -> QWidget:
+        return self._build_guided_step_scroll(
+            "guidedStepRun",
+            "Run",
+            [
+                "Future stage: validation, dry-run, and run controls for the guided path.",
+                "For Stage 1, existing Full Control buttons remain the only active validation/run path. This Guided step does not execute analysis.",
+            ],
+        )
+
+    def _build_guided_review_step(self) -> QWidget:
+        return self._build_guided_step_scroll(
+            "guidedStepReview",
+            "Review",
+            [
+                "Future stage: completed-run review, diagnostics, plots, retuning/reanalysis entry points, and provenance.",
+                "Stage 1 does not wire a completed-run loader into the Guided Workflow.",
+            ],
+        )
+
+    def _build_guided_planned_stages_panel(self) -> QGroupBox:
+        group = QGroupBox("Planned stages / not yet wired")
+        group.setObjectName("guidedWorkflowPlannedStages")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
+        planned = [
+            "Stage 2: mirror data/format/ROI/run-spec setup",
+            "Stage 3: map correction cards to existing dynamic-fit modes",
+            "Stage 4: add correction preview/diagnostics",
+            "Stage 5: bridge to explicit applied-dFF strategy confirmation",
+            "Stage 6: add read-only Decision-Support Audit evidence",
+            "Stage 7: validate and consider making Guided Workflow default",
+        ]
+        for idx, text in enumerate(planned):
+            label = QLabel(text)
+            label.setObjectName(f"guidedWorkflowPlannedStage{idx + 2}")
+            label.setWordWrap(True)
+            layout.addWidget(label)
+        return group
 
     def _lock_main_splitter_handle(self) -> None:
         """Keep shell widths mode-controlled; divider is not user-adjustable."""
