@@ -35,7 +35,10 @@ def test_guided_workflow_and_full_control_tabs_are_accessible(window):
 def test_guided_workflow_stepper_has_expected_steps(window):
     stepper = window._guided_workflow_stepper
     assert stepper.count() == len(GUIDED_WORKFLOW_STEPS)
-    assert [stepper.item(i).text() for i in range(stepper.count())] == list(GUIDED_WORKFLOW_STEPS)
+    assert [stepper.item(i).data(0x0100) for i in range(stepper.count())] == list(GUIDED_WORKFLOW_STEPS)
+    assert [stepper.item(i).text() for i in range(stepper.count())] == [
+        f"{idx}. {step}" for idx, step in enumerate(GUIDED_WORKFLOW_STEPS, start=1)
+    ]
 
 
 def test_guided_workflow_stepper_switches_placeholder_panels(window):
@@ -63,7 +66,7 @@ def test_guided_correction_step_shows_expected_non_executing_cards(window):
         "Decision-Support Audit",
     ]
     assert "not recommended" in " ".join(_label_texts(cards["Global Linear Regression"])).lower()
-    assert not cards["Decision-Support Audit"].isEnabled()
+    assert cards["Decision-Support Audit"].property("guidedCorrectionCardNonExecuting") is True
     assert "read-only evidence" in " ".join(_label_texts(cards["Decision-Support Audit"])).lower()
     assert "No Correction" not in cards
 
@@ -94,4 +97,3 @@ def test_guided_stage1_has_no_run_or_manifest_action_buttons(window):
         if button.text()
     }
     assert guided_button_texts.isdisjoint(forbidden)
-

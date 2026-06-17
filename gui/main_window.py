@@ -1361,19 +1361,93 @@ class MainWindow(QMainWindow):
         shell = QWidget()
         shell.setObjectName("guidedWorkflowShell")
         outer = QHBoxLayout(shell)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(12)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(14)
+        shell.setStyleSheet(
+            """
+            QWidget#guidedWorkflowShell {
+                background: #f7f8fa;
+            }
+            QGroupBox#guidedWorkflowStepperGroup,
+            QGroupBox#guidedWorkflowPlannedStages,
+            QGroupBox[guidedCorrectionCard="true"] {
+                background: #ffffff;
+                border: 1px solid #d7dce2;
+                border-radius: 6px;
+                margin-top: 12px;
+            }
+            QGroupBox#guidedWorkflowStepperGroup::title,
+            QGroupBox#guidedWorkflowPlannedStages::title,
+            QGroupBox[guidedCorrectionCard="true"]::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 4px;
+                font-weight: bold;
+            }
+            QListWidget#guidedWorkflowStepper {
+                background: transparent;
+                border: 0;
+                outline: 0;
+            }
+            QListWidget#guidedWorkflowStepper::item {
+                margin: 2px 0;
+                padding: 8px 10px;
+                border-radius: 4px;
+            }
+            QListWidget#guidedWorkflowStepper::item:selected {
+                background: #e8f1ff;
+                color: #173b68;
+                font-weight: bold;
+            }
+            QLabel#guidedWorkflowStageNotice {
+                background: #f0f4f8;
+                border: 1px solid #d8e0e8;
+                border-radius: 4px;
+                color: #334155;
+                padding: 8px;
+            }
+            QLabel#guidedWorkflowStepTitle {
+                color: #1f2937;
+            }
+            QLabel[guidedCardBadge="true"] {
+                background: #edf2f7;
+                border-radius: 4px;
+                color: #27364a;
+                font-weight: bold;
+                padding: 4px 6px;
+            }
+            QLabel[guidedCardBadgeLevel="recommended"] {
+                background: #e6f4ea;
+                color: #1f5b35;
+            }
+            QLabel[guidedCardBadgeLevel="caution"] {
+                background: #fff4d6;
+                color: #6f4d00;
+            }
+            QLabel[guidedCardBadgeLevel="future"] {
+                background: #eef2ff;
+                color: #3730a3;
+            }
+            QLabel[guidedSecondaryText="true"] {
+                color: #4b5563;
+            }
+            QLabel[guidedMutedText="true"] {
+                color: #6b7280;
+                font-size: 11px;
+            }
+            """
+        )
 
         stepper_group = QGroupBox("Guided Workflow")
         stepper_group.setObjectName("guidedWorkflowStepperGroup")
         stepper_group.setMaximumWidth(260)
         stepper_layout = QVBoxLayout(stepper_group)
-        stepper_layout.setContentsMargins(10, 10, 10, 10)
-        stepper_layout.setSpacing(8)
+        stepper_layout.setContentsMargins(12, 12, 12, 12)
+        stepper_layout.setSpacing(10)
 
         intro = QLabel(
-            "Stage 1 shell only. These steps do not run analysis, write manifests, "
-            "or route applied-dF/F."
+            "Stage 1 shell only. Guided Workflow does not run analysis, write "
+            "manifests, or route applied-dF/F yet. Use Full Control for real runs."
         )
         intro.setWordWrap(True)
         intro.setObjectName("guidedWorkflowStageNotice")
@@ -1381,8 +1455,10 @@ class MainWindow(QMainWindow):
 
         self._guided_workflow_stepper = QListWidget()
         self._guided_workflow_stepper.setObjectName("guidedWorkflowStepper")
-        for step in GUIDED_WORKFLOW_STEPS:
-            self._guided_workflow_stepper.addItem(QListWidgetItem(step))
+        for idx, step in enumerate(GUIDED_WORKFLOW_STEPS, start=1):
+            item = QListWidgetItem(f"{idx}. {step}")
+            item.setData(Qt.UserRole, step)
+            self._guided_workflow_stepper.addItem(item)
         self._guided_workflow_stepper.setCurrentRow(0)
         stepper_layout.addWidget(self._guided_workflow_stepper, 1)
 
@@ -1420,15 +1496,16 @@ class MainWindow(QMainWindow):
         scroll.setFrameShape(QScrollArea.NoFrame)
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
         title_label = QLabel(title)
         title_label.setObjectName("guidedWorkflowStepTitle")
-        title_label.setStyleSheet("font-weight: bold; font-size: 16px;")
+        title_label.setStyleSheet("font-weight: bold; font-size: 18px;")
         layout.addWidget(title_label)
         for idx, text in enumerate(paragraphs):
             label = QLabel(text)
             label.setObjectName(f"{object_name}Text{idx}")
+            label.setProperty("guidedSecondaryText", True)
             label.setWordWrap(True)
             layout.addWidget(label)
         if extra is not None:
@@ -1469,36 +1546,36 @@ class MainWindow(QMainWindow):
                 "Robust Global Event-Reject Fit",
                 "Default / recommended starting point",
                 "Default guided correction candidate. Fits the reference relationship while excluding event-like periods that can contaminate the fit.",
-                True,
+                "recommended",
             ),
             (
                 "Adaptive Event-Gated Fit",
                 "Candidate",
                 "Candidate for recordings where the signal-reference relationship may change over time. Preview diagnostics should be inspected before use.",
-                True,
+                "standard",
             ),
             (
                 "Global Linear Regression",
                 "Baseline comparison, not recommended for most long-duration recordings.",
                 "Included because many users expect this field-standard baseline. It can fail when reference coupling changes or event-rich periods contaminate the fit.",
-                True,
+                "caution",
             ),
             (
                 "Signal-Only F0",
                 "Explicit strategy",
                 "Use when reference-based correction is unavailable, inappropriate, failed diagnostic checks, or intentionally not used. This is an explicit user-selected strategy, not an automatic fallback.",
-                True,
+                "standard",
             ),
             (
                 "Decision-Support Audit",
                 "Coming later / read-only evidence.",
                 "Future advisory report that may summarize evidence for candidate strategies. It will not run analysis, silently choose a strategy, or write manifests automatically.",
-                False,
+                "future",
             ),
         ]
         self._guided_correction_cards = {}
-        for idx, (title, badge, helper, enabled) in enumerate(card_defs):
-            card = self._build_guided_correction_card(title, badge, helper, enabled=enabled)
+        for idx, (title, badge, helper, badge_level) in enumerate(card_defs):
+            card = self._build_guided_correction_card(title, badge, helper, badge_level=badge_level)
             self._guided_correction_cards[title] = card
             grid.addWidget(card, idx // 2, idx % 2)
         grid.setColumnStretch(0, 1)
@@ -1513,29 +1590,33 @@ class MainWindow(QMainWindow):
             cards,
         )
 
-    def _build_guided_correction_card(self, title: str, badge: str, helper: str, *, enabled: bool) -> QGroupBox:
+    def _build_guided_correction_card(self, title: str, badge: str, helper: str, *, badge_level: str) -> QGroupBox:
         safe_name = re.sub(r"[^A-Za-z0-9]+", "", title)
         card = QGroupBox(title)
         card.setObjectName(f"guidedCorrectionCard{safe_name}")
         card.setProperty("guidedCorrectionCardTitle", title)
+        card.setProperty("guidedCorrectionCard", True)
+        card.setProperty("guidedCorrectionCardNonExecuting", True)
         # Stage 1 cards are deliberately non-executing; no clicked/changed signals are connected here.
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
         badge_label = QLabel(badge)
         badge_label.setObjectName(f"guidedCorrectionCard{safe_name}Badge")
-        badge_label.setStyleSheet("font-weight: bold; color: #444;")
+        badge_label.setProperty("guidedCardBadge", True)
+        badge_label.setProperty("guidedCardBadgeLevel", badge_level)
         badge_label.setWordWrap(True)
         layout.addWidget(badge_label)
         helper_label = QLabel(helper)
         helper_label.setObjectName(f"guidedCorrectionCard{safe_name}Helper")
+        helper_label.setProperty("guidedSecondaryText", True)
         helper_label.setWordWrap(True)
         layout.addWidget(helper_label)
         stage_label = QLabel("Stage 1: not wired to execution.")
         stage_label.setObjectName(f"guidedCorrectionCard{safe_name}Stage")
+        stage_label.setProperty("guidedMutedText", True)
         stage_label.setWordWrap(True)
         layout.addWidget(stage_label)
-        card.setEnabled(bool(enabled))
         return card
 
     def _build_guided_diagnostics_step(self) -> QWidget:
@@ -1582,9 +1663,10 @@ class MainWindow(QMainWindow):
     def _build_guided_planned_stages_panel(self) -> QGroupBox:
         group = QGroupBox("Planned stages / not yet wired")
         group.setObjectName("guidedWorkflowPlannedStages")
+        group.setMaximumHeight(170)
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(4)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(3)
         planned = [
             "Stage 2: mirror data/format/ROI/run-spec setup",
             "Stage 3: map correction cards to existing dynamic-fit modes",
@@ -1596,6 +1678,7 @@ class MainWindow(QMainWindow):
         for idx, text in enumerate(planned):
             label = QLabel(text)
             label.setObjectName(f"guidedWorkflowPlannedStage{idx + 2}")
+            label.setProperty("guidedMutedText", True)
             label.setWordWrap(True)
             layout.addWidget(label)
         return group
