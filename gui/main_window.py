@@ -102,6 +102,12 @@ GUIDED_WORKFLOW_STEPS = (
     "Run",
     "Review",
 )
+GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE = {
+    "Robust Global Event-Reject Fit": "robust_global_event_reject",
+    "Adaptive Event-Gated Fit": "adaptive_event_gated_regression",
+    "Global Linear Regression": "global_linear_regression",
+}
+GUIDED_SIGNAL_ONLY_F0_CARD = "Signal-Only F0"
 
 
 def _generate_run_id():
@@ -1430,6 +1436,10 @@ class MainWindow(QMainWindow):
                 background: #eef2ff;
                 color: #3730a3;
             }
+            QGroupBox[guidedCorrectionSelected="true"] {
+                border: 2px solid #2563eb;
+                background: #f8fbff;
+            }
             QLabel[guidedSecondaryText="true"] {
                 color: #4b5563;
             }
@@ -1808,6 +1818,9 @@ class MainWindow(QMainWindow):
             "selected_roi_count": len(selected_rois),
             "total_roi_count": len(all_rois),
             "selected_rois": selected_rois,
+            "reference_correction_method": self._selected_dynamic_fit_mode(),
+            "reference_correction_label": dynamic_fit_mode_label(self._selected_dynamic_fit_mode()),
+            "guided_correction_intent": getattr(self, "_guided_correction_intent", "") or "not selected",
         }
 
     def _refresh_guided_setup_summary(self) -> None:
@@ -1823,6 +1836,7 @@ class MainWindow(QMainWindow):
         )
         lines = [
             "Status: not validated. Use Full Control for real validation/runs.",
+            "Correction cards configure setup state only; diagnostics and strategy confirmation are not wired yet.",
             f"Input: {state['input_dir'] or '(not set)'}",
             f"Output: {state['output_dir'] or '(not set)'}",
             f"Format: {state['format']} | Resolved: {resolved}",
@@ -1834,6 +1848,9 @@ class MainWindow(QMainWindow):
             "RWD incomplete final chunk exclusion: "
             f"{'on' if state['exclude_incomplete_final_rwd_chunk'] else 'off'}",
             f"ROIs: {roi_text}",
+            f"Reference correction method: {state['reference_correction_label']} "
+            f"({state['reference_correction_method']})",
+            f"Guided correction intent: {state['guided_correction_intent']}",
         ]
         self._guided_setup_summary_label.setText("\n".join(lines))
 
@@ -2043,6 +2060,8 @@ class MainWindow(QMainWindow):
                 "future",
             ),
         ]
+        self._guided_correction_intent = ""
+        self._guided_correction_select_buttons = {}
         self._guided_correction_cards = {}
         for idx, (title, badge, helper, badge_level) in enumerate(card_defs):
             card = self._build_guided_correction_card(title, badge, helper, badge_level=badge_level)
@@ -2050,6 +2069,12 @@ class MainWindow(QMainWindow):
             grid.addWidget(card, idx // 2, idx % 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
+        if not getattr(self, "_guided_correction_sync_connected", False):
+            self._dynamic_fit_mode_combo.currentIndexChanged.connect(
+                lambda _idx: self._sync_guided_correction_from_full()
+            )
+            self._guided_correction_sync_connected = True
+        self._sync_guided_correction_from_full()
         return self._build_guided_step_scroll(
             "guidedStepCorrectionApproach",
             "Correction approach",
@@ -2087,7 +2112,73 @@ class MainWindow(QMainWindow):
         stage_label.setProperty("guidedMutedText", True)
         stage_label.setWordWrap(True)
         layout.addWidget(stage_label)
+        if title in GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE:
+            select_btn = QPushButton("Select")
+            select_btn.setObjectName(f"guidedCorrectionSelect{safe_name}")
+            select_btn.setToolTip(
+                "Updates the existing Full Control Dynamic Fit Mode setup state. "
+                "Does not validate, run diagnostics, or execute analysis."
+            )
+            select_btn.clicked.connect(
+                lambda _checked=False, card_title=title: self._select_guided_reference_correction_card(card_title)
+            )
+            self._guided_correction_select_buttons[title] = select_btn
+            layout.addWidget(select_btn)
+        elif title == GUIDED_SIGNAL_ONLY_F0_CARD:
+            select_btn = QPushButton("Mark for later confirmation")
+            select_btn.setObjectName(f"guidedCorrectionSelect{safe_name}")
+            select_btn.setToolTip(
+                "Records Guided intent only. It does not change Dynamic Fit Mode, "
+                "write manifests, route applied-dF/F, or run analysis."
+            )
+            select_btn.clicked.connect(self._select_guided_signal_only_f0_intent)
+            self._guided_correction_select_buttons[title] = select_btn
+            layout.addWidget(select_btn)
         return card
+
+    def _select_guided_reference_correction_card(self, card_title: str) -> None:
+        """Reference correction cards sync to existing Dynamic Fit Mode only."""
+        mode = GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE.get(card_title)
+        if not mode:
+            return
+        idx = self._dynamic_fit_mode_combo.findData(mode)
+        if idx >= 0 and self._dynamic_fit_mode_combo.currentIndex() != idx:
+            self._dynamic_fit_mode_combo.setCurrentIndex(idx)
+        self._guided_correction_intent = card_title
+        self._sync_guided_correction_from_full()
+        self._refresh_guided_setup_summary()
+
+    def _select_guided_signal_only_f0_intent(self) -> None:
+        """Signal-Only F0 is explicit future intent, not a Dynamic Fit Mode fallback."""
+        self._guided_correction_intent = GUIDED_SIGNAL_ONLY_F0_CARD
+        self._sync_guided_correction_from_full()
+        self._refresh_guided_setup_summary()
+
+    def _sync_guided_correction_from_full(self) -> None:
+        if not hasattr(self, "_guided_correction_cards"):
+            return
+        current_mode = self._selected_dynamic_fit_mode()
+        selected_reference_card = ""
+        for title, mode in GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE.items():
+            if normalize_dynamic_fit_mode(mode) == current_mode:
+                selected_reference_card = title
+                break
+        if self._guided_correction_intent != GUIDED_SIGNAL_ONLY_F0_CARD:
+            self._guided_correction_intent = selected_reference_card
+        for title, card in self._guided_correction_cards.items():
+            is_selected = title == self._guided_correction_intent
+            card.setProperty("guidedCorrectionSelected", bool(is_selected))
+            card.style().unpolish(card)
+            card.style().polish(card)
+            btn = getattr(self, "_guided_correction_select_buttons", {}).get(title)
+            if btn is not None:
+                if is_selected:
+                    btn.setText("Selected")
+                elif title == GUIDED_SIGNAL_ONLY_F0_CARD:
+                    btn.setText("Mark for later confirmation")
+                else:
+                    btn.setText("Select")
+        self._refresh_guided_setup_summary()
 
     def _build_guided_diagnostics_step(self) -> QWidget:
         return self._build_guided_step_scroll(

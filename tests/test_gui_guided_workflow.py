@@ -67,8 +67,18 @@ def _state_for_equivalence(window: MainWindow) -> dict[str, object]:
             "selected_roi_count",
             "total_roi_count",
             "selected_rois",
+            "reference_correction_method",
+            "reference_correction_label",
+            "guided_correction_intent",
         )
     }
+
+
+GUIDED_CARD_TO_DYNAMIC_MODE = {
+    "Robust Global Event-Reject Fit": "robust_global_event_reject",
+    "Adaptive Event-Gated Fit": "adaptive_event_gated_regression",
+    "Global Linear Regression": "global_linear_regression",
+}
 
 
 def test_guided_workflow_and_full_control_tabs_are_accessible(window):
@@ -114,6 +124,7 @@ def test_guided_correction_step_shows_expected_non_executing_cards(window):
     assert cards["Decision-Support Audit"].property("guidedCorrectionCardNonExecuting") is True
     assert "read-only evidence" in " ".join(_label_texts(cards["Decision-Support Audit"])).lower()
     assert "No Correction" not in cards
+    assert "Decision-Support Audit" not in window._guided_correction_select_buttons
 
 
 def test_no_correction_is_not_a_normal_guided_correction_card(window):
@@ -412,3 +423,62 @@ def test_guided_and_full_control_rwd_final_chunk_option_equivalence(qapp):
     finally:
         _close_window(guided)
         _close_window(full)
+
+
+@pytest.mark.parametrize("card_title,mode", GUIDED_CARD_TO_DYNAMIC_MODE.items())
+def test_guided_reference_correction_cards_sync_to_dynamic_fit_mode(window, card_title, mode):
+    button = window._guided_correction_select_buttons[card_title]
+    button.click()
+
+    assert window._selected_dynamic_fit_mode() == mode
+    assert window._guided_correction_cards[card_title].property("guidedCorrectionSelected") is True
+    assert window._guided_correction_intent == card_title
+
+
+@pytest.mark.parametrize("card_title,mode", GUIDED_CARD_TO_DYNAMIC_MODE.items())
+def test_full_control_dynamic_fit_mode_syncs_to_guided_reference_card(window, card_title, mode):
+    idx = window._dynamic_fit_mode_combo.findData(mode)
+    assert idx >= 0
+    window._dynamic_fit_mode_combo.setCurrentIndex(idx)
+
+    assert window._guided_correction_cards[card_title].property("guidedCorrectionSelected") is True
+    assert window._guided_correction_intent == card_title
+
+
+def test_guided_signal_only_f0_intent_does_not_change_dynamic_fit_mode_or_write_manifest(window, tmp_path):
+    idx = window._dynamic_fit_mode_combo.findData("robust_global_event_reject")
+    assert idx >= 0
+    window._dynamic_fit_mode_combo.setCurrentIndex(idx)
+    before_mode = window._selected_dynamic_fit_mode()
+    output_root = tmp_path / "out"
+    window._applied_dff_output_root_edit.setText(str(output_root))
+
+    window._guided_correction_select_buttons["Signal-Only F0"].click()
+
+    assert window._selected_dynamic_fit_mode() == before_mode
+    assert window._guided_correction_intent == "Signal-Only F0"
+    assert window._guided_correction_cards["Signal-Only F0"].property("guidedCorrectionSelected") is True
+    assert not (output_root / "gui_manifest").exists()
+    assert not (output_root / "applied_dff_gui_provenance.json").exists()
+
+
+def test_decision_support_audit_does_not_alter_dynamic_fit_mode(window):
+    idx = window._dynamic_fit_mode_combo.findData("global_linear_regression")
+    assert idx >= 0
+    window._dynamic_fit_mode_combo.setCurrentIndex(idx)
+    before_mode = window._selected_dynamic_fit_mode()
+
+    assert "Decision-Support Audit" not in window._guided_correction_select_buttons
+    assert window._guided_correction_cards["Decision-Support Audit"].property("guidedCorrectionCardNonExecuting") is True
+    assert window._selected_dynamic_fit_mode() == before_mode
+
+
+def test_guided_setup_summary_reports_correction_state_without_validation_claim(window):
+    window._guided_correction_select_buttons["Adaptive Event-Gated Fit"].click()
+    text = window._guided_setup_summary_label.text()
+
+    assert "Status: not validated" in text
+    assert "diagnostics and strategy confirmation are not wired yet" in text
+    assert "Reference correction method:" in text
+    assert "adaptive_event_gated_regression" in text
+    assert "Guided correction intent: Adaptive Event-Gated Fit" in text
