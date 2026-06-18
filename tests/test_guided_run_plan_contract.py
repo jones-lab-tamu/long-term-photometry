@@ -9,9 +9,12 @@ from photometry_pipeline.guided_run_plan import (
     GuidedPlanSource,
     GuidedRunPlan,
     GuidedRunPlanContractError,
+    OutputPolicy,
+    PlanProvenanceFlags,
     RoiPlanEntry,
     assert_valid_plan_contract,
     deserialize_plan_from_dict,
+    evaluate_guided_plan_checklist,
     is_runnable_correction_strategy,
     serialize_plan_to_dict,
     validate_correction_strategy,
@@ -73,6 +76,10 @@ def _valid_plan() -> GuidedRunPlan:
     )
 
 
+def _checklist_items(plan: GuidedRunPlan | None, errors: list[str] | None = None):
+    return evaluate_guided_plan_checklist(plan, errors).item_by_key()
+
+
 def test_round_trip_serialization_preserves_roi_level_correction_choices():
     plan = _valid_plan()
 
@@ -86,6 +93,121 @@ def test_round_trip_serialization_preserves_roi_level_correction_choices():
     assert by_roi["CH2"].correction_strategy.strategy == "signal_only_f0"
     assert by_roi["CH1"].evidence[0].chunk_id == 0
     assert by_roi["CH2"].evidence[0].chunk_id == 3
+
+
+def test_checklist_for_none_plan_is_blocked():
+    checklist = evaluate_guided_plan_checklist(None)
+    items = checklist.item_by_key()
+
+    assert items["source"].status == "not_configured"
+    assert items["contract"].status == "fail"
+    assert items["execution"].status == "blocked"
+    assert checklist.execution_ready is False
+
+
+def test_checklist_for_valid_plan_with_strategy_and_evidence():
+    plan = _valid_plan()
+    plan.feature_event_profiles = []
+    items = _checklist_items(plan)
+    checklist = evaluate_guided_plan_checklist(plan)
+
+    assert items["contract"].status == "pass"
+    assert items["roi_choices"].status == "pass"
+    assert items["evidence"].status == "pass"
+    assert items["feature_event"].status == "not_configured"
+    assert items["output_destination"].status == "not_configured"
+    assert items["execution"].status == "blocked"
+    assert checklist.execution_ready is False
+
+
+def test_checklist_for_valid_plan_with_no_roi_choices():
+    plan = GuidedRunPlan(
+        mode="completed_run_planning",
+        source=GuidedPlanSource(source_mode="completed_run", completed_run_dir="C:/runs/example"),
+        roi_plan=[RoiPlanEntry(roi="CH1")],
+    )
+
+    items = _checklist_items(plan)
+
+    assert items["contract"].status == "pass"
+    assert items["roi_choices"].status == "not_configured"
+    assert items["execution"].status == "blocked"
+
+
+def test_checklist_with_contract_errors_reports_blocking_messages():
+    plan = _valid_plan()
+    plan.roi_plan[0].correction_strategy = CorrectionStrategyChoice(strategy="auto")
+    errors = validate_plan_contract(plan)
+    checklist = evaluate_guided_plan_checklist(plan, errors)
+    items = checklist.item_by_key()
+
+    assert items["contract"].status == "fail"
+    assert any("forbidden runnable correction strategy: auto" in msg for msg in checklist.blocking_messages)
+    assert items["execution"].status == "blocked"
+    assert checklist.execution_ready is False
+
+
+def test_checklist_warns_for_roi_strategy_without_evidence():
+    plan = GuidedRunPlan(
+        mode="completed_run_planning",
+        source=GuidedPlanSource(source_mode="completed_run", completed_run_dir="C:/runs/example"),
+        roi_plan=[
+            RoiPlanEntry(
+                roi="CH1",
+                correction_strategy=CorrectionStrategyChoice(strategy="signal_only_f0"),
+                evidence=[],
+            )
+        ],
+    )
+
+    items = _checklist_items(plan)
+
+    assert items["roi_choices"].status == "pass"
+    assert items["evidence"].status == "warning"
+    assert items["execution"].status == "blocked"
+
+
+def test_checklist_fails_when_non_execution_provenance_flags_are_false():
+    plan = _valid_plan()
+    plan.provenance = PlanProvenanceFlags(no_pipeline_execution=False, no_applied_dff_outputs=False)
+    items = _checklist_items(plan)
+
+    assert items["non_execution"].status == "fail"
+    assert items["execution"].status == "blocked"
+
+
+def test_checklist_feature_event_profile_readiness():
+    no_profiles = _valid_plan()
+    no_profiles.feature_event_profiles = []
+    assert _checklist_items(no_profiles)["feature_event"].status == "not_configured"
+
+    valid_profile = _valid_plan()
+    assert _checklist_items(valid_profile)["feature_event"].status == "pass"
+
+    invalid_profile = _valid_plan()
+    invalid_profile.feature_event_profiles[0].config_fields["unknown_feature_setting"] = True
+    errors = validate_plan_contract(invalid_profile)
+    items = _checklist_items(invalid_profile, errors)
+    assert items["contract"].status == "fail"
+    assert items["feature_event"].status == "fail"
+
+
+def test_checklist_output_destination_readiness_does_not_touch_filesystem(tmp_path):
+    plan = _valid_plan()
+    output_root = tmp_path / "future_output"
+    plan.output_policy = OutputPolicy(output_root=str(output_root))
+
+    items = _checklist_items(plan)
+
+    assert items["output_destination"].status == "pass"
+    assert not output_root.exists()
+
+    unsafe_policy = _valid_plan()
+    unsafe_policy.output_policy = OutputPolicy(
+        output_root=str(output_root),
+        separate_from_source_required=False,
+    )
+    assert _checklist_items(unsafe_policy)["output_destination"].status == "fail"
 
 
 def test_evidence_chunk_is_not_production_scope():

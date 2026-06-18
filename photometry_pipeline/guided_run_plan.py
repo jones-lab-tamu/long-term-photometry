@@ -43,9 +43,37 @@ FEATURE_EVENT_CONFIG_FIELDS = {
     "event_auc_baseline",
 }
 
+CHECKLIST_STATUSES = {"pass", "warning", "fail", "not_configured", "blocked"}
+
 
 class GuidedRunPlanContractError(ValueError):
     """Raised when a Guided run-plan contract is invalid."""
+
+
+@dataclass
+class PlanChecklistItem:
+    key: str
+    label: str
+    status: str
+    message: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "key": self.key,
+            "label": self.label,
+            "status": self.status,
+            "message": self.message,
+        }
+
+
+@dataclass
+class GuidedPlanChecklist:
+    items: list[PlanChecklistItem]
+    execution_ready: bool = False
+    blocking_messages: list[str] = field(default_factory=list)
+
+    def item_by_key(self) -> dict[str, PlanChecklistItem]:
+        return {item.key: item for item in self.items}
 
 
 def _require_mapping(value: Any, path: str) -> dict[str, Any]:
@@ -440,6 +468,211 @@ def validate_plan_contract(plan: GuidedRunPlan) -> list[str]:
     return errors
 
 
+def evaluate_guided_plan_checklist(
+    plan: GuidedRunPlan | None,
+    contract_errors: list[str] | None = None,
+) -> GuidedPlanChecklist:
+    """Evaluate draft-plan readiness without touching the filesystem or executing work."""
+
+    errors = list(contract_errors if contract_errors is not None else validate_plan_contract(plan) if plan else [])
+    items: list[PlanChecklistItem] = []
+    blocking_messages: list[str] = []
+
+    if plan is None:
+        items.extend(
+            [
+                PlanChecklistItem("source", "Source", "not_configured", "No completed run/source loaded."),
+                PlanChecklistItem("contract", "Contract", "fail", "No draft plan is available."),
+                PlanChecklistItem("roi_choices", "ROI choices", "not_configured", "No ROI choices marked."),
+                PlanChecklistItem(
+                    "evidence",
+                    "Evidence provenance",
+                    "not_configured",
+                    "No ROI evidence is recorded.",
+                ),
+                PlanChecklistItem(
+                    "feature_event",
+                    "Feature/event settings",
+                    "not_configured",
+                    "Feature/event profiles are not configured in this draft.",
+                ),
+                PlanChecklistItem(
+                    "output_destination",
+                    "Output destination",
+                    "not_configured",
+                    "No output root is configured.",
+                ),
+                PlanChecklistItem(
+                    "non_execution",
+                    "Non-execution provenance",
+                    "blocked",
+                    "No plan provenance is available.",
+                ),
+                PlanChecklistItem(
+                    "execution",
+                    "Execution readiness",
+                    "blocked",
+                    "Guided Run is not wired yet. This draft plan is for review only.",
+                ),
+            ]
+        )
+        blocking_messages.extend(["No draft plan is available.", items[-1].message])
+        return GuidedPlanChecklist(items=items, execution_ready=False, blocking_messages=blocking_messages)
+
+    source_errors = [err for err in errors if _is_source_error(err)]
+    if source_errors:
+        items.append(PlanChecklistItem("source", "Source", "fail", "; ".join(source_errors)))
+    else:
+        items.append(PlanChecklistItem("source", "Source", "pass", "Plan source fields are present."))
+
+    if errors:
+        items.append(
+            PlanChecklistItem(
+                "contract",
+                "Contract",
+                "fail",
+                f"{len(errors)} contract error(s).",
+            )
+        )
+        blocking_messages.extend(errors)
+    else:
+        items.append(PlanChecklistItem("contract", "Contract", "pass", "Plan contract validation passed."))
+
+    strategy_entries = [entry for entry in plan.roi_plan if entry.correction_strategy is not None]
+    strategy_errors = [err for err in errors if _is_strategy_error(err)]
+    if strategy_errors:
+        items.append(PlanChecklistItem("roi_choices", "ROI choices", "fail", "; ".join(strategy_errors)))
+    elif strategy_entries:
+        items.append(
+            PlanChecklistItem(
+                "roi_choices",
+                "ROI choices",
+                "pass",
+                f"{len(strategy_entries)} ROI-level correction choice(s) marked.",
+            )
+        )
+    else:
+        items.append(
+            PlanChecklistItem(
+                "roi_choices",
+                "ROI choices",
+                "not_configured",
+                "No ROI-level correction choices are marked.",
+            )
+        )
+
+    evidence_errors = [err for err in errors if _is_evidence_error(err)]
+    if evidence_errors:
+        items.append(PlanChecklistItem("evidence", "Evidence provenance", "fail", "; ".join(evidence_errors)))
+    elif strategy_entries and any(not entry.evidence for entry in strategy_entries):
+        items.append(
+            PlanChecklistItem(
+                "evidence",
+                "Evidence provenance",
+                "warning",
+                "At least one marked ROI has no evidence chunk recorded.",
+            )
+        )
+    elif strategy_entries:
+        items.append(
+            PlanChecklistItem(
+                "evidence",
+                "Evidence provenance",
+                "pass",
+                "Marked ROI choices include evidence provenance.",
+            )
+        )
+    else:
+        items.append(
+            PlanChecklistItem(
+                "evidence",
+                "Evidence provenance",
+                "not_configured",
+                "No marked ROI choices require evidence yet.",
+            )
+        )
+
+    feature_errors = [err for err in errors if err.startswith("feature_event_profiles[")]
+    if feature_errors:
+        items.append(
+            PlanChecklistItem("feature_event", "Feature/event settings", "fail", "; ".join(feature_errors))
+        )
+    elif plan.feature_event_profiles:
+        items.append(
+            PlanChecklistItem(
+                "feature_event",
+                "Feature/event settings",
+                "pass",
+                f"{len(plan.feature_event_profiles)} feature/event profile(s) configured.",
+            )
+        )
+    else:
+        items.append(
+            PlanChecklistItem(
+                "feature_event",
+                "Feature/event settings",
+                "not_configured",
+                "Feature/event profiles are not configured in this draft.",
+            )
+        )
+
+    output_policy_errors = _output_policy_errors(plan.output_policy)
+    if output_policy_errors:
+        items.append(
+            PlanChecklistItem(
+                "output_destination",
+                "Output destination",
+                "fail",
+                "; ".join(output_policy_errors),
+            )
+        )
+        blocking_messages.extend(output_policy_errors)
+    elif plan.output_policy.output_root:
+        items.append(
+            PlanChecklistItem(
+                "output_destination",
+                "Output destination",
+                "pass",
+                "Output root is configured for later safety checks.",
+            )
+        )
+    else:
+        items.append(
+            PlanChecklistItem(
+                "output_destination",
+                "Output destination",
+                "not_configured",
+                "No output root is configured.",
+            )
+        )
+
+    provenance_errors = [err for err in errors if err.startswith("plan provenance must record")]
+    if provenance_errors:
+        items.append(
+            PlanChecklistItem(
+                "non_execution",
+                "Non-execution provenance",
+                "fail",
+                "; ".join(provenance_errors),
+            )
+        )
+    else:
+        items.append(
+            PlanChecklistItem(
+                "non_execution",
+                "Non-execution provenance",
+                "pass",
+                "Plan records no manifest, pipeline, feature extraction, auto-selection, or applied-dF/F outputs.",
+            )
+        )
+
+    execution_message = "Guided Run is not wired yet. This draft plan is for review only."
+    items.append(PlanChecklistItem("execution", "Execution readiness", "blocked", execution_message))
+    blocking_messages.append(execution_message)
+
+    return GuidedPlanChecklist(items=items, execution_ready=False, blocking_messages=blocking_messages)
+
+
 def assert_valid_plan_contract(plan: GuidedRunPlan) -> None:
     errors = validate_plan_contract(plan)
     if errors:
@@ -470,3 +703,38 @@ def _validate_evidence(evidence: EvidenceChunkReview, prefix: str, errors: list[
         return
     if evidence.chunk_id < 0:
         errors.append(f"{prefix}: chunk_id must be non-negative")
+
+
+def _is_source_error(error: str) -> bool:
+    return (
+        "source_mode" in error
+        or "source requires" in error
+        or "plans must use source_mode" in error
+        or error.startswith("invalid plan mode")
+        or error.startswith("unsupported schema_version")
+    )
+
+
+def _is_strategy_error(error: str) -> bool:
+    return (
+        "correction" in error
+        or "choice_source" in error
+        or "no_auto_selection" in error
+        or "signal_only_f0 must be an explicit" in error
+        or "invalid roi_status" in error
+        or "missing roi" in error
+        or "duplicate ROI" in error
+    )
+
+
+def _is_evidence_error(error: str) -> bool:
+    return ".evidence[" in error or ".evidence_previews[" in error or "evidence_chunk" in error
+
+
+def _output_policy_errors(policy: OutputPolicy) -> list[str]:
+    errors: list[str] = []
+    if policy.output_root and not policy.separate_from_source_required:
+        errors.append("output policy must require outputs separate from source")
+    if policy.output_root and not policy.legacy_outputs_protected:
+        errors.append("output policy must protect legacy outputs")
+    return errors

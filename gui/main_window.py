@@ -76,6 +76,7 @@ from photometry_pipeline.guided_run_plan import (
     GuidedPlanSource,
     GuidedRunPlan,
     RoiPlanEntry,
+    evaluate_guided_plan_checklist,
     validate_plan_contract,
 )
 from photometry_pipeline.preview.correction_preview import (
@@ -3960,6 +3961,34 @@ class MainWindow(QMainWindow):
             label.setToolTip(f"Completed run: {plan.source.completed_run_dir}")
         else:
             label.setToolTip("")
+        self._refresh_guided_draft_run_plan_checklist(plan, errors)
+
+    def _guided_draft_run_plan_checklist_text(
+        self,
+        plan: GuidedRunPlan | None,
+        errors: list[str],
+    ) -> str:
+        checklist = evaluate_guided_plan_checklist(plan, errors)
+        lines = [
+            f"{item.label}: {item.status} - {item.message}"
+            for item in checklist.items
+        ]
+        lines.append(f"Execution ready: {str(checklist.execution_ready).lower()}")
+        return "\n".join(lines)
+
+    def _refresh_guided_draft_run_plan_checklist(
+        self,
+        plan: GuidedRunPlan | None,
+        errors: list[str],
+    ) -> None:
+        label = getattr(self, "_guided_draft_run_plan_checklist_label", None)
+        if label is None:
+            return
+        label.setText(self._guided_draft_run_plan_checklist_text(plan, errors))
+        if plan is not None and plan.source.completed_run_dir:
+            label.setToolTip(f"Completed run: {plan.source.completed_run_dir}")
+        else:
+            label.setToolTip("")
 
     def _guided_marked_choice_text(self) -> str:
         run_dir = self._current_guided_completed_run_dir()
@@ -4101,6 +4130,19 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_draft_run_plan_preview_label)
         draft_layout.addWidget(self._guided_draft_run_plan_preview_label)
         layout.addWidget(draft_group)
+
+        checklist_group = QGroupBox("Draft plan checklist")
+        checklist_group.setObjectName("guidedDraftRunPlanChecklistPanel")
+        checklist_layout = QVBoxLayout(checklist_group)
+        checklist_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_draft_run_plan_checklist_label = QLabel("")
+        self._guided_draft_run_plan_checklist_label.setObjectName("guidedDraftRunPlanChecklist")
+        self._guided_draft_run_plan_checklist_label.setProperty("guidedSecondaryText", True)
+        self._guided_draft_run_plan_checklist_label.setWordWrap(True)
+        self._guided_draft_run_plan_checklist_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_draft_run_plan_checklist_label)
+        checklist_layout.addWidget(self._guided_draft_run_plan_checklist_label)
+        layout.addWidget(checklist_group)
 
         self._refresh_guided_confirm_strategy_panel()
         return self._build_guided_step_scroll(

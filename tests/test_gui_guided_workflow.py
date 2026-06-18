@@ -498,6 +498,11 @@ def test_guided_draft_run_plan_preview_appears_only_from_marked_roi_choices(wind
 
     assert "Status: no marked ROI choices" in window._guided_draft_run_plan_preview_label.text()
     assert "Planned ROIs: 0" in window._guided_draft_run_plan_preview_label.text()
+    checklist = window._guided_draft_run_plan_checklist_label.text()
+    assert "Source: pass" in checklist
+    assert "ROI choices: not_configured" in checklist
+    assert "Execution readiness: blocked" in checklist
+    assert "Execution ready: false" in checklist
 
     idx = window._guided_confirm_strategy_combo.findData("signal_only_f0")
     window._guided_confirm_strategy_combo.setCurrentIndex(idx)
@@ -511,6 +516,12 @@ def test_guided_draft_run_plan_preview_appears_only_from_marked_roi_choices(wind
     assert "Preview only. This plan is in memory only" in text
     assert "cannot run, write manifests, create applied-dF/F outputs, or extract features" in text
     assert str(run_dir.resolve()) in window._guided_draft_run_plan_preview_label.toolTip()
+    checklist = window._guided_draft_run_plan_checklist_label.text()
+    assert "ROI choices: pass" in checklist
+    assert "Evidence provenance: pass" in checklist
+    assert "Feature/event settings: not_configured" in checklist
+    assert "Output destination: not_configured" in checklist
+    assert "Execution readiness: blocked" in checklist
 
 
 def test_guided_confirm_strategy_evidence_marks_stale_for_selection_change(window, tmp_path, monkeypatch):
@@ -656,6 +667,9 @@ def test_guided_diagnostics_do_not_auto_populate_draft_run_plan_preview(window, 
     assert "Signal-Only F0 diagnostic: success" in window._guided_confirm_evidence_label.text()
     assert "Status: no marked ROI choices" in window._guided_draft_run_plan_preview_label.text()
     assert "Planned ROIs: 0" in window._guided_draft_run_plan_preview_label.text()
+    checklist = window._guided_draft_run_plan_checklist_label.text()
+    assert "ROI choices: not_configured" in checklist
+    assert "Execution readiness: blocked" in checklist
     assert window._guided_strategy_choices == {}
 
 
@@ -714,6 +728,11 @@ def test_guided_draft_run_plan_preview_reports_malformed_stored_evidence_chunk(
     assert "chunk_id must be an integer evidence reference" in text
     assert "- CH1: Signal-Only F0 | evidence reviewed chunk bad" in text
     assert "evidence reviewed chunk 0" not in text
+    checklist = window._guided_draft_run_plan_checklist_label.text()
+    assert "Contract: fail" in checklist
+    assert "Evidence provenance: fail" in checklist
+    assert "Execution readiness: blocked" in checklist
+    assert "Execution ready: false" in checklist
 
 
 def test_guided_draft_run_plan_preview_writes_no_outputs(window, tmp_path, monkeypatch):
