@@ -8,6 +8,12 @@ from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QScr
 
 import gui.main_window as main_window_module
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
+from photometry_pipeline.guided_run_plan import (
+    EvidenceChunkReview,
+    FeatureEventProfile,
+    GuidedPlanSource,
+    GuidedRunPlan,
+)
 
 
 @pytest.fixture(scope="module")
@@ -491,6 +497,38 @@ def test_guided_confirm_strategy_explicit_mark_is_ui_state_only(window, tmp_path
     assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
 
 
+def _guided_feature_profile_config() -> dict:
+    return {
+        "event_signal": "dff",
+        "signal_excursion_polarity": "positive",
+        "peak_threshold_method": "mean_std",
+        "peak_threshold_k": 2.5,
+        "peak_min_distance_sec": 1.0,
+        "peak_min_prominence_k": 2.0,
+        "peak_min_width_sec": 0.3,
+        "peak_pre_filter": "none",
+        "event_auc_baseline": "zero",
+    }
+
+
+def _guided_plan_with_feature_profile(run_dir, *, scope="run", chunk_id=0) -> GuidedRunPlan:
+    return GuidedRunPlan(
+        mode="completed_run_planning",
+        source=GuidedPlanSource(source_mode="completed_run", completed_run_dir=str(run_dir.resolve())),
+        roi_plan=[],
+        feature_event_profiles=[
+            FeatureEventProfile(
+                profile_id="default-events",
+                profile_label="Default event profile",
+                scope=scope,
+                status="complete",
+                config_fields=_guided_feature_profile_config(),
+                evidence_previews=[EvidenceChunkReview(chunk_id=chunk_id)],
+            )
+        ],
+    )
+
+
 def test_guided_draft_run_plan_preview_appears_only_from_marked_roi_choices(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
@@ -498,9 +536,11 @@ def test_guided_draft_run_plan_preview_appears_only_from_marked_roi_choices(wind
 
     assert "Status: no marked ROI choices" in window._guided_draft_run_plan_preview_label.text()
     assert "Planned ROIs: 0" in window._guided_draft_run_plan_preview_label.text()
+    assert "Feature/event profiles: none configured" in window._guided_draft_run_plan_preview_label.text()
     checklist = window._guided_draft_run_plan_checklist_label.text()
     assert "Source: pass" in checklist
     assert "ROI choices: not_configured" in checklist
+    assert "Feature/event settings: not_configured" in checklist
     assert "Execution readiness: blocked" in checklist
     assert "Execution ready: false" in checklist
 
@@ -522,6 +562,105 @@ def test_guided_draft_run_plan_preview_appears_only_from_marked_roi_choices(wind
     assert "Feature/event settings: not_configured" in checklist
     assert "Output destination: not_configured" in checklist
     assert "Execution readiness: blocked" in checklist
+
+
+def test_guided_draft_run_plan_preview_displays_injected_feature_event_profile(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    plan = _guided_plan_with_feature_profile(run_dir, chunk_id=1)
+    monkeypatch.setattr(window, "_build_guided_draft_run_plan", lambda: (plan, []))
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._refresh_guided_confirm_strategy_panel()
+
+    preview = window._guided_draft_run_plan_preview_label.text()
+    assert "Feature/event profile default-events (Default event profile)" in preview
+    assert "scope=run" in preview
+    assert "status=complete" in preview
+    assert "config_fields=9" in preview
+    assert "event_signal" in preview
+    assert "evidence preview chunks=1" in preview
+    checklist = window._guided_draft_run_plan_checklist_label.text()
+    assert "Feature/event settings: pass" in checklist
+    assert "Execution readiness: blocked" in checklist
+    assert "Execution ready: false" in checklist
+
+
+def test_guided_draft_run_plan_preview_displays_invalid_feature_event_profile_errors(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    plan = _guided_plan_with_feature_profile(run_dir, scope="chunk")
+    monkeypatch.setattr(window, "_build_guided_draft_run_plan", lambda: (plan, []))
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._refresh_guided_confirm_strategy_panel()
+
+    preview = window._guided_draft_run_plan_preview_label.text()
+    assert "Feature/event profile default-events" in preview
+    assert "scope=chunk" in preview
+    assert "Status: draft has errors" in preview
+    checklist = window._guided_draft_run_plan_checklist_label.text()
+    assert "Contract: fail" in checklist
+    assert "Feature/event settings: fail" in checklist
+    assert "Execution readiness: blocked" in checklist
+
+
+def test_guided_feature_event_profile_display_is_not_mutated_by_visible_selection(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    plan = _guided_plan_with_feature_profile(run_dir, chunk_id=0)
+    monkeypatch.setattr(window, "_build_guided_draft_run_plan", lambda: (plan, []))
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._refresh_guided_confirm_strategy_panel()
+    before = serialize_feature_preview_text = window._guided_draft_run_plan_preview_label.text()
+
+    window._guided_confirm_roi_combo.setCurrentText("CH2")
+    window._guided_confirm_chunk_combo.setCurrentIndex(window._guided_confirm_chunk_combo.findData(1))
+    window._refresh_guided_confirm_strategy_panel()
+
+    after = window._guided_draft_run_plan_preview_label.text()
+    assert "scope=run" in after
+    assert "evidence preview chunks=0" in after
+    assert "evidence preview chunks=1" not in after
+    assert "config_fields=9" in after
+    assert len(plan.feature_event_profiles) == 1
+    assert plan.feature_event_profiles[0].scope == "run"
+    assert plan.feature_event_profiles[0].evidence_previews[0].chunk_id == 0
+    assert before == after
+
+
+def test_guided_feature_event_profile_display_writes_no_outputs(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    before = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    plan = _guided_plan_with_feature_profile(run_dir)
+    monkeypatch.setattr(window, "_build_guided_draft_run_plan", lambda: (plan, []))
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._refresh_guided_confirm_strategy_panel()
+
+    after = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    assert after == before
+    assert not list(run_dir.rglob("guided_run_plan*.json"))
+    assert not (run_dir / "MANIFEST.csv").exists()
+    assert not (run_dir / "manifest.csv").exists()
+    assert not (run_dir / "features.csv").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
+    assert not (run_dir / "validation").exists()
 
 
 def test_guided_confirm_strategy_evidence_marks_stale_for_selection_change(window, tmp_path, monkeypatch):
@@ -667,8 +806,10 @@ def test_guided_diagnostics_do_not_auto_populate_draft_run_plan_preview(window, 
     assert "Signal-Only F0 diagnostic: success" in window._guided_confirm_evidence_label.text()
     assert "Status: no marked ROI choices" in window._guided_draft_run_plan_preview_label.text()
     assert "Planned ROIs: 0" in window._guided_draft_run_plan_preview_label.text()
+    assert "Feature/event profiles: none configured" in window._guided_draft_run_plan_preview_label.text()
     checklist = window._guided_draft_run_plan_checklist_label.text()
     assert "ROI choices: not_configured" in checklist
+    assert "Feature/event settings: not_configured" in checklist
     assert "Execution readiness: blocked" in checklist
     assert window._guided_strategy_choices == {}
 

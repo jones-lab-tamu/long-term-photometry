@@ -451,6 +451,28 @@ def deserialize_plan_from_dict(data: dict[str, Any]) -> GuidedRunPlan:
     return GuidedRunPlan.from_dict(data)
 
 
+def feature_event_profile_summary_lines(plan: GuidedRunPlan) -> list[str]:
+    """Return compact read-only feature/event profile summary lines."""
+
+    if not plan.feature_event_profiles:
+        return ["Feature/event profiles: none configured"]
+    lines: list[str] = []
+    for profile in plan.feature_event_profiles:
+        label = str(profile.profile_label or "").strip()
+        title = str(profile.profile_id or "(missing profile_id)").strip()
+        if label:
+            title = f"{title} ({label})"
+        pieces = [
+            f"scope={profile.scope}",
+            f"status={profile.status}",
+            _profile_roi_summary(profile),
+            _profile_config_summary(profile),
+            _profile_evidence_summary(profile),
+        ]
+        lines.append(f"Feature/event profile {title}: " + "; ".join(piece for piece in pieces if piece))
+    return lines
+
+
 def validate_plan_contract(plan: GuidedRunPlan) -> list[str]:
     errors: list[str] = []
 
@@ -889,3 +911,25 @@ def _output_policy_errors(policy: OutputPolicy) -> list[str]:
     if policy.output_root and not policy.legacy_outputs_protected:
         errors.append("output policy must protect legacy outputs")
     return errors
+
+
+def _profile_roi_summary(profile: FeatureEventProfile) -> str:
+    if profile.resolved_rois:
+        return "resolved_rois=" + ",".join(str(roi) for roi in profile.resolved_rois)
+    if profile.target_rois:
+        return "target_rois=" + ",".join(str(roi) for roi in profile.target_rois)
+    return ""
+
+
+def _profile_config_summary(profile: FeatureEventProfile) -> str:
+    keys = sorted(str(key) for key in profile.config_fields)
+    if not keys:
+        return "config_fields=0"
+    return f"config_fields={len(keys)} ({', '.join(keys)})"
+
+
+def _profile_evidence_summary(profile: FeatureEventProfile) -> str:
+    if not profile.evidence_previews:
+        return "evidence preview chunks=none"
+    chunks = ",".join(str(item.chunk_id) for item in profile.evidence_previews)
+    return f"evidence preview chunks={chunks}"

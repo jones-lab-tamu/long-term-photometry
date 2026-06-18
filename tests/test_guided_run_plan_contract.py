@@ -15,6 +15,7 @@ from photometry_pipeline.guided_run_plan import (
     assert_valid_plan_contract,
     deserialize_plan_from_dict,
     evaluate_guided_plan_checklist,
+    feature_event_profile_summary_lines,
     is_runnable_correction_strategy,
     serialize_plan_to_dict,
     validate_correction_strategy,
@@ -237,6 +238,79 @@ def test_valid_run_level_feature_event_profile_passes_and_execution_remains_bloc
     assert errors == []
     assert items["feature_event"].status == "pass"
     assert checklist.execution_ready is False
+    assert items["execution"].status == "blocked"
+
+
+def test_feature_event_profile_summary_for_no_profiles():
+    plan = _valid_plan()
+    plan.feature_event_profiles = []
+
+    lines = feature_event_profile_summary_lines(plan)
+    items = _checklist_items(plan)
+
+    assert lines == ["Feature/event profiles: none configured"]
+    assert items["feature_event"].status == "not_configured"
+
+
+def test_feature_event_profile_summary_for_valid_profile():
+    plan = _valid_plan()
+    plan.feature_event_profiles = [
+        _valid_feature_event_profile(
+            profile_id="roi-profile",
+            profile_label="ROI CH1 feature profile",
+            scope="roi",
+            status="complete",
+            resolved_rois=["CH1"],
+            evidence_previews=[EvidenceChunkReview(chunk_id=4)],
+        )
+    ]
+
+    lines = feature_event_profile_summary_lines(plan)
+
+    assert len(lines) == 1
+    assert "roi-profile" in lines[0]
+    assert "ROI CH1 feature profile" in lines[0]
+    assert "scope=roi" in lines[0]
+    assert "status=complete" in lines[0]
+    assert "resolved_rois=CH1" in lines[0]
+    assert "config_fields=10" in lines[0]
+    assert "event_signal" in lines[0]
+    assert "evidence preview chunks=4" in lines[0]
+
+
+def test_feature_event_profile_summary_does_not_execute_or_write(tmp_path):
+    plan = _valid_plan()
+    plan.feature_event_profiles = [_valid_feature_event_profile()]
+    before = sorted(tmp_path.rglob("*"))
+
+    lines = feature_event_profile_summary_lines(plan)
+    errors = validate_plan_contract(plan)
+    payload = serialize_plan_to_dict(plan)
+    restored = deserialize_plan_from_dict(payload)
+
+    assert lines
+    assert errors == []
+    assert validate_plan_contract(restored) == []
+    assert sorted(tmp_path.rglob("*")) == before
+    assert "photometry_pipeline.core.feature_extraction" not in sys.modules
+    assert not (tmp_path / "features.csv").exists()
+    assert not (tmp_path / "features").exists()
+    assert not (tmp_path / "MANIFEST.json").exists()
+
+
+def test_invalid_feature_event_profile_summary_still_displays_and_checklist_fails():
+    plan = _valid_plan()
+    plan.feature_event_profiles = [
+        _valid_feature_event_profile(profile_id="bad-profile", scope="chunk")
+    ]
+    errors = validate_plan_contract(plan)
+    lines = feature_event_profile_summary_lines(plan)
+    items = _checklist_items(plan, errors)
+
+    assert any("bad-profile" in line for line in lines)
+    assert any("scope=chunk" in line for line in lines)
+    assert items["contract"].status == "fail"
+    assert items["feature_event"].status == "fail"
     assert items["execution"].status == "blocked"
 
 

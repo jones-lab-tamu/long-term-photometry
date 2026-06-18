@@ -77,6 +77,7 @@ from photometry_pipeline.guided_run_plan import (
     GuidedRunPlan,
     RoiPlanEntry,
     evaluate_guided_plan_checklist,
+    feature_event_profile_summary_lines,
     validate_plan_contract,
 )
 from photometry_pipeline.preview.correction_preview import (
@@ -3942,6 +3943,7 @@ class MainWindow(QMainWindow):
                 strategy = entry.correction_strategy.strategy
             evidence_chunks = ", ".join(str(item.chunk_id) for item in entry.evidence)
             lines.append(f"- {entry.roi}: {strategy} | evidence reviewed chunk {evidence_chunks}")
+        lines.extend(feature_event_profile_summary_lines(plan))
         if errors:
             lines.append("Errors:")
             lines.extend(f"- {err}" for err in errors)
