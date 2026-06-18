@@ -1577,6 +1577,7 @@ class MainWindow(QMainWindow):
         self._guided_feature_event_editor_synced_run = None
         self._guided_draft_output_policy_by_run = {}
         self._guided_output_policy_editor_synced_run = None
+        self._guided_export_editor_synced_run = None
         self._guided_raw_setup_controls = {}
         self._guided_open_results_mode_panels = {}
         self._guided_new_analysis_mode_panels = {}
@@ -3883,6 +3884,7 @@ class MainWindow(QMainWindow):
 
         self._sync_guided_feature_event_editor_to_current_run()
         self._sync_guided_output_policy_editor_to_current_run()
+        self._sync_guided_export_editor_to_current_run()
 
         for widget in (
             self._guided_confirm_roi_combo,
@@ -3892,6 +3894,8 @@ class MainWindow(QMainWindow):
             self._guided_output_path_edit,
             self._guided_output_apply_btn,
             self._guided_output_clear_btn,
+            self._guided_export_path_edit,
+            self._guided_export_btn,
         ):
             widget.setEnabled(source_ok)
 
@@ -4599,6 +4603,150 @@ class MainWindow(QMainWindow):
 
         return group
 
+    def _build_guided_draft_plan_export_editor(self) -> QGroupBox:
+        group = QGroupBox("Draft plan export")
+        group.setObjectName("guidedDraftPlanExportPanel")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+
+        explain_label = QLabel(
+            "Writes one reviewable GuidedRunPlan JSON file only when Export is clicked.\n"
+            "Does not run analysis, create output folders, or generate RunSpec.\n"
+            "The export path is separate from the future analysis output destination."
+        )
+        explain_label.setObjectName("guidedDraftPlanExportExplanation")
+        explain_label.setProperty("guidedSecondaryText", True)
+        explain_label.setWordWrap(True)
+        self._make_guided_widget_shrinkable(explain_label)
+        layout.addWidget(explain_label)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+
+        self._guided_export_path_edit = QLineEdit()
+        self._guided_export_path_edit.setObjectName("guidedExportPathEdit")
+        self._guided_export_path_edit.setPlaceholderText("Enter absolute path to export JSON file...")
+        self._make_guided_widget_shrinkable(self._guided_export_path_edit)
+        form.addRow("Export path:", self._guided_export_path_edit)
+        layout.addLayout(form)
+
+        button_row = QHBoxLayout()
+        self._guided_export_btn = QPushButton("Export draft plan JSON")
+        self._guided_export_btn.setObjectName("guidedExportButton")
+        self._guided_export_btn.clicked.connect(self._on_guided_export_draft_plan)
+        button_row.addWidget(self._guided_export_btn)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self._guided_export_status_label = QLabel("No export performed yet.")
+        self._guided_export_status_label.setObjectName("guidedExportStatusLabel")
+        self._guided_export_status_label.setProperty("guidedSecondaryText", True)
+        self._guided_export_status_label.setWordWrap(True)
+        self._make_guided_widget_shrinkable(self._guided_export_status_label)
+        layout.addWidget(self._guided_export_status_label)
+
+        return group
+
+    def _validate_guided_export_path(self, path: str, run_dir: str) -> str | None:
+        trimmed = path.strip()
+        if not trimmed:
+            return "Export path cannot be empty."
+        if not trimmed.lower().endswith(".json"):
+            return "Export path must have a .json suffix."
+
+        try:
+            from pathlib import Path
+            norm_path = Path(trimmed).expanduser().resolve(strict=False)
+            norm_run = Path(run_dir).resolve(strict=False)
+        except Exception as exc:
+            return f"Invalid path format: {exc}"
+
+        legacy_dirs = [
+            norm_run / "_analysis",
+            norm_run / "_analysis" / "phasic_out",
+            norm_run / "_analysis" / "phasic_out" / "features",
+            norm_run / "_analysis" / "phasic_out" / "applied_dff",
+        ]
+        if norm_path in legacy_dirs or any(d in norm_path.parents for d in legacy_dirs):
+            return "Export path cannot be inside legacy output directories."
+
+        if norm_path == norm_run:
+            return "Export path cannot be the completed run directory itself."
+        if norm_run in norm_path.parents:
+            return "Export path cannot be inside the completed run directory."
+
+        if norm_path.is_dir():
+            return "Export path cannot be a directory."
+
+        if norm_path.exists():
+            return "Export path already exists."
+
+        if not norm_path.parent.exists():
+            return "Parent directory of export path does not exist."
+        if not norm_path.parent.is_dir():
+            return "Parent of export path is not a directory."
+
+        return None
+
+    def _on_guided_export_draft_plan(self) -> None:
+        run_dir = self._current_guided_completed_run_dir()
+        if not run_dir:
+            self._guided_export_status_label.setText(
+                "Export failed: Open Results must be used first; no completed run is loaded."
+            )
+            return
+
+        path = self._guided_export_path_edit.text()
+        err = self._validate_guided_export_path(path, run_dir)
+        if err:
+            self._guided_export_status_label.setText(f"Export failed: {err}")
+            return
+
+        plan, preview_errors = self._build_guided_draft_run_plan()
+        if plan is None:
+            self._guided_export_status_label.setText("Export failed: No draft plan is available.")
+            return
+
+        errors = list(preview_errors)
+        errors.extend(validate_plan_contract(plan))
+
+        from photometry_pipeline.guided_run_plan import evaluate_guided_plan_checklist
+        checklist = evaluate_guided_plan_checklist(plan, errors)
+        for item in checklist.items:
+            if item.status == "fail":
+                errors.append(f"{item.label}: {item.message}")
+
+        if errors:
+            self._guided_export_status_label.setText(
+                "Export failed due to plan contract validation errors: " + "; ".join(errors)
+            )
+            return
+
+        try:
+            from photometry_pipeline.guided_run_plan import plan_export_json_text
+            json_text = plan_export_json_text(plan)
+            with open(path.strip(), "x", encoding="utf-8") as f:
+                f.write(json_text)
+            self._guided_export_status_label.setText(
+                f"Draft plan successfully exported to: {path.strip()}"
+            )
+        except Exception as exc:
+            self._guided_export_status_label.setText(f"Export failed: {exc}")
+
+    def _sync_guided_export_editor_to_current_run(self, *, force: bool = False) -> None:
+        if not hasattr(self, "_guided_export_path_edit"):
+            return
+        run_dir = self._current_guided_completed_run_dir()
+        synced_run = getattr(self, "_guided_export_editor_synced_run", None)
+        if not force and run_dir == synced_run:
+            return
+        with QSignalBlocker(self._guided_export_path_edit):
+            self._guided_export_path_edit.setText("")
+        self._guided_export_status_label.setText("No export performed yet.")
+        self._guided_export_editor_synced_run = run_dir
+
     def _build_guided_confirm_strategy_step(self) -> QWidget:
         wrapper = QWidget()
         wrapper.setObjectName("guidedConfirmStrategyContent")
@@ -4688,6 +4836,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self._build_guided_feature_event_profile_editor())
         layout.addWidget(self._build_guided_output_policy_editor())
+        layout.addWidget(self._build_guided_draft_plan_export_editor())
 
         readiness_group = QGroupBox("Plan readiness summary")
         readiness_group.setObjectName("guidedPlanReadinessSummaryPanel")

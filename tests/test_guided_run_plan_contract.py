@@ -974,3 +974,26 @@ def test_readiness_summary_pure_non_executing_guarantee(tmp_path):
     assert "photometry_pipeline.core.feature_extraction" not in sys.modules
     assert "photometry_pipeline.core.pipeline" not in sys.modules
     assert not list(tmp_path.rglob("*"))
+
+
+def test_plan_export_json_helper():
+    import json
+    from photometry_pipeline.guided_run_plan import (
+        plan_export_json_text,
+        deserialize_plan_from_dict,
+        validate_plan_contract,
+    )
+    plan = _valid_plan()
+    json_text = plan_export_json_text(plan)
+
+    parsed = json.loads(json_text)
+    assert parsed["schema_version"] == "guided_run_plan.v1"
+
+    restored = deserialize_plan_from_dict(parsed)
+    assert restored.plan_id == plan.plan_id
+    assert restored.source.completed_run_dir == plan.source.completed_run_dir
+    assert len(restored.roi_plan) == len(plan.roi_plan)
+    assert restored.roi_plan[0].roi == plan.roi_plan[0].roi
+
+    errors = validate_plan_contract(restored)
+    assert errors == []

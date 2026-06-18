@@ -2653,3 +2653,240 @@ def test_guided_output_policy_non_output_guarantee(window, tmp_path, monkeypatch
     assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
     assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
     assert not any(p.name.startswith("guided_run_plan") and p.name.endswith(".json") for p in run_dir.rglob("*"))
+
+
+def test_gui_export_no_file_by_default(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    assert window._guided_export_status_label.text() == "No export performed yet."
+    assert not any(p.name.startswith("guided_run_plan") and p.name.endswith(".json") for p in run_dir.rglob("*"))
+
+
+def test_gui_export_incomplete_but_valid_plan(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    export_file = tmp_path / "plan.json"
+    assert not export_file.exists()
+
+    window._guided_export_path_edit.setText(str(export_file))
+    window._guided_export_btn.click()
+
+    assert export_file.exists()
+    import json
+    from photometry_pipeline.guided_run_plan import deserialize_plan_from_dict, validate_plan_contract
+    with open(export_file, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    assert payload["schema_version"] == "guided_run_plan.v1"
+
+    restored = deserialize_plan_from_dict(payload)
+    assert validate_plan_contract(restored) == []
+    assert restored.roi_plan == []
+    assert restored.output_policy.output_root is None
+
+
+def test_gui_export_fully_configured_plan(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    # 1. Mark Strategy
+    idx = window._guided_confirm_strategy_combo.findData("robust_global_event_reject")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    # 2. Apply Profile
+    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._guided_feature_event_polarity_combo.setCurrentText("positive")
+    window._guided_feature_event_peak_method_combo.setCurrentText("mean_std")
+    window._guided_feature_event_peak_k_edit.setText("3.0")
+    window._guided_feature_event_apply_btn.click()
+
+    # 3. Apply Output Policy
+    out_dest = tmp_path / "future_output"
+    window._guided_output_path_edit.setText(str(out_dest))
+    window._guided_output_apply_btn.click()
+
+    # 4. Export
+    export_file = tmp_path / "full_plan.json"
+    window._guided_export_path_edit.setText(str(export_file))
+    window._guided_export_btn.click()
+
+    assert export_file.exists()
+    import json
+    from photometry_pipeline.guided_run_plan import deserialize_plan_from_dict, validate_plan_contract
+    with open(export_file, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    restored = deserialize_plan_from_dict(payload)
+    assert validate_plan_contract(restored) == []
+    assert len(restored.roi_plan) == 1
+    assert restored.roi_plan[0].roi == "CH1"
+    assert restored.roi_plan[0].correction_strategy.strategy == "robust_global_event_reject"
+    assert len(restored.feature_event_profiles) == 1
+    assert restored.output_policy.output_root == str(out_dest.resolve())
+    assert not out_dest.exists()
+
+
+def test_gui_export_empty_path_rejected(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    window._guided_export_path_edit.setText("    ")
+    window._guided_export_btn.click()
+
+    assert "Export failed: Export path cannot be empty." in window._guided_export_status_label.text()
+
+
+def test_gui_export_non_json_suffix_rejected(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    window._guided_export_path_edit.setText(str(tmp_path / "plan.txt"))
+    window._guided_export_btn.click()
+
+    assert "Export failed: Export path must have a .json suffix." in window._guided_export_status_label.text()
+
+
+def test_gui_export_existing_file_rejected(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    existing_file = tmp_path / "existing.json"
+    with open(existing_file, "w", encoding="utf-8") as f:
+        f.write("original content")
+
+    window._guided_export_path_edit.setText(str(existing_file))
+    window._guided_export_btn.click()
+
+    with open(existing_file, "r", encoding="utf-8") as f:
+        assert f.read() == "original content"
+    assert "Export failed: Export path already exists." in window._guided_export_status_label.text()
+
+
+def test_gui_export_missing_parent_rejected(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    non_existent_dir = tmp_path / "no_such_folder"
+    export_file = non_existent_dir / "plan.json"
+
+    window._guided_export_path_edit.setText(str(export_file))
+    window._guided_export_btn.click()
+
+    assert not non_existent_dir.exists()
+    assert not export_file.exists()
+    assert "Export failed: Parent directory of export path does not exist." in window._guided_export_status_label.text()
+
+
+def test_gui_export_completed_run_rejected(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    window._guided_export_path_edit.setText(str(run_dir))
+    window._guided_export_btn.click()
+    assert "Export failed: Export path must have a .json suffix." in window._guided_export_status_label.text()
+
+    sub_path = run_dir / "plan.json"
+    window._guided_export_path_edit.setText(str(sub_path))
+    window._guided_export_btn.click()
+    assert "Export failed: Export path cannot be inside the completed run directory." in window._guided_export_status_label.text()
+    assert not sub_path.exists()
+
+
+def test_gui_export_legacy_paths_rejected(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    legacy_subpaths = [
+        "_analysis",
+        "_analysis/phasic_out",
+        "_analysis/phasic_out/features",
+        "_analysis/phasic_out/applied_dff",
+    ]
+    for sub in legacy_subpaths:
+        legacy_path = run_dir / sub
+        window._guided_export_path_edit.setText(str(legacy_path / "plan.json"))
+        window._guided_export_btn.click()
+        assert "Export path cannot be inside legacy output directories." in window._guided_export_status_label.text()
+        assert not (legacy_path / "plan.json").exists()
+
+
+def test_gui_export_source_switching_clears_path(window, tmp_path, monkeypatch):
+    run_a = _make_preview_completed_run(tmp_path / "run_a")
+    run_b = _make_preview_completed_run(tmp_path / "run_b")
+    export_a = tmp_path / "plan_a.json"
+
+    _load_preview_completed_run(window, run_a, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_export_path_edit.setText(str(export_a))
+
+    window._refresh_guided_confirm_strategy_panel()
+    assert window._guided_export_path_edit.text() == str(export_a)
+
+    _load_preview_completed_run(window, run_b, monkeypatch)
+    window._refresh_guided_confirm_strategy_panel()
+    assert window._guided_export_path_edit.text() == ""
+
+
+def test_gui_export_path_does_not_affect_output_policy(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    export_path = tmp_path / "plan.json"
+    window._guided_export_path_edit.setText(str(export_path))
+    window._guided_export_btn.click()
+
+    plan, _ = window._build_guided_draft_run_plan()
+    assert plan.output_policy.output_root is None
+
+
+def test_gui_export_contract_invalid_plan_rejected(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    from photometry_pipeline.guided_run_plan import OutputPolicy
+    monkeypatch.setattr(
+        window,
+        "_guided_output_policy_for_current_run",
+        lambda: OutputPolicy(output_root=str(run_dir), separate_from_source_required=False)
+    )
+
+    export_path = tmp_path / "invalid_plan.json"
+    window._guided_export_path_edit.setText(str(export_path))
+    window._guided_export_btn.click()
+
+    assert not export_path.exists()
+    assert "Export failed due to plan contract validation errors:" in window._guided_export_status_label.text()
+
+
+def test_gui_export_non_production_output_guarantee(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    before_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    export_file = tmp_path / "plan.json"
+    window._guided_export_path_edit.setText(str(export_file))
+    window._guided_export_btn.click()
+
+    assert export_file.exists()
+    assert not (run_dir / "manifest.csv").exists()
+    assert not (run_dir / "MANIFEST.csv").exists()
+    assert not (run_dir / "features.csv").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
+    after_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    assert after_files == before_files

@@ -976,3 +976,9 @@ def guided_plan_readiness_summary_lines(
         "Files written: none"
     ])
     return lines
+
+
+def plan_export_json_text(plan: GuidedRunPlan) -> str:
+    import json
+    payload = serialize_plan_to_dict(plan)
+    return json.dumps(payload, indent=2, sort_keys=True)
