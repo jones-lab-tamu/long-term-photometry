@@ -24,6 +24,10 @@ from .contract import (
     resolve_phasic_out_signal_only_f0_source,
     validate_signal_only_f0_diagnostic_output_dir,
 )
+from .generate import (
+    SIGNAL_ONLY_F0_DIAGNOSTIC_CHUNKS_FILENAME,
+    run_signal_only_f0_diagnostic_review,
+)
 
 __all__ = [
     "GUIDED_WORKFLOW_DIR_NAME",
@@ -48,4 +52,6 @@ __all__ = [
     "resolve_completed_run_signal_only_f0_source",
     "resolve_phasic_out_signal_only_f0_source",
     "validate_signal_only_f0_diagnostic_output_dir",
+    "SIGNAL_ONLY_F0_DIAGNOSTIC_CHUNKS_FILENAME",
+    "run_signal_only_f0_diagnostic_review",
 ]
