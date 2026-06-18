@@ -341,35 +341,336 @@ def test_guided_open_results_mode_marks_setup_steps_skipped_and_can_switch_back(
     assert all(not controls.isHidden() for controls in window._guided_raw_setup_controls.values())
 
 
-def test_guided_confirm_strategy_and_run_are_skipped_in_open_results_mode(window, tmp_path, monkeypatch):
+def test_guided_confirm_strategy_is_real_planning_ui_and_run_stays_skipped_in_open_results_mode(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_args: str(run_dir))
     window._guided_start_open_results_btn.click()
 
-    for step_name, object_name in [
-        ("Confirm strategy", "guidedConfirmStrategyOpenResultsSkipped"),
-        ("Run", "guidedRunOpenResultsSkipped"),
-    ]:
-        idx = list(GUIDED_WORKFLOW_STEPS).index(step_name)
-        window._guided_workflow_stepper.setCurrentRow(idx)
-        panel = window._guided_workflow_tab.findChild(QGroupBox, object_name)
-        assert panel is not None
-        assert panel.isHidden() is False
-        text = " ".join(label.text() for label in panel.findChildren(QLabel))
-        assert "Open Results mode" in panel.title()
-        assert "Completed" in text or "completed" in text
-        button_texts = {button.text() for button in panel.findChildren(QPushButton)}
-        assert {"Go to Diagnostics", "Switch to new analysis setup"} <= button_texts
+    idx = list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    window._guided_workflow_stepper.setCurrentRow(idx)
+    assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepConfirmStrategy"
+    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedConfirmStrategyOpenResultsSkipped") is None
+    assert [window._guided_confirm_roi_combo.itemText(i) for i in range(window._guided_confirm_roi_combo.count())] == [
+        "CH1",
+        "CH2",
+    ]
+    assert [window._guided_confirm_chunk_combo.itemData(i) for i in range(window._guided_confirm_chunk_combo.count())] == [
+        0,
+        1,
+    ]
+    strategy_values = {
+        window._guided_confirm_strategy_combo.itemData(i)
+        for i in range(window._guided_confirm_strategy_combo.count())
+    }
+    assert {
+        "robust_global_event_reject",
+        "adaptive_event_gated_regression",
+        "global_linear_regression",
+        "signal_only_f0",
+    } <= strategy_values
+    assert "auto" not in strategy_values
+    assert "needs_review" not in strategy_values
+    assert "no_correction" not in strategy_values
+    assert window._guided_confirm_strategy_combo.currentData() == ""
+    assert window._guided_confirm_mark_btn.isEnabled() is False
 
     run_panel = window._guided_workflow_tab.findChild(QGroupBox, "guidedRunOpenResultsSkipped")
+    idx = list(GUIDED_WORKFLOW_STEPS).index("Run")
+    window._guided_workflow_stepper.setCurrentRow(idx)
+    assert run_panel is not None
+    assert run_panel.isHidden() is False
+    text = " ".join(label.text() for label in run_panel.findChildren(QLabel))
+    assert "Open Results mode" in run_panel.title()
+    assert "does not validate" in text
+    button_texts = {button.text() for button in run_panel.findChildren(QPushButton)}
+    assert {"Go to Diagnostics", "Switch to new analysis setup"} <= button_texts
     run_panel.findChild(QPushButton, "guidedRunOpenResultsSkippedGoToDiagnostics").click()
     assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepDiagnostics"
 
-    idx = list(GUIDED_WORKFLOW_STEPS).index("Run")
     window._guided_workflow_stepper.setCurrentRow(idx)
     run_panel.findChild(QPushButton, "guidedRunOpenResultsSkippedSwitchToNewAnalysis").click()
     assert window._guided_workflow_mode == "new_analysis"
     assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepSelectData"
+
+
+def test_guided_confirm_strategy_requires_completed_run_and_does_not_generate(window, monkeypatch):
+    calls = {"preview": 0, "signal": 0}
+    monkeypatch.setattr(
+        main_window_module,
+        "run_guided_correction_preview_comparison",
+        lambda *_args, **_kwargs: calls.__setitem__("preview", calls["preview"] + 1),
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "run_signal_only_f0_diagnostic_review",
+        lambda *_args, **_kwargs: calls.__setitem__("signal", calls["signal"] + 1),
+    )
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    assert window._guided_confirm_roi_combo.isEnabled() is False
+    assert window._guided_confirm_chunk_combo.isEnabled() is False
+    assert window._guided_confirm_strategy_combo.isEnabled() is False
+    assert window._guided_confirm_mark_btn.isEnabled() is False
+    assert "Open Results must be used first" in window._guided_confirm_context_label.text()
+    assert "Correction preview: not generated" in window._guided_confirm_evidence_label.text()
+    assert "Signal-Only F0 diagnostic: not generated" in window._guided_confirm_evidence_label.text()
+    assert calls == {"preview": 0, "signal": 0}
+
+
+def test_guided_confirm_strategy_never_auto_selects_from_loaded_or_generated_evidence(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    raw_input = tmp_path / "raw_input"
+    raw_input.mkdir()
+    window._guided_input_dir_edit.setText(str(raw_input))
+    monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_args: str(run_dir))
+    window._guided_start_open_results_btn.click()
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    assert window._guided_confirm_strategy_combo.currentData() == ""
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Diagnostics"))
+    window._guided_preview_generate_btn.click()
+    assert window._guided_confirm_strategy_combo.currentData() == ""
+    window._guided_signal_f0_generate_btn.click()
+    assert window._guided_confirm_strategy_combo.currentData() == ""
+    assert "Signal-Only F0 diagnostic: success" in window._guided_confirm_evidence_label.text()
+    assert "recommend" not in window._guided_confirm_evidence_label.text().lower()
+    assert window._guided_input_dir_edit.text() == str(raw_input)
+
+
+def test_guided_confirm_strategy_explicit_mark_is_ui_state_only(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    before = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    calls = {"preview": 0, "signal": 0}
+    monkeypatch.setattr(
+        main_window_module,
+        "run_guided_correction_preview_comparison",
+        lambda *_args, **_kwargs: calls.__setitem__("preview", calls["preview"] + 1),
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "run_signal_only_f0_diagnostic_review",
+        lambda *_args, **_kwargs: calls.__setitem__("signal", calls["signal"] + 1),
+    )
+    monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_args: str(run_dir))
+    window._guided_start_open_results_btn.click()
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    assert window._guided_confirm_mark_btn.isEnabled() is False
+    idx = window._guided_confirm_strategy_combo.findData("signal_only_f0")
+    assert idx >= 0
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    assert window._guided_confirm_mark_btn.isEnabled() is False
+    window._guided_confirm_ack_cb.setChecked(True)
+    assert window._guided_confirm_mark_btn.isEnabled() is True
+
+    window._guided_confirm_mark_btn.click()
+
+    key = (str(run_dir.resolve()), "CH1")
+    assert key in window._guided_strategy_choices
+    entry = window._guided_strategy_choices[key]
+    assert entry["strategy"] == "signal_only_f0"
+    assert entry["strategy_label"] == "Signal-Only F0"
+    assert entry["confirmed"] is True
+    assert entry["completed_run_dir"] == str(run_dir.resolve())
+    assert entry["roi"] == "CH1"
+    assert entry["evidence_chunk"] == 0
+    assert "not generated" in entry["evidence_summary"]["preview"]
+    assert "not generated" in entry["evidence_summary"]["signal_only_f0"]
+    assert "ROI: CH1" in window._guided_confirm_marked_choice_label.text()
+    assert "Evidence reviewed: chunk 0" in window._guided_confirm_marked_choice_label.text()
+    assert "marked for later planning only" in window._guided_confirm_marked_choice_label.text()
+    assert "no manifest written" in window._guided_confirm_marked_choice_label.text()
+    after = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    assert after == before
+    assert calls == {"preview": 0, "signal": 0}
+    assert not (run_dir / "MANIFEST.csv").exists()
+    assert not (run_dir / "manifest.csv").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
+
+
+def test_guided_confirm_strategy_evidence_marks_stale_for_selection_change(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_preview_generate_btn.click()
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    assert "Correction preview: success" in window._guided_confirm_evidence_label.text()
+    window._guided_confirm_chunk_combo.setCurrentIndex(window._guided_confirm_chunk_combo.findData(1))
+    assert "Correction preview: success stale" in window._guided_confirm_evidence_label.text()
+    assert "Displayed evidence is stale for the current selection" in window._guided_confirm_evidence_label.text()
+
+
+def test_guided_confirm_acknowledgment_resets_when_chunk_changes(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    idx = window._guided_confirm_strategy_combo.findData("signal_only_f0")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    assert window._guided_confirm_mark_btn.isEnabled() is True
+
+    window._guided_confirm_chunk_combo.setCurrentIndex(window._guided_confirm_chunk_combo.findData(1))
+
+    assert window._guided_confirm_ack_cb.isChecked() is False
+    assert window._guided_confirm_strategy_combo.currentData() == "signal_only_f0"
+    assert window._guided_confirm_mark_btn.isEnabled() is False
+
+
+def test_guided_confirm_choice_is_roi_level_and_evidence_chunk_can_update(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    idx = window._guided_confirm_strategy_combo.findData("signal_only_f0")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    key = (str(run_dir.resolve()), "CH1")
+    assert key in window._guided_strategy_choices
+    assert window._guided_strategy_choices[key]["evidence_chunk"] == 0
+    assert "Evidence reviewed: chunk 0" in window._guided_confirm_marked_choice_label.text()
+
+    window._guided_confirm_chunk_combo.setCurrentIndex(window._guided_confirm_chunk_combo.findData(1))
+
+    assert "Signal-Only F0" in window._guided_confirm_marked_choice_label.text()
+    assert "Evidence reviewed: chunk 0" in window._guided_confirm_marked_choice_label.text()
+    assert window._guided_confirm_ack_cb.isChecked() is False
+    assert window._guided_confirm_mark_btn.isEnabled() is False
+
+    window._guided_confirm_ack_cb.setChecked(True)
+    assert window._guided_confirm_mark_btn.isEnabled() is True
+    window._guided_confirm_mark_btn.click()
+
+    assert key in window._guided_strategy_choices
+    assert window._guided_strategy_choices[key]["evidence_chunk"] == 1
+    assert "Evidence reviewed: chunk 1" in window._guided_confirm_marked_choice_label.text()
+
+
+def test_guided_confirm_choices_are_independent_by_roi(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    idx = window._guided_confirm_strategy_combo.findData("signal_only_f0")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+    assert (str(run_dir.resolve()), "CH1") in window._guided_strategy_choices
+
+    window._guided_confirm_roi_combo.setCurrentIndex(window._guided_confirm_roi_combo.findData("CH2"))
+
+    assert "Current marked choice: none." in window._guided_confirm_marked_choice_label.text()
+    assert window._guided_confirm_ack_cb.isChecked() is False
+    assert window._guided_confirm_mark_btn.isEnabled() is False
+
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    assert (str(run_dir.resolve()), "CH1") in window._guided_strategy_choices
+    assert (str(run_dir.resolve()), "CH2") in window._guided_strategy_choices
+    assert "ROI: CH2" in window._guided_confirm_marked_choice_label.text()
+
+
+def test_guided_confirm_strategy_choices_are_scoped_to_loaded_completed_run(window, tmp_path, monkeypatch):
+    run_a = _make_preview_completed_run(tmp_path / "run_a_parent")
+    run_b = _make_preview_completed_run(tmp_path / "run_b_parent")
+
+    window._open_completed_results_dir(str(run_a))
+    window._set_guided_workflow_mode("open_results")
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    idx = window._guided_confirm_strategy_combo.findData("signal_only_f0")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+    assert (str(run_a.resolve()), "CH1") in window._guided_strategy_choices
+    assert "Signal-Only F0" in window._guided_confirm_marked_choice_label.text()
+
+    window._open_completed_results_dir(str(run_b))
+    window._set_guided_workflow_mode("open_results")
+    window._refresh_guided_confirm_strategy_panel()
+
+    assert window._guided_confirm_roi_combo.currentText() == "CH1"
+    assert window._guided_confirm_chunk_combo.currentData() == 0
+    assert "Current marked choice: none." in window._guided_confirm_marked_choice_label.text()
+    assert (str(run_a.resolve()), "CH1") in window._guided_strategy_choices
+
+    window._open_completed_results_dir(str(run_a))
+    window._set_guided_workflow_mode("open_results")
+    window._refresh_guided_confirm_strategy_panel()
+    assert window._guided_confirm_chunk_combo.currentData() == 0
+    assert "Signal-Only F0" in window._guided_confirm_marked_choice_label.text()
+    assert "Evidence reviewed: chunk 0" in window._guided_confirm_marked_choice_label.text()
+
+
+def test_guided_confirm_acknowledgment_and_strategy_reset_when_completed_run_changes(window, tmp_path, monkeypatch):
+    run_a = _make_preview_completed_run(tmp_path / "ack_run_a_parent")
+    run_b = _make_preview_completed_run(tmp_path / "ack_run_b_parent")
+
+    window._open_completed_results_dir(str(run_a))
+    window._set_guided_workflow_mode("open_results")
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    idx = window._guided_confirm_strategy_combo.findData("signal_only_f0")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    assert window._guided_confirm_mark_btn.isEnabled() is True
+
+    window._open_completed_results_dir(str(run_b))
+    window._set_guided_workflow_mode("open_results")
+    window._refresh_guided_confirm_strategy_panel()
+
+    assert window._guided_confirm_ack_cb.isChecked() is False
+    assert window._guided_confirm_strategy_combo.currentData() == ""
+    assert window._guided_confirm_mark_btn.isEnabled() is False
+    assert "Current marked choice: none." in window._guided_confirm_marked_choice_label.text()
+
+
+def test_guided_confirm_returning_to_marked_run_still_requires_fresh_ack(window, tmp_path, monkeypatch):
+    run_a = _make_preview_completed_run(tmp_path / "return_ack_run_a_parent")
+    run_b = _make_preview_completed_run(tmp_path / "return_ack_run_b_parent")
+
+    window._open_completed_results_dir(str(run_a))
+    window._set_guided_workflow_mode("open_results")
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    idx = window._guided_confirm_strategy_combo.findData("signal_only_f0")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+    assert "Signal-Only F0" in window._guided_confirm_marked_choice_label.text()
+
+    window._open_completed_results_dir(str(run_b))
+    window._set_guided_workflow_mode("open_results")
+    window._refresh_guided_confirm_strategy_panel()
+    window._open_completed_results_dir(str(run_a))
+    window._set_guided_workflow_mode("open_results")
+    window._refresh_guided_confirm_strategy_panel()
+
+    assert "Signal-Only F0" in window._guided_confirm_marked_choice_label.text()
+    assert window._guided_confirm_ack_cb.isChecked() is False
+    assert window._guided_confirm_strategy_combo.currentData() == ""
+    assert window._guided_confirm_mark_btn.isEnabled() is False
+
+
+def test_guided_confirm_strategy_evidence_is_scoped_to_loaded_completed_run(window, tmp_path, monkeypatch):
+    run_a = _make_preview_completed_run(tmp_path / "evidence_run_a_parent")
+    run_b = _make_preview_completed_run(tmp_path / "evidence_run_b_parent")
+
+    _load_preview_completed_run(window, run_a, monkeypatch)
+    window._guided_preview_generate_btn.click()
+    window._guided_signal_f0_generate_btn.click()
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    assert "Correction preview: success" in window._guided_confirm_evidence_label.text()
+    assert "Signal-Only F0 diagnostic: success" in window._guided_confirm_evidence_label.text()
+
+    window._open_completed_results_dir(str(run_b))
+    window._set_guided_workflow_mode("open_results")
+    window._refresh_guided_confirm_strategy_panel()
+    text = window._guided_confirm_evidence_label.text()
+    assert "Correction preview: not generated for current completed run" in text
+    assert "Signal-Only F0 diagnostic: not generated for current completed run" in text
+    assert "Correction preview: success" not in text
+    assert "Signal-Only F0 diagnostic: success" not in text
 
 
 def test_full_control_open_results_still_uses_same_completed_loader(window, tmp_path, monkeypatch):

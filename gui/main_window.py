@@ -126,6 +126,12 @@ GUIDED_CORRECTION_PREVIEW_METHOD_LABELS = {
     "global_linear_regression": "Global Linear Regression",
 }
 GUIDED_SIGNAL_ONLY_F0_CARD = "Signal-Only F0"
+GUIDED_CONFIRM_STRATEGIES = (
+    ("Robust Global Event-Reject Fit", "robust_global_event_reject"),
+    ("Adaptive Event-Gated Fit", "adaptive_event_gated_regression"),
+    ("Global Linear Regression", "global_linear_regression"),
+    ("Signal-Only F0", "signal_only_f0"),
+)
 
 
 def _generate_run_id():
@@ -1504,6 +1510,7 @@ class MainWindow(QMainWindow):
         self._guided_workflow_stack.setObjectName("guidedWorkflowStepStack")
         self._guided_workflow_mode = "start"
         self._guided_diagnostics_status = "not_generated"
+        self._guided_strategy_choices = {}
         self._guided_raw_setup_controls = {}
         self._guided_open_results_mode_panels = {}
         self._guided_new_analysis_mode_panels = {}
@@ -2049,6 +2056,7 @@ class MainWindow(QMainWindow):
         self._guided_workflow_mode = mode
         self._refresh_guided_mode_display()
         self._refresh_guided_start_panel()
+        self._refresh_guided_confirm_strategy_panel()
 
     def _display_path(self, path: str, *, max_chars: int = 60) -> str:
         text = str(path or "").strip()
@@ -2998,6 +3006,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_guided_preview_status_label"):
             self._guided_preview_status_label.setText(reason)
         self._refresh_guided_generated_outputs_summary()
+        self._refresh_guided_confirm_strategy_panel()
 
     def _guided_signal_f0_mark_stale(
         self,
@@ -3009,6 +3018,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_guided_signal_f0_status_label"):
             self._guided_signal_f0_status_label.setText(reason)
         self._refresh_guided_generated_outputs_summary()
+        self._refresh_guided_confirm_strategy_panel()
 
     def _on_guided_preview_selection_changed(self, *_args) -> None:
         self._guided_preview_mark_stale()
@@ -3079,6 +3089,7 @@ class MainWindow(QMainWindow):
         self._guided_generated_outputs_summary_label.setText(
             f"{preview_text}\n{signal_text}"
         )
+        self._refresh_guided_confirm_strategy_panel()
 
     def _guided_generated_preview_summary_text(self) -> str:
         if not getattr(self, "_guided_preview_has_result", False):
@@ -3503,6 +3514,9 @@ class MainWindow(QMainWindow):
             }
         self._guided_signal_f0_has_result = True
         self._guided_signal_f0_result_stale = False
+        result["completed_run_dir"] = os.path.realpath(run_dir)
+        result["roi"] = roi
+        result["chunk_index"] = int(chunk)
         self._guided_signal_f0_last_result = result
         if hasattr(self, "_guided_signal_f0_status_label"):
             status = str(result.get("status", "failed"))
@@ -3514,6 +3528,7 @@ class MainWindow(QMainWindow):
                 self._guided_signal_f0_status_label.setText("Signal-Only F0 diagnostic review failed.")
         self._populate_guided_signal_f0_result_widgets(result)
         self._refresh_guided_signal_f0_enablement()
+        self._refresh_guided_confirm_strategy_panel()
 
     def _legacy_guided_preview_result_text(self, result: dict[str, object]) -> str:
         lines = [
@@ -3585,6 +3600,9 @@ class MainWindow(QMainWindow):
             }
         self._guided_preview_has_result = True
         self._guided_preview_result_stale = False
+        result["completed_run_dir"] = os.path.realpath(run_dir)
+        result["roi"] = roi
+        result["chunk_index"] = int(chunk)
         self._guided_preview_last_result = result
         if hasattr(self, "_guided_preview_status_label"):
             status = str(result.get("status", "failed"))
@@ -3594,6 +3612,7 @@ class MainWindow(QMainWindow):
                 self._guided_preview_status_label.setText("Preview comparison failed.")
         self._populate_guided_preview_result_widgets(result)
         self._refresh_guided_preview_enablement()
+        self._refresh_guided_confirm_strategy_panel()
 
     def _refresh_guided_diagnostics_panel(self) -> None:
         if not hasattr(self, "_guided_diagnostics_status_label"):
@@ -3645,6 +3664,217 @@ class MainWindow(QMainWindow):
             for slot, label in self._guided_diagnostics_slot_labels.items():
                 suffix = "coming later / read-only evidence" if "Decision-Support Audit" in slot else "not generated"
                 label.setText(f"{slot}: {suffix}")
+        self._refresh_guided_confirm_strategy_panel()
+
+    def _selected_guided_confirm_roi(self) -> str:
+        combo = getattr(self, "_guided_confirm_roi_combo", None)
+        return str(combo.currentData() or combo.currentText() or "").strip() if combo is not None else ""
+
+    def _selected_guided_confirm_chunk(self) -> int | None:
+        combo = getattr(self, "_guided_confirm_chunk_combo", None)
+        if combo is None:
+            return None
+        value = combo.currentData()
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _selected_guided_confirm_strategy(self) -> str:
+        combo = getattr(self, "_guided_confirm_strategy_combo", None)
+        return str(combo.currentData() or "").strip() if combo is not None else ""
+
+    def _guided_confirm_strategy_label(self, strategy: str) -> str:
+        for label, value in GUIDED_CONFIRM_STRATEGIES:
+            if value == strategy:
+                return label
+        return str(strategy or "")
+
+    def _on_guided_confirm_selection_changed(self, *_args) -> None:
+        self._refresh_guided_confirm_strategy_panel()
+
+    def _current_guided_completed_run_dir(self) -> str:
+        return os.path.realpath((self._current_run_dir or "").strip())
+
+    def _confirm_evidence_status(self, prefix: str, result_attr: str, stale_attr: str) -> str:
+        result = getattr(self, result_attr, None)
+        current_run_dir = self._current_guided_completed_run_dir()
+        roi = self._selected_guided_confirm_roi()
+        chunk = self._selected_guided_confirm_chunk()
+        if not result:
+            return f"{prefix}: not generated for current completed run"
+        status = str(result.get("status") or "unknown") if isinstance(result, dict) else "unknown"
+        result_run_dir = os.path.realpath(str(result.get("completed_run_dir") or "")) if isinstance(result, dict) else ""
+        if result_run_dir != current_run_dir:
+            return f"{prefix}: not generated for current completed run"
+        result_roi = str(result.get("roi") or "") if isinstance(result, dict) else ""
+        try:
+            result_chunk = int(result.get("chunk_index"))
+        except Exception:
+            result_chunk = None
+        stale = bool(getattr(self, stale_attr, False))
+        if result_roi and result_roi != roi:
+            stale = True
+        if result_chunk is not None and chunk is not None and result_chunk != chunk:
+            stale = True
+        suffix = " stale" if stale else ""
+        return f"{prefix}: {status}{suffix}"
+
+    def _guided_confirm_evidence_summary(self) -> dict[str, object]:
+        preview = self._confirm_evidence_status(
+            "Correction preview",
+            "_guided_preview_last_result",
+            "_guided_preview_result_stale",
+        )
+        signal = self._confirm_evidence_status(
+            "Signal-Only F0 diagnostic",
+            "_guided_signal_f0_last_result",
+            "_guided_signal_f0_result_stale",
+        )
+        stale = " stale" in preview or " stale" in signal
+        lines = [preview, signal]
+        if stale:
+            lines.append("Displayed evidence is stale for the current selection.")
+        lines.append("Evidence is descriptive only. It does not select a strategy.")
+        return {
+            "preview": preview,
+            "signal_only_f0": signal,
+            "stale": stale,
+            "text": "\n".join(lines),
+        }
+
+    def _refresh_guided_confirm_strategy_panel(self, *_args) -> None:
+        if not hasattr(self, "_guided_confirm_context_label"):
+            return
+        artifact_state = self._guided_completed_run_diagnostic_artifacts()
+        run_dir = str(artifact_state.get("run_dir") or "")
+        mode = getattr(self, "_guided_workflow_mode", "start")
+        source_ok = False
+        reason = "Open Results must be used first; no completed run is loaded."
+        rois: list[str] = []
+        chunk_ids: list[int] = []
+        if run_dir:
+            source = resolve_completed_run_preview_source(run_dir)
+            if source.ok:
+                try:
+                    with open_phasic_cache(source.phasic_trace_cache_path) as cache:
+                        rois = [str(x) for x in list_cache_rois(cache)]
+                        chunk_ids = [int(x) for x in list_cache_chunk_ids(cache)]
+                    source_ok = bool(rois and chunk_ids)
+                    reason = "Completed-run cache is available for strategy marking." if source_ok else (
+                        "Completed-run phasic cache has no ROI/chunk entries."
+                    )
+                except Exception as exc:
+                    reason = f"Unable to read completed-run phasic cache: {exc}"
+            else:
+                reason = source.reason
+
+        full_context = (
+            f"Mode: {mode}\n"
+            f"Completed run: {run_dir or 'none'}\n"
+            f"{reason}\n"
+            "Planning only: no manifest, applied-dF/F output, feature extraction, validation, or pipeline run."
+        )
+        visible_context = (
+            f"Mode: {mode} - Completed run: {self._display_path(run_dir) if run_dir else 'none'} - "
+            f"{reason}"
+        )
+        self._guided_confirm_context_label.setText(visible_context)
+        self._guided_confirm_context_label.setToolTip(full_context)
+
+        previous_roi = self._selected_guided_confirm_roi()
+        previous_chunk = self._selected_guided_confirm_chunk()
+        with QSignalBlocker(self._guided_confirm_roi_combo), QSignalBlocker(self._guided_confirm_chunk_combo):
+            self._guided_confirm_roi_combo.clear()
+            self._guided_confirm_chunk_combo.clear()
+            for roi in rois:
+                self._guided_confirm_roi_combo.addItem(roi, roi)
+            for chunk_id in chunk_ids:
+                self._guided_confirm_chunk_combo.addItem(str(chunk_id), int(chunk_id))
+            if previous_roi:
+                idx = self._guided_confirm_roi_combo.findData(previous_roi)
+                if idx >= 0:
+                    self._guided_confirm_roi_combo.setCurrentIndex(idx)
+            if previous_chunk is not None:
+                idx = self._guided_confirm_chunk_combo.findData(int(previous_chunk))
+                if idx >= 0:
+                    self._guided_confirm_chunk_combo.setCurrentIndex(idx)
+
+        current_roi = self._selected_guided_confirm_roi()
+        current_chunk = self._selected_guided_confirm_chunk()
+        current_target = (run_dir, current_roi, current_chunk)
+        previous_target = getattr(self, "_guided_confirm_active_target", None)
+        if previous_target is None:
+            self._guided_confirm_active_target = current_target
+        elif current_target != previous_target:
+            previous_run = previous_target[0] if isinstance(previous_target, tuple) and previous_target else ""
+            with QSignalBlocker(self._guided_confirm_ack_cb):
+                self._guided_confirm_ack_cb.setChecked(False)
+            if run_dir != previous_run:
+                with QSignalBlocker(self._guided_confirm_strategy_combo):
+                    self._guided_confirm_strategy_combo.setCurrentIndex(0)
+            self._guided_confirm_active_target = current_target
+
+        for widget in (
+            self._guided_confirm_roi_combo,
+            self._guided_confirm_chunk_combo,
+            self._guided_confirm_strategy_combo,
+            self._guided_confirm_ack_cb,
+        ):
+            widget.setEnabled(source_ok)
+
+        evidence = self._guided_confirm_evidence_summary()
+        self._guided_confirm_evidence_label.setText(str(evidence["text"]))
+        self._guided_confirm_marked_choice_label.setText(self._guided_marked_choice_text())
+        can_mark = bool(
+            source_ok
+            and self._selected_guided_confirm_roi()
+            and self._selected_guided_confirm_chunk() is not None
+            and self._selected_guided_confirm_strategy()
+            and self._guided_confirm_ack_cb.isChecked()
+        )
+        self._guided_confirm_mark_btn.setEnabled(can_mark)
+
+    def _guided_marked_choice_text(self) -> str:
+        run_dir = self._current_guided_completed_run_dir()
+        roi = self._selected_guided_confirm_roi()
+        chunk = self._selected_guided_confirm_chunk()
+        if not run_dir or not roi:
+            return "Current marked choice: none."
+        entry = getattr(self, "_guided_strategy_choices", {}).get((run_dir, roi))
+        if not entry:
+            return "Current marked choice: none."
+        return (
+            "Current marked choice:\n"
+            f"ROI: {roi}\n"
+            f"Strategy: {entry.get('strategy_label', '')}\n"
+            f"Evidence reviewed: chunk {entry.get('evidence_chunk', '')}\n"
+            "Status: marked for later planning only; no manifest written and no applied-dF/F output created."
+        )
+
+    def _on_guided_mark_strategy_choice(self) -> None:
+        roi = self._selected_guided_confirm_roi()
+        chunk = self._selected_guided_confirm_chunk()
+        strategy = self._selected_guided_confirm_strategy()
+        if not roi or chunk is None or not strategy or not self._guided_confirm_ack_cb.isChecked():
+            self._refresh_guided_confirm_strategy_panel()
+            return
+        evidence = self._guided_confirm_evidence_summary()
+        run_dir = self._current_guided_completed_run_dir()
+        self._guided_strategy_choices[(run_dir, roi)] = {
+            "strategy": strategy,
+            "strategy_label": self._guided_confirm_strategy_label(strategy),
+            "confirmed": True,
+            "completed_run_dir": run_dir,
+            "roi": roi,
+            "evidence_chunk": int(chunk),
+            "evidence_summary": {
+                "preview": evidence["preview"],
+                "signal_only_f0": evidence["signal_only_f0"],
+                "stale": evidence["stale"],
+            },
+        }
+        self._refresh_guided_confirm_strategy_panel()
 
     def _build_guided_confirm_strategy_step(self) -> QWidget:
         wrapper = QWidget()
@@ -3652,29 +3882,95 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
-        normal = QLabel(
-            "Future stage: explicitly confirm runnable strategies before applied-dF/F production.\n"
-            "Runnable production strategies are explicit dynamic_fit and signal_only_f0. "
-            "auto, no_correction, and needs_review are not runnable strategies.\n"
-            "This stage does not write manifests or populate applied-dF/F batch rows."
+
+        context_group = QGroupBox("Loaded context")
+        context_group.setObjectName("guidedConfirmStrategyContextPanel")
+        context_layout = QVBoxLayout(context_group)
+        context_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_confirm_context_label = QLabel("")
+        self._guided_confirm_context_label.setObjectName("guidedConfirmStrategyContext")
+        self._guided_confirm_context_label.setProperty("guidedSecondaryText", True)
+        self._guided_confirm_context_label.setWordWrap(True)
+        self._guided_confirm_context_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_confirm_context_label)
+        context_layout.addWidget(self._guided_confirm_context_label)
+        layout.addWidget(context_group)
+
+        selection_group = QGroupBox("ROI and evidence chunk")
+        selection_group.setObjectName("guidedConfirmStrategySelectionPanel")
+        selection_layout = QFormLayout(selection_group)
+        selection_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_confirm_roi_combo = QComboBox()
+        self._guided_confirm_roi_combo.setObjectName("guidedConfirmStrategyRoiCombo")
+        self._guided_confirm_roi_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._guided_confirm_roi_combo.setMinimumContentsLength(6)
+        self._make_guided_widget_shrinkable(self._guided_confirm_roi_combo)
+        self._guided_confirm_roi_combo.currentIndexChanged.connect(self._on_guided_confirm_selection_changed)
+        selection_layout.addRow("ROI:", self._guided_confirm_roi_combo)
+        self._guided_confirm_chunk_combo = QComboBox()
+        self._guided_confirm_chunk_combo.setObjectName("guidedConfirmStrategyChunkCombo")
+        self._guided_confirm_chunk_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._guided_confirm_chunk_combo.setMinimumContentsLength(6)
+        self._make_guided_widget_shrinkable(self._guided_confirm_chunk_combo)
+        self._guided_confirm_chunk_combo.currentIndexChanged.connect(self._on_guided_confirm_selection_changed)
+        selection_layout.addRow("Evidence chunk:", self._guided_confirm_chunk_combo)
+        layout.addWidget(selection_group)
+
+        evidence_group = QGroupBox("Evidence summary")
+        evidence_group.setObjectName("guidedConfirmStrategyEvidencePanel")
+        evidence_layout = QVBoxLayout(evidence_group)
+        evidence_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_confirm_evidence_label = QLabel("")
+        self._guided_confirm_evidence_label.setObjectName("guidedConfirmStrategyEvidence")
+        self._guided_confirm_evidence_label.setProperty("guidedSecondaryText", True)
+        self._guided_confirm_evidence_label.setWordWrap(True)
+        self._guided_confirm_evidence_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_confirm_evidence_label)
+        evidence_layout.addWidget(self._guided_confirm_evidence_label)
+        layout.addWidget(evidence_group)
+
+        choice_group = QGroupBox("Candidate strategy")
+        choice_group.setObjectName("guidedConfirmStrategyChoicePanel")
+        choice_layout = QFormLayout(choice_group)
+        choice_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_confirm_strategy_combo = QComboBox()
+        self._guided_confirm_strategy_combo.setObjectName("guidedConfirmStrategyChoiceCombo")
+        self._guided_confirm_strategy_combo.addItem("Select a strategy...", "")
+        for label, value in GUIDED_CONFIRM_STRATEGIES:
+            self._guided_confirm_strategy_combo.addItem(label, value)
+        self._guided_confirm_strategy_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._guided_confirm_strategy_combo.setMinimumContentsLength(12)
+        self._make_guided_widget_shrinkable(self._guided_confirm_strategy_combo)
+        self._guided_confirm_strategy_combo.currentIndexChanged.connect(self._refresh_guided_confirm_strategy_panel)
+        choice_layout.addRow("Strategy:", self._guided_confirm_strategy_combo)
+        self._guided_confirm_ack_cb = QCheckBox(
+            "I reviewed the diagnostic evidence and am explicitly marking this strategy for later planning."
         )
-        normal.setObjectName("guidedConfirmStrategyNewAnalysisContent")
-        normal.setProperty("guidedSecondaryText", True)
-        normal.setWordWrap(True)
-        self._guided_new_analysis_mode_panels["Confirm strategy"] = normal
-        layout.addWidget(normal)
-        open_panel = self._build_guided_open_results_unavailable_panel(
-            "Confirm strategy is skipped in Open Results mode",
-            "Strategy confirmation is for future new-analysis/applied-dF/F routing. "
-            "Completed-run review currently stays in Diagnostics.",
-            "guidedConfirmStrategyOpenResultsSkipped",
-        )
-        self._guided_open_results_mode_panels["Confirm strategy"] = open_panel
-        layout.addWidget(open_panel)
+        self._guided_confirm_ack_cb.setObjectName("guidedConfirmStrategyAcknowledge")
+        self._guided_confirm_ack_cb.stateChanged.connect(self._refresh_guided_confirm_strategy_panel)
+        choice_layout.addRow("", self._guided_confirm_ack_cb)
+        self._guided_confirm_mark_btn = QPushButton("Mark strategy choice")
+        self._guided_confirm_mark_btn.setObjectName("guidedConfirmStrategyMarkButton")
+        self._guided_confirm_mark_btn.clicked.connect(self._on_guided_mark_strategy_choice)
+        choice_layout.addRow("", self._guided_confirm_mark_btn)
+        layout.addWidget(choice_group)
+
+        self._guided_confirm_marked_choice_label = QLabel("Current marked choice: none.")
+        self._guided_confirm_marked_choice_label.setObjectName("guidedConfirmStrategyMarkedChoice")
+        self._guided_confirm_marked_choice_label.setProperty("guidedSecondaryText", True)
+        self._guided_confirm_marked_choice_label.setWordWrap(True)
+        self._guided_confirm_marked_choice_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_confirm_marked_choice_label)
+        layout.addWidget(self._guided_confirm_marked_choice_label)
+
+        self._refresh_guided_confirm_strategy_panel()
         return self._build_guided_step_scroll(
             "guidedStepConfirmStrategy",
             "Confirm strategy",
-            [],
+            [
+                "Explicitly mark a candidate strategy for later planning after reviewing diagnostics. "
+                "This does not write manifests, create applied-dF/F outputs, route analysis, or choose automatically.",
+            ],
             wrapper,
         )
 
