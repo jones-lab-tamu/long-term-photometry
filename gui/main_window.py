@@ -1573,6 +1573,7 @@ class MainWindow(QMainWindow):
         # persistence/export exists. Values are scoped to completed-run source
         # and populated only by explicit Apply.
         self._guided_draft_feature_event_profiles_by_run = {}
+        self._guided_feature_event_editor_synced_run = None
         self._guided_raw_setup_controls = {}
         self._guided_open_results_mode_panels = {}
         self._guided_new_analysis_mode_panels = {}
@@ -3877,6 +3878,8 @@ class MainWindow(QMainWindow):
                     self._guided_confirm_strategy_combo.setCurrentIndex(0)
             self._guided_confirm_active_target = current_target
 
+        self._sync_guided_feature_event_editor_to_current_run()
+
         for widget in (
             self._guided_confirm_roi_combo,
             self._guided_confirm_chunk_combo,
@@ -4094,6 +4097,10 @@ class MainWindow(QMainWindow):
             getattr(self, "_guided_draft_feature_event_profiles_by_run", {}).get(run_dir, [])
         )
 
+    def _guided_feature_event_profile_for_current_run(self) -> FeatureEventProfile | None:
+        profiles = self._guided_feature_event_profiles_for_current_run()
+        return profiles[0] if profiles else None
+
     def _guided_feature_event_editor_defaults(self) -> dict[str, object]:
         cfg = Config()
         return {
@@ -4109,6 +4116,103 @@ class MainWindow(QMainWindow):
             "peak_pre_filter": cfg.peak_pre_filter,
             "event_auc_baseline": cfg.event_auc_baseline,
         }
+
+    def _set_guided_feature_event_combo_value(self, combo: QComboBox, value: object) -> None:
+        text = str(value)
+        idx = combo.findText(text)
+        if idx >= 0:
+            with QSignalBlocker(combo):
+                combo.setCurrentIndex(idx)
+
+    def _set_guided_feature_event_line_edit_value(self, edit: QLineEdit, value: object) -> None:
+        with QSignalBlocker(edit):
+            edit.setText(str(value))
+
+    def _set_guided_feature_event_editor_values(
+        self,
+        values: dict[str, object],
+        *,
+        status_text: str,
+    ) -> None:
+        if not hasattr(self, "_guided_feature_event_signal_combo"):
+            return
+        defaults = self._guided_feature_event_editor_defaults()
+        merged = dict(defaults)
+        merged.update(values)
+        self._set_guided_feature_event_combo_value(
+            self._guided_feature_event_signal_combo,
+            merged["event_signal"],
+        )
+        self._set_guided_feature_event_combo_value(
+            self._guided_feature_event_polarity_combo,
+            merged["signal_excursion_polarity"],
+        )
+        self._set_guided_feature_event_combo_value(
+            self._guided_feature_event_peak_method_combo,
+            merged["peak_threshold_method"],
+        )
+        self._set_guided_feature_event_line_edit_value(
+            self._guided_feature_event_peak_k_edit,
+            merged["peak_threshold_k"],
+        )
+        self._set_guided_feature_event_line_edit_value(
+            self._guided_feature_event_peak_pct_edit,
+            merged["peak_threshold_percentile"],
+        )
+        self._set_guided_feature_event_line_edit_value(
+            self._guided_feature_event_peak_abs_edit,
+            merged["peak_threshold_abs"],
+        )
+        self._set_guided_feature_event_line_edit_value(
+            self._guided_feature_event_peak_distance_edit,
+            merged["peak_min_distance_sec"],
+        )
+        self._set_guided_feature_event_line_edit_value(
+            self._guided_feature_event_peak_prominence_edit,
+            merged["peak_min_prominence_k"],
+        )
+        self._set_guided_feature_event_line_edit_value(
+            self._guided_feature_event_peak_width_edit,
+            merged["peak_min_width_sec"],
+        )
+        self._set_guided_feature_event_combo_value(
+            self._guided_feature_event_pre_filter_combo,
+            merged["peak_pre_filter"],
+        )
+        self._set_guided_feature_event_combo_value(
+            self._guided_feature_event_auc_baseline_combo,
+            merged["event_auc_baseline"],
+        )
+        self._guided_feature_event_status_label.setText(status_text)
+
+    def _set_guided_feature_event_editor_from_profile(self, profile: FeatureEventProfile) -> None:
+        self._set_guided_feature_event_editor_values(
+            dict(profile.config_fields or {}),
+            status_text=(
+                "Showing applied in-memory feature/event profile for this completed run. "
+                "No outputs were written."
+            ),
+        )
+
+    def _reset_guided_feature_event_editor_to_defaults(self, *, status_text: str | None = None) -> None:
+        self._set_guided_feature_event_editor_values(
+            self._guided_feature_event_editor_defaults(),
+            status_text=status_text or "No draft feature/event profile applied.",
+        )
+
+    def _sync_guided_feature_event_editor_to_current_run(self, *, force: bool = False) -> None:
+        if not hasattr(self, "_guided_feature_event_signal_combo"):
+            return
+        run_dir = self._current_guided_completed_run_dir()
+        synced_run = getattr(self, "_guided_feature_event_editor_synced_run", None)
+        if not force and run_dir == synced_run:
+            return
+        profile = self._guided_feature_event_profile_for_current_run()
+        if profile is not None:
+            self._set_guided_feature_event_editor_from_profile(profile)
+        else:
+            self._reset_guided_feature_event_editor_to_defaults()
+        self._guided_feature_event_editor_synced_run = run_dir
 
     def _guided_feature_event_current_values(self) -> tuple[dict | None, str | None]:
         if not hasattr(self, "_guided_feature_event_signal_combo"):
@@ -4173,6 +4277,7 @@ class MainWindow(QMainWindow):
         self._guided_feature_event_status_label.setText(
             "Feature/event profile applied to in-memory draft plan. No outputs were written."
         )
+        self._guided_feature_event_editor_synced_run = run_dir
         self._refresh_guided_draft_run_plan_preview()
 
     def _on_guided_clear_feature_event_profile(self) -> None:
@@ -4181,9 +4286,10 @@ class MainWindow(QMainWindow):
             profiles_by_run = getattr(self, "_guided_draft_feature_event_profiles_by_run", {})
             profiles_by_run.pop(run_dir, None)
             self._guided_draft_feature_event_profiles_by_run = profiles_by_run
-        self._guided_feature_event_status_label.setText(
-            "Draft feature/event profile cleared from in-memory plan. No files were changed."
+        self._reset_guided_feature_event_editor_to_defaults(
+            status_text="Draft feature/event profile cleared from in-memory plan. No files were changed."
         )
+        self._guided_feature_event_editor_synced_run = run_dir
         self._refresh_guided_draft_run_plan_preview()
 
     def _build_guided_feature_event_profile_editor(self) -> QGroupBox:

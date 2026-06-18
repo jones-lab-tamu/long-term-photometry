@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QScr
 
 import gui.main_window as main_window_module
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
+from photometry_pipeline.config import Config
 from photometry_pipeline.guided_run_plan import (
     EvidenceChunkReview,
     FeatureEventProfile,
@@ -623,6 +624,7 @@ def test_guided_feature_event_profile_apply_valid_run_level_profile(window, tmp_
 def test_guided_feature_event_profiles_are_scoped_to_completed_run(window, tmp_path, monkeypatch):
     run_a = _make_preview_completed_run(tmp_path / "feature_run_a_parent")
     run_b = _make_preview_completed_run(tmp_path / "feature_run_b_parent")
+    defaults = Config()
 
     window._open_completed_results_dir(str(run_a))
     window._set_guided_workflow_mode("open_results")
@@ -645,6 +647,7 @@ def test_guided_feature_event_profiles_are_scoped_to_completed_run(window, tmp_p
     plan_b, errors_b = window._build_guided_draft_run_plan()
     assert errors_b == []
     assert plan_b.feature_event_profiles == []
+    assert window._guided_feature_event_signal_combo.currentText() == defaults.event_signal
     assert "Feature/event profiles: none configured" in window._guided_draft_run_plan_preview_label.text()
     assert "Feature/event settings: not_configured" in window._guided_draft_run_plan_checklist_label.text()
 
@@ -656,8 +659,61 @@ def test_guided_feature_event_profiles_are_scoped_to_completed_run(window, tmp_p
     assert restored_errors == []
     assert len(restored_plan.feature_event_profiles) == 1
     assert restored_plan.feature_event_profiles[0].config_fields == run_a_config
+    assert window._guided_feature_event_signal_combo.currentText() == "delta_f"
     assert "Feature/event profile default-events" in window._guided_draft_run_plan_preview_label.text()
     assert "Feature/event settings: pass" in window._guided_draft_run_plan_checklist_label.text()
+
+
+def test_guided_feature_event_unsaved_same_run_edits_survive_refresh_without_plan_mutation(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._refresh_guided_confirm_strategy_panel()
+
+    plan, errors = window._build_guided_draft_run_plan()
+    assert errors == []
+    assert plan.feature_event_profiles == []
+    assert window._guided_feature_event_signal_combo.currentText() == "delta_f"
+    assert "Feature/event settings: not_configured" in window._guided_draft_run_plan_checklist_label.text()
+
+
+def test_guided_feature_event_unsaved_edits_do_not_leak_across_completed_runs(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    run_a = _make_preview_completed_run(tmp_path / "unsaved_run_a_parent")
+    run_b = _make_preview_completed_run(tmp_path / "unsaved_run_b_parent")
+    defaults = Config()
+
+    window._open_completed_results_dir(str(run_a))
+    window._set_guided_workflow_mode("open_results")
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._refresh_guided_confirm_strategy_panel()
+    assert window._guided_feature_event_signal_combo.currentText() == "delta_f"
+
+    window._open_completed_results_dir(str(run_b))
+    window._set_guided_workflow_mode("open_results")
+    window._refresh_guided_confirm_strategy_panel()
+    plan_b, errors_b = window._build_guided_draft_run_plan()
+    assert errors_b == []
+    assert plan_b.feature_event_profiles == []
+    assert window._guided_feature_event_signal_combo.currentText() == defaults.event_signal
+
+    window._open_completed_results_dir(str(run_a))
+    window._set_guided_workflow_mode("open_results")
+    window._refresh_guided_confirm_strategy_panel()
+    plan_a, errors_a = window._build_guided_draft_run_plan()
+    assert errors_a == []
+    assert plan_a.feature_event_profiles == []
+    assert window._guided_feature_event_signal_combo.currentText() == defaults.event_signal
 
 
 def test_guided_feature_event_profile_controls_do_not_live_bind_before_apply(window, tmp_path, monkeypatch):
@@ -712,6 +768,8 @@ def test_guided_feature_event_profile_invalid_values_are_rejected_without_updati
     plan, _ = window._build_guided_draft_run_plan()
     assert plan.feature_event_profiles[0].config_fields == previous
     assert "Peak Threshold Absolute must be > 0." in window._guided_feature_event_status_label.text()
+    assert window._guided_feature_event_peak_method_combo.currentText() == "absolute"
+    assert window._guided_feature_event_peak_abs_edit.text() == "0"
     assert "Feature/event settings: pass" in window._guided_draft_run_plan_checklist_label.text()
 
 
@@ -785,6 +843,7 @@ def test_guided_feature_event_profile_clear_removes_only_in_memory_profile(windo
     plan, errors = window._build_guided_draft_run_plan()
     assert errors == []
     assert plan.feature_event_profiles == []
+    assert window._guided_feature_event_signal_combo.currentText() == Config().event_signal
     assert "Feature/event profiles: none configured" in window._guided_draft_run_plan_preview_label.text()
     assert "Feature/event settings: not_configured" in window._guided_draft_run_plan_checklist_label.text()
     window._open_completed_results_dir(str(run_dir))
@@ -794,6 +853,7 @@ def test_guided_feature_event_profile_clear_removes_only_in_memory_profile(windo
     assert errors_a == []
     assert len(plan_a.feature_event_profiles) == 1
     assert plan_a.feature_event_profiles[0].config_fields == run_a_config
+    assert window._guided_feature_event_signal_combo.currentText() == run_a_config["event_signal"]
     after = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
     after_b = sorted(p.relative_to(run_b).as_posix() for p in run_b.rglob("*"))
     assert after == before
