@@ -4,7 +4,7 @@ import h5py
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QScrollArea, QVBoxLayout
 
 import gui.main_window as main_window_module
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
@@ -159,6 +159,16 @@ def test_guided_workflow_stepper_switches_placeholder_panels(window):
         assert window._guided_workflow_stack.currentWidget().objectName() == expected_name
 
 
+def test_guided_step_scroll_areas_are_width_resizable_without_page_horizontal_scroll(window):
+    for step_name in GUIDED_WORKFLOW_STEPS:
+        idx = list(GUIDED_WORKFLOW_STEPS).index(step_name)
+        window._guided_workflow_stepper.setCurrentRow(idx)
+        scroll = window._guided_workflow_stack.currentWidget()
+        assert isinstance(scroll, QScrollArea)
+        assert scroll.widgetResizable() is True
+        assert scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+
+
 def test_guided_start_step_exists_first_with_raw_setup_and_open_results_choices(window):
     stepper = window._guided_workflow_stepper
     assert stepper.item(0).data(Qt.UserRole) == "Start"
@@ -170,18 +180,21 @@ def test_guided_start_step_exists_first_with_raw_setup_and_open_results_choices(
     open_card = window._guided_workflow_tab.findChild(QGroupBox, "guidedStartOpenResultsCard")
     assert setup_card is not None
     assert open_card is not None
+    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedStartStatusPanel") is None
     assert "Set up a new analysis" in setup_card.title()
     assert "Open results from a completed run" in open_card.title()
+    assert "Input folder:" in window._guided_start_setup_status_label.text()
+    assert "Completed run:" in window._guided_start_open_status_label.text()
     assert window._guided_start_setup_btn.text() == "Set up new analysis"
     assert window._guided_start_open_results_btn.text() == "Open Results..."
-    assert "No completed run loaded" in window._guided_start_status_label.text()
 
 
 def test_guided_mode_banner_initially_distinguishes_input_from_completed_results(window):
     text = window._guided_mode_banner_label.text()
-    assert "Guided Workflow mode: Choose a starting path" in text
-    assert "raw/input data" in text
-    assert "completed run" in text
+    assert text.startswith("Mode: choose a starting path")
+    assert "new analysis" in text
+    assert "completed results" in text
+    assert "\n" not in text
 
 
 def test_guided_start_setup_new_analysis_navigates_without_loading_or_generating(
@@ -208,9 +221,12 @@ def test_guided_start_setup_new_analysis_navigates_without_loading_or_generating
 
     assert window._guided_workflow_mode == "new_analysis"
     assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepSelectData"
-    assert "Guided Workflow mode: Set up a new analysis" in window._guided_mode_banner_label.text()
+    assert window._guided_mode_banner_label.text().startswith("Mode: New analysis")
+    assert "Input:" in window._guided_mode_banner_label.text()
+    assert "Completed results:" in window._guided_mode_banner_label.text()
     assert window._guided_input_dir_edit.text() == str(input_dir)
-    assert all(not banner.isVisible() for banner in window._guided_skipped_setup_banners.values())
+    assert all(banner.isHidden() for banner in window._guided_skipped_setup_banners.values())
+    assert all(not controls.isHidden() for controls in window._guided_raw_setup_controls.values())
     assert calls == {"open": 0, "preview": 0, "signal": 0}
 
 
@@ -238,8 +254,8 @@ def test_guided_start_open_results_uses_shared_loader_and_navigates_to_diagnosti
     assert calls["open"] == 1
     assert window._guided_workflow_mode == "open_results"
     assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepDiagnostics"
-    assert "Guided Workflow mode: Open results from a completed run" in window._guided_mode_banner_label.text()
-    assert "Raw input setup is unchanged" in window._guided_mode_banner_label.text()
+    assert window._guided_mode_banner_label.text().startswith("Mode: Open Results")
+    assert "Raw input setup unchanged" in window._guided_mode_banner_label.text()
     assert window._guided_input_dir_edit.text() == str(raw_input)
     assert window._input_dir.text() == str(raw_input)
 
@@ -280,7 +296,7 @@ def test_guided_start_open_results_populates_diagnostics_without_overloading_inp
     assert window._guided_signal_f0_generate_btn.isEnabled() is True
     assert calls == {"preview": 0, "signal": 0}
     assert window._guided_workflow_mode == "open_results"
-    assert "Guided Workflow mode: Open results from a completed run" in window._guided_mode_banner_label.text()
+    assert window._guided_mode_banner_label.text().startswith("Mode: Open Results")
     assert window._guided_input_dir_edit.text() == str(raw_input)
     assert window._input_dir.text() == str(raw_input)
     assert window._input_dir.text() != str(run_dir)
@@ -306,6 +322,7 @@ def test_guided_open_results_mode_marks_setup_steps_skipped_and_can_switch_back(
         assert window._guided_workflow_stack.currentWidget().objectName() == object_name
         banner = window._guided_skipped_setup_banners[step_name]
         assert banner.isHidden() is False
+        assert window._guided_raw_setup_controls[step_name].isHidden() is True
         text = " ".join(label.text() for label in banner.findChildren(QLabel))
         assert "reviewing a completed run" in text
         assert "raw/input data" in text
@@ -321,6 +338,38 @@ def test_guided_open_results_mode_marks_setup_steps_skipped_and_can_switch_back(
     assert window._guided_workflow_mode == "new_analysis"
     assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepSelectData"
     assert all(not banner.isVisible() for banner in window._guided_skipped_setup_banners.values())
+    assert all(not controls.isHidden() for controls in window._guided_raw_setup_controls.values())
+
+
+def test_guided_confirm_strategy_and_run_are_skipped_in_open_results_mode(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_args: str(run_dir))
+    window._guided_start_open_results_btn.click()
+
+    for step_name, object_name in [
+        ("Confirm strategy", "guidedConfirmStrategyOpenResultsSkipped"),
+        ("Run", "guidedRunOpenResultsSkipped"),
+    ]:
+        idx = list(GUIDED_WORKFLOW_STEPS).index(step_name)
+        window._guided_workflow_stepper.setCurrentRow(idx)
+        panel = window._guided_workflow_tab.findChild(QGroupBox, object_name)
+        assert panel is not None
+        assert panel.isHidden() is False
+        text = " ".join(label.text() for label in panel.findChildren(QLabel))
+        assert "Open Results mode" in panel.title()
+        assert "Completed" in text or "completed" in text
+        button_texts = {button.text() for button in panel.findChildren(QPushButton)}
+        assert {"Go to Diagnostics", "Switch to new analysis setup"} <= button_texts
+
+    run_panel = window._guided_workflow_tab.findChild(QGroupBox, "guidedRunOpenResultsSkipped")
+    run_panel.findChild(QPushButton, "guidedRunOpenResultsSkippedGoToDiagnostics").click()
+    assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepDiagnostics"
+
+    idx = list(GUIDED_WORKFLOW_STEPS).index("Run")
+    window._guided_workflow_stepper.setCurrentRow(idx)
+    run_panel.findChild(QPushButton, "guidedRunOpenResultsSkippedSwitchToNewAnalysis").click()
+    assert window._guided_workflow_mode == "new_analysis"
+    assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepSelectData"
 
 
 def test_full_control_open_results_still_uses_same_completed_loader(window, tmp_path, monkeypatch):
@@ -752,7 +801,7 @@ def test_guided_setup_summary_reports_correction_state_without_validation_claim(
     text = window._guided_setup_summary_label.text()
 
     assert "Status: not validated" in text
-    assert "diagnostics and strategy confirmation are not wired yet" in text
+    assert "completed-run diagnostics are explicit actions" in text
     assert "Reference correction method:" in text
     assert "adaptive_event_gated_regression" in text
     assert "Guided correction intent: Adaptive Event-Gated Fit" in text
@@ -762,6 +811,14 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Diagnostics"))
 
     assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepDiagnostics"
+    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedDiagnosticsCompletedRunSection").title() == "Completed run"
+    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedDiagnosticsActionsSection").title() == "Diagnostic actions"
+    assert (
+        window._guided_workflow_tab.findChild(QGroupBox, "guidedDiagnosticsGeneratedOutputsSection").title()
+        == "Generated diagnostic outputs"
+    )
+    actions_section = window._guided_workflow_tab.findChild(QGroupBox, "guidedDiagnosticsActionsSection")
+    assert isinstance(actions_section.layout(), QVBoxLayout)
     assert window._guided_diagnostics_status_label.text() == "Diagnostics: not generated; no completed run loaded"
     assert "Reference correction method:" in window._guided_diagnostics_context_label.text()
     assert "Decision-Support Audit: coming later / read-only evidence" in window._guided_diagnostics_context_label.text()
@@ -769,6 +826,9 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
     assert "Global linear baseline comparison" in window._guided_diagnostics_slot_labels
     assert "Decision-Support Audit evidence" in window._guided_diagnostics_slot_labels
     assert "not generated" in window._guided_diagnostics_slot_labels["Fit stability"].text()
+    assert window._guided_diagnostics_completed_run_content.isHidden() is True
+    assert window._guided_diagnostics_context_content.isHidden() is True
+    assert window._guided_diagnostics_slot_labels["Fit stability"].isHidden() is True
     assert "No completed run is loaded" in window._guided_diagnostics_completed_run_label.text()
     assert "Load a completed run to generate preview-only correction comparisons" in window._guided_preview_source_status_label.text()
     assert window._guided_preview_generate_btn.text() == "Generate preview comparison"
@@ -779,11 +839,17 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
     assert signal_panel is not None
     assert preview_panel is not None
     assert signal_panel is not preview_panel
+    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedCorrectionPreviewArtifactsPanel").isChecked() is False
+    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedSignalOnlyF0ArtifactsPanel").isChecked() is False
     assert "Load a completed run to generate Signal-Only F0 diagnostic review artifacts" in (
         window._guided_signal_f0_source_status_label.text()
     )
     assert window._guided_signal_f0_generate_btn.text() == "Generate Signal-Only F0 diagnostic review"
     assert window._guided_signal_f0_generate_btn.isEnabled() is False
+    output_summary = window._guided_generated_outputs_summary_label.text()
+    assert "Correction preview: not generated." in output_summary
+    assert "Signal-Only F0 diagnostic: not generated." in output_summary
+    assert "Load a completed run" not in output_summary
 
 
 def test_guided_correction_preview_panel_populates_from_loaded_completed_run(window, tmp_path, monkeypatch):
@@ -792,7 +858,10 @@ def test_guided_correction_preview_panel_populates_from_loaded_completed_run(win
     _load_preview_completed_run(window, run_dir, monkeypatch)
 
     assert "Preview is generated from the loaded completed run" in window._guided_preview_source_status_label.text()
-    assert str(run_dir) in window._guided_preview_source_status_label.text()
+    if len(str(run_dir)) > 60:
+        assert str(run_dir) not in window._guided_preview_source_status_label.text()
+    assert window._display_path(str(run_dir)) in window._guided_preview_source_status_label.text()
+    assert window._guided_preview_source_status_label.toolTip() == str(run_dir)
     assert [window._guided_preview_roi_combo.itemText(i) for i in range(window._guided_preview_roi_combo.count())] == [
         "CH1",
         "CH2",
@@ -812,6 +881,7 @@ def test_guided_correction_preview_panel_populates_from_loaded_completed_run(win
     assert "Signal-Only F0" not in method_text
     assert "Decision-Support Audit" not in method_text
     assert "No Correction" not in method_text
+    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedCorrectionPreviewArtifactsPanel").isChecked() is False
 
 
 def test_guided_signal_only_f0_panel_populates_from_loaded_completed_run(window, tmp_path, monkeypatch):
@@ -822,7 +892,10 @@ def test_guided_signal_only_f0_panel_populates_from_loaded_completed_run(window,
     assert "Diagnostic review is generated from the loaded completed run" in (
         window._guided_signal_f0_source_status_label.text()
     )
-    assert str(run_dir) in window._guided_signal_f0_source_status_label.text()
+    if len(str(run_dir)) > 60:
+        assert str(run_dir) not in window._guided_signal_f0_source_status_label.text()
+    assert window._display_path(str(run_dir)) in window._guided_signal_f0_source_status_label.text()
+    assert window._guided_signal_f0_source_status_label.toolTip() == str(run_dir)
     assert [window._guided_signal_f0_roi_combo.itemText(i) for i in range(window._guided_signal_f0_roi_combo.count())] == [
         "CH1",
         "CH2",
@@ -835,6 +908,33 @@ def test_guided_signal_only_f0_panel_populates_from_loaded_completed_run(window,
     assert window._guided_signal_f0_generate_btn.isEnabled() is True
     method_text = " ".join(cb.text() for cb in window._guided_preview_method_checkboxes.values())
     assert "Signal-Only F0" not in method_text
+    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedSignalOnlyF0ArtifactsPanel").isChecked() is False
+
+
+def test_guided_diagnostics_long_completed_run_paths_are_compact_in_visible_labels(window, tmp_path, monkeypatch):
+    long_base = tmp_path / ("long_completed_run_path_segment_" * 3)
+    long_base.mkdir()
+    run_dir = _make_preview_completed_run(long_base)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._set_guided_workflow_mode("open_results")
+
+    full_path = str(run_dir)
+    assert len(full_path) > 60
+    compact_path = window._display_path(full_path)
+
+    visible_labels = [
+        window._guided_mode_banner_label,
+        window._guided_preview_source_status_label,
+        window._guided_signal_f0_source_status_label,
+    ]
+    for label in visible_labels:
+        assert compact_path in label.text()
+        assert full_path not in label.text()
+
+    assert window._guided_preview_source_status_label.toolTip() == full_path
+    assert window._guided_signal_f0_source_status_label.toolTip() == full_path
+    assert full_path in window._guided_diagnostics_completed_run_label.text()
+    assert window._guided_diagnostics_completed_run_content.isHidden() is True
 
 
 def test_guided_correction_preview_button_generates_backend_preview_read_only(window, tmp_path, monkeypatch):
@@ -876,6 +976,14 @@ def test_guided_correction_preview_button_generates_backend_preview_read_only(wi
     assert not (preview_dir / "MANIFEST.json").exists()
     assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
     assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
+    output_summary = window._guided_generated_outputs_summary_label.text()
+    assert "Correction preview: success" in output_summary
+    assert "Signal-Only F0 diagnostic: not generated." in output_summary
+    assert "Preview comparison ready" not in output_summary
+    preview_output_dir = str(window._guided_preview_last_result["preview_output_dir"])
+    assert window._display_path(preview_output_dir) in output_summary
+    if len(preview_output_dir) > 60:
+        assert preview_output_dir not in output_summary
 
 
 def test_guided_signal_only_f0_button_generates_backend_diagnostic_read_only(window, tmp_path, monkeypatch):
@@ -924,6 +1032,10 @@ def test_guided_signal_only_f0_button_generates_backend_diagnostic_read_only(win
     assert not (phasic / "features").exists()
     assert not (phasic / "applied_dff").exists()
     assert not (run_dir / "manifest.csv").exists()
+    output_summary = window._guided_generated_outputs_summary_label.text()
+    assert "Correction preview: not generated." in output_summary
+    assert "Signal-Only F0 diagnostic: success" in output_summary
+    assert "diagnostic review ready" not in output_summary.lower()
 
 
 def test_guided_correction_preview_does_not_auto_generate(window, tmp_path, monkeypatch):
@@ -1014,6 +1126,9 @@ def test_guided_correction_preview_result_marks_stale_on_selection_change(window
     window._guided_preview_chunk_combo.setCurrentIndex(1)
 
     assert "Displayed preview is stale because the preview selection changed" in window._guided_preview_status_label.text()
+    output_summary = window._guided_generated_outputs_summary_label.text()
+    assert "Correction preview: success stale" in output_summary
+    assert "Displayed preview is stale" not in output_summary
 
 
 def test_guided_signal_only_f0_result_displays_partial_failed_and_does_not_select_strategy(window, tmp_path, monkeypatch):
@@ -1052,6 +1167,9 @@ def test_guided_signal_only_f0_result_displays_partial_failed_and_does_not_selec
         if window._guided_signal_f0_chunk_table.item(row, col) is not None
     )
     assert "failed" in table_text
+    output_summary = window._guided_generated_outputs_summary_label.text()
+    assert "Signal-Only F0 diagnostic: partial" in output_summary
+    assert "chunk 1: failed" in output_summary
     assert window._guided_correction_intent == before_intent
 
     def _fake_failed(*_args, **_kwargs):
@@ -1073,6 +1191,9 @@ def test_guided_signal_only_f0_result_displays_partial_failed_and_does_not_selec
     window._guided_signal_f0_generate_btn.click()
     assert "failed" in window._guided_signal_f0_status_label.text().lower()
     assert "source failed" in window._guided_signal_f0_messages_label.text()
+    output_summary = window._guided_generated_outputs_summary_label.text()
+    assert "Signal-Only F0 diagnostic: failed" in output_summary
+    assert "source failed" in output_summary
     assert window._guided_correction_intent == before_intent
 
 
@@ -1087,6 +1208,9 @@ def test_guided_signal_only_f0_result_marks_stale_on_selection_change(window, tm
     assert "Displayed Signal-Only F0 diagnostic review is stale because the selection changed" in (
         window._guided_signal_f0_status_label.text()
     )
+    output_summary = window._guided_generated_outputs_summary_label.text()
+    assert "Signal-Only F0 diagnostic: success stale" in output_summary
+    assert "Displayed Signal-Only F0" not in output_summary
 
 
 def test_guided_correction_preview_refresh_preserves_non_default_selection_with_result(window, tmp_path, monkeypatch):
@@ -1216,3 +1340,15 @@ def test_guided_diagnostics_step_has_no_generation_or_execution_buttons(window):
     }
     assert button_texts.isdisjoint(forbidden)
     assert "Generate preview comparison" in button_texts
+
+
+def test_guided_visible_text_does_not_use_stale_shell_or_completed_loader_wording(window):
+    labels = [
+        label.text()
+        for label in window._guided_workflow_tab.findChildren(QLabel)
+        if label.text() and not label.isHidden()
+    ]
+    visible_text = "\n".join(labels)
+    assert "Stage 1 shell only" not in visible_text
+    assert "does not wire a completed-run loader into the Guided Workflow" not in visible_text
+    assert "Production runs and applied-dF/F routing still use Full Control" in visible_text

@@ -1484,8 +1484,8 @@ class MainWindow(QMainWindow):
         stepper_layout.setSpacing(10)
 
         intro = QLabel(
-            "Stage 1 shell only. Guided Workflow does not run analysis, write "
-            "manifests, or route applied-dF/F yet. Use Full Control for real runs."
+            "Guided Workflow supports setup review and completed-run diagnostics. "
+            "Production runs and applied-dF/F routing still use Full Control."
         )
         intro.setWordWrap(True)
         intro.setObjectName("guidedWorkflowStageNotice")
@@ -1504,6 +1504,9 @@ class MainWindow(QMainWindow):
         self._guided_workflow_stack.setObjectName("guidedWorkflowStepStack")
         self._guided_workflow_mode = "start"
         self._guided_diagnostics_status = "not_generated"
+        self._guided_raw_setup_controls = {}
+        self._guided_open_results_mode_panels = {}
+        self._guided_new_analysis_mode_panels = {}
         for widget in (
             self._build_guided_start_step(),
             self._build_guided_select_data_step(),
@@ -1518,6 +1521,9 @@ class MainWindow(QMainWindow):
         self._guided_workflow_stepper.currentRowChanged.connect(
             self._guided_workflow_stack.setCurrentIndex
         )
+        self._guided_workflow_stepper.currentRowChanged.connect(
+            lambda _idx: self._refresh_guided_mode_display()
+        )
 
         content_wrap = QWidget()
         content_layout = QVBoxLayout(content_wrap)
@@ -1528,6 +1534,7 @@ class MainWindow(QMainWindow):
         self._guided_mode_banner_label.setProperty("guidedStatusPill", True)
         self._guided_mode_banner_label.setWordWrap(True)
         self._guided_mode_banner_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_mode_banner_label)
         content_layout.addWidget(self._guided_mode_banner_label, 0)
         content_layout.addWidget(self._guided_workflow_stack, 1)
         content_layout.addWidget(self._build_guided_setup_summary_panel(), 0)
@@ -1557,6 +1564,7 @@ class MainWindow(QMainWindow):
         self._guided_setup_summary_label.setProperty("guidedMutedText", True)
         self._guided_setup_summary_label.setWordWrap(True)
         self._guided_setup_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_setup_summary_label)
         content_layout.addWidget(self._guided_setup_summary_label)
         layout.addWidget(self._guided_setup_summary_content)
         self._guided_setup_summary_content.setVisible(False)
@@ -1568,8 +1576,11 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setObjectName(object_name)
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         scroll.setFrameShape(QScrollArea.NoFrame)
         panel = QWidget()
+        panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
@@ -1596,17 +1607,12 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
 
-        status_group = QGroupBox("Current workflow context")
-        status_group.setObjectName("guidedStartStatusPanel")
-        status_layout = QVBoxLayout(status_group)
-        status_layout.setContentsMargins(10, 10, 10, 10)
         self._guided_start_status_label = QLabel("")
         self._guided_start_status_label.setObjectName("guidedStartStatusLabel")
         self._guided_start_status_label.setProperty("guidedSecondaryText", True)
         self._guided_start_status_label.setWordWrap(True)
         self._guided_start_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        status_layout.addWidget(self._guided_start_status_label)
-        layout.addWidget(status_group)
+        self._guided_start_status_label.setVisible(False)
 
         setup_group = QGroupBox("Set up a new analysis")
         setup_group.setObjectName("guidedStartSetupNewAnalysisCard")
@@ -1617,6 +1623,13 @@ class MainWindow(QMainWindow):
         setup_desc.setProperty("guidedSecondaryText", True)
         setup_desc.setWordWrap(True)
         setup_layout.addWidget(setup_desc)
+        self._guided_start_setup_status_label = QLabel("Input folder: not selected")
+        self._guided_start_setup_status_label.setObjectName("guidedStartSetupStatus")
+        self._guided_start_setup_status_label.setProperty("guidedMutedText", True)
+        self._guided_start_setup_status_label.setWordWrap(True)
+        self._guided_start_setup_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_start_setup_status_label)
+        setup_layout.addWidget(self._guided_start_setup_status_label)
         self._guided_start_setup_btn = QPushButton("Set up new analysis")
         self._guided_start_setup_btn.setObjectName("guidedStartSetupNewAnalysisButton")
         self._guided_start_setup_btn.clicked.connect(self._on_guided_start_setup_new_analysis)
@@ -1635,6 +1648,13 @@ class MainWindow(QMainWindow):
         open_desc.setProperty("guidedSecondaryText", True)
         open_desc.setWordWrap(True)
         open_layout.addWidget(open_desc)
+        self._guided_start_open_status_label = QLabel("Completed run: none")
+        self._guided_start_open_status_label.setObjectName("guidedStartOpenResultsStatus")
+        self._guided_start_open_status_label.setProperty("guidedMutedText", True)
+        self._guided_start_open_status_label.setWordWrap(True)
+        self._guided_start_open_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_start_open_status_label)
+        open_layout.addWidget(self._guided_start_open_status_label)
         self._guided_start_open_results_btn = QPushButton("Open Results...")
         self._guided_start_open_results_btn.setObjectName("guidedStartOpenResultsButton")
         self._guided_start_open_results_btn.clicked.connect(self._on_guided_start_open_results)
@@ -1647,7 +1667,6 @@ class MainWindow(QMainWindow):
             "Start",
             [
                 "Choose whether this Guided Workflow session starts from raw/input data or from an existing completed run.",
-                "Input folder remains raw/input data. Open Results loads completed-run outputs for review and diagnostics.",
             ],
             start,
         )
@@ -1679,17 +1698,24 @@ class MainWindow(QMainWindow):
         return group
 
     def _build_guided_select_data_step(self) -> QWidget:
+        wrapper = QWidget()
+        wrapper.setObjectName("guidedSelectDataStepContent")
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.setSpacing(10)
+        wrapper_layout.addWidget(self._build_guided_skipped_setup_banner("Select data"))
+
         controls = QWidget()
         controls.setObjectName("guidedSelectDataControls")
         form = QFormLayout(controls)
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(8)
-        form.addRow("", self._build_guided_skipped_setup_banner("Select data"))
 
         self._guided_input_dir_edit = QLineEdit()
         self._guided_input_dir_edit.setObjectName("guidedInputDirectory")
         self._guided_input_dir_edit.setToolTip(self._input_dir.toolTip())
+        self._make_guided_widget_shrinkable(self._guided_input_dir_edit)
         input_row = QHBoxLayout()
         input_row.addWidget(self._guided_input_dir_edit)
         input_browse = QPushButton("Browse...")
@@ -1703,6 +1729,7 @@ class MainWindow(QMainWindow):
         self._guided_output_dir_edit = QLineEdit()
         self._guided_output_dir_edit.setObjectName("guidedOutputDirectory")
         self._guided_output_dir_edit.setToolTip(self._output_dir.toolTip())
+        self._make_guided_widget_shrinkable(self._guided_output_dir_edit)
         output_row = QHBoxLayout()
         output_row.addWidget(self._guided_output_dir_edit)
         output_browse = QPushButton("Browse...")
@@ -1717,6 +1744,9 @@ class MainWindow(QMainWindow):
         self._guided_format_combo.setObjectName("guidedFormatCombo")
         self._guided_format_combo.addItems(list(FORMAT_CHOICES))
         self._guided_format_combo.setToolTip(self._format_combo.toolTip())
+        self._guided_format_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._guided_format_combo.setMinimumContentsLength(8)
+        self._make_guided_widget_shrinkable(self._guided_format_combo)
         form.addRow("Format:", self._guided_format_combo)
 
         self._guided_resolved_format_label = QLabel("Resolved format will appear after discovery/validation.")
@@ -1757,6 +1787,8 @@ class MainWindow(QMainWindow):
 
         self._connect_guided_setup_sync()
         self._sync_guided_setup_from_full()
+        self._guided_raw_setup_controls["Select data"] = controls
+        wrapper_layout.addWidget(controls)
         return self._build_guided_step_scroll(
             "guidedStepSelectData",
             "Select data",
@@ -1764,17 +1796,23 @@ class MainWindow(QMainWindow):
                 "These controls mirror the existing setup state used by Full Control. They do not run analysis.",
                 "ROI discovery uses the existing discovery path and shared ROI inclusion state.",
             ],
-            controls,
+            wrapper,
         )
 
     def _build_guided_recording_structure_step(self) -> QWidget:
+        wrapper = QWidget()
+        wrapper.setObjectName("guidedRecordingStructureStepContent")
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.setSpacing(10)
+        wrapper_layout.addWidget(self._build_guided_skipped_setup_banner("Recording structure"))
+
         controls = QWidget()
         controls.setObjectName("guidedRecordingStructureControls")
         form = QFormLayout(controls)
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(8)
-        form.addRow("", self._build_guided_skipped_setup_banner("Recording structure"))
 
         self._guided_acquisition_mode_combo = QComboBox()
         self._guided_acquisition_mode_combo.setObjectName("guidedAcquisitionModeCombo")
@@ -1784,18 +1822,23 @@ class MainWindow(QMainWindow):
                 self._acquisition_mode_combo.itemData(idx),
             )
         self._guided_acquisition_mode_combo.setToolTip(self._acquisition_mode_combo.toolTip())
+        self._guided_acquisition_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._guided_acquisition_mode_combo.setMinimumContentsLength(8)
+        self._make_guided_widget_shrinkable(self._guided_acquisition_mode_combo)
         form.addRow("Acquisition mode:", self._guided_acquisition_mode_combo)
 
         self._guided_sessions_per_hour_edit = QLineEdit()
         self._guided_sessions_per_hour_edit.setObjectName("guidedSessionsPerHour")
         self._guided_sessions_per_hour_edit.setPlaceholderText(self._sph_edit.placeholderText())
         self._guided_sessions_per_hour_edit.setToolTip(self._sph_edit.toolTip())
+        self._make_guided_widget_shrinkable(self._guided_sessions_per_hour_edit)
         form.addRow("Sessions/hour:", self._guided_sessions_per_hour_edit)
 
         self._guided_session_duration_edit = QLineEdit()
         self._guided_session_duration_edit.setObjectName("guidedSessionDuration")
         self._guided_session_duration_edit.setPlaceholderText(self._duration_edit.placeholderText())
         self._guided_session_duration_edit.setToolTip(self._duration_edit.toolTip())
+        self._make_guided_widget_shrinkable(self._guided_session_duration_edit)
         form.addRow("Session duration (s):", self._guided_session_duration_edit)
 
         self._guided_continuous_window_sec_spin = QDoubleSpinBox()
@@ -1834,6 +1877,8 @@ class MainWindow(QMainWindow):
 
         self._connect_guided_setup_sync()
         self._sync_guided_setup_from_full()
+        self._guided_raw_setup_controls["Recording structure"] = controls
+        wrapper_layout.addWidget(controls)
         return self._build_guided_step_scroll(
             "guidedStepRecordingStructure",
             "Recording structure",
@@ -1841,7 +1886,7 @@ class MainWindow(QMainWindow):
                 "These controls mirror the acquisition and timing state used by Full Control.",
                 "Guided Workflow uses non-overlapping continuous windows; the continuous step remains derived from the window length.",
             ],
-            controls,
+            wrapper,
         )
 
     def _connect_guided_setup_sync(self) -> None:
@@ -1979,7 +2024,7 @@ class MainWindow(QMainWindow):
         )
         lines = [
             "Status: not validated. Use Full Control for real validation/runs.",
-            "Correction cards configure setup state only; diagnostics and strategy confirmation are not wired yet.",
+            "Correction cards configure setup state only; completed-run diagnostics are explicit actions.",
             f"Input: {state['input_dir'] or '(not set)'}",
             f"Output: {state['output_dir'] or '(not set)'}",
             f"Format: {state['format']} | Resolved: {resolved}",
@@ -2005,6 +2050,17 @@ class MainWindow(QMainWindow):
         self._refresh_guided_mode_display()
         self._refresh_guided_start_panel()
 
+    def _display_path(self, path: str, *, max_chars: int = 60) -> str:
+        text = str(path or "").strip()
+        if len(text) <= max_chars:
+            return text
+        return "..." + text[-(max_chars - 3):]
+
+    def _make_guided_widget_shrinkable(self, widget: QWidget) -> None:
+        widget.setSizePolicy(QSizePolicy.Ignored, widget.sizePolicy().verticalPolicy())
+        if hasattr(widget, "setMinimumWidth"):
+            widget.setMinimumWidth(0)
+
     def _refresh_guided_mode_display(self) -> None:
         mode = getattr(self, "_guided_workflow_mode", "start")
         input_dir = self._input_dir.text().strip() if hasattr(self, "_input_dir") else ""
@@ -2016,26 +2072,43 @@ class MainWindow(QMainWindow):
         )
         if hasattr(self, "_guided_mode_banner_label"):
             if mode == "new_analysis":
+                full_text = (
+                    "Mode: New analysis - "
+                    f"Input: {input_dir or 'not selected'} - "
+                    f"Completed results: {run_dir if has_loaded_results else 'none'}"
+                )
                 text = (
-                    "Guided Workflow mode: Set up a new analysis\n"
-                    f"Input folder: {input_dir or 'not selected'}\n"
-                    f"Completed run loaded for diagnostics: {run_dir if has_loaded_results else 'none'}"
+                    "Mode: New analysis - "
+                    f"Input: {self._display_path(input_dir) if input_dir else 'not selected'} - "
+                    f"Completed results: {self._display_path(run_dir) if has_loaded_results else 'none'}"
                 )
             elif mode == "open_results":
+                full_text = (
+                    "Mode: Open Results - "
+                    f"Completed run: {run_dir if has_loaded_results else 'none'} - "
+                    "Raw input setup unchanged"
+                )
                 text = (
-                    "Guided Workflow mode: Open results from a completed run\n"
-                    f"Loaded completed run: {run_dir if has_loaded_results else 'none'}\n"
-                    "Raw input setup is unchanged."
+                    "Mode: Open Results - "
+                    f"Completed run: {self._display_path(run_dir) if has_loaded_results else 'none'} - "
+                    "Raw input setup unchanged"
                 )
             else:
+                full_text = "Mode: choose a starting path - set up a new analysis or open completed results."
                 text = (
-                    "Guided Workflow mode: Choose a starting path\n"
-                    "Start from raw/input data or open a completed run for review."
+                    "Mode: choose a starting path - set up a new analysis or open completed results."
                 )
             self._guided_mode_banner_label.setText(text)
+            self._guided_mode_banner_label.setToolTip(full_text)
         skipped = mode == "open_results"
         for banner in getattr(self, "_guided_skipped_setup_banners", {}).values():
             banner.setVisible(bool(skipped))
+        for controls in getattr(self, "_guided_raw_setup_controls", {}).values():
+            controls.setVisible(not skipped)
+        for panel in getattr(self, "_guided_open_results_mode_panels", {}).values():
+            panel.setVisible(skipped)
+        for panel in getattr(self, "_guided_new_analysis_mode_panels", {}).values():
+            panel.setVisible(not skipped)
 
     def _refresh_guided_start_panel(self) -> None:
         if not hasattr(self, "_guided_start_status_label"):
@@ -2064,6 +2137,21 @@ class MainWindow(QMainWindow):
         else:
             lines.append("No input data selected.")
         self._guided_start_status_label.setText("\n".join(lines))
+        if hasattr(self, "_guided_start_setup_status_label"):
+            input_display = self._display_path(input_dir) if input_dir else "not selected"
+            self._guided_start_setup_status_label.setText(
+                f"Input folder: {input_display}"
+            )
+            self._guided_start_setup_status_label.setToolTip(input_dir)
+            self._guided_start_setup_btn.setText(
+                "Continue setup" if getattr(self, "_guided_workflow_mode", "start") == "new_analysis" else "Set up new analysis"
+            )
+        if hasattr(self, "_guided_start_open_status_label"):
+            run_display = self._display_path(run_dir) if has_loaded_results else "none"
+            self._guided_start_open_status_label.setText(
+                f"Completed run: {run_display}"
+            )
+            self._guided_start_open_status_label.setToolTip(run_dir if has_loaded_results else "")
 
     def _on_guided_start_setup_new_analysis(self) -> None:
         self._set_guided_workflow_mode("new_analysis")
@@ -2082,6 +2170,10 @@ class MainWindow(QMainWindow):
     def _on_guided_switch_to_new_analysis_setup(self) -> None:
         self._set_guided_workflow_mode("new_analysis")
         idx = list(GUIDED_WORKFLOW_STEPS).index("Select data")
+        self._guided_workflow_stepper.setCurrentRow(idx)
+
+    def _on_guided_go_to_diagnostics(self) -> None:
+        idx = list(GUIDED_WORKFLOW_STEPS).index("Diagnostics")
         self._guided_workflow_stepper.setCurrentRow(idx)
 
     def _sync_line_edit_value(self, target: QLineEdit, text: str) -> None:
@@ -2311,13 +2403,14 @@ class MainWindow(QMainWindow):
             )
             self._guided_correction_sync_connected = True
         self._sync_guided_correction_from_full()
+        self._guided_raw_setup_controls["Correction approach"] = cards
         wrapper_layout.addWidget(cards)
         return self._build_guided_step_scroll(
             "guidedStepCorrectionApproach",
             "Correction approach",
             [
-                "Stage 1 correction cards are static and non-executing. They do not change config, run diagnostics, write manifests, or route analysis.",
-                "Correction preview is encouraged in the future guided path, but is not required or wired in Stage 1.",
+                "Correction cards are static and non-executing. They do not change config, run diagnostics, write manifests, or route analysis.",
+                "Use Diagnostics after opening completed results to generate explicit preview-only evidence.",
             ],
             wrapper,
         )
@@ -2329,7 +2422,7 @@ class MainWindow(QMainWindow):
         card.setProperty("guidedCorrectionCardTitle", title)
         card.setProperty("guidedCorrectionCard", True)
         card.setProperty("guidedCorrectionCardNonExecuting", True)
-        # Stage 1 cards are deliberately non-executing; no clicked/changed signals are connected here.
+        # Guided correction cards are deliberately non-executing; no clicked/changed signals are connected here.
         layout = QVBoxLayout(card)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
@@ -2344,7 +2437,7 @@ class MainWindow(QMainWindow):
         helper_label.setProperty("guidedSecondaryText", True)
         helper_label.setWordWrap(True)
         layout.addWidget(helper_label)
-        stage_label = QLabel("Stage 1: not wired to execution.")
+        stage_label = QLabel("Setup intent only; not wired to execution.")
         stage_label.setObjectName(f"guidedCorrectionCard{safe_name}Stage")
         stage_label.setProperty("guidedMutedText", True)
         stage_label.setWordWrap(True)
@@ -2427,8 +2520,8 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        status_group = QGroupBox("Diagnostics status")
-        status_group.setObjectName("guidedDiagnosticsStatusPanel")
+        status_group = QGroupBox("Completed run")
+        status_group.setObjectName("guidedDiagnosticsCompletedRunSection")
         status_layout = QVBoxLayout(status_group)
         status_layout.setContentsMargins(10, 10, 10, 10)
         status_layout.setSpacing(6)
@@ -2437,45 +2530,75 @@ class MainWindow(QMainWindow):
         self._guided_diagnostics_status_label.setProperty("guidedStatusPill", True)
         self._guided_diagnostics_status_label.setWordWrap(True)
         status_layout.addWidget(self._guided_diagnostics_status_label)
-        status_note = QLabel(
-            "Diagnostics are read-only evidence. Stage 4A does not generate previews, "
-            "run correction tuning, validate, or execute analysis."
-        )
+        status_note = QLabel("Read-only status for the loaded completed run.")
         status_note.setObjectName("guidedDiagnosticsStatusNote")
         status_note.setProperty("guidedSecondaryText", True)
         status_note.setWordWrap(True)
         status_layout.addWidget(status_note)
         layout.addWidget(status_group)
 
-        context_group = QGroupBox("Current correction context")
+        context_group = QGroupBox("Completed-run details")
         context_group.setObjectName("guidedDiagnosticsCorrectionContextPanel")
+        context_group.setCheckable(True)
+        context_group.setChecked(False)
         context_layout = QVBoxLayout(context_group)
         context_layout.setContentsMargins(10, 10, 10, 10)
+        self._guided_diagnostics_context_content = QWidget()
+        self._guided_diagnostics_context_content.setObjectName("guidedDiagnosticsCorrectionContextContent")
+        context_content_layout = QVBoxLayout(self._guided_diagnostics_context_content)
+        context_content_layout.setContentsMargins(0, 0, 0, 0)
         self._guided_diagnostics_context_label = QLabel("")
         self._guided_diagnostics_context_label.setObjectName("guidedDiagnosticsCorrectionContext")
         self._guided_diagnostics_context_label.setProperty("guidedSecondaryText", True)
         self._guided_diagnostics_context_label.setWordWrap(True)
         self._guided_diagnostics_context_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        context_layout.addWidget(self._guided_diagnostics_context_label)
+        self._make_guided_widget_shrinkable(self._guided_diagnostics_context_label)
+        context_content_layout.addWidget(self._guided_diagnostics_context_label)
+        context_layout.addWidget(self._guided_diagnostics_context_content)
+        self._guided_diagnostics_context_content.setVisible(False)
+        context_group.toggled.connect(self._guided_diagnostics_context_content.setVisible)
         layout.addWidget(context_group)
 
-        completed_group = QGroupBox("Loaded completed-run diagnostic artifacts")
+        completed_group = QGroupBox("Loaded artifact details")
         completed_group.setObjectName("guidedDiagnosticsCompletedRunPanel")
+        completed_group.setCheckable(True)
+        completed_group.setChecked(False)
         completed_layout = QVBoxLayout(completed_group)
         completed_layout.setContentsMargins(10, 10, 10, 10)
+        self._guided_diagnostics_completed_run_content = QWidget()
+        self._guided_diagnostics_completed_run_content.setObjectName("guidedDiagnosticsCompletedRunContent")
+        completed_content_layout = QVBoxLayout(self._guided_diagnostics_completed_run_content)
+        completed_content_layout.setContentsMargins(0, 0, 0, 0)
         self._guided_diagnostics_completed_run_label = QLabel("")
         self._guided_diagnostics_completed_run_label.setObjectName("guidedDiagnosticsCompletedRunArtifacts")
         self._guided_diagnostics_completed_run_label.setProperty("guidedSecondaryText", True)
         self._guided_diagnostics_completed_run_label.setWordWrap(True)
         self._guided_diagnostics_completed_run_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        completed_layout.addWidget(self._guided_diagnostics_completed_run_label)
+        self._make_guided_widget_shrinkable(self._guided_diagnostics_completed_run_label)
+        completed_content_layout.addWidget(self._guided_diagnostics_completed_run_label)
+        completed_layout.addWidget(self._guided_diagnostics_completed_run_content)
+        self._guided_diagnostics_completed_run_content.setVisible(False)
+        completed_group.toggled.connect(self._guided_diagnostics_completed_run_content.setVisible)
         layout.addWidget(completed_group)
+
+        actions_group = QGroupBox("Diagnostic actions")
+        actions_group.setObjectName("guidedDiagnosticsActionsSection")
+        actions_layout = QVBoxLayout(actions_group)
+        actions_layout.setContentsMargins(10, 10, 10, 10)
+        actions_layout.setSpacing(10)
 
         preview_group = QGroupBox("Correction preview comparison")
         preview_group.setObjectName("guidedCorrectionPreviewPanel")
         preview_layout = QVBoxLayout(preview_group)
         preview_layout.setContentsMargins(10, 10, 10, 10)
         preview_layout.setSpacing(8)
+        preview_intro = QLabel(
+            "Compare reference-based correction methods from the loaded completed-run cache."
+        )
+        preview_intro.setObjectName("guidedCorrectionPreviewIntro")
+        preview_intro.setProperty("guidedSecondaryText", True)
+        preview_intro.setWordWrap(True)
+        preview_layout.addWidget(preview_intro)
 
         self._guided_preview_source_status_label = QLabel(
             "Load a completed run to generate preview-only correction comparisons."
@@ -2484,22 +2607,29 @@ class MainWindow(QMainWindow):
         self._guided_preview_source_status_label.setProperty("guidedSecondaryText", True)
         self._guided_preview_source_status_label.setWordWrap(True)
         self._guided_preview_source_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_preview_source_status_label)
         preview_layout.addWidget(self._guided_preview_source_status_label)
 
         form = QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
         self._guided_preview_roi_combo = QComboBox()
         self._guided_preview_roi_combo.setObjectName("guidedCorrectionPreviewRoiCombo")
+        self._guided_preview_roi_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._guided_preview_roi_combo.setMinimumContentsLength(6)
+        self._make_guided_widget_shrinkable(self._guided_preview_roi_combo)
         self._guided_preview_roi_combo.currentIndexChanged.connect(self._on_guided_preview_selection_changed)
         form.addRow("ROI", self._guided_preview_roi_combo)
         self._guided_preview_chunk_combo = QComboBox()
         self._guided_preview_chunk_combo.setObjectName("guidedCorrectionPreviewChunkCombo")
+        self._guided_preview_chunk_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._guided_preview_chunk_combo.setMinimumContentsLength(6)
+        self._make_guided_widget_shrinkable(self._guided_preview_chunk_combo)
         self._guided_preview_chunk_combo.currentIndexChanged.connect(self._on_guided_preview_selection_changed)
         form.addRow("Chunk", self._guided_preview_chunk_combo)
         preview_layout.addLayout(form)
 
         self._guided_preview_method_checkboxes: dict[str, QCheckBox] = {}
-        method_row = QHBoxLayout()
+        method_row = QVBoxLayout()
         for method in GUIDED_REFERENCE_PREVIEW_METHODS:
             cb = QCheckBox(GUIDED_CORRECTION_PREVIEW_METHOD_LABELS[method])
             cb.setObjectName(f"guidedCorrectionPreviewMethod{re.sub(r'[^A-Za-z0-9]+', '', method)}")
@@ -2507,7 +2637,6 @@ class MainWindow(QMainWindow):
             cb.stateChanged.connect(self._on_guided_preview_selection_changed)
             self._guided_preview_method_checkboxes[method] = cb
             method_row.addWidget(cb)
-        method_row.addStretch(1)
         preview_layout.addLayout(method_row)
 
         preview_note = QLabel(
@@ -2530,10 +2659,13 @@ class MainWindow(QMainWindow):
         self._guided_preview_status_label.setProperty("guidedSecondaryText", True)
         self._guided_preview_status_label.setWordWrap(True)
         self._guided_preview_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_preview_status_label)
         preview_layout.addWidget(self._guided_preview_status_label)
 
-        artifacts_group = QGroupBox("Preview artifact paths")
+        artifacts_group = QGroupBox("Preview result details")
         artifacts_group.setObjectName("guidedCorrectionPreviewArtifactsPanel")
+        artifacts_group.setCheckable(True)
+        artifacts_group.setChecked(False)
         artifacts_layout = QVBoxLayout(artifacts_group)
         artifacts_layout.setContentsMargins(8, 8, 8, 8)
         artifacts_layout.setSpacing(4)
@@ -2542,8 +2674,8 @@ class MainWindow(QMainWindow):
         self._guided_preview_artifacts_label.setProperty("guidedSecondaryText", True)
         self._guided_preview_artifacts_label.setWordWrap(True)
         self._guided_preview_artifacts_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_preview_artifacts_label)
         artifacts_layout.addWidget(self._guided_preview_artifacts_label)
-        preview_layout.addWidget(artifacts_group)
 
         self._guided_preview_method_table = QTableWidget(0, 5)
         self._guided_preview_method_table.setObjectName("guidedCorrectionPreviewMethodTable")
@@ -2557,22 +2689,42 @@ class MainWindow(QMainWindow):
         self._guided_preview_method_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self._guided_preview_method_table.horizontalHeader().setStretchLastSection(True)
         self._guided_preview_method_table.setMinimumHeight(120)
-        preview_layout.addWidget(self._guided_preview_method_table)
+        self._guided_preview_method_table.setMinimumWidth(0)
+        self._guided_preview_method_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._make_guided_widget_shrinkable(self._guided_preview_method_table)
+        artifacts_layout.addWidget(self._guided_preview_method_table)
 
         self._guided_preview_messages_label = QLabel("")
         self._guided_preview_messages_label.setObjectName("guidedCorrectionPreviewMessages")
         self._guided_preview_messages_label.setProperty("guidedSecondaryText", True)
         self._guided_preview_messages_label.setWordWrap(True)
         self._guided_preview_messages_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        preview_layout.addWidget(self._guided_preview_messages_label)
+        self._make_guided_widget_shrinkable(self._guided_preview_messages_label)
+        artifacts_layout.addWidget(self._guided_preview_messages_label)
 
         self._guided_preview_result_label = QLabel("")
         self._guided_preview_result_label.setObjectName("guidedCorrectionPreviewResult")
         self._guided_preview_result_label.setProperty("guidedSecondaryText", True)
         self._guided_preview_result_label.setWordWrap(True)
         self._guided_preview_result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        preview_layout.addWidget(self._guided_preview_result_label)
-        layout.addWidget(preview_group)
+        self._make_guided_widget_shrinkable(self._guided_preview_result_label)
+        artifacts_layout.addWidget(self._guided_preview_result_label)
+        self._guided_preview_artifacts_detail_widgets = [
+            self._guided_preview_artifacts_label,
+            self._guided_preview_method_table,
+            self._guided_preview_messages_label,
+            self._guided_preview_result_label,
+        ]
+        for widget in self._guided_preview_artifacts_detail_widgets:
+            widget.setVisible(False)
+        artifacts_group.toggled.connect(
+            lambda checked: [
+                widget.setVisible(bool(checked))
+                for widget in getattr(self, "_guided_preview_artifacts_detail_widgets", [])
+            ]
+        )
+        preview_layout.addWidget(artifacts_group)
+        actions_layout.addWidget(preview_group)
 
         signal_group = QGroupBox("Signal-Only F0 diagnostic review")
         signal_group.setObjectName("guidedSignalOnlyF0DiagnosticPanel")
@@ -2581,12 +2733,7 @@ class MainWindow(QMainWindow):
         signal_layout.setSpacing(8)
 
         signal_intro = QLabel(
-            "Signal-Only F0 is an explicit reference-free diagnostic path. It is not a "
-            "fallback from reference correction and is not selected automatically.\n\n"
-            "This creates diagnostic-only Signal-Only F0 review artifacts from the loaded "
-            "completed run. It does not choose a strategy, write a manifest, route "
-            "applied-dF/F, run feature extraction, validate the dataset, or modify "
-            "source/completed-run outputs."
+            "Review a Signal-Only F0 diagnostic for one ROI/chunk without choosing or routing a strategy."
         )
         signal_intro.setObjectName("guidedSignalOnlyF0DiagnosticIntro")
         signal_intro.setProperty("guidedSecondaryText", True)
@@ -2600,18 +2747,25 @@ class MainWindow(QMainWindow):
         self._guided_signal_f0_source_status_label.setProperty("guidedSecondaryText", True)
         self._guided_signal_f0_source_status_label.setWordWrap(True)
         self._guided_signal_f0_source_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_signal_f0_source_status_label)
         signal_layout.addWidget(self._guided_signal_f0_source_status_label)
 
         signal_form = QFormLayout()
         signal_form.setContentsMargins(0, 0, 0, 0)
         self._guided_signal_f0_roi_combo = QComboBox()
         self._guided_signal_f0_roi_combo.setObjectName("guidedSignalOnlyF0RoiCombo")
+        self._guided_signal_f0_roi_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._guided_signal_f0_roi_combo.setMinimumContentsLength(6)
+        self._make_guided_widget_shrinkable(self._guided_signal_f0_roi_combo)
         self._guided_signal_f0_roi_combo.currentIndexChanged.connect(
             self._on_guided_signal_f0_selection_changed
         )
         signal_form.addRow("ROI", self._guided_signal_f0_roi_combo)
         self._guided_signal_f0_chunk_combo = QComboBox()
         self._guided_signal_f0_chunk_combo.setObjectName("guidedSignalOnlyF0ChunkCombo")
+        self._guided_signal_f0_chunk_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._guided_signal_f0_chunk_combo.setMinimumContentsLength(6)
+        self._make_guided_widget_shrinkable(self._guided_signal_f0_chunk_combo)
         self._guided_signal_f0_chunk_combo.currentIndexChanged.connect(
             self._on_guided_signal_f0_selection_changed
         )
@@ -2632,10 +2786,13 @@ class MainWindow(QMainWindow):
         self._guided_signal_f0_status_label.setProperty("guidedSecondaryText", True)
         self._guided_signal_f0_status_label.setWordWrap(True)
         self._guided_signal_f0_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_signal_f0_status_label)
         signal_layout.addWidget(self._guided_signal_f0_status_label)
 
-        signal_artifacts_group = QGroupBox("Signal-Only F0 diagnostic artifact paths")
+        signal_artifacts_group = QGroupBox("Signal-Only F0 result details")
         signal_artifacts_group.setObjectName("guidedSignalOnlyF0ArtifactsPanel")
+        signal_artifacts_group.setCheckable(True)
+        signal_artifacts_group.setChecked(False)
         signal_artifacts_layout = QVBoxLayout(signal_artifacts_group)
         signal_artifacts_layout.setContentsMargins(8, 8, 8, 8)
         signal_artifacts_layout.setSpacing(4)
@@ -2644,8 +2801,8 @@ class MainWindow(QMainWindow):
         self._guided_signal_f0_artifacts_label.setProperty("guidedSecondaryText", True)
         self._guided_signal_f0_artifacts_label.setWordWrap(True)
         self._guided_signal_f0_artifacts_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_signal_f0_artifacts_label)
         signal_artifacts_layout.addWidget(self._guided_signal_f0_artifacts_label)
-        signal_layout.addWidget(signal_artifacts_group)
 
         self._guided_signal_f0_chunk_table = QTableWidget(0, 10)
         self._guided_signal_f0_chunk_table.setObjectName("guidedSignalOnlyF0ChunkTable")
@@ -2670,18 +2827,53 @@ class MainWindow(QMainWindow):
         self._guided_signal_f0_chunk_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self._guided_signal_f0_chunk_table.horizontalHeader().setStretchLastSection(True)
         self._guided_signal_f0_chunk_table.setMinimumHeight(100)
-        signal_layout.addWidget(self._guided_signal_f0_chunk_table)
+        self._guided_signal_f0_chunk_table.setMinimumWidth(0)
+        self._guided_signal_f0_chunk_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._make_guided_widget_shrinkable(self._guided_signal_f0_chunk_table)
+        signal_artifacts_layout.addWidget(self._guided_signal_f0_chunk_table)
 
         self._guided_signal_f0_messages_label = QLabel("")
         self._guided_signal_f0_messages_label.setObjectName("guidedSignalOnlyF0Messages")
         self._guided_signal_f0_messages_label.setProperty("guidedSecondaryText", True)
         self._guided_signal_f0_messages_label.setWordWrap(True)
         self._guided_signal_f0_messages_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        signal_layout.addWidget(self._guided_signal_f0_messages_label)
-        layout.addWidget(signal_group)
+        self._make_guided_widget_shrinkable(self._guided_signal_f0_messages_label)
+        signal_artifacts_layout.addWidget(self._guided_signal_f0_messages_label)
+        self._guided_signal_f0_detail_widgets = [
+            self._guided_signal_f0_artifacts_label,
+            self._guided_signal_f0_chunk_table,
+            self._guided_signal_f0_messages_label,
+        ]
+        for widget in self._guided_signal_f0_detail_widgets:
+            widget.setVisible(False)
+        signal_artifacts_group.toggled.connect(
+            lambda checked: [
+                widget.setVisible(bool(checked))
+                for widget in getattr(self, "_guided_signal_f0_detail_widgets", [])
+            ]
+        )
+        signal_layout.addWidget(signal_artifacts_group)
+        actions_layout.addWidget(signal_group)
+        layout.addWidget(actions_group)
+
+        outputs_group = QGroupBox("Generated diagnostic outputs")
+        outputs_group.setObjectName("guidedDiagnosticsGeneratedOutputsSection")
+        outputs_layout = QVBoxLayout(outputs_group)
+        outputs_layout.setContentsMargins(10, 10, 10, 10)
+        self._guided_generated_outputs_summary_label = QLabel(
+            "No correction preview or Signal-Only F0 diagnostic outputs generated in this session."
+        )
+        self._guided_generated_outputs_summary_label.setObjectName("guidedDiagnosticsGeneratedOutputsSummary")
+        self._guided_generated_outputs_summary_label.setProperty("guidedSecondaryText", True)
+        self._guided_generated_outputs_summary_label.setWordWrap(True)
+        self._make_guided_widget_shrinkable(self._guided_generated_outputs_summary_label)
+        outputs_layout.addWidget(self._guided_generated_outputs_summary_label)
+        layout.addWidget(outputs_group)
 
         slots_group = QGroupBox("Planned diagnostic evidence slots")
         slots_group.setObjectName("guidedDiagnosticsSlotsPanel")
+        slots_group.setCheckable(True)
+        slots_group.setChecked(False)
         slots_layout = QGridLayout(slots_group)
         slots_layout.setContentsMargins(10, 10, 10, 10)
         slots_layout.setSpacing(8)
@@ -2705,14 +2897,18 @@ class MainWindow(QMainWindow):
             label.setWordWrap(True)
             self._guided_diagnostics_slot_labels[slot] = label
             slots_layout.addWidget(label, idx // 3, idx % 3)
+        for label in self._guided_diagnostics_slot_labels.values():
+            label.setVisible(False)
+        slots_group.toggled.connect(
+            lambda checked: [label.setVisible(bool(checked)) for label in self._guided_diagnostics_slot_labels.values()]
+        )
         layout.addWidget(slots_group)
         self._refresh_guided_diagnostics_panel()
         return self._build_guided_step_scroll(
             "guidedStepDiagnostics",
             "Diagnostics",
             [
-                "This step is a read-only diagnostics/status surface. It does not generate diagnostics or run analysis.",
-                "Future stages will attach correction previews, fit stability, correction impact, warning, and read-only Decision-Support Audit evidence.",
+                "Review completed-run status and explicitly generate diagnostic-only artifacts.",
             ],
             diagnostics,
         )
@@ -2801,6 +2997,7 @@ class MainWindow(QMainWindow):
         self._guided_preview_result_stale = True
         if hasattr(self, "_guided_preview_status_label"):
             self._guided_preview_status_label.setText(reason)
+        self._refresh_guided_generated_outputs_summary()
 
     def _guided_signal_f0_mark_stale(
         self,
@@ -2811,6 +3008,7 @@ class MainWindow(QMainWindow):
         self._guided_signal_f0_result_stale = True
         if hasattr(self, "_guided_signal_f0_status_label"):
             self._guided_signal_f0_status_label.setText(reason)
+        self._refresh_guided_generated_outputs_summary()
 
     def _on_guided_preview_selection_changed(self, *_args) -> None:
         self._guided_preview_mark_stale()
@@ -2845,6 +3043,7 @@ class MainWindow(QMainWindow):
             else:
                 message = "Preview comparison ready."
             self._guided_preview_status_label.setText(message)
+        self._refresh_guided_generated_outputs_summary()
 
     def _refresh_guided_signal_f0_enablement(self) -> None:
         if not hasattr(self, "_guided_signal_f0_generate_btn"):
@@ -2870,6 +3069,74 @@ class MainWindow(QMainWindow):
             else:
                 message = "Signal-Only F0 diagnostic review ready."
             self._guided_signal_f0_status_label.setText(message)
+        self._refresh_guided_generated_outputs_summary()
+
+    def _refresh_guided_generated_outputs_summary(self) -> None:
+        if not hasattr(self, "_guided_generated_outputs_summary_label"):
+            return
+        preview_text = self._guided_generated_preview_summary_text()
+        signal_text = self._guided_generated_signal_f0_summary_text()
+        self._guided_generated_outputs_summary_label.setText(
+            f"{preview_text}\n{signal_text}"
+        )
+
+    def _guided_generated_preview_summary_text(self) -> str:
+        if not getattr(self, "_guided_preview_has_result", False):
+            return "Correction preview: not generated."
+        result = getattr(self, "_guided_preview_last_result", {}) or {}
+        status = str(result.get("status") or "unknown")
+        path = str(result.get("preview_output_dir") or result.get("preview_summary_path") or "")
+        stale = " stale" if getattr(self, "_guided_preview_result_stale", False) else ""
+        problem = self._first_result_problem(result)
+        text = f"Correction preview: {status}{stale}"
+        if path:
+            text += f" - {self._display_path(path)}"
+        if problem:
+            text += f" - {problem}"
+        return text
+
+    def _guided_generated_signal_f0_summary_text(self) -> str:
+        if not getattr(self, "_guided_signal_f0_has_result", False):
+            return "Signal-Only F0 diagnostic: not generated."
+        result = getattr(self, "_guided_signal_f0_last_result", {}) or {}
+        status = str(result.get("status") or "unknown")
+        path = str(result.get("output_dir") or result.get("summary_path") or "")
+        stale = " stale" if getattr(self, "_guided_signal_f0_result_stale", False) else ""
+        problem = self._first_result_problem(result)
+        text = f"Signal-Only F0 diagnostic: {status}{stale}"
+        if path:
+            text += f" - {self._display_path(path)}"
+        if problem:
+            text += f" - {problem}"
+        return text
+
+    def _first_result_problem(self, result: dict[str, object]) -> str:
+        for key in ("errors", "warnings"):
+            values = result.get(key) or []
+            if isinstance(values, (list, tuple)) and values:
+                return str(values[0])
+            if isinstance(values, str) and values.strip():
+                return values.strip()
+        statuses = result.get("chunk_statuses") or {}
+        if isinstance(statuses, dict):
+            for chunk_id, status in statuses.items():
+                if not isinstance(status, dict):
+                    continue
+                state = str(status.get("status") or "").lower()
+                error = str(status.get("error") or "").strip()
+                if state in {"failed", "error"} or error:
+                    return f"chunk {chunk_id}: {error or state}"
+        method_statuses = result.get("method_statuses") or {}
+        if isinstance(method_statuses, dict):
+            for method, status in method_statuses.items():
+                if not isinstance(status, dict):
+                    continue
+                state = str(status.get("status") or "").lower()
+                errors = status.get("errors") or []
+                if state in {"failed", "error"} or errors:
+                    detail = "; ".join(str(x) for x in errors) if isinstance(errors, (list, tuple)) else str(errors)
+                    return f"{self._guided_preview_method_label(str(method))}: {detail or state}"
+        return ""
 
     def _refresh_guided_correction_preview_panel(self, artifact_state: dict[str, object]) -> None:
         if not hasattr(self, "_guided_preview_source_status_label"):
@@ -2953,9 +3220,10 @@ class MainWindow(QMainWindow):
             else "Completed-run phasic cache has no ROI/chunk entries for preview."
         )
         self._guided_preview_source_status_label.setText(
-            "Preview is generated from the loaded completed run, separate from the active editable setup:\n"
-            f"{run_dir}"
+            "Preview is generated from the loaded completed run, separate from the active editable setup: "
+            f"{self._display_path(run_dir)}"
         )
+        self._guided_preview_source_status_label.setToolTip(run_dir)
         self._refresh_guided_preview_enablement()
 
     def _format_guided_preview_result(self, result: dict[str, object]) -> str:
@@ -3020,6 +3288,7 @@ class MainWindow(QMainWindow):
             self._guided_preview_messages_label.setText("\n".join(lines))
         if hasattr(self, "_guided_preview_result_label"):
             self._guided_preview_result_label.setText(self._format_guided_preview_result(result))
+        self._refresh_guided_generated_outputs_summary()
 
     def _clear_guided_preview_result_widgets(self) -> None:
         if hasattr(self, "_guided_preview_artifacts_label"):
@@ -3030,6 +3299,7 @@ class MainWindow(QMainWindow):
             self._guided_preview_messages_label.setText("")
         if hasattr(self, "_guided_preview_result_label"):
             self._guided_preview_result_label.setText("")
+        self._refresh_guided_generated_outputs_summary()
 
     def _refresh_guided_signal_f0_panel(self, artifact_state: dict[str, object]) -> None:
         if not hasattr(self, "_guided_signal_f0_source_status_label"):
@@ -3117,9 +3387,10 @@ class MainWindow(QMainWindow):
             else "Completed-run phasic cache has no ROI/chunk entries for Signal-Only F0 diagnostic review."
         )
         self._guided_signal_f0_source_status_label.setText(
-            "Diagnostic review is generated from the loaded completed run, separate from the active editable setup:\n"
-            f"{run_dir}"
+            "Diagnostic review is generated from the loaded completed run, separate from the active editable setup: "
+            f"{self._display_path(run_dir)}"
         )
+        self._guided_signal_f0_source_status_label.setToolTip(run_dir)
         self._refresh_guided_signal_f0_enablement()
 
     def _clear_guided_signal_f0_result_widgets(self) -> None:
@@ -3131,6 +3402,7 @@ class MainWindow(QMainWindow):
             self._guided_signal_f0_chunk_table.setRowCount(0)
         if hasattr(self, "_guided_signal_f0_messages_label"):
             self._guided_signal_f0_messages_label.setText("")
+        self._refresh_guided_generated_outputs_summary()
 
     def _set_signal_f0_table_item(self, row: int, column: int, text: str, tooltip: str = "") -> None:
         item = QTableWidgetItem(str(text or ""))
@@ -3199,6 +3471,7 @@ class MainWindow(QMainWindow):
             if not lines:
                 lines.append("Errors/warnings: none reported by Signal-Only F0 diagnostic backend.")
             self._guided_signal_f0_messages_label.setText("\n".join(lines))
+        self._refresh_guided_generated_outputs_summary()
 
     def _on_generate_guided_signal_only_f0_diagnostic(self) -> None:
         run_dir = str(getattr(self, "_guided_signal_f0_loaded_run_dir", "") or "")
@@ -3374,24 +3647,66 @@ class MainWindow(QMainWindow):
                 label.setText(f"{slot}: {suffix}")
 
     def _build_guided_confirm_strategy_step(self) -> QWidget:
+        wrapper = QWidget()
+        wrapper.setObjectName("guidedConfirmStrategyContent")
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        normal = QLabel(
+            "Future stage: explicitly confirm runnable strategies before applied-dF/F production.\n"
+            "Runnable production strategies are explicit dynamic_fit and signal_only_f0. "
+            "auto, no_correction, and needs_review are not runnable strategies.\n"
+            "This stage does not write manifests or populate applied-dF/F batch rows."
+        )
+        normal.setObjectName("guidedConfirmStrategyNewAnalysisContent")
+        normal.setProperty("guidedSecondaryText", True)
+        normal.setWordWrap(True)
+        self._guided_new_analysis_mode_panels["Confirm strategy"] = normal
+        layout.addWidget(normal)
+        open_panel = self._build_guided_open_results_unavailable_panel(
+            "Confirm strategy is skipped in Open Results mode",
+            "Strategy confirmation is for future new-analysis/applied-dF/F routing. "
+            "Completed-run review currently stays in Diagnostics.",
+            "guidedConfirmStrategyOpenResultsSkipped",
+        )
+        self._guided_open_results_mode_panels["Confirm strategy"] = open_panel
+        layout.addWidget(open_panel)
         return self._build_guided_step_scroll(
             "guidedStepConfirmStrategy",
             "Confirm strategy",
-            [
-                "Future stage: explicitly confirm runnable strategies before applied-dF/F production.",
-                "Runnable production strategies are explicit dynamic_fit and signal_only_f0. auto, no_correction, and needs_review are not runnable strategies.",
-                "Stage 1 does not write manifests or populate applied-dF/F batch rows.",
-            ],
+            [],
+            wrapper,
         )
 
     def _build_guided_run_step(self) -> QWidget:
+        wrapper = QWidget()
+        wrapper.setObjectName("guidedRunContent")
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        normal = QLabel(
+            "Future stage: validation, dry-run, and run controls for the guided path.\n"
+            "Existing Full Control buttons remain the only active validation/run path. "
+            "This Guided step does not execute analysis."
+        )
+        normal.setObjectName("guidedRunNewAnalysisContent")
+        normal.setProperty("guidedSecondaryText", True)
+        normal.setWordWrap(True)
+        self._guided_new_analysis_mode_panels["Run"] = normal
+        layout.addWidget(normal)
+        open_panel = self._build_guided_open_results_unavailable_panel(
+            "Run is skipped in Open Results mode",
+            "Open Results mode reviews an existing completed run. It does not validate, "
+            "launch the pipeline, or create new analysis outputs.",
+            "guidedRunOpenResultsSkipped",
+        )
+        self._guided_open_results_mode_panels["Run"] = open_panel
+        layout.addWidget(open_panel)
         return self._build_guided_step_scroll(
             "guidedStepRun",
             "Run",
-            [
-                "Future stage: validation, dry-run, and run controls for the guided path.",
-                "For Stage 1, existing Full Control buttons remain the only active validation/run path. This Guided step does not execute analysis.",
-            ],
+            [],
+            wrapper,
         )
 
     def _build_guided_review_step(self) -> QWidget:
@@ -3399,10 +3714,39 @@ class MainWindow(QMainWindow):
             "guidedStepReview",
             "Review",
             [
-                "Future stage: completed-run review, diagnostics, plots, retuning/reanalysis entry points, and provenance.",
-                "Stage 1 does not wire a completed-run loader into the Guided Workflow.",
+                "Review summarizes completed-run outputs when results are loaded.",
+                "Additional downstream reanalysis and applied-dF/F routing remain future guided stages.",
             ],
         )
+
+    def _build_guided_open_results_unavailable_panel(
+        self,
+        title: str,
+        message: str,
+        object_name: str,
+    ) -> QGroupBox:
+        group = QGroupBox(title)
+        group.setObjectName(object_name)
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        label = QLabel(message)
+        label.setObjectName(f"{object_name}Message")
+        label.setProperty("guidedSecondaryText", True)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        row = QHBoxLayout()
+        diagnostics_btn = QPushButton("Go to Diagnostics")
+        diagnostics_btn.setObjectName(f"{object_name}GoToDiagnostics")
+        diagnostics_btn.clicked.connect(self._on_guided_go_to_diagnostics)
+        row.addWidget(diagnostics_btn)
+        switch_btn = QPushButton("Switch to new analysis setup")
+        switch_btn.setObjectName(f"{object_name}SwitchToNewAnalysis")
+        switch_btn.clicked.connect(self._on_guided_switch_to_new_analysis_setup)
+        row.addWidget(switch_btn)
+        row.addStretch(1)
+        layout.addLayout(row)
+        group.setVisible(False)
+        return group
 
     def _build_guided_planned_stages_panel(self) -> QGroupBox:
         group = QGroupBox("Planned stages / not yet wired")
