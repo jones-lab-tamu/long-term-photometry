@@ -685,6 +685,37 @@ def test_guided_draft_run_plan_preview_reports_contract_errors(window, tmp_path,
     assert "no_auto_selection must be true" in text
 
 
+def test_guided_draft_run_plan_preview_reports_malformed_stored_evidence_chunk(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    run_key = str(run_dir.resolve())
+    window._guided_strategy_choices[(run_key, "CH1")] = {
+        "strategy": "signal_only_f0",
+        "strategy_label": "Signal-Only F0",
+        "choice_source": "explicit_user_mark",
+        "no_auto_selection": True,
+        "confirmed": True,
+        "completed_run_dir": run_key,
+        "roi": "CH1",
+        "evidence_chunk": "bad",
+        "evidence_summary": {"preview": "Correction preview: success", "signal_only_f0": "", "stale": False},
+    }
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._refresh_guided_confirm_strategy_panel()
+
+    text = window._guided_draft_run_plan_preview_label.text()
+    assert "Status: draft has errors" in text
+    assert "guided strategy choice for ROI CH1 has invalid evidence_chunk" in text
+    assert "chunk_id must be an integer evidence reference" in text
+    assert "- CH1: Signal-Only F0 | evidence reviewed chunk bad" in text
+    assert "evidence reviewed chunk 0" not in text
+
+
 def test_guided_draft_run_plan_preview_writes_no_outputs(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     before = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))

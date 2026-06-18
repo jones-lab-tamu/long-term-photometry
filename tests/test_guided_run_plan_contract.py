@@ -261,3 +261,111 @@ def test_duplicate_roi_entries_fail_validation():
     errors = validate_plan_contract(plan)
 
     assert any("duplicate ROI plan entry: CH1" in err for err in errors)
+
+
+def test_serialized_non_dict_roi_plan_item_is_rejected():
+    payload = serialize_plan_to_dict(_valid_plan())
+    payload["roi_plan"].append("CH3")
+
+    with pytest.raises(GuidedRunPlanContractError, match="roi_plan item must be an object"):
+        deserialize_plan_from_dict(payload)
+
+
+def test_serialized_non_dict_evidence_item_is_rejected():
+    payload = serialize_plan_to_dict(_valid_plan())
+    payload["roi_plan"][0]["evidence"].append("chunk 2")
+
+    with pytest.raises(GuidedRunPlanContractError, match="evidence item must be an object"):
+        deserialize_plan_from_dict(payload)
+
+
+def test_serialized_missing_evidence_chunk_is_rejected():
+    payload = serialize_plan_to_dict(_valid_plan())
+    del payload["roi_plan"][0]["evidence"][0]["chunk_id"]
+
+    with pytest.raises(GuidedRunPlanContractError, match="chunk_id is required"):
+        deserialize_plan_from_dict(payload)
+
+
+def test_serialized_non_integer_evidence_chunk_is_rejected():
+    payload = serialize_plan_to_dict(_valid_plan())
+    payload["roi_plan"][0]["evidence"][0]["chunk_id"] = "bad"
+
+    with pytest.raises(GuidedRunPlanContractError, match="chunk_id must be an integer"):
+        deserialize_plan_from_dict(payload)
+
+
+def test_serialized_negative_evidence_chunk_is_rejected():
+    payload = serialize_plan_to_dict(_valid_plan())
+    payload["roi_plan"][0]["evidence"][0]["chunk_id"] = -1
+
+    with pytest.raises(GuidedRunPlanContractError, match="chunk_id must be non-negative"):
+        deserialize_plan_from_dict(payload)
+
+
+def test_manually_constructed_invalid_evidence_chunks_fail_validation():
+    missing = _valid_plan()
+    missing.roi_plan[0].evidence = [EvidenceChunkReview(chunk_id=None)]  # type: ignore[arg-type]
+    assert any("chunk_id is required" in err for err in validate_plan_contract(missing))
+
+    non_integer = _valid_plan()
+    non_integer.roi_plan[0].evidence = [EvidenceChunkReview(chunk_id="bad")]  # type: ignore[arg-type]
+    assert any("chunk_id must be an integer" in err for err in validate_plan_contract(non_integer))
+
+    negative = _valid_plan()
+    negative.roi_plan[0].evidence = [EvidenceChunkReview(chunk_id=-1)]
+    assert any("chunk_id must be non-negative" in err for err in validate_plan_contract(negative))
+
+
+def test_serialized_malformed_feature_event_profile_item_is_rejected():
+    payload = serialize_plan_to_dict(_valid_plan())
+    payload["feature_event_profiles"].append(["default"])
+
+    with pytest.raises(
+        GuidedRunPlanContractError,
+        match="feature_event_profiles item must be an object",
+    ):
+        deserialize_plan_from_dict(payload)
+
+
+def test_serialized_malformed_feature_event_evidence_preview_item_is_rejected():
+    payload = serialize_plan_to_dict(_valid_plan())
+    payload["feature_event_profiles"][0]["evidence_previews"].append("chunk 3")
+
+    with pytest.raises(GuidedRunPlanContractError, match="evidence item must be an object"):
+        deserialize_plan_from_dict(payload)
+
+
+def test_serialized_malformed_correction_strategy_structure_is_rejected():
+    payload = serialize_plan_to_dict(_valid_plan())
+    payload["roi_plan"][0]["correction_strategy"] = "signal_only_f0"
+
+    with pytest.raises(GuidedRunPlanContractError, match="correction_strategy must be an object"):
+        deserialize_plan_from_dict(payload)
+
+
+def test_serialized_forbidden_and_automatic_correction_strategy_still_fail_validation():
+    payload = serialize_plan_to_dict(_valid_plan())
+    payload["roi_plan"][0]["correction_strategy"]["strategy"] = "auto"
+    plan = deserialize_plan_from_dict(payload)
+    errors = validate_plan_contract(plan)
+    assert any("forbidden runnable correction strategy: auto" in err for err in errors)
+
+    payload = serialize_plan_to_dict(_valid_plan())
+    payload["roi_plan"][0]["correction_strategy"]["choice_source"] = "diagnostic_success"
+    payload["roi_plan"][0]["correction_strategy"]["no_auto_selection"] = False
+    plan = deserialize_plan_from_dict(payload)
+    errors = validate_plan_contract(plan)
+    assert any("choice_source must be explicit_user_mark" in err for err in errors)
+    assert any("no_auto_selection must be true" in err for err in errors)
+
+
+def test_roi_entry_missing_roi_and_invalid_status_fail_validation():
+    plan = _valid_plan()
+    plan.roi_plan[0].roi = ""
+    plan.roi_plan[0].roi_status = "needs_review"
+
+    errors = validate_plan_contract(plan)
+
+    assert any("roi_plan[0] missing roi" in err for err in errors)
+    assert any("invalid roi_status: needs_review" in err for err in errors)

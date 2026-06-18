@@ -3844,11 +3844,12 @@ class MainWindow(QMainWindow):
         )
         self._guided_confirm_mark_btn.setEnabled(can_mark)
 
-    def _build_guided_draft_run_plan(self) -> GuidedRunPlan | None:
+    def _build_guided_draft_run_plan(self) -> tuple[GuidedRunPlan | None, list[str]]:
         run_dir = self._current_guided_completed_run_dir()
         if not run_dir:
-            return None
+            return None, []
         entries: list[RoiPlanEntry] = []
+        preview_errors: list[str] = []
         choices = getattr(self, "_guided_strategy_choices", {})
         for key, choice in sorted(choices.items(), key=lambda item: str(item[0])):
             if not isinstance(key, tuple) or len(key) != 2:
@@ -3857,6 +3858,7 @@ class MainWindow(QMainWindow):
             if os.path.realpath(str(choice_run_dir or "")) != run_dir:
                 continue
             if not isinstance(choice, dict):
+                preview_errors.append(f"guided strategy choice for ROI {roi} is malformed")
                 continue
             evidence_summary = choice.get("evidence_summary", {})
             if isinstance(evidence_summary, dict):
@@ -3869,10 +3871,18 @@ class MainWindow(QMainWindow):
             else:
                 evidence_text = str(evidence_summary or "").strip()
                 evidence_stale = False
-            try:
-                evidence_chunk = int(choice.get("evidence_chunk"))
-            except Exception:
-                evidence_chunk = 0
+            raw_evidence_chunk = choice.get("evidence_chunk")
+            evidence_chunk = raw_evidence_chunk
+            if (
+                raw_evidence_chunk is None
+                or isinstance(raw_evidence_chunk, bool)
+                or not isinstance(raw_evidence_chunk, int)
+                or raw_evidence_chunk < 0
+            ):
+                preview_errors.append(
+                    f"guided strategy choice for ROI {choice.get('roi') or roi} "
+                    "has invalid evidence_chunk"
+                )
             entries.append(
                 RoiPlanEntry(
                     roi=str(choice.get("roi") or roi),
@@ -3897,13 +3907,16 @@ class MainWindow(QMainWindow):
                     ],
                 )
             )
-        return GuidedRunPlan(
-            mode="completed_run_planning",
-            source=GuidedPlanSource(
-                source_mode="completed_run",
-                completed_run_dir=run_dir,
+        return (
+            GuidedRunPlan(
+                mode="completed_run_planning",
+                source=GuidedPlanSource(
+                    source_mode="completed_run",
+                    completed_run_dir=run_dir,
+                ),
+                roi_plan=entries,
             ),
-            roi_plan=entries,
+            preview_errors,
         )
 
     def _guided_draft_run_plan_summary_text(
@@ -3938,8 +3951,10 @@ class MainWindow(QMainWindow):
         label = getattr(self, "_guided_draft_run_plan_preview_label", None)
         if label is None:
             return
-        plan = self._build_guided_draft_run_plan()
-        errors = validate_plan_contract(plan) if plan is not None else []
+        plan, preview_errors = self._build_guided_draft_run_plan()
+        errors = list(preview_errors)
+        if plan is not None:
+            errors.extend(validate_plan_contract(plan))
         label.setText(self._guided_draft_run_plan_summary_text(plan, errors))
         if plan is not None and plan.source.completed_run_dir:
             label.setToolTip(f"Completed run: {plan.source.completed_run_dir}")

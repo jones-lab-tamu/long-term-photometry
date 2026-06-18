@@ -48,6 +48,36 @@ class GuidedRunPlanContractError(ValueError):
     """Raised when a Guided run-plan contract is invalid."""
 
 
+def _require_mapping(value: Any, path: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise GuidedRunPlanContractError(f"{path} must be an object")
+    return value
+
+
+def _optional_mapping(value: Any, path: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return _require_mapping(value, path)
+
+
+def _require_list(value: Any, path: str) -> list[Any]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise GuidedRunPlanContractError(f"{path} must be a list")
+    return value
+
+
+def _require_non_negative_int(value: Any, path: str) -> int:
+    if value is None:
+        raise GuidedRunPlanContractError(f"{path} is required")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise GuidedRunPlanContractError(f"{path} must be an integer evidence reference")
+    if value < 0:
+        raise GuidedRunPlanContractError(f"{path} must be non-negative")
+    return int(value)
+
+
 def is_runnable_correction_strategy(strategy: str) -> bool:
     return str(strategy or "").strip() in RUNNABLE_CORRECTION_STRATEGIES
 
@@ -81,6 +111,7 @@ class GuidedPlanSource:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GuidedPlanSource":
+        data = _require_mapping(data, "source")
         return cls(
             source_mode=str(data.get("source_mode") or ""),
             raw_input_dir=data.get("raw_input_dir"),
@@ -112,11 +143,24 @@ class EvidenceChunkReview:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EvidenceChunkReview":
+        data = _require_mapping(data, "evidence item")
         return cls(
-            chunk_id=int(data.get("chunk_id")),
+            chunk_id=_require_non_negative_int(data.get("chunk_id"), "evidence item chunk_id"),
             role=str(data.get("role") or "representative_evidence"),
-            diagnostic_artifact_paths=[str(x) for x in data.get("diagnostic_artifact_paths", [])],
-            preview_artifact_paths=[str(x) for x in data.get("preview_artifact_paths", [])],
+            diagnostic_artifact_paths=[
+                str(x)
+                for x in _require_list(
+                    data.get("diagnostic_artifact_paths", []),
+                    "evidence item diagnostic_artifact_paths",
+                )
+            ],
+            preview_artifact_paths=[
+                str(x)
+                for x in _require_list(
+                    data.get("preview_artifact_paths", []),
+                    "evidence item preview_artifact_paths",
+                )
+            ],
             summary=str(data.get("summary") or ""),
             stale=bool(data.get("stale", False)),
         )
@@ -139,6 +183,7 @@ class CorrectionStrategyChoice:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CorrectionStrategyChoice":
+        data = _require_mapping(data, "correction_strategy")
         return cls(
             strategy=str(data.get("strategy") or ""),
             strategy_label=str(data.get("strategy_label") or ""),
@@ -168,7 +213,10 @@ class RoiPlanEntry:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RoiPlanEntry":
+        data = _require_mapping(data, "roi_plan item")
         choice = data.get("correction_strategy")
+        if choice is not None and not isinstance(choice, dict):
+            raise GuidedRunPlanContractError("roi_plan item correction_strategy must be an object")
         return cls(
             roi=str(data.get("roi") or ""),
             roi_status=str(data.get("roi_status") or "planned"),
@@ -177,8 +225,7 @@ class RoiPlanEntry:
             ),
             evidence=[
                 EvidenceChunkReview.from_dict(item)
-                for item in data.get("evidence", [])
-                if isinstance(item, dict)
+                for item in _require_list(data.get("evidence", []), "roi_plan item evidence")
             ],
             feature_event_profile_id=data.get("feature_event_profile_id"),
         )
@@ -201,14 +248,20 @@ class FeatureEventProfile:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "FeatureEventProfile":
+        data = _require_mapping(data, "feature_event_profiles item")
+        config_fields = data.get("config_fields") or {}
+        if not isinstance(config_fields, dict):
+            raise GuidedRunPlanContractError("feature_event_profiles item config_fields must be an object")
         return cls(
             profile_id=str(data.get("profile_id") or ""),
             scope=str(data.get("scope") or "run"),
-            config_fields=dict(data.get("config_fields") or {}),
+            config_fields=dict(config_fields),
             evidence_previews=[
                 EvidenceChunkReview.from_dict(item)
-                for item in data.get("evidence_previews", [])
-                if isinstance(item, dict)
+                for item in _require_list(
+                    data.get("evidence_previews", []),
+                    "feature_event_profiles item evidence_previews",
+                )
             ],
         )
 
@@ -230,7 +283,7 @@ class OutputPolicy:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "OutputPolicy":
-        data = data or {}
+        data = _optional_mapping(data, "output_policy") or {}
         return cls(
             output_root=data.get("output_root"),
             overwrite=bool(data.get("overwrite", False)),
@@ -258,7 +311,7 @@ class PlanProvenanceFlags:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "PlanProvenanceFlags":
-        data = data or {}
+        data = _optional_mapping(data, "provenance") or {}
         return cls(
             no_manifest_written=bool(data.get("no_manifest_written", True)),
             no_pipeline_execution=bool(data.get("no_pipeline_execution", True)),
@@ -293,6 +346,7 @@ class GuidedRunPlan:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GuidedRunPlan":
+        data = _require_mapping(data, "guided run plan")
         return cls(
             schema_version=str(data.get("schema_version") or ""),
             plan_id=str(data.get("plan_id") or ""),
@@ -300,13 +354,14 @@ class GuidedRunPlan:
             source=GuidedPlanSource.from_dict(data.get("source") or {}),
             roi_plan=[
                 RoiPlanEntry.from_dict(item)
-                for item in data.get("roi_plan", [])
-                if isinstance(item, dict)
+                for item in _require_list(data.get("roi_plan", []), "roi_plan")
             ],
             feature_event_profiles=[
                 FeatureEventProfile.from_dict(item)
-                for item in data.get("feature_event_profiles", [])
-                if isinstance(item, dict)
+                for item in _require_list(
+                    data.get("feature_event_profiles", []),
+                    "feature_event_profiles",
+                )
             ],
             output_policy=OutputPolicy.from_dict(data.get("output_policy")),
             provenance=PlanProvenanceFlags.from_dict(data.get("provenance")),
@@ -407,10 +462,11 @@ def _validate_choice(choice: CorrectionStrategyChoice, prefix: str, errors: list
 def _validate_evidence(evidence: EvidenceChunkReview, prefix: str, errors: list[str]) -> None:
     if evidence.role not in EVIDENCE_ROLES:
         errors.append(f"{prefix}: invalid evidence role: {evidence.role}")
-    try:
-        chunk_id = int(evidence.chunk_id)
-    except Exception:
+    if evidence.chunk_id is None:
+        errors.append(f"{prefix}: chunk_id is required")
+        return
+    if isinstance(evidence.chunk_id, bool) or not isinstance(evidence.chunk_id, int):
         errors.append(f"{prefix}: chunk_id must be an integer evidence reference")
         return
-    if chunk_id < 0:
+    if evidence.chunk_id < 0:
         errors.append(f"{prefix}: chunk_id must be non-negative")
