@@ -592,6 +592,16 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
     assert window._guided_preview_generate_btn.text() == "Generate preview comparison"
     assert window._guided_preview_generate_btn.isEnabled() is False
     assert window._guided_preview_result_label.text() == ""
+    signal_panel = window._guided_workflow_tab.findChild(QGroupBox, "guidedSignalOnlyF0DiagnosticPanel")
+    preview_panel = window._guided_workflow_tab.findChild(QGroupBox, "guidedCorrectionPreviewPanel")
+    assert signal_panel is not None
+    assert preview_panel is not None
+    assert signal_panel is not preview_panel
+    assert "Load a completed run to generate Signal-Only F0 diagnostic review artifacts" in (
+        window._guided_signal_f0_source_status_label.text()
+    )
+    assert window._guided_signal_f0_generate_btn.text() == "Generate Signal-Only F0 diagnostic review"
+    assert window._guided_signal_f0_generate_btn.isEnabled() is False
 
 
 def test_guided_correction_preview_panel_populates_from_loaded_completed_run(window, tmp_path, monkeypatch):
@@ -620,6 +630,29 @@ def test_guided_correction_preview_panel_populates_from_loaded_completed_run(win
     assert "Signal-Only F0" not in method_text
     assert "Decision-Support Audit" not in method_text
     assert "No Correction" not in method_text
+
+
+def test_guided_signal_only_f0_panel_populates_from_loaded_completed_run(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+
+    assert "Diagnostic review is generated from the loaded completed run" in (
+        window._guided_signal_f0_source_status_label.text()
+    )
+    assert str(run_dir) in window._guided_signal_f0_source_status_label.text()
+    assert [window._guided_signal_f0_roi_combo.itemText(i) for i in range(window._guided_signal_f0_roi_combo.count())] == [
+        "CH1",
+        "CH2",
+    ]
+    assert [
+        window._guided_signal_f0_chunk_combo.itemData(i)
+        for i in range(window._guided_signal_f0_chunk_combo.count())
+    ] == [0, 1]
+    assert window._guided_signal_f0_chunk_combo.currentData() == 0
+    assert window._guided_signal_f0_generate_btn.isEnabled() is True
+    method_text = " ".join(cb.text() for cb in window._guided_preview_method_checkboxes.values())
+    assert "Signal-Only F0" not in method_text
 
 
 def test_guided_correction_preview_button_generates_backend_preview_read_only(window, tmp_path, monkeypatch):
@@ -663,6 +696,54 @@ def test_guided_correction_preview_button_generates_backend_preview_read_only(wi
     assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
 
 
+def test_guided_signal_only_f0_button_generates_backend_diagnostic_read_only(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    phasic = run_dir / "_analysis" / "phasic_out"
+    before = {
+        str(path.relative_to(phasic)): path.read_bytes()
+        for path in sorted(phasic.rglob("*"))
+        if path.is_file()
+    }
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+
+    window._guided_signal_f0_generate_btn.click()
+
+    assert "Signal-Only F0 diagnostic review generated: success." in window._guided_signal_f0_status_label.text()
+    artifacts_text = window._guided_signal_f0_artifacts_label.text()
+    assert "Diagnostic directory:" in artifacts_text
+    assert "Provenance JSON:" in artifacts_text
+    assert "Summary JSON:" in artifacts_text
+    assert "Chunk CSV:" in artifacts_text
+    assert "Strategy recommendation: none; not selected." in artifacts_text
+    table = window._guided_signal_f0_chunk_table
+    assert table.rowCount() == 1
+    table_text = " ".join(
+        table.item(row, col).text()
+        for row in range(table.rowCount())
+        for col in range(table.columnCount())
+        if table.item(row, col) is not None
+    )
+    assert "0" in table_text
+    assert "success" in table_text
+    assert "best" not in table_text.lower()
+    diagnostic_dir = run_dir / "_guided_workflow" / "signal_only_f0_diagnostics"
+    assert diagnostic_dir.exists()
+    assert list(diagnostic_dir.glob("*/signal_only_f0_diagnostic_provenance.json"))
+    assert list(diagnostic_dir.glob("*/signal_only_f0_diagnostic_summary.json"))
+    assert list(diagnostic_dir.glob("*/signal_only_f0_diagnostic_chunks.csv"))
+    assert not list(diagnostic_dir.glob("*.png"))
+    after = {
+        str(path.relative_to(phasic)): path.read_bytes()
+        for path in sorted(phasic.rglob("*"))
+        if path.is_file()
+    }
+    assert after == before
+    assert not (phasic / "qc").exists()
+    assert not (phasic / "features").exists()
+    assert not (phasic / "applied_dff").exists()
+    assert not (run_dir / "manifest.csv").exists()
+
+
 def test_guided_correction_preview_does_not_auto_generate(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     calls = {"count": 0}
@@ -695,6 +776,52 @@ def test_guided_correction_preview_does_not_auto_generate(window, tmp_path, monk
     assert calls["count"] == 1
 
 
+def test_guided_signal_only_f0_diagnostic_is_explicit_button_only(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    calls = {"count": 0, "kwargs": None, "args": None}
+
+    def _fake_backend(*args, **kwargs):
+        calls["count"] += 1
+        calls["args"] = args
+        calls["kwargs"] = kwargs
+        return {
+            "ok": True,
+            "status": "success",
+            "diagnostic_id": "signal_only_f0_test",
+            "output_dir": "diagnostic_dir",
+            "provenance_path": "provenance.json",
+            "summary_path": "summary.json",
+            "chunk_csv_path": "chunks.csv",
+            "trace_csv_paths": [],
+            "warnings": [],
+            "errors": [],
+            "chunk_statuses": {"1": {"status": "success", "error": ""}},
+        }
+
+    monkeypatch.setattr(main_window_module, "run_signal_only_f0_diagnostic_review", _fake_backend)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Diagnostics"))
+    assert calls["count"] == 0
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    assert calls["count"] == 0
+    window._guided_signal_f0_roi_combo.setCurrentIndex(1)
+    window._guided_signal_f0_chunk_combo.setCurrentIndex(1)
+    assert calls["count"] == 0
+    window._guided_correction_select_buttons["Adaptive Event-Gated Fit"].click()
+    assert calls["count"] == 0
+    window._guided_preview_generate_btn.click()
+    assert calls["count"] == 0
+
+    window._guided_signal_f0_generate_btn.click()
+
+    assert calls["count"] == 1
+    assert calls["args"] == (str(run_dir),)
+    assert calls["kwargs"]["roi"] == "CH2"
+    assert calls["kwargs"]["chunk_ids"] == [1]
+    assert calls["kwargs"]["allow_existing"] is False
+    assert "output_dir" not in calls["kwargs"]
+    assert "diagnostic_id" not in calls["kwargs"]
+
+
 def test_guided_correction_preview_result_marks_stale_on_selection_change(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
@@ -705,6 +832,79 @@ def test_guided_correction_preview_result_marks_stale_on_selection_change(window
     window._guided_preview_chunk_combo.setCurrentIndex(1)
 
     assert "Displayed preview is stale because the preview selection changed" in window._guided_preview_status_label.text()
+
+
+def test_guided_signal_only_f0_result_displays_partial_failed_and_does_not_select_strategy(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    before_intent = window._guided_correction_intent
+
+    def _fake_backend(*_args, **_kwargs):
+        return {
+            "ok": False,
+            "status": "partial",
+            "diagnostic_id": "signal_only_f0_test",
+            "output_dir": "diagnostic_dir",
+            "provenance_path": "provenance.json",
+            "summary_path": "summary.json",
+            "chunk_csv_path": "",
+            "trace_csv_paths": [],
+            "warnings": ["caution"],
+            "errors": ["chunk 1: failed"],
+            "chunk_statuses": {
+                "0": {"status": "success", "error": ""},
+                "1": {"status": "failed", "error": "failed"},
+            },
+        }
+
+    monkeypatch.setattr(main_window_module, "run_signal_only_f0_diagnostic_review", _fake_backend)
+
+    window._guided_signal_f0_generate_btn.click()
+
+    assert "partial" in window._guided_signal_f0_status_label.text()
+    assert "chunk 1: failed" in window._guided_signal_f0_messages_label.text()
+    table_text = " ".join(
+        window._guided_signal_f0_chunk_table.item(row, col).text()
+        for row in range(window._guided_signal_f0_chunk_table.rowCount())
+        for col in range(window._guided_signal_f0_chunk_table.columnCount())
+        if window._guided_signal_f0_chunk_table.item(row, col) is not None
+    )
+    assert "failed" in table_text
+    assert window._guided_correction_intent == before_intent
+
+    def _fake_failed(*_args, **_kwargs):
+        return {
+            "ok": False,
+            "status": "failed",
+            "diagnostic_id": "signal_only_f0_test",
+            "output_dir": "",
+            "provenance_path": "",
+            "summary_path": "",
+            "chunk_csv_path": "",
+            "trace_csv_paths": [],
+            "warnings": [],
+            "errors": ["source failed"],
+            "chunk_statuses": {},
+        }
+
+    monkeypatch.setattr(main_window_module, "run_signal_only_f0_diagnostic_review", _fake_failed)
+    window._guided_signal_f0_generate_btn.click()
+    assert "failed" in window._guided_signal_f0_status_label.text().lower()
+    assert "source failed" in window._guided_signal_f0_messages_label.text()
+    assert window._guided_correction_intent == before_intent
+
+
+def test_guided_signal_only_f0_result_marks_stale_on_selection_change(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_signal_f0_generate_btn.click()
+    assert "Signal-Only F0 diagnostic review generated: success." in window._guided_signal_f0_status_label.text()
+
+    window._guided_signal_f0_chunk_combo.setCurrentIndex(1)
+
+    assert "Displayed Signal-Only F0 diagnostic review is stale because the selection changed" in (
+        window._guided_signal_f0_status_label.text()
+    )
 
 
 def test_guided_correction_preview_refresh_preserves_non_default_selection_with_result(window, tmp_path, monkeypatch):

@@ -77,6 +77,10 @@ from photometry_pipeline.preview.correction_preview import (
     resolve_completed_run_preview_source,
     run_guided_correction_preview_comparison,
 )
+from photometry_pipeline.signal_only_f0_diagnostics import (
+    resolve_completed_run_signal_only_f0_source,
+    run_signal_only_f0_diagnostic_review,
+)
 from photometry_pipeline.tuning.cache_downstream_retune import run_cache_downstream_retune
 from photometry_pipeline.tuning.cache_correction_retune import run_cache_correction_retune
 from tools.run_applied_dff_batch import AppliedDffBatchError, run_applied_dff_batch
@@ -2372,6 +2376,112 @@ class MainWindow(QMainWindow):
         preview_layout.addWidget(self._guided_preview_result_label)
         layout.addWidget(preview_group)
 
+        signal_group = QGroupBox("Signal-Only F0 diagnostic review")
+        signal_group.setObjectName("guidedSignalOnlyF0DiagnosticPanel")
+        signal_layout = QVBoxLayout(signal_group)
+        signal_layout.setContentsMargins(10, 10, 10, 10)
+        signal_layout.setSpacing(8)
+
+        signal_intro = QLabel(
+            "Signal-Only F0 is an explicit reference-free diagnostic path. It is not a "
+            "fallback from reference correction and is not selected automatically.\n\n"
+            "This creates diagnostic-only Signal-Only F0 review artifacts from the loaded "
+            "completed run. It does not choose a strategy, write a manifest, route "
+            "applied-dF/F, run feature extraction, validate the dataset, or modify "
+            "source/completed-run outputs."
+        )
+        signal_intro.setObjectName("guidedSignalOnlyF0DiagnosticIntro")
+        signal_intro.setProperty("guidedSecondaryText", True)
+        signal_intro.setWordWrap(True)
+        signal_layout.addWidget(signal_intro)
+
+        self._guided_signal_f0_source_status_label = QLabel(
+            "Load a completed run to generate Signal-Only F0 diagnostic review artifacts."
+        )
+        self._guided_signal_f0_source_status_label.setObjectName("guidedSignalOnlyF0SourceStatus")
+        self._guided_signal_f0_source_status_label.setProperty("guidedSecondaryText", True)
+        self._guided_signal_f0_source_status_label.setWordWrap(True)
+        self._guided_signal_f0_source_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        signal_layout.addWidget(self._guided_signal_f0_source_status_label)
+
+        signal_form = QFormLayout()
+        signal_form.setContentsMargins(0, 0, 0, 0)
+        self._guided_signal_f0_roi_combo = QComboBox()
+        self._guided_signal_f0_roi_combo.setObjectName("guidedSignalOnlyF0RoiCombo")
+        self._guided_signal_f0_roi_combo.currentIndexChanged.connect(
+            self._on_guided_signal_f0_selection_changed
+        )
+        signal_form.addRow("ROI", self._guided_signal_f0_roi_combo)
+        self._guided_signal_f0_chunk_combo = QComboBox()
+        self._guided_signal_f0_chunk_combo.setObjectName("guidedSignalOnlyF0ChunkCombo")
+        self._guided_signal_f0_chunk_combo.currentIndexChanged.connect(
+            self._on_guided_signal_f0_selection_changed
+        )
+        signal_form.addRow("Chunk", self._guided_signal_f0_chunk_combo)
+        signal_layout.addLayout(signal_form)
+
+        self._guided_signal_f0_generate_btn = QPushButton(
+            "Generate Signal-Only F0 diagnostic review"
+        )
+        self._guided_signal_f0_generate_btn.setObjectName("guidedSignalOnlyF0GenerateButton")
+        self._guided_signal_f0_generate_btn.clicked.connect(
+            self._on_generate_guided_signal_only_f0_diagnostic
+        )
+        signal_layout.addWidget(self._guided_signal_f0_generate_btn, alignment=Qt.AlignLeft)
+
+        self._guided_signal_f0_status_label = QLabel("")
+        self._guided_signal_f0_status_label.setObjectName("guidedSignalOnlyF0Status")
+        self._guided_signal_f0_status_label.setProperty("guidedSecondaryText", True)
+        self._guided_signal_f0_status_label.setWordWrap(True)
+        self._guided_signal_f0_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        signal_layout.addWidget(self._guided_signal_f0_status_label)
+
+        signal_artifacts_group = QGroupBox("Signal-Only F0 diagnostic artifact paths")
+        signal_artifacts_group.setObjectName("guidedSignalOnlyF0ArtifactsPanel")
+        signal_artifacts_layout = QVBoxLayout(signal_artifacts_group)
+        signal_artifacts_layout.setContentsMargins(8, 8, 8, 8)
+        signal_artifacts_layout.setSpacing(4)
+        self._guided_signal_f0_artifacts_label = QLabel("No Signal-Only F0 diagnostic artifacts generated.")
+        self._guided_signal_f0_artifacts_label.setObjectName("guidedSignalOnlyF0Artifacts")
+        self._guided_signal_f0_artifacts_label.setProperty("guidedSecondaryText", True)
+        self._guided_signal_f0_artifacts_label.setWordWrap(True)
+        self._guided_signal_f0_artifacts_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        signal_artifacts_layout.addWidget(self._guided_signal_f0_artifacts_label)
+        signal_layout.addWidget(signal_artifacts_group)
+
+        self._guided_signal_f0_chunk_table = QTableWidget(0, 10)
+        self._guided_signal_f0_chunk_table.setObjectName("guidedSignalOnlyF0ChunkTable")
+        self._guided_signal_f0_chunk_table.setHorizontalHeaderLabels(
+            [
+                "Chunk",
+                "Status",
+                "n_samples",
+                "signal finite",
+                "F0 finite",
+                "dF/F finite",
+                "dF/F min",
+                "dF/F median",
+                "negative dF/F",
+                "Error",
+            ]
+        )
+        self._guided_signal_f0_chunk_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._guided_signal_f0_chunk_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._guided_signal_f0_chunk_table.setWordWrap(True)
+        self._guided_signal_f0_chunk_table.verticalHeader().setVisible(False)
+        self._guided_signal_f0_chunk_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self._guided_signal_f0_chunk_table.horizontalHeader().setStretchLastSection(True)
+        self._guided_signal_f0_chunk_table.setMinimumHeight(100)
+        signal_layout.addWidget(self._guided_signal_f0_chunk_table)
+
+        self._guided_signal_f0_messages_label = QLabel("")
+        self._guided_signal_f0_messages_label.setObjectName("guidedSignalOnlyF0Messages")
+        self._guided_signal_f0_messages_label.setProperty("guidedSecondaryText", True)
+        self._guided_signal_f0_messages_label.setWordWrap(True)
+        self._guided_signal_f0_messages_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        signal_layout.addWidget(self._guided_signal_f0_messages_label)
+        layout.addWidget(signal_group)
+
         slots_group = QGroupBox("Planned diagnostic evidence slots")
         slots_group.setObjectName("guidedDiagnosticsSlotsPanel")
         slots_layout = QGridLayout(slots_group)
@@ -2473,6 +2583,20 @@ class MainWindow(QMainWindow):
         except Exception:
             return None
 
+    def _selected_guided_signal_f0_roi(self) -> str:
+        combo = getattr(self, "_guided_signal_f0_roi_combo", None)
+        return str(combo.currentData() or combo.currentText() or "").strip() if combo is not None else ""
+
+    def _selected_guided_signal_f0_chunk(self) -> int | None:
+        combo = getattr(self, "_guided_signal_f0_chunk_combo", None)
+        if combo is None:
+            return None
+        value = combo.currentData()
+        try:
+            return int(value)
+        except Exception:
+            return None
+
     def _guided_preview_mark_stale(self, reason: str = "Displayed preview is stale because the preview selection changed.") -> None:
         if not getattr(self, "_guided_preview_has_result", False):
             return
@@ -2480,9 +2604,23 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_guided_preview_status_label"):
             self._guided_preview_status_label.setText(reason)
 
+    def _guided_signal_f0_mark_stale(
+        self,
+        reason: str = "Displayed Signal-Only F0 diagnostic review is stale because the selection changed.",
+    ) -> None:
+        if not getattr(self, "_guided_signal_f0_has_result", False):
+            return
+        self._guided_signal_f0_result_stale = True
+        if hasattr(self, "_guided_signal_f0_status_label"):
+            self._guided_signal_f0_status_label.setText(reason)
+
     def _on_guided_preview_selection_changed(self, *_args) -> None:
         self._guided_preview_mark_stale()
         self._refresh_guided_preview_enablement()
+
+    def _on_guided_signal_f0_selection_changed(self, *_args) -> None:
+        self._guided_signal_f0_mark_stale()
+        self._refresh_guided_signal_f0_enablement()
 
     def _refresh_guided_preview_enablement(self) -> None:
         if not hasattr(self, "_guided_preview_generate_btn"):
@@ -2509,6 +2647,31 @@ class MainWindow(QMainWindow):
             else:
                 message = "Preview comparison ready."
             self._guided_preview_status_label.setText(message)
+
+    def _refresh_guided_signal_f0_enablement(self) -> None:
+        if not hasattr(self, "_guided_signal_f0_generate_btn"):
+            return
+        source_ok = bool(getattr(self, "_guided_signal_f0_source_ok", False))
+        roi = self._selected_guided_signal_f0_roi()
+        chunk = self._selected_guided_signal_f0_chunk()
+        enabled = bool(source_ok and roi and chunk is not None)
+        self._guided_signal_f0_generate_btn.setEnabled(enabled)
+        if hasattr(self, "_guided_signal_f0_status_label") and not getattr(
+            self, "_guided_signal_f0_has_result", False
+        ):
+            if not source_ok:
+                message = getattr(
+                    self,
+                    "_guided_signal_f0_source_reason",
+                    "Load a completed run to generate Signal-Only F0 diagnostic review artifacts.",
+                )
+            elif not roi:
+                message = "Select an ROI for Signal-Only F0 diagnostic review."
+            elif chunk is None:
+                message = "Select a chunk for Signal-Only F0 diagnostic review."
+            else:
+                message = "Signal-Only F0 diagnostic review ready."
+            self._guided_signal_f0_status_label.setText(message)
 
     def _refresh_guided_correction_preview_panel(self, artifact_state: dict[str, object]) -> None:
         if not hasattr(self, "_guided_preview_source_status_label"):
@@ -2670,6 +2833,217 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_guided_preview_result_label"):
             self._guided_preview_result_label.setText("")
 
+    def _refresh_guided_signal_f0_panel(self, artifact_state: dict[str, object]) -> None:
+        if not hasattr(self, "_guided_signal_f0_source_status_label"):
+            return
+        previous_source = getattr(self, "_guided_signal_f0_loaded_run_dir", "")
+        previous_roi = self._selected_guided_signal_f0_roi()
+        previous_chunk = self._selected_guided_signal_f0_chunk()
+        run_dir = str(artifact_state.get("run_dir") or "")
+        self._guided_signal_f0_source_ok = False
+        self._guided_signal_f0_source_reason = (
+            "Load a completed run to generate Signal-Only F0 diagnostic review artifacts."
+        )
+        self._guided_signal_f0_loaded_run_dir = run_dir
+        if previous_source and run_dir != previous_source:
+            self._guided_signal_f0_mark_stale(
+                "Displayed Signal-Only F0 diagnostic review is stale because the loaded completed run changed."
+            )
+
+        with QSignalBlocker(self._guided_signal_f0_roi_combo), QSignalBlocker(self._guided_signal_f0_chunk_combo):
+            self._guided_signal_f0_roi_combo.clear()
+            self._guided_signal_f0_chunk_combo.clear()
+            restored_roi = False
+            restored_chunk = False
+
+        if artifact_state.get("status") == "not_generated" or not run_dir:
+            self._guided_signal_f0_source_status_label.setText(
+                "Load a completed run to generate Signal-Only F0 diagnostic review artifacts."
+            )
+            if not getattr(self, "_guided_signal_f0_has_result", False):
+                self._clear_guided_signal_f0_result_widgets()
+            self._refresh_guided_signal_f0_enablement()
+            return
+
+        source = resolve_completed_run_signal_only_f0_source(run_dir)
+        if not source.ok:
+            self._guided_signal_f0_source_reason = source.reason
+            self._guided_signal_f0_source_status_label.setText(
+                "Loaded completed run is not available for Signal-Only F0 diagnostic review:\n"
+                f"{source.reason}"
+            )
+            self._refresh_guided_signal_f0_enablement()
+            return
+
+        try:
+            with open_phasic_cache(source.phasic_trace_cache_path) as cache:
+                rois = list_cache_rois(cache)
+                chunk_ids = list_cache_chunk_ids(cache)
+        except Exception as exc:
+            self._guided_signal_f0_source_reason = str(exc)
+            self._guided_signal_f0_source_status_label.setText(
+                "Unable to read completed-run phasic cache for Signal-Only F0 diagnostic review:\n"
+                f"{exc}"
+            )
+            self._refresh_guided_signal_f0_enablement()
+            return
+
+        with QSignalBlocker(self._guided_signal_f0_roi_combo), QSignalBlocker(self._guided_signal_f0_chunk_combo):
+            for roi in rois:
+                self._guided_signal_f0_roi_combo.addItem(str(roi), str(roi))
+            for chunk_id in chunk_ids:
+                self._guided_signal_f0_chunk_combo.addItem(str(chunk_id), int(chunk_id))
+            if previous_roi:
+                idx = self._guided_signal_f0_roi_combo.findData(previous_roi)
+                if idx >= 0:
+                    self._guided_signal_f0_roi_combo.setCurrentIndex(idx)
+                    restored_roi = True
+            if previous_chunk is not None:
+                idx = self._guided_signal_f0_chunk_combo.findData(int(previous_chunk))
+                if idx >= 0:
+                    self._guided_signal_f0_chunk_combo.setCurrentIndex(idx)
+                    restored_chunk = True
+        if getattr(self, "_guided_signal_f0_has_result", False) and run_dir == previous_source:
+            if previous_roi and not restored_roi:
+                self._guided_signal_f0_mark_stale(
+                    "Displayed Signal-Only F0 diagnostic review is stale because the previous ROI is no longer available."
+                )
+            elif previous_chunk is not None and not restored_chunk:
+                self._guided_signal_f0_mark_stale(
+                    "Displayed Signal-Only F0 diagnostic review is stale because the previous chunk is no longer available."
+                )
+        self._guided_signal_f0_source_ok = bool(rois and chunk_ids)
+        self._guided_signal_f0_source_reason = (
+            "Signal-Only F0 diagnostic review ready."
+            if self._guided_signal_f0_source_ok
+            else "Completed-run phasic cache has no ROI/chunk entries for Signal-Only F0 diagnostic review."
+        )
+        self._guided_signal_f0_source_status_label.setText(
+            "Diagnostic review is generated from the loaded completed run, separate from the active editable setup:\n"
+            f"{run_dir}"
+        )
+        self._refresh_guided_signal_f0_enablement()
+
+    def _clear_guided_signal_f0_result_widgets(self) -> None:
+        if hasattr(self, "_guided_signal_f0_artifacts_label"):
+            self._guided_signal_f0_artifacts_label.setText(
+                "No Signal-Only F0 diagnostic artifacts generated."
+            )
+        if hasattr(self, "_guided_signal_f0_chunk_table"):
+            self._guided_signal_f0_chunk_table.setRowCount(0)
+        if hasattr(self, "_guided_signal_f0_messages_label"):
+            self._guided_signal_f0_messages_label.setText("")
+
+    def _set_signal_f0_table_item(self, row: int, column: int, text: str, tooltip: str = "") -> None:
+        item = QTableWidgetItem(str(text or ""))
+        item.setToolTip(str(tooltip or text or ""))
+        self._guided_signal_f0_chunk_table.setItem(row, column, item)
+
+    def _load_signal_f0_chunk_rows(self, chunk_csv_path: str) -> list[dict[str, str]]:
+        if not chunk_csv_path or not os.path.isfile(chunk_csv_path):
+            return []
+        try:
+            with open(chunk_csv_path, "r", encoding="utf-8", newline="") as handle:
+                return list(csv.DictReader(handle))
+        except Exception:
+            return []
+
+    def _populate_guided_signal_f0_result_widgets(self, result: dict[str, object]) -> None:
+        if hasattr(self, "_guided_signal_f0_artifacts_label"):
+            self._guided_signal_f0_artifacts_label.setText(
+                "\n".join(
+                    [
+                        f"Diagnostic directory: {result.get('output_dir', '')}",
+                        f"Provenance JSON: {result.get('provenance_path', '')}",
+                        f"Summary JSON: {result.get('summary_path', '')}",
+                        f"Chunk CSV: {result.get('chunk_csv_path', '')}",
+                        "Strategy recommendation: none; not selected.",
+                    ]
+                )
+            )
+        rows = self._load_signal_f0_chunk_rows(str(result.get("chunk_csv_path", "") or ""))
+        if not rows:
+            statuses = result.get("chunk_statuses", {})
+            if isinstance(statuses, dict):
+                rows = [
+                    {
+                        "chunk_id": str(chunk_id),
+                        "status": str(status.get("status", "")) if isinstance(status, dict) else str(status),
+                        "error": str(status.get("error", "")) if isinstance(status, dict) else "",
+                    }
+                    for chunk_id, status in statuses.items()
+                ]
+        if hasattr(self, "_guided_signal_f0_chunk_table"):
+            self._guided_signal_f0_chunk_table.setRowCount(0)
+            for row_idx, row_data in enumerate(rows):
+                self._guided_signal_f0_chunk_table.insertRow(row_idx)
+                self._set_signal_f0_table_item(row_idx, 0, str(row_data.get("chunk_id", "")))
+                self._set_signal_f0_table_item(row_idx, 1, str(row_data.get("status", "")))
+                self._set_signal_f0_table_item(row_idx, 2, str(row_data.get("n_samples", "")))
+                self._set_signal_f0_table_item(row_idx, 3, str(row_data.get("signal_finite_fraction", "")))
+                self._set_signal_f0_table_item(row_idx, 4, str(row_data.get("f0_finite_fraction", "")))
+                self._set_signal_f0_table_item(row_idx, 5, str(row_data.get("dff_finite_fraction", "")))
+                self._set_signal_f0_table_item(row_idx, 6, str(row_data.get("dff_min", "")))
+                self._set_signal_f0_table_item(row_idx, 7, str(row_data.get("dff_median", "")))
+                self._set_signal_f0_table_item(row_idx, 8, str(row_data.get("negative_dff_count", "")))
+                error = str(row_data.get("error", ""))
+                flags = str(row_data.get("warning_flags", ""))
+                self._set_signal_f0_table_item(row_idx, 9, error or flags)
+            self._guided_signal_f0_chunk_table.resizeRowsToContents()
+        if hasattr(self, "_guided_signal_f0_messages_label"):
+            lines: list[str] = []
+            warnings = result.get("warnings") or []
+            errors = result.get("errors") or []
+            if warnings:
+                lines.append(f"Warnings: {'; '.join(str(x) for x in warnings)}")
+            if errors:
+                lines.append(f"Errors: {'; '.join(str(x) for x in errors)}")
+            if not lines:
+                lines.append("Errors/warnings: none reported by Signal-Only F0 diagnostic backend.")
+            self._guided_signal_f0_messages_label.setText("\n".join(lines))
+
+    def _on_generate_guided_signal_only_f0_diagnostic(self) -> None:
+        run_dir = str(getattr(self, "_guided_signal_f0_loaded_run_dir", "") or "")
+        roi = self._selected_guided_signal_f0_roi()
+        chunk = self._selected_guided_signal_f0_chunk()
+        if not run_dir or not roi or chunk is None:
+            self._refresh_guided_signal_f0_enablement()
+            return
+        try:
+            result = run_signal_only_f0_diagnostic_review(
+                run_dir,
+                roi=roi,
+                chunk_ids=[chunk],
+                allow_existing=False,
+            )
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "status": "failed",
+                "diagnostic_id": "",
+                "output_dir": "",
+                "provenance_path": "",
+                "summary_path": "",
+                "chunk_csv_path": "",
+                "trace_csv_paths": [],
+                "warnings": [],
+                "errors": [str(exc)],
+                "chunk_statuses": {},
+            }
+        self._guided_signal_f0_has_result = True
+        self._guided_signal_f0_result_stale = False
+        self._guided_signal_f0_last_result = result
+        if hasattr(self, "_guided_signal_f0_status_label"):
+            status = str(result.get("status", "failed"))
+            if status in {"success", "partial"}:
+                self._guided_signal_f0_status_label.setText(
+                    f"Signal-Only F0 diagnostic review generated: {status}."
+                )
+            else:
+                self._guided_signal_f0_status_label.setText("Signal-Only F0 diagnostic review failed.")
+        self._populate_guided_signal_f0_result_widgets(result)
+        self._refresh_guided_signal_f0_enablement()
+
     def _legacy_guided_preview_result_text(self, result: dict[str, object]) -> str:
         lines = [
             f"Preview status: {result.get('status', 'failed')}",
@@ -2795,6 +3169,7 @@ class MainWindow(QMainWindow):
                     lines.append(f"- {category}: {name} ({path})")
                 self._guided_diagnostics_completed_run_label.setText("\n".join(lines))
         self._refresh_guided_correction_preview_panel(artifact_state)
+        self._refresh_guided_signal_f0_panel(artifact_state)
         if hasattr(self, "_guided_diagnostics_slot_labels"):
             for slot, label in self._guided_diagnostics_slot_labels.items():
                 suffix = "coming later / read-only evidence" if "Decision-Support Audit" in slot else "not generated"
