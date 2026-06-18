@@ -177,6 +177,13 @@ def test_guided_start_step_exists_first_with_raw_setup_and_open_results_choices(
     assert "No completed run loaded" in window._guided_start_status_label.text()
 
 
+def test_guided_mode_banner_initially_distinguishes_input_from_completed_results(window):
+    text = window._guided_mode_banner_label.text()
+    assert "Guided Workflow mode: Choose a starting path" in text
+    assert "raw/input data" in text
+    assert "completed run" in text
+
+
 def test_guided_start_setup_new_analysis_navigates_without_loading_or_generating(
     window, tmp_path, monkeypatch
 ):
@@ -199,8 +206,11 @@ def test_guided_start_setup_new_analysis_navigates_without_loading_or_generating
     window._guided_workflow_stepper.setCurrentRow(0)
     window._guided_start_setup_btn.click()
 
+    assert window._guided_workflow_mode == "new_analysis"
     assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepSelectData"
+    assert "Guided Workflow mode: Set up a new analysis" in window._guided_mode_banner_label.text()
     assert window._guided_input_dir_edit.text() == str(input_dir)
+    assert all(not banner.isVisible() for banner in window._guided_skipped_setup_banners.values())
     assert calls == {"open": 0, "preview": 0, "signal": 0}
 
 
@@ -226,7 +236,10 @@ def test_guided_start_open_results_uses_shared_loader_and_navigates_to_diagnosti
     window._guided_start_open_results_btn.click()
 
     assert calls["open"] == 1
+    assert window._guided_workflow_mode == "open_results"
     assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepDiagnostics"
+    assert "Guided Workflow mode: Open results from a completed run" in window._guided_mode_banner_label.text()
+    assert "Raw input setup is unchanged" in window._guided_mode_banner_label.text()
     assert window._guided_input_dir_edit.text() == str(raw_input)
     assert window._input_dir.text() == str(raw_input)
 
@@ -266,11 +279,48 @@ def test_guided_start_open_results_populates_diagnostics_without_overloading_inp
     assert window._guided_preview_generate_btn.isEnabled() is True
     assert window._guided_signal_f0_generate_btn.isEnabled() is True
     assert calls == {"preview": 0, "signal": 0}
+    assert window._guided_workflow_mode == "open_results"
+    assert "Guided Workflow mode: Open results from a completed run" in window._guided_mode_banner_label.text()
     assert window._guided_input_dir_edit.text() == str(raw_input)
     assert window._input_dir.text() == str(raw_input)
     assert window._input_dir.text() != str(run_dir)
     assert str(run_dir) in window._guided_start_status_label.text()
     assert str(raw_input) in window._guided_start_status_label.text()
+
+
+def test_guided_open_results_mode_marks_setup_steps_skipped_and_can_switch_back(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_args: str(run_dir))
+
+    window._guided_start_open_results_btn.click()
+
+    for step_name, object_name in [
+        ("Select data", "guidedStepSelectData"),
+        ("Recording structure", "guidedStepRecordingStructure"),
+        ("Correction approach", "guidedStepCorrectionApproach"),
+    ]:
+        idx = list(GUIDED_WORKFLOW_STEPS).index(step_name)
+        window._guided_workflow_stepper.setCurrentRow(idx)
+        assert window._guided_workflow_stack.currentWidget().objectName() == object_name
+        banner = window._guided_skipped_setup_banners[step_name]
+        assert banner.isHidden() is False
+        text = " ".join(label.text() for label in banner.findChildren(QLabel))
+        assert "reviewing a completed run" in text
+        assert "raw/input data" in text
+        assert "do not configure the loaded completed run" in text
+
+    switch_btn = window._guided_skipped_setup_banners["Select data"].findChild(
+        QPushButton,
+        "guidedSwitchToNewAnalysisSelectdata",
+    )
+    assert switch_btn is not None
+    switch_btn.click()
+
+    assert window._guided_workflow_mode == "new_analysis"
+    assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepSelectData"
+    assert all(not banner.isVisible() for banner in window._guided_skipped_setup_banners.values())
 
 
 def test_full_control_open_results_still_uses_same_completed_loader(window, tmp_path, monkeypatch):

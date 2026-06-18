@@ -1502,6 +1502,7 @@ class MainWindow(QMainWindow):
 
         self._guided_workflow_stack = QStackedWidget()
         self._guided_workflow_stack.setObjectName("guidedWorkflowStepStack")
+        self._guided_workflow_mode = "start"
         self._guided_diagnostics_status = "not_generated"
         for widget in (
             self._build_guided_start_step(),
@@ -1522,9 +1523,16 @@ class MainWindow(QMainWindow):
         content_layout = QVBoxLayout(content_wrap)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(10)
+        self._guided_mode_banner_label = QLabel("")
+        self._guided_mode_banner_label.setObjectName("guidedWorkflowModeBanner")
+        self._guided_mode_banner_label.setProperty("guidedStatusPill", True)
+        self._guided_mode_banner_label.setWordWrap(True)
+        self._guided_mode_banner_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        content_layout.addWidget(self._guided_mode_banner_label, 0)
         content_layout.addWidget(self._guided_workflow_stack, 1)
         content_layout.addWidget(self._build_guided_setup_summary_panel(), 0)
         content_layout.addWidget(self._build_guided_planned_stages_panel(), 0)
+        self._refresh_guided_mode_display()
 
         outer.addWidget(stepper_group, 0)
         outer.addWidget(content_wrap, 1)
@@ -1644,6 +1652,32 @@ class MainWindow(QMainWindow):
             start,
         )
 
+    def _build_guided_skipped_setup_banner(self, step_name: str) -> QGroupBox:
+        safe = re.sub(r"[^A-Za-z0-9]+", "", step_name)
+        group = QGroupBox(f"{step_name} skipped in Open Results mode")
+        group.setObjectName(f"guidedSkippedSetupBanner{safe}")
+        group.setProperty("guidedSkippedSetupBanner", True)
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        label = QLabel(
+            "You are reviewing a completed run. This setup step is used when setting up "
+            "a new analysis from raw/input data and is skipped in Open Results mode. "
+            "These controls do not configure the loaded completed run."
+        )
+        label.setObjectName(f"guidedSkippedSetupMessage{safe}")
+        label.setProperty("guidedSecondaryText", True)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        btn = QPushButton("Switch to new analysis setup")
+        btn.setObjectName(f"guidedSwitchToNewAnalysis{safe}")
+        btn.clicked.connect(self._on_guided_switch_to_new_analysis_setup)
+        layout.addWidget(btn, alignment=Qt.AlignLeft)
+        if not hasattr(self, "_guided_skipped_setup_banners"):
+            self._guided_skipped_setup_banners = {}
+        self._guided_skipped_setup_banners[step_name] = group
+        group.setVisible(False)
+        return group
+
     def _build_guided_select_data_step(self) -> QWidget:
         controls = QWidget()
         controls.setObjectName("guidedSelectDataControls")
@@ -1651,6 +1685,7 @@ class MainWindow(QMainWindow):
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(8)
+        form.addRow("", self._build_guided_skipped_setup_banner("Select data"))
 
         self._guided_input_dir_edit = QLineEdit()
         self._guided_input_dir_edit.setObjectName("guidedInputDirectory")
@@ -1739,6 +1774,7 @@ class MainWindow(QMainWindow):
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(8)
+        form.addRow("", self._build_guided_skipped_setup_banner("Recording structure"))
 
         self._guided_acquisition_mode_combo = QComboBox()
         self._guided_acquisition_mode_combo.setObjectName("guidedAcquisitionModeCombo")
@@ -1931,6 +1967,8 @@ class MainWindow(QMainWindow):
             self._refresh_guided_diagnostics_panel()
         if hasattr(self, "_guided_start_status_label"):
             self._refresh_guided_start_panel()
+        if hasattr(self, "_guided_mode_banner_label"):
+            self._refresh_guided_mode_display()
         state = self._guided_setup_summary_state()
         resolved = state["resolved_format"] or "not discovered"
         roi_text = (
@@ -1960,6 +1998,45 @@ class MainWindow(QMainWindow):
         ]
         self._guided_setup_summary_label.setText("\n".join(lines))
 
+    def _set_guided_workflow_mode(self, mode: str) -> None:
+        if mode not in {"start", "new_analysis", "open_results"}:
+            mode = "start"
+        self._guided_workflow_mode = mode
+        self._refresh_guided_mode_display()
+        self._refresh_guided_start_panel()
+
+    def _refresh_guided_mode_display(self) -> None:
+        mode = getattr(self, "_guided_workflow_mode", "start")
+        input_dir = self._input_dir.text().strip() if hasattr(self, "_input_dir") else ""
+        run_dir = os.path.realpath((self._current_run_dir or "").strip())
+        has_loaded_results = (
+            hasattr(self, "_report_viewer")
+            and bool(self._report_viewer.has_loaded_results())
+            and bool(run_dir)
+        )
+        if hasattr(self, "_guided_mode_banner_label"):
+            if mode == "new_analysis":
+                text = (
+                    "Guided Workflow mode: Set up a new analysis\n"
+                    f"Input folder: {input_dir or 'not selected'}\n"
+                    f"Completed run loaded for diagnostics: {run_dir if has_loaded_results else 'none'}"
+                )
+            elif mode == "open_results":
+                text = (
+                    "Guided Workflow mode: Open results from a completed run\n"
+                    f"Loaded completed run: {run_dir if has_loaded_results else 'none'}\n"
+                    "Raw input setup is unchanged."
+                )
+            else:
+                text = (
+                    "Guided Workflow mode: Choose a starting path\n"
+                    "Start from raw/input data or open a completed run for review."
+                )
+            self._guided_mode_banner_label.setText(text)
+        skipped = mode == "open_results"
+        for banner in getattr(self, "_guided_skipped_setup_banners", {}).values():
+            banner.setVisible(bool(skipped))
+
     def _refresh_guided_start_panel(self) -> None:
         if not hasattr(self, "_guided_start_status_label"):
             return
@@ -1971,6 +2048,13 @@ class MainWindow(QMainWindow):
             and bool(run_dir)
         )
         lines = []
+        mode = getattr(self, "_guided_workflow_mode", "start")
+        if mode == "new_analysis":
+            lines.append("Current mode: Set up a new analysis")
+        elif mode == "open_results":
+            lines.append("Current mode: Open results from a completed run")
+        else:
+            lines.append("Current mode: choose a starting path")
         if has_loaded_results:
             lines.extend(["Completed run loaded:", run_dir])
         else:
@@ -1982,16 +2066,23 @@ class MainWindow(QMainWindow):
         self._guided_start_status_label.setText("\n".join(lines))
 
     def _on_guided_start_setup_new_analysis(self) -> None:
+        self._set_guided_workflow_mode("new_analysis")
         idx = list(GUIDED_WORKFLOW_STEPS).index("Select data")
         self._guided_workflow_stepper.setCurrentRow(idx)
 
     def _on_guided_start_open_results(self) -> None:
         loaded = self._prompt_open_completed_results()
         if loaded:
+            self._set_guided_workflow_mode("open_results")
             self._refresh_guided_start_panel()
             self._refresh_guided_diagnostics_panel()
             idx = list(GUIDED_WORKFLOW_STEPS).index("Diagnostics")
             self._guided_workflow_stepper.setCurrentRow(idx)
+
+    def _on_guided_switch_to_new_analysis_setup(self) -> None:
+        self._set_guided_workflow_mode("new_analysis")
+        idx = list(GUIDED_WORKFLOW_STEPS).index("Select data")
+        self._guided_workflow_stepper.setCurrentRow(idx)
 
     def _sync_line_edit_value(self, target: QLineEdit, text: str) -> None:
         if getattr(self, "_guided_setup_syncing", False):
@@ -2162,6 +2253,12 @@ class MainWindow(QMainWindow):
         self._sync_guided_discovery_from_full()
 
     def _build_guided_correction_approach_step(self) -> QWidget:
+        wrapper = QWidget()
+        wrapper.setObjectName("guidedCorrectionApproachControls")
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.setSpacing(10)
+        wrapper_layout.addWidget(self._build_guided_skipped_setup_banner("Correction approach"))
         cards = QWidget()
         cards.setObjectName("guidedCorrectionCards")
         grid = QGridLayout(cards)
@@ -2214,6 +2311,7 @@ class MainWindow(QMainWindow):
             )
             self._guided_correction_sync_connected = True
         self._sync_guided_correction_from_full()
+        wrapper_layout.addWidget(cards)
         return self._build_guided_step_scroll(
             "guidedStepCorrectionApproach",
             "Correction approach",
@@ -2221,7 +2319,7 @@ class MainWindow(QMainWindow):
                 "Stage 1 correction cards are static and non-executing. They do not change config, run diagnostics, write manifests, or route analysis.",
                 "Correction preview is encouraged in the future guided path, but is not required or wired in Stage 1.",
             ],
-            cards,
+            wrapper,
         )
 
     def _build_guided_correction_card(self, title: str, badge: str, helper: str, *, badge_level: str) -> QGroupBox:
