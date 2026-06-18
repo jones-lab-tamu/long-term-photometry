@@ -491,6 +491,28 @@ def test_guided_confirm_strategy_explicit_mark_is_ui_state_only(window, tmp_path
     assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
 
 
+def test_guided_draft_run_plan_preview_appears_only_from_marked_roi_choices(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    assert "Status: no marked ROI choices" in window._guided_draft_run_plan_preview_label.text()
+    assert "Planned ROIs: 0" in window._guided_draft_run_plan_preview_label.text()
+
+    idx = window._guided_confirm_strategy_combo.findData("signal_only_f0")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    text = window._guided_draft_run_plan_preview_label.text()
+    assert "Status: draft valid" in text
+    assert "Planned ROIs: 1" in text
+    assert "- CH1: Signal-Only F0 | evidence reviewed chunk 0" in text
+    assert "Preview only. This plan is in memory only" in text
+    assert "cannot run, write manifests, create applied-dF/F outputs, or extract features" in text
+    assert str(run_dir.resolve()) in window._guided_draft_run_plan_preview_label.toolTip()
+
+
 def test_guided_confirm_strategy_evidence_marks_stale_for_selection_change(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
@@ -532,11 +554,18 @@ def test_guided_confirm_choice_is_roi_level_and_evidence_chunk_can_update(window
     assert key in window._guided_strategy_choices
     assert window._guided_strategy_choices[key]["evidence_chunk"] == 0
     assert "Evidence reviewed: chunk 0" in window._guided_confirm_marked_choice_label.text()
+    assert "- CH1: Signal-Only F0 | evidence reviewed chunk 0" in (
+        window._guided_draft_run_plan_preview_label.text()
+    )
 
     window._guided_confirm_chunk_combo.setCurrentIndex(window._guided_confirm_chunk_combo.findData(1))
 
     assert "Signal-Only F0" in window._guided_confirm_marked_choice_label.text()
     assert "Evidence reviewed: chunk 0" in window._guided_confirm_marked_choice_label.text()
+    assert "- CH1: Signal-Only F0 | evidence reviewed chunk 0" in (
+        window._guided_draft_run_plan_preview_label.text()
+    )
+    assert "chunk 1" not in window._guided_draft_run_plan_preview_label.text()
     assert window._guided_confirm_ack_cb.isChecked() is False
     assert window._guided_confirm_mark_btn.isEnabled() is False
 
@@ -547,6 +576,9 @@ def test_guided_confirm_choice_is_roi_level_and_evidence_chunk_can_update(window
     assert key in window._guided_strategy_choices
     assert window._guided_strategy_choices[key]["evidence_chunk"] == 1
     assert "Evidence reviewed: chunk 1" in window._guided_confirm_marked_choice_label.text()
+    plan_text = window._guided_draft_run_plan_preview_label.text()
+    assert plan_text.count("- CH1:") == 1
+    assert "- CH1: Signal-Only F0 | evidence reviewed chunk 1" in plan_text
 
 
 def test_guided_confirm_choices_are_independent_by_roi(window, tmp_path, monkeypatch):
@@ -571,6 +603,10 @@ def test_guided_confirm_choices_are_independent_by_roi(window, tmp_path, monkeyp
     assert (str(run_dir.resolve()), "CH1") in window._guided_strategy_choices
     assert (str(run_dir.resolve()), "CH2") in window._guided_strategy_choices
     assert "ROI: CH2" in window._guided_confirm_marked_choice_label.text()
+    plan_text = window._guided_draft_run_plan_preview_label.text()
+    assert "Planned ROIs: 2" in plan_text
+    assert plan_text.count("- CH1:") == 1
+    assert plan_text.count("- CH2:") == 1
 
 
 def test_guided_confirm_strategy_choices_are_scoped_to_loaded_completed_run(window, tmp_path, monkeypatch):
@@ -594,6 +630,7 @@ def test_guided_confirm_strategy_choices_are_scoped_to_loaded_completed_run(wind
     assert window._guided_confirm_roi_combo.currentText() == "CH1"
     assert window._guided_confirm_chunk_combo.currentData() == 0
     assert "Current marked choice: none." in window._guided_confirm_marked_choice_label.text()
+    assert "Status: no marked ROI choices" in window._guided_draft_run_plan_preview_label.text()
     assert (str(run_a.resolve()), "CH1") in window._guided_strategy_choices
 
     window._open_completed_results_dir(str(run_a))
@@ -602,6 +639,71 @@ def test_guided_confirm_strategy_choices_are_scoped_to_loaded_completed_run(wind
     assert window._guided_confirm_chunk_combo.currentData() == 0
     assert "Signal-Only F0" in window._guided_confirm_marked_choice_label.text()
     assert "Evidence reviewed: chunk 0" in window._guided_confirm_marked_choice_label.text()
+    assert "- CH1: Signal-Only F0 | evidence reviewed chunk 0" in (
+        window._guided_draft_run_plan_preview_label.text()
+    )
+
+
+def test_guided_diagnostics_do_not_auto_populate_draft_run_plan_preview(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+
+    window._guided_preview_generate_btn.click()
+    window._guided_signal_f0_generate_btn.click()
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    assert "Correction preview: success" in window._guided_confirm_evidence_label.text()
+    assert "Signal-Only F0 diagnostic: success" in window._guided_confirm_evidence_label.text()
+    assert "Status: no marked ROI choices" in window._guided_draft_run_plan_preview_label.text()
+    assert "Planned ROIs: 0" in window._guided_draft_run_plan_preview_label.text()
+    assert window._guided_strategy_choices == {}
+
+
+def test_guided_draft_run_plan_preview_reports_contract_errors(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    run_key = str(run_dir.resolve())
+    window._guided_strategy_choices[(run_key, "CH1")] = {
+        "strategy": "auto",
+        "strategy_label": "auto",
+        "choice_source": "diagnostic_success",
+        "no_auto_selection": False,
+        "confirmed": True,
+        "completed_run_dir": run_key,
+        "roi": "CH1",
+        "evidence_chunk": 0,
+        "evidence_summary": {"preview": "Correction preview: success", "signal_only_f0": "", "stale": False},
+    }
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._refresh_guided_confirm_strategy_panel()
+
+    text = window._guided_draft_run_plan_preview_label.text()
+    assert "Status: draft has errors" in text
+    assert "forbidden runnable correction strategy: auto" in text
+    assert "choice_source must be explicit_user_mark" in text
+    assert "no_auto_selection must be true" in text
+
+
+def test_guided_draft_run_plan_preview_writes_no_outputs(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    before = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    idx = window._guided_confirm_strategy_combo.findData("signal_only_f0")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+    window._refresh_guided_confirm_strategy_panel()
+
+    after = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    assert after == before
+    assert not list(run_dir.rglob("guided_run_plan*.json"))
+    assert not (run_dir / "MANIFEST.csv").exists()
+    assert not (run_dir / "manifest.csv").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
+    assert not (run_dir / "validation").exists()
 
 
 def test_guided_confirm_acknowledgment_and_strategy_reset_when_completed_run_changes(window, tmp_path, monkeypatch):

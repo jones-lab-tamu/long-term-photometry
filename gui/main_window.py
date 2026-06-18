@@ -70,6 +70,14 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     list_cache_rois,
     open_phasic_cache,
 )
+from photometry_pipeline.guided_run_plan import (
+    CorrectionStrategyChoice,
+    EvidenceChunkReview,
+    GuidedPlanSource,
+    GuidedRunPlan,
+    RoiPlanEntry,
+    validate_plan_contract,
+)
 from photometry_pipeline.preview.correction_preview import (
     GUIDED_REFERENCE_PREVIEW_METHODS,
     PREVIEW_PROVENANCE_FILENAME,
@@ -3826,6 +3834,7 @@ class MainWindow(QMainWindow):
         evidence = self._guided_confirm_evidence_summary()
         self._guided_confirm_evidence_label.setText(str(evidence["text"]))
         self._guided_confirm_marked_choice_label.setText(self._guided_marked_choice_text())
+        self._refresh_guided_draft_run_plan_preview()
         can_mark = bool(
             source_ok
             and self._selected_guided_confirm_roi()
@@ -3834,6 +3843,108 @@ class MainWindow(QMainWindow):
             and self._guided_confirm_ack_cb.isChecked()
         )
         self._guided_confirm_mark_btn.setEnabled(can_mark)
+
+    def _build_guided_draft_run_plan(self) -> GuidedRunPlan | None:
+        run_dir = self._current_guided_completed_run_dir()
+        if not run_dir:
+            return None
+        entries: list[RoiPlanEntry] = []
+        choices = getattr(self, "_guided_strategy_choices", {})
+        for key, choice in sorted(choices.items(), key=lambda item: str(item[0])):
+            if not isinstance(key, tuple) or len(key) != 2:
+                continue
+            choice_run_dir, roi = key
+            if os.path.realpath(str(choice_run_dir or "")) != run_dir:
+                continue
+            if not isinstance(choice, dict):
+                continue
+            evidence_summary = choice.get("evidence_summary", {})
+            if isinstance(evidence_summary, dict):
+                summary_parts = [
+                    str(evidence_summary.get("preview") or "").strip(),
+                    str(evidence_summary.get("signal_only_f0") or "").strip(),
+                ]
+                evidence_text = " | ".join(part for part in summary_parts if part)
+                evidence_stale = bool(evidence_summary.get("stale", False))
+            else:
+                evidence_text = str(evidence_summary or "").strip()
+                evidence_stale = False
+            try:
+                evidence_chunk = int(choice.get("evidence_chunk"))
+            except Exception:
+                evidence_chunk = 0
+            entries.append(
+                RoiPlanEntry(
+                    roi=str(choice.get("roi") or roi),
+                    correction_strategy=CorrectionStrategyChoice(
+                        strategy=str(choice.get("strategy") or ""),
+                        strategy_label=str(choice.get("strategy_label") or ""),
+                        choice_source=str(choice.get("choice_source") or "explicit_user_mark"),
+                        no_auto_selection=bool(choice.get("no_auto_selection", True)),
+                    ),
+                    evidence=[
+                        EvidenceChunkReview(
+                            chunk_id=evidence_chunk,
+                            diagnostic_artifact_paths=[
+                                str(x) for x in choice.get("diagnostic_artifact_paths", [])
+                            ],
+                            preview_artifact_paths=[
+                                str(x) for x in choice.get("preview_artifact_paths", [])
+                            ],
+                            summary=evidence_text,
+                            stale=evidence_stale,
+                        )
+                    ],
+                )
+            )
+        return GuidedRunPlan(
+            mode="completed_run_planning",
+            source=GuidedPlanSource(
+                source_mode="completed_run",
+                completed_run_dir=run_dir,
+            ),
+            roi_plan=entries,
+        )
+
+    def _guided_draft_run_plan_summary_text(
+        self,
+        plan: GuidedRunPlan | None,
+        errors: list[str],
+    ) -> str:
+        note = (
+            "Preview only. This plan is in memory only and cannot run, write manifests, "
+            "create applied-dF/F outputs, or extract features."
+        )
+        if plan is None:
+            return f"Status: no completed run loaded.\n{note}"
+        lines = [
+            f"Status: {'draft has errors' if errors else ('no marked ROI choices' if not plan.roi_plan else 'draft valid')}",
+            f"Source: {self._display_path(plan.source.completed_run_dir or '')}",
+            f"Planned ROIs: {len(plan.roi_plan)}",
+        ]
+        for entry in plan.roi_plan:
+            strategy = entry.correction_strategy.strategy_label if entry.correction_strategy else ""
+            if not strategy and entry.correction_strategy:
+                strategy = entry.correction_strategy.strategy
+            evidence_chunks = ", ".join(str(item.chunk_id) for item in entry.evidence)
+            lines.append(f"- {entry.roi}: {strategy} | evidence reviewed chunk {evidence_chunks}")
+        if errors:
+            lines.append("Errors:")
+            lines.extend(f"- {err}" for err in errors)
+        lines.append(note)
+        return "\n".join(lines)
+
+    def _refresh_guided_draft_run_plan_preview(self) -> None:
+        label = getattr(self, "_guided_draft_run_plan_preview_label", None)
+        if label is None:
+            return
+        plan = self._build_guided_draft_run_plan()
+        errors = validate_plan_contract(plan) if plan is not None else []
+        label.setText(self._guided_draft_run_plan_summary_text(plan, errors))
+        if plan is not None and plan.source.completed_run_dir:
+            label.setToolTip(f"Completed run: {plan.source.completed_run_dir}")
+        else:
+            label.setToolTip("")
 
     def _guided_marked_choice_text(self) -> str:
         run_dir = self._current_guided_completed_run_dir()
@@ -3962,6 +4073,19 @@ class MainWindow(QMainWindow):
         self._guided_confirm_marked_choice_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._make_guided_widget_shrinkable(self._guided_confirm_marked_choice_label)
         layout.addWidget(self._guided_confirm_marked_choice_label)
+
+        draft_group = QGroupBox("Draft run-plan preview")
+        draft_group.setObjectName("guidedDraftRunPlanPreviewPanel")
+        draft_layout = QVBoxLayout(draft_group)
+        draft_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_draft_run_plan_preview_label = QLabel("")
+        self._guided_draft_run_plan_preview_label.setObjectName("guidedDraftRunPlanPreview")
+        self._guided_draft_run_plan_preview_label.setProperty("guidedSecondaryText", True)
+        self._guided_draft_run_plan_preview_label.setWordWrap(True)
+        self._guided_draft_run_plan_preview_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_draft_run_plan_preview_label)
+        draft_layout.addWidget(self._guided_draft_run_plan_preview_label)
+        layout.addWidget(draft_group)
 
         self._refresh_guided_confirm_strategy_panel()
         return self._build_guided_step_scroll(
