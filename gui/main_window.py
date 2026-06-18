@@ -106,6 +106,7 @@ _CONSERVATIVE_EVENT_DEFAULTS = {
     "peak_min_width_sec": 0.3,
 }
 GUIDED_WORKFLOW_STEPS = (
+    "Start",
     "Select data",
     "Recording structure",
     "Correction approach",
@@ -1503,6 +1504,7 @@ class MainWindow(QMainWindow):
         self._guided_workflow_stack.setObjectName("guidedWorkflowStepStack")
         self._guided_diagnostics_status = "not_generated"
         for widget in (
+            self._build_guided_start_step(),
             self._build_guided_select_data_step(),
             self._build_guided_recording_structure_step(),
             self._build_guided_correction_approach_step(),
@@ -1578,6 +1580,69 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         scroll.setWidget(panel)
         return scroll
+
+    def _build_guided_start_step(self) -> QWidget:
+        start = QWidget()
+        start.setObjectName("guidedStartContent")
+        layout = QVBoxLayout(start)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        status_group = QGroupBox("Current workflow context")
+        status_group.setObjectName("guidedStartStatusPanel")
+        status_layout = QVBoxLayout(status_group)
+        status_layout.setContentsMargins(10, 10, 10, 10)
+        self._guided_start_status_label = QLabel("")
+        self._guided_start_status_label.setObjectName("guidedStartStatusLabel")
+        self._guided_start_status_label.setProperty("guidedSecondaryText", True)
+        self._guided_start_status_label.setWordWrap(True)
+        self._guided_start_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        status_layout.addWidget(self._guided_start_status_label)
+        layout.addWidget(status_group)
+
+        setup_group = QGroupBox("Set up a new analysis")
+        setup_group.setObjectName("guidedStartSetupNewAnalysisCard")
+        setup_layout = QVBoxLayout(setup_group)
+        setup_layout.setContentsMargins(12, 10, 12, 10)
+        setup_desc = QLabel("Start from raw/input data and configure a new analysis run.")
+        setup_desc.setObjectName("guidedStartSetupDescription")
+        setup_desc.setProperty("guidedSecondaryText", True)
+        setup_desc.setWordWrap(True)
+        setup_layout.addWidget(setup_desc)
+        self._guided_start_setup_btn = QPushButton("Set up new analysis")
+        self._guided_start_setup_btn.setObjectName("guidedStartSetupNewAnalysisButton")
+        self._guided_start_setup_btn.clicked.connect(self._on_guided_start_setup_new_analysis)
+        setup_layout.addWidget(self._guided_start_setup_btn, alignment=Qt.AlignLeft)
+        layout.addWidget(setup_group)
+
+        open_group = QGroupBox("Open results from a completed run")
+        open_group.setObjectName("guidedStartOpenResultsCard")
+        open_layout = QVBoxLayout(open_group)
+        open_layout.setContentsMargins(12, 10, 12, 10)
+        open_desc = QLabel(
+            "Review completed outputs, generate diagnostics, retune correction, or prepare "
+            "downstream reanalysis from an existing completed run."
+        )
+        open_desc.setObjectName("guidedStartOpenResultsDescription")
+        open_desc.setProperty("guidedSecondaryText", True)
+        open_desc.setWordWrap(True)
+        open_layout.addWidget(open_desc)
+        self._guided_start_open_results_btn = QPushButton("Open Results...")
+        self._guided_start_open_results_btn.setObjectName("guidedStartOpenResultsButton")
+        self._guided_start_open_results_btn.clicked.connect(self._on_guided_start_open_results)
+        open_layout.addWidget(self._guided_start_open_results_btn, alignment=Qt.AlignLeft)
+        layout.addWidget(open_group)
+
+        self._refresh_guided_start_panel()
+        return self._build_guided_step_scroll(
+            "guidedStepStart",
+            "Start",
+            [
+                "Choose whether this Guided Workflow session starts from raw/input data or from an existing completed run.",
+                "Input folder remains raw/input data. Open Results loads completed-run outputs for review and diagnostics.",
+            ],
+            start,
+        )
 
     def _build_guided_select_data_step(self) -> QWidget:
         controls = QWidget()
@@ -1864,6 +1929,8 @@ class MainWindow(QMainWindow):
             return
         if hasattr(self, "_guided_diagnostics_status_label"):
             self._refresh_guided_diagnostics_panel()
+        if hasattr(self, "_guided_start_status_label"):
+            self._refresh_guided_start_panel()
         state = self._guided_setup_summary_state()
         resolved = state["resolved_format"] or "not discovered"
         roi_text = (
@@ -1892,6 +1959,39 @@ class MainWindow(QMainWindow):
             f"Diagnostics: {getattr(self, '_guided_diagnostics_status', 'not_generated')}",
         ]
         self._guided_setup_summary_label.setText("\n".join(lines))
+
+    def _refresh_guided_start_panel(self) -> None:
+        if not hasattr(self, "_guided_start_status_label"):
+            return
+        input_dir = self._input_dir.text().strip() if hasattr(self, "_input_dir") else ""
+        run_dir = os.path.realpath((self._current_run_dir or "").strip())
+        has_loaded_results = (
+            hasattr(self, "_report_viewer")
+            and bool(self._report_viewer.has_loaded_results())
+            and bool(run_dir)
+        )
+        lines = []
+        if has_loaded_results:
+            lines.extend(["Completed run loaded:", run_dir])
+        else:
+            lines.append("No completed run loaded.")
+        if input_dir:
+            lines.extend(["Input data selected:", input_dir])
+        else:
+            lines.append("No input data selected.")
+        self._guided_start_status_label.setText("\n".join(lines))
+
+    def _on_guided_start_setup_new_analysis(self) -> None:
+        idx = list(GUIDED_WORKFLOW_STEPS).index("Select data")
+        self._guided_workflow_stepper.setCurrentRow(idx)
+
+    def _on_guided_start_open_results(self) -> None:
+        loaded = self._prompt_open_completed_results()
+        if loaded:
+            self._refresh_guided_start_panel()
+            self._refresh_guided_diagnostics_panel()
+            idx = list(GUIDED_WORKFLOW_STEPS).index("Diagnostics")
+            self._guided_workflow_stepper.setCurrentRow(idx)
 
     def _sync_line_edit_value(self, target: QLineEdit, text: str) -> None:
         if getattr(self, "_guided_setup_syncing", False):
@@ -9976,10 +10076,14 @@ class MainWindow(QMainWindow):
             self._exit_complete_state_workspace()
             self._refresh_tuning_workspace_availability()
         self._update_button_states()
+        if hasattr(self, "_guided_start_status_label"):
+            self._refresh_guided_start_panel()
+        if hasattr(self, "_guided_diagnostics_status_label"):
+            self._refresh_guided_diagnostics_panel()
         return bool(loaded)
 
-    def _on_open_results(self):
-        """Open a completed successful output directory into complete-state workspace."""
+    def _prompt_open_completed_results(self) -> bool:
+        """Browse for and load a completed successful output directory."""
         current = (self._current_run_dir or "").strip()
         output = self._output_dir.text().strip()
         start_dir = ""
@@ -9994,7 +10098,7 @@ class MainWindow(QMainWindow):
             start_dir,
         )
         if not selected:
-            return
+            return False
 
         loaded = self._open_completed_results_dir(selected)
         if not loaded:
@@ -10014,7 +10118,12 @@ class MainWindow(QMainWindow):
             self._ui_state = RunnerState.IDLE
             self._render_status_label()
             self._update_button_states()
-            return
+            return False
+        return bool(loaded)
+
+    def _on_open_results(self):
+        """Open a completed successful output directory into complete-state workspace."""
+        self._prompt_open_completed_results()
 
     def _on_open_folder(self):
         """Open the current run_dir in the system file manager."""

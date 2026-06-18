@@ -145,6 +145,7 @@ def test_guided_workflow_stepper_has_expected_steps(window):
 
 def test_guided_workflow_stepper_switches_placeholder_panels(window):
     expected_panels = [
+        "guidedStepStart",
         "guidedStepSelectData",
         "guidedStepRecordingStructure",
         "guidedStepCorrectionApproach",
@@ -156,6 +157,137 @@ def test_guided_workflow_stepper_switches_placeholder_panels(window):
     for idx, expected_name in enumerate(expected_panels):
         window._guided_workflow_stepper.setCurrentRow(idx)
         assert window._guided_workflow_stack.currentWidget().objectName() == expected_name
+
+
+def test_guided_start_step_exists_first_with_raw_setup_and_open_results_choices(window):
+    stepper = window._guided_workflow_stepper
+    assert stepper.item(0).data(Qt.UserRole) == "Start"
+    assert stepper.item(1).data(Qt.UserRole) == "Select data"
+    window._guided_workflow_stepper.setCurrentRow(0)
+
+    assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepStart"
+    setup_card = window._guided_workflow_tab.findChild(QGroupBox, "guidedStartSetupNewAnalysisCard")
+    open_card = window._guided_workflow_tab.findChild(QGroupBox, "guidedStartOpenResultsCard")
+    assert setup_card is not None
+    assert open_card is not None
+    assert "Set up a new analysis" in setup_card.title()
+    assert "Open results from a completed run" in open_card.title()
+    assert window._guided_start_setup_btn.text() == "Set up new analysis"
+    assert window._guided_start_open_results_btn.text() == "Open Results..."
+    assert "No completed run loaded" in window._guided_start_status_label.text()
+
+
+def test_guided_start_setup_new_analysis_navigates_without_loading_or_generating(
+    window, tmp_path, monkeypatch
+):
+    input_dir = tmp_path / "raw_input"
+    input_dir.mkdir()
+    window._guided_input_dir_edit.setText(str(input_dir))
+    calls = {"open": 0, "preview": 0, "signal": 0}
+    monkeypatch.setattr(window, "_prompt_open_completed_results", lambda: calls.__setitem__("open", calls["open"] + 1) or True)
+    monkeypatch.setattr(
+        main_window_module,
+        "run_guided_correction_preview_comparison",
+        lambda *_args, **_kwargs: calls.__setitem__("preview", calls["preview"] + 1),
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "run_signal_only_f0_diagnostic_review",
+        lambda *_args, **_kwargs: calls.__setitem__("signal", calls["signal"] + 1),
+    )
+
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+
+    assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepSelectData"
+    assert window._guided_input_dir_edit.text() == str(input_dir)
+    assert calls == {"open": 0, "preview": 0, "signal": 0}
+
+
+def test_guided_start_open_results_uses_shared_loader_and_navigates_to_diagnostics(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    raw_input = tmp_path / "raw_input"
+    raw_input.mkdir()
+    window._guided_input_dir_edit.setText(str(raw_input))
+    calls = {"open": 0}
+
+    def _fake_open(path):
+        calls["open"] += 1
+        assert path == str(run_dir)
+        window._current_run_dir = str(run_dir)
+        return True
+
+    monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_args: str(run_dir))
+    monkeypatch.setattr(window, "_open_completed_results_dir", _fake_open)
+
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_open_results_btn.click()
+
+    assert calls["open"] == 1
+    assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepDiagnostics"
+    assert window._guided_input_dir_edit.text() == str(raw_input)
+    assert window._input_dir.text() == str(raw_input)
+
+
+def test_guided_start_open_results_populates_diagnostics_without_overloading_input(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    raw_input = tmp_path / "raw_input"
+    raw_input.mkdir()
+    window._guided_input_dir_edit.setText(str(raw_input))
+    calls = {"preview": 0, "signal": 0}
+    monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_args: str(run_dir))
+    monkeypatch.setattr(
+        main_window_module,
+        "run_guided_correction_preview_comparison",
+        lambda *_args, **_kwargs: calls.__setitem__("preview", calls["preview"] + 1),
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "run_signal_only_f0_diagnostic_review",
+        lambda *_args, **_kwargs: calls.__setitem__("signal", calls["signal"] + 1),
+    )
+
+    window._guided_start_open_results_btn.click()
+
+    assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepDiagnostics"
+    assert str(run_dir) in window._guided_diagnostics_completed_run_label.text()
+    assert [window._guided_preview_roi_combo.itemText(i) for i in range(window._guided_preview_roi_combo.count())] == [
+        "CH1",
+        "CH2",
+    ]
+    assert [window._guided_signal_f0_roi_combo.itemText(i) for i in range(window._guided_signal_f0_roi_combo.count())] == [
+        "CH1",
+        "CH2",
+    ]
+    assert window._guided_preview_generate_btn.isEnabled() is True
+    assert window._guided_signal_f0_generate_btn.isEnabled() is True
+    assert calls == {"preview": 0, "signal": 0}
+    assert window._guided_input_dir_edit.text() == str(raw_input)
+    assert window._input_dir.text() == str(raw_input)
+    assert window._input_dir.text() != str(run_dir)
+    assert str(run_dir) in window._guided_start_status_label.text()
+    assert str(raw_input) in window._guided_start_status_label.text()
+
+
+def test_full_control_open_results_still_uses_same_completed_loader(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    calls = {"open": 0}
+
+    def _fake_open(path):
+        calls["open"] += 1
+        assert path == str(run_dir)
+        return True
+
+    monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_args: str(run_dir))
+    monkeypatch.setattr(window, "_open_completed_results_dir", _fake_open)
+
+    window._on_open_results()
+
+    assert calls["open"] == 1
 
 
 def test_guided_correction_step_shows_expected_non_executing_cards(window):
