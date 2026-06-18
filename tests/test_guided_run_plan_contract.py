@@ -80,6 +80,38 @@ def _checklist_items(plan: GuidedRunPlan | None, errors: list[str] | None = None
     return evaluate_guided_plan_checklist(plan, errors).item_by_key()
 
 
+def _valid_feature_event_config() -> dict:
+    return {
+        "event_signal": "dff",
+        "signal_excursion_polarity": "positive",
+        "peak_threshold_method": "mean_std",
+        "peak_threshold_k": 2.5,
+        "peak_threshold_percentile": 95.0,
+        "peak_min_distance_sec": 1.0,
+        "peak_min_prominence_k": 2.0,
+        "peak_min_width_sec": 0.3,
+        "peak_pre_filter": "none",
+        "event_auc_baseline": "zero",
+    }
+
+
+def _valid_feature_event_profile(**overrides) -> FeatureEventProfile:
+    values = {
+        "profile_id": "default",
+        "profile_label": "Default feature detection",
+        "scope": "run",
+        "config_fields": _valid_feature_event_config(),
+        "evidence_previews": [EvidenceChunkReview(chunk_id=0, summary="preview only")],
+        "choice_source": "explicit_user_profile_edit",
+        "status": "draft",
+        "target_rois": [],
+        "resolved_rois": [],
+        "provenance_references": ["preview://feature/default"],
+    }
+    values.update(overrides)
+    return FeatureEventProfile(**values)
+
+
 def test_round_trip_serialization_preserves_roi_level_correction_choices():
     plan = _valid_plan()
 
@@ -182,14 +214,42 @@ def test_checklist_feature_event_profile_readiness():
     assert _checklist_items(no_profiles)["feature_event"].status == "not_configured"
 
     valid_profile = _valid_plan()
+    valid_profile.feature_event_profiles = [_valid_feature_event_profile()]
     assert _checklist_items(valid_profile)["feature_event"].status == "pass"
 
     invalid_profile = _valid_plan()
+    invalid_profile.feature_event_profiles = [_valid_feature_event_profile()]
     invalid_profile.feature_event_profiles[0].config_fields["unknown_feature_setting"] = True
     errors = validate_plan_contract(invalid_profile)
     items = _checklist_items(invalid_profile, errors)
     assert items["contract"].status == "fail"
     assert items["feature_event"].status == "fail"
+
+
+def test_valid_run_level_feature_event_profile_passes_and_execution_remains_blocked():
+    plan = _valid_plan()
+    plan.feature_event_profiles = [_valid_feature_event_profile()]
+
+    errors = validate_plan_contract(plan)
+    checklist = evaluate_guided_plan_checklist(plan, errors)
+    items = checklist.item_by_key()
+
+    assert errors == []
+    assert items["feature_event"].status == "pass"
+    assert checklist.execution_ready is False
+    assert items["execution"].status == "blocked"
+
+
+def test_duplicate_feature_event_profile_id_is_rejected():
+    plan = _valid_plan()
+    plan.feature_event_profiles = [
+        _valid_feature_event_profile(profile_id="events"),
+        _valid_feature_event_profile(profile_id="events"),
+    ]
+
+    errors = validate_plan_contract(plan)
+
+    assert any("duplicate feature_event profile_id: events" in err for err in errors)
 
 
 def test_checklist_output_destination_readiness_does_not_touch_filesystem(tmp_path):
@@ -267,24 +327,157 @@ def test_signal_only_f0_is_allowed_only_as_explicit_user_mark():
 def test_feature_event_profile_scope_rejects_chunk_but_allows_evidence_preview_chunks():
     for scope in ("run", "roi", "selected_roi_group"):
         plan = _valid_plan()
-        plan.feature_event_profiles[0].scope = scope
+        plan.feature_event_profiles = [_valid_feature_event_profile(scope=scope)]
+        if scope == "roi":
+            plan.feature_event_profiles[0].resolved_rois = ["CH1"]
         assert validate_plan_contract(plan) == []
 
     plan = _valid_plan()
-    plan.feature_event_profiles[0].scope = "chunk"
-    plan.feature_event_profiles[0].evidence_previews = [EvidenceChunkReview(chunk_id=2)]
+    plan.feature_event_profiles = [
+        _valid_feature_event_profile(scope="chunk", evidence_previews=[EvidenceChunkReview(chunk_id=2)])
+    ]
     errors = validate_plan_contract(plan)
     assert any("invalid scope: chunk" in err for err in errors)
     assert not any("chunk_id" in err for err in errors)
+    assert _checklist_items(plan, errors)["feature_event"].status == "fail"
 
 
 def test_feature_event_profile_unknown_config_fields_are_rejected():
     plan = _valid_plan()
+    plan.feature_event_profiles = [_valid_feature_event_profile()]
     plan.feature_event_profiles[0].config_fields["new_detector_threshold"] = 1.0
 
     errors = validate_plan_contract(plan)
 
     assert any("unknown config fields" in err for err in errors)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("event_signal", "raw", "invalid event_signal"),
+        ("signal_excursion_polarity", "upward", "invalid signal_excursion_polarity"),
+        ("peak_threshold_method", "magic", "invalid peak_threshold_method"),
+        ("peak_threshold_k", 0.0, "peak_threshold_k must be > 0"),
+        ("peak_threshold_k", -1.0, "peak_threshold_k must be > 0"),
+        ("peak_threshold_percentile", -0.1, "peak_threshold_percentile must be >= 0"),
+        ("peak_threshold_percentile", 100.1, "peak_threshold_percentile must be <= 100"),
+        ("peak_min_distance_sec", -1.0, "peak_min_distance_sec must be >= 0"),
+        ("peak_min_prominence_k", -1.0, "peak_min_prominence_k must be >= 0"),
+        ("peak_min_width_sec", -1.0, "peak_min_width_sec must be >= 0"),
+        ("peak_pre_filter", "smooth", "invalid peak_pre_filter"),
+        ("event_auc_baseline", "mean", "invalid event_auc_baseline"),
+    ],
+)
+def test_feature_event_profile_invalid_config_values_are_rejected(field, value, message):
+    plan = _valid_plan()
+    cfg = _valid_feature_event_config()
+    cfg[field] = value
+    plan.feature_event_profiles = [_valid_feature_event_profile(config_fields=cfg)]
+
+    errors = validate_plan_contract(plan)
+
+    assert any(message in err for err in errors)
+
+
+def test_feature_event_profile_absolute_threshold_requires_positive_abs():
+    plan = _valid_plan()
+    cfg = _valid_feature_event_config()
+    cfg["peak_threshold_method"] = "absolute"
+    cfg.pop("peak_threshold_abs", None)
+    plan.feature_event_profiles = [_valid_feature_event_profile(config_fields=cfg)]
+    errors = validate_plan_contract(plan)
+    assert any("peak_threshold_abs is required" in err for err in errors)
+
+    cfg["peak_threshold_abs"] = 0.0
+    plan.feature_event_profiles = [_valid_feature_event_profile(config_fields=cfg)]
+    errors = validate_plan_contract(plan)
+    assert any("peak_threshold_abs must be > 0" in err for err in errors)
+
+
+@pytest.mark.parametrize("source", ["diagnostic_success", "preview_success", "auto"])
+def test_feature_event_profile_automatic_choice_source_is_rejected(source):
+    plan = _valid_plan()
+    plan.feature_event_profiles = [_valid_feature_event_profile(choice_source=source)]
+
+    errors = validate_plan_contract(plan)
+
+    assert any("feature/event choice_source must be explicit_user_profile_edit" in err for err in errors)
+
+
+@pytest.mark.parametrize("status", ["needs_review", "ready", ""])
+def test_feature_event_profile_invalid_status_is_rejected(status):
+    plan = _valid_plan()
+    plan.feature_event_profiles = [_valid_feature_event_profile(status=status)]
+
+    errors = validate_plan_contract(plan)
+
+    assert any("invalid status" in err for err in errors)
+
+
+def test_feature_event_profile_roi_scope_requires_single_roi_when_rois_are_provided():
+    one_roi = _valid_plan()
+    one_roi.feature_event_profiles = [
+        _valid_feature_event_profile(scope="roi", resolved_rois=["CH1"], target_rois=["CH1"])
+    ]
+    assert validate_plan_contract(one_roi) == []
+
+    multi_resolved = _valid_plan()
+    multi_resolved.feature_event_profiles = [
+        _valid_feature_event_profile(scope="roi", resolved_rois=["CH1", "CH2"])
+    ]
+    assert any("roi scope resolved_rois must contain exactly one ROI" in err for err in validate_plan_contract(multi_resolved))
+
+    group = _valid_plan()
+    group.feature_event_profiles = [
+        _valid_feature_event_profile(scope="selected_roi_group", resolved_rois=["CH1", "CH2"])
+    ]
+    assert validate_plan_contract(group) == []
+
+
+def test_feature_event_evidence_preview_chunk_is_provenance_only():
+    plan = _valid_plan()
+    plan.feature_event_profiles = [
+        _valid_feature_event_profile(scope="run", evidence_previews=[EvidenceChunkReview(chunk_id=0)])
+    ]
+
+    assert validate_plan_contract(plan) == []
+    payload = serialize_plan_to_dict(plan)
+    profile = payload["feature_event_profiles"][0]
+    assert profile["scope"] == "run"
+    assert "chunk_id" not in profile
+    assert profile["evidence_previews"][0]["chunk_id"] == 0
+
+
+def test_feature_event_profile_round_trip_preserves_profile_fields():
+    plan = _valid_plan()
+    plan.feature_event_profiles = [
+        _valid_feature_event_profile(
+            profile_id="roi-profile",
+            profile_label="ROI CH1 feature profile",
+            scope="roi",
+            target_rois=["CH1"],
+            resolved_rois=["CH1"],
+            choice_source="explicit_user_profile_edit",
+            status="complete",
+            provenance_references=["preview://feature/roi-profile"],
+        )
+    ]
+
+    restored = deserialize_plan_from_dict(serialize_plan_to_dict(plan))
+    profile = restored.feature_event_profiles[0]
+
+    assert validate_plan_contract(restored) == []
+    assert profile.profile_id == "roi-profile"
+    assert profile.profile_label == "ROI CH1 feature profile"
+    assert profile.scope == "roi"
+    assert profile.target_rois == ["CH1"]
+    assert profile.resolved_rois == ["CH1"]
+    assert profile.config_fields == _valid_feature_event_config()
+    assert profile.evidence_previews[0].chunk_id == 0
+    assert profile.choice_source == "explicit_user_profile_edit"
+    assert profile.status == "complete"
+    assert profile.provenance_references == ["preview://feature/roi-profile"]
 
 
 def test_source_mode_boundary_is_explicit():
@@ -353,7 +546,9 @@ def test_non_execution_guarantee(tmp_path):
     assert not (tmp_path / "manifest.csv").exists()
     assert not (tmp_path / "applied_dff").exists()
     assert not (tmp_path / "features").exists()
+    assert not (tmp_path / "features.csv").exists()
     assert not (tmp_path / "validation").exists()
+    assert "photometry_pipeline.core.feature_extraction" not in sys.modules
     assert "photometry_pipeline.pipeline" not in sys.modules
 
 
