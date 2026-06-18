@@ -4033,6 +4033,18 @@ class MainWindow(QMainWindow):
             label.setToolTip(f"Completed run: {plan.source.completed_run_dir}")
         else:
             label.setToolTip("")
+
+        # Refresh readiness summary
+        readiness_label = getattr(self, "_guided_plan_readiness_summary_label", None)
+        if readiness_label is not None:
+            from photometry_pipeline.guided_run_plan import guided_plan_readiness_summary_lines
+            lines = guided_plan_readiness_summary_lines(plan, errors)
+            readiness_label.setText("\n".join(lines))
+            if plan is not None and plan.source.completed_run_dir:
+                readiness_label.setToolTip(f"Completed run: {plan.source.completed_run_dir}")
+            else:
+                readiness_label.setToolTip("")
+
         self._refresh_guided_draft_run_plan_checklist(plan, errors)
 
     def _guided_draft_run_plan_checklist_text(
@@ -4676,6 +4688,19 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self._build_guided_feature_event_profile_editor())
         layout.addWidget(self._build_guided_output_policy_editor())
+
+        readiness_group = QGroupBox("Plan readiness summary")
+        readiness_group.setObjectName("guidedPlanReadinessSummaryPanel")
+        readiness_layout = QVBoxLayout(readiness_group)
+        readiness_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_plan_readiness_summary_label = QLabel("")
+        self._guided_plan_readiness_summary_label.setObjectName("guidedPlanReadinessSummaryLabel")
+        self._guided_plan_readiness_summary_label.setProperty("guidedSecondaryText", True)
+        self._guided_plan_readiness_summary_label.setWordWrap(True)
+        self._guided_plan_readiness_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_plan_readiness_summary_label)
+        readiness_layout.addWidget(self._guided_plan_readiness_summary_label)
+        layout.addWidget(readiness_group)
 
         draft_group = QGroupBox("Draft run-plan preview")
         draft_group.setObjectName("guidedDraftRunPlanPreviewPanel")

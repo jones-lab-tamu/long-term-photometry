@@ -774,3 +774,203 @@ def test_roi_entry_missing_roi_and_invalid_status_fail_validation():
 
     assert any("roi_plan[0] missing roi" in err for err in errors)
     assert any("invalid roi_status: needs_review" in err for err in errors)
+
+
+def test_readiness_summary_empty_incomplete_plan():
+    from photometry_pipeline.guided_run_plan import (
+        GuidedRunPlan,
+        GuidedPlanSource,
+        summarize_guided_plan_readiness,
+        guided_plan_readiness_summary_lines,
+    )
+    plan = GuidedRunPlan(
+        mode="completed_run_planning",
+        source=GuidedPlanSource(
+            source_mode="completed_run",
+            completed_run_dir="C:/runs/example",
+        ),
+        roi_plan=[],
+    )
+
+    summary = summarize_guided_plan_readiness(plan)
+    assert "source" in summary.configured
+    assert "ROI correction strategies" in summary.missing
+    assert "feature/event profile" in summary.missing
+    assert "output destination" in summary.missing
+    assert any("execution intentionally unavailable" in b for b in summary.blocked)
+    assert summary.execution_ready is False
+
+    lines = guided_plan_readiness_summary_lines(plan)
+    assert "Configured: source" in lines[0]
+    assert "Missing: ROI correction strategies; feature/event profile; output destination" in lines[1]
+    assert "Blocked: execution intentionally unavailable until a later Guided Run/RunSpec stage" in lines[2]
+    assert "Files written: none" in lines[3]
+
+
+def test_readiness_summary_partially_configured_plan():
+    from photometry_pipeline.guided_run_plan import (
+        GuidedRunPlan,
+        GuidedPlanSource,
+        RoiPlanEntry,
+        CorrectionStrategyChoice,
+        summarize_guided_plan_readiness,
+        guided_plan_readiness_summary_lines,
+    )
+    plan = GuidedRunPlan(
+        mode="completed_run_planning",
+        source=GuidedPlanSource(
+            source_mode="completed_run",
+            completed_run_dir="C:/runs/example",
+        ),
+        roi_plan=[
+            RoiPlanEntry(
+                roi="CH1",
+                correction_strategy=CorrectionStrategyChoice(
+                    strategy="robust_global_event_reject",
+                    strategy_label="Robust Global Event-Reject Fit",
+                ),
+            )
+        ],
+    )
+
+    summary = summarize_guided_plan_readiness(plan)
+    assert "source" in summary.configured
+    assert any("1 ROI correction strategy" in c for c in summary.configured)
+    assert "feature/event profile" in summary.missing
+    assert "output destination" in summary.missing
+    assert summary.execution_ready is False
+
+    lines = guided_plan_readiness_summary_lines(plan)
+    assert "Configured: source; 1 ROI correction strategy" in lines[0]
+    assert "Missing: feature/event profile; output destination" in lines[1]
+
+
+def test_readiness_summary_fully_configured_plan():
+    from photometry_pipeline.guided_run_plan import (
+        GuidedRunPlan,
+        GuidedPlanSource,
+        RoiPlanEntry,
+        CorrectionStrategyChoice,
+        EvidenceChunkReview,
+        FeatureEventProfile,
+        OutputPolicy,
+        summarize_guided_plan_readiness,
+        guided_plan_readiness_summary_lines,
+    )
+    plan = GuidedRunPlan(
+        mode="completed_run_planning",
+        source=GuidedPlanSource(
+            source_mode="completed_run",
+            completed_run_dir="C:/runs/example",
+        ),
+        roi_plan=[
+            RoiPlanEntry(
+                roi="CH1",
+                correction_strategy=CorrectionStrategyChoice(
+                    strategy="robust_global_event_reject",
+                    strategy_label="Robust Global Event-Reject Fit",
+                ),
+                evidence=[
+                    EvidenceChunkReview(
+                        chunk_id=0,
+                    )
+                ],
+            )
+        ],
+        feature_event_profiles=[
+            FeatureEventProfile(
+                profile_id="run_profile",
+                scope="run",
+                status="complete",
+                config_fields={
+                    "event_signal": "dff",
+                    "signal_excursion_polarity": "positive",
+                    "peak_threshold_method": "mean_std",
+                    "peak_threshold_k": 3.0,
+                    "peak_min_distance_sec": 0.5,
+                    "peak_min_prominence_k": 1.0,
+                    "peak_min_width_sec": 0.2,
+                    "peak_pre_filter": "none",
+                    "event_auc_baseline": "zero",
+                },
+            )
+        ],
+        output_policy=OutputPolicy(
+            output_root="C:/outputs",
+        ),
+    )
+
+    summary = summarize_guided_plan_readiness(plan)
+    assert "source" in summary.configured
+    assert any("1 ROI correction strategy" in c for c in summary.configured)
+    assert "feature/event profile" in summary.configured
+    assert "output destination" in summary.configured
+    assert not summary.missing
+    assert summary.execution_ready is False
+
+    lines = guided_plan_readiness_summary_lines(plan)
+    assert "Configured: source; 1 ROI correction strategy; feature/event profile; output destination" in lines[0]
+    assert "Missing: none" in lines[1]
+    assert "Blocked: execution intentionally unavailable until a later Guided Run/RunSpec stage" in lines[2]
+
+
+def test_readiness_summary_contract_errors():
+    from photometry_pipeline.guided_run_plan import (
+        GuidedRunPlan,
+        GuidedPlanSource,
+        OutputPolicy,
+        summarize_guided_plan_readiness,
+        guided_plan_readiness_summary_lines,
+    )
+    # Invalid output policy (e.g. separate_from_source_required is False but output_root is set)
+    plan = GuidedRunPlan(
+        mode="completed_run_planning",
+        source=GuidedPlanSource(
+            source_mode="completed_run",
+            completed_run_dir="C:/runs/example",
+        ),
+        roi_plan=[],
+        output_policy=OutputPolicy(
+            output_root="C:/runs/example",
+            separate_from_source_required=False,
+        ),
+    )
+
+    summary = summarize_guided_plan_readiness(plan)
+    assert "Invalid output destination policy" in summary.warnings
+    assert summary.execution_ready is False
+
+    lines = guided_plan_readiness_summary_lines(plan)
+    # The problems line should display
+    problems_line = [l for l in lines if l.startswith("Problems:")]
+    assert len(problems_line) == 1
+    assert "Invalid output destination policy" in problems_line[0]
+
+
+def test_readiness_summary_pure_non_executing_guarantee(tmp_path):
+    import sys
+    from photometry_pipeline.guided_run_plan import (
+        GuidedRunPlan,
+        GuidedPlanSource,
+        summarize_guided_plan_readiness,
+    )
+    plan = GuidedRunPlan(
+        mode="completed_run_planning",
+        source=GuidedPlanSource(
+            source_mode="completed_run",
+            completed_run_dir=str(tmp_path),
+        ),
+        roi_plan=[],
+    )
+
+    # Before calling, assert no production/execution pipeline modules are loaded
+    assert "photometry_pipeline.core.feature_extraction" not in sys.modules
+    assert "photometry_pipeline.core.pipeline" not in sys.modules
+
+    summary = summarize_guided_plan_readiness(plan)
+    assert summary is not None
+
+    # After calling, they must still not be loaded
+    assert "photometry_pipeline.core.feature_extraction" not in sys.modules
+    assert "photometry_pipeline.core.pipeline" not in sys.modules
+    assert not list(tmp_path.rglob("*"))

@@ -838,3 +838,141 @@ def _profile_evidence_summary(profile: FeatureEventProfile) -> str:
         return "evidence preview chunks=none"
     chunks = ",".join(str(item.chunk_id) for item in profile.evidence_previews)
     return f"evidence preview chunks={chunks}"
+
+
+@dataclass
+class GuidedPlanReadinessSummary:
+    configured: list[str]
+    missing: list[str]
+    blocked: list[str]
+    warnings: list[str]
+    execution_ready: bool = False
+
+
+def summarize_guided_plan_readiness(
+    plan: GuidedRunPlan | None,
+    contract_errors: list[str] | None = None,
+) -> GuidedPlanReadinessSummary:
+    checklist = evaluate_guided_plan_checklist(plan, contract_errors)
+    configured: list[str] = []
+    missing: list[str] = []
+    blocked = ["execution intentionally unavailable until a later Guided Run/RunSpec stage"]
+    warnings: list[str] = []
+
+    if plan is None:
+        missing = ["source", "ROI correction strategies", "feature/event profile", "output destination"]
+    else:
+        # Source
+        src_item = checklist.item_by_key().get("source")
+        if src_item and src_item.status == "pass":
+            configured.append("source")
+        else:
+            missing.append("source")
+
+        # ROI Choices
+        roi_item = checklist.item_by_key().get("roi_choices")
+        if roi_item:
+            if roi_item.status == "pass":
+                num_marked = len([entry for entry in plan.roi_plan if entry.correction_strategy is not None])
+                roi_label = f"{num_marked} ROI correction strategy" if num_marked == 1 else f"{num_marked} ROI correction strategies"
+                configured.append(roi_label)
+            elif roi_item.status == "not_configured":
+                missing.append("ROI correction strategies")
+            elif roi_item.status == "fail":
+                warnings.append("Invalid correction strategy")
+
+        # Feature/Event
+        fe_item = checklist.item_by_key().get("feature_event")
+        if fe_item:
+            if fe_item.status == "pass":
+                configured.append("feature/event profile")
+            elif fe_item.status == "not_configured":
+                missing.append("feature/event profile")
+            elif fe_item.status == "fail":
+                warnings.append("Invalid feature/event profile")
+
+        # Output Destination
+        out_item = checklist.item_by_key().get("output_destination")
+        if out_item:
+            if out_item.status == "pass":
+                configured.append("output destination")
+            elif out_item.status == "not_configured":
+                missing.append("output destination")
+            elif out_item.status == "fail":
+                warnings.append("Invalid output destination policy")
+
+        # Contract
+        c_item = checklist.item_by_key().get("contract")
+        if c_item:
+            if c_item.status == "pass":
+                configured.append("contract: valid")
+            elif c_item.status == "fail":
+                warnings.append("Contract errors present")
+
+        # Non-execution safety
+        prov_item = checklist.item_by_key().get("non_execution")
+        if prov_item:
+            if prov_item.status == "pass":
+                configured.append("non-execution safety: preserved")
+            elif prov_item.status == "fail":
+                warnings.append("Invalid plan provenance")
+
+        # Add checklist warnings
+        for item in checklist.items:
+            if item.status == "warning":
+                warnings.append(item.message)
+
+    return GuidedPlanReadinessSummary(
+        configured=configured,
+        missing=missing,
+        blocked=blocked,
+        warnings=warnings,
+        execution_ready=False,
+    )
+
+
+def guided_plan_readiness_summary_lines(
+    plan: GuidedRunPlan | None,
+    contract_errors: list[str] | None = None,
+) -> list[str]:
+    summary = summarize_guided_plan_readiness(plan, contract_errors)
+
+    configured_str = "; ".join(summary.configured) if summary.configured else "none"
+    missing_str = "; ".join(summary.missing) if summary.missing else "none"
+
+    lines = [
+        f"Configured: {configured_str}",
+        f"Missing: {missing_str}",
+    ]
+
+    problems: list[str] = []
+    if plan is None:
+        problems.append("No draft plan is available.")
+    else:
+        checklist = evaluate_guided_plan_checklist(plan, contract_errors)
+        c_item = checklist.item_by_key().get("contract")
+        if c_item and c_item.status == "fail":
+            problems.append("Contract errors present")
+
+        for key, label in [
+            ("roi_choices", "Invalid correction strategy"),
+            ("feature_event", "Invalid feature/event profile"),
+            ("output_destination", "Invalid output destination policy"),
+            ("non_execution", "Invalid plan provenance"),
+        ]:
+            item = checklist.item_by_key().get(key)
+            if item and item.status == "fail":
+                problems.append(label)
+
+        for item in checklist.items:
+            if item.status == "warning":
+                problems.append(item.message)
+
+    if problems:
+        lines.append(f"Problems: {'; '.join(problems)}")
+
+    lines.extend([
+        "Blocked: execution intentionally unavailable until a later Guided Run/RunSpec stage",
+        "Files written: none"
+    ])
+    return lines

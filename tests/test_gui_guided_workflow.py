@@ -2438,6 +2438,172 @@ def test_guided_output_policy_clear_affects_only_current(window, tmp_path, monke
     assert window._build_guided_draft_run_plan()[0].output_policy.output_root == str(out_a.resolve())
 
 
+
+
+def test_gui_readiness_summary_default(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    summary = window._guided_plan_readiness_summary_label.text()
+    assert "Configured: source" in summary
+    assert "ROI correction strategies" in summary
+    assert "feature/event profile" in summary
+    assert "output destination" in summary
+    assert "Blocked: execution intentionally unavailable" in summary
+    assert "Files written: none" in summary
+
+
+def test_gui_readiness_summary_updates_on_mark(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    # Select strategy
+    idx = window._guided_confirm_strategy_combo.findData("robust_global_event_reject")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    summary = window._guided_plan_readiness_summary_label.text()
+    assert "1 ROI correction strategy" in summary
+    assert "feature/event profile" in summary
+    assert "output destination" in summary
+    assert "Blocked: execution intentionally unavailable" in summary
+
+
+def test_gui_readiness_summary_updates_on_profile(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._guided_feature_event_polarity_combo.setCurrentText("positive")
+    window._guided_feature_event_peak_method_combo.setCurrentText("mean_std")
+    window._guided_feature_event_peak_k_edit.setText("3.0")
+    window._guided_feature_event_apply_btn.click()
+
+    summary = window._guided_plan_readiness_summary_label.text()
+    assert "feature/event profile" in summary
+    assert "ROI correction strategies" in summary
+    assert "output destination" in summary
+    assert "Blocked: execution intentionally unavailable" in summary
+
+
+def test_gui_readiness_summary_updates_on_output(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    out_dest = tmp_path / "future_gui_out"
+    window._guided_output_path_edit.setText(str(out_dest))
+    window._guided_output_apply_btn.click()
+
+    summary = window._guided_plan_readiness_summary_label.text()
+    assert "output destination" in summary
+    assert "ROI correction strategies" in summary
+    assert "feature/event profile" in summary
+    assert "Blocked: execution intentionally unavailable" in summary
+    assert not out_dest.exists()
+
+
+def test_gui_readiness_summary_full_and_non_output_guarantee(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    before_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    # 1. Mark Strategy
+    idx = window._guided_confirm_strategy_combo.findData("robust_global_event_reject")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    # 2. Apply Profile
+    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._guided_feature_event_polarity_combo.setCurrentText("positive")
+    window._guided_feature_event_peak_method_combo.setCurrentText("mean_std")
+    window._guided_feature_event_peak_k_edit.setText("3.0")
+    window._guided_feature_event_apply_btn.click()
+
+    # 3. Apply Output Destination
+    out_dest = tmp_path / "future_gui_out_full"
+    window._guided_output_path_edit.setText(str(out_dest))
+    window._guided_output_apply_btn.click()
+
+    summary = window._guided_plan_readiness_summary_label.text()
+    assert "Configured: source; 1 ROI correction strategy; feature/event profile; output destination" in summary
+    assert "Missing: none" in summary
+    assert "Blocked: execution intentionally unavailable" in summary
+    assert "Files written: none" in summary
+
+    # Ensure no files/folders were created
+    assert not out_dest.exists()
+    after_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    assert after_files == before_files
+
+
+def test_gui_readiness_summary_source_switching(window, tmp_path, monkeypatch):
+    run_a = _make_preview_completed_run(tmp_path / "run_a")
+    run_b = _make_preview_completed_run(tmp_path / "run_b")
+    out_a = tmp_path / "out_a"
+
+    # Load Run A and configure output policy
+    _load_preview_completed_run(window, run_a, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_output_path_edit.setText(str(out_a))
+    window._guided_output_apply_btn.click()
+
+    summary_a = window._guided_plan_readiness_summary_label.text()
+    assert "output destination" in summary_a.split("Missing:")[0]
+
+    # Load Run B and check summary (should reset/report missing output destination)
+    _load_preview_completed_run(window, run_b, monkeypatch)
+    window._refresh_guided_confirm_strategy_panel()
+    summary_b = window._guided_plan_readiness_summary_label.text()
+
+    assert "output destination" not in summary_b.split("Missing:")[0]
+    assert "output destination" in summary_b.split("Missing:")[1]
+
+    # Re-load Run A and verify output destination is configured again
+    _load_preview_completed_run(window, run_a, monkeypatch)
+    window._refresh_guided_confirm_strategy_panel()
+    summary_a_restored = window._guided_plan_readiness_summary_label.text()
+    assert "output destination" in summary_a_restored.split("Missing:")[0]
+
+
+def test_gui_readiness_summary_unsaved_widget_edits_ignored(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    # Type/edit but do not click Apply
+    window._guided_output_path_edit.setText(str(tmp_path / "unsaved_out"))
+    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+
+    # Refresh panel
+    window._refresh_guided_confirm_strategy_panel()
+
+    summary = window._guided_plan_readiness_summary_label.text()
+    assert "output destination" not in summary.split("Missing:")[0]
+    assert "output destination" in summary.split("Missing:")[1]
+    assert "feature/event profile" in summary.split("Missing:")[1]
+
+
+def test_gui_readiness_summary_invalid_apply_does_not_make_configured(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    # Apply invalid output destination (same as completed run)
+    window._guided_output_path_edit.setText(str(run_dir))
+    window._guided_output_apply_btn.click()
+
+    summary = window._guided_plan_readiness_summary_label.text()
+    assert "output destination" in summary.split("Missing:")[1]
+    assert "Problems" not in summary
+
+
 def test_guided_output_policy_non_output_guarantee(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     before_run_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
@@ -2447,19 +2613,43 @@ def test_guided_output_policy_non_output_guarantee(window, tmp_path, monkeypatch
 
     _load_preview_completed_run(window, run_dir, monkeypatch)
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    # 4. Assert proposed output root does not exist before Apply
+    assert not out_dest.exists()
+
+    # 5. Apply the proposed output root
     window._guided_output_path_edit.setText(str(out_dest))
     window._guided_output_apply_btn.click()
 
+    # 6. Assert proposed output root still does not exist
     assert not out_dest.exists()
+
+    # 7. Assert no production files were created
     assert not (run_dir / "manifest.csv").exists()
+    assert not (run_dir / "MANIFEST.csv").exists()
     assert not (run_dir / "features.csv").exists()
     assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
+    assert not any(p.name.startswith("guided_run_plan") and p.name.endswith(".json") for p in run_dir.rglob("*"))
 
+    # 8. Attempt invalid Apply (completed run dir)
     window._guided_output_path_edit.setText(str(run_dir))
     window._guided_output_apply_btn.click()
 
+    # 9. Clear the output policy
     window._guided_output_clear_btn.click()
 
+    # 10. Assert proposed output root still does not exist
     assert not out_dest.exists()
+
+    # 11. Assert completed-run file tree is unchanged
     after_run_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
     assert after_run_files == before_run_files
+
+    # 12. Assert no other directories or exports exist
+    assert not (run_dir / "manifest.csv").exists()
+    assert not (run_dir / "MANIFEST.csv").exists()
+    assert not (run_dir / "features.csv").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
+    assert not any(p.name.startswith("guided_run_plan") and p.name.endswith(".json") for p in run_dir.rglob("*"))
