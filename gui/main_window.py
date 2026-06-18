@@ -73,6 +73,7 @@ from photometry_pipeline.io.hdf5_cache_reader import (
 from photometry_pipeline.guided_run_plan import (
     CorrectionStrategyChoice,
     EvidenceChunkReview,
+    FeatureEventProfile,
     GuidedPlanSource,
     GuidedRunPlan,
     RoiPlanEntry,
@@ -1568,6 +1569,10 @@ class MainWindow(QMainWindow):
         self._guided_workflow_mode = "start"
         self._guided_diagnostics_status = "not_generated"
         self._guided_strategy_choices = {}
+        # Temporary in-memory Guided draft plan state until durable plan
+        # persistence/export exists. Values are scoped to completed-run source
+        # and populated only by explicit Apply.
+        self._guided_draft_feature_event_profiles_by_run = {}
         self._guided_raw_setup_controls = {}
         self._guided_open_results_mode_panels = {}
         self._guided_new_analysis_mode_panels = {}
@@ -3964,6 +3969,7 @@ class MainWindow(QMainWindow):
                     completed_run_dir=run_dir,
                 ),
                 roi_plan=entries,
+                feature_event_profiles=self._guided_feature_event_profiles_for_current_run(),
             ),
             preview_errors,
         )
@@ -4080,6 +4086,217 @@ class MainWindow(QMainWindow):
         }
         self._refresh_guided_confirm_strategy_panel()
 
+    def _guided_feature_event_profiles_for_current_run(self) -> list[FeatureEventProfile]:
+        run_dir = self._current_guided_completed_run_dir()
+        if not run_dir:
+            return []
+        return list(
+            getattr(self, "_guided_draft_feature_event_profiles_by_run", {}).get(run_dir, [])
+        )
+
+    def _guided_feature_event_editor_defaults(self) -> dict[str, object]:
+        cfg = Config()
+        return {
+            "event_signal": cfg.event_signal,
+            "signal_excursion_polarity": cfg.signal_excursion_polarity,
+            "peak_threshold_method": cfg.peak_threshold_method,
+            "peak_threshold_k": cfg.peak_threshold_k,
+            "peak_threshold_percentile": cfg.peak_threshold_percentile,
+            "peak_threshold_abs": cfg.peak_threshold_abs,
+            "peak_min_distance_sec": cfg.peak_min_distance_sec,
+            "peak_min_prominence_k": cfg.peak_min_prominence_k,
+            "peak_min_width_sec": cfg.peak_min_width_sec,
+            "peak_pre_filter": cfg.peak_pre_filter,
+            "event_auc_baseline": cfg.event_auc_baseline,
+        }
+
+    def _guided_feature_event_current_values(self) -> tuple[dict | None, str | None]:
+        if not hasattr(self, "_guided_feature_event_signal_combo"):
+            return None, "Feature/event profile editor is not available."
+        return parse_and_validate_event_feature_knobs(
+            self._guided_feature_event_signal_combo.currentText(),
+            self._guided_feature_event_peak_method_combo.currentText(),
+            self._guided_feature_event_peak_k_edit.text(),
+            self._guided_feature_event_peak_pct_edit.text(),
+            self._guided_feature_event_peak_abs_edit.text(),
+            self._guided_feature_event_peak_distance_edit.text(),
+            self._guided_feature_event_auc_baseline_combo.currentText(),
+            defaults=self._guided_feature_event_editor_defaults(),
+            peak_pre_filter_text=self._guided_feature_event_pre_filter_combo.currentText(),
+            peak_prominence_k_str=self._guided_feature_event_peak_prominence_edit.text(),
+            peak_width_sec_str=self._guided_feature_event_peak_width_edit.text(),
+            signal_excursion_polarity_text=self._guided_feature_event_polarity_combo.currentText(),
+        )
+
+    def _on_guided_apply_feature_event_profile(self) -> None:
+        run_dir = self._current_guided_completed_run_dir()
+        if not run_dir:
+            self._guided_feature_event_status_label.setText(
+                "Feature/event profile not applied: Open Results must be used first."
+            )
+            return
+        config_fields, err = self._guided_feature_event_current_values()
+        if err:
+            self._guided_feature_event_status_label.setText(f"Feature/event profile not applied: {err}")
+            return
+        profile = FeatureEventProfile(
+            profile_id="default-events",
+            profile_label="Default feature/event profile",
+            scope="run",
+            status="complete",
+            config_fields=dict(config_fields or {}),
+            evidence_previews=[],
+            choice_source="explicit_user_profile_edit",
+            target_rois=[],
+            resolved_rois=[],
+            provenance_references=[],
+        )
+        profiles_by_run = getattr(self, "_guided_draft_feature_event_profiles_by_run", {})
+        previous_profiles = list(profiles_by_run.get(run_dir, []))
+        profiles_by_run[run_dir] = [profile]
+        self._guided_draft_feature_event_profiles_by_run = profiles_by_run
+        plan, preview_errors = self._build_guided_draft_run_plan()
+        errors = list(preview_errors)
+        if plan is not None:
+            errors.extend(validate_plan_contract(plan))
+        if errors:
+            if previous_profiles:
+                profiles_by_run[run_dir] = previous_profiles
+            else:
+                profiles_by_run.pop(run_dir, None)
+            self._guided_draft_feature_event_profiles_by_run = profiles_by_run
+            self._guided_feature_event_status_label.setText(
+                "Feature/event profile not applied: " + "; ".join(errors)
+            )
+            self._refresh_guided_draft_run_plan_preview()
+            return
+        self._guided_feature_event_status_label.setText(
+            "Feature/event profile applied to in-memory draft plan. No outputs were written."
+        )
+        self._refresh_guided_draft_run_plan_preview()
+
+    def _on_guided_clear_feature_event_profile(self) -> None:
+        run_dir = self._current_guided_completed_run_dir()
+        if run_dir:
+            profiles_by_run = getattr(self, "_guided_draft_feature_event_profiles_by_run", {})
+            profiles_by_run.pop(run_dir, None)
+            self._guided_draft_feature_event_profiles_by_run = profiles_by_run
+        self._guided_feature_event_status_label.setText(
+            "Draft feature/event profile cleared from in-memory plan. No files were changed."
+        )
+        self._refresh_guided_draft_run_plan_preview()
+
+    def _build_guided_feature_event_profile_editor(self) -> QGroupBox:
+        group = QGroupBox("Feature/event profile")
+        group.setObjectName("guidedFeatureEventProfileEditorPanel")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+
+        note = QLabel(
+            "Run-level draft profile only.\n"
+            "Preview only; does not extract features or write outputs.\n"
+            "Apply explicitly to add/update the draft plan profile."
+        )
+        note.setObjectName("guidedFeatureEventProfileEditorNote")
+        note.setProperty("guidedSecondaryText", True)
+        note.setWordWrap(True)
+        self._make_guided_widget_shrinkable(note)
+        layout.addWidget(note)
+
+        defaults = self._guided_feature_event_editor_defaults()
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+
+        self._guided_feature_event_signal_combo = QComboBox()
+        self._guided_feature_event_signal_combo.setObjectName("guidedFeatureEventSignalCombo")
+        self._guided_feature_event_signal_combo.addItems(get_allowed_event_signals_from_config())
+        self._guided_feature_event_signal_combo.setCurrentText(str(defaults["event_signal"]))
+        self._make_guided_widget_shrinkable(self._guided_feature_event_signal_combo)
+        form.addRow("Event signal:", self._guided_feature_event_signal_combo)
+
+        self._guided_feature_event_polarity_combo = QComboBox()
+        self._guided_feature_event_polarity_combo.setObjectName("guidedFeatureEventPolarityCombo")
+        self._guided_feature_event_polarity_combo.addItems(get_allowed_signal_excursion_polarities_from_config())
+        self._guided_feature_event_polarity_combo.setCurrentText(str(defaults["signal_excursion_polarity"]))
+        self._make_guided_widget_shrinkable(self._guided_feature_event_polarity_combo)
+        form.addRow("Signal excursion polarity:", self._guided_feature_event_polarity_combo)
+
+        self._guided_feature_event_peak_method_combo = QComboBox()
+        self._guided_feature_event_peak_method_combo.setObjectName("guidedFeatureEventPeakMethodCombo")
+        self._guided_feature_event_peak_method_combo.addItems(get_allowed_peak_threshold_methods_from_config())
+        self._guided_feature_event_peak_method_combo.setCurrentText(str(defaults["peak_threshold_method"]))
+        self._make_guided_widget_shrinkable(self._guided_feature_event_peak_method_combo)
+        form.addRow("Peak threshold method:", self._guided_feature_event_peak_method_combo)
+
+        self._guided_feature_event_peak_k_edit = QLineEdit(str(defaults["peak_threshold_k"]))
+        self._guided_feature_event_peak_k_edit.setObjectName("guidedFeatureEventPeakKEdit")
+        self._make_guided_widget_shrinkable(self._guided_feature_event_peak_k_edit)
+        form.addRow("Peak threshold k:", self._guided_feature_event_peak_k_edit)
+
+        self._guided_feature_event_peak_pct_edit = QLineEdit(str(defaults["peak_threshold_percentile"]))
+        self._guided_feature_event_peak_pct_edit.setObjectName("guidedFeatureEventPeakPercentileEdit")
+        self._make_guided_widget_shrinkable(self._guided_feature_event_peak_pct_edit)
+        form.addRow("Peak threshold percentile:", self._guided_feature_event_peak_pct_edit)
+
+        self._guided_feature_event_peak_abs_edit = QLineEdit(str(defaults["peak_threshold_abs"]))
+        self._guided_feature_event_peak_abs_edit.setObjectName("guidedFeatureEventPeakAbsEdit")
+        self._make_guided_widget_shrinkable(self._guided_feature_event_peak_abs_edit)
+        form.addRow("Peak threshold absolute:", self._guided_feature_event_peak_abs_edit)
+
+        self._guided_feature_event_peak_distance_edit = QLineEdit(str(defaults["peak_min_distance_sec"]))
+        self._guided_feature_event_peak_distance_edit.setObjectName("guidedFeatureEventPeakDistanceEdit")
+        self._make_guided_widget_shrinkable(self._guided_feature_event_peak_distance_edit)
+        form.addRow("Peak min distance (sec):", self._guided_feature_event_peak_distance_edit)
+
+        self._guided_feature_event_peak_prominence_edit = QLineEdit(str(defaults["peak_min_prominence_k"]))
+        self._guided_feature_event_peak_prominence_edit.setObjectName("guidedFeatureEventPeakProminenceEdit")
+        self._make_guided_widget_shrinkable(self._guided_feature_event_peak_prominence_edit)
+        form.addRow("Peak min prominence k:", self._guided_feature_event_peak_prominence_edit)
+
+        self._guided_feature_event_peak_width_edit = QLineEdit(str(defaults["peak_min_width_sec"]))
+        self._guided_feature_event_peak_width_edit.setObjectName("guidedFeatureEventPeakWidthEdit")
+        self._make_guided_widget_shrinkable(self._guided_feature_event_peak_width_edit)
+        form.addRow("Peak min width (sec):", self._guided_feature_event_peak_width_edit)
+
+        self._guided_feature_event_pre_filter_combo = QComboBox()
+        self._guided_feature_event_pre_filter_combo.setObjectName("guidedFeatureEventPreFilterCombo")
+        self._guided_feature_event_pre_filter_combo.addItems(get_allowed_peak_pre_filters_from_config())
+        self._guided_feature_event_pre_filter_combo.setCurrentText(str(defaults["peak_pre_filter"]))
+        self._make_guided_widget_shrinkable(self._guided_feature_event_pre_filter_combo)
+        form.addRow("Peak pre-filter:", self._guided_feature_event_pre_filter_combo)
+
+        self._guided_feature_event_auc_baseline_combo = QComboBox()
+        self._guided_feature_event_auc_baseline_combo.setObjectName("guidedFeatureEventAucBaselineCombo")
+        self._guided_feature_event_auc_baseline_combo.addItems(get_allowed_event_auc_baselines_from_config())
+        self._guided_feature_event_auc_baseline_combo.setCurrentText(str(defaults["event_auc_baseline"]))
+        self._make_guided_widget_shrinkable(self._guided_feature_event_auc_baseline_combo)
+        form.addRow("Event AUC baseline:", self._guided_feature_event_auc_baseline_combo)
+
+        layout.addLayout(form)
+
+        button_row = QHBoxLayout()
+        self._guided_feature_event_apply_btn = QPushButton("Apply feature/event profile to draft plan")
+        self._guided_feature_event_apply_btn.setObjectName("guidedFeatureEventApplyButton")
+        self._guided_feature_event_apply_btn.clicked.connect(self._on_guided_apply_feature_event_profile)
+        button_row.addWidget(self._guided_feature_event_apply_btn)
+        self._guided_feature_event_clear_btn = QPushButton("Clear draft feature/event profile")
+        self._guided_feature_event_clear_btn.setObjectName("guidedFeatureEventClearButton")
+        self._guided_feature_event_clear_btn.clicked.connect(self._on_guided_clear_feature_event_profile)
+        button_row.addWidget(self._guided_feature_event_clear_btn)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self._guided_feature_event_status_label = QLabel("No draft feature/event profile applied.")
+        self._guided_feature_event_status_label.setObjectName("guidedFeatureEventProfileStatus")
+        self._guided_feature_event_status_label.setProperty("guidedSecondaryText", True)
+        self._guided_feature_event_status_label.setWordWrap(True)
+        self._make_guided_widget_shrinkable(self._guided_feature_event_status_label)
+        layout.addWidget(self._guided_feature_event_status_label)
+
+        return group
+
     def _build_guided_confirm_strategy_step(self) -> QWidget:
         wrapper = QWidget()
         wrapper.setObjectName("guidedConfirmStrategyContent")
@@ -4166,6 +4383,8 @@ class MainWindow(QMainWindow):
         self._guided_confirm_marked_choice_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._make_guided_widget_shrinkable(self._guided_confirm_marked_choice_label)
         layout.addWidget(self._guided_confirm_marked_choice_label)
+
+        layout.addWidget(self._build_guided_feature_event_profile_editor())
 
         draft_group = QGroupBox("Draft run-plan preview")
         draft_group.setObjectName("guidedDraftRunPlanPreviewPanel")
