@@ -11,6 +11,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from photometry_pipeline.feature_event_config import (
+    FEATURE_EVENT_CONFIG_FIELDS,
+    FEATURE_EVENT_EVENT_SIGNALS,
+    FEATURE_EVENT_POLARITIES,
+    FEATURE_EVENT_THRESHOLD_METHODS,
+    FEATURE_EVENT_PEAK_PRE_FILTERS,
+    FEATURE_EVENT_AUC_BASELINES,
+    validate_feature_event_config_fields,
+)
+
 
 SCHEMA_VERSION = "guided_run_plan.v1"
 
@@ -30,25 +40,6 @@ RUNNABLE_CORRECTION_STRATEGIES = {
 FORBIDDEN_CORRECTION_STRATEGIES = {"auto", "needs_review", "no_correction"}
 EXPLICIT_CHOICE_SOURCE = "explicit_user_mark"
 EXPLICIT_FEATURE_PROFILE_CHOICE_SOURCE = "explicit_user_profile_edit"
-
-FEATURE_EVENT_CONFIG_FIELDS = {
-    "event_signal",
-    "signal_excursion_polarity",
-    "peak_threshold_method",
-    "peak_threshold_k",
-    "peak_threshold_percentile",
-    "peak_threshold_abs",
-    "peak_min_distance_sec",
-    "peak_min_prominence_k",
-    "peak_min_width_sec",
-    "peak_pre_filter",
-    "event_auc_baseline",
-}
-FEATURE_EVENT_EVENT_SIGNALS = {"dff", "delta_f"}
-FEATURE_EVENT_POLARITIES = {"positive", "negative", "both"}
-FEATURE_EVENT_THRESHOLD_METHODS = {"mean_std", "percentile", "median_mad", "absolute"}
-FEATURE_EVENT_PEAK_PRE_FILTERS = {"none", "lowpass"}
-FEATURE_EVENT_AUC_BASELINES = {"zero", "median"}
 
 CHECKLIST_STATUSES = {"pass", "warning", "fail", "not_configured", "blocked"}
 
@@ -531,10 +522,8 @@ def validate_plan_contract(plan: GuidedRunPlan) -> list[str]:
                 errors.append(f"{prefix}: roi scope target_rois must contain exactly one ROI when provided")
             if profile.resolved_rois and len(profile.resolved_rois) != 1:
                 errors.append(f"{prefix}: roi scope resolved_rois must contain exactly one ROI when provided")
-        unknown = sorted(set(profile.config_fields) - FEATURE_EVENT_CONFIG_FIELDS)
-        if unknown:
-            errors.append(f"{prefix} unknown config fields: {unknown}")
-        _validate_feature_event_config_fields(profile.config_fields, prefix, errors)
+        for issue in validate_feature_event_config_fields(profile.config_fields):
+            errors.append(f"{prefix}: {issue}")
         for ev_index, evidence in enumerate(profile.evidence_previews):
             _validate_evidence(
                 evidence,
@@ -792,90 +781,6 @@ def _validate_evidence(evidence: EvidenceChunkReview, prefix: str, errors: list[
         return
     if evidence.chunk_id < 0:
         errors.append(f"{prefix}: chunk_id must be non-negative")
-
-
-def _validate_feature_event_config_fields(
-    config_fields: dict[str, Any],
-    prefix: str,
-    errors: list[str],
-) -> None:
-    event_signal = config_fields.get("event_signal")
-    if event_signal is not None and str(event_signal) not in FEATURE_EVENT_EVENT_SIGNALS:
-        errors.append(f"{prefix}: invalid event_signal: {event_signal}")
-
-    polarity = config_fields.get("signal_excursion_polarity")
-    if polarity is not None and str(polarity) not in FEATURE_EVENT_POLARITIES:
-        errors.append(f"{prefix}: invalid signal_excursion_polarity: {polarity}")
-
-    method = config_fields.get("peak_threshold_method")
-    method_text = str(method) if method is not None else ""
-    if method is not None and method_text not in FEATURE_EVENT_THRESHOLD_METHODS:
-        errors.append(f"{prefix}: invalid peak_threshold_method: {method}")
-
-    if "peak_threshold_k" in config_fields:
-        _validate_numeric(
-            config_fields["peak_threshold_k"],
-            f"{prefix}: peak_threshold_k",
-            errors,
-            min_value=0.0,
-            inclusive_min=False,
-        )
-    if "peak_threshold_percentile" in config_fields:
-        _validate_numeric(
-            config_fields["peak_threshold_percentile"],
-            f"{prefix}: peak_threshold_percentile",
-            errors,
-            min_value=0.0,
-            max_value=100.0,
-        )
-    if "peak_threshold_abs" in config_fields:
-        _validate_numeric(
-            config_fields["peak_threshold_abs"],
-            f"{prefix}: peak_threshold_abs",
-            errors,
-            min_value=0.0,
-            inclusive_min=False,
-        )
-    if method_text == "absolute" and "peak_threshold_abs" not in config_fields:
-        errors.append(f"{prefix}: peak_threshold_abs is required when peak_threshold_method is absolute")
-
-    for key in ("peak_min_distance_sec", "peak_min_prominence_k", "peak_min_width_sec"):
-        if key in config_fields:
-            _validate_numeric(config_fields[key], f"{prefix}: {key}", errors, min_value=0.0)
-
-    pre_filter = config_fields.get("peak_pre_filter")
-    if pre_filter is not None and str(pre_filter) not in FEATURE_EVENT_PEAK_PRE_FILTERS:
-        errors.append(f"{prefix}: invalid peak_pre_filter: {pre_filter}")
-
-    auc_baseline = config_fields.get("event_auc_baseline")
-    if auc_baseline is not None and str(auc_baseline) not in FEATURE_EVENT_AUC_BASELINES:
-        errors.append(f"{prefix}: invalid event_auc_baseline: {auc_baseline}")
-
-
-def _validate_numeric(
-    value: Any,
-    label: str,
-    errors: list[str],
-    *,
-    min_value: float | None = None,
-    max_value: float | None = None,
-    inclusive_min: bool = True,
-    inclusive_max: bool = True,
-) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        errors.append(f"{label} must be numeric")
-        return
-    numeric = float(value)
-    if min_value is not None:
-        if inclusive_min and numeric < min_value:
-            errors.append(f"{label} must be >= {min_value:g}")
-        elif not inclusive_min and numeric <= min_value:
-            errors.append(f"{label} must be > {min_value:g}")
-    if max_value is not None:
-        if inclusive_max and numeric > max_value:
-            errors.append(f"{label} must be <= {max_value:g}")
-        elif not inclusive_max and numeric >= max_value:
-            errors.append(f"{label} must be < {max_value:g}")
 
 
 def _is_source_error(error: str) -> bool:

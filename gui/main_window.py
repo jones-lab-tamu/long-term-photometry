@@ -80,6 +80,7 @@ from photometry_pipeline.guided_run_plan import (
     feature_event_profile_summary_lines,
     validate_plan_contract,
 )
+from photometry_pipeline.feature_event_config import validate_feature_event_config_fields
 from photometry_pipeline.preview.correction_preview import (
     GUIDED_REFERENCE_PREVIEW_METHODS,
     PREVIEW_PROVENANCE_FILENAME,
@@ -968,6 +969,47 @@ def validate_representative_index_preview_compatibility(
         )
     return None
 
+
+def _event_feature_semantic_error_to_gui_message(issue: str) -> str:
+    """Map shared semantic validation issues to existing GUI-style messages."""
+
+    if "invalid event_signal" in issue:
+        return "Invalid Event Signal."
+    if "invalid signal_excursion_polarity" in issue:
+        return "Invalid Signal Excursion Polarity."
+    if "invalid peak_threshold_method" in issue:
+        return "Invalid Peak Threshold Method."
+    if "peak_threshold_k must be numeric" in issue:
+        return "Peak Threshold K must be a number."
+    if "peak_threshold_k must be >" in issue:
+        return "Peak Threshold K must be > 0."
+    if "peak_threshold_percentile must be numeric" in issue:
+        return "Peak Threshold Percentile must be a number."
+    if "peak_threshold_percentile" in issue:
+        return "Peak Threshold Percentile must be between 0 and 100."
+    if "peak_threshold_abs must be numeric" in issue:
+        return "Peak Threshold Absolute must be a number."
+    if "peak_threshold_abs" in issue:
+        return "Peak Threshold Absolute must be > 0."
+    if "peak_min_distance_sec must be numeric" in issue:
+        return "Peak Min Distance (sec) must be a number."
+    if "peak_min_distance_sec" in issue:
+        return "Peak Min Distance (sec) must be >= 0."
+    if "peak_min_prominence_k must be numeric" in issue:
+        return "Peak Min Prominence K must be a number."
+    if "peak_min_prominence_k" in issue:
+        return "Peak Min Prominence K must be >= 0."
+    if "peak_min_width_sec must be numeric" in issue:
+        return "Peak Min Width (s) must be a number."
+    if "peak_min_width_sec" in issue:
+        return "Peak Min Width (s) must be >= 0."
+    if "invalid peak_pre_filter" in issue:
+        return "Invalid Peak Pre-Filter."
+    if "invalid event_auc_baseline" in issue:
+        return "Invalid Event AUC Baseline."
+    return issue
+
+
 def parse_and_validate_event_feature_knobs(
     event_signal_text: str,
     peak_method_text: str,
@@ -999,16 +1041,17 @@ def parse_and_validate_event_feature_knobs(
     signal_excursion_polarity = "positive"
     if include_polarity:
         if signal_excursion_polarity_text is None:
-            signal_excursion_polarity = normalize_signal_excursion_polarity(
-                str(defaults.get("signal_excursion_polarity", "positive"))
-            )
+            signal_excursion_polarity_raw = str(
+                defaults.get("signal_excursion_polarity", "positive")
+            ).strip().lower()
         else:
-            signal_excursion_polarity = normalize_signal_excursion_polarity(
-                signal_excursion_polarity_text
-            )
+            signal_excursion_polarity_raw = str(signal_excursion_polarity_text).strip().lower()
         allowed_polarities = get_allowed_signal_excursion_polarities_from_config()
-        if signal_excursion_polarity not in allowed_polarities:
+        if signal_excursion_polarity_raw not in allowed_polarities:
             return None, "Invalid Signal Excursion Polarity."
+        signal_excursion_polarity = normalize_signal_excursion_polarity(
+            signal_excursion_polarity_raw
+        )
 
     peak_method = peak_method_text.strip()
     allowed_peak_methods = get_allowed_peak_threshold_methods_from_config()
@@ -1093,6 +1136,10 @@ def parse_and_validate_event_feature_knobs(
             overrides["peak_threshold_abs"] = abs_v
         except ValueError:
             return None, "Peak Threshold Absolute must be a number."
+
+    semantic_errors = validate_feature_event_config_fields(overrides)
+    if semantic_errors:
+        return None, _event_feature_semantic_error_to_gui_message(semantic_errors[0])
 
     return overrides, None
 

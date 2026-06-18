@@ -2,6 +2,7 @@ import sys
 
 import pytest
 
+from photometry_pipeline.feature_event_config import validate_feature_event_config_fields
 from photometry_pipeline.guided_run_plan import (
     CorrectionStrategyChoice,
     EvidenceChunkReview,
@@ -452,6 +453,19 @@ def test_feature_event_profile_invalid_config_values_are_rejected(field, value, 
     errors = validate_plan_contract(plan)
 
     assert any(message in err for err in errors)
+
+
+def test_feature_event_profile_validation_uses_shared_feature_event_semantics():
+    plan = _valid_plan()
+    cfg = _valid_feature_event_config()
+    cfg["peak_pre_filter"] = "smooth"
+    plan.feature_event_profiles = [_valid_feature_event_profile(config_fields=cfg)]
+    shared_issue = validate_feature_event_config_fields(cfg)[0]
+
+    errors = validate_plan_contract(plan)
+
+    assert shared_issue == "invalid peak_pre_filter: smooth"
+    assert any(shared_issue in err for err in errors)
 
 
 def test_feature_event_profile_absolute_threshold_requires_positive_abs():
