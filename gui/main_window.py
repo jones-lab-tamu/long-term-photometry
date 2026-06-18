@@ -125,6 +125,7 @@ GUIDED_WORKFLOW_STEPS = (
     "Correction approach",
     "Diagnostics",
     "Confirm strategy",
+    "Draft plan",
     "Run",
     "Review",
 )
@@ -1588,6 +1589,7 @@ class MainWindow(QMainWindow):
             self._build_guided_correction_approach_step(),
             self._build_guided_diagnostics_step(),
             self._build_guided_confirm_strategy_step(),
+            self._build_guided_draft_plan_step(),
             self._build_guided_run_step(),
             self._build_guided_review_step(),
         ):
@@ -3891,13 +3893,18 @@ class MainWindow(QMainWindow):
             self._guided_confirm_chunk_combo,
             self._guided_confirm_strategy_combo,
             self._guided_confirm_ack_cb,
-            self._guided_output_path_edit,
-            self._guided_output_apply_btn,
-            self._guided_output_clear_btn,
-            self._guided_export_path_edit,
-            self._guided_export_btn,
         ):
             widget.setEnabled(source_ok)
+
+        if hasattr(self, "_guided_output_path_edit"):
+            for widget in (
+                self._guided_output_path_edit,
+                self._guided_output_apply_btn,
+                self._guided_output_clear_btn,
+                self._guided_export_path_edit,
+                self._guided_export_btn,
+            ):
+                widget.setEnabled(source_ok)
 
         evidence = self._guided_confirm_evidence_summary()
         self._guided_confirm_evidence_label.setText(str(evidence["text"]))
@@ -4834,6 +4841,33 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_confirm_marked_choice_label)
         layout.addWidget(self._guided_confirm_marked_choice_label)
 
+        self._refresh_guided_confirm_strategy_panel()
+        return self._build_guided_step_scroll(
+            "guidedStepConfirmStrategy",
+            "Confirm strategy",
+            [
+                "Explicitly mark a candidate strategy for later planning after reviewing diagnostics. "
+                "This does not write manifests, create applied-dF/F outputs, route analysis, or choose automatically.",
+            ],
+            wrapper,
+        )
+
+    def _build_guided_draft_plan_step(self) -> QWidget:
+        wrapper = QWidget()
+        wrapper.setObjectName("guidedDraftPlanContent")
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        explain_label = QLabel(
+            "Review and export the in-memory GuidedRunPlan. This does not run analysis."
+        )
+        explain_label.setObjectName("guidedDraftPlanStepExplanation")
+        explain_label.setProperty("guidedSecondaryText", True)
+        explain_label.setWordWrap(True)
+        self._make_guided_widget_shrinkable(explain_label)
+        layout.addWidget(explain_label)
+
         layout.addWidget(self._build_guided_feature_event_profile_editor())
         layout.addWidget(self._build_guided_output_policy_editor())
         layout.addWidget(self._build_guided_draft_plan_export_editor())
@@ -4879,12 +4913,9 @@ class MainWindow(QMainWindow):
 
         self._refresh_guided_confirm_strategy_panel()
         return self._build_guided_step_scroll(
-            "guidedStepConfirmStrategy",
-            "Confirm strategy",
-            [
-                "Explicitly mark a candidate strategy for later planning after reviewing diagnostics. "
-                "This does not write manifests, create applied-dF/F outputs, route analysis, or choose automatically.",
-            ],
+            "guidedStepDraftPlan",
+            "Draft plan",
+            [],
             wrapper,
         )
 

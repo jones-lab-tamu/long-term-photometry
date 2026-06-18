@@ -4,7 +4,7 @@ import h5py
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QScrollArea, QVBoxLayout
+from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 import gui.main_window as main_window_module
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
@@ -158,6 +158,7 @@ def test_guided_workflow_stepper_switches_placeholder_panels(window):
         "guidedStepCorrectionApproach",
         "guidedStepDiagnostics",
         "guidedStepConfirmStrategy",
+        "guidedStepDraftPlan",
         "guidedStepRun",
         "guidedStepReview",
     ]
@@ -719,7 +720,7 @@ def test_guided_feature_event_unsaved_edits_do_not_leak_across_completed_runs(
 def test_guided_feature_event_profile_controls_do_not_live_bind_before_apply(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     window._guided_feature_event_signal_combo.setCurrentText("dff")
     window._guided_feature_event_apply_btn.click()
@@ -742,7 +743,7 @@ def test_guided_feature_event_profile_invalid_values_are_rejected_without_updati
 ):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     window._guided_feature_event_peak_method_combo.setCurrentText("mean_std")
     window._guided_feature_event_peak_k_edit.setText("0")
@@ -780,13 +781,16 @@ def test_guided_feature_event_profile_is_not_scoped_or_changed_by_roi_chunk_sele
 ):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._guided_feature_event_apply_btn.click()
     before_plan, _ = window._build_guided_draft_run_plan()
     before_config = dict(before_plan.feature_event_profiles[0].config_fields)
 
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
     window._guided_confirm_roi_combo.setCurrentIndex(window._guided_confirm_roi_combo.findData("CH2"))
     window._guided_confirm_chunk_combo.setCurrentIndex(window._guided_confirm_chunk_combo.findData(1))
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     after_plan, _ = window._build_guided_draft_run_plan()
     profile = after_plan.feature_event_profiles[0]
 
@@ -805,7 +809,7 @@ def test_guided_diagnostics_do_not_create_or_mutate_feature_event_profile(window
     plan, _ = window._build_guided_draft_run_plan()
     assert plan.feature_event_profiles == []
 
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._guided_feature_event_apply_btn.click()
     before_plan, _ = window._build_guided_draft_run_plan()
     before_config = dict(before_plan.feature_event_profiles[0].config_fields)
@@ -826,7 +830,7 @@ def test_guided_feature_event_profile_clear_removes_only_in_memory_profile(windo
     before_b = sorted(p.relative_to(run_b).as_posix() for p in run_b.rglob("*"))
     window._open_completed_results_dir(str(run_dir))
     window._set_guided_workflow_mode("open_results")
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     window._guided_feature_event_apply_btn.click()
     assert window._build_guided_draft_run_plan()[0].feature_event_profiles
@@ -878,7 +882,7 @@ def test_guided_draft_run_plan_preview_displays_injected_feature_event_profile(
     plan = _guided_plan_with_feature_profile(run_dir, chunk_id=1)
     monkeypatch.setattr(window, "_build_guided_draft_run_plan", lambda: (plan, []))
 
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._refresh_guided_confirm_strategy_panel()
 
     preview = window._guided_draft_run_plan_preview_label.text()
@@ -904,7 +908,7 @@ def test_guided_draft_run_plan_preview_displays_invalid_feature_event_profile_er
     plan = _guided_plan_with_feature_profile(run_dir, scope="chunk")
     monkeypatch.setattr(window, "_build_guided_draft_run_plan", lambda: (plan, []))
 
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._refresh_guided_confirm_strategy_panel()
 
     preview = window._guided_draft_run_plan_preview_label.text()
@@ -927,13 +931,18 @@ def test_guided_feature_event_profile_display_is_not_mutated_by_visible_selectio
     plan = _guided_plan_with_feature_profile(run_dir, chunk_id=0)
     monkeypatch.setattr(window, "_build_guided_draft_run_plan", lambda: (plan, []))
 
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._refresh_guided_confirm_strategy_panel()
     before = serialize_feature_preview_text = window._guided_draft_run_plan_preview_label.text()
 
+    # Navigate to Confirm strategy to interact with confirm widgets
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
     window._guided_confirm_roi_combo.setCurrentText("CH2")
     window._guided_confirm_chunk_combo.setCurrentIndex(window._guided_confirm_chunk_combo.findData(1))
     window._refresh_guided_confirm_strategy_panel()
+
+    # Navigate back to Draft plan to check output
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     after = window._guided_draft_run_plan_preview_label.text()
     assert "scope=run" in after
@@ -953,7 +962,7 @@ def test_guided_feature_event_profile_display_writes_no_outputs(window, tmp_path
     plan = _guided_plan_with_feature_profile(run_dir)
     monkeypatch.setattr(window, "_build_guided_draft_run_plan", lambda: (plan, []))
 
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._refresh_guided_confirm_strategy_panel()
 
     after = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
@@ -1104,10 +1113,14 @@ def test_guided_diagnostics_do_not_auto_populate_draft_run_plan_preview(window, 
 
     window._guided_preview_generate_btn.click()
     window._guided_signal_f0_generate_btn.click()
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
 
+    # Navigate to Confirm strategy to verify evidence labels
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
     assert "Correction preview: success" in window._guided_confirm_evidence_label.text()
     assert "Signal-Only F0 diagnostic: success" in window._guided_confirm_evidence_label.text()
+
+    # Navigate to Draft plan to verify draft plan labels
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     assert "Status: no marked ROI choices" in window._guided_draft_run_plan_preview_label.text()
     assert "Planned ROIs: 0" in window._guided_draft_run_plan_preview_label.text()
     assert "Feature/event profiles: none configured" in window._guided_draft_run_plan_preview_label.text()
@@ -1134,7 +1147,7 @@ def test_guided_draft_run_plan_preview_reports_contract_errors(window, tmp_path,
         "evidence_summary": {"preview": "Correction preview: success", "signal_only_f0": "", "stale": False},
     }
 
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._refresh_guided_confirm_strategy_panel()
 
     text = window._guided_draft_run_plan_preview_label.text()
@@ -1164,7 +1177,7 @@ def test_guided_draft_run_plan_preview_reports_malformed_stored_evidence_chunk(
         "evidence_summary": {"preview": "Correction preview: success", "signal_only_f0": "", "stale": False},
     }
 
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._refresh_guided_confirm_strategy_panel()
 
     text = window._guided_draft_run_plan_preview_label.text()
@@ -1184,11 +1197,15 @@ def test_guided_draft_run_plan_preview_writes_no_outputs(window, tmp_path, monke
     run_dir = _make_preview_completed_run(tmp_path)
     before = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
     _load_preview_completed_run(window, run_dir, monkeypatch)
+    # Navigate to Confirm strategy to mark strategy
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
     idx = window._guided_confirm_strategy_combo.findData("signal_only_f0")
     window._guided_confirm_strategy_combo.setCurrentIndex(idx)
     window._guided_confirm_ack_cb.setChecked(True)
     window._guided_confirm_mark_btn.click()
+
+    # Navigate to Draft plan
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._refresh_guided_confirm_strategy_panel()
 
     after = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
@@ -2255,7 +2272,7 @@ def test_guided_visible_text_does_not_use_stale_shell_or_completed_loader_wordin
 def test_guided_output_policy_no_policy_by_default(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     plan, errors = window._build_guided_draft_run_plan()
     assert errors == []
@@ -2271,7 +2288,7 @@ def test_guided_output_policy_no_policy_by_default(window, tmp_path, monkeypatch
 def test_guided_output_policy_apply_valid(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     target_out = tmp_path / "future_output"
     assert not target_out.exists()
@@ -2297,7 +2314,7 @@ def test_guided_output_policy_apply_valid(window, tmp_path, monkeypatch):
 def test_guided_output_policy_empty_rejected(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     window._guided_output_path_edit.setText("   ")
     window._guided_output_apply_btn.click()
@@ -2311,7 +2328,7 @@ def test_guided_output_policy_empty_rejected(window, tmp_path, monkeypatch):
 def test_guided_output_policy_completed_run_rejected(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     window._guided_output_path_edit.setText(str(run_dir))
     window._guided_output_apply_btn.click()
@@ -2324,7 +2341,7 @@ def test_guided_output_policy_completed_run_rejected(window, tmp_path, monkeypat
 def test_guided_output_policy_legacy_paths_rejected(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     legacy_subpaths = [
         "_analysis",
@@ -2349,7 +2366,7 @@ def test_guided_output_policy_scoped_by_run(window, tmp_path, monkeypatch):
     out_b = tmp_path / "out_b"
 
     _load_preview_completed_run(window, run_a, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._guided_output_path_edit.setText(str(out_a))
     window._guided_output_apply_btn.click()
 
@@ -2379,7 +2396,7 @@ def test_guided_output_policy_unsaved_edits_do_not_leak(window, tmp_path, monkey
     run_b = _make_preview_completed_run(tmp_path / "run_b")
 
     _load_preview_completed_run(window, run_a, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     window._guided_output_path_edit.setText("typed_path_a")
     plan_a, _ = window._build_guided_draft_run_plan()
@@ -2398,7 +2415,7 @@ def test_guided_output_policy_unsaved_edits_do_not_leak(window, tmp_path, monkey
 def test_guided_output_policy_invalid_apply_preserves_previous(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     out_valid = tmp_path / "out_valid"
     window._guided_output_path_edit.setText(str(out_valid))
@@ -2420,7 +2437,7 @@ def test_guided_output_policy_clear_affects_only_current(window, tmp_path, monke
     out_b = tmp_path / "out_b"
 
     _load_preview_completed_run(window, run_a, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._guided_output_path_edit.setText(str(out_a))
     window._guided_output_apply_btn.click()
 
@@ -2443,7 +2460,7 @@ def test_guided_output_policy_clear_affects_only_current(window, tmp_path, monke
 def test_gui_readiness_summary_default(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     summary = window._guided_plan_readiness_summary_label.text()
     assert "Configured: source" in summary
@@ -2465,6 +2482,7 @@ def test_gui_readiness_summary_updates_on_mark(window, tmp_path, monkeypatch):
     window._guided_confirm_ack_cb.setChecked(True)
     window._guided_confirm_mark_btn.click()
 
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     summary = window._guided_plan_readiness_summary_label.text()
     assert "1 ROI correction strategy" in summary
     assert "feature/event profile" in summary
@@ -2475,7 +2493,7 @@ def test_gui_readiness_summary_updates_on_mark(window, tmp_path, monkeypatch):
 def test_gui_readiness_summary_updates_on_profile(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     window._guided_feature_event_signal_combo.setCurrentText("dff")
     window._guided_feature_event_polarity_combo.setCurrentText("positive")
@@ -2493,7 +2511,7 @@ def test_gui_readiness_summary_updates_on_profile(window, tmp_path, monkeypatch)
 def test_gui_readiness_summary_updates_on_output(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     out_dest = tmp_path / "future_gui_out"
     window._guided_output_path_edit.setText(str(out_dest))
@@ -2518,6 +2536,8 @@ def test_gui_readiness_summary_full_and_non_output_guarantee(window, tmp_path, m
     window._guided_confirm_strategy_combo.setCurrentIndex(idx)
     window._guided_confirm_ack_cb.setChecked(True)
     window._guided_confirm_mark_btn.click()
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     # 2. Apply Profile
     window._guided_feature_event_signal_combo.setCurrentText("dff")
@@ -2550,7 +2570,7 @@ def test_gui_readiness_summary_source_switching(window, tmp_path, monkeypatch):
 
     # Load Run A and configure output policy
     _load_preview_completed_run(window, run_a, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._guided_output_path_edit.setText(str(out_a))
     window._guided_output_apply_btn.click()
 
@@ -2575,7 +2595,7 @@ def test_gui_readiness_summary_source_switching(window, tmp_path, monkeypatch):
 def test_gui_readiness_summary_unsaved_widget_edits_ignored(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     # Type/edit but do not click Apply
     window._guided_output_path_edit.setText(str(tmp_path / "unsaved_out"))
@@ -2593,7 +2613,7 @@ def test_gui_readiness_summary_unsaved_widget_edits_ignored(window, tmp_path, mo
 def test_gui_readiness_summary_invalid_apply_does_not_make_configured(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     # Apply invalid output destination (same as completed run)
     window._guided_output_path_edit.setText(str(run_dir))
@@ -2612,7 +2632,7 @@ def test_guided_output_policy_non_output_guarantee(window, tmp_path, monkeypatch
     assert not out_dest.exists()
 
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     # 4. Assert proposed output root does not exist before Apply
     assert not out_dest.exists()
@@ -2658,7 +2678,7 @@ def test_guided_output_policy_non_output_guarantee(window, tmp_path, monkeypatch
 def test_gui_export_no_file_by_default(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     assert window._guided_export_status_label.text() == "No export performed yet."
     assert not any(p.name.startswith("guided_run_plan") and p.name.endswith(".json") for p in run_dir.rglob("*"))
@@ -2667,7 +2687,7 @@ def test_gui_export_no_file_by_default(window, tmp_path, monkeypatch):
 def test_gui_export_incomplete_but_valid_plan(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     export_file = tmp_path / "plan.json"
     assert not export_file.exists()
@@ -2698,6 +2718,8 @@ def test_gui_export_fully_configured_plan(window, tmp_path, monkeypatch):
     window._guided_confirm_strategy_combo.setCurrentIndex(idx)
     window._guided_confirm_ack_cb.setChecked(True)
     window._guided_confirm_mark_btn.click()
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     # 2. Apply Profile
     window._guided_feature_event_signal_combo.setCurrentText("dff")
@@ -2735,7 +2757,7 @@ def test_gui_export_fully_configured_plan(window, tmp_path, monkeypatch):
 def test_gui_export_empty_path_rejected(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     window._guided_export_path_edit.setText("    ")
     window._guided_export_btn.click()
@@ -2746,7 +2768,7 @@ def test_gui_export_empty_path_rejected(window, tmp_path, monkeypatch):
 def test_gui_export_non_json_suffix_rejected(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     window._guided_export_path_edit.setText(str(tmp_path / "plan.txt"))
     window._guided_export_btn.click()
@@ -2757,7 +2779,7 @@ def test_gui_export_non_json_suffix_rejected(window, tmp_path, monkeypatch):
 def test_gui_export_existing_file_rejected(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     existing_file = tmp_path / "existing.json"
     with open(existing_file, "w", encoding="utf-8") as f:
@@ -2774,7 +2796,7 @@ def test_gui_export_existing_file_rejected(window, tmp_path, monkeypatch):
 def test_gui_export_missing_parent_rejected(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     non_existent_dir = tmp_path / "no_such_folder"
     export_file = non_existent_dir / "plan.json"
@@ -2790,7 +2812,7 @@ def test_gui_export_missing_parent_rejected(window, tmp_path, monkeypatch):
 def test_gui_export_completed_run_rejected(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     window._guided_export_path_edit.setText(str(run_dir))
     window._guided_export_btn.click()
@@ -2806,7 +2828,7 @@ def test_gui_export_completed_run_rejected(window, tmp_path, monkeypatch):
 def test_gui_export_legacy_paths_rejected(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     legacy_subpaths = [
         "_analysis",
@@ -2828,7 +2850,7 @@ def test_gui_export_source_switching_clears_path(window, tmp_path, monkeypatch):
     export_a = tmp_path / "plan_a.json"
 
     _load_preview_completed_run(window, run_a, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._guided_export_path_edit.setText(str(export_a))
 
     window._refresh_guided_confirm_strategy_panel()
@@ -2842,7 +2864,7 @@ def test_gui_export_source_switching_clears_path(window, tmp_path, monkeypatch):
 def test_gui_export_path_does_not_affect_output_policy(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     export_path = tmp_path / "plan.json"
     window._guided_export_path_edit.setText(str(export_path))
@@ -2855,7 +2877,7 @@ def test_gui_export_path_does_not_affect_output_policy(window, tmp_path, monkeyp
 def test_gui_export_contract_invalid_plan_rejected(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     from photometry_pipeline.guided_run_plan import OutputPolicy
     monkeypatch.setattr(
@@ -2876,7 +2898,7 @@ def test_gui_export_non_production_output_guarantee(window, tmp_path, monkeypatc
     run_dir = _make_preview_completed_run(tmp_path)
     before_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     export_file = tmp_path / "plan.json"
     window._guided_export_path_edit.setText(str(export_file))
@@ -2895,7 +2917,7 @@ def test_gui_export_non_production_output_guarantee(window, tmp_path, monkeypatc
 def test_gui_export_resolved_path_writing(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     export_path_raw = "  " + str(tmp_path / "." / "plan.json") + "  "
     resolved_path = tmp_path.resolve() / "plan.json"
@@ -2911,7 +2933,7 @@ def test_gui_export_resolved_path_writing(window, tmp_path, monkeypatch):
 def test_gui_export_existing_file_resolved_rejection(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     resolved_path = tmp_path.resolve() / "plan_existing.json"
     with open(resolved_path, "w", encoding="utf-8") as f:
@@ -2929,7 +2951,7 @@ def test_gui_export_existing_file_resolved_rejection(window, tmp_path, monkeypat
 def test_gui_export_missing_parent_resolved_rejection(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     missing_dir = tmp_path / "missing_parent"
     export_path = missing_dir / "plan.json"
@@ -2940,3 +2962,170 @@ def test_gui_export_missing_parent_resolved_rejection(window, tmp_path, monkeypa
     assert not missing_dir.exists()
     assert not export_path.exists()
     assert "Export failed: Parent directory of export path does not exist." in window._guided_export_status_label.text()
+
+
+def test_gui_stepper_order_has_draft_plan_after_confirm_strategy():
+    steps = list(GUIDED_WORKFLOW_STEPS)
+    assert "Draft plan" in steps
+    confirm_idx = steps.index("Confirm strategy")
+    draft_idx = steps.index("Draft plan")
+    assert draft_idx == confirm_idx + 1
+
+
+def test_gui_confirm_strategy_contains_only_correction_strategy_controls(window):
+    # Navigate to Confirm Strategy
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    # Confirm Strategy step layout wrapper
+    confirm_step_widget = window._guided_workflow_stack.widget(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    # Verify correction controls are inside
+    assert confirm_step_widget.findChild(QWidget, "guidedConfirmStrategyRoiCombo") is not None
+    assert confirm_step_widget.findChild(QWidget, "guidedConfirmStrategyChunkCombo") is not None
+    assert confirm_step_widget.findChild(QWidget, "guidedConfirmStrategyChoiceCombo") is not None
+    assert confirm_step_widget.findChild(QWidget, "guidedConfirmStrategyAcknowledge") is not None
+    assert confirm_step_widget.findChild(QWidget, "guidedConfirmStrategyMarkButton") is not None
+
+    # Verify moved panels are NOT part of the Confirm Strategy step
+    assert confirm_step_widget.findChild(QWidget, "guidedFeatureEventProfileEditorPanel") is None
+    assert confirm_step_widget.findChild(QWidget, "guidedOutputDestinationPanel") is None
+    assert confirm_step_widget.findChild(QWidget, "guidedDraftPlanExportPanel") is None
+    assert confirm_step_widget.findChild(QWidget, "guidedPlanReadinessSummaryPanel") is None
+    assert confirm_step_widget.findChild(QWidget, "guidedDraftRunPlanPreviewPanel") is None
+    assert confirm_step_widget.findChild(QWidget, "guidedDraftRunPlanChecklistPanel") is None
+
+
+def test_gui_draft_plan_contains_moved_plan_panels(window):
+    # Navigate to Draft Plan
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+
+    # Draft Plan step layout wrapper
+    draft_step_widget = window._guided_workflow_stack.widget(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+
+    # Verify moved panels are present
+    assert draft_step_widget.findChild(QWidget, "guidedFeatureEventProfileEditorPanel") is not None
+    assert draft_step_widget.findChild(QWidget, "guidedOutputDestinationPanel") is not None
+    assert draft_step_widget.findChild(QWidget, "guidedDraftPlanExportPanel") is not None
+    assert draft_step_widget.findChild(QWidget, "guidedPlanReadinessSummaryPanel") is not None
+    assert draft_step_widget.findChild(QWidget, "guidedDraftRunPlanPreviewPanel") is not None
+    assert draft_step_widget.findChild(QWidget, "guidedDraftRunPlanChecklistPanel") is not None
+
+    # Verify correction controls are NOT part of the Draft Plan step
+    assert draft_step_widget.findChild(QWidget, "guidedConfirmStrategyRoiCombo") is None
+    assert draft_step_widget.findChild(QWidget, "guidedConfirmStrategyChoiceCombo") is None
+
+
+def test_gui_real_split_workflow_flow(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    before_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+
+    # 1. Navigate to Confirm Strategy step
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    # 2. Select correction strategy
+    idx = window._guided_confirm_strategy_combo.findData("robust_global_event_reject")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    # Assert stored choice
+    plan, _ = window._build_guided_draft_run_plan()
+    assert len(plan.roi_plan) == 1
+    assert plan.roi_plan[0].roi == "CH1"
+    assert plan.roi_plan[0].correction_strategy.strategy == "robust_global_event_reject"
+
+    # 3. Navigate to Draft Plan step
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+
+    # Assert readiness, preview, checklist show 1 ROI choice
+    summary = window._guided_plan_readiness_summary_label.text()
+    assert "1 ROI correction strategy" in summary
+    assert "feature/event profile" in summary
+    assert "output destination" in summary
+    assert "Blocked: execution intentionally unavailable" in summary
+
+    # 4. Apply a feature/event profile
+    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._guided_feature_event_polarity_combo.setCurrentText("positive")
+    window._guided_feature_event_peak_method_combo.setCurrentText("mean_std")
+    window._guided_feature_event_peak_k_edit.setText("3.0")
+    window._guided_feature_event_apply_btn.click()
+
+    # 5. Apply an output destination
+    out_dest = tmp_path / "future_workflow_out"
+    window._guided_output_path_edit.setText(str(out_dest))
+    window._guided_output_apply_btn.click()
+
+    # 6. Export JSON
+    export_file = tmp_path / "workflow_plan.json"
+    window._guided_export_path_edit.setText(str(export_file))
+    window._guided_export_btn.click()
+
+    # Assert exported JSON exists and round-trips
+    assert export_file.exists()
+    import json
+    from photometry_pipeline.guided_run_plan import deserialize_plan_from_dict, validate_plan_contract
+    with open(export_file, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    restored = deserialize_plan_from_dict(payload)
+    assert validate_plan_contract(restored) == []
+    assert len(restored.roi_plan) == 1
+    assert restored.feature_event_profiles[0].config_fields["event_signal"] == "dff"
+    assert restored.output_policy.output_root == str(out_dest.resolve())
+
+    # Assert non-production outputs guarantee (only export file written)
+    assert not out_dest.exists()
+    assert not (run_dir / "manifest.csv").exists()
+    assert not (run_dir / "MANIFEST.csv").exists()
+    assert not (run_dir / "features.csv").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
+    after_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    assert after_files == before_files
+
+
+def test_gui_no_draft_plan_tests_use_hidden_confirm_controls():
+    import ast
+    import os
+    test_file = __file__
+    with open(test_file, "r", encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=test_file)
+
+    confirm_widgets = {
+        "_guided_confirm_roi_combo",
+        "_guided_confirm_chunk_combo",
+        "_guided_confirm_strategy_combo",
+        "_guided_confirm_ack_cb",
+        "_guided_confirm_mark_btn",
+        "_guided_confirm_evidence_label",
+        "_guided_confirm_marked_choice_label",
+    }
+
+    class TestVisitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node):
+            if not node.name.startswith("test_"):
+                return
+
+            current_step = None
+
+            for stmt in node.body:
+                for subnode in ast.walk(stmt):
+                    if isinstance(subnode, ast.Call):
+                        if (isinstance(subnode.func, ast.Attribute) and
+                            subnode.func.attr == "setCurrentRow"):
+                            for arg in ast.walk(subnode):
+                                if isinstance(arg, ast.Constant) and arg.value in ("Confirm strategy", "Draft plan"):
+                                    current_step = arg.value
+                                    break
+
+                    if isinstance(subnode, ast.Attribute):
+                        if subnode.attr in confirm_widgets:
+                            if current_step == "Draft plan":
+                                raise AssertionError(
+                                    f"Test {node.name} accesses confirm widget {subnode.attr} "
+                                    f"while selected step is 'Draft plan' (line {subnode.lineno})"
+                                )
+            self.generic_visit(node)
+
+    TestVisitor().visit(tree)
