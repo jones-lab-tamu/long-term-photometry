@@ -2250,3 +2250,216 @@ def test_guided_visible_text_does_not_use_stale_shell_or_completed_loader_wordin
     assert "Stage 1 shell only" not in visible_text
     assert "does not wire a completed-run loader into the Guided Workflow" not in visible_text
     assert "Production runs and applied-dF/F routing still use Full Control" in visible_text
+
+
+def test_guided_output_policy_no_policy_by_default(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    plan, errors = window._build_guided_draft_run_plan()
+    assert errors == []
+    assert plan.output_policy.output_root is None
+
+    preview = window._guided_draft_run_plan_preview_label.text()
+    assert "Output destination: none configured" in preview
+    checklist = window._guided_draft_run_plan_checklist_label.text()
+    assert "Output destination: not_configured" in checklist
+    assert "Execution ready: false" in checklist
+
+
+def test_guided_output_policy_apply_valid(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    target_out = tmp_path / "future_output"
+    assert not target_out.exists()
+    window._guided_output_path_edit.setText(str(target_out))
+    window._guided_output_apply_btn.click()
+
+    plan, errors = window._build_guided_draft_run_plan()
+    assert errors == []
+    assert plan.output_policy.output_root == str(target_out.resolve())
+    assert plan.output_policy.overwrite is False
+    assert plan.output_policy.legacy_outputs_protected is True
+
+    preview = window._guided_draft_run_plan_preview_label.text()
+    assert f"Output destination: {str(target_out.resolve())}" in preview
+    assert "Legacy outputs protected: true" in preview
+    assert "Overwrite existing: false" in preview
+    checklist = window._guided_draft_run_plan_checklist_label.text()
+    assert "Output destination: pass" in checklist
+    assert "Execution ready: false" in checklist
+    assert not target_out.exists()
+
+
+def test_guided_output_policy_empty_rejected(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    window._guided_output_path_edit.setText("   ")
+    window._guided_output_apply_btn.click()
+
+    plan, errors = window._build_guided_draft_run_plan()
+    assert plan.output_policy.output_root is None
+    assert "Output destination not applied: Output root path cannot be empty." in window._guided_output_status_label.text()
+    assert "Output destination: not_configured" in window._guided_draft_run_plan_checklist_label.text()
+
+
+def test_guided_output_policy_completed_run_rejected(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    window._guided_output_path_edit.setText(str(run_dir))
+    window._guided_output_apply_btn.click()
+
+    plan, errors = window._build_guided_draft_run_plan()
+    assert plan.output_policy.output_root is None
+    assert "Output root cannot be the completed run directory itself." in window._guided_output_status_label.text()
+
+
+def test_guided_output_policy_legacy_paths_rejected(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    legacy_subpaths = [
+        "_analysis",
+        "_analysis/phasic_out",
+        "_analysis/phasic_out/features",
+        "_analysis/phasic_out/applied_dff",
+    ]
+    for sub in legacy_subpaths:
+        legacy_path = run_dir / sub
+        window._guided_output_path_edit.setText(str(legacy_path))
+        window._guided_output_apply_btn.click()
+
+        plan, errors = window._build_guided_draft_run_plan()
+        assert plan.output_policy.output_root is None
+        assert "Output root cannot be inside the completed run directory." in window._guided_output_status_label.text()
+
+
+def test_guided_output_policy_scoped_by_run(window, tmp_path, monkeypatch):
+    run_a = _make_preview_completed_run(tmp_path / "run_a")
+    run_b = _make_preview_completed_run(tmp_path / "run_b")
+    out_a = tmp_path / "out_a"
+    out_b = tmp_path / "out_b"
+
+    _load_preview_completed_run(window, run_a, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_output_path_edit.setText(str(out_a))
+    window._guided_output_apply_btn.click()
+
+    plan_a, _ = window._build_guided_draft_run_plan()
+    assert plan_a.output_policy.output_root == str(out_a.resolve())
+
+    _load_preview_completed_run(window, run_b, monkeypatch)
+    window._refresh_guided_confirm_strategy_panel()
+    plan_b_initial, _ = window._build_guided_draft_run_plan()
+    assert plan_b_initial.output_policy.output_root is None
+    assert window._guided_output_path_edit.text() == ""
+
+    window._guided_output_path_edit.setText(str(out_b))
+    window._guided_output_apply_btn.click()
+    plan_b_applied, _ = window._build_guided_draft_run_plan()
+    assert plan_b_applied.output_policy.output_root == str(out_b.resolve())
+
+    _load_preview_completed_run(window, run_a, monkeypatch)
+    window._refresh_guided_confirm_strategy_panel()
+    plan_a_restored, _ = window._build_guided_draft_run_plan()
+    assert plan_a_restored.output_policy.output_root == str(out_a.resolve())
+    assert window._guided_output_path_edit.text() == str(out_a.resolve())
+
+
+def test_guided_output_policy_unsaved_edits_do_not_leak(window, tmp_path, monkeypatch):
+    run_a = _make_preview_completed_run(tmp_path / "run_a")
+    run_b = _make_preview_completed_run(tmp_path / "run_b")
+
+    _load_preview_completed_run(window, run_a, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    window._guided_output_path_edit.setText("typed_path_a")
+    plan_a, _ = window._build_guided_draft_run_plan()
+    assert plan_a.output_policy.output_root is None
+
+    window._refresh_guided_confirm_strategy_panel()
+    assert window._guided_output_path_edit.text() == "typed_path_a"
+
+    _load_preview_completed_run(window, run_b, monkeypatch)
+    window._refresh_guided_confirm_strategy_panel()
+    assert window._guided_output_path_edit.text() == ""
+    plan_b, _ = window._build_guided_draft_run_plan()
+    assert plan_b.output_policy.output_root is None
+
+
+def test_guided_output_policy_invalid_apply_preserves_previous(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    out_valid = tmp_path / "out_valid"
+    window._guided_output_path_edit.setText(str(out_valid))
+    window._guided_output_apply_btn.click()
+    assert window._build_guided_draft_run_plan()[0].output_policy.output_root == str(out_valid.resolve())
+
+    window._guided_output_path_edit.setText(str(run_dir))
+    window._guided_output_apply_btn.click()
+
+    assert "Output root cannot be the completed run directory itself." in window._guided_output_status_label.text()
+    assert window._build_guided_draft_run_plan()[0].output_policy.output_root == str(out_valid.resolve())
+    assert window._guided_output_path_edit.text() == str(run_dir)
+
+
+def test_guided_output_policy_clear_affects_only_current(window, tmp_path, monkeypatch):
+    run_a = _make_preview_completed_run(tmp_path / "run_a")
+    run_b = _make_preview_completed_run(tmp_path / "run_b")
+    out_a = tmp_path / "out_a"
+    out_b = tmp_path / "out_b"
+
+    _load_preview_completed_run(window, run_a, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_output_path_edit.setText(str(out_a))
+    window._guided_output_apply_btn.click()
+
+    _load_preview_completed_run(window, run_b, monkeypatch)
+    window._refresh_guided_confirm_strategy_panel()
+    window._guided_output_path_edit.setText(str(out_b))
+    window._guided_output_apply_btn.click()
+
+    window._guided_output_clear_btn.click()
+    assert window._build_guided_draft_run_plan()[0].output_policy.output_root is None
+    assert window._guided_output_path_edit.text() == ""
+
+    _load_preview_completed_run(window, run_a, monkeypatch)
+    window._refresh_guided_confirm_strategy_panel()
+    assert window._build_guided_draft_run_plan()[0].output_policy.output_root == str(out_a.resolve())
+
+
+def test_guided_output_policy_non_output_guarantee(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    before_run_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+
+    out_dest = tmp_path / "future_guided_output"
+    assert not out_dest.exists()
+
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_output_path_edit.setText(str(out_dest))
+    window._guided_output_apply_btn.click()
+
+    assert not out_dest.exists()
+    assert not (run_dir / "manifest.csv").exists()
+    assert not (run_dir / "features.csv").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
+
+    window._guided_output_path_edit.setText(str(run_dir))
+    window._guided_output_apply_btn.click()
+
+    window._guided_output_clear_btn.click()
+
+    assert not out_dest.exists()
+    after_run_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    assert after_run_files == before_run_files

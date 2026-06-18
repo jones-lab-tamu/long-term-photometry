@@ -77,6 +77,7 @@ from photometry_pipeline.guided_run_plan import (
     GuidedPlanSource,
     GuidedRunPlan,
     RoiPlanEntry,
+    OutputPolicy,
     evaluate_guided_plan_checklist,
     feature_event_profile_summary_lines,
     validate_plan_contract,
@@ -1574,6 +1575,8 @@ class MainWindow(QMainWindow):
         # and populated only by explicit Apply.
         self._guided_draft_feature_event_profiles_by_run = {}
         self._guided_feature_event_editor_synced_run = None
+        self._guided_draft_output_policy_by_run = {}
+        self._guided_output_policy_editor_synced_run = None
         self._guided_raw_setup_controls = {}
         self._guided_open_results_mode_panels = {}
         self._guided_new_analysis_mode_panels = {}
@@ -3879,12 +3882,16 @@ class MainWindow(QMainWindow):
             self._guided_confirm_active_target = current_target
 
         self._sync_guided_feature_event_editor_to_current_run()
+        self._sync_guided_output_policy_editor_to_current_run()
 
         for widget in (
             self._guided_confirm_roi_combo,
             self._guided_confirm_chunk_combo,
             self._guided_confirm_strategy_combo,
             self._guided_confirm_ack_cb,
+            self._guided_output_path_edit,
+            self._guided_output_apply_btn,
+            self._guided_output_clear_btn,
         ):
             widget.setEnabled(source_ok)
 
@@ -3973,6 +3980,7 @@ class MainWindow(QMainWindow):
                 ),
                 roi_plan=entries,
                 feature_event_profiles=self._guided_feature_event_profiles_for_current_run(),
+                output_policy=self._guided_output_policy_for_current_run(),
             ),
             preview_errors,
         )
@@ -4000,6 +4008,12 @@ class MainWindow(QMainWindow):
             evidence_chunks = ", ".join(str(item.chunk_id) for item in entry.evidence)
             lines.append(f"- {entry.roi}: {strategy} | evidence reviewed chunk {evidence_chunks}")
         lines.extend(feature_event_profile_summary_lines(plan))
+        if plan.output_policy and plan.output_policy.output_root:
+            lines.append(f"Output destination: {plan.output_policy.output_root}")
+            lines.append(f"Legacy outputs protected: {str(plan.output_policy.legacy_outputs_protected).lower()}")
+            lines.append(f"Overwrite existing: {str(plan.output_policy.overwrite).lower()}")
+        else:
+            lines.append("Output destination: none configured")
         if errors:
             lines.append("Errors:")
             lines.extend(f"- {err}" for err in errors)
@@ -4292,6 +4306,126 @@ class MainWindow(QMainWindow):
         self._guided_feature_event_editor_synced_run = run_dir
         self._refresh_guided_draft_run_plan_preview()
 
+    def _validate_guided_output_path(self, path: str, run_dir: str) -> str | None:
+        trimmed = path.strip()
+        if not trimmed:
+            return "Output root path cannot be empty."
+
+        try:
+            from pathlib import Path
+            norm_path = Path(trimmed).expanduser().resolve(strict=False)
+            norm_run = Path(run_dir).resolve(strict=False)
+        except Exception as exc:
+            return f"Invalid path format: {exc}"
+
+        if norm_path == norm_run:
+            return "Output root cannot be the completed run directory itself."
+
+        if norm_run in norm_path.parents:
+            return "Output root cannot be inside the completed run directory."
+
+        legacy_dirs = [
+            norm_run / "_analysis",
+            norm_run / "_analysis" / "phasic_out",
+            norm_run / "_analysis" / "phasic_out" / "features",
+            norm_run / "_analysis" / "phasic_out" / "applied_dff",
+        ]
+        if norm_path in legacy_dirs:
+            return "Output root cannot be inside the completed run directory."
+
+        return None
+
+    def _guided_output_policy_for_current_run(self) -> OutputPolicy:
+        run_dir = self._current_guided_completed_run_dir()
+        if not run_dir:
+            return OutputPolicy()
+        return getattr(self, "_guided_draft_output_policy_by_run", {}).get(run_dir, OutputPolicy())
+
+    def _sync_guided_output_policy_editor_to_current_run(self, *, force: bool = False) -> None:
+        if not hasattr(self, "_guided_output_path_edit"):
+            return
+        run_dir = self._current_guided_completed_run_dir()
+        synced_run = getattr(self, "_guided_output_policy_editor_synced_run", None)
+        if not force and run_dir == synced_run:
+            return
+        policy = getattr(self, "_guided_draft_output_policy_by_run", {}).get(run_dir)
+        if policy is not None and policy.output_root:
+            with QSignalBlocker(self._guided_output_path_edit):
+                self._guided_output_path_edit.setText(policy.output_root)
+            self._guided_output_status_label.setText(
+                "Showing applied in-memory output policy for this completed run. "
+                "No outputs were written."
+            )
+        else:
+            with QSignalBlocker(self._guided_output_path_edit):
+                self._guided_output_path_edit.setText("")
+            self._guided_output_status_label.setText("No output root is configured.")
+        self._guided_output_policy_editor_synced_run = run_dir
+
+    def _on_guided_apply_output_policy(self) -> None:
+        run_dir = self._current_guided_completed_run_dir()
+        if not run_dir:
+            self._guided_output_status_label.setText(
+                "Output destination not applied: Open Results must be used first."
+            )
+            return
+        path = self._guided_output_path_edit.text()
+        err = self._validate_guided_output_path(path, run_dir)
+        if err:
+            self._guided_output_status_label.setText(f"Output destination not applied: {err}")
+            return
+
+        from pathlib import Path
+        resolved_root = str(Path(path.strip()).expanduser().resolve(strict=False))
+        policy = OutputPolicy(
+            output_root=resolved_root,
+            overwrite=False,
+            separate_from_source_required=True,
+            legacy_outputs_protected=True,
+        )
+
+        policies_by_run = getattr(self, "_guided_draft_output_policy_by_run", {})
+        previous_policy = policies_by_run.get(run_dir)
+        policies_by_run[run_dir] = policy
+        self._guided_draft_output_policy_by_run = policies_by_run
+
+        plan, preview_errors = self._build_guided_draft_run_plan()
+        errors = list(preview_errors)
+        if plan is not None:
+            errors.extend(validate_plan_contract(plan))
+        if errors:
+            if previous_policy is not None:
+                policies_by_run[run_dir] = previous_policy
+            else:
+                policies_by_run.pop(run_dir, None)
+            self._guided_draft_output_policy_by_run = policies_by_run
+            self._guided_output_status_label.setText(
+                "Output destination not applied: " + "; ".join(errors)
+            )
+            self._refresh_guided_draft_run_plan_preview()
+            return
+
+        self._guided_output_status_label.setText(
+            "Output destination applied to in-memory draft plan. No directories or files were created."
+        )
+        self._guided_output_policy_editor_synced_run = run_dir
+        self._refresh_guided_draft_run_plan_preview()
+
+    def _on_guided_clear_output_policy(self) -> None:
+        run_dir = self._current_guided_completed_run_dir()
+        if run_dir:
+            policies_by_run = getattr(self, "_guided_draft_output_policy_by_run", {})
+            policies_by_run.pop(run_dir, None)
+            self._guided_draft_output_policy_by_run = policies_by_run
+
+        with QSignalBlocker(self._guided_output_path_edit):
+            self._guided_output_path_edit.setText("")
+        self._guided_output_status_label.setText(
+            "Draft output destination cleared from in-memory plan. No files were changed."
+        )
+        self._guided_output_policy_editor_synced_run = run_dir
+        self._refresh_guided_draft_run_plan_preview()
+
     def _build_guided_feature_event_profile_editor(self) -> QGroupBox:
         group = QGroupBox("Feature/event profile")
         group.setObjectName("guidedFeatureEventProfileEditorPanel")
@@ -4403,6 +4537,56 @@ class MainWindow(QMainWindow):
 
         return group
 
+    def _build_guided_output_policy_editor(self) -> QGroupBox:
+        group = QGroupBox("Output destination")
+        group.setObjectName("guidedOutputDestinationPanel")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+
+        note = QLabel(
+            "Planning only; no directories or files are created.\n"
+            "Apply explicitly to add/update the draft plan output policy.\n"
+            "Execution remains disabled until a later stage."
+        )
+        note.setObjectName("guidedOutputDestinationNote")
+        note.setProperty("guidedSecondaryText", True)
+        note.setWordWrap(True)
+        self._make_guided_widget_shrinkable(note)
+        layout.addWidget(note)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+
+        self._guided_output_path_edit = QLineEdit()
+        self._guided_output_path_edit.setObjectName("guidedOutputDestinationPathEdit")
+        self._make_guided_widget_shrinkable(self._guided_output_path_edit)
+        form.addRow("Output root:", self._guided_output_path_edit)
+        layout.addLayout(form)
+
+        button_row = QHBoxLayout()
+        self._guided_output_apply_btn = QPushButton("Apply output destination to draft plan")
+        self._guided_output_apply_btn.setObjectName("guidedOutputDestinationApplyButton")
+        self._guided_output_apply_btn.clicked.connect(self._on_guided_apply_output_policy)
+        button_row.addWidget(self._guided_output_apply_btn)
+
+        self._guided_output_clear_btn = QPushButton("Clear draft output destination")
+        self._guided_output_clear_btn.setObjectName("guidedOutputDestinationClearButton")
+        self._guided_output_clear_btn.clicked.connect(self._on_guided_clear_output_policy)
+        button_row.addWidget(self._guided_output_clear_btn)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self._guided_output_status_label = QLabel("No output root is configured.")
+        self._guided_output_status_label.setObjectName("guidedOutputDestinationStatus")
+        self._guided_output_status_label.setProperty("guidedSecondaryText", True)
+        self._guided_output_status_label.setWordWrap(True)
+        self._make_guided_widget_shrinkable(self._guided_output_status_label)
+        layout.addWidget(self._guided_output_status_label)
+
+        return group
+
     def _build_guided_confirm_strategy_step(self) -> QWidget:
         wrapper = QWidget()
         wrapper.setObjectName("guidedConfirmStrategyContent")
@@ -4491,6 +4675,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._guided_confirm_marked_choice_label)
 
         layout.addWidget(self._build_guided_feature_event_profile_editor())
+        layout.addWidget(self._build_guided_output_policy_editor())
 
         draft_group = QGroupBox("Draft run-plan preview")
         draft_group.setObjectName("guidedDraftRunPlanPreviewPanel")
