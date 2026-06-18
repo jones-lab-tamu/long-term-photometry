@@ -976,24 +976,41 @@ def test_readiness_summary_pure_non_executing_guarantee(tmp_path):
     assert not list(tmp_path.rglob("*"))
 
 
-def test_plan_export_json_helper():
+def test_plan_export_json_helper(tmp_path):
     import json
+    import sys
     from photometry_pipeline.guided_run_plan import (
         plan_export_json_text,
         deserialize_plan_from_dict,
         validate_plan_contract,
     )
     plan = _valid_plan()
-    json_text = plan_export_json_text(plan)
 
-    parsed = json.loads(json_text)
+    # 1. Deterministic JSON text
+    json_text_1 = plan_export_json_text(plan)
+    json_text_2 = plan_export_json_text(plan)
+    assert json_text_1 == json_text_2
+
+    parsed = json.loads(json_text_1)
     assert parsed["schema_version"] == "guided_run_plan.v1"
+    assert "roi_plan" in parsed
+    assert "source" in parsed
 
+    # 2. Round-trip contract
     restored = deserialize_plan_from_dict(parsed)
     assert restored.plan_id == plan.plan_id
     assert restored.source.completed_run_dir == plan.source.completed_run_dir
     assert len(restored.roi_plan) == len(plan.roi_plan)
     assert restored.roi_plan[0].roi == plan.roi_plan[0].roi
+    assert len(restored.feature_event_profiles) == len(plan.feature_event_profiles)
+    assert restored.output_policy.output_root == plan.output_policy.output_root
 
     errors = validate_plan_contract(restored)
     assert errors == []
+
+    # 3. Pure/non-executing guarantee
+    # Assert no files written
+    assert not list(tmp_path.rglob("*"))
+    # Assert no import of feature_extraction or pipeline
+    assert "photometry_pipeline.core.feature_extraction" not in sys.modules
+    assert "photometry_pipeline.core.pipeline" not in sys.modules

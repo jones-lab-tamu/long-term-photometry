@@ -2890,3 +2890,53 @@ def test_gui_export_non_production_output_guarantee(window, tmp_path, monkeypatc
     assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
     after_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
     assert after_files == before_files
+
+
+def test_gui_export_resolved_path_writing(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    export_path_raw = "  " + str(tmp_path / "." / "plan.json") + "  "
+    resolved_path = tmp_path.resolve() / "plan.json"
+
+    window._guided_export_path_edit.setText(export_path_raw)
+    window._guided_export_btn.click()
+
+    assert resolved_path.exists()
+    assert str(resolved_path) in window._guided_export_status_label.text()
+    assert "Draft plan successfully exported to:" in window._guided_export_status_label.text()
+
+
+def test_gui_export_existing_file_resolved_rejection(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    resolved_path = tmp_path.resolve() / "plan_existing.json"
+    with open(resolved_path, "w", encoding="utf-8") as f:
+        f.write("should not be overwritten")
+
+    export_path_raw = "  " + str(tmp_path / "." / "plan_existing.json") + "  "
+    window._guided_export_path_edit.setText(export_path_raw)
+    window._guided_export_btn.click()
+
+    with open(resolved_path, "r", encoding="utf-8") as f:
+        assert f.read() == "should not be overwritten"
+    assert "Export failed: Export path already exists." in window._guided_export_status_label.text()
+
+
+def test_gui_export_missing_parent_resolved_rejection(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    missing_dir = tmp_path / "missing_parent"
+    export_path = missing_dir / "plan.json"
+
+    window._guided_export_path_edit.setText(str(export_path))
+    window._guided_export_btn.click()
+
+    assert not missing_dir.exists()
+    assert not export_path.exists()
+    assert "Export failed: Parent directory of export path does not exist." in window._guided_export_status_label.text()

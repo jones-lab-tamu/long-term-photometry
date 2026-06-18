@@ -4649,19 +4649,19 @@ class MainWindow(QMainWindow):
 
         return group
 
-    def _validate_guided_export_path(self, path: str, run_dir: str) -> str | None:
+    def _resolve_guided_export_path(self, path: str, run_dir: str) -> tuple[object, str | None]:
         trimmed = path.strip()
         if not trimmed:
-            return "Export path cannot be empty."
+            return None, "Export path cannot be empty."
         if not trimmed.lower().endswith(".json"):
-            return "Export path must have a .json suffix."
+            return None, "Export path must have a .json suffix."
 
         try:
             from pathlib import Path
             norm_path = Path(trimmed).expanduser().resolve(strict=False)
             norm_run = Path(run_dir).resolve(strict=False)
         except Exception as exc:
-            return f"Invalid path format: {exc}"
+            return None, f"Invalid path format: {exc}"
 
         legacy_dirs = [
             norm_run / "_analysis",
@@ -4670,25 +4670,25 @@ class MainWindow(QMainWindow):
             norm_run / "_analysis" / "phasic_out" / "applied_dff",
         ]
         if norm_path in legacy_dirs or any(d in norm_path.parents for d in legacy_dirs):
-            return "Export path cannot be inside legacy output directories."
+            return None, "Export path cannot be inside legacy output directories."
 
         if norm_path == norm_run:
-            return "Export path cannot be the completed run directory itself."
+            return None, "Export path cannot be the completed run directory itself."
         if norm_run in norm_path.parents:
-            return "Export path cannot be inside the completed run directory."
+            return None, "Export path cannot be inside the completed run directory."
 
         if norm_path.is_dir():
-            return "Export path cannot be a directory."
+            return None, "Export path cannot be a directory."
 
         if norm_path.exists():
-            return "Export path already exists."
+            return None, "Export path already exists."
 
         if not norm_path.parent.exists():
-            return "Parent directory of export path does not exist."
+            return None, "Parent directory of export path does not exist."
         if not norm_path.parent.is_dir():
-            return "Parent of export path is not a directory."
+            return None, "Parent of export path is not a directory."
 
-        return None
+        return norm_path, None
 
     def _on_guided_export_draft_plan(self) -> None:
         run_dir = self._current_guided_completed_run_dir()
@@ -4699,7 +4699,7 @@ class MainWindow(QMainWindow):
             return
 
         path = self._guided_export_path_edit.text()
-        err = self._validate_guided_export_path(path, run_dir)
+        export_path, err = self._resolve_guided_export_path(path, run_dir)
         if err:
             self._guided_export_status_label.setText(f"Export failed: {err}")
             return
@@ -4727,10 +4727,10 @@ class MainWindow(QMainWindow):
         try:
             from photometry_pipeline.guided_run_plan import plan_export_json_text
             json_text = plan_export_json_text(plan)
-            with open(path.strip(), "x", encoding="utf-8") as f:
+            with open(export_path, "x", encoding="utf-8") as f:
                 f.write(json_text)
             self._guided_export_status_label.setText(
-                f"Draft plan successfully exported to: {path.strip()}"
+                f"Draft plan successfully exported to: {export_path}"
             )
         except Exception as exc:
             self._guided_export_status_label.setText(f"Export failed: {exc}")
