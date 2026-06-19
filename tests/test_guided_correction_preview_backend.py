@@ -12,6 +12,13 @@ from photometry_pipeline.preview.correction_preview import (
     PREVIEW_SUMMARY_FILENAME,
     run_guided_correction_preview_comparison,
 )
+from photometry_pipeline.guided_diagnostic_cache import (
+    DiagnosticCacheBuildRequest,
+    artifact_record_from_request,
+    write_artifact_record_json,
+    write_build_request_json,
+    write_json_file,
+)
 
 
 PREVIEW_ID = "preview_20260617T010203Z_abcd1234"
@@ -60,6 +67,55 @@ def _make_completed_run(tmp_path: Path, *, missing_field: str | None = None) -> 
         if missing_field != "uv_raw":
             grp.create_dataset("uv_raw", data=uv)
     return run_dir
+
+
+def _make_diagnostic_cache(tmp_path: Path) -> Path:
+    run_dir = _make_completed_run(tmp_path)
+    cache_root = tmp_path / "diagnostic_cache"
+    phasic_src = run_dir / "_analysis" / "phasic_out"
+    phasic_dest = cache_root / "_analysis" / "phasic_out"
+    phasic_dest.mkdir(parents=True)
+    (phasic_dest / "phasic_trace_cache.h5").write_bytes((phasic_src / "phasic_trace_cache.h5").read_bytes())
+    (phasic_dest / "config_used.yaml").write_text(
+        (phasic_src / "config_used.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (cache_root / "status.json").write_text(
+        json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
+        encoding="utf-8",
+    )
+    request = DiagnosticCacheBuildRequest(
+        raw_input_path=str(tmp_path / "raw_input"),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+        included_roi_ids=("CH1",),
+        output_base=str(tmp_path),
+        requested_cache_path=str(cache_root),
+        requested_at_utc="2026-06-19T12:00:00Z",
+    )
+    request_path = cache_root / "guided_diagnostic_cache_request.json"
+    write_build_request_json(request_path, request)
+    record = artifact_record_from_request(
+        request,
+        cache_id="cache_001",
+        cache_root_path=str(cache_root),
+        phasic_trace_cache_path=str(phasic_dest / "phasic_trace_cache.h5"),
+        config_used_path=str(phasic_dest / "config_used.yaml"),
+        status_marker_path=str(cache_root / "status.json"),
+        request_json_path=str(request_path),
+        roi_inventory=("CH1",),
+    )
+    artifact_path = cache_root / "guided_diagnostic_cache_artifact.json"
+    write_artifact_record_json(artifact_path, record)
+    write_json_file(
+        cache_root / "guided_diagnostic_cache_provenance.json",
+        {
+            "schema_version": "guided_diagnostic_cache.v1",
+            "purpose": "guided_diagnostic_cache",
+            "production_analysis": False,
+        },
+    )
+    return cache_root
 
 
 def _load_json(path: Path) -> dict:
@@ -121,6 +177,54 @@ def test_preview_backend_success_from_phasic_cache_source_requires_external_outp
     assert Path(result["preview_output_dir"]) == preview_dir.resolve()
     provenance = _load_json(preview_dir / PREVIEW_PROVENANCE_FILENAME)
     assert provenance["source_type"] == "phasic_cache"
+
+
+def test_preview_backend_success_from_diagnostic_cache_preserves_source_identity(tmp_path):
+    cache_root = _make_diagnostic_cache(tmp_path)
+    preview_dir = cache_root / "_guided_workflow" / "previews" / PREVIEW_ID
+
+    result = run_guided_correction_preview_comparison(
+        cache_root,
+        preview_dir,
+        roi="CH1",
+        methods=["global_linear_regression"],
+        preview_id=PREVIEW_ID,
+        source_type="diagnostic_cache",
+        overwrite=True,
+    )
+
+    assert result["ok"] is True
+    provenance = _load_json(preview_dir / PREVIEW_PROVENANCE_FILENAME)
+    assert provenance["source_type"] == "diagnostic_cache"
+    assert provenance["completed_run_dir"] == ""
+    assert provenance["diagnostic_cache"]["source_type"] == "diagnostic_cache"
+    assert provenance["diagnostic_cache"]["cache_id"] == "cache_001"
+    assert provenance["diagnostic_cache"]["cache_root_path"] == str(cache_root)
+    assert provenance["diagnostic_cache"]["production_analysis"] is False
+    assert provenance["diagnostic_cache"]["preliminary_cache"] is True
+    assert provenance["pipeline_run_executed"] is False
+    assert provenance["production_output"] is False
+
+
+def test_preview_backend_refuses_production_diagnostic_cache(tmp_path):
+    cache_root = _make_diagnostic_cache(tmp_path)
+    artifact_path = cache_root / "guided_diagnostic_cache_artifact.json"
+    artifact = _load_json(artifact_path)
+    artifact["production_analysis"] = True
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    result = run_guided_correction_preview_comparison(
+        cache_root,
+        cache_root / "_guided_workflow" / "previews" / PREVIEW_ID,
+        roi="CH1",
+        methods=["global_linear_regression"],
+        preview_id=PREVIEW_ID,
+        source_type="diagnostic_cache",
+        overwrite=True,
+    )
+
+    assert result["ok"] is False
+    assert "must not be marked as production analysis" in "; ".join(result["errors"])
 
 
 def test_preview_backend_refuses_protected_output_namespaces_without_writing(tmp_path):

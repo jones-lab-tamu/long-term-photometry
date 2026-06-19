@@ -116,8 +116,28 @@ def _configure_guided_raw_cache_setup(window: MainWindow, tmp_path, monkeypatch)
 def _write_minimal_guided_cache_outputs(cache_dir):
     phasic = cache_dir / "_analysis" / "phasic_out"
     phasic.mkdir(parents=True)
-    (phasic / "phasic_trace_cache.h5").write_bytes(b"cache")
-    (phasic / "config_used.yaml").write_text("event_signal: dff\n", encoding="utf-8")
+    (phasic / "config_used.yaml").write_text(
+        "target_fs_hz: 20.0\nlowpass_hz: 1.0\nfilter_order: 3\n"
+        "dynamic_fit_mode: robust_global_event_reject\n",
+        encoding="utf-8",
+    )
+    t = np.arange(400, dtype=float) / 20.0
+    uv = 1.0 + 0.02 * np.sin(t * 0.7)
+    sig = 1.2 * uv + 0.05 * np.exp(-0.5 * ((t - 8.0) / 0.5) ** 2)
+    with h5py.File(phasic / "phasic_trace_cache.h5", "w") as h5:
+        meta = h5.create_group("meta")
+        meta.attrs["mode"] = "phasic"
+        meta.attrs["schema_version"] = "1.0"
+        meta.create_dataset("rois", data=np.asarray([b"CH1", b"CH2", b"CH3"]))
+        meta.create_dataset("chunk_ids", data=np.asarray([0, 1], dtype=int))
+        meta.create_dataset("source_files", data=np.asarray([b"mock0.csv", b"mock1.csv"]))
+        for roi in ("CH1", "CH2", "CH3"):
+            roi_group = h5.create_group(f"roi/{roi}")
+            for chunk_id in (0, 1):
+                grp = roi_group.create_group(f"chunk_{chunk_id}")
+                grp.create_dataset("time_sec", data=t)
+                grp.create_dataset("sig_raw", data=sig + chunk_id)
+                grp.create_dataset("uv_raw", data=uv + 0.1 * chunk_id)
     (cache_dir / "run_report.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
     (cache_dir / "status.json").write_text(
         json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
@@ -2076,6 +2096,123 @@ def test_guided_diagnostic_cache_success_then_setup_change_marks_stale(window, t
     assert "Diagnostic cache stale" in window._guided_diagnostic_cache_status_label.text()
     assert "ROI inclusion/exclusion changed" in window._guided_diagnostic_cache_summary_label.text()
     assert window._guided_diagnostic_cache_record is not None
+
+
+def test_guided_correction_preview_new_analysis_blocks_without_diagnostic_cache(window):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Diagnostics"))
+
+    assert window._guided_preview_generate_btn.isEnabled() is False
+    assert "Build a diagnostic cache before generating correction previews" in (
+        window._guided_preview_source_status_label.text()
+    )
+
+
+def test_guided_correction_preview_new_analysis_uses_current_diagnostic_cache(window, tmp_path, monkeypatch):
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    fake_runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = fake_runner
+    window._set_guided_workflow_mode("new_analysis")
+    before_run_dir = window._current_run_dir
+    monkeypatch.setattr(window._report_viewer, "load_report", lambda _path: pytest.fail("completed-run workspace loaded"))
+
+    window._guided_diagnostic_cache_build_btn.click()
+    cache_path = Path(fake_runner.run_dir)
+    _write_minimal_guided_cache_outputs(cache_path)
+    fake_runner.succeed()
+    window._on_guided_diagnostic_cache_finished(0)
+
+    assert window._guided_preview_generate_btn.isEnabled() is True
+    assert window._guided_preview_source_type == "diagnostic_cache"
+    assert window._guided_preview_source_path == str(cache_path)
+    assert "preliminary diagnostic cache" in window._guided_preview_source_status_label.text()
+    assert "not final production analysis" in window._guided_preview_source_status_label.text()
+    assert [window._guided_preview_roi_combo.itemText(i) for i in range(window._guided_preview_roi_combo.count())] == [
+        "CH1",
+        "CH2",
+        "CH3",
+    ]
+    assert [window._guided_preview_chunk_combo.itemData(i) for i in range(window._guided_preview_chunk_combo.count())] == [
+        0,
+        1,
+    ]
+    assert window._current_run_dir == before_run_dir
+    assert window._report_viewer.has_loaded_results() is False
+
+
+def test_guided_correction_preview_new_analysis_stale_cache_blocks_preview(window, tmp_path, monkeypatch):
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    fake_runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = fake_runner
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_diagnostic_cache_build_btn.click()
+    cache_path = Path(fake_runner.run_dir)
+    _write_minimal_guided_cache_outputs(cache_path)
+    fake_runner.succeed()
+    window._on_guided_diagnostic_cache_finished(0)
+    assert window._guided_preview_generate_btn.isEnabled() is True
+
+    window._guided_roi_list.item(2).setCheckState(Qt.Unchecked)
+    window._refresh_guided_diagnostics_panel()
+
+    assert window._guided_preview_generate_btn.isEnabled() is False
+    assert "Diagnostic cache is stale" in window._guided_preview_source_status_label.text()
+    assert "must be rebuilt" in window._guided_preview_source_status_label.text()
+
+
+def test_guided_correction_preview_generation_passes_diagnostic_cache_identity(window, tmp_path, monkeypatch):
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    fake_runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = fake_runner
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_diagnostic_cache_build_btn.click()
+    cache_path = Path(fake_runner.run_dir)
+    _write_minimal_guided_cache_outputs(cache_path)
+    fake_runner.succeed()
+    window._on_guided_diagnostic_cache_finished(0)
+    before_run_dir = window._current_run_dir
+    before_choices = dict(window._guided_strategy_choices)
+    calls = {"args": None, "kwargs": None}
+
+    def _fake_preview_backend(*args, **kwargs):
+        calls["args"] = args
+        calls["kwargs"] = kwargs
+        return {
+            "ok": True,
+            "status": "success",
+            "preview_id": kwargs.get("preview_id", "preview"),
+            "preview_output_dir": kwargs.get("preview_output_dir", ""),
+            "preview_summary_path": "summary.json",
+            "preview_provenance_path": "provenance.json",
+            "generated_artifacts": {},
+            "method_statuses": {
+                "robust_global_event_reject": {
+                    "status": "success",
+                    "errors": [],
+                    "warnings": [],
+                    "diagnostics_json": "diagnostics.json",
+                    "trace_csv": "trace.csv",
+                }
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(main_window_module, "run_guided_correction_preview_comparison", _fake_preview_backend)
+
+    window._guided_preview_generate_btn.click()
+
+    assert calls["args"] == (str(cache_path),)
+    assert calls["kwargs"]["source_type"] == "diagnostic_cache"
+    assert calls["kwargs"]["preview_output_dir"].startswith(str(cache_path / "_guided_workflow" / "previews"))
+    assert calls["kwargs"]["roi"] == "CH1"
+    assert calls["kwargs"]["chunk_index"] == 0
+    assert window._guided_preview_last_result["source_type"] == "diagnostic_cache"
+    assert window._guided_preview_last_result["diagnostic_cache_root"] == str(cache_path.resolve())
+    assert "completed_run_dir" not in window._guided_preview_last_result
+    assert window._current_run_dir == before_run_dir
+    assert window._report_viewer.has_loaded_results() is False
+    assert window._guided_strategy_choices == before_choices
 
 
 def test_guided_correction_preview_panel_populates_from_loaded_completed_run(window, tmp_path, monkeypatch):

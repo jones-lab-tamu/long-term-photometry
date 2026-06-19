@@ -103,6 +103,7 @@ from photometry_pipeline.guided_diagnostic_cache import (
     DiagnosticCacheStatus,
     artifact_record_from_request,
     compare_request_to_artifact,
+    resolve_diagnostic_cache_source,
     validate_diagnostic_cache_artifact,
     write_artifact_record_json,
     write_build_request_json,
@@ -2169,6 +2170,8 @@ class MainWindow(QMainWindow):
         self._guided_workflow_mode = mode
         self._refresh_guided_mode_display()
         self._refresh_guided_start_panel()
+        if hasattr(self, "_guided_diagnostics_status_label"):
+            self._refresh_guided_diagnostics_panel()
         self._refresh_guided_confirm_strategy_panel()
 
     def _display_path(self, path: str, *, max_chars: int = 60) -> str:
@@ -3147,6 +3150,46 @@ class MainWindow(QMainWindow):
         except Exception:
             return None
 
+    def _resolve_current_guided_preview_diagnostic_cache_source(self):
+        record = getattr(self, "_guided_diagnostic_cache_record", None)
+        if record is None:
+            return None, DiagnosticCacheStatus(
+                False,
+                "missing_diagnostic_cache",
+                "Build a diagnostic cache before generating correction previews.",
+            )
+        try:
+            current_request = self._build_guided_diagnostic_cache_request(
+                cache_id=record.cache_id,
+                cache_root_path=record.cache_root_path,
+            )
+            stale_status = compare_request_to_artifact(current_request, record)
+        except Exception as exc:
+            return None, DiagnosticCacheStatus(
+                False,
+                "stale_check_failed",
+                f"Diagnostic cache state could not be compared with the current setup: {exc}",
+            )
+        if not stale_status.ok:
+            reasons = "; ".join(stale_status.stale_reasons) or stale_status.message
+            return None, DiagnosticCacheStatus(
+                False,
+                "stale",
+                f"Diagnostic cache is stale and must be rebuilt before generating previews: {reasons}",
+                stale=True,
+                stale_reasons=stale_status.stale_reasons,
+            )
+        resolved = resolve_diagnostic_cache_source(record)
+        if not resolved.ok or resolved.source is None:
+            return None, resolved.status
+        if resolved.source.source_type != "diagnostic_cache":
+            return None, DiagnosticCacheStatus(
+                False,
+                "invalid_source_type",
+                "Resolved preview source is not a diagnostic cache.",
+            )
+        return resolved.source, resolved.status
+
     def _selected_guided_signal_f0_roi(self) -> str:
         combo = getattr(self, "_guided_signal_f0_roi_combo", None)
         return str(combo.currentData() or combo.currentText() or "").strip() if combo is not None else ""
@@ -3318,17 +3361,93 @@ class MainWindow(QMainWindow):
         previous_roi = self._selected_guided_preview_roi()
         previous_chunk = self._selected_guided_preview_chunk()
         run_dir = str(artifact_state.get("run_dir") or "")
+        mode = getattr(self, "_guided_workflow_mode", "start")
         self._guided_preview_source_ok = False
-        self._guided_preview_source_reason = "Load a completed run to generate preview-only correction comparisons."
-        self._guided_preview_loaded_run_dir = run_dir
-        if previous_source and run_dir != previous_source:
-            self._guided_preview_mark_stale("Displayed preview is stale because the loaded completed run changed.")
+        self._guided_preview_source_type = ""
+        self._guided_preview_source_path = ""
+        self._guided_preview_source_reason = "Build a diagnostic cache before generating correction previews."
 
         with QSignalBlocker(self._guided_preview_roi_combo), QSignalBlocker(self._guided_preview_chunk_combo):
             self._guided_preview_roi_combo.clear()
             self._guided_preview_chunk_combo.clear()
             restored_roi = False
             restored_chunk = False
+
+        if mode == "new_analysis":
+            source, status = self._resolve_current_guided_preview_diagnostic_cache_source()
+            if source is None:
+                self._guided_preview_loaded_run_dir = ""
+                self._guided_preview_source_reason = status.message
+                self._guided_preview_source_status_label.setText(status.message)
+                self._guided_preview_source_status_label.setToolTip("")
+                if not getattr(self, "_guided_preview_has_result", False):
+                    self._clear_guided_preview_result_widgets()
+                self._refresh_guided_preview_enablement()
+                return
+
+            source_id = source.cache_root_path
+            self._guided_preview_loaded_run_dir = source_id
+            if previous_source and source_id != previous_source:
+                self._guided_preview_mark_stale(
+                    "Displayed preview is stale because the diagnostic cache source changed."
+                )
+            try:
+                with open_phasic_cache(source.phasic_trace_cache_path) as cache:
+                    rois = list_cache_rois(cache)
+                    chunk_ids = list_cache_chunk_ids(cache)
+            except Exception as exc:
+                self._guided_preview_source_reason = str(exc)
+                self._guided_preview_source_status_label.setText(
+                    "Unable to read diagnostic-cache phasic cache for correction preview:\n"
+                    f"{exc}"
+                )
+                self._refresh_guided_preview_enablement()
+                return
+
+            with QSignalBlocker(self._guided_preview_roi_combo), QSignalBlocker(self._guided_preview_chunk_combo):
+                for roi in rois:
+                    self._guided_preview_roi_combo.addItem(str(roi), str(roi))
+                for chunk_id in chunk_ids:
+                    self._guided_preview_chunk_combo.addItem(str(chunk_id), int(chunk_id))
+                if previous_roi:
+                    idx = self._guided_preview_roi_combo.findData(previous_roi)
+                    if idx >= 0:
+                        self._guided_preview_roi_combo.setCurrentIndex(idx)
+                        restored_roi = True
+                if previous_chunk is not None:
+                    idx = self._guided_preview_chunk_combo.findData(int(previous_chunk))
+                    if idx >= 0:
+                        self._guided_preview_chunk_combo.setCurrentIndex(idx)
+                        restored_chunk = True
+            if getattr(self, "_guided_preview_has_result", False) and source_id == previous_source:
+                if previous_roi and not restored_roi:
+                    self._guided_preview_mark_stale(
+                        "Displayed preview is stale because the previous preview ROI is no longer available."
+                    )
+                elif previous_chunk is not None and not restored_chunk:
+                    self._guided_preview_mark_stale(
+                        "Displayed preview is stale because the previous preview chunk is no longer available."
+                    )
+            self._guided_preview_source_ok = bool(rois and chunk_ids)
+            self._guided_preview_source_type = "diagnostic_cache"
+            self._guided_preview_source_path = source.artifact_record_path or source.cache_root_path
+            self._guided_preview_source_reason = (
+                "Preview comparison ready from preliminary diagnostic cache."
+                if self._guided_preview_source_ok
+                else "Diagnostic cache has no ROI/chunk entries for preview."
+            )
+            self._guided_preview_source_status_label.setText(
+                "Preview will use the preliminary diagnostic cache; this is not final production analysis: "
+                f"{self._display_path(source.cache_root_path)}"
+            )
+            self._guided_preview_source_status_label.setToolTip(source.cache_root_path)
+            self._refresh_guided_preview_enablement()
+            return
+
+        self._guided_preview_source_reason = "Load a completed run to generate preview-only correction comparisons."
+        self._guided_preview_loaded_run_dir = run_dir
+        if previous_source and run_dir != previous_source:
+            self._guided_preview_mark_stale("Displayed preview is stale because the loaded completed run changed.")
 
         if artifact_state.get("status") == "not_generated" or not run_dir:
             self._guided_preview_source_status_label.setText(
@@ -3387,6 +3506,8 @@ class MainWindow(QMainWindow):
                     "Displayed preview is stale because the previous preview chunk is no longer available."
                 )
         self._guided_preview_source_ok = bool(rois and chunk_ids)
+        self._guided_preview_source_type = "completed_run"
+        self._guided_preview_source_path = run_dir
         self._guided_preview_source_reason = (
             "Preview comparison ready."
             if self._guided_preview_source_ok
@@ -3733,21 +3854,35 @@ class MainWindow(QMainWindow):
         return "\n".join(lines)
 
     def _on_generate_guided_correction_preview(self) -> None:
-        run_dir = str(getattr(self, "_guided_preview_loaded_run_dir", "") or "")
+        source_path = str(getattr(self, "_guided_preview_source_path", "") or "")
+        source_type = str(getattr(self, "_guided_preview_source_type", "") or "")
+        source_id = str(getattr(self, "_guided_preview_loaded_run_dir", "") or "")
         roi = self._selected_guided_preview_roi()
         chunk = self._selected_guided_preview_chunk()
         methods = self._selected_guided_preview_methods()
-        if not run_dir or not roi or chunk is None or not methods:
+        if not source_path or source_type not in {"completed_run", "diagnostic_cache"} or not roi or chunk is None or not methods:
             self._refresh_guided_preview_enablement()
             return
         try:
+            kwargs = {
+                "roi": roi,
+                "chunk_index": chunk,
+                "methods": methods,
+                "source_type": source_type,
+                "overwrite": False,
+            }
+            if source_type == "diagnostic_cache":
+                preview_id = f"diagnostic_cache_preview_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{secrets.token_hex(4)}"
+                kwargs["preview_id"] = preview_id
+                kwargs["preview_output_dir"] = os.path.join(
+                    source_id,
+                    "_guided_workflow",
+                    "previews",
+                    preview_id,
+                )
             result = run_guided_correction_preview_comparison(
-                run_dir,
-                roi=roi,
-                chunk_index=chunk,
-                methods=methods,
-                source_type="completed_run",
-                overwrite=False,
+                source_path,
+                **kwargs,
             )
         except Exception as exc:
             result = {
@@ -3762,7 +3897,11 @@ class MainWindow(QMainWindow):
             }
         self._guided_preview_has_result = True
         self._guided_preview_result_stale = False
-        result["completed_run_dir"] = os.path.realpath(run_dir)
+        if source_type == "completed_run":
+            result["completed_run_dir"] = os.path.realpath(source_id)
+        else:
+            result["diagnostic_cache_root"] = os.path.realpath(source_id)
+            result["source_type"] = "diagnostic_cache"
         result["roi"] = roi
         result["chunk_index"] = int(chunk)
         self._guided_preview_last_result = result
@@ -4400,7 +4539,7 @@ class MainWindow(QMainWindow):
             self._guided_diagnostic_cache_pending_request = None
             self._guided_diagnostic_cache_pending_cache_id = ""
             self._guided_diagnostic_cache_pending_path = ""
-            self._refresh_guided_diagnostic_cache_panel()
+            self._refresh_guided_diagnostics_panel()
 
     def _selected_guided_confirm_roi(self) -> str:
         combo = getattr(self, "_guided_confirm_roi_combo", None)

@@ -38,6 +38,7 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     load_cache_chunk_attrs,
     open_phasic_cache,
 )
+from photometry_pipeline.guided_diagnostic_cache import resolve_diagnostic_cache_source
 
 
 PREVIEW_PROVENANCE_FILENAME = "preview_provenance.json"
@@ -68,7 +69,7 @@ REJECTED_GUIDED_PREVIEW_METHODS = {
     "rolling_filtered_to_raw",
     "rolling_filtered_to_filtered",
 }
-VALID_PREVIEW_SOURCE_TYPES = {"completed_run", "phasic_cache"}
+VALID_PREVIEW_SOURCE_TYPES = {"completed_run", "phasic_cache", "diagnostic_cache"}
 REQUIRED_PREVIEW_CHUNK_FIELDS = ("time_sec", "sig_raw", "uv_raw")
 
 
@@ -98,6 +99,7 @@ class PreviewSourceValidationResult:
     phasic_out: str = ""
     phasic_trace_cache_path: str = ""
     config_path: str = ""
+    diagnostic_cache_metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
     code: str = "ok"
     reason: str = ""
 
@@ -624,6 +626,47 @@ def resolve_phasic_cache_preview_source(
     )
 
 
+def resolve_diagnostic_cache_preview_source(
+    source: str | os.PathLike[str] | None,
+) -> PreviewSourceValidationResult:
+    """Resolve a Guided diagnostic cache without relabeling it as a completed run."""
+    result = resolve_diagnostic_cache_source(source or "")
+    if not result.ok or result.source is None:
+        return PreviewSourceValidationResult(
+            ok=False,
+            source_type="diagnostic_cache",
+            code=result.status.code,
+            reason=result.status.message,
+        )
+    resolved = result.source
+    phasic_out = os.path.dirname(resolved.phasic_trace_cache_path)
+    return PreviewSourceValidationResult(
+        ok=True,
+        source_type="diagnostic_cache",
+        completed_run_dir="",
+        phasic_out=phasic_out,
+        phasic_trace_cache_path=resolved.phasic_trace_cache_path,
+        config_path=resolved.config_used_path,
+        diagnostic_cache_metadata={
+            "source_type": "diagnostic_cache",
+            "cache_id": resolved.cache_id,
+            "cache_root_path": resolved.cache_root_path,
+            "phasic_trace_cache_path": resolved.phasic_trace_cache_path,
+            "config_used_path": resolved.config_used_path,
+            "request_json_path": resolved.request_json_path,
+            "artifact_record_path": resolved.artifact_record_path,
+            "provenance_path": resolved.provenance_path,
+            "source_setup_signature": resolved.source_setup_signature,
+            "diagnostic_scope_signature": resolved.diagnostic_scope_signature,
+            "build_request_signature": resolved.build_request_signature,
+            "production_analysis": False,
+            "preliminary_cache": True,
+        },
+        code="ok",
+        reason="Diagnostic-cache preview source is available.",
+    )
+
+
 def _resolve_preview_source(
     source: str | os.PathLike[str] | None,
     source_type: str | None,
@@ -634,12 +677,14 @@ def _resolve_preview_source(
             ok=False,
             source_type=requested,
             code="unsupported_source_type",
-            reason="Stage 4C2 supports only completed_run and phasic_cache sources.",
+            reason="Correction preview supports completed_run, phasic_cache, and diagnostic_cache sources.",
         )
     if requested == "completed_run":
         return resolve_completed_run_preview_source(source)
     if requested == "phasic_cache":
         return resolve_phasic_cache_preview_source(source)
+    if requested == "diagnostic_cache":
+        return resolve_diagnostic_cache_preview_source(source)
 
     completed = resolve_completed_run_preview_source(source)
     if completed.ok:
@@ -962,6 +1007,7 @@ def build_preview_provenance(
     phasic_trace_cache_path: str | os.PathLike[str] | None = None,
     source_paths: Iterable[str | os.PathLike[str]] | None = None,
     source_artifact_hashes: dict[str, str] | None = None,
+    diagnostic_cache_metadata: dict[str, Any] | None = None,
     created_at_utc: str | None = None,
 ) -> dict[str, Any]:
     """Build preview-only provenance in memory; does not write files."""
@@ -990,6 +1036,7 @@ def build_preview_provenance(
         "config_values": dict(config_values or {}),
         "config_source_path": _resolve_path(config_source_path),
         "source_artifact_hashes": dict(source_artifact_hashes or {}),
+        "diagnostic_cache": dict(diagnostic_cache_metadata or {}),
         "pipeline_run_executed": False,
         "manifest_written": False,
         "applied_dff_routed": False,
@@ -1196,6 +1243,7 @@ def run_guided_correction_preview_comparison(
         config_source_path=source_result.config_path,
         source_paths=[source],
         source_artifact_hashes=source_hashes,
+        diagnostic_cache_metadata=source_result.diagnostic_cache_metadata,
     )
     provenance["source_file"] = str(record["source_file"])
     provenance["selected_window_tuple"] = _json_safe(record.get("window"))
