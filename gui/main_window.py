@@ -2235,6 +2235,9 @@ class MainWindow(QMainWindow):
             panel.setVisible(skipped)
         for panel in getattr(self, "_guided_new_analysis_mode_panels", {}).values():
             panel.setVisible(not skipped)
+        if hasattr(self, "_guided_confirm_context_label"):
+            self._refresh_guided_confirm_strategy_panel()
+        self._refresh_guided_draft_run_plan_preview()
 
     def _refresh_guided_start_panel(self) -> None:
         if not hasattr(self, "_guided_start_status_label"):
@@ -5131,6 +5134,22 @@ class MainWindow(QMainWindow):
         label = getattr(self, "_guided_draft_run_plan_preview_label", None)
         if label is None:
             return
+
+        if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
+            plan = self._build_guided_new_analysis_draft_plan()
+            from photometry_pipeline.guided_new_analysis_plan import evaluate_new_analysis_plan_issues
+            issues = evaluate_new_analysis_plan_issues(plan)
+            label.setText(self._guided_new_analysis_draft_plan_summary_text(plan, issues))
+            label.setToolTip("")
+
+            readiness_label = getattr(self, "_guided_plan_readiness_summary_label", None)
+            if readiness_label is not None:
+                readiness_label.setText(self._guided_new_analysis_readiness_summary_text(plan, issues))
+                readiness_label.setToolTip("")
+
+            self._refresh_guided_new_analysis_draft_plan_checklist(plan, issues)
+            return
+
         plan, preview_errors = self._build_guided_draft_run_plan()
         errors = list(preview_errors)
         if plan is not None:
@@ -5153,6 +5172,364 @@ class MainWindow(QMainWindow):
                 readiness_label.setToolTip("")
 
         self._refresh_guided_draft_run_plan_checklist(plan, errors)
+
+    def _build_guided_new_analysis_draft_plan(self):
+        from photometry_pipeline.guided_new_analysis_plan import (
+            GuidedNewAnalysisDraftPlan,
+            GuidedPlanCorrectionChoice
+        )
+        
+        input_path = self._guided_input_dir_edit.text().strip() if hasattr(self, "_guided_input_dir_edit") else ""
+        input_format = self._guided_format_combo.currentText() if hasattr(self, "_guided_format_combo") else "auto"
+        acq_mode = "continuous"
+        if hasattr(self, "_guided_acquisition_mode_combo"):
+            acq_mode = self._guided_acquisition_mode_combo.currentData() or self._guided_acquisition_mode_combo.currentText().lower()
+            if not acq_mode:
+                acq_mode = "continuous"
+        
+        sph_val = None
+        if hasattr(self, "_guided_sessions_per_hour_edit"):
+            txt = self._guided_sessions_per_hour_edit.text().strip()
+            if txt:
+                try:
+                    sph_val = int(txt)
+                except ValueError:
+                    pass
+                    
+        dur_val = None
+        if hasattr(self, "_guided_session_duration_edit"):
+            txt = self._guided_session_duration_edit.text().strip()
+            if txt:
+                try:
+                    dur_val = float(txt)
+                except ValueError:
+                    pass
+                    
+        win_val = float(self._guided_continuous_window_sec_spin.value()) if hasattr(self, "_guided_continuous_window_sec_spin") else 600.0
+        step_val = win_val
+        
+        allow_partial = self._guided_allow_partial_final_window_cb.isChecked() if hasattr(self, "_guided_allow_partial_final_window_cb") else False
+        exclude_rwd = self._guided_exclude_incomplete_final_rwd_chunk_cb.isChecked() if hasattr(self, "_guided_exclude_incomplete_final_rwd_chunk_cb") else False
+        
+        if acq_mode == "continuous":
+            if win_val > 0:
+                acq_status = "ready"
+            else:
+                acq_status = "invalid"
+        elif acq_mode == "intermittent":
+            if sph_val is not None and sph_val > 0 and dur_val is not None and dur_val > 0:
+                acq_status = "ready"
+            elif sph_val is None or dur_val is None:
+                acq_status = "incomplete"
+            else:
+                acq_status = "invalid"
+        else:
+            acq_status = "unknown"
+            
+        discovered = []
+        included = []
+        excluded = []
+        if hasattr(self, "_guided_roi_list"):
+            for idx in range(self._guided_roi_list.count()):
+                item = self._guided_roi_list.item(idx)
+                discovered.append(item.text())
+                if item.checkState() == Qt.Checked:
+                    included.append(item.text())
+                else:
+                    excluded.append(item.text())
+                    
+        record = getattr(self, "_guided_diagnostic_cache_record", None)
+        cache_id = None
+        cache_root_path = None
+        artifact_record_path = None
+        request_json_path = None
+        provenance_path = None
+        phasic_trace_cache_path = None
+        config_used_path = None
+        source_setup_signature = None
+        diagnostic_scope_signature = None
+        build_request_signature = None
+        stale_or_current = None
+        stale_reasons = []
+
+        if record is not None:
+            source_resolved, status = self._resolve_current_guided_confirm_diagnostic_cache_source()
+            from photometry_pipeline.guided_diagnostic_cache import resolve_diagnostic_cache_source
+            resolved_res = resolve_diagnostic_cache_source(record)
+            active_source = resolved_res.source if resolved_res.ok else None
+
+            if source_resolved is None:
+                stale_or_current = "stale"
+                if status.stale_reasons:
+                    stale_reasons = list(status.stale_reasons)
+                else:
+                    stale_reasons = [status.message]
+            else:
+                stale_or_current = "current"
+                active_source = source_resolved
+
+            if active_source is not None:
+                cache_id = active_source.cache_id
+                cache_root_path = active_source.cache_root_path
+                artifact_record_path = active_source.artifact_record_path or None
+                request_json_path = active_source.request_json_path or None
+                provenance_path = active_source.provenance_path or None
+                phasic_trace_cache_path = active_source.phasic_trace_cache_path or None
+                config_used_path = active_source.config_used_path or None
+                source_setup_signature = active_source.source_setup_signature or None
+                diagnostic_scope_signature = active_source.diagnostic_scope_signature or None
+                build_request_signature = active_source.build_request_signature or None
+
+        per_roi_choices = []
+        choices = getattr(self, "_guided_strategy_choices", {})
+        active_cache_source_key = self._diagnostic_cache_source_key(record) if record is not None else None
+
+        for key, choice in sorted(choices.items(), key=lambda item: str(item[0])):
+            if not isinstance(key, tuple) or len(key) != 2:
+                continue
+            choice_source_key, roi_id = key
+            if choice.get("source_type") != "diagnostic_cache":
+                continue
+
+            is_active = (record is not None and choice_source_key == active_cache_source_key)
+            choice_stale = "current" if (is_active and stale_or_current == "current" and not choice.get("stale", False)) else "stale"
+
+            per_roi_choices.append(
+                GuidedPlanCorrectionChoice(
+                    roi_id=roi_id,
+                    selected_strategy=choice.get("strategy", ""),
+                    source_type="diagnostic_cache",
+                    diagnostic_cache_id=choice.get("cache_id"),
+                    diagnostic_cache_root=choice.get("cache_root_path"),
+                    diagnostic_cache_signature=choice.get("build_request_signature"),
+                    source_setup_signature=choice.get("source_setup_signature"),
+                    diagnostic_scope_signature=choice.get("diagnostic_scope_signature"),
+                    build_request_signature=choice.get("build_request_signature"),
+                    evidence_chunk=choice.get("evidence_chunk"),
+                    evidence_summary=choice.get("evidence_summary", {}).get("preview", "") if isinstance(choice.get("evidence_summary"), dict) else choice.get("evidence_summary"),
+                    current_or_stale=choice_stale,
+                    explicit_user_mark=choice.get("confirmed", False) or choice.get("choice_source") == "explicit_user_mark",
+                    selected_at_utc=choice.get("marked_at_utc"),
+                )
+            )
+
+        preview_id = None
+        preview_path = None
+        preview_status = None
+        preview_source_cache_id = None
+        if getattr(self, "_guided_preview_has_result", False):
+            res = getattr(self, "_guided_preview_last_result", {})
+            preview_id = res.get("preview_id")
+            preview_path = res.get("preview_output_dir") or None
+            preview_status = "stale" if getattr(self, "_guided_preview_result_stale", False) else "current"
+            preview_source_cache_id = res.get("source_cache_id") or res.get("cache_id") or res.get("diagnostic_cache_id")
+
+        sig_id = None
+        sig_path = None
+        sig_status = None
+        sig_source_cache_id = None
+        if getattr(self, "_guided_signal_f0_has_result", False):
+            res = getattr(self, "_guided_signal_f0_last_result", {})
+            sig_id = res.get("diagnostic_id")
+            sig_path = res.get("output_dir") or None
+            sig_status = "stale" if getattr(self, "_guided_signal_f0_result_stale", False) else "current"
+            sig_diag_cache = res.get("diagnostic_cache") or {}
+            sig_source_cache_id = sig_diag_cache.get("cache_id") or res.get("source_cache_id")
+
+        return GuidedNewAnalysisDraftPlan(
+            input_source_path=input_path,
+            resolved_input_source_path=input_path,
+            input_format=input_format,
+            acquisition_mode=acq_mode,
+            sessions_per_hour=sph_val,
+            session_duration_sec=dur_val,
+            continuous_window_sec=win_val,
+            continuous_step_sec=step_val,
+            allow_partial_final_window=allow_partial,
+            exclude_incomplete_final_rwd_chunk=exclude_rwd,
+            acquisition_structure_status=acq_status,
+            discovered_roi_ids=discovered,
+            included_roi_ids=included,
+            excluded_roi_ids=excluded,
+            cache_id=cache_id,
+            cache_root_path=cache_root_path,
+            artifact_record_path=artifact_record_path,
+            request_json_path=request_json_path,
+            provenance_path=provenance_path,
+            phasic_trace_cache_path=phasic_trace_cache_path,
+            config_used_path=config_used_path,
+            source_setup_signature=source_setup_signature,
+            diagnostic_scope_signature=diagnostic_scope_signature,
+            build_request_signature=build_request_signature,
+            stale_or_current=stale_or_current,
+            stale_reasons=stale_reasons,
+            per_roi_correction_strategy_choices=per_roi_choices,
+            correction_preview_result_id=preview_id,
+            correction_preview_path=preview_path,
+            correction_preview_status=preview_status,
+            correction_preview_source_cache_id=preview_source_cache_id,
+            signal_only_f0_result_id=sig_id,
+            signal_only_f0_path=sig_path,
+            signal_only_f0_status=sig_status,
+            signal_only_f0_source_cache_id=sig_source_cache_id,
+        )
+
+    def _guided_new_analysis_draft_plan_summary_text(self, plan, issues) -> str:
+        acq_mode = plan.acquisition_mode
+        if acq_mode == "continuous":
+            timing_summary = f"continuous (window={plan.continuous_window_sec}s, step={plan.continuous_step_sec}s)"
+        elif acq_mode == "intermittent":
+            timing_summary = f"intermittent (sph={plan.sessions_per_hour}, duration={plan.session_duration_sec}s)"
+        else:
+            timing_summary = f"{acq_mode}"
+            
+        if plan.cache_id:
+            cache_status = f"{plan.stale_or_current or 'current'} ({plan.cache_id} at {self._display_path(plan.cache_root_path or '')})"
+        else:
+            cache_status = "missing"
+            
+        total_included = len(plan.included_roi_ids)
+        choices_by_roi = {choice.roi_id: choice for choice in plan.per_roi_correction_strategy_choices}
+        covered_count = 0
+        stale_count = 0
+        missing_count = 0
+        for roi in plan.included_roi_ids:
+            if roi in choices_by_roi:
+                choice = choices_by_roi[roi]
+                if choice.current_or_stale == "stale":
+                    stale_count += 1
+                else:
+                    covered_count += 1
+            else:
+                missing_count += 1
+                
+        coverage_summary = f"{covered_count}/{total_included} ROIs covered"
+        if missing_count > 0:
+            coverage_summary += f", {missing_count} missing"
+        if stale_count > 0:
+            coverage_summary += f", {stale_count} stale"
+
+        lines = [
+            "Status: new_analysis draft plan",
+            f"Input/source: {self._display_path(plan.input_source_path or '') if plan.input_source_path else 'none'}",
+            f"Format: {plan.input_format}",
+            f"Acquisition mode: {acq_mode}",
+            f"Acquisition structure summary: {timing_summary}",
+            f"ROI counts: {len(plan.discovered_roi_ids)} discovered, {len(plan.included_roi_ids)} included, {len(plan.excluded_roi_ids)} excluded",
+            f"Diagnostic cache: {cache_status}",
+            f"Correction strategy coverage: {coverage_summary}",
+            f"Feature/event profile status: {plan.feature_event_profile_status}",
+            f"Output policy status: {plan.output_policy_status}",
+        ]
+        
+        blocking = [iss for iss in issues if iss.severity == "blocking"]
+        warnings = [iss for iss in issues if iss.severity == "warning"]
+        infos = [iss for iss in issues if iss.severity == "info"]
+        
+        if blocking:
+            lines.append("Blocking issues:")
+            for iss in blocking:
+                lines.append(f"  - [{iss.category}] {iss.message}")
+        if warnings:
+            lines.append("Warnings:")
+            for iss in warnings:
+                lines.append(f"  - [{iss.category}] {iss.message}")
+        if infos:
+            lines.append("Information:")
+            for iss in infos:
+                lines.append(f"  - [{iss.category}] {iss.message}")
+
+        lines.append("This draft plan is not executable yet. Final Run is not implemented in this stage.")
+        return "\n".join(lines)
+
+    def _guided_new_analysis_readiness_summary_text(self, plan, issues) -> str:
+        configured = []
+        missing = []
+        if plan.input_source_path:
+            configured.append("raw input path")
+        else:
+            missing.append("raw input path")
+            
+        if plan.discovered_roi_ids:
+            configured.append("discovered ROIs")
+        else:
+            missing.append("discovered ROIs")
+            
+        if plan.included_roi_ids:
+            configured.append("included ROIs")
+        else:
+            missing.append("included ROIs")
+            
+        if plan.cache_id:
+            configured.append("diagnostic cache")
+        else:
+            missing.append("diagnostic cache")
+            
+        total_rois = len(plan.included_roi_ids)
+        choices_by_roi = {choice.roi_id: choice for choice in plan.per_roi_correction_strategy_choices}
+        missing_choices = [r for r in plan.included_roi_ids if r not in choices_by_roi]
+        if total_rois > 0 and not missing_choices:
+            configured.append("correction strategy choices")
+        else:
+            missing.append("correction strategy choices")
+            
+        if plan.feature_event_profile_status == "applied":
+            configured.append("feature/event profile")
+        else:
+            missing.append("feature/event profile")
+            
+        if plan.output_policy_status == "ready":
+            configured.append("output destination policy")
+        else:
+            missing.append("output destination policy")
+
+        configured_str = "; ".join(configured) if configured else "none"
+        missing_str = "; ".join(missing) if missing else "none"
+
+        lines = [
+            f"Configured: {configured_str}",
+            f"Missing: {missing_str}",
+        ]
+
+        problems = [iss.message for iss in issues if iss.severity in ("blocking", "warning") and iss.category != "execution_not_implemented"]
+        if problems:
+            lines.append(f"Problems: {'; '.join(problems)}")
+
+        lines.extend([
+            "Blocked: execution intentionally unavailable until a later Guided Run/RunSpec stage",
+            "Files written: none"
+        ])
+        return "\n".join(lines)
+
+    def _refresh_guided_new_analysis_draft_plan_checklist(self, plan, issues) -> None:
+        label = getattr(self, "_guided_draft_run_plan_checklist_label", None)
+        if label is None:
+            return
+        
+        lines = []
+        groups = [
+            ("source", "Source", ["missing_input_source", "invalid_or_missing_input_format"]),
+            ("recording_structure", "Recording structure", ["missing_or_invalid_acquisition_structure"]),
+            ("roi_inclusion", "ROI inclusion", ["no_roi_inventory", "no_included_rois"]),
+            ("diagnostic_cache", "Diagnostic cache", ["missing_diagnostic_cache", "stale_diagnostic_cache"]),
+            ("roi_choices", "ROI choices", ["missing_strategy_choice_for_included_roi", "stale_strategy_choice", "forbidden_strategy"]),
+            ("feature_event", "Feature/event settings", ["missing_feature_event_profile", "invalid_feature_event_profile"]),
+            ("output_destination", "Output destination", ["missing_output_policy", "unsafe_output_policy"]),
+            ("execution", "Execution readiness", ["execution_not_implemented"])
+        ]
+        
+        for key, name, cats in groups:
+            matching_issues = [iss for iss in issues if iss.category in cats]
+            if matching_issues:
+                worst_iss = matching_issues[0]
+                status = "fail" if worst_iss.severity == "blocking" else "warning" if worst_iss.severity == "warning" else "info"
+                lines.append(f"{name}: {status} - {worst_iss.message}")
+            else:
+                lines.append(f"{name}: pass - Ready.")
+                
+        lines.append("Execution ready: false")
+        label.setText("\n".join(lines))
+        label.setToolTip("")
 
     def _guided_draft_run_plan_checklist_text(
         self,
