@@ -11,10 +11,18 @@ from photometry_pipeline.signal_only_f0_diagnostics import (
     SIGNAL_ONLY_F0_DIAGNOSTIC_CHUNKS_FILENAME,
     SIGNAL_ONLY_F0_DIAGNOSTIC_PROVENANCE_FILENAME,
     SIGNAL_ONLY_F0_DIAGNOSTIC_SUMMARY_FILENAME,
+    SOURCE_TYPE_DIAGNOSTIC_CACHE,
     build_default_signal_only_f0_diagnostic_output_dir,
     run_signal_only_f0_diagnostic_review,
 )
 from photometry_pipeline.signal_only_f0_diagnostics import generate
+from photometry_pipeline.guided_diagnostic_cache import (
+    DiagnosticCacheBuildRequest,
+    artifact_record_from_request,
+    write_artifact_record_json,
+    write_build_request_json,
+    write_json_file,
+)
 
 
 def _make_completed_run(
@@ -78,6 +86,54 @@ def _read_csv(path: str | Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def _make_diagnostic_cache(tmp_path: Path) -> Path:
+    run_dir = _make_completed_run(tmp_path)
+    cache_root = tmp_path / "diagnostic_cache"
+    phasic_src = run_dir / "_analysis" / "phasic_out"
+    phasic_dest = cache_root / "_analysis" / "phasic_out"
+    phasic_dest.mkdir(parents=True)
+    (phasic_dest / "phasic_trace_cache.h5").write_bytes((phasic_src / "phasic_trace_cache.h5").read_bytes())
+    (phasic_dest / "config_used.yaml").write_text(
+        (phasic_src / "config_used.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (cache_root / "status.json").write_text(
+        json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
+        encoding="utf-8",
+    )
+    request = DiagnosticCacheBuildRequest(
+        raw_input_path=str(tmp_path / "raw_input"),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+        included_roi_ids=("CH1",),
+        output_base=str(tmp_path),
+        requested_cache_path=str(cache_root),
+        requested_at_utc="2026-06-19T12:00:00Z",
+    )
+    request_path = cache_root / "guided_diagnostic_cache_request.json"
+    write_build_request_json(request_path, request)
+    record = artifact_record_from_request(
+        request,
+        cache_id="cache_001",
+        cache_root_path=str(cache_root),
+        phasic_trace_cache_path=str(phasic_dest / "phasic_trace_cache.h5"),
+        config_used_path=str(phasic_dest / "config_used.yaml"),
+        status_marker_path=str(cache_root / "status.json"),
+        request_json_path=str(request_path),
+        roi_inventory=("CH1",),
+    )
+    write_artifact_record_json(cache_root / "guided_diagnostic_cache_artifact.json", record)
+    write_json_file(
+        cache_root / "guided_diagnostic_cache_provenance.json",
+        {
+            "schema_version": "guided_diagnostic_cache.v1",
+            "purpose": "guided_diagnostic_cache",
+            "production_analysis": False,
+        },
+    )
+    return cache_root
+
+
 def test_successful_minimal_generation_writes_diagnostic_only_artifacts(tmp_path):
     run_dir = _make_completed_run(tmp_path)
     diagnostic_id = "signal_only_f0_20260617T120000Z_abc123"
@@ -125,6 +181,56 @@ def test_successful_minimal_generation_writes_diagnostic_only_artifacts(tmp_path
     assert rows[0]["status"] == "success"
     assert "recommend" not in ";".join(rows[0].values()).lower()
     assert "fallback" not in ";".join(rows[0].values()).lower()
+
+
+def test_diagnostic_cache_generation_preserves_source_identity_and_namespace(tmp_path):
+    cache_root = _make_diagnostic_cache(tmp_path)
+
+    result = run_signal_only_f0_diagnostic_review(
+        cache_root,
+        roi="CH1",
+        chunk_ids=[0],
+        diagnostic_id="diagnostic_cache_signal_only_f0_20260617T120000Z_abc123",
+        source_type=SOURCE_TYPE_DIAGNOSTIC_CACHE,
+    )
+
+    assert result["ok"] is True
+    assert result["source_type"] == SOURCE_TYPE_DIAGNOSTIC_CACHE
+    assert Path(result["output_dir"]).is_relative_to(
+        cache_root / "_guided_workflow" / "signal_only_f0_diagnostics"
+    )
+    provenance = _read_json(result["provenance_path"])
+    assert provenance["source_type"] == SOURCE_TYPE_DIAGNOSTIC_CACHE
+    assert provenance["completed_run_dir"] == ""
+    assert provenance["diagnostic_cache"]["source_type"] == SOURCE_TYPE_DIAGNOSTIC_CACHE
+    assert provenance["diagnostic_cache"]["cache_id"] == "cache_001"
+    assert provenance["diagnostic_cache"]["cache_root_path"] == str(cache_root)
+    assert provenance["diagnostic_cache"]["production_analysis"] is False
+    assert provenance["diagnostic_cache"]["preliminary_cache"] is True
+    assert provenance["pipeline_run_executed"] is False
+    assert provenance["production_output"] is False
+    assert not (cache_root / "MANIFEST.csv").exists()
+    assert not (cache_root / "_analysis" / "phasic_out" / "applied_dff").exists()
+
+
+def test_diagnostic_cache_generation_rejects_production_cache(tmp_path):
+    cache_root = _make_diagnostic_cache(tmp_path)
+    artifact_path = cache_root / "guided_diagnostic_cache_artifact.json"
+    artifact = _read_json(artifact_path)
+    artifact["production_analysis"] = True
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    result = run_signal_only_f0_diagnostic_review(
+        cache_root,
+        roi="CH1",
+        chunk_ids=[0],
+        diagnostic_id="diagnostic_cache_signal_only_f0_20260617T120000Z_abc123",
+        source_type=SOURCE_TYPE_DIAGNOSTIC_CACHE,
+    )
+
+    assert result["ok"] is False
+    assert "must not be marked as production analysis" in result["errors"][0]
+    assert not (cache_root / "_guided_workflow" / "signal_only_f0_diagnostics").exists()
 
 
 def test_default_chunk_selection_is_bounded_to_first_chunk_by_default(tmp_path):

@@ -2389,11 +2389,176 @@ def test_guided_confirm_strategy_new_analysis_marks_source_scoped_choice_without
     assert entry["no_auto_selection"] is True
     assert entry["production_analysis"] is False
     assert entry["preliminary_cache"] is True
-    assert "diagnostic-cache review not connected yet" in entry["evidence_summary"]["signal_only_f0"]
+    assert "not generated for current diagnostic cache" in entry["evidence_summary"]["signal_only_f0"]
     assert "Current marked choice" in window._guided_confirm_marked_choice_label.text()
     assert "Source: diagnostic_cache" in window._guided_confirm_marked_choice_label.text()
     assert not (cache_path / "MANIFEST.csv").exists()
     assert not (cache_path / "_analysis" / "phasic_out" / "applied_dff").exists()
+
+
+def test_guided_signal_only_f0_new_analysis_blocks_without_diagnostic_cache(window):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Diagnostics"))
+
+    assert window._guided_signal_f0_generate_btn.isEnabled() is False
+    assert "Build a diagnostic cache before running Signal-Only F0 diagnostic review" in (
+        window._guided_signal_f0_source_status_label.text()
+    )
+    assert window._current_run_dir == ""
+
+
+def test_guided_signal_only_f0_new_analysis_uses_current_diagnostic_cache(window, tmp_path, monkeypatch):
+    cache_path = _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    before_run_dir = window._current_run_dir
+    monkeypatch.setattr(window._report_viewer, "load_report", lambda _path: pytest.fail("completed-run workspace loaded"))
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Diagnostics"))
+
+    assert window._guided_signal_f0_generate_btn.isEnabled() is True
+    assert window._guided_signal_f0_source_type == "diagnostic_cache"
+    assert window._guided_signal_f0_source_path == str(cache_path)
+    assert "preliminary diagnostic cache" in window._guided_signal_f0_source_status_label.text()
+    assert "not final production analysis" in window._guided_signal_f0_source_status_label.text()
+    assert [window._guided_signal_f0_roi_combo.itemText(i) for i in range(window._guided_signal_f0_roi_combo.count())] == [
+        "CH1",
+        "CH2",
+        "CH3",
+    ]
+    assert [
+        window._guided_signal_f0_chunk_combo.itemData(i)
+        for i in range(window._guided_signal_f0_chunk_combo.count())
+    ] == [0, 1]
+    assert window._current_run_dir == before_run_dir
+    assert window._report_viewer.has_loaded_results() is False
+
+
+def test_guided_signal_only_f0_new_analysis_stale_cache_blocks_diagnostic(window, tmp_path, monkeypatch):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    assert window._guided_signal_f0_generate_btn.isEnabled() is True
+
+    window._guided_roi_list.item(2).setCheckState(Qt.Unchecked)
+    window._refresh_guided_diagnostics_panel()
+
+    assert window._guided_signal_f0_generate_btn.isEnabled() is False
+    assert "Diagnostic cache is stale" in window._guided_signal_f0_source_status_label.text()
+    assert "must be rebuilt" in window._guided_signal_f0_source_status_label.text()
+
+
+def test_guided_signal_only_f0_new_analysis_rejects_completed_run_like_folder_without_cache_identity(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._current_run_dir = str(run_dir)
+    window._set_guided_workflow_mode("new_analysis")
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Diagnostics"))
+
+    assert window._guided_signal_f0_generate_btn.isEnabled() is False
+    assert "Build a diagnostic cache before running Signal-Only F0 diagnostic review" in (
+        window._guided_signal_f0_source_status_label.text()
+    )
+    assert window._guided_signal_f0_source_type == ""
+
+
+def test_guided_signal_only_f0_new_analysis_rejects_production_diagnostic_cache(window, tmp_path, monkeypatch):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    window._guided_diagnostic_cache_record = replace(
+        window._guided_diagnostic_cache_record,
+        production_analysis=True,
+    )
+
+    window._refresh_guided_signal_f0_panel(window._guided_completed_run_diagnostic_artifacts())
+
+    assert window._guided_signal_f0_generate_btn.isEnabled() is False
+    assert "must not be marked as production analysis" in window._guided_signal_f0_source_status_label.text()
+    assert window._guided_signal_f0_source_type == ""
+
+
+def test_guided_signal_only_f0_generation_passes_diagnostic_cache_identity(window, tmp_path, monkeypatch):
+    cache_path = _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    before_run_dir = window._current_run_dir
+    before_choices = dict(window._guided_strategy_choices)
+    calls = {"args": None, "kwargs": None}
+
+    def _fake_backend(*args, **kwargs):
+        calls["args"] = args
+        calls["kwargs"] = kwargs
+        return {
+            "ok": True,
+            "status": "success",
+            "diagnostic_id": kwargs.get("diagnostic_id", "diagnostic"),
+            "output_dir": str(kwargs.get("output_dir", "")),
+            "provenance_path": "provenance.json",
+            "summary_path": "summary.json",
+            "chunk_csv_path": "",
+            "trace_csv_paths": [],
+            "warnings": [],
+            "errors": [],
+            "chunk_statuses": {"0": {"status": "success", "error": ""}},
+            "source_type": "diagnostic_cache",
+            "diagnostic_cache": {"cache_id": window._guided_diagnostic_cache_record.cache_id},
+        }
+
+    monkeypatch.setattr(main_window_module, "run_signal_only_f0_diagnostic_review", _fake_backend)
+
+    window._guided_signal_f0_generate_btn.click()
+
+    assert calls["args"] == (str(cache_path),)
+    assert calls["kwargs"]["source_type"] == "diagnostic_cache"
+    assert calls["kwargs"]["roi"] == "CH1"
+    assert calls["kwargs"]["chunk_ids"] == [0]
+    assert str(calls["kwargs"]["output_dir"]).startswith(
+        str(cache_path / "_guided_workflow" / "signal_only_f0_diagnostics")
+    )
+    assert calls["kwargs"]["diagnostic_id"].startswith("diagnostic_cache_signal_only_f0_")
+    assert window._guided_signal_f0_last_result["source_type"] == "diagnostic_cache"
+    assert window._guided_signal_f0_last_result["diagnostic_cache_root"] == str(cache_path.resolve())
+    assert "completed_run_dir" not in window._guided_signal_f0_last_result
+    assert window._current_run_dir == before_run_dir
+    assert window._report_viewer.has_loaded_results() is False
+    assert window._guided_strategy_choices == before_choices
+    assert not (cache_path / "MANIFEST.csv").exists()
+    assert not (cache_path / "_analysis" / "phasic_out" / "applied_dff").exists()
+
+
+def test_guided_confirm_strategy_sees_current_signal_only_f0_diagnostic_cache_evidence(
+    window, tmp_path, monkeypatch
+):
+    cache_path = _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+
+    def _fake_backend(*_args, **kwargs):
+        return {
+            "ok": True,
+            "status": "success",
+            "diagnostic_id": kwargs.get("diagnostic_id", "diagnostic"),
+            "output_dir": str(kwargs.get("output_dir", "")),
+            "provenance_path": "provenance.json",
+            "summary_path": "summary.json",
+            "chunk_csv_path": "",
+            "trace_csv_paths": [],
+            "warnings": [],
+            "errors": [],
+            "chunk_statuses": {"0": {"status": "success", "error": ""}},
+            "source_type": "diagnostic_cache",
+            "diagnostic_cache": {"cache_id": window._guided_diagnostic_cache_record.cache_id},
+        }
+
+    monkeypatch.setattr(main_window_module, "run_signal_only_f0_diagnostic_review", _fake_backend)
+    window._guided_signal_f0_generate_btn.click()
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+
+    assert "Signal-Only F0 diagnostic: success" in window._guided_confirm_evidence_label.text()
+    assert window._guided_confirm_strategy_combo.currentData() == ""
+
+    window._guided_roi_list.item(2).setCheckState(Qt.Unchecked)
+    window._refresh_guided_diagnostics_panel()
+    assert "Signal-Only F0 diagnostic: not generated for current diagnostic cache" in (
+        window._guided_confirm_evidence_label.text()
+    ) or "stale" in window._guided_confirm_evidence_label.text()
+    assert window._guided_confirm_strategy_combo.currentData() == ""
+    assert not (cache_path / "MANIFEST.csv").exists()
 
 
 def test_guided_correction_preview_panel_populates_from_loaded_completed_run(window, tmp_path, monkeypatch):

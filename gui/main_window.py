@@ -117,6 +117,8 @@ from photometry_pipeline.preview.correction_preview import (
     run_guided_correction_preview_comparison,
 )
 from photometry_pipeline.signal_only_f0_diagnostics import (
+    build_default_signal_only_f0_diagnostic_cache_output_dir,
+    make_signal_only_f0_diagnostic_id,
     resolve_completed_run_signal_only_f0_source,
     run_signal_only_f0_diagnostic_review,
 )
@@ -3241,6 +3243,34 @@ class MainWindow(QMainWindow):
             )
         return source, status
 
+    def _resolve_current_guided_signal_f0_diagnostic_cache_source(self):
+        source, status = self._resolve_current_guided_preview_diagnostic_cache_source()
+        if source is None:
+            if status.code == "missing_diagnostic_cache":
+                return None, DiagnosticCacheStatus(
+                    False,
+                    "missing_diagnostic_cache",
+                    "Build a diagnostic cache before running Signal-Only F0 diagnostic review.",
+                )
+            if status.stale or status.code == "stale":
+                reasons = "; ".join(status.stale_reasons) or status.message
+                return None, DiagnosticCacheStatus(
+                    False,
+                    "stale",
+                    "Diagnostic cache is stale and must be rebuilt before running "
+                    f"Signal-Only F0 diagnostic review: {reasons}",
+                    stale=True,
+                    stale_reasons=status.stale_reasons,
+                )
+            return None, status
+        if source.source_type != "diagnostic_cache":
+            return None, DiagnosticCacheStatus(
+                False,
+                "invalid_source_type",
+                "Resolved Signal-Only F0 source is not a diagnostic cache.",
+            )
+        return source, status
+
     def _guided_confirm_choice_key(self, source_type: str, source_id: object, roi: str):
         if source_type == "diagnostic_cache":
             return (self._diagnostic_cache_source_key(source_id), roi)
@@ -3683,21 +3713,103 @@ class MainWindow(QMainWindow):
         previous_roi = self._selected_guided_signal_f0_roi()
         previous_chunk = self._selected_guided_signal_f0_chunk()
         run_dir = str(artifact_state.get("run_dir") or "")
+        mode = getattr(self, "_guided_workflow_mode", "start")
         self._guided_signal_f0_source_ok = False
+        self._guided_signal_f0_source_type = ""
+        self._guided_signal_f0_source_path = ""
         self._guided_signal_f0_source_reason = (
-            "Load a completed run to generate Signal-Only F0 diagnostic review artifacts."
+            "Build a diagnostic cache before running Signal-Only F0 diagnostic review."
+            if mode == "new_analysis"
+            else "Load a completed run to generate Signal-Only F0 diagnostic review artifacts."
         )
-        self._guided_signal_f0_loaded_run_dir = run_dir
-        if previous_source and run_dir != previous_source:
-            self._guided_signal_f0_mark_stale(
-                "Displayed Signal-Only F0 diagnostic review is stale because the loaded completed run changed."
-            )
 
         with QSignalBlocker(self._guided_signal_f0_roi_combo), QSignalBlocker(self._guided_signal_f0_chunk_combo):
             self._guided_signal_f0_roi_combo.clear()
             self._guided_signal_f0_chunk_combo.clear()
             restored_roi = False
             restored_chunk = False
+
+        if mode == "new_analysis":
+            source, status = self._resolve_current_guided_signal_f0_diagnostic_cache_source()
+            if source is None:
+                self._guided_signal_f0_loaded_run_dir = ""
+                self._guided_signal_f0_source_reason = status.message
+                self._guided_signal_f0_source_status_label.setText(status.message)
+                self._guided_signal_f0_source_status_label.setToolTip("")
+                if status.stale or status.code == "stale":
+                    self._guided_signal_f0_mark_stale(
+                        "Displayed Signal-Only F0 diagnostic review is stale because the diagnostic cache is stale."
+                    )
+                if not getattr(self, "_guided_signal_f0_has_result", False):
+                    self._clear_guided_signal_f0_result_widgets()
+                self._refresh_guided_signal_f0_enablement()
+                return
+
+            source_id = source.cache_root_path
+            self._guided_signal_f0_loaded_run_dir = source_id
+            if previous_source and source_id != previous_source:
+                self._guided_signal_f0_mark_stale(
+                    "Displayed Signal-Only F0 diagnostic review is stale because the diagnostic cache source changed."
+                )
+            try:
+                with open_phasic_cache(source.phasic_trace_cache_path) as cache:
+                    rois = list_cache_rois(cache)
+                    chunk_ids = list_cache_chunk_ids(cache)
+            except Exception as exc:
+                self._guided_signal_f0_source_reason = str(exc)
+                self._guided_signal_f0_source_status_label.setText(
+                    "Unable to read diagnostic-cache phasic cache for Signal-Only F0 diagnostic review:\n"
+                    f"{exc}"
+                )
+                self._refresh_guided_signal_f0_enablement()
+                return
+
+            with QSignalBlocker(self._guided_signal_f0_roi_combo), QSignalBlocker(self._guided_signal_f0_chunk_combo):
+                for roi in rois:
+                    self._guided_signal_f0_roi_combo.addItem(str(roi), str(roi))
+                for chunk_id in chunk_ids:
+                    self._guided_signal_f0_chunk_combo.addItem(str(chunk_id), int(chunk_id))
+                if previous_roi:
+                    idx = self._guided_signal_f0_roi_combo.findData(previous_roi)
+                    if idx >= 0:
+                        self._guided_signal_f0_roi_combo.setCurrentIndex(idx)
+                        restored_roi = True
+                if previous_chunk is not None:
+                    idx = self._guided_signal_f0_chunk_combo.findData(int(previous_chunk))
+                    if idx >= 0:
+                        self._guided_signal_f0_chunk_combo.setCurrentIndex(idx)
+                        restored_chunk = True
+            if getattr(self, "_guided_signal_f0_has_result", False) and source_id == previous_source:
+                if previous_roi and not restored_roi:
+                    self._guided_signal_f0_mark_stale(
+                        "Displayed Signal-Only F0 diagnostic review is stale because the previous ROI is no longer available."
+                    )
+                elif previous_chunk is not None and not restored_chunk:
+                    self._guided_signal_f0_mark_stale(
+                        "Displayed Signal-Only F0 diagnostic review is stale because the previous chunk is no longer available."
+                    )
+            self._guided_signal_f0_source_ok = bool(rois and chunk_ids)
+            self._guided_signal_f0_source_type = "diagnostic_cache"
+            self._guided_signal_f0_source_path = source.artifact_record_path or source.cache_root_path
+            self._guided_signal_f0_source_reason = (
+                "Signal-Only F0 diagnostic review ready from preliminary diagnostic cache."
+                if self._guided_signal_f0_source_ok
+                else "Diagnostic cache has no ROI/chunk entries for Signal-Only F0 diagnostic review."
+            )
+            self._guided_signal_f0_source_status_label.setText(
+                "Signal-Only F0 diagnostic review will use the preliminary diagnostic cache; "
+                "this is not final production analysis: "
+                f"{self._display_path(source.cache_root_path)}"
+            )
+            self._guided_signal_f0_source_status_label.setToolTip(source.cache_root_path)
+            self._refresh_guided_signal_f0_enablement()
+            return
+
+        self._guided_signal_f0_loaded_run_dir = run_dir
+        if previous_source and run_dir != previous_source:
+            self._guided_signal_f0_mark_stale(
+                "Displayed Signal-Only F0 diagnostic review is stale because the loaded completed run changed."
+            )
 
         if artifact_state.get("status") == "not_generated" or not run_dir:
             self._guided_signal_f0_source_status_label.setText(
@@ -3756,6 +3868,8 @@ class MainWindow(QMainWindow):
                     "Displayed Signal-Only F0 diagnostic review is stale because the previous chunk is no longer available."
                 )
         self._guided_signal_f0_source_ok = bool(rois and chunk_ids)
+        self._guided_signal_f0_source_type = "completed_run"
+        self._guided_signal_f0_source_path = run_dir
         self._guided_signal_f0_source_reason = (
             "Signal-Only F0 diagnostic review ready."
             if self._guided_signal_f0_source_ok
@@ -3849,18 +3963,31 @@ class MainWindow(QMainWindow):
         self._refresh_guided_generated_outputs_summary()
 
     def _on_generate_guided_signal_only_f0_diagnostic(self) -> None:
-        run_dir = str(getattr(self, "_guided_signal_f0_loaded_run_dir", "") or "")
+        source_id = str(getattr(self, "_guided_signal_f0_loaded_run_dir", "") or "")
+        source_path = str(getattr(self, "_guided_signal_f0_source_path", "") or source_id)
+        source_type = str(getattr(self, "_guided_signal_f0_source_type", "") or "")
         roi = self._selected_guided_signal_f0_roi()
         chunk = self._selected_guided_signal_f0_chunk()
-        if not run_dir or not roi or chunk is None:
+        if not source_path or source_type not in {"completed_run", "diagnostic_cache"} or not roi or chunk is None:
             self._refresh_guided_signal_f0_enablement()
             return
         try:
+            kwargs = {
+                "roi": roi,
+                "chunk_ids": [chunk],
+                "allow_existing": False,
+            }
+            if source_type == "diagnostic_cache":
+                diagnostic_id = make_signal_only_f0_diagnostic_id(prefix="diagnostic_cache_signal_only_f0")
+                kwargs["source_type"] = "diagnostic_cache"
+                kwargs["diagnostic_id"] = diagnostic_id
+                kwargs["output_dir"] = build_default_signal_only_f0_diagnostic_cache_output_dir(
+                    source_id,
+                    diagnostic_id,
+                )
             result = run_signal_only_f0_diagnostic_review(
-                run_dir,
-                roi=roi,
-                chunk_ids=[chunk],
-                allow_existing=False,
+                source_path,
+                **kwargs,
             )
         except Exception as exc:
             result = {
@@ -3878,7 +4005,11 @@ class MainWindow(QMainWindow):
             }
         self._guided_signal_f0_has_result = True
         self._guided_signal_f0_result_stale = False
-        result["completed_run_dir"] = os.path.realpath(run_dir)
+        if source_type == "completed_run":
+            result["completed_run_dir"] = os.path.realpath(source_id)
+        else:
+            result["diagnostic_cache_root"] = os.path.realpath(source_id)
+            result["source_type"] = "diagnostic_cache"
         result["roi"] = roi
         result["chunk_index"] = int(chunk)
         self._guided_signal_f0_last_result = result
@@ -4666,8 +4797,6 @@ class MainWindow(QMainWindow):
                 current_cache_root = os.path.realpath(str(getattr(source, "cache_root_path", "") or ""))
         roi = self._selected_guided_confirm_roi()
         chunk = self._selected_guided_confirm_chunk()
-        if mode == "new_analysis" and result_attr == "_guided_signal_f0_last_result":
-            return f"{prefix}: diagnostic-cache review not connected yet; Signal-Only F0 remains a manual strategy choice"
         if not result:
             return (
                 f"{prefix}: not generated for current diagnostic cache"
@@ -4803,8 +4932,8 @@ class MainWindow(QMainWindow):
             f"Mode: {mode}\n"
             f"{source_label}: {source_identity or 'none'}\n"
             f"{reason}\n"
-            "Signal-Only F0 diagnostic review from diagnostic cache is not connected yet; "
-            "selecting Signal-Only F0 is manual strategy intent at this stage.\n"
+            "Signal-Only F0 diagnostic review is evidence only; selecting Signal-Only F0 "
+            "remains manual strategy intent at this stage.\n"
             "Planning only: no manifest, applied-dF/F output, feature extraction, validation, or pipeline run."
         )
         visible_context = (

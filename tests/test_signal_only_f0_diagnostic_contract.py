@@ -7,6 +7,13 @@ from pathlib import Path
 import pytest
 
 from photometry_pipeline.signal_only_f0_diagnostics import contract
+from photometry_pipeline.guided_diagnostic_cache import (
+    DiagnosticCacheBuildRequest,
+    artifact_record_from_request,
+    write_artifact_record_json,
+    write_build_request_json,
+    write_json_file,
+)
 
 
 def _make_completed_run(tmp_path: Path, *, successful: bool = True) -> Path:
@@ -31,6 +38,54 @@ def _snapshot_tree(root: Path) -> dict[str, bytes]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     }
+
+
+def _make_diagnostic_cache(tmp_path: Path) -> Path:
+    run_dir = _make_completed_run(tmp_path)
+    cache_root = tmp_path / "diagnostic_cache"
+    phasic_src = run_dir / "_analysis" / "phasic_out"
+    phasic_dest = cache_root / "_analysis" / "phasic_out"
+    phasic_dest.mkdir(parents=True)
+    (phasic_dest / "phasic_trace_cache.h5").write_bytes((phasic_src / "phasic_trace_cache.h5").read_bytes())
+    (phasic_dest / "config_used.yaml").write_text(
+        (phasic_src / "config_used.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (cache_root / "status.json").write_text(
+        json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
+        encoding="utf-8",
+    )
+    request = DiagnosticCacheBuildRequest(
+        raw_input_path=str(tmp_path / "raw_input"),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+        included_roi_ids=("CH1",),
+        output_base=str(tmp_path),
+        requested_cache_path=str(cache_root),
+        requested_at_utc="2026-06-19T12:00:00Z",
+    )
+    request_path = cache_root / "guided_diagnostic_cache_request.json"
+    write_build_request_json(request_path, request)
+    record = artifact_record_from_request(
+        request,
+        cache_id="cache_001",
+        cache_root_path=str(cache_root),
+        phasic_trace_cache_path=str(phasic_dest / "phasic_trace_cache.h5"),
+        config_used_path=str(phasic_dest / "config_used.yaml"),
+        status_marker_path=str(cache_root / "status.json"),
+        request_json_path=str(request_path),
+        roi_inventory=("CH1",),
+    )
+    write_artifact_record_json(cache_root / "guided_diagnostic_cache_artifact.json", record)
+    write_json_file(
+        cache_root / "guided_diagnostic_cache_provenance.json",
+        {
+            "schema_version": "guided_diagnostic_cache.v1",
+            "purpose": "guided_diagnostic_cache",
+            "production_analysis": False,
+        },
+    )
+    return cache_root
 
 
 def test_diagnostic_id_is_safe_and_deterministic_with_fixed_inputs():
@@ -132,6 +187,22 @@ def test_direct_phasic_out_resolver_reports_missing_cache_or_config(tmp_path):
     missing_config = contract.resolve_phasic_out_signal_only_f0_source(phasic)
     assert missing_config.ok is False
     assert missing_config.code == "config_snapshot_missing"
+
+
+def test_diagnostic_cache_resolver_accepts_guided_cache_identity_and_is_read_only(tmp_path):
+    cache_root = _make_diagnostic_cache(tmp_path)
+    before = _snapshot_tree(cache_root)
+
+    result = contract.resolve_diagnostic_cache_signal_only_f0_source(cache_root)
+
+    assert result.ok is True
+    assert result.source_type == contract.SOURCE_TYPE_DIAGNOSTIC_CACHE
+    assert result.completed_run_dir == ""
+    assert result.phasic_out_dir.endswith(os.path.join("_analysis", "phasic_out"))
+    assert result.diagnostic_cache_metadata["cache_id"] == "cache_001"
+    assert result.diagnostic_cache_metadata["source_type"] == "diagnostic_cache"
+    assert result.diagnostic_cache_metadata["production_analysis"] is False
+    assert _snapshot_tree(cache_root) == before
 
 
 def test_default_namespace_builder_uses_accepted_stage4d_namespace(tmp_path):

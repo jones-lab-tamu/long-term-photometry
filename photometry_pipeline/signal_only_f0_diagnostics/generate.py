@@ -28,14 +28,17 @@ from photometry_pipeline.signal_only_f0_diagnostics.contract import (
     SIGNAL_ONLY_F0_DIAGNOSTIC_PROVENANCE_FILENAME,
     SIGNAL_ONLY_F0_DIAGNOSTIC_SUMMARY_FILENAME,
     SOURCE_TYPE_COMPLETED_RUN,
+    SOURCE_TYPE_DIAGNOSTIC_CACHE,
     STATUS_FAILED,
     STATUS_PARTIAL,
     STATUS_SUCCESS,
+    build_default_signal_only_f0_diagnostic_cache_output_dir,
     build_default_signal_only_f0_diagnostic_output_dir,
     build_signal_only_f0_diagnostic_provenance,
     build_signal_only_f0_diagnostic_summary,
     make_signal_only_f0_diagnostic_id,
     resolve_completed_run_signal_only_f0_source,
+    resolve_diagnostic_cache_signal_only_f0_source,
     validate_signal_only_f0_diagnostic_output_dir,
 )
 
@@ -302,25 +305,36 @@ def run_signal_only_f0_diagnostic_review(
     diagnostic_id: str | None = None,
     output_dir: str | os.PathLike[str] | None = None,
     allow_existing: bool = False,
+    source_type: str = SOURCE_TYPE_COMPLETED_RUN,
 ) -> dict[str, Any]:
     """Generate bounded Signal-Only F0 diagnostic-review artifacts.
 
-    The public Stage 4D2 generator accepts completed-run sources only. By
-    default it processes the first available chunk for the requested ROI.
+    By default it processes the first available chunk for the requested ROI.
     """
     did = diagnostic_id or make_signal_only_f0_diagnostic_id()
     if not str(roi or "").strip():
         return _failed_result(diagnostic_id=did, errors=["explicit ROI is required"])
 
-    source = resolve_completed_run_signal_only_f0_source(completed_run_dir)
+    requested_source_type = str(source_type or SOURCE_TYPE_COMPLETED_RUN)
+    if requested_source_type == SOURCE_TYPE_DIAGNOSTIC_CACHE:
+        source = resolve_diagnostic_cache_signal_only_f0_source(completed_run_dir)
+    elif requested_source_type == SOURCE_TYPE_COMPLETED_RUN:
+        source = resolve_completed_run_signal_only_f0_source(completed_run_dir)
+    else:
+        return _failed_result(
+            diagnostic_id=did,
+            errors=[f"Unsupported Signal-Only F0 diagnostic source_type: {requested_source_type!r}"],
+        )
     if not source.ok:
         return _failed_result(diagnostic_id=did, errors=[source.reason])
 
-    out_dir_path = (
-        Path(output_dir)
-        if output_dir is not None
-        else build_default_signal_only_f0_diagnostic_output_dir(source.completed_run_dir, did)
-    )
+    if output_dir is not None:
+        out_dir_path = Path(output_dir)
+    elif requested_source_type == SOURCE_TYPE_DIAGNOSTIC_CACHE:
+        cache_root = str((source.diagnostic_cache_metadata or {}).get("cache_root_path") or "")
+        out_dir_path = build_default_signal_only_f0_diagnostic_cache_output_dir(cache_root, did)
+    else:
+        out_dir_path = build_default_signal_only_f0_diagnostic_output_dir(source.completed_run_dir, did)
     output_check = validate_signal_only_f0_diagnostic_output_dir(
         out_dir_path,
         completed_run_dir=source.completed_run_dir,
@@ -429,7 +443,7 @@ def run_signal_only_f0_diagnostic_review(
     ]
     provenance = build_signal_only_f0_diagnostic_provenance(
         diagnostic_id=did,
-        source_type=SOURCE_TYPE_COMPLETED_RUN,
+        source_type=source.source_type,
         completed_run_dir=source.completed_run_dir,
         phasic_out_dir=source.phasic_out_dir,
         phasic_trace_cache_path=source.phasic_trace_cache_path,
@@ -438,6 +452,7 @@ def run_signal_only_f0_diagnostic_review(
         selected_chunks=[int(row["chunk_id"]) for row in rows],
         selected_window={},
         source_artifact_hashes={},
+        diagnostic_cache_metadata=source.diagnostic_cache_metadata or {},
     )
     summary = build_signal_only_f0_diagnostic_summary(
         diagnostic_id=did,
@@ -473,4 +488,6 @@ def run_signal_only_f0_diagnostic_review(
         "warnings": warnings,
         "errors": errors,
         "chunk_statuses": chunk_statuses,
+        "source_type": source.source_type,
+        "diagnostic_cache": dict(source.diagnostic_cache_metadata or {}),
     }

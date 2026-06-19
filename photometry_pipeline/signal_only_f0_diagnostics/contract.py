@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from photometry_pipeline.guided_diagnostic_cache import resolve_diagnostic_cache_source
+
 
 GUIDED_WORKFLOW_DIR_NAME = "_guided_workflow"
 SIGNAL_ONLY_F0_DIAGNOSTIC_DIR_NAME = "signal_only_f0_diagnostics"
@@ -29,9 +31,11 @@ SIGNAL_ONLY_F0_DIAGNOSTIC_SUMMARY_FILENAME = "signal_only_f0_diagnostic_summary.
 
 SOURCE_TYPE_COMPLETED_RUN = "completed_run"
 SOURCE_TYPE_PHASIC_OUT_BACKEND_ONLY = "phasic_out_backend_only"
+SOURCE_TYPE_DIAGNOSTIC_CACHE = "diagnostic_cache"
 SUPPORTED_SOURCE_TYPES = {
     SOURCE_TYPE_COMPLETED_RUN,
     SOURCE_TYPE_PHASIC_OUT_BACKEND_ONLY,
+    SOURCE_TYPE_DIAGNOSTIC_CACHE,
 }
 
 STATUS_NOT_RUN = "not_run"
@@ -61,6 +65,7 @@ class SignalOnlyF0DiagnosticSourceResult:
     phasic_trace_cache_path: str = ""
     config_source_path: str = ""
     code: str = "ok"
+    diagnostic_cache_metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -336,6 +341,55 @@ def resolve_phasic_out_signal_only_f0_source(
     )
 
 
+def resolve_diagnostic_cache_signal_only_f0_source(
+    source: str | os.PathLike[str] | Any,
+) -> SignalOnlyF0DiagnosticSourceResult:
+    """Resolve a Guided diagnostic-cache source for Signal-Only F0 review."""
+    result = resolve_diagnostic_cache_source(source)
+    if not result.ok or result.source is None:
+        return SignalOnlyF0DiagnosticSourceResult(
+            ok=False,
+            reason=result.status.message,
+            source_type=SOURCE_TYPE_DIAGNOSTIC_CACHE,
+            code=result.status.code,
+        )
+    resolved = result.source
+    if resolved.source_type != SOURCE_TYPE_DIAGNOSTIC_CACHE:
+        return SignalOnlyF0DiagnosticSourceResult(
+            ok=False,
+            reason="Resolved Signal-Only F0 source is not a diagnostic cache.",
+            source_type=SOURCE_TYPE_DIAGNOSTIC_CACHE,
+            code="invalid_source_type",
+        )
+    phasic_out = os.path.dirname(resolved.phasic_trace_cache_path)
+    metadata = {
+        "source_type": SOURCE_TYPE_DIAGNOSTIC_CACHE,
+        "cache_id": resolved.cache_id,
+        "cache_root_path": resolved.cache_root_path,
+        "phasic_trace_cache_path": resolved.phasic_trace_cache_path,
+        "config_used_path": resolved.config_used_path,
+        "request_json_path": resolved.request_json_path,
+        "artifact_record_path": resolved.artifact_record_path,
+        "provenance_path": resolved.provenance_path,
+        "source_setup_signature": resolved.source_setup_signature,
+        "diagnostic_scope_signature": resolved.diagnostic_scope_signature,
+        "build_request_signature": resolved.build_request_signature,
+        "production_analysis": False,
+        "preliminary_cache": True,
+    }
+    return SignalOnlyF0DiagnosticSourceResult(
+        ok=True,
+        reason="diagnostic cache source resolved",
+        source_type=SOURCE_TYPE_DIAGNOSTIC_CACHE,
+        completed_run_dir="",
+        phasic_out_dir=phasic_out,
+        phasic_trace_cache_path=resolved.phasic_trace_cache_path,
+        config_source_path=resolved.config_used_path,
+        code="ok",
+        diagnostic_cache_metadata=metadata,
+    )
+
+
 def build_default_signal_only_f0_diagnostic_output_dir(
     completed_run_dir: str | os.PathLike[str],
     diagnostic_id: str,
@@ -345,6 +399,21 @@ def build_default_signal_only_f0_diagnostic_output_dir(
         raise ValueError(f"Unsafe Signal-Only F0 diagnostic_id: {diagnostic_id!r}")
     return (
         Path(completed_run_dir)
+        / GUIDED_WORKFLOW_DIR_NAME
+        / SIGNAL_ONLY_F0_DIAGNOSTIC_DIR_NAME
+        / diagnostic_id
+    )
+
+
+def build_default_signal_only_f0_diagnostic_cache_output_dir(
+    cache_root_path: str | os.PathLike[str],
+    diagnostic_id: str,
+) -> Path:
+    """Build the accepted diagnostic-cache review leaf path without creating it."""
+    if not _safe_id_component(diagnostic_id):
+        raise ValueError(f"Unsafe Signal-Only F0 diagnostic_id: {diagnostic_id!r}")
+    return (
+        Path(cache_root_path)
         / GUIDED_WORKFLOW_DIR_NAME
         / SIGNAL_ONLY_F0_DIAGNOSTIC_DIR_NAME
         / diagnostic_id
@@ -554,6 +623,7 @@ def build_signal_only_f0_diagnostic_provenance(
     selected_chunks: list[int] | tuple[int, ...] | None = None,
     selected_window: dict[str, Any] | None = None,
     source_artifact_hashes: dict[str, str] | None = None,
+    diagnostic_cache_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a JSON-serializable provenance skeleton; does not write it."""
     if not _safe_id_component(diagnostic_id):
@@ -575,9 +645,11 @@ def build_signal_only_f0_diagnostic_provenance(
         "selected_chunks": [int(chunk) for chunk in (selected_chunks or [])],
         "selected_window": dict(selected_window or {}),
         "source_artifact_hashes": dict(source_artifact_hashes or {}),
+        "diagnostic_cache": dict(diagnostic_cache_metadata or {}),
         "manifest_written": False,
         "applied_dff_routed": False,
         "production_applied_dff_output_written": False,
+        "production_output": False,
         "feature_extraction_run": False,
         "pipeline_run_executed": False,
         "validation_run_executed": False,
