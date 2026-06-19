@@ -84,6 +84,7 @@ from photometry_pipeline.guided_run_plan import (
     deserialize_plan_from_dict,
     evaluate_guided_plan_checklist,
     feature_event_profile_summary_lines,
+    validate_correction_strategy,
     validate_plan_contract,
 )
 from photometry_pipeline.feature_event_config import validate_feature_event_config_fields
@@ -1587,6 +1588,7 @@ class MainWindow(QMainWindow):
         self._guided_imported_plan_file_path = ""
         self._guided_imported_plan_status = ""
         self._guided_imported_plan_review_run_dir = None
+        self._guided_imported_plan_adoption_status = None
         self._guided_raw_setup_controls = {}
         self._guided_open_results_mode_panels = {}
         self._guided_new_analysis_mode_panels = {}
@@ -5053,6 +5055,18 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_imported_plan_summary_label)
         layout.addWidget(self._guided_imported_plan_summary_label)
 
+        self._guided_imported_plan_adoption_status_label = QLabel(
+            self._guided_imported_plan_adoption_status_text(
+                self._no_guided_imported_plan_adoption_status()
+            )
+        )
+        self._guided_imported_plan_adoption_status_label.setObjectName("guidedImportedPlanAdoptionStatusLabel")
+        self._guided_imported_plan_adoption_status_label.setProperty("guidedSecondaryText", True)
+        self._guided_imported_plan_adoption_status_label.setWordWrap(True)
+        self._guided_imported_plan_adoption_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_imported_plan_adoption_status_label)
+        layout.addWidget(self._guided_imported_plan_adoption_status_label)
+
         return group
 
     def _reset_guided_imported_plan_review_display(self, message: str = "No exported plan opened for review.") -> None:
@@ -5060,18 +5074,68 @@ class MainWindow(QMainWindow):
         self._guided_imported_plan_file_path = ""
         self._guided_imported_plan_status = ""
         self._guided_imported_plan_review_run_dir = self._current_guided_completed_run_dir()
+        self._guided_imported_plan_adoption_status = self._no_guided_imported_plan_adoption_status()
         status = getattr(self, "_guided_imported_plan_status_label", None)
         summary = getattr(self, "_guided_imported_plan_summary_label", None)
+        adoption = getattr(self, "_guided_imported_plan_adoption_status_label", None)
         if status is not None:
             status.setText(message)
         if summary is not None:
             summary.setText("Candidate review: none.\nAdoption: unavailable in this read-only stage\nExecution: blocked\nFiles written: none")
+        if adoption is not None:
+            adoption.setText(
+                self._guided_imported_plan_adoption_status_text(
+                    self._guided_imported_plan_adoption_status
+                )
+            )
 
     def _show_guided_imported_plan_open_failed(self, reason: str) -> None:
         self._reset_guided_imported_plan_review_display()
         status = getattr(self, "_guided_imported_plan_status_label", None)
         if status is not None:
             status.setText(f"Open plan failed: {reason}")
+
+    def _no_guided_imported_plan_adoption_status(self) -> dict[str, object]:
+        return {
+            "eligible": False,
+            "blocking_reasons": ["no active candidate"],
+            "warnings": [],
+            "source_status": "not checked: no candidate plan is open for review",
+            "roi_status": "not checked: no candidate plan is open for review",
+            "correction_strategy_status": "not checked: no candidate plan is open for review",
+            "feature_event_status": "not checked: no candidate plan is open for review",
+            "output_policy_status": "not checked: no candidate plan is open for review",
+            "adoption_action": "unavailable in this stage",
+            "execution_status": "blocked",
+            "files_written": "none",
+        }
+
+    def _guided_imported_plan_adoption_status_text(self, status: dict[str, object] | None) -> str:
+        status = status or self._no_guided_imported_plan_adoption_status()
+        blockers = [str(item) for item in status.get("blocking_reasons", [])]
+        warnings = [str(item) for item in status.get("warnings", [])]
+        lines = [
+            "Future adoption eligibility",
+            "Eligibility is informational only. No adoption action is available in this stage.",
+            f"Future adoption eligible: {'Yes' if status.get('eligible') else 'No'}",
+            f"Adoption action: {status.get('adoption_action', 'unavailable in this stage')}",
+            "Blocking reasons:",
+        ]
+        lines.extend([f"- {item}" for item in blockers] if blockers else ["- none"])
+        lines.append("Warnings:")
+        lines.extend([f"- {item}" for item in warnings] if warnings else ["- none"])
+        lines.extend(
+            [
+                f"Source: {status.get('source_status', '')}",
+                f"ROI: {status.get('roi_status', '')}",
+                f"Correction strategies: {status.get('correction_strategy_status', '')}",
+                f"Feature/event profile: {status.get('feature_event_status', '')}",
+                f"Output policy: {status.get('output_policy_status', '')}",
+                f"Execution: {status.get('execution_status', 'blocked')}",
+                f"Files written: {status.get('files_written', 'none')}",
+            ]
+        )
+        return "\n".join(lines)
 
     def _clear_guided_imported_plan_candidate_if_run_changed(self) -> None:
         if getattr(self, "_guided_imported_plan_candidate", None) is None:
@@ -5174,6 +5238,10 @@ class MainWindow(QMainWindow):
         try:
             contract_errors = validate_plan_contract(candidate)
             review = self._guided_imported_plan_review(candidate, review_path, contract_errors)
+            adoption_status = self._guided_imported_plan_adoption_eligibility(
+                candidate,
+                contract_errors,
+            )
         except Exception as exc:
             self._show_guided_imported_plan_open_failed(f"Unexpected review error: {exc}")
             return
@@ -5181,12 +5249,16 @@ class MainWindow(QMainWindow):
         self._guided_imported_plan_file_path = str(review_path)
         self._guided_imported_plan_status = str(review.get("contract_status") or "")
         self._guided_imported_plan_review_run_dir = self._current_guided_completed_run_dir()
+        self._guided_imported_plan_adoption_status = adoption_status
         self._guided_imported_plan_status_label.setText(
             "Plan opened for read-only review. Live draft plan was not changed."
         )
         self._guided_imported_plan_summary_label.setText(
             self._guided_imported_plan_review_summary_text(review)
         )
+        adoption_label = getattr(self, "_guided_imported_plan_adoption_status_label", None)
+        if adoption_label is not None:
+            adoption_label.setText(self._guided_imported_plan_adoption_status_text(adoption_status))
 
     def _guided_completed_run_basic_validity(self, run_dir: str) -> str:
         if not run_dir:
@@ -5258,6 +5330,155 @@ class MainWindow(QMainWindow):
         if not policy.legacy_outputs_protected:
             warnings.append("Safety warning: legacy_outputs_protected is disabled.")
         return status, warnings
+
+    def _source_validity_passed(self, status: str) -> bool:
+        return str(status or "").startswith("valid completed-run source")
+
+    def _guided_imported_plan_adoption_eligibility(
+        self,
+        plan: GuidedRunPlan | None,
+        contract_errors: list[str] | None = None,
+    ) -> dict[str, object]:
+        if plan is None:
+            return self._no_guided_imported_plan_adoption_status()
+
+        blockers: list[str] = []
+        warnings: list[str] = []
+        errors = list(contract_errors if contract_errors is not None else validate_plan_contract(plan))
+
+        if plan.schema_version != SCHEMA_VERSION:
+            blockers.append(f"unsupported schema version: {plan.schema_version}")
+        if plan.mode != "completed_run_planning":
+            blockers.append(f"candidate mode is not completed_run_planning: {plan.mode}")
+        for error in errors:
+            blockers.append(f"contract error: {error}")
+
+        current_source = self._current_guided_completed_run_dir()
+        imported_source = str(plan.source.completed_run_dir or "").strip()
+        imported_resolved = os.path.realpath(imported_source) if imported_source else ""
+        current_resolved = os.path.realpath(current_source) if current_source else ""
+        source_status_parts: list[str] = []
+        if not current_resolved:
+            blockers.append("no current completed run loaded")
+            source_status_parts.append("blocked: no current completed run loaded")
+        if not imported_resolved:
+            blockers.append("imported source is empty")
+            source_status_parts.append("blocked: imported source is empty")
+        if current_resolved and imported_resolved:
+            if imported_resolved != current_resolved:
+                blockers.append("source mismatch between imported plan and current completed run")
+                source_status_parts.append("blocked: source mismatch")
+            else:
+                source_status_parts.append("source matched")
+
+        if current_resolved:
+            current_validity = self._guided_completed_run_basic_validity(current_resolved)
+            if not self._source_validity_passed(current_validity):
+                blockers.append(f"current completed-run source invalid: {current_validity}")
+            source_status_parts.append(f"current source: {current_validity}")
+        if imported_resolved:
+            imported_validity = self._guided_completed_run_basic_validity(imported_resolved)
+            if not self._source_validity_passed(imported_validity):
+                blockers.append(f"imported source invalid: {imported_validity}")
+            source_status_parts.append(f"imported source: {imported_validity}")
+        source_status = "; ".join(source_status_parts) if source_status_parts else "not checked"
+
+        current_rois: list[str] = []
+        current_chunks: list[int] = []
+        roi_status_parts: list[str] = []
+        if current_resolved:
+            current_rois, current_chunks, inventory_status = self._guided_completed_run_roi_inventory(current_resolved)
+            if not current_rois:
+                blockers.append(f"ROI inventory unavailable: {inventory_status}")
+                roi_status_parts.append(f"blocked: {inventory_status}")
+            else:
+                roi_status_parts.append(f"current ROI inventory: {len(current_rois)} ROI(s)")
+        else:
+            roi_status_parts.append("blocked: no current completed run loaded")
+
+        imported_rois = [str(entry.roi or "").strip() for entry in plan.roi_plan if str(entry.roi or "").strip()]
+        if not imported_rois:
+            blockers.append("zero ROI choices cannot be adopted in first adoption implementation")
+            roi_status_parts.append("blocked: zero ROI choices")
+        duplicate_rois = sorted({roi for roi in imported_rois if imported_rois.count(roi) > 1})
+        if duplicate_rois:
+            blockers.append("duplicate imported ROI entries: " + ", ".join(duplicate_rois))
+        if current_rois and imported_rois:
+            missing_rois = sorted(roi for roi in imported_rois if roi not in current_rois)
+            extra_rois = sorted(roi for roi in current_rois if roi not in imported_rois)
+            if missing_rois:
+                blockers.append("missing imported ROI(s) in current run: " + ", ".join(missing_rois))
+                roi_status_parts.append("blocked: missing imported ROI(s)")
+            else:
+                roi_status_parts.append("imported ROI choices match current inventory")
+            if extra_rois:
+                warnings.append("extra current ROI(s) not present in candidate; adopted draft would be partial: " + ", ".join(extra_rois))
+        if current_chunks:
+            chunk_set = set(current_chunks)
+            stale_chunks: list[str] = []
+            for entry in plan.roi_plan:
+                for evidence in entry.evidence:
+                    if evidence.chunk_id not in chunk_set:
+                        stale_chunks.append(f"{entry.roi}: chunk {evidence.chunk_id}")
+                    if evidence.stale:
+                        stale_chunks.append(f"{entry.roi}: chunk {evidence.chunk_id} marked stale")
+            if stale_chunks:
+                warnings.append("evidence chunk availability/staleness warning: " + "; ".join(stale_chunks))
+        elif imported_rois:
+            warnings.append("evidence chunk availability not checked because current chunk inventory is unavailable")
+        roi_status = "; ".join(roi_status_parts) if roi_status_parts else "not checked"
+
+        strategy_status_parts: list[str] = []
+        if not plan.roi_plan:
+            strategy_status_parts.append("blocked: no ROI plan entries")
+        for entry in plan.roi_plan:
+            choice = entry.correction_strategy
+            roi = str(entry.roi or "(missing ROI)")
+            if choice is None:
+                blockers.append(f"ROI {roi} has no correction strategy")
+                continue
+            try:
+                validate_correction_strategy(choice.strategy)
+            except GuidedRunPlanContractError as exc:
+                blockers.append(f"ROI {roi} correction strategy blocked: {exc}")
+                continue
+            if choice.strategy == "signal_only_f0":
+                warnings.append(f"ROI {roi}: Signal-Only F0 is explicit, not fallback; no diagnostic will run")
+        configured_strategy_count = len([entry for entry in plan.roi_plan if entry.correction_strategy is not None])
+        strategy_status_parts.append(f"{configured_strategy_count} ROI strategy choice(s) configured")
+        correction_strategy_status = "; ".join(strategy_status_parts)
+
+        if not plan.feature_event_profiles:
+            feature_event_status = "no feature/event profile configured"
+            warnings.append("no feature/event profile; candidate would remain incomplete")
+        else:
+            feature_event_status = f"{len(plan.feature_event_profiles)} feature/event profile(s)"
+            if len(plan.feature_event_profiles) > 1:
+                warnings.append("multiple feature/event profiles would be preserved as planning state")
+            for index, profile in enumerate(plan.feature_event_profiles):
+                if profile.scope == "chunk":
+                    blockers.append(f"feature/event profile {index} uses chunk scope")
+
+        output_policy_status, output_policy_warnings = self._guided_output_policy_review_lines(plan)
+        policy = plan.output_policy or OutputPolicy()
+        if not policy.output_root:
+            warnings.append("no output_root; candidate would remain incomplete")
+        for warning in output_policy_warnings:
+            blockers.append(f"unsafe OutputPolicy: {warning}")
+
+        return {
+            "eligible": not blockers,
+            "blocking_reasons": blockers,
+            "warnings": warnings,
+            "source_status": source_status,
+            "roi_status": roi_status,
+            "correction_strategy_status": correction_strategy_status,
+            "feature_event_status": feature_event_status,
+            "output_policy_status": output_policy_status,
+            "adoption_action": "unavailable in this stage",
+            "execution_status": "blocked",
+            "files_written": "none",
+        }
 
     def _guided_imported_plan_review(
         self,

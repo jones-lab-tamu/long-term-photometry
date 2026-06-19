@@ -117,6 +117,10 @@ def _review_plan(window: MainWindow, path) -> str:
     return window._guided_imported_plan_summary_label.text()
 
 
+def _adoption_status_text(window: MainWindow) -> str:
+    return window._guided_imported_plan_adoption_status_label.text()
+
+
 def _candidate_plan(run_dir, *, rois=None, strategy="robust_global_event_reject", profile=False, output_policy=None):
     entries = []
     for roi in rois or []:
@@ -164,6 +168,7 @@ def _candidate_plan(run_dir, *, rois=None, strategy="robust_global_event_reject"
 
 def _assert_no_active_imported_plan_candidate(window: MainWindow) -> None:
     summary = window._guided_imported_plan_summary_label.text()
+    adoption = _adoption_status_text(window)
     assert window._guided_imported_plan_candidate is None
     assert window._guided_imported_plan_file_path == ""
     assert window._guided_imported_plan_status == ""
@@ -171,6 +176,11 @@ def _assert_no_active_imported_plan_candidate(window: MainWindow) -> None:
     assert "Adoption: unavailable in this read-only stage" in summary
     assert "Execution: blocked" in summary
     assert "Files written: none" in summary
+    assert "Future adoption eligible: No" in adoption
+    assert "no active candidate" in adoption
+    assert "Adoption action: unavailable in this stage" in adoption
+    assert "Execution: blocked" in adoption
+    assert "Files written: none" in adoption
 
 
 def _state_for_equivalence(window: MainWindow) -> dict[str, object]:
@@ -3168,14 +3178,482 @@ def test_gui_imported_plan_review_panel_is_draft_plan_only(window):
     assert draft_step.findChild(QWidget, "guidedImportedPlanOpenButton") is not None
     assert draft_step.findChild(QWidget, "guidedImportedPlanStatusLabel") is not None
     assert draft_step.findChild(QWidget, "guidedImportedPlanSummaryLabel") is not None
+    assert draft_step.findChild(QWidget, "guidedImportedPlanAdoptionStatusLabel") is not None
     assert "Open an exported GuidedRunPlan JSON for read-only review" in "\n".join(_label_texts(panel))
+    assert "Eligibility is informational only" in _adoption_status_text(window)
     assert confirm_step.findChild(QWidget, "guidedImportedPlanReviewPanel") is None
 
     panel_buttons = [button.text() for button in panel.findChildren(QPushButton)]
     assert panel_buttons == ["Open plan for review"]
     assert not any("Adopt" in text for text in panel_buttons)
+    assert not any("Apply imported" in text for text in panel_buttons)
+    assert not any("Load into draft" in text for text in panel_buttons)
     assert not any("RunSpec" in text for text in panel_buttons)
     assert not any(text == "Run" or "Guided Run" in text for text in panel_buttons)
+
+
+def test_gui_imported_plan_adoption_status_no_candidate_initial(window):
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligibility" in text
+    assert "Eligibility is informational only" in text
+    assert "Future adoption eligible: No" in text
+    assert "no active candidate" in text
+    assert "Adoption action: unavailable in this stage" in text
+    assert "Execution: blocked" in text
+    assert "Files written: none" in text
+
+
+def test_gui_imported_plan_adoption_status_source_matched_candidate_eligible(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    before_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    path = tmp_path / "eligible_plan.json"
+    out_root = tmp_path / "future_output"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH1", "CH2"],
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(out_root)),
+        ),
+    )
+    before_plan = window._build_guided_draft_run_plan()[0].to_dict()
+
+    _review_plan(window, path)
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligible: Yes" in text
+    assert "Blocking reasons:\n- none" in text
+    assert "source matched" in text
+    assert "imported ROI choices match current inventory" in text
+    assert window._build_guided_draft_run_plan()[0].to_dict() == before_plan
+    assert not out_root.exists()
+    assert sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*")) == before_files
+
+
+def test_gui_imported_plan_adoption_status_source_mismatch_blocks(window, tmp_path, monkeypatch):
+    run_a = _make_preview_completed_run(tmp_path / "run_a")
+    run_b = _make_preview_completed_run(tmp_path / "run_b")
+    _load_preview_completed_run(window, run_a, monkeypatch)
+    before_source = window._current_guided_completed_run_dir()
+    path = tmp_path / "source_mismatch_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_b,
+            rois=["CH1", "CH2"],
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(tmp_path / "future_output")),
+        ),
+    )
+
+    _review_plan(window, path)
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligible: No" in text
+    assert "source mismatch between imported plan and current completed run" in text
+    assert window._current_guided_completed_run_dir() == before_source
+
+
+def test_gui_imported_plan_adoption_status_no_current_run_blocks(window, tmp_path):
+    run_dir = _make_preview_completed_run(tmp_path)
+    window._current_run_dir = ""
+    path = tmp_path / "no_current_run_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH1", "CH2"],
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(tmp_path / "future_output")),
+        ),
+    )
+
+    _review_plan(window, path)
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligible: No" in text
+    assert "no current completed run loaded" in text
+    assert window._current_guided_completed_run_dir() == ""
+
+
+def test_gui_imported_plan_adoption_status_missing_imported_roi_blocks(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    path = tmp_path / "missing_roi_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH3"],
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(tmp_path / "future_output")),
+        ),
+    )
+
+    _review_plan(window, path)
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligible: No" in text
+    assert "missing imported ROI(s) in current run: CH3" in text
+
+
+def test_gui_imported_plan_adoption_status_zero_roi_choices_block(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    path = tmp_path / "zero_roi_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_dir,
+            rois=[],
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(tmp_path / "future_output")),
+        ),
+    )
+
+    _review_plan(window, path)
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligible: No" in text
+    assert "zero ROI choices cannot be adopted in first adoption implementation" in text
+
+
+def test_gui_imported_plan_adoption_status_extra_current_roi_warns_only(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    path = tmp_path / "partial_roi_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH1"],
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(tmp_path / "future_output")),
+        ),
+    )
+
+    _review_plan(window, path)
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligible: Yes" in text
+    assert "Blocking reasons:\n- none" in text
+    assert "extra current ROI(s) not present in candidate" in text
+    assert "CH2" in text
+
+
+def test_gui_imported_plan_adoption_status_signal_only_f0_warns_without_execution(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    before_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    calls = {"signal": 0, "preview": 0}
+    monkeypatch.setattr(
+        main_window_module,
+        "run_signal_only_f0_diagnostic_review",
+        lambda *_args, **_kwargs: calls.__setitem__("signal", calls["signal"] + 1),
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "run_guided_correction_preview_comparison",
+        lambda *_args, **_kwargs: calls.__setitem__("preview", calls["preview"] + 1),
+    )
+    path = tmp_path / "signal_only_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH1", "CH2"],
+            strategy="signal_only_f0",
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(tmp_path / "future_output")),
+        ),
+    )
+
+    _review_plan(window, path)
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligible: Yes" in text
+    assert "Signal-Only F0 is explicit, not fallback; no diagnostic will run" in text
+    assert calls == {"signal": 0, "preview": 0}
+    assert sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*")) == before_files
+
+
+@pytest.mark.parametrize("strategy", ["auto", "needs_review", "no_correction"])
+def test_gui_imported_plan_adoption_status_forbidden_strategy_blocks(window, tmp_path, monkeypatch, strategy):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    path = tmp_path / f"{strategy}_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH1", "CH2"],
+            strategy=strategy,
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(tmp_path / "future_output")),
+        ),
+    )
+
+    _review_plan(window, path)
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligible: No" in text
+    assert f"forbidden runnable correction strategy: {strategy}" in text
+
+
+def test_gui_imported_plan_adoption_status_unsafe_output_root_blocks(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    unsafe_root = run_dir / "_analysis" / "phasic_out" / "features" / "future"
+    path = tmp_path / "unsafe_root_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH1", "CH2"],
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(unsafe_root)),
+        ),
+    )
+
+    _review_plan(window, path)
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligible: No" in text
+    assert "unsafe OutputPolicy" in text
+    assert "inside legacy output directory" in text
+    assert not unsafe_root.exists()
+
+
+def test_gui_imported_plan_adoption_status_unsafe_output_flags_block(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    path = tmp_path / "unsafe_flags_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH1", "CH2"],
+            profile=True,
+            output_policy=OutputPolicy(
+                output_root=str(tmp_path / "future_output"),
+                overwrite=True,
+                separate_from_source_required=False,
+                legacy_outputs_protected=False,
+            ),
+        ),
+    )
+
+    _review_plan(window, path)
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligible: No" in text
+    assert "Overwrite is enabled" in text
+    assert "separate_from_source_required is disabled" in text
+    assert "legacy_outputs_protected is disabled" in text
+
+
+def test_gui_imported_plan_adoption_status_no_output_root_warns_not_blocks(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    path = tmp_path / "no_output_root_plan.json"
+    _write_guided_plan_json(path, _candidate_plan(run_dir, rois=["CH1", "CH2"], profile=True))
+
+    _review_plan(window, path)
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligible: Yes" in text
+    assert "no output_root; candidate would remain incomplete" in text
+    assert "Output policy: no output destination configured" in text
+
+
+def test_gui_imported_plan_adoption_status_no_feature_profile_warns_not_blocks(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    path = tmp_path / "no_profile_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH1", "CH2"],
+            profile=False,
+            output_policy=OutputPolicy(output_root=str(tmp_path / "future_output")),
+        ),
+    )
+
+    _review_plan(window, path)
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligible: Yes" in text
+    assert "no feature/event profile; candidate would remain incomplete" in text
+    assert "Feature/event profile: no feature/event profile configured" in text
+
+
+def test_gui_imported_plan_adoption_status_failed_open_clears_eligibility(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    valid_path = tmp_path / "eligible_plan.json"
+    bad_path = tmp_path / "bad_plan.json"
+    _write_guided_plan_json(
+        valid_path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH1", "CH2"],
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(tmp_path / "future_output")),
+        ),
+    )
+    bad_path.write_text("{bad", encoding="utf-8")
+
+    _review_plan(window, valid_path)
+    assert "Future adoption eligible: Yes" in _adoption_status_text(window)
+    _review_plan(window, bad_path)
+
+    _assert_no_active_imported_plan_candidate(window)
+
+
+def test_gui_imported_plan_adoption_status_candidate_replacement_recomputes(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    eligible_path = tmp_path / "eligible_plan.json"
+    ineligible_path = tmp_path / "ineligible_plan.json"
+    _write_guided_plan_json(
+        eligible_path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH1", "CH2"],
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(tmp_path / "future_output")),
+        ),
+    )
+    _write_guided_plan_json(
+        ineligible_path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH3"],
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(tmp_path / "future_output_2")),
+        ),
+    )
+
+    _review_plan(window, eligible_path)
+    assert "Future adoption eligible: Yes" in _adoption_status_text(window)
+    _review_plan(window, ineligible_path)
+    text = _adoption_status_text(window)
+
+    assert "Future adoption eligible: No" in text
+    assert "missing imported ROI(s) in current run: CH3" in text
+    assert str(eligible_path.resolve()) not in text
+
+
+def test_gui_imported_plan_adoption_status_completed_run_switch_clears(window, tmp_path, monkeypatch):
+    run_a = _make_preview_completed_run(tmp_path / "run_a")
+    run_b = _make_preview_completed_run(tmp_path / "run_b")
+    _load_preview_completed_run(window, run_a, monkeypatch)
+    path = tmp_path / "eligible_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_a,
+            rois=["CH1", "CH2"],
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(tmp_path / "future_output")),
+        ),
+    )
+
+    _review_plan(window, path)
+    assert "Future adoption eligible: Yes" in _adoption_status_text(window)
+    _load_preview_completed_run(window, run_b, monkeypatch)
+
+    _assert_no_active_imported_plan_candidate(window)
+
+
+def test_gui_imported_plan_adoption_status_does_not_mutate_live_draft_state(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    idx = window._guided_confirm_strategy_combo.findData("robust_global_event_reject")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_output_path_edit.setText(str(tmp_path / "unsaved_output"))
+    window._guided_export_path_edit.setText(str(tmp_path / "export_target.json"))
+    path = tmp_path / "eligible_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH1", "CH2"],
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(tmp_path / "future_output")),
+        ),
+    )
+    before_plan = window._build_guided_draft_run_plan()[0].to_dict()
+    before_readiness = window._guided_plan_readiness_summary_label.text()
+    before_preview = window._guided_draft_run_plan_preview_label.text()
+    before_checklist = window._guided_draft_run_plan_checklist_label.text()
+    before_export_path = window._guided_export_path_edit.text()
+    before_output_path = window._guided_output_path_edit.text()
+    before_feature_signal = window._guided_feature_event_signal_combo.currentText()
+    before_source = window._current_guided_completed_run_dir()
+
+    _review_plan(window, path)
+
+    assert "Future adoption eligible:" in _adoption_status_text(window)
+    assert window._build_guided_draft_run_plan()[0].to_dict() == before_plan
+    assert window._guided_plan_readiness_summary_label.text() == before_readiness
+    assert window._guided_draft_run_plan_preview_label.text() == before_preview
+    assert window._guided_draft_run_plan_checklist_label.text() == before_checklist
+    assert window._guided_export_path_edit.text() == before_export_path
+    assert window._guided_output_path_edit.text() == before_output_path
+    assert window._guided_feature_event_signal_combo.currentText() == before_feature_signal
+    assert window._current_guided_completed_run_dir() == before_source
+
+
+def test_gui_imported_plan_adoption_status_no_output_guarantee(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    before_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    out_root = tmp_path / "future_output"
+    path = tmp_path / "eligible_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH1", "CH2"],
+            profile=True,
+            output_policy=OutputPolicy(output_root=str(out_root)),
+        ),
+    )
+
+    _review_plan(window, path)
+
+    assert sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*")) == before_files
+    assert not out_root.exists()
+    assert not (run_dir / "manifest.csv").exists()
+    assert not (run_dir / "features.csv").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
+
+
+def test_gui_imported_plan_adoption_status_no_adoption_controls(window):
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    panel = window._guided_workflow_tab.findChild(QWidget, "guidedImportedPlanReviewPanel")
+    button_texts = [button.text() for button in panel.findChildren(QPushButton)]
+
+    assert button_texts == ["Open plan for review"]
+    assert not any("Adopt" in text for text in button_texts)
+    assert not any("Apply imported" in text for text in button_texts)
+    assert not any("Load into draft" in text for text in button_texts)
+    assert not any("RunSpec" in text for text in button_texts)
+    assert not any(text == "Run" or "Guided Run" in text for text in button_texts)
 
 
 @pytest.mark.parametrize(
