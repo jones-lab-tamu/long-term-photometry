@@ -522,6 +522,46 @@ def test_switching_config_source_refreshes_main_advanced_controls(window, tmp_pa
     )
 
 
+def test_guided_feature_event_defaults_follow_active_custom_baseline(window, tmp_path):
+    _set_valid_dirs(window, tmp_path)
+    custom_cfg_path = tmp_path / "guided_feature_defaults.yaml"
+    custom_cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "event_signal": "delta_f",
+                "signal_excursion_polarity": "negative",
+                "peak_threshold_method": "percentile",
+                "peak_threshold_percentile": 88.0,
+                "peak_min_distance_sec": 2.5,
+                "peak_min_prominence_k": 3.5,
+                "peak_min_width_sec": 0.6,
+                "peak_pre_filter": "lowpass",
+                "event_auc_baseline": "median",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    window._use_custom_config_cb.setChecked(True)
+    window._config_path.setText(str(custom_cfg_path))
+    window._update_config_source_ui()
+
+    defaults = window._guided_feature_event_editor_defaults()
+    provenance = window._active_feature_event_defaults_result()
+
+    assert provenance.baseline_source_kind == "custom_config"
+    assert _norm_abs(provenance.baseline_source_path) == _norm_abs(custom_cfg_path)
+    assert defaults["event_signal"] == "delta_f"
+    assert defaults["signal_excursion_polarity"] == "negative"
+    assert defaults["peak_threshold_method"] == "percentile"
+    assert defaults["peak_threshold_percentile"] == pytest.approx(88.0)
+    assert defaults["peak_min_distance_sec"] == pytest.approx(2.5)
+    assert defaults["peak_min_prominence_k"] == pytest.approx(3.5)
+    assert defaults["peak_min_width_sec"] == pytest.approx(0.6)
+    assert defaults["peak_pre_filter"] == "lowpass"
+    assert defaults["event_auc_baseline"] == "median"
+
+
 def test_gui_run_spec_records_active_config_source(window, tmp_path):
     _set_valid_dirs(window, tmp_path)
 

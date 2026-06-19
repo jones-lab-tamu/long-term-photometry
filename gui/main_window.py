@@ -88,6 +88,10 @@ from photometry_pipeline.guided_run_plan import (
     validate_plan_contract,
 )
 from photometry_pipeline.feature_event_config import validate_feature_event_config_fields
+from photometry_pipeline.workflow_safety import (
+    FeatureEventDefaultsResult,
+    resolve_feature_event_defaults,
+)
 from photometry_pipeline.preview.correction_preview import (
     GUIDED_REFERENCE_PREVIEW_METHODS,
     PREVIEW_PROVENANCE_FILENAME,
@@ -4153,20 +4157,7 @@ class MainWindow(QMainWindow):
         return profiles[0] if profiles else None
 
     def _guided_feature_event_editor_defaults(self) -> dict[str, object]:
-        cfg = Config()
-        return {
-            "event_signal": cfg.event_signal,
-            "signal_excursion_polarity": cfg.signal_excursion_polarity,
-            "peak_threshold_method": cfg.peak_threshold_method,
-            "peak_threshold_k": cfg.peak_threshold_k,
-            "peak_threshold_percentile": cfg.peak_threshold_percentile,
-            "peak_threshold_abs": cfg.peak_threshold_abs,
-            "peak_min_distance_sec": cfg.peak_min_distance_sec,
-            "peak_min_prominence_k": cfg.peak_min_prominence_k,
-            "peak_min_width_sec": cfg.peak_min_width_sec,
-            "peak_pre_filter": cfg.peak_pre_filter,
-            "event_auc_baseline": cfg.event_auc_baseline,
-        }
+        return dict(self._event_feature_defaults_from_active_baseline())
 
     def _set_guided_feature_event_combo_value(self, combo: QComboBox, value: object) -> None:
         text = str(value)
@@ -10955,24 +10946,24 @@ class MainWindow(QMainWindow):
                 pass
         return self._default_cfg
 
+    def _active_feature_event_defaults_result(self) -> FeatureEventDefaultsResult:
+        """Resolve feature/event defaults from the active baseline source."""
+        return resolve_feature_event_defaults(
+            config_source_path=self._active_config_source_path(),
+            baseline_source_kind=(
+                "custom_config" if self._is_custom_config_enabled() else "lab_default"
+            ),
+            fallback_config=self._default_cfg,
+            allow_fallback=True,
+        )
+
     def _event_feature_defaults_from_active_baseline(self) -> dict:
         """Event-feature default values sourced from active baseline config."""
-        base_cfg = self._active_baseline_config()
-        return {
-            "event_signal": base_cfg.event_signal,
-            "signal_excursion_polarity": normalize_signal_excursion_polarity(
-                str(getattr(base_cfg, "signal_excursion_polarity", "positive"))
-            ),
-            "peak_threshold_method": base_cfg.peak_threshold_method,
-            "peak_threshold_k": base_cfg.peak_threshold_k,
-            "peak_threshold_percentile": base_cfg.peak_threshold_percentile,
-            "peak_threshold_abs": base_cfg.peak_threshold_abs,
-            "peak_min_distance_sec": base_cfg.peak_min_distance_sec,
-            "peak_min_prominence_k": getattr(base_cfg, "peak_min_prominence_k", 0.0),
-            "peak_min_width_sec": getattr(base_cfg, "peak_min_width_sec", 0.0),
-            "peak_pre_filter": getattr(base_cfg, "peak_pre_filter", "none"),
-            "event_auc_baseline": base_cfg.event_auc_baseline,
-        }
+        defaults = dict(self._active_feature_event_defaults_result().defaults)
+        defaults["signal_excursion_polarity"] = normalize_signal_excursion_polarity(
+            str(defaults.get("signal_excursion_polarity", "positive"))
+        )
+        return defaults
 
     def _sync_event_feature_controls_from_active_baseline(self) -> None:
         """Sync the full main-run event-feature subsection to active baseline defaults."""
