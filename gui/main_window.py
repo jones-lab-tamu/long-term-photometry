@@ -1618,6 +1618,15 @@ class MainWindow(QMainWindow):
         # and populated only by explicit Apply.
         self._guided_draft_feature_event_profiles_by_run = {}
         self._guided_feature_event_editor_synced_run = None
+        self._guided_new_analysis_feature_event_profile = None
+        self._guided_new_analysis_feature_event_profile_status = "missing"
+        self._guided_new_analysis_feature_event_profile_baseline_source = None
+        self._guided_new_analysis_feature_event_profile_baseline_kind = None
+        self._guided_new_analysis_feature_event_profile_stale_reasons = []
+        self._guided_new_analysis_feature_event_profile_errors = []
+        self._guided_new_analysis_feature_event_profile_updated_at_utc = None
+        self._guided_new_analysis_feature_event_profile_format = None
+        self._guided_new_analysis_feature_event_profile_acq_mode = None
         self._guided_draft_output_policy_by_run = {}
         self._guided_output_policy_editor_synced_run = None
         self._guided_export_editor_synced_run = None
@@ -5372,6 +5381,15 @@ class MainWindow(QMainWindow):
             signal_only_f0_path=sig_path,
             signal_only_f0_status=sig_status,
             signal_only_f0_source_cache_id=sig_source_cache_id,
+            feature_event_profile_status=getattr(self, "_guided_new_analysis_feature_event_profile_status", "missing"),
+            feature_event_profile_id=self._guided_new_analysis_feature_event_profile.get("profile_id") if self._guided_new_analysis_feature_event_profile else None,
+            feature_event_baseline_config_source=self._guided_new_analysis_feature_event_profile_baseline_source,
+            feature_event_baseline_status=self._guided_new_analysis_feature_event_profile_baseline_kind,
+            feature_event_values=self._guided_new_analysis_feature_event_profile if self._guided_new_analysis_feature_event_profile else {},
+            feature_event_validation_issues=self._guided_new_analysis_feature_event_profile_errors,
+            feature_event_stale_reasons=self._guided_new_analysis_feature_event_profile_stale_reasons,
+            feature_event_updated_at_utc=self._guided_new_analysis_feature_event_profile_updated_at_utc,
+            feature_event_explicitly_applied=(getattr(self, "_guided_new_analysis_feature_event_profile_status", "missing") == "applied"),
         )
 
     def _guided_new_analysis_draft_plan_summary_text(self, plan, issues) -> str:
@@ -5409,6 +5427,16 @@ class MainWindow(QMainWindow):
         if stale_count > 0:
             coverage_summary += f", {stale_count} stale"
 
+        fe_lines = [f"Feature/event profile status: {plan.feature_event_profile_status}"]
+        if plan.feature_event_baseline_config_source:
+            fe_lines.append(f"Feature/event profile baseline source: {self._display_path(plan.feature_event_baseline_config_source)}")
+        if plan.feature_event_baseline_status:
+            fe_lines.append(f"Feature/event profile baseline status: {plan.feature_event_baseline_status}")
+        if plan.feature_event_profile_status == "invalid" and plan.feature_event_validation_issues:
+            fe_lines.append(f"Feature/event profile validation issues: {'; '.join(plan.feature_event_validation_issues)}")
+        if plan.feature_event_profile_status == "stale" and plan.feature_event_stale_reasons:
+            fe_lines.append(f"Feature/event profile stale reasons: {'; '.join(plan.feature_event_stale_reasons)}")
+
         lines = [
             "Status: new_analysis draft plan",
             f"Input/source: {self._display_path(plan.input_source_path or '') if plan.input_source_path else 'none'}",
@@ -5418,9 +5446,9 @@ class MainWindow(QMainWindow):
             f"ROI counts: {len(plan.discovered_roi_ids)} discovered, {len(plan.included_roi_ids)} included, {len(plan.excluded_roi_ids)} excluded",
             f"Diagnostic cache: {cache_status}",
             f"Correction strategy coverage: {coverage_summary}",
-            f"Feature/event profile status: {plan.feature_event_profile_status}",
-            f"Output policy status: {plan.output_policy_status}",
         ]
+        lines.extend(fe_lines)
+        lines.append(f"Output policy status: {plan.output_policy_status}")
         
         blocking = [iss for iss in issues if iss.severity == "blocking"]
         warnings = [iss for iss in issues if iss.severity == "warning"]
@@ -5513,7 +5541,7 @@ class MainWindow(QMainWindow):
             ("roi_inclusion", "ROI inclusion", ["no_roi_inventory", "no_included_rois"]),
             ("diagnostic_cache", "Diagnostic cache", ["missing_diagnostic_cache", "stale_diagnostic_cache"]),
             ("roi_choices", "ROI choices", ["missing_strategy_choice_for_included_roi", "stale_strategy_choice", "forbidden_strategy"]),
-            ("feature_event", "Feature/event settings", ["missing_feature_event_profile", "invalid_feature_event_profile"]),
+            ("feature_event", "Feature/event settings", ["missing_feature_event_profile", "invalid_feature_event_profile", "feature_event_profile_not_applied", "stale_feature_event_profile"]),
             ("output_destination", "Output destination", ["missing_output_policy", "unsafe_output_policy"]),
             ("execution", "Execution readiness", ["execution_not_implemented"])
         ]
@@ -5732,6 +5760,9 @@ class MainWindow(QMainWindow):
     def _sync_guided_feature_event_editor_to_current_run(self, *, force: bool = False) -> None:
         if not hasattr(self, "_guided_feature_event_signal_combo"):
             return
+        if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
+            self._sync_guided_feature_event_editor_to_new_analysis(force=force)
+            return
         run_dir = self._current_guided_completed_run_dir()
         synced_run = getattr(self, "_guided_feature_event_editor_synced_run", None)
         if not force and run_dir == synced_run:
@@ -5742,6 +5773,113 @@ class MainWindow(QMainWindow):
         else:
             self._reset_guided_feature_event_editor_to_defaults()
         self._guided_feature_event_editor_synced_run = run_dir
+
+    def _sync_guided_feature_event_editor_to_new_analysis(self, *, force: bool = False) -> None:
+        if not hasattr(self, "_guided_feature_event_signal_combo"):
+            return
+        defaults_res = self._active_feature_event_defaults_result()
+        baseline_path = defaults_res.baseline_source_path
+        baseline_kind = defaults_res.baseline_source_kind
+        
+        current_format = self._guided_format_combo.currentText() if hasattr(self, "_guided_format_combo") else "auto"
+        current_acq_mode = "continuous"
+        if hasattr(self, "_guided_acquisition_mode_combo"):
+            current_acq_mode = self._guided_acquisition_mode_combo.currentData() or self._guided_acquisition_mode_combo.currentText().lower()
+            if not current_acq_mode:
+                current_acq_mode = "continuous"
+
+        stale_reasons = []
+        if self._guided_new_analysis_feature_event_profile_status in ("applied", "stale", "invalid"):
+            from photometry_pipeline.guided_new_analysis_plan import _paths_match
+            if not _paths_match(self._guided_new_analysis_feature_event_profile_baseline_source, baseline_path):
+                stale_reasons.append("active baseline config source path changed")
+            if self._guided_new_analysis_feature_event_profile_baseline_kind != baseline_kind:
+                stale_reasons.append("active baseline config source kind changed")
+            if self._guided_new_analysis_feature_event_profile_format != current_format:
+                stale_reasons.append("acquisition format changed")
+            if self._guided_new_analysis_feature_event_profile_acq_mode != current_acq_mode:
+                stale_reasons.append("acquisition mode changed")
+                
+            if stale_reasons:
+                self._guided_new_analysis_feature_event_profile_status = "stale"
+                self._guided_new_analysis_feature_event_profile_stale_reasons = stale_reasons
+
+        should_reload_defaults = False
+        if self._guided_new_analysis_feature_event_profile_status == "missing":
+            should_reload_defaults = True
+        elif self._guided_new_analysis_feature_event_profile_status == "unavailable" and force:
+            should_reload_defaults = True
+        elif self._guided_new_analysis_feature_event_profile_status == "default_initialized" and force:
+            current_widget_values, _ = self._guided_feature_event_current_values()
+            user_edited = True
+            if current_widget_values is not None and self._guided_new_analysis_feature_event_profile is not None:
+                user_edited = False
+                for k, v in current_widget_values.items():
+                    if str(self._guided_new_analysis_feature_event_profile.get(k)) != str(v):
+                        user_edited = True
+                        break
+            if not user_edited:
+                should_reload_defaults = True
+
+        if should_reload_defaults:
+            self._guided_new_analysis_feature_event_profile_stale_reasons = []
+            self._guided_new_analysis_feature_event_profile_errors = []
+            
+            if defaults_res.fallback_reason:
+                self._guided_new_analysis_feature_event_profile_status = "unavailable"
+                self._guided_new_analysis_feature_event_profile = None
+                self._guided_new_analysis_feature_event_profile_baseline_source = baseline_path
+                self._guided_new_analysis_feature_event_profile_baseline_kind = baseline_kind
+                self._guided_new_analysis_feature_event_profile_format = current_format
+                self._guided_new_analysis_feature_event_profile_acq_mode = current_acq_mode
+                self._guided_new_analysis_feature_event_profile_errors = [defaults_res.fallback_reason]
+                self._reset_guided_feature_event_editor_to_defaults(
+                    status_text=f"Active baseline defaults unavailable: {defaults_res.fallback_reason}"
+                )
+                return
+            
+            defaults = self._event_feature_defaults_from_active_baseline()
+            self._guided_new_analysis_feature_event_profile = dict(defaults)
+            self._guided_new_analysis_feature_event_profile_status = "default_initialized"
+            self._guided_new_analysis_feature_event_profile_baseline_source = baseline_path
+            self._guided_new_analysis_feature_event_profile_baseline_kind = baseline_kind
+            self._guided_new_analysis_feature_event_profile_format = current_format
+            self._guided_new_analysis_feature_event_profile_acq_mode = current_acq_mode
+            
+            self._set_guided_feature_event_editor_values(
+                self._guided_new_analysis_feature_event_profile,
+                status_text="Loaded defaults from active baseline. Click Apply to add to draft plan."
+            )
+            return
+
+        if self._guided_new_analysis_feature_event_profile_status == "unavailable":
+            self._guided_feature_event_status_label.setText(
+                f"Active baseline defaults unavailable: {'; '.join(self._guided_new_analysis_feature_event_profile_errors or ['unknown reasons'])}"
+            )
+        elif self._guided_new_analysis_feature_event_profile_status == "default_initialized":
+            self._guided_feature_event_status_label.setText(
+                "Loaded defaults from active baseline. Click Apply to add to draft plan."
+            )
+        elif self._guided_new_analysis_feature_event_profile_status == "applied":
+            self._guided_feature_event_status_label.setText(
+                "Feature/event profile applied to in-memory draft plan. No outputs were written."
+            )
+        elif self._guided_new_analysis_feature_event_profile_status == "stale":
+            reasons_str = "; ".join(self._guided_new_analysis_feature_event_profile_stale_reasons)
+            self._guided_feature_event_status_label.setText(
+                f"Applied feature/event profile is stale: {reasons_str}. Re-apply or reset to fix."
+            )
+        elif self._guided_new_analysis_feature_event_profile_status == "invalid":
+            errors_str = "; ".join(self._guided_new_analysis_feature_event_profile_errors)
+            self._guided_feature_event_status_label.setText(
+                f"Feature/event profile not applied (invalid): {errors_str}"
+            )
+
+        if self._guided_new_analysis_feature_event_profile_status in ("applied", "stale", "invalid") and self._guided_new_analysis_feature_event_profile:
+            self._set_guided_feature_event_editor_values(
+                self._guided_new_analysis_feature_event_profile,
+                status_text=self._guided_feature_event_status_label.text()
+            )
 
     def _guided_feature_event_current_values(self) -> tuple[dict | None, str | None]:
         if not hasattr(self, "_guided_feature_event_signal_combo"):
@@ -5762,6 +5900,9 @@ class MainWindow(QMainWindow):
         )
 
     def _on_guided_apply_feature_event_profile(self) -> None:
+        if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
+            self._on_guided_apply_feature_event_profile_new_analysis()
+            return
         run_dir = self._current_guided_completed_run_dir()
         if not run_dir:
             self._guided_feature_event_status_label.setText(
@@ -5809,7 +5950,61 @@ class MainWindow(QMainWindow):
         self._guided_feature_event_editor_synced_run = run_dir
         self._refresh_guided_draft_run_plan_preview()
 
+    def _on_guided_apply_feature_event_profile_new_analysis(self) -> None:
+        config_fields, err = self._guided_feature_event_current_values()
+        defaults_res = self._active_feature_event_defaults_result()
+        baseline_path = defaults_res.baseline_source_path
+        baseline_kind = defaults_res.baseline_source_kind
+        
+        current_format = self._guided_format_combo.currentText() if hasattr(self, "_guided_format_combo") else "auto"
+        current_acq_mode = "continuous"
+        if hasattr(self, "_guided_acquisition_mode_combo"):
+            current_acq_mode = self._guided_acquisition_mode_combo.currentData() or self._guided_acquisition_mode_combo.currentText().lower()
+            if not current_acq_mode:
+                current_acq_mode = "continuous"
+
+        if err:
+            self._guided_new_analysis_feature_event_profile_status = "invalid"
+            self._guided_new_analysis_feature_event_profile_errors = [err]
+            self._guided_feature_event_status_label.setText(f"Feature/event profile not applied (invalid): {err}")
+            self._refresh_guided_draft_run_plan_preview()
+            return
+
+        semantic_errors = validate_feature_event_config_fields(config_fields or {})
+        if semantic_errors:
+            self._guided_new_analysis_feature_event_profile_status = "invalid"
+            self._guided_new_analysis_feature_event_profile_errors = semantic_errors
+            self._guided_feature_event_status_label.setText(
+                f"Feature/event profile not applied (invalid): {'; '.join(semantic_errors)}"
+            )
+            self._refresh_guided_draft_run_plan_preview()
+            return
+            
+        import uuid
+        profile_id = getattr(self, "_guided_new_analysis_feature_event_profile", {}).get("profile_id") if self._guided_new_analysis_feature_event_profile else None
+        if not profile_id:
+            profile_id = f"profile-{uuid.uuid4().hex[:8]}"
+            
+        self._guided_new_analysis_feature_event_profile = dict(config_fields or {})
+        self._guided_new_analysis_feature_event_profile["profile_id"] = profile_id
+        self._guided_new_analysis_feature_event_profile_status = "applied"
+        self._guided_new_analysis_feature_event_profile_baseline_source = baseline_path
+        self._guided_new_analysis_feature_event_profile_baseline_kind = baseline_kind
+        self._guided_new_analysis_feature_event_profile_format = current_format
+        self._guided_new_analysis_feature_event_profile_acq_mode = current_acq_mode
+        self._guided_new_analysis_feature_event_profile_stale_reasons = []
+        self._guided_new_analysis_feature_event_profile_errors = []
+        self._guided_new_analysis_feature_event_profile_updated_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        self._guided_feature_event_status_label.setText(
+            "Feature/event profile applied to in-memory draft plan. No outputs were written."
+        )
+        self._refresh_guided_draft_run_plan_preview()
+
     def _on_guided_clear_feature_event_profile(self) -> None:
+        if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
+            self._on_guided_clear_feature_event_profile_new_analysis()
+            return
         run_dir = self._current_guided_completed_run_dir()
         if run_dir:
             profiles_by_run = getattr(self, "_guided_draft_feature_event_profiles_by_run", {})
@@ -5819,6 +6014,50 @@ class MainWindow(QMainWindow):
             status_text="Draft feature/event profile cleared from in-memory plan. No files were changed."
         )
         self._guided_feature_event_editor_synced_run = run_dir
+        self._refresh_guided_draft_run_plan_preview()
+
+    def _on_guided_clear_feature_event_profile_new_analysis(self) -> None:
+        defaults_res = self._active_feature_event_defaults_result()
+        baseline_path = defaults_res.baseline_source_path
+        baseline_kind = defaults_res.baseline_source_kind
+        
+        current_format = self._guided_format_combo.currentText() if hasattr(self, "_guided_format_combo") else "auto"
+        current_acq_mode = "continuous"
+        if hasattr(self, "_guided_acquisition_mode_combo"):
+            current_acq_mode = self._guided_acquisition_mode_combo.currentData() or self._guided_acquisition_mode_combo.currentText().lower()
+            if not current_acq_mode:
+                current_acq_mode = "continuous"
+
+        self._guided_new_analysis_feature_event_profile_stale_reasons = []
+        self._guided_new_analysis_feature_event_profile_errors = []
+        
+        if defaults_res.fallback_reason:
+            self._guided_new_analysis_feature_event_profile_status = "unavailable"
+            self._guided_new_analysis_feature_event_profile = None
+            self._guided_new_analysis_feature_event_profile_baseline_source = baseline_path
+            self._guided_new_analysis_feature_event_profile_baseline_kind = baseline_kind
+            self._guided_new_analysis_feature_event_profile_format = current_format
+            self._guided_new_analysis_feature_event_profile_acq_mode = current_acq_mode
+            self._guided_new_analysis_feature_event_profile_errors = [defaults_res.fallback_reason]
+            self._reset_guided_feature_event_editor_to_defaults(
+                status_text=f"Active baseline defaults unavailable: {defaults_res.fallback_reason}"
+            )
+            self._refresh_guided_draft_run_plan_preview()
+            return
+            
+        defaults = self._event_feature_defaults_from_active_baseline()
+        self._guided_new_analysis_feature_event_profile = dict(defaults)
+        self._guided_new_analysis_feature_event_profile_status = "default_initialized"
+        self._guided_new_analysis_feature_event_profile_baseline_source = baseline_path
+        self._guided_new_analysis_feature_event_profile_baseline_kind = baseline_kind
+        self._guided_new_analysis_feature_event_profile_format = current_format
+        self._guided_new_analysis_feature_event_profile_acq_mode = current_acq_mode
+        self._guided_new_analysis_feature_event_profile_updated_at_utc = None
+        
+        self._set_guided_feature_event_editor_values(
+            self._guided_new_analysis_feature_event_profile,
+            status_text="Draft feature/event profile cleared; loaded defaults from active baseline. Click Apply to add to draft plan."
+        )
         self._refresh_guided_draft_run_plan_preview()
 
     def _validate_guided_output_path(self, path: str, run_dir: str) -> str | None:

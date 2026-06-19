@@ -271,3 +271,55 @@ def test_warning_issues_for_missing_paths_and_evidence_cache_identities():
     assert any(iss.category == "correction_preview_source_identity_missing" and iss.severity == "warning" for iss in issues_ev)
     assert any(iss.category == "signal_only_f0_evidence_path_missing" and iss.severity == "warning" for iss in issues_ev)
     assert any(iss.category == "signal_only_f0_source_identity_missing" and iss.severity == "warning" for iss in issues_ev)
+
+
+def test_feature_event_profile_statuses_validation():
+    # Case A: Applied status with no validation issues has no feature/event issues
+    plan_a = GuidedNewAnalysisDraftPlan(
+        feature_event_profile_status="applied",
+        feature_event_validation_issues=[]
+    )
+    issues_a = evaluate_new_analysis_plan_issues(plan_a)
+    assert not any(iss.category.startswith("missing_feature_event") or iss.category.startswith("feature_event") or iss.category.startswith("invalid_feature_event") or iss.category.startswith("stale_feature_event") for iss in issues_a)
+
+    # Case B: default_initialized status results in blocking feature_event_profile_not_applied
+    plan_b = GuidedNewAnalysisDraftPlan(
+        feature_event_profile_status="default_initialized"
+    )
+    issues_b = evaluate_new_analysis_plan_issues(plan_b)
+    iss_b = [iss for iss in issues_b if iss.category == "feature_event_profile_not_applied"]
+    assert len(iss_b) == 1
+    assert iss_b[0].severity == "blocking"
+    assert "explicitly applied" in iss_b[0].message
+
+    # Case C: invalid status results in blocking invalid_feature_event_profile
+    plan_c = GuidedNewAnalysisDraftPlan(
+        feature_event_profile_status="invalid",
+        feature_event_validation_issues=["Window size must be positive", "Invalid threshold"]
+    )
+    issues_c = evaluate_new_analysis_plan_issues(plan_c)
+    iss_c = [iss for iss in issues_c if iss.category == "invalid_feature_event_profile"]
+    assert len(iss_c) == 1
+    assert iss_c[0].severity == "blocking"
+    assert "Window size must be positive" in iss_c[0].message
+
+    # Case D: stale status results in warning stale_feature_event_profile
+    plan_d = GuidedNewAnalysisDraftPlan(
+        feature_event_profile_status="stale",
+        feature_event_stale_reasons=["active baseline config changed", "format changed"]
+    )
+    issues_d = evaluate_new_analysis_plan_issues(plan_d)
+    iss_d = [iss for iss in issues_d if iss.category == "stale_feature_event_profile"]
+    assert len(iss_d) == 1
+    assert iss_d[0].severity == "warning"
+    assert "active baseline config changed" in iss_d[0].message
+
+    # Case E: unavailable status results in warning missing_feature_event_profile
+    plan_e = GuidedNewAnalysisDraftPlan(
+        feature_event_profile_status="unavailable"
+    )
+    issues_e = evaluate_new_analysis_plan_issues(plan_e)
+    iss_e = [iss for iss in issues_e if iss.category == "missing_feature_event_profile"]
+    assert len(iss_e) == 1
+    assert iss_e[0].severity == "warning"
+

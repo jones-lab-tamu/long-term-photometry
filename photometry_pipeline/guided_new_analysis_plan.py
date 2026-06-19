@@ -107,7 +107,12 @@ class GuidedNewAnalysisDraftPlan:
     feature_event_profile_status: str = "unavailable"  # missing / default_initialized / applied / stale / invalid / unavailable
     feature_event_profile_id: str | None = None
     feature_event_baseline_config_source: str | None = None
-    feature_event_settings_not_represented_note: str = "feature/event settings are not yet represented as new-analysis plan state"
+    feature_event_baseline_status: str | None = None
+    feature_event_values: dict[str, Any] = field(default_factory=dict)
+    feature_event_validation_issues: list[str] = field(default_factory=list)
+    feature_event_stale_reasons: list[str] = field(default_factory=list)
+    feature_event_updated_at_utc: str | None = None
+    feature_event_explicitly_applied: bool = False
 
     # output policy status
     output_policy_status: str = "unavailable"  # missing / selected / unsafe / ready / unavailable
@@ -355,12 +360,32 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
             severity="warning" if plan.feature_event_profile_status == "unavailable" else "blocking"
         ))
 
-    # 12. invalid_feature_event_profile
+    # 12. feature_event_profile_not_applied
+    elif plan.feature_event_profile_status == "default_initialized":
+        issues.append(GuidedPlanIssue(
+            category="feature_event_profile_not_applied",
+            message="Defaults are loaded, but feature/event settings have not been explicitly applied to the draft plan.",
+            severity="blocking"
+        ))
+
+    # 12b. invalid_feature_event_profile
     elif plan.feature_event_profile_status == "invalid":
+        msg = "Feature/event profile settings are invalid."
+        if plan.feature_event_validation_issues:
+            msg = f"Feature/event profile settings are invalid: {'; '.join(plan.feature_event_validation_issues)}"
         issues.append(GuidedPlanIssue(
             category="invalid_feature_event_profile",
-            message="Feature/event profile settings are invalid.",
+            message=msg,
             severity="blocking"
+        ))
+
+    # 12c. stale_feature_event_profile
+    elif plan.feature_event_profile_status == "stale":
+        reasons = "; ".join(plan.feature_event_stale_reasons) or "active baseline config changed"
+        issues.append(GuidedPlanIssue(
+            category="stale_feature_event_profile",
+            message=f"Feature/event profile is stale: {reasons}",
+            severity="warning"
         ))
 
     # 13. missing_output_policy
