@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -62,6 +63,66 @@ def _populate_fake_discovery(window: MainWindow) -> None:
     }
     window._discovery_cache = discovery
     window._populate_discovery_ui(discovery)
+
+
+class _FakeDiagnosticCacheRunner:
+    def __init__(self):
+        self.argv = None
+        self.run_dir = ""
+        self.state = main_window_module.RunnerState.IDLE
+        self.final_status_code = None
+        self.final_errors = []
+        self._running = False
+
+    def is_running(self):
+        return self._running
+
+    def set_run_dir(self, run_dir):
+        self.run_dir = run_dir
+
+    def start(self, argv, state):
+        self.argv = list(argv)
+        self.state = state
+        self._running = True
+
+    def succeed(self):
+        self.state = main_window_module.RunnerState.SUCCESS
+        self.final_status_code = "success"
+        self.final_errors = []
+        self._running = False
+
+    def fail(self, errors=None):
+        self.state = main_window_module.RunnerState.FAILED
+        self.final_status_code = "error"
+        self.final_errors = list(errors or [])
+        self._running = False
+
+
+def _configure_guided_raw_cache_setup(window: MainWindow, tmp_path, monkeypatch):
+    input_dir = tmp_path / "raw_input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    window._guided_input_dir_edit.setText(str(input_dir))
+    window._guided_output_dir_edit.setText(str(output_dir))
+    window._mode_combo.setCurrentText("both")
+    idx = window._format_combo.findText("rwd")
+    window._format_combo.setCurrentIndex(idx)
+    _populate_fake_discovery(window)
+    monkeypatch.setattr(window, "_infer_dataset_contract_overrides", lambda _fmt: {})
+    return input_dir, output_dir
+
+
+def _write_minimal_guided_cache_outputs(cache_dir):
+    phasic = cache_dir / "_analysis" / "phasic_out"
+    phasic.mkdir(parents=True)
+    (phasic / "phasic_trace_cache.h5").write_bytes(b"cache")
+    (phasic / "config_used.yaml").write_text("event_signal: dff\n", encoding="utf-8")
+    (cache_dir / "run_report.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    (cache_dir / "status.json").write_text(
+        json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
+        encoding="utf-8",
+    )
 
 
 def _make_preview_completed_run(tmp_path):
@@ -1846,6 +1907,175 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
     assert "Correction preview: not generated." in output_summary
     assert "Signal-Only F0 diagnostic: not generated." in output_summary
     assert "Load a completed run" not in output_summary
+
+
+def test_guided_diagnostic_cache_action_blocks_without_roi_discovery(window, tmp_path):
+    input_dir = tmp_path / "raw_input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Diagnostics"))
+    window._guided_input_dir_edit.setText(str(input_dir))
+    window._guided_output_dir_edit.setText(str(output_dir))
+    window._refresh_guided_diagnostic_cache_panel()
+
+    assert window._guided_diagnostic_cache_build_btn.text() == "Build diagnostic cache"
+    assert window._guided_diagnostic_cache_build_btn.isEnabled() is False
+    assert "Run ROI discovery" in window._guided_diagnostic_cache_readiness_label.text()
+    assert window._guided_diagnostic_cache_record is None
+    assert window._current_run_dir == ""
+
+
+def test_guided_diagnostic_cache_panel_text_uses_preliminary_not_final_language(window):
+    panel = window._guided_workflow_tab.findChild(QGroupBox, "guidedDiagnosticCachePanel")
+    assert panel is not None
+    visible_text = "\n".join(
+        label.text()
+        for label in panel.findChildren(QLabel)
+        if label.text()
+    )
+    visible_text += "\n" + window._guided_diagnostic_cache_build_btn.text()
+
+    assert "Tuning Prep" not in visible_text
+    assert "preliminary" in visible_text.lower()
+    assert "not final" in visible_text.lower() or "not the final production analysis" in visible_text.lower()
+    assert "diagnostic" in visible_text.lower()
+
+
+def test_guided_diagnostic_cache_build_launches_tuning_prep_without_completed_run(window, tmp_path, monkeypatch):
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    fake_runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = fake_runner
+    before_run_dir = window._current_run_dir
+
+    window._guided_diagnostic_cache_build_btn.click()
+
+    assert fake_runner.argv is not None
+    assert fake_runner.run_dir
+    cache_dir = tmp_path / "output" / "_guided_diagnostic_cache"
+    assert str(fake_runner.run_dir).startswith(str(cache_dir))
+    assert "--run-type" in fake_runner.argv
+    assert fake_runner.argv[fake_runner.argv.index("--run-type") + 1] == "tuning_prep"
+    assert "--include-rois" in fake_runner.argv
+    assert fake_runner.argv[fake_runner.argv.index("--include-rois") + 1] == "CH1,CH2,CH3"
+    assert "--out" in fake_runner.argv
+    assert fake_runner.argv[fake_runner.argv.index("--out") + 1] == fake_runner.run_dir
+    assert window._current_run_dir == before_run_dir
+    request_json = tmp_path / "output" / "_guided_diagnostic_cache" / Path(fake_runner.run_dir).name / "guided_diagnostic_cache_request.json"
+    assert request_json.exists()
+    request = json.loads(request_json.read_text(encoding="utf-8"))
+    assert request["diagnostic_scope"] == "full_selected_input"
+    assert request["included_roi_ids"] == ["CH1", "CH2", "CH3"]
+    assert request["baseline_config_source_kind"] == "lab_default"
+    assert "Diagnostic cache building" in window._guided_diagnostic_cache_status_label.text()
+    assert window._guided_diagnostic_cache_record is None
+    assert window._report_viewer.has_loaded_results() is False
+
+
+def test_guided_diagnostic_cache_success_rewrites_identity_files_after_cleanup(window, tmp_path, monkeypatch):
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    fake_runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = fake_runner
+
+    window._guided_diagnostic_cache_build_btn.click()
+    cache_path = Path(fake_runner.run_dir)
+    prelaunch_request = cache_path / "guided_diagnostic_cache_request.json"
+    assert prelaunch_request.exists()
+    prelaunch_request.unlink()
+    _write_minimal_guided_cache_outputs(cache_path)
+    fake_runner.succeed()
+    window._on_guided_diagnostic_cache_finished(0)
+
+    assert window._guided_diagnostic_cache_request is not None
+    assert window._guided_diagnostic_cache_record is not None
+    assert window._guided_diagnostic_cache_status.ok is True
+    assert "Diagnostic cache ready" in window._guided_diagnostic_cache_status_label.text()
+    summary = window._guided_diagnostic_cache_summary_label.text()
+    assert "preliminary; not final analysis" in summary
+    assert "ROI count: 3" in summary
+    assert str(cache_path) in summary
+    assert (cache_path / "guided_diagnostic_cache_request.json").exists()
+    assert (cache_path / "guided_diagnostic_cache_artifact.json").exists()
+    assert (cache_path / "guided_diagnostic_cache_provenance.json").exists()
+    request = json.loads((cache_path / "guided_diagnostic_cache_request.json").read_text(encoding="utf-8"))
+    artifact = json.loads((cache_path / "guided_diagnostic_cache_artifact.json").read_text(encoding="utf-8"))
+    provenance = json.loads((cache_path / "guided_diagnostic_cache_provenance.json").read_text(encoding="utf-8"))
+    assert request["included_roi_ids"] == ["CH1", "CH2", "CH3"]
+    assert artifact["purpose"] == "guided_diagnostic_cache"
+    assert artifact["production_analysis"] is False
+    assert artifact["included_roi_ids"] == ["CH1", "CH2", "CH3"]
+    assert provenance["purpose"] == "guided_diagnostic_cache"
+    assert provenance["production_analysis"] is False
+    assert window._current_run_dir == ""
+    assert window._report_viewer.has_loaded_results() is False
+
+
+def test_guided_diagnostic_cache_missing_request_json_after_finish_blocks_ready(window, tmp_path, monkeypatch):
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    fake_runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = fake_runner
+    window._guided_diagnostic_cache_build_btn.click()
+    cache_path = Path(fake_runner.run_dir)
+    _write_minimal_guided_cache_outputs(cache_path)
+    fake_runner.succeed()
+
+    def _raise_request_write(_path, _request):
+        raise OSError("request write blocked")
+
+    monkeypatch.setattr(main_window_module, "write_build_request_json", _raise_request_write)
+    window._on_guided_diagnostic_cache_finished(0)
+
+    assert window._guided_diagnostic_cache_record is None
+    assert window._guided_diagnostic_cache_status.ok is False
+    assert "request JSON could not be written" in window._guided_diagnostic_cache_status_label.text()
+    assert not (cache_path / "guided_diagnostic_cache_artifact.json").exists()
+    assert not (cache_path / "guided_diagnostic_cache_provenance.json").exists()
+
+
+def test_guided_diagnostic_cache_missing_identity_file_blocks_ready(window, tmp_path, monkeypatch):
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    fake_runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = fake_runner
+    window._guided_diagnostic_cache_build_btn.click()
+    cache_path = Path(fake_runner.run_dir)
+    _write_minimal_guided_cache_outputs(cache_path)
+    fake_runner.succeed()
+
+    real_write_json_file = main_window_module.write_json_file
+
+    def _skip_provenance(path, payload):
+        if str(path).endswith("guided_diagnostic_cache_provenance.json"):
+            return None
+        return real_write_json_file(path, payload)
+
+    monkeypatch.setattr(main_window_module, "write_json_file", _skip_provenance)
+    window._on_guided_diagnostic_cache_finished(0)
+
+    assert window._guided_diagnostic_cache_record is None
+    assert window._guided_diagnostic_cache_status.ok is False
+    assert "identity/provenance files are missing" in window._guided_diagnostic_cache_status_label.text()
+    assert (cache_path / "guided_diagnostic_cache_request.json").exists()
+    assert (cache_path / "guided_diagnostic_cache_artifact.json").exists()
+    assert not (cache_path / "guided_diagnostic_cache_provenance.json").exists()
+
+
+def test_guided_diagnostic_cache_success_then_setup_change_marks_stale(window, tmp_path, monkeypatch):
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    fake_runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = fake_runner
+    window._guided_diagnostic_cache_build_btn.click()
+    cache_path = Path(fake_runner.run_dir)
+    _write_minimal_guided_cache_outputs(cache_path)
+    fake_runner.succeed()
+    window._on_guided_diagnostic_cache_finished(0)
+
+    item = window._guided_roi_list.item(2)
+    item.setCheckState(Qt.Unchecked)
+    window._refresh_guided_diagnostic_cache_panel()
+
+    assert "Diagnostic cache stale" in window._guided_diagnostic_cache_status_label.text()
+    assert "ROI inclusion/exclusion changed" in window._guided_diagnostic_cache_summary_label.text()
+    assert window._guided_diagnostic_cache_record is not None
 
 
 def test_guided_correction_preview_panel_populates_from_loaded_completed_run(window, tmp_path, monkeypatch):

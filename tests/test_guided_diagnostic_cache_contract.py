@@ -218,6 +218,24 @@ def test_artifact_validation_fails_when_config_used_missing(tmp_path):
     assert "config_used_path" in status.missing_artifacts
 
 
+def test_artifact_validation_can_require_request_json(tmp_path):
+    request_path = tmp_path / "output" / "_guided_diagnostic_cache" / "cache_001" / "guided_diagnostic_cache_request.json"
+    request_path.parent.mkdir(parents=True)
+    write_build_request_json(request_path, _request(tmp_path))
+    record = _record(tmp_path, request_json_path=str(request_path))
+
+    default_status = validate_diagnostic_cache_artifact(record)
+    required_present_status = validate_diagnostic_cache_artifact(record, require_request_json=True)
+    request_path.unlink()
+    required_status = validate_diagnostic_cache_artifact(record, require_request_json=True)
+
+    assert default_status.ok
+    assert required_present_status.ok
+    assert not required_status.ok
+    assert required_status.code == "missing_artifacts"
+    assert "request_json_path" in required_status.missing_artifacts
+
+
 def test_artifact_validation_fails_if_purpose_is_not_diagnostic_cache(tmp_path):
     record = _record(tmp_path, purpose="completed_run")
 

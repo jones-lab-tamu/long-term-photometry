@@ -91,6 +91,22 @@ from photometry_pipeline.feature_event_config import validate_feature_event_conf
 from photometry_pipeline.workflow_safety import (
     FeatureEventDefaultsResult,
     resolve_feature_event_defaults,
+    validate_format_mode_compatibility,
+    validate_output_write_safety,
+)
+from photometry_pipeline.guided_diagnostic_cache import (
+    DIAGNOSTIC_CACHE_PURPOSE,
+    DIAGNOSTIC_CACHE_SCOPE_FULL,
+    DIAGNOSTIC_CACHE_SCHEMA_VERSION,
+    DiagnosticCacheBuildRequest,
+    DiagnosticCacheContractError,
+    DiagnosticCacheStatus,
+    artifact_record_from_request,
+    compare_request_to_artifact,
+    validate_diagnostic_cache_artifact,
+    write_artifact_record_json,
+    write_build_request_json,
+    write_json_file,
 )
 from photometry_pipeline.preview.correction_preview import (
     GUIDED_REFERENCE_PREVIEW_METHODS,
@@ -1206,6 +1222,20 @@ class MainWindow(QMainWindow):
         self._runner.error.connect(self._on_run_error)
         self._runner.state_changed.connect(self._on_state_changed)
         self._runner.finished.connect(self._on_run_finished_failsafe)
+        self._guided_diagnostic_cache_runner = PipelineRunner()
+        self._guided_diagnostic_cache_runner.log_line.connect(self._append_log)
+        self._guided_diagnostic_cache_runner.error.connect(self._on_guided_diagnostic_cache_error)
+        self._guided_diagnostic_cache_runner.finished.connect(self._on_guided_diagnostic_cache_finished)
+        self._guided_diagnostic_cache_request = None
+        self._guided_diagnostic_cache_record = None
+        self._guided_diagnostic_cache_status = DiagnosticCacheStatus(
+            ok=False,
+            code="not_built",
+            message="Diagnostic cache has not been built.",
+        )
+        self._guided_diagnostic_cache_pending_request = None
+        self._guided_diagnostic_cache_pending_cache_id = ""
+        self._guided_diagnostic_cache_pending_path = ""
 
         # Current run directory (set before each run)
         self._current_run_dir = ""
@@ -2678,6 +2708,55 @@ class MainWindow(QMainWindow):
         actions_layout.setContentsMargins(10, 10, 10, 10)
         actions_layout.setSpacing(10)
 
+        cache_group = QGroupBox("Preliminary diagnostic cache")
+        cache_group.setObjectName("guidedDiagnosticCachePanel")
+        cache_layout = QVBoxLayout(cache_group)
+        cache_layout.setContentsMargins(10, 10, 10, 10)
+        cache_layout.setSpacing(8)
+
+        cache_intro = QLabel(
+            "Build preliminary diagnostic artifacts from the selected raw input for correction review "
+            "and strategy decisions. This is not the final production analysis."
+        )
+        cache_intro.setObjectName("guidedDiagnosticCacheIntro")
+        cache_intro.setProperty("guidedSecondaryText", True)
+        cache_intro.setWordWrap(True)
+        cache_layout.addWidget(cache_intro)
+
+        self._guided_diagnostic_cache_status_label = QLabel(
+            "Diagnostic cache: not built."
+        )
+        self._guided_diagnostic_cache_status_label.setObjectName("guidedDiagnosticCacheStatus")
+        self._guided_diagnostic_cache_status_label.setProperty("guidedStatusPill", True)
+        self._guided_diagnostic_cache_status_label.setWordWrap(True)
+        self._guided_diagnostic_cache_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_diagnostic_cache_status_label)
+        cache_layout.addWidget(self._guided_diagnostic_cache_status_label)
+
+        self._guided_diagnostic_cache_readiness_label = QLabel("")
+        self._guided_diagnostic_cache_readiness_label.setObjectName("guidedDiagnosticCacheReadiness")
+        self._guided_diagnostic_cache_readiness_label.setProperty("guidedSecondaryText", True)
+        self._guided_diagnostic_cache_readiness_label.setWordWrap(True)
+        self._guided_diagnostic_cache_readiness_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_diagnostic_cache_readiness_label)
+        cache_layout.addWidget(self._guided_diagnostic_cache_readiness_label)
+
+        self._guided_diagnostic_cache_build_btn = QPushButton("Build diagnostic cache")
+        self._guided_diagnostic_cache_build_btn.setObjectName("guidedDiagnosticCacheBuildButton")
+        self._guided_diagnostic_cache_build_btn.clicked.connect(self._on_build_guided_diagnostic_cache)
+        cache_layout.addWidget(self._guided_diagnostic_cache_build_btn, alignment=Qt.AlignLeft)
+
+        self._guided_diagnostic_cache_summary_label = QLabel(
+            "Diagnostic cache: none.\nPreliminary cache only; not final analysis."
+        )
+        self._guided_diagnostic_cache_summary_label.setObjectName("guidedDiagnosticCacheSummary")
+        self._guided_diagnostic_cache_summary_label.setProperty("guidedSecondaryText", True)
+        self._guided_diagnostic_cache_summary_label.setWordWrap(True)
+        self._guided_diagnostic_cache_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_diagnostic_cache_summary_label)
+        cache_layout.addWidget(self._guided_diagnostic_cache_summary_label)
+        actions_layout.addWidget(cache_group)
+
         preview_group = QGroupBox("Correction preview comparison")
         preview_group.setObjectName("guidedCorrectionPreviewPanel")
         preview_layout = QVBoxLayout(preview_group)
@@ -3748,7 +3827,580 @@ class MainWindow(QMainWindow):
             for slot, label in self._guided_diagnostics_slot_labels.items():
                 suffix = "coming later / read-only evidence" if "Decision-Support Audit" in slot else "not generated"
                 label.setText(f"{slot}: {suffix}")
+        self._refresh_guided_diagnostic_cache_panel()
         self._refresh_guided_confirm_strategy_panel()
+
+    def _guided_selected_roi_ids(self) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        if getattr(self, "_discovery_cache", None) is None:
+            return (), (), ()
+        all_rois: list[str] = []
+        included: list[str] = []
+        excluded: list[str] = []
+        for idx in range(self._roi_list.count()):
+            item = self._roi_list.item(idx)
+            if item is None:
+                continue
+            roi_id = str(item.text()).strip()
+            if not roi_id:
+                continue
+            all_rois.append(roi_id)
+            if item.checkState() == Qt.Checked:
+                included.append(roi_id)
+            else:
+                excluded.append(roi_id)
+        return tuple(all_rois), tuple(included), tuple(excluded)
+
+    def _guided_diagnostic_cache_config_identity(self, config_path: str) -> str:
+        path = str(config_path or "").strip()
+        if not path or not os.path.isfile(path):
+            return ""
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return f"sha256:{digest.hexdigest()}"
+
+    def _guided_diagnostic_cache_id(self, request_payload: dict[str, object]) -> str:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        signature = hashlib.sha256(
+            json.dumps(request_payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:10]
+        return f"diagcache_{stamp}_{signature}"
+
+    def _guided_diagnostic_cache_request_payload(self) -> dict[str, object]:
+        all_rois, included, excluded = self._guided_selected_roi_ids()
+        return {
+            "raw_input_path": self._input_dir.text().strip(),
+            "input_format": self._format_combo.currentText(),
+            "resolved_format": (
+                str(self._discovery_cache.get("resolved_format", "") or "")
+                if getattr(self, "_discovery_cache", None) is not None
+                else ""
+            ),
+            "acquisition_mode": self._selected_acquisition_mode(),
+            "sessions_per_hour": self._sph_edit.text().strip(),
+            "session_duration_sec": self._duration_edit.text().strip(),
+            "continuous_window_sec": float(self._continuous_window_sec_spin.value()),
+            "continuous_step_sec": float(self._continuous_window_sec_spin.value()),
+            "allow_partial_final_window": bool(self._allow_partial_final_window_cb.isChecked()),
+            "all_roi_ids": list(all_rois),
+            "included_roi_ids": list(included),
+            "excluded_roi_ids": list(excluded),
+            "output_base": self._output_dir.text().strip(),
+            "baseline_config_source_path": self._active_config_source_path(),
+            "baseline_config_source_kind": (
+                "custom_config" if self._is_custom_config_enabled() else "lab_default"
+            ),
+            "diagnostic_scope": DIAGNOSTIC_CACHE_SCOPE_FULL,
+        }
+
+    def _build_guided_diagnostic_cache_request(
+        self,
+        *,
+        cache_id: str | None = None,
+        cache_root_path: str | None = None,
+    ) -> DiagnosticCacheBuildRequest:
+        payload = self._guided_diagnostic_cache_request_payload()
+        selected_cache_id = cache_id or self._guided_diagnostic_cache_id(payload)
+        output_base = str(payload["output_base"])
+        requested_cache_path = (
+            str(cache_root_path)
+            if cache_root_path
+            else os.path.join(output_base, "_guided_diagnostic_cache", selected_cache_id)
+        )
+        sessions_text = str(payload["sessions_per_hour"] or "").strip()
+        duration_text = str(payload["session_duration_sec"] or "").strip()
+        config_path = str(payload["baseline_config_source_path"] or "").strip()
+        return DiagnosticCacheBuildRequest(
+            raw_input_path=str(payload["raw_input_path"]),
+            input_format=str(payload["input_format"]),
+            acquisition_mode=str(payload["acquisition_mode"]),
+            sessions_per_hour=int(sessions_text) if sessions_text else None,
+            session_duration_sec=float(duration_text) if duration_text else None,
+            continuous_window_sec=float(payload["continuous_window_sec"]),
+            continuous_step_sec=float(payload["continuous_step_sec"]),
+            allow_partial_final_window=bool(payload["allow_partial_final_window"]),
+            included_roi_ids=tuple(str(x) for x in payload["included_roi_ids"]),
+            excluded_roi_ids=tuple(str(x) for x in payload["excluded_roi_ids"]),
+            baseline_config_source_path=config_path,
+            baseline_config_source_kind=str(payload["baseline_config_source_kind"]),
+            config_identity=self._guided_diagnostic_cache_config_identity(config_path),
+            diagnostic_scope=DIAGNOSTIC_CACHE_SCOPE_FULL,
+            preview_first_n=None,
+            output_base=output_base,
+            requested_cache_path=requested_cache_path,
+        )
+
+    def _guided_diagnostic_cache_readiness(
+        self,
+        *,
+        cache_id: str | None = None,
+        cache_root_path: str | None = None,
+        allow_existing_target: bool = False,
+    ) -> tuple[DiagnosticCacheStatus, DiagnosticCacheBuildRequest | None, str]:
+        input_dir = self._input_dir.text().strip()
+        if not input_dir:
+            return DiagnosticCacheStatus(False, "missing_input", "Input directory is required."), None, ""
+        if not os.path.isdir(input_dir):
+            return (
+                DiagnosticCacheStatus(False, "input_missing", f"Input directory does not exist: {input_dir}"),
+                None,
+                "",
+            )
+        output_base = self._output_dir.text().strip()
+        if not output_base:
+            return DiagnosticCacheStatus(False, "missing_output", "Output directory path is required."), None, ""
+        gui_error = self._validate_gui_inputs()
+        if gui_error:
+            return DiagnosticCacheStatus(False, "invalid_setup", gui_error), None, ""
+        if not is_isosbestic_active(self._mode_combo.currentText()):
+            return (
+                DiagnosticCacheStatus(
+                    False,
+                    "phasic_mode_required",
+                    "Diagnostic cache requires phasic-capable mode ('both' or 'phasic') "
+                    "for preliminary correction-review artifacts.",
+                ),
+                None,
+                "",
+            )
+        if getattr(self, "_discovery_cache", None) is None:
+            return (
+                DiagnosticCacheStatus(
+                    False,
+                    "roi_discovery_required",
+                    "Run ROI discovery before building a Guided diagnostic cache.",
+                ),
+                None,
+                "",
+            )
+        all_rois, included, _excluded = self._guided_selected_roi_ids()
+        if not all_rois:
+            return (
+                DiagnosticCacheStatus(False, "no_discovered_rois", "ROI discovery returned no ROIs."),
+                None,
+                "",
+            )
+        if not included:
+            return (
+                DiagnosticCacheStatus(False, "zero_included_rois", "Select at least one ROI for the diagnostic cache."),
+                None,
+                "",
+            )
+        resolved_format = str(self._discovery_cache.get("resolved_format", "") or "") if self._discovery_cache else ""
+        fmt_status = validate_format_mode_compatibility(
+            input_format=self._format_combo.currentText(),
+            acquisition_mode=self._selected_acquisition_mode(),
+            resolved_format=resolved_format or None,
+        )
+        if not fmt_status.ok:
+            return DiagnosticCacheStatus(False, fmt_status.code, fmt_status.message), None, ""
+        try:
+            resolve_feature_event_defaults(
+                config_source_path=self._active_config_source_path(),
+                baseline_source_kind=(
+                    "custom_config" if self._is_custom_config_enabled() else "lab_default"
+                ),
+                fallback_config=None,
+                allow_fallback=False,
+            )
+        except Exception as exc:
+            return (
+                DiagnosticCacheStatus(False, "invalid_active_baseline", f"Active baseline config is invalid: {exc}"),
+                None,
+                "",
+            )
+        try:
+            request = self._build_guided_diagnostic_cache_request(
+                cache_id=cache_id,
+                cache_root_path=cache_root_path,
+            )
+        except (DiagnosticCacheContractError, ValueError) as exc:
+            return DiagnosticCacheStatus(False, "invalid_request", str(exc)), None, ""
+        safety = validate_output_write_safety(
+            source_root=input_dir,
+            output_base=output_base,
+            target_path=request.requested_cache_path,
+            operation_kind="diagnostic_cache",
+            allow_existing_target=allow_existing_target,
+            overwrite=False,
+        )
+        if not safety.ok:
+            return DiagnosticCacheStatus(False, safety.code, safety.message), None, ""
+        return (
+            DiagnosticCacheStatus(True, "ready_to_build", "Diagnostic cache build is ready.", warnings=safety.warnings),
+            request,
+            request.requested_cache_path,
+        )
+
+    def _refresh_guided_diagnostic_cache_panel(self) -> None:
+        if not hasattr(self, "_guided_diagnostic_cache_status_label"):
+            return
+        runner = getattr(self, "_guided_diagnostic_cache_runner", None)
+        if runner is not None and runner.is_running():
+            self._guided_diagnostic_cache_status_label.setText(
+                "Diagnostic cache building (preliminary; not final analysis)."
+            )
+            self._guided_diagnostic_cache_readiness_label.setText("Build in progress.")
+            self._guided_diagnostic_cache_build_btn.setEnabled(False)
+            self._guided_diagnostic_cache_summary_label.setText(
+                "Diagnostic cache build in progress.\n"
+                f"Cache path: {self._guided_diagnostic_cache_pending_path or '(pending)'}\n"
+                "No completed-run state has been changed."
+            )
+            return
+
+        status, _request, _path = self._guided_diagnostic_cache_readiness()
+        record = getattr(self, "_guided_diagnostic_cache_record", None)
+        if record is None:
+            current_status = getattr(self, "_guided_diagnostic_cache_status", None)
+            if (
+                isinstance(current_status, DiagnosticCacheStatus)
+                and current_status.code
+                not in {"not_built", "ready_to_build"}
+            ):
+                self._guided_diagnostic_cache_status_label.setText(current_status.message)
+                readiness_text = (
+                    "No diagnostic cache is ready."
+                    if not current_status.ok
+                    else current_status.message
+                )
+                self._guided_diagnostic_cache_readiness_label.setText(readiness_text)
+                self._guided_diagnostic_cache_build_btn.setEnabled(status.ok)
+                self._guided_diagnostic_cache_summary_label.setText(
+                    "Diagnostic cache: none ready.\n"
+                    "Preliminary cache only; not final analysis."
+                )
+                return
+            self._guided_diagnostic_cache_status_label.setText("Diagnostic cache: not built.")
+            self._guided_diagnostic_cache_readiness_label.setText(status.message)
+            self._guided_diagnostic_cache_build_btn.setEnabled(status.ok)
+            self._guided_diagnostic_cache_summary_label.setText(
+                "Diagnostic cache: none.\nPreliminary cache only; not final analysis."
+            )
+            return
+
+        stale_status = None
+        try:
+            current_request = self._build_guided_diagnostic_cache_request(
+                cache_id=record.cache_id,
+                cache_root_path=record.cache_root_path,
+            )
+            stale_status = compare_request_to_artifact(current_request, record)
+        except Exception as exc:
+            stale_status = DiagnosticCacheStatus(
+                False,
+                "stale_check_failed",
+                f"Diagnostic cache state could not be compared with the current setup: {exc}",
+                stale=True,
+                stale_reasons=("current setup could not be compared",),
+            )
+
+        if stale_status.ok:
+            self._guided_diagnostic_cache_status_label.setText(
+                "Diagnostic cache ready (preliminary; not final analysis)."
+            )
+        else:
+            reasons = ", ".join(stale_status.stale_reasons) or stale_status.message
+            self._guided_diagnostic_cache_status_label.setText(
+                f"Diagnostic cache stale: {reasons}"
+            )
+        self._guided_diagnostic_cache_readiness_label.setText(status.message)
+        self._guided_diagnostic_cache_build_btn.setEnabled(status.ok)
+        self._guided_diagnostic_cache_summary_label.setText(
+            self._guided_diagnostic_cache_summary_text(record, stale_status)
+        )
+
+    def _guided_diagnostic_cache_summary_text(
+        self,
+        record,
+        status: DiagnosticCacheStatus,
+    ) -> str:
+        state = "current" if status.ok else "stale"
+        lines = [
+            f"Diagnostic cache: {state} (preliminary; not final analysis).",
+            f"Cache ID: {record.cache_id}",
+            f"ROI count: {len(record.included_roi_ids)}",
+            f"Scope: {DIAGNOSTIC_CACHE_SCOPE_FULL}",
+            f"Cache path: {record.cache_root_path}",
+            f"Created: {record.created_at_utc or '(unknown)'}",
+        ]
+        if status.stale_reasons:
+            lines.append("Stale reasons: " + "; ".join(status.stale_reasons))
+        return "\n".join(lines)
+
+    def _build_guided_diagnostic_cache_argv(
+        self,
+        request: DiagnosticCacheBuildRequest,
+    ) -> list[str]:
+        previous_run_dir = self._current_run_dir
+        try:
+            spec = self._build_run_spec(validate_only=False)
+        finally:
+            self._current_run_dir = previous_run_dir
+        spec.run_dir = request.requested_cache_path
+        spec.run_profile = "tuning_prep"
+        spec.validate_only = False
+        spec.preview_first_n = request.preview_first_n
+        spec.include_roi_ids = list(request.included_roi_ids)
+        spec.exclude_roi_ids = None
+        spec.overwrite = True
+        os.makedirs(request.requested_cache_path, exist_ok=False)
+        write_build_request_json(
+            os.path.join(request.requested_cache_path, "guided_diagnostic_cache_request.json"),
+            request,
+        )
+        config_path = spec.generate_derived_config(request.requested_cache_path)
+        RunSpec.validate_effective_config(config_path)
+        argv = spec.build_runner_argv()
+        spec.write_gui_run_spec(request.requested_cache_path)
+        spec.write_command_invoked(request.requested_cache_path, argv)
+        return argv
+
+    def _on_build_guided_diagnostic_cache(self) -> None:
+        runner = getattr(self, "_guided_diagnostic_cache_runner", None)
+        if runner is not None and runner.is_running():
+            return
+        cache_id = self._guided_diagnostic_cache_id(self._guided_diagnostic_cache_request_payload())
+        status, request, cache_path = self._guided_diagnostic_cache_readiness(cache_id=cache_id)
+        if not status.ok or request is None:
+            self._guided_diagnostic_cache_status = status
+            self._guided_diagnostic_cache_status_label.setText(
+                f"Diagnostic cache blocked: {status.message}"
+            )
+            self._guided_diagnostic_cache_readiness_label.setText(status.message)
+            self._guided_diagnostic_cache_build_btn.setEnabled(False)
+            return
+        try:
+            argv = self._build_guided_diagnostic_cache_argv(request)
+        except Exception as exc:
+            self._guided_diagnostic_cache_status = DiagnosticCacheStatus(
+                False,
+                "build_prepare_failed",
+                f"Diagnostic cache build could not be prepared: {exc}",
+            )
+            self._guided_diagnostic_cache_status_label.setText(
+                self._guided_diagnostic_cache_status.message
+            )
+            self._guided_diagnostic_cache_readiness_label.setText(
+                "No diagnostic cache was marked ready."
+            )
+            self._refresh_guided_diagnostic_cache_panel()
+            return
+
+        self._guided_diagnostic_cache_pending_request = request
+        self._guided_diagnostic_cache_pending_cache_id = cache_id
+        self._guided_diagnostic_cache_pending_path = cache_path
+        self._guided_diagnostic_cache_status = DiagnosticCacheStatus(
+            False,
+            "building",
+            "Diagnostic cache build is running.",
+        )
+        self._guided_diagnostic_cache_status_label.setText(
+            "Diagnostic cache building (preliminary; not final analysis)."
+        )
+        self._guided_diagnostic_cache_readiness_label.setText("Build in progress.")
+        self._guided_diagnostic_cache_build_btn.setEnabled(False)
+        self._append_run_log(f"--- Guided diagnostic cache build: {cache_id} ---")
+        self._append_run_log(f"Cache path: {cache_path}")
+        runner.set_run_dir(cache_path)
+        runner.start(argv, state=RunnerState.RUNNING)
+
+    def _on_guided_diagnostic_cache_error(self, msg: str) -> None:
+        self._guided_diagnostic_cache_status = DiagnosticCacheStatus(
+            False,
+            "launch_error",
+            f"Diagnostic cache launch failed: {msg}",
+        )
+        if hasattr(self, "_guided_diagnostic_cache_status_label"):
+            self._guided_diagnostic_cache_status_label.setText(self._guided_diagnostic_cache_status.message)
+            self._guided_diagnostic_cache_readiness_label.setText(
+                "No diagnostic cache was marked ready."
+            )
+
+    def _guided_diagnostic_cache_identity_files_status(
+        self,
+        *,
+        artifact_path: str,
+        provenance_path: str,
+    ) -> DiagnosticCacheStatus:
+        missing = [
+            label
+            for label, path in (
+                ("guided_diagnostic_cache_artifact.json", artifact_path),
+                ("guided_diagnostic_cache_provenance.json", provenance_path),
+            )
+            if not path or not os.path.isfile(path)
+        ]
+        if missing:
+            return DiagnosticCacheStatus(
+                False,
+                "missing_identity_files",
+                "Diagnostic cache identity/provenance files are missing.",
+                missing_artifacts=tuple(missing),
+            )
+        try:
+            artifact_payload = json.loads(Path(artifact_path).read_text(encoding="utf-8"))
+            provenance_payload = json.loads(Path(provenance_path).read_text(encoding="utf-8"))
+        except Exception as exc:
+            return DiagnosticCacheStatus(
+                False,
+                "invalid_identity_json",
+                f"Diagnostic cache identity/provenance JSON could not be read: {exc}",
+            )
+        if artifact_payload.get("purpose") != DIAGNOSTIC_CACHE_PURPOSE:
+            return DiagnosticCacheStatus(
+                False,
+                "invalid_artifact_identity",
+                "Diagnostic cache artifact identity is invalid.",
+            )
+        if provenance_payload.get("purpose") != DIAGNOSTIC_CACHE_PURPOSE:
+            return DiagnosticCacheStatus(
+                False,
+                "invalid_provenance_identity",
+                "Diagnostic cache provenance identity is invalid.",
+            )
+        if bool(artifact_payload.get("production_analysis")):
+            return DiagnosticCacheStatus(
+                False,
+                "artifact_marked_production",
+                "Diagnostic cache artifact must not be marked as production analysis.",
+            )
+        if bool(provenance_payload.get("production_analysis")):
+            return DiagnosticCacheStatus(
+                False,
+                "provenance_marked_production",
+                "Diagnostic cache provenance must not be marked as production analysis.",
+            )
+        return DiagnosticCacheStatus(True, "ok", "Diagnostic cache identity/provenance files are present.")
+
+    def _on_guided_diagnostic_cache_finished(self, _exit_code: int) -> None:
+        request = getattr(self, "_guided_diagnostic_cache_pending_request", None)
+        cache_id = getattr(self, "_guided_diagnostic_cache_pending_cache_id", "")
+        runner = getattr(self, "_guided_diagnostic_cache_runner", None)
+        if request is None or runner is None:
+            return
+        try:
+            state = runner.state
+            if state != RunnerState.SUCCESS:
+                detail = runner.final_status_code or state.value
+                errors = "; ".join(str(x) for x in getattr(runner, "final_errors", []) or [])
+                message = f"Diagnostic cache build failed: {detail}"
+                if errors:
+                    message += f" ({errors})"
+                self._guided_diagnostic_cache_status = DiagnosticCacheStatus(False, "build_failed", message)
+                self._guided_diagnostic_cache_status_label.setText(message)
+                self._guided_diagnostic_cache_readiness_label.setText(
+                    "No diagnostic cache was marked ready. Partial artifacts may remain in the cache folder."
+                )
+                return
+
+            cache_root = request.requested_cache_path
+            request_json_path = os.path.join(cache_root, "guided_diagnostic_cache_request.json")
+            try:
+                write_build_request_json(request_json_path, request)
+            except Exception as exc:
+                self._guided_diagnostic_cache_status = DiagnosticCacheStatus(
+                    False,
+                    "request_restore_failed",
+                    f"Diagnostic cache request JSON could not be written after completion: {exc}",
+                )
+                self._guided_diagnostic_cache_status_label.setText(
+                    self._guided_diagnostic_cache_status.message
+                )
+                self._guided_diagnostic_cache_readiness_label.setText(
+                    "No diagnostic cache was marked ready."
+                )
+                return
+            record = artifact_record_from_request(
+                request,
+                cache_id=cache_id,
+                cache_root_path=cache_root,
+                phasic_trace_cache_path=os.path.join(cache_root, "_analysis", "phasic_out", "phasic_trace_cache.h5"),
+                config_used_path=os.path.join(cache_root, "_analysis", "phasic_out", "config_used.yaml"),
+                status_marker_path=os.path.join(cache_root, "status.json"),
+                run_report_path=os.path.join(cache_root, "run_report.json"),
+                effective_config_path=os.path.join(cache_root, "config_effective.yaml"),
+                request_json_path=request_json_path,
+                roi_inventory=self._guided_selected_roi_ids()[0],
+                session_chunk_inventory_summary={
+                    "source_setup_signature_payload": request.source_setup_signature_payload(),
+                    "diagnostic_scope_signature_payload": request.diagnostic_scope_signature_payload(),
+                    "preliminary_cache": True,
+                    "production_analysis": False,
+                },
+            )
+            artifact_status = validate_diagnostic_cache_artifact(
+                record,
+                require_request_json=True,
+            )
+            if not artifact_status.ok:
+                self._guided_diagnostic_cache_status = artifact_status
+                self._guided_diagnostic_cache_status_label.setText(
+                    "Diagnostic cache build finished but required artifacts are missing."
+                )
+                self._guided_diagnostic_cache_readiness_label.setText(artifact_status.message)
+                return
+            artifact_path = os.path.join(cache_root, "guided_diagnostic_cache_artifact.json")
+            provenance_path = os.path.join(cache_root, "guided_diagnostic_cache_provenance.json")
+            try:
+                write_artifact_record_json(artifact_path, record)
+                write_json_file(
+                    provenance_path,
+                    {
+                        "schema_version": DIAGNOSTIC_CACHE_SCHEMA_VERSION,
+                        "purpose": DIAGNOSTIC_CACHE_PURPOSE,
+                        "preliminary_cache": True,
+                        "production_analysis": False,
+                        "build_request": request.to_json_dict(),
+                        "artifact": record.to_json_dict(),
+                    },
+                )
+            except Exception as exc:
+                self._guided_diagnostic_cache_status = DiagnosticCacheStatus(
+                    False,
+                    "identity_write_failed",
+                    f"Diagnostic cache identity/provenance files could not be written: {exc}",
+                )
+                self._guided_diagnostic_cache_status_label.setText(
+                    self._guided_diagnostic_cache_status.message
+                )
+                self._guided_diagnostic_cache_readiness_label.setText(
+                    "No diagnostic cache was marked ready."
+                )
+                return
+            identity_status = self._guided_diagnostic_cache_identity_files_status(
+                artifact_path=artifact_path,
+                provenance_path=provenance_path,
+            )
+            if not identity_status.ok:
+                self._guided_diagnostic_cache_status = identity_status
+                self._guided_diagnostic_cache_status_label.setText(identity_status.message)
+                self._guided_diagnostic_cache_readiness_label.setText(
+                    "No diagnostic cache was marked ready."
+                )
+                return
+            self._guided_diagnostic_cache_request = request
+            self._guided_diagnostic_cache_record = record
+            self._guided_diagnostic_cache_status = DiagnosticCacheStatus(
+                True,
+                "ready",
+                "Diagnostic cache ready.",
+            )
+            self._guided_diagnostic_cache_status_label.setText(
+                "Diagnostic cache ready (preliminary; not final analysis)."
+            )
+            self._guided_diagnostic_cache_readiness_label.setText(
+                "Diagnostic cache artifact validated. It is not a completed production run."
+            )
+            self._guided_diagnostic_cache_summary_label.setText(
+                self._guided_diagnostic_cache_summary_text(record, self._guided_diagnostic_cache_status)
+            )
+        finally:
+            self._guided_diagnostic_cache_pending_request = None
+            self._guided_diagnostic_cache_pending_cache_id = ""
+            self._guided_diagnostic_cache_pending_path = ""
+            self._refresh_guided_diagnostic_cache_panel()
 
     def _selected_guided_confirm_roi(self) -> str:
         combo = getattr(self, "_guided_confirm_roi_combo", None)

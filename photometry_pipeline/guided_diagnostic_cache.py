@@ -397,6 +397,7 @@ def validate_diagnostic_cache_artifact(
     record: DiagnosticCacheArtifactRecord,
     *,
     require_status_marker: bool = True,
+    require_request_json: bool = False,
 ) -> DiagnosticCacheStatus:
     missing: list[str] = []
     warnings = list(record.warnings)
@@ -426,6 +427,10 @@ def validate_diagnostic_cache_artifact(
         missing.append("phasic_trace_cache_path")
     if not os.path.isfile(record.config_used_path):
         missing.append("config_used_path")
+    if require_request_json and (
+        not record.request_json_path or not os.path.isfile(record.request_json_path)
+    ):
+        missing.append("request_json_path")
     if missing:
         return DiagnosticCacheStatus(
             ok=False,
