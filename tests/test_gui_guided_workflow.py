@@ -162,6 +162,17 @@ def _candidate_plan(run_dir, *, rois=None, strategy="robust_global_event_reject"
     )
 
 
+def _assert_no_active_imported_plan_candidate(window: MainWindow) -> None:
+    summary = window._guided_imported_plan_summary_label.text()
+    assert window._guided_imported_plan_candidate is None
+    assert window._guided_imported_plan_file_path == ""
+    assert window._guided_imported_plan_status == ""
+    assert "Candidate review: none." in summary
+    assert "Adoption: unavailable in this read-only stage" in summary
+    assert "Execution: blocked" in summary
+    assert "Files written: none" in summary
+
+
 def _state_for_equivalence(window: MainWindow) -> dict[str, object]:
     state = dict(window._guided_setup_summary_state())
     return {
@@ -3182,7 +3193,7 @@ def test_gui_imported_plan_review_invalid_paths_rejected(window, tmp_path, path_
 
     assert "Open plan failed" in window._guided_imported_plan_status_label.text()
     assert expected in window._guided_imported_plan_status_label.text()
-    assert window._guided_imported_plan_candidate is None
+    _assert_no_active_imported_plan_candidate(window)
 
 
 def test_gui_imported_plan_review_directory_path_rejected(window, tmp_path):
@@ -3191,7 +3202,7 @@ def test_gui_imported_plan_review_directory_path_rejected(window, tmp_path):
     _review_plan(window, json_dir)
 
     assert "Open plan failed: Path points to a directory, not a file." in window._guided_imported_plan_status_label.text()
-    assert window._guided_imported_plan_candidate is None
+    _assert_no_active_imported_plan_candidate(window)
 
 
 @pytest.mark.parametrize(
@@ -3212,7 +3223,138 @@ def test_gui_imported_plan_review_invalid_json_and_schema_rejected(window, tmp_p
 
     assert "Open plan failed" in window._guided_imported_plan_status_label.text()
     assert expected in window._guided_imported_plan_status_label.text()
-    assert window._guided_imported_plan_candidate is None
+    _assert_no_active_imported_plan_candidate(window)
+
+
+def test_gui_imported_plan_review_failed_open_clears_prior_candidate_invalid_json(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    plan_a = _candidate_plan(run_dir, rois=["CH1"])
+    plan_a.plan_id = "candidate-a"
+    valid_path = tmp_path / "candidate_a.json"
+    bad_path = tmp_path / "bad_candidate.json"
+    _write_guided_plan_json(valid_path, plan_a)
+    bad_path.write_text("{not json", encoding="utf-8")
+
+    valid_summary = _review_plan(window, valid_path)
+    assert "Plan ID: candidate-a" in valid_summary
+    assert window._guided_imported_plan_candidate is not None
+    assert window._guided_imported_plan_file_path == str(valid_path.resolve())
+
+    _review_plan(window, bad_path)
+
+    assert "Open plan failed" in window._guided_imported_plan_status_label.text()
+    assert "Invalid JSON format" in window._guided_imported_plan_status_label.text()
+    _assert_no_active_imported_plan_candidate(window)
+    assert "candidate-a" not in window._guided_imported_plan_summary_label.text()
+    assert str(valid_path.resolve()) not in window._guided_imported_plan_summary_label.text()
+
+
+def test_gui_imported_plan_review_failed_open_clears_prior_candidate_bad_schema(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    plan_a = _candidate_plan(run_dir, rois=["CH1"])
+    plan_a.plan_id = "candidate-a"
+    valid_path = tmp_path / "candidate_a.json"
+    bad_schema_path = tmp_path / "bad_schema.json"
+    _write_guided_plan_json(valid_path, plan_a)
+    bad_schema_path.write_text(json.dumps({"schema_version": "guided_run_plan.v999"}), encoding="utf-8")
+
+    assert "Plan ID: candidate-a" in _review_plan(window, valid_path)
+    assert window._guided_imported_plan_candidate is not None
+
+    _review_plan(window, bad_schema_path)
+
+    assert "Unsupported schema version" in window._guided_imported_plan_status_label.text()
+    _assert_no_active_imported_plan_candidate(window)
+    assert "candidate-a" not in window._guided_imported_plan_summary_label.text()
+
+
+def test_gui_imported_plan_review_failed_open_clears_prior_candidate_missing_path(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    plan_a = _candidate_plan(run_dir, rois=["CH1"])
+    plan_a.plan_id = "candidate-a"
+    valid_path = tmp_path / "candidate_a.json"
+    missing_path = tmp_path / "missing_candidate.json"
+    _write_guided_plan_json(valid_path, plan_a)
+    before_plan = window._build_guided_draft_run_plan()[0].to_dict()
+
+    assert "Plan ID: candidate-a" in _review_plan(window, valid_path)
+    assert window._guided_imported_plan_candidate is not None
+
+    _review_plan(window, missing_path)
+
+    assert "File does not exist" in window._guided_imported_plan_status_label.text()
+    _assert_no_active_imported_plan_candidate(window)
+    assert window._build_guided_draft_run_plan()[0].to_dict() == before_plan
+
+
+def test_gui_imported_plan_review_failed_open_does_not_mutate_live_draft_state(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    idx = window._guided_confirm_strategy_combo.findData("robust_global_event_reject")
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_output_path_edit.setText(str(tmp_path / "unsaved_output"))
+    window._guided_export_path_edit.setText(str(tmp_path / "export_target.json"))
+    valid_path = tmp_path / "candidate_a.json"
+    bad_path = tmp_path / "bad_candidate.json"
+    _write_guided_plan_json(valid_path, _candidate_plan(run_dir, rois=["CH2"]))
+    bad_path.write_text("{bad", encoding="utf-8")
+
+    before_plan = window._build_guided_draft_run_plan()[0].to_dict()
+    before_readiness = window._guided_plan_readiness_summary_label.text()
+    before_preview = window._guided_draft_run_plan_preview_label.text()
+    before_checklist = window._guided_draft_run_plan_checklist_label.text()
+    before_export_path = window._guided_export_path_edit.text()
+    before_output_path = window._guided_output_path_edit.text()
+    before_feature_signal = window._guided_feature_event_signal_combo.currentText()
+    before_source = window._current_guided_completed_run_dir()
+
+    _review_plan(window, valid_path)
+    _review_plan(window, bad_path)
+
+    _assert_no_active_imported_plan_candidate(window)
+    assert window._build_guided_draft_run_plan()[0].to_dict() == before_plan
+    assert window._guided_plan_readiness_summary_label.text() == before_readiness
+    assert window._guided_draft_run_plan_preview_label.text() == before_preview
+    assert window._guided_draft_run_plan_checklist_label.text() == before_checklist
+    assert window._guided_export_path_edit.text() == before_export_path
+    assert window._guided_output_path_edit.text() == before_output_path
+    assert window._guided_feature_event_signal_combo.currentText() == before_feature_signal
+    assert window._current_guided_completed_run_dir() == before_source
+
+
+def test_gui_imported_plan_review_success_after_failure_sets_new_candidate(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    plan_a = _candidate_plan(run_dir, rois=["CH1"])
+    plan_a.plan_id = "candidate-a"
+    plan_b = _candidate_plan(run_dir, rois=["CH2"])
+    plan_b.plan_id = "candidate-b"
+    path_a = tmp_path / "candidate_a.json"
+    path_b = tmp_path / "candidate_b.json"
+    bad_path = tmp_path / "bad_candidate.json"
+    _write_guided_plan_json(path_a, plan_a)
+    _write_guided_plan_json(path_b, plan_b)
+    bad_path.write_text("{bad", encoding="utf-8")
+
+    assert "Plan ID: candidate-a" in _review_plan(window, path_a)
+    _review_plan(window, bad_path)
+    _assert_no_active_imported_plan_candidate(window)
+
+    summary_b = _review_plan(window, path_b)
+
+    assert window._guided_imported_plan_candidate is not None
+    assert window._guided_imported_plan_file_path == str(path_b.resolve())
+    assert "Plan ID: candidate-b" in summary_b
+    assert "Plan ID: candidate-a" not in summary_b
 
 
 def test_gui_imported_plan_review_valid_incomplete_plan_opens_without_live_mutation(window, tmp_path, monkeypatch):

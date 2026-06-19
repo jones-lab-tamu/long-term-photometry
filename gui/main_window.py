@@ -5067,6 +5067,12 @@ class MainWindow(QMainWindow):
         if summary is not None:
             summary.setText("Candidate review: none.\nAdoption: unavailable in this read-only stage\nExecution: blocked\nFiles written: none")
 
+    def _show_guided_imported_plan_open_failed(self, reason: str) -> None:
+        self._reset_guided_imported_plan_review_display()
+        status = getattr(self, "_guided_imported_plan_status_label", None)
+        if status is not None:
+            status.setText(f"Open plan failed: {reason}")
+
     def _clear_guided_imported_plan_candidate_if_run_changed(self) -> None:
         if getattr(self, "_guided_imported_plan_candidate", None) is None:
             return
@@ -5146,33 +5152,31 @@ class MainWindow(QMainWindow):
         path_text = self._guided_imported_plan_path_edit.text()
         review_path, path_error = self._resolve_guided_import_review_path(path_text)
         if path_error:
-            self._guided_imported_plan_status_label.setText(f"Open plan failed: {path_error}")
-            self._guided_imported_plan_summary_label.setText(
-                "Candidate review: none.\nAdoption: unavailable in this read-only stage\nExecution: blocked\nFiles written: none"
-            )
+            self._show_guided_imported_plan_open_failed(path_error)
             return
 
         payload, read_error = self._read_guided_import_review_json(review_path)
         if read_error:
-            self._guided_imported_plan_status_label.setText(f"Open plan failed: {read_error}")
-            self._guided_imported_plan_summary_label.setText(
-                "Candidate review: none.\nAdoption: unavailable in this read-only stage\nExecution: blocked\nFiles written: none"
-            )
+            self._show_guided_imported_plan_open_failed(read_error)
             return
 
         try:
             candidate = deserialize_plan_from_dict(payload)
         except GuidedRunPlanContractError as exc:
-            self._guided_imported_plan_status_label.setText(
-                f"Open plan failed: Plan contract deserialization failed: {exc}"
-            )
-            self._guided_imported_plan_summary_label.setText(
-                "Candidate review: none.\nAdoption: unavailable in this read-only stage\nExecution: blocked\nFiles written: none"
+            self._show_guided_imported_plan_open_failed(
+                f"Plan contract deserialization failed: {exc}"
             )
             return
+        except Exception as exc:
+            self._show_guided_imported_plan_open_failed(f"Unexpected review error: {exc}")
+            return
 
-        contract_errors = validate_plan_contract(candidate)
-        review = self._guided_imported_plan_review(candidate, review_path, contract_errors)
+        try:
+            contract_errors = validate_plan_contract(candidate)
+            review = self._guided_imported_plan_review(candidate, review_path, contract_errors)
+        except Exception as exc:
+            self._show_guided_imported_plan_open_failed(f"Unexpected review error: {exc}")
+            return
         self._guided_imported_plan_candidate = candidate
         self._guided_imported_plan_file_path = str(review_path)
         self._guided_imported_plan_status = str(review.get("contract_status") or "")
