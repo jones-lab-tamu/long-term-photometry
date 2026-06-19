@@ -3190,6 +3190,87 @@ class MainWindow(QMainWindow):
             )
         return resolved.source, resolved.status
 
+    def _diagnostic_cache_source_key(self, source) -> tuple[str, str, str, str] | None:
+        if source is None:
+            return None
+        return (
+            "diagnostic_cache",
+            str(getattr(source, "cache_id", "") or ""),
+            os.path.realpath(str(getattr(source, "cache_root_path", "") or "")),
+            str(getattr(source, "diagnostic_scope_signature", "") or ""),
+        )
+
+    def _diagnostic_cache_choice_metadata(self, source) -> dict[str, object]:
+        return {
+            "source_type": "diagnostic_cache",
+            "cache_id": str(getattr(source, "cache_id", "") or ""),
+            "cache_root_path": os.path.realpath(str(getattr(source, "cache_root_path", "") or "")),
+            "artifact_record_path": str(getattr(source, "artifact_record_path", "") or ""),
+            "diagnostic_scope_signature": str(getattr(source, "diagnostic_scope_signature", "") or ""),
+            "build_request_signature": str(getattr(source, "build_request_signature", "") or ""),
+            "source_setup_signature": str(getattr(source, "source_setup_signature", "") or ""),
+            "production_analysis": False,
+            "preliminary_cache": True,
+            "current": True,
+        }
+
+    def _resolve_current_guided_confirm_diagnostic_cache_source(self):
+        source, status = self._resolve_current_guided_preview_diagnostic_cache_source()
+        if source is None:
+            if status.code == "missing_diagnostic_cache":
+                return None, DiagnosticCacheStatus(
+                    False,
+                    "missing_diagnostic_cache",
+                    "Build a diagnostic cache before confirming correction strategies.",
+                )
+            if status.stale or status.code == "stale":
+                reasons = "; ".join(status.stale_reasons) or status.message
+                return None, DiagnosticCacheStatus(
+                    False,
+                    "stale",
+                    f"Diagnostic cache is stale and must be rebuilt before confirming strategies: {reasons}",
+                    stale=True,
+                    stale_reasons=status.stale_reasons,
+                )
+            return None, status
+        if source.source_type != "diagnostic_cache":
+            return None, DiagnosticCacheStatus(
+                False,
+                "invalid_source_type",
+                "Resolved Confirm Strategy source is not a diagnostic cache.",
+            )
+        return source, status
+
+    def _guided_confirm_choice_key(self, source_type: str, source_id: object, roi: str):
+        if source_type == "diagnostic_cache":
+            return (self._diagnostic_cache_source_key(source_id), roi)
+        return (str(source_id or ""), roi)
+
+    def _mark_guided_diagnostic_cache_choices_stale(self, reason: str) -> None:
+        choices = getattr(self, "_guided_strategy_choices", {})
+        for key, entry in list(choices.items()):
+            if not isinstance(entry, dict) or entry.get("source_type") != "diagnostic_cache":
+                continue
+            updated = dict(entry)
+            updated["current"] = False
+            updated["stale"] = True
+            updated["stale_reason"] = reason
+            choices[key] = updated
+
+    def _mark_current_guided_diagnostic_cache_choices_current(self, source) -> None:
+        current_key = self._diagnostic_cache_source_key(source)
+        choices = getattr(self, "_guided_strategy_choices", {})
+        for key, entry in list(choices.items()):
+            if not isinstance(entry, dict) or entry.get("source_type") != "diagnostic_cache":
+                continue
+            updated = dict(entry)
+            is_current = isinstance(key, tuple) and len(key) == 2 and key[0] == current_key
+            updated["current"] = bool(is_current)
+            if is_current:
+                updated["stale"] = False
+                updated.pop("stale_reason", None)
+            choices[key] = updated
+
     def _selected_guided_signal_f0_roi(self) -> str:
         combo = getattr(self, "_guided_signal_f0_roi_combo", None)
         return str(combo.currentData() or combo.currentText() or "").strip() if combo is not None else ""
@@ -4576,15 +4657,33 @@ class MainWindow(QMainWindow):
 
     def _confirm_evidence_status(self, prefix: str, result_attr: str, stale_attr: str) -> str:
         result = getattr(self, result_attr, None)
+        mode = getattr(self, "_guided_workflow_mode", "start")
         current_run_dir = self._current_guided_completed_run_dir()
+        current_cache_root = ""
+        if mode == "new_analysis":
+            source = getattr(self, "_guided_confirm_source", None)
+            if source is not None and getattr(source, "source_type", "") == "diagnostic_cache":
+                current_cache_root = os.path.realpath(str(getattr(source, "cache_root_path", "") or ""))
         roi = self._selected_guided_confirm_roi()
         chunk = self._selected_guided_confirm_chunk()
+        if mode == "new_analysis" and result_attr == "_guided_signal_f0_last_result":
+            return f"{prefix}: diagnostic-cache review not connected yet; Signal-Only F0 remains a manual strategy choice"
         if not result:
-            return f"{prefix}: not generated for current completed run"
+            return (
+                f"{prefix}: not generated for current diagnostic cache"
+                if mode == "new_analysis"
+                else f"{prefix}: not generated for current completed run"
+            )
         status = str(result.get("status") or "unknown") if isinstance(result, dict) else "unknown"
-        result_run_dir = os.path.realpath(str(result.get("completed_run_dir") or "")) if isinstance(result, dict) else ""
-        if result_run_dir != current_run_dir:
-            return f"{prefix}: not generated for current completed run"
+        if mode == "new_analysis":
+            result_cache_root = os.path.realpath(str(result.get("diagnostic_cache_root") or "")) if isinstance(result, dict) else ""
+            result_source_type = str(result.get("source_type") or "") if isinstance(result, dict) else ""
+            if result_source_type != "diagnostic_cache" or result_cache_root != current_cache_root:
+                return f"{prefix}: not generated for current diagnostic cache"
+        else:
+            result_run_dir = os.path.realpath(str(result.get("completed_run_dir") or "")) if isinstance(result, dict) else ""
+            if result_run_dir != current_run_dir:
+                return f"{prefix}: not generated for current completed run"
         result_roi = str(result.get("roi") or "") if isinstance(result, dict) else ""
         try:
             result_chunk = int(result.get("chunk_index"))
@@ -4629,9 +4728,58 @@ class MainWindow(QMainWindow):
         mode = getattr(self, "_guided_workflow_mode", "start")
         source_ok = False
         reason = "Open Results must be used first; no completed run is loaded."
+        source_type = "completed_run"
+        source_identity = run_dir
+        source_label = "Completed run"
+        source_display = self._display_path(run_dir) if run_dir else "none"
+        self._guided_confirm_source_type = ""
+        self._guided_confirm_source_key = None
+        self._guided_confirm_source = None
         rois: list[str] = []
         chunk_ids: list[int] = []
-        if run_dir:
+        if mode == "new_analysis":
+            source_type = "diagnostic_cache"
+            source_label = "Diagnostic cache"
+            source, status = self._resolve_current_guided_confirm_diagnostic_cache_source()
+            if source is None:
+                reason = status.message
+                source_identity = ""
+                source_display = "none"
+                if status.stale or status.code == "stale":
+                    self._mark_guided_diagnostic_cache_choices_stale(reason)
+            else:
+                source_identity = source.cache_root_path
+                source_display = self._display_path(source.cache_root_path)
+                self._mark_current_guided_diagnostic_cache_choices_current(source)
+                try:
+                    with open_phasic_cache(source.phasic_trace_cache_path) as cache:
+                        phasic_rois = [str(x) for x in list_cache_rois(cache)]
+                        chunk_ids = [int(x) for x in list_cache_chunk_ids(cache)]
+                except Exception as exc:
+                    phasic_rois = []
+                    reason = f"Unable to read diagnostic-cache phasic cache for strategy confirmation: {exc}"
+                else:
+                    included_rois = [str(x) for x in source.included_roi_ids]
+                    if not included_rois:
+                        reason = "Diagnostic cache does not contain included ROI IDs for strategy confirmation."
+                    elif set(included_rois) != set(phasic_rois):
+                        reason = (
+                            "Diagnostic cache ROI mismatch; included ROI IDs do not match phasic-cache ROI inventory. "
+                            "Rebuild the diagnostic cache before confirming strategies."
+                        )
+                    elif not chunk_ids:
+                        reason = "Diagnostic cache has no evidence chunk entries for strategy confirmation."
+                    else:
+                        rois = included_rois
+                        source_ok = True
+                        self._guided_confirm_source_type = "diagnostic_cache"
+                        self._guided_confirm_source_key = self._diagnostic_cache_source_key(source)
+                        self._guided_confirm_source = source
+                        reason = (
+                            "Confirm Strategy will use the preliminary diagnostic cache; "
+                            "this is not final production analysis."
+                        )
+        elif run_dir:
             source = resolve_completed_run_preview_source(run_dir)
             if source.ok:
                 try:
@@ -4642,6 +4790,10 @@ class MainWindow(QMainWindow):
                     reason = "Completed-run cache is available for strategy marking." if source_ok else (
                         "Completed-run phasic cache has no ROI/chunk entries."
                     )
+                    if source_ok:
+                        self._guided_confirm_source_type = "completed_run"
+                        self._guided_confirm_source_key = run_dir
+                        self._guided_confirm_source = None
                 except Exception as exc:
                     reason = f"Unable to read completed-run phasic cache: {exc}"
             else:
@@ -4649,12 +4801,14 @@ class MainWindow(QMainWindow):
 
         full_context = (
             f"Mode: {mode}\n"
-            f"Completed run: {run_dir or 'none'}\n"
+            f"{source_label}: {source_identity or 'none'}\n"
             f"{reason}\n"
+            "Signal-Only F0 diagnostic review from diagnostic cache is not connected yet; "
+            "selecting Signal-Only F0 is manual strategy intent at this stage.\n"
             "Planning only: no manifest, applied-dF/F output, feature extraction, validation, or pipeline run."
         )
         visible_context = (
-            f"Mode: {mode} - Completed run: {self._display_path(run_dir) if run_dir else 'none'} - "
+            f"Mode: {mode} - {source_label}: {source_display} - "
             f"{reason}"
         )
         self._guided_confirm_context_label.setText(visible_context)
@@ -4680,15 +4834,18 @@ class MainWindow(QMainWindow):
 
         current_roi = self._selected_guided_confirm_roi()
         current_chunk = self._selected_guided_confirm_chunk()
-        current_target = (run_dir, current_roi, current_chunk)
+        current_source_key = getattr(self, "_guided_confirm_source_key", None) or (
+            run_dir if mode != "new_analysis" else ""
+        )
+        current_target = (current_source_key, current_roi, current_chunk)
         previous_target = getattr(self, "_guided_confirm_active_target", None)
         if previous_target is None:
             self._guided_confirm_active_target = current_target
         elif current_target != previous_target:
-            previous_run = previous_target[0] if isinstance(previous_target, tuple) and previous_target else ""
+            previous_source = previous_target[0] if isinstance(previous_target, tuple) and previous_target else ""
             with QSignalBlocker(self._guided_confirm_ack_cb):
                 self._guided_confirm_ack_cb.setChecked(False)
-            if run_dir != previous_run:
+            if current_source_key != previous_source:
                 with QSignalBlocker(self._guided_confirm_strategy_combo):
                     self._guided_confirm_strategy_combo.setCurrentIndex(0)
             self._guided_confirm_active_target = current_target
@@ -4706,6 +4863,7 @@ class MainWindow(QMainWindow):
             widget.setEnabled(source_ok)
 
         if hasattr(self, "_guided_output_path_edit"):
+            draft_controls_enabled = bool(source_ok and mode != "new_analysis")
             for widget in (
                 self._guided_output_path_edit,
                 self._guided_output_apply_btn,
@@ -4713,7 +4871,7 @@ class MainWindow(QMainWindow):
                 self._guided_export_path_edit,
                 self._guided_export_btn,
             ):
-                widget.setEnabled(source_ok)
+                widget.setEnabled(draft_controls_enabled)
 
         evidence = self._guided_confirm_evidence_summary()
         self._guided_confirm_evidence_label.setText(str(evidence["text"]))
@@ -4895,19 +5053,32 @@ class MainWindow(QMainWindow):
             label.setToolTip("")
 
     def _guided_marked_choice_text(self) -> str:
-        run_dir = self._current_guided_completed_run_dir()
+        source_type = str(getattr(self, "_guided_confirm_source_type", "") or "")
         roi = self._selected_guided_confirm_roi()
         chunk = self._selected_guided_confirm_chunk()
-        if not run_dir or not roi:
+        if not source_type or not roi:
             return "Current marked choice: none."
-        entry = getattr(self, "_guided_strategy_choices", {}).get((run_dir, roi))
+        source_id = (
+            getattr(self, "_guided_confirm_source", None)
+            if source_type == "diagnostic_cache"
+            else self._current_guided_completed_run_dir()
+        )
+        entry = getattr(self, "_guided_strategy_choices", {}).get(
+            self._guided_confirm_choice_key(source_type, source_id, roi)
+        )
         if not entry:
             return "Current marked choice: none."
+        source_line = (
+            f"Source: diagnostic_cache {entry.get('cache_id', '')}"
+            if entry.get("source_type") == "diagnostic_cache"
+            else f"Source: completed run {self._display_path(str(entry.get('completed_run_dir', '') or ''))}"
+        )
         return (
             "Current marked choice:\n"
             f"ROI: {roi}\n"
             f"Strategy: {entry.get('strategy_label', '')}\n"
             f"Evidence reviewed: chunk {entry.get('evidence_chunk', '')}\n"
+            f"{source_line}\n"
             "Status: marked for later planning only; no manifest written and no applied-dF/F output created."
         )
 
@@ -4919,12 +5090,28 @@ class MainWindow(QMainWindow):
             self._refresh_guided_confirm_strategy_panel()
             return
         evidence = self._guided_confirm_evidence_summary()
+        source_type = str(getattr(self, "_guided_confirm_source_type", "") or "")
+        source_obj = getattr(self, "_guided_confirm_source", None)
         run_dir = self._current_guided_completed_run_dir()
-        self._guided_strategy_choices[(run_dir, roi)] = {
+        if source_type == "diagnostic_cache":
+            source_key = self._guided_confirm_choice_key("diagnostic_cache", source_obj, roi)
+            source_fields = self._diagnostic_cache_choice_metadata(source_obj)
+            source_fields["completed_run_dir"] = ""
+        elif source_type == "completed_run" and run_dir:
+            source_key = self._guided_confirm_choice_key("completed_run", run_dir, roi)
+            source_fields = {
+                "source_type": "completed_run",
+                "completed_run_dir": run_dir,
+                "current": True,
+            }
+        else:
+            self._refresh_guided_confirm_strategy_panel()
+            return
+        self._guided_strategy_choices[source_key] = {
             "strategy": strategy,
             "strategy_label": self._guided_confirm_strategy_label(strategy),
             "confirmed": True,
-            "completed_run_dir": run_dir,
+            **source_fields,
             "roi": roi,
             "evidence_chunk": int(chunk),
             "evidence_summary": {
@@ -4932,6 +5119,9 @@ class MainWindow(QMainWindow):
                 "signal_only_f0": evidence["signal_only_f0"],
                 "stale": evidence["stale"],
             },
+            "choice_source": "explicit_user_mark",
+            "no_auto_selection": True,
+            "marked_at_utc": datetime.now(timezone.utc).isoformat(),
         }
         self._refresh_guided_confirm_strategy_panel()
 
