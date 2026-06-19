@@ -9,9 +9,12 @@ from photometry_pipeline.guided_diagnostic_cache import (
     compare_request_to_artifact,
     read_artifact_record_json,
     read_build_request_json,
+    resolve_diagnostic_cache_phasic_paths,
+    resolve_diagnostic_cache_source,
     validate_diagnostic_cache_artifact,
     write_artifact_record_json,
     write_build_request_json,
+    write_json_file,
 )
 
 
@@ -67,6 +70,35 @@ def _record(tmp_path, request=None, **overrides):
     }
     values.update(overrides)
     return artifact_record_from_request(request, **values)
+
+
+def _resolvable_record(tmp_path, request=None, **overrides):
+    request = request or _request(tmp_path)
+    request_path = tmp_path / "output" / "_guided_diagnostic_cache" / "cache_001" / "guided_diagnostic_cache_request.json"
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    write_build_request_json(request_path, request)
+    values = {
+        "request_json_path": str(request_path),
+        "warnings": ("preliminary cache",),
+    }
+    values.update(overrides)
+    return _record(tmp_path, request, **values)
+
+
+def _write_resolvable_artifact(tmp_path, record=None):
+    record = record or _resolvable_record(tmp_path)
+    artifact_path = tmp_path / "output" / "_guided_diagnostic_cache" / "cache_001" / "guided_diagnostic_cache_artifact.json"
+    write_artifact_record_json(artifact_path, record)
+    provenance_path = artifact_path.with_name("guided_diagnostic_cache_provenance.json")
+    write_json_file(
+        provenance_path,
+        {
+            "schema_version": "guided_diagnostic_cache.v1",
+            "purpose": DIAGNOSTIC_CACHE_PURPOSE,
+            "production_analysis": False,
+        },
+    )
+    return artifact_path, record
 
 
 def test_build_request_constructs_representative_intermittent_npm(tmp_path):
@@ -252,6 +284,156 @@ def test_artifact_validation_fails_if_marked_production_analysis(tmp_path):
 
     assert not status.ok
     assert status.code == "production_analysis_not_allowed"
+
+
+def test_resolve_diagnostic_cache_from_record_succeeds(tmp_path):
+    record = _resolvable_record(tmp_path)
+
+    result = resolve_diagnostic_cache_source(record)
+
+    assert result.ok
+    assert result.status.code == "ok"
+    assert result.source is not None
+    assert result.source.source_type == "diagnostic_cache"
+    assert result.source.cache_id == "cache_001"
+    assert result.source.included_roi_ids == ("CH1", "CH2")
+    assert result.source.excluded_roi_ids == ("CH3",)
+    assert result.source.roi_inventory == ("CH1", "CH2")
+    assert result.source.source_setup_signature == record.source_setup_signature
+    assert result.source.diagnostic_scope_signature == record.diagnostic_scope_signature
+    assert result.source.build_request_signature == record.build_request_signature
+    assert result.source.warnings == ("preliminary cache",)
+
+
+def test_resolve_diagnostic_cache_from_artifact_json_succeeds(tmp_path):
+    artifact_path, record = _write_resolvable_artifact(tmp_path)
+
+    result = resolve_diagnostic_cache_source(artifact_path)
+
+    assert result.ok
+    assert result.source is not None
+    assert result.source.artifact_record_path == str(artifact_path)
+    assert result.source.provenance_path == str(artifact_path.with_name("guided_diagnostic_cache_provenance.json"))
+    assert result.source.cache_root_path == record.cache_root_path
+
+
+def test_resolve_diagnostic_cache_from_cache_root_requires_identity_file(tmp_path):
+    artifact_path, _record_obj = _write_resolvable_artifact(tmp_path)
+
+    result = resolve_diagnostic_cache_source(artifact_path.parent)
+
+    assert result.ok
+    assert result.source is not None
+    assert result.source.artifact_record_path == str(artifact_path)
+
+
+def test_resolve_completed_run_like_folder_without_diagnostic_identity_fails(tmp_path):
+    run_dir = tmp_path / "completed_like"
+    phasic = run_dir / "_analysis" / "phasic_out"
+    phasic.mkdir(parents=True)
+    (run_dir / "status.json").write_text("{}", encoding="utf-8")
+    (run_dir / "run_report.json").write_text("{}", encoding="utf-8")
+    (phasic / "phasic_trace_cache.h5").write_bytes(b"cache")
+    (phasic / "config_used.yaml").write_text("event_signal: dff\n", encoding="utf-8")
+
+    result = resolve_diagnostic_cache_source(run_dir)
+
+    assert not result.ok
+    assert result.status.code == "missing_artifact_record"
+    assert result.source is None
+
+
+def test_resolve_diagnostic_cache_fails_if_purpose_is_not_diagnostic_cache(tmp_path):
+    record = _resolvable_record(tmp_path, purpose="completed_run")
+
+    result = resolve_diagnostic_cache_source(record)
+
+    assert not result.ok
+    assert result.status.code == "invalid_purpose"
+
+
+def test_resolve_diagnostic_cache_fails_if_marked_production_analysis(tmp_path):
+    record = _resolvable_record(tmp_path, production_analysis=True)
+
+    result = resolve_diagnostic_cache_source(record)
+
+    assert not result.ok
+    assert result.status.code == "production_analysis_not_allowed"
+
+
+def test_resolve_diagnostic_cache_fails_if_request_json_missing(tmp_path):
+    record = _resolvable_record(tmp_path)
+    request_path = record.request_json_path
+    assert request_path
+    (tmp_path / "output" / "_guided_diagnostic_cache" / "cache_001" / "guided_diagnostic_cache_request.json").unlink()
+
+    result = resolve_diagnostic_cache_source(record)
+
+    assert not result.ok
+    assert result.status.code == "missing_artifacts"
+    assert "request_json_path" in result.status.missing_artifacts
+
+
+def test_resolve_diagnostic_cache_fails_if_phasic_cache_missing(tmp_path):
+    record = _resolvable_record(tmp_path)
+    (tmp_path / "output" / "_guided_diagnostic_cache" / "cache_001" / "_analysis" / "phasic_out" / "phasic_trace_cache.h5").unlink()
+
+    result = resolve_diagnostic_cache_source(record)
+
+    assert not result.ok
+    assert result.status.code == "missing_artifacts"
+    assert "phasic_trace_cache_path" in result.status.missing_artifacts
+
+
+def test_resolve_diagnostic_cache_fails_if_config_used_missing(tmp_path):
+    record = _resolvable_record(tmp_path)
+    (tmp_path / "output" / "_guided_diagnostic_cache" / "cache_001" / "_analysis" / "phasic_out" / "config_used.yaml").unlink()
+
+    result = resolve_diagnostic_cache_source(record)
+
+    assert not result.ok
+    assert result.status.code == "missing_artifacts"
+    assert "config_used_path" in result.status.missing_artifacts
+
+
+def test_resolved_diagnostic_cache_exposes_phasic_cache_paths_without_renaming_source(tmp_path):
+    record = _resolvable_record(tmp_path)
+
+    result = resolve_diagnostic_cache_phasic_paths(record)
+
+    assert result.ok
+    assert result.source is not None
+    assert result.source.source_type == "diagnostic_cache"
+    args = result.source.phasic_cache_source_args()
+    paths = result.source.as_phasic_cache_paths()
+    assert args["source_type"] == "diagnostic_cache"
+    assert args["phasic_trace_cache_path"] == record.phasic_trace_cache_path
+    assert args["config_used_path"] == record.config_used_path
+    assert paths == {
+        "cache_root_path": record.cache_root_path,
+        "phasic_trace_cache_path": record.phasic_trace_cache_path,
+        "config_used_path": record.config_used_path,
+    }
+
+
+def test_resolve_diagnostic_cache_artifact_json_failure_codes(tmp_path):
+    artifact_path = tmp_path / "guided_diagnostic_cache_artifact.json"
+    artifact_path.write_text("{not-json", encoding="utf-8")
+
+    invalid_json = resolve_diagnostic_cache_source(artifact_path)
+
+    assert not invalid_json.ok
+    assert invalid_json.status.code == "invalid_json"
+
+    artifact_path.write_text(
+        '{"artifact_contract_version": "guided_diagnostic_cache.v999"}',
+        encoding="utf-8",
+    )
+
+    unsupported = resolve_diagnostic_cache_source(artifact_path)
+
+    assert not unsupported.ok
+    assert unsupported.status.code == "unsupported_schema_version"
 
 
 def test_matching_request_and_artifact_are_current(tmp_path):

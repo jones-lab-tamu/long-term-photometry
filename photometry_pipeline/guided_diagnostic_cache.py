@@ -21,6 +21,9 @@ DIAGNOSTIC_CACHE_SCHEMA_VERSION = "guided_diagnostic_cache.v1"
 DIAGNOSTIC_CACHE_PURPOSE = "guided_diagnostic_cache"
 DIAGNOSTIC_CACHE_SCOPE_FULL = "full_selected_input"
 DIAGNOSTIC_CACHE_SCOPE_FIRST_N = "first_n"
+DIAGNOSTIC_CACHE_ARTIFACT_FILENAME = "guided_diagnostic_cache_artifact.json"
+DIAGNOSTIC_CACHE_PROVENANCE_FILENAME = "guided_diagnostic_cache_provenance.json"
+DIAGNOSTIC_CACHE_REQUEST_FILENAME = "guided_diagnostic_cache_request.json"
 SUPPORTED_INPUT_FORMATS = {"auto", "rwd", "npm", "custom_tabular"}
 SUPPORTED_ACQUISITION_MODES = {"intermittent", "continuous"}
 SUPPORTED_DIAGNOSTIC_SCOPES = {
@@ -42,6 +45,53 @@ class DiagnosticCacheStatus:
     stale: bool = False
     missing_artifacts: tuple[str, ...] = ()
     stale_reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DiagnosticCacheResolvedSource:
+    source_type: str
+    cache_id: str
+    cache_root_path: str
+    phasic_trace_cache_path: str
+    config_used_path: str
+    request_json_path: str
+    status_marker_path: str = ""
+    run_report_path: str = ""
+    artifact_record_path: str = ""
+    provenance_path: str = ""
+    included_roi_ids: tuple[str, ...] = ()
+    excluded_roi_ids: tuple[str, ...] = ()
+    roi_inventory: tuple[str, ...] = ()
+    session_chunk_inventory_summary: dict[str, Any] = field(default_factory=dict)
+    source_setup_signature: str = ""
+    diagnostic_scope_signature: str = ""
+    build_request_signature: str = ""
+    warnings: tuple[str, ...] = ()
+
+    def phasic_cache_source_args(self) -> dict[str, str]:
+        return {
+            "source_type": self.source_type,
+            "cache_root_path": self.cache_root_path,
+            "phasic_trace_cache_path": self.phasic_trace_cache_path,
+            "config_used_path": self.config_used_path,
+        }
+
+    def as_phasic_cache_paths(self) -> dict[str, str]:
+        return {
+            "cache_root_path": self.cache_root_path,
+            "phasic_trace_cache_path": self.phasic_trace_cache_path,
+            "config_used_path": self.config_used_path,
+        }
+
+
+@dataclass(frozen=True)
+class DiagnosticCacheResolveResult:
+    status: DiagnosticCacheStatus
+    source: DiagnosticCacheResolvedSource | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status.ok
 
 
 def utc_now_iso() -> str:
@@ -445,6 +495,151 @@ def validate_diagnostic_cache_artifact(
         message="Diagnostic cache artifact is ready.",
         warnings=tuple(warnings),
     )
+
+
+def _status_from_contract_error(exc: Exception) -> DiagnosticCacheStatus:
+    message = str(exc)
+    if "unsupported artifact_contract_version" in message or "unsupported schema_version" in message:
+        return DiagnosticCacheStatus(
+            ok=False,
+            code="unsupported_schema_version",
+            message=message,
+        )
+    return DiagnosticCacheStatus(
+        ok=False,
+        code="invalid_artifact_record",
+        message=message,
+    )
+
+
+def _load_artifact_record_for_resolution(
+    source: DiagnosticCacheArtifactRecord | str | os.PathLike[str],
+) -> tuple[DiagnosticCacheArtifactRecord | None, str, DiagnosticCacheStatus | None]:
+    if isinstance(source, DiagnosticCacheArtifactRecord):
+        return source, "", None
+
+    path = Path(source)
+    artifact_path = path / DIAGNOSTIC_CACHE_ARTIFACT_FILENAME if path.is_dir() else path
+    if not artifact_path.exists():
+        return (
+            None,
+            str(artifact_path),
+            DiagnosticCacheStatus(
+                ok=False,
+                code="missing_artifact_record",
+                message=(
+                    "Diagnostic cache artifact identity file is required: "
+                    f"{artifact_path}"
+                ),
+                missing_artifacts=("artifact_record_path",),
+            ),
+        )
+    if not artifact_path.is_file():
+        return (
+            None,
+            str(artifact_path),
+            DiagnosticCacheStatus(
+                ok=False,
+                code="missing_artifact_record",
+                message=f"Diagnostic cache artifact identity path is not a file: {artifact_path}",
+                missing_artifacts=("artifact_record_path",),
+            ),
+        )
+    try:
+        record = read_artifact_record_json(artifact_path)
+    except json.JSONDecodeError as exc:
+        return (
+            None,
+            str(artifact_path),
+            DiagnosticCacheStatus(
+                ok=False,
+                code="invalid_json",
+                message=f"Diagnostic cache artifact JSON is invalid: {exc}",
+            ),
+        )
+    except DiagnosticCacheContractError as exc:
+        return None, str(artifact_path), _status_from_contract_error(exc)
+    except OSError as exc:
+        return (
+            None,
+            str(artifact_path),
+            DiagnosticCacheStatus(
+                ok=False,
+                code="invalid_artifact_record",
+                message=f"Diagnostic cache artifact could not be read: {exc}",
+            ),
+        )
+    return record, str(artifact_path), None
+
+
+def resolve_diagnostic_cache_source(
+    source: DiagnosticCacheArtifactRecord | str | os.PathLike[str],
+) -> DiagnosticCacheResolveResult:
+    record, artifact_path, load_status = _load_artifact_record_for_resolution(source)
+    if load_status is not None:
+        return DiagnosticCacheResolveResult(load_status)
+    if record is None:
+        return DiagnosticCacheResolveResult(
+            DiagnosticCacheStatus(
+                ok=False,
+                code="invalid_artifact_record",
+                message="Diagnostic cache artifact record could not be resolved.",
+            )
+        )
+
+    validation = validate_diagnostic_cache_artifact(
+        record,
+        require_status_marker=False,
+        require_request_json=True,
+    )
+    if not validation.ok:
+        return DiagnosticCacheResolveResult(validation)
+
+    provenance_path = ""
+    if artifact_path:
+        candidate = Path(artifact_path).with_name(DIAGNOSTIC_CACHE_PROVENANCE_FILENAME)
+        if candidate.exists():
+            provenance_path = str(candidate)
+    else:
+        candidate = Path(record.cache_root_path) / DIAGNOSTIC_CACHE_PROVENANCE_FILENAME
+        if candidate.exists():
+            provenance_path = str(candidate)
+
+    resolved = DiagnosticCacheResolvedSource(
+        source_type="diagnostic_cache",
+        cache_id=record.cache_id,
+        cache_root_path=record.cache_root_path,
+        phasic_trace_cache_path=record.phasic_trace_cache_path,
+        config_used_path=record.config_used_path,
+        status_marker_path=record.status_marker_path if os.path.isfile(record.status_marker_path) else "",
+        run_report_path=record.run_report_path if os.path.isfile(record.run_report_path) else "",
+        request_json_path=record.request_json_path,
+        artifact_record_path=artifact_path,
+        provenance_path=provenance_path,
+        included_roi_ids=record.included_roi_ids,
+        excluded_roi_ids=record.excluded_roi_ids,
+        roi_inventory=record.roi_inventory,
+        session_chunk_inventory_summary=dict(record.session_chunk_inventory_summary),
+        source_setup_signature=record.source_setup_signature,
+        diagnostic_scope_signature=record.diagnostic_scope_signature,
+        build_request_signature=record.build_request_signature,
+        warnings=record.warnings,
+    )
+    return DiagnosticCacheResolveResult(
+        DiagnosticCacheStatus(
+            ok=True,
+            code="ok",
+            message="Diagnostic cache source resolved.",
+            warnings=record.warnings,
+        ),
+        source=resolved,
+    )
+
+
+def resolve_diagnostic_cache_phasic_paths(
+    source: DiagnosticCacheArtifactRecord | str | os.PathLike[str],
+) -> DiagnosticCacheResolveResult:
+    return resolve_diagnostic_cache_source(source)
 
 
 def compare_request_to_artifact(
