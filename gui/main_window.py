@@ -25,6 +25,7 @@ import subprocess as _subprocess
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from statistics import median
 
 from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, Signal, QSignalBlocker
@@ -76,8 +77,11 @@ from photometry_pipeline.guided_run_plan import (
     FeatureEventProfile,
     GuidedPlanSource,
     GuidedRunPlan,
+    GuidedRunPlanContractError,
     RoiPlanEntry,
     OutputPolicy,
+    SCHEMA_VERSION,
+    deserialize_plan_from_dict,
     evaluate_guided_plan_checklist,
     feature_event_profile_summary_lines,
     validate_plan_contract,
@@ -1579,6 +1583,10 @@ class MainWindow(QMainWindow):
         self._guided_draft_output_policy_by_run = {}
         self._guided_output_policy_editor_synced_run = None
         self._guided_export_editor_synced_run = None
+        self._guided_imported_plan_candidate = None
+        self._guided_imported_plan_file_path = ""
+        self._guided_imported_plan_status = ""
+        self._guided_imported_plan_review_run_dir = None
         self._guided_raw_setup_controls = {}
         self._guided_open_results_mode_panels = {}
         self._guided_new_analysis_mode_panels = {}
@@ -3686,6 +3694,7 @@ class MainWindow(QMainWindow):
     def _refresh_guided_diagnostics_panel(self) -> None:
         if not hasattr(self, "_guided_diagnostics_status_label"):
             return
+        self._clear_guided_imported_plan_candidate_if_run_changed()
         artifact_state = self._guided_completed_run_diagnostic_artifacts()
         self._guided_diagnostics_status = str(artifact_state["status"])
         status_text = {
@@ -3763,7 +3772,10 @@ class MainWindow(QMainWindow):
         self._refresh_guided_confirm_strategy_panel()
 
     def _current_guided_completed_run_dir(self) -> str:
-        return os.path.realpath((self._current_run_dir or "").strip())
+        run_dir = (self._current_run_dir or "").strip()
+        if not run_dir:
+            return ""
+        return os.path.realpath(run_dir)
 
     def _confirm_evidence_status(self, prefix: str, result_attr: str, stale_attr: str) -> str:
         result = getattr(self, result_attr, None)
@@ -4871,6 +4883,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_guided_feature_event_profile_editor())
         layout.addWidget(self._build_guided_output_policy_editor())
         layout.addWidget(self._build_guided_draft_plan_export_editor())
+        layout.addWidget(self._build_guided_imported_plan_review_panel())
 
         readiness_group = QGroupBox("Plan readiness summary")
         readiness_group.setObjectName("guidedPlanReadinessSummaryPanel")
@@ -4988,6 +5001,412 @@ class MainWindow(QMainWindow):
         layout.addLayout(row)
         group.setVisible(False)
         return group
+
+    def _build_guided_imported_plan_review_panel(self) -> QGroupBox:
+        group = QGroupBox("Imported plan review")
+        group.setObjectName("guidedImportedPlanReviewPanel")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+
+        explain_label = QLabel(
+            "Open an exported GuidedRunPlan JSON for read-only review. This does not adopt the plan, "
+            "change the current draft plan, run analysis, or write outputs."
+        )
+        explain_label.setObjectName("guidedImportedPlanReviewExplanation")
+        explain_label.setProperty("guidedSecondaryText", True)
+        explain_label.setWordWrap(True)
+        self._make_guided_widget_shrinkable(explain_label)
+        layout.addWidget(explain_label)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+        self._guided_imported_plan_path_edit = QLineEdit()
+        self._guided_imported_plan_path_edit.setObjectName("guidedImportedPlanPathEdit")
+        self._guided_imported_plan_path_edit.setPlaceholderText("Enter path to exported GuidedRunPlan JSON...")
+        self._make_guided_widget_shrinkable(self._guided_imported_plan_path_edit)
+        form.addRow("Plan JSON path:", self._guided_imported_plan_path_edit)
+        layout.addLayout(form)
+
+        button_row = QHBoxLayout()
+        self._guided_imported_plan_open_btn = QPushButton("Open plan for review")
+        self._guided_imported_plan_open_btn.setObjectName("guidedImportedPlanOpenButton")
+        self._guided_imported_plan_open_btn.clicked.connect(self._on_guided_open_plan_for_review)
+        button_row.addWidget(self._guided_imported_plan_open_btn)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self._guided_imported_plan_status_label = QLabel("No exported plan opened for review.")
+        self._guided_imported_plan_status_label.setObjectName("guidedImportedPlanStatusLabel")
+        self._guided_imported_plan_status_label.setProperty("guidedSecondaryText", True)
+        self._guided_imported_plan_status_label.setWordWrap(True)
+        self._guided_imported_plan_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_imported_plan_status_label)
+        layout.addWidget(self._guided_imported_plan_status_label)
+
+        self._guided_imported_plan_summary_label = QLabel("Candidate review: none.")
+        self._guided_imported_plan_summary_label.setObjectName("guidedImportedPlanSummaryLabel")
+        self._guided_imported_plan_summary_label.setProperty("guidedSecondaryText", True)
+        self._guided_imported_plan_summary_label.setWordWrap(True)
+        self._guided_imported_plan_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_imported_plan_summary_label)
+        layout.addWidget(self._guided_imported_plan_summary_label)
+
+        return group
+
+    def _reset_guided_imported_plan_review_display(self, message: str = "No exported plan opened for review.") -> None:
+        self._guided_imported_plan_candidate = None
+        self._guided_imported_plan_file_path = ""
+        self._guided_imported_plan_status = ""
+        self._guided_imported_plan_review_run_dir = self._current_guided_completed_run_dir()
+        status = getattr(self, "_guided_imported_plan_status_label", None)
+        summary = getattr(self, "_guided_imported_plan_summary_label", None)
+        if status is not None:
+            status.setText(message)
+        if summary is not None:
+            summary.setText("Candidate review: none.\nAdoption: unavailable in this read-only stage\nExecution: blocked\nFiles written: none")
+
+    def _clear_guided_imported_plan_candidate_if_run_changed(self) -> None:
+        if getattr(self, "_guided_imported_plan_candidate", None) is None:
+            return
+        current_run = self._current_guided_completed_run_dir()
+        review_run = getattr(self, "_guided_imported_plan_review_run_dir", None)
+        if current_run != review_run:
+            self._reset_guided_imported_plan_review_display(
+                "Candidate plan review cleared because the loaded completed run changed."
+            )
+
+    def _resolve_guided_import_review_path(self, path: str) -> tuple[Path | None, str | None]:
+        trimmed = str(path or "").strip()
+        if not trimmed:
+            return None, "Path cannot be empty."
+        if not trimmed.lower().endswith(".json"):
+            return None, "Plan file must have .json extension."
+        try:
+            review_path = Path(trimmed).expanduser().resolve(strict=False)
+        except Exception as exc:
+            return None, f"Invalid path format: {exc}"
+        if not review_path.parent.exists():
+            return None, "Parent directory does not exist."
+        if not review_path.exists():
+            return None, f"File does not exist at {review_path}."
+        if review_path.is_dir():
+            return None, "Path points to a directory, not a file."
+        return review_path, None
+
+    def _json_max_depth(self, value: object, depth: int = 0) -> int:
+        if isinstance(value, dict):
+            if not value:
+                return depth + 1
+            return max(self._json_max_depth(item, depth + 1) for item in value.values())
+        if isinstance(value, list):
+            if not value:
+                return depth + 1
+            return max(self._json_max_depth(item, depth + 1) for item in value)
+        return depth
+
+    def _reject_duplicate_json_keys(self, pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    def _read_guided_import_review_json(self, path: Path) -> tuple[dict[str, object] | None, str | None]:
+        try:
+            if path.stat().st_size > 500 * 1024:
+                return None, "File exceeds maximum size limit (500 KB)."
+            text = path.read_text(encoding="utf-8")
+        except PermissionError:
+            return None, "File cannot be read (Permission denied)."
+        except OSError as exc:
+            return None, f"File cannot be read ({exc})."
+        try:
+            payload = json.loads(text, object_pairs_hook=self._reject_duplicate_json_keys)
+        except json.JSONDecodeError as exc:
+            return None, f"Invalid JSON format. {exc}"
+        except ValueError as exc:
+            return None, str(exc)
+        if not isinstance(payload, dict):
+            return None, "JSON root must be an object."
+        if self._json_max_depth(payload) > 10:
+            return None, "JSON nesting depth exceeds maximum supported depth (10)."
+        if "schema_version" not in payload:
+            return None, "Missing plan schema version."
+        if not isinstance(payload.get("schema_version"), str):
+            return None, "schema_version must be a string."
+        schema = str(payload.get("schema_version") or "")
+        if schema != SCHEMA_VERSION:
+            return None, f"Unsupported schema version '{schema}'."
+        return payload, None
+
+    def _on_guided_open_plan_for_review(self) -> None:
+        path_text = self._guided_imported_plan_path_edit.text()
+        review_path, path_error = self._resolve_guided_import_review_path(path_text)
+        if path_error:
+            self._guided_imported_plan_status_label.setText(f"Open plan failed: {path_error}")
+            self._guided_imported_plan_summary_label.setText(
+                "Candidate review: none.\nAdoption: unavailable in this read-only stage\nExecution: blocked\nFiles written: none"
+            )
+            return
+
+        payload, read_error = self._read_guided_import_review_json(review_path)
+        if read_error:
+            self._guided_imported_plan_status_label.setText(f"Open plan failed: {read_error}")
+            self._guided_imported_plan_summary_label.setText(
+                "Candidate review: none.\nAdoption: unavailable in this read-only stage\nExecution: blocked\nFiles written: none"
+            )
+            return
+
+        try:
+            candidate = deserialize_plan_from_dict(payload)
+        except GuidedRunPlanContractError as exc:
+            self._guided_imported_plan_status_label.setText(
+                f"Open plan failed: Plan contract deserialization failed: {exc}"
+            )
+            self._guided_imported_plan_summary_label.setText(
+                "Candidate review: none.\nAdoption: unavailable in this read-only stage\nExecution: blocked\nFiles written: none"
+            )
+            return
+
+        contract_errors = validate_plan_contract(candidate)
+        review = self._guided_imported_plan_review(candidate, review_path, contract_errors)
+        self._guided_imported_plan_candidate = candidate
+        self._guided_imported_plan_file_path = str(review_path)
+        self._guided_imported_plan_status = str(review.get("contract_status") or "")
+        self._guided_imported_plan_review_run_dir = self._current_guided_completed_run_dir()
+        self._guided_imported_plan_status_label.setText(
+            "Plan opened for read-only review. Live draft plan was not changed."
+        )
+        self._guided_imported_plan_summary_label.setText(
+            self._guided_imported_plan_review_summary_text(review)
+        )
+
+    def _guided_completed_run_basic_validity(self, run_dir: str) -> str:
+        if not run_dir:
+            return "no imported completed-run source path"
+        if not os.path.exists(run_dir):
+            return "imported source path missing"
+        if not os.path.isdir(run_dir):
+            return "imported source path is not a directory"
+        completed, evidence = is_successful_completed_run_dir(run_dir)
+        if not completed:
+            return f"source exists but is not a confirmed completed run ({evidence})"
+        source = resolve_completed_run_preview_source(run_dir)
+        if not source.ok:
+            return f"basic source artifact check failed ({source.reason})"
+        return "valid completed-run source by basic artifact check"
+
+    def _guided_completed_run_roi_inventory(self, run_dir: str) -> tuple[list[str], list[int], str]:
+        if not run_dir:
+            return [], [], "ROI compatibility unknown: no active completed run loaded"
+        source = resolve_completed_run_preview_source(run_dir)
+        if not source.ok:
+            return [], [], f"ROI compatibility unknown: {source.reason}"
+        try:
+            with open_phasic_cache(source.phasic_trace_cache_path) as cache:
+                rois = [str(roi) for roi in list_cache_rois(cache)]
+                chunks = [int(chunk) for chunk in list_cache_chunk_ids(cache)]
+        except Exception as exc:
+            return [], [], f"ROI compatibility unknown: unable to read completed-run cache ({exc})"
+        return rois, chunks, "ROI inventory read from active completed-run cache"
+
+    def _is_path_equal_or_inside(self, path: Path, root: Path) -> bool:
+        return path == root or root in path.parents
+
+    def _guided_output_policy_review_lines(self, plan: GuidedRunPlan) -> tuple[str, list[str]]:
+        policy = plan.output_policy or OutputPolicy()
+        warnings: list[str] = []
+        if not policy.output_root:
+            status = "no output destination configured"
+        else:
+            status = f"output root: {policy.output_root}"
+            try:
+                output_root = Path(str(policy.output_root)).expanduser().resolve(strict=False)
+                source_paths = [
+                    str(plan.source.completed_run_dir or "").strip(),
+                    self._current_guided_completed_run_dir(),
+                ]
+                for source_path in source_paths:
+                    if not source_path:
+                        continue
+                    source_root = Path(source_path).expanduser().resolve(strict=False)
+                    if self._is_path_equal_or_inside(output_root, source_root):
+                        warnings.append(f"output root is equal to or inside source: {source_root}")
+                    legacy_roots = [
+                        source_root / "_analysis",
+                        source_root / "_analysis" / "phasic_out",
+                        source_root / "_analysis" / "phasic_out" / "features",
+                        source_root / "_analysis" / "phasic_out" / "applied_dff",
+                    ]
+                    for legacy_root in legacy_roots:
+                        if self._is_path_equal_or_inside(output_root, legacy_root):
+                            warnings.append(f"output root is inside legacy output directory: {legacy_root}")
+                            break
+            except Exception as exc:
+                warnings.append(f"output root path could not be normalized: {exc}")
+        if policy.overwrite:
+            warnings.append("Safety warning: Overwrite is enabled.")
+        if not policy.separate_from_source_required:
+            warnings.append("Safety warning: separate_from_source_required is disabled.")
+        if not policy.legacy_outputs_protected:
+            warnings.append("Safety warning: legacy_outputs_protected is disabled.")
+        return status, warnings
+
+    def _guided_imported_plan_review(
+        self,
+        plan: GuidedRunPlan,
+        file_path: Path,
+        contract_errors: list[str],
+    ) -> dict[str, object]:
+        imported_source = str(plan.source.completed_run_dir or "")
+        imported_resolved = os.path.realpath(imported_source) if imported_source else ""
+        current_source = self._current_guided_completed_run_dir()
+        current_resolved = os.path.realpath(current_source) if current_source else ""
+
+        if not current_resolved:
+            source_match_status = "not matched: no active completed run loaded"
+        elif not imported_resolved:
+            source_match_status = "not matched: imported source missing"
+        elif imported_resolved == current_resolved:
+            source_match_status = "source matched"
+        else:
+            source_match_status = "source mismatch"
+
+        source_validity = self._guided_completed_run_basic_validity(imported_resolved)
+        current_rois, current_chunks, roi_inventory_status = self._guided_completed_run_roi_inventory(current_resolved)
+        imported_rois = [str(entry.roi) for entry in plan.roi_plan if str(entry.roi or "").strip()]
+        missing_imported = sorted(roi for roi in imported_rois if current_rois and roi not in current_rois)
+        extra_current = sorted(roi for roi in current_rois if roi not in imported_rois)
+        if not current_resolved:
+            roi_status = "unknown: no active completed run loaded"
+        elif not current_rois:
+            roi_status = roi_inventory_status
+        elif not imported_rois:
+            roi_status = "incomplete: zero imported ROI choices"
+        elif missing_imported:
+            roi_status = "missing imported ROIs"
+        elif extra_current:
+            roi_status = "compatible partial: active run has extra ROIs"
+        else:
+            roi_status = "compatible"
+
+        evidence_warnings: list[str] = []
+        if current_chunks:
+            chunk_set = set(current_chunks)
+            for entry in plan.roi_plan:
+                for evidence in entry.evidence:
+                    if evidence.chunk_id not in chunk_set:
+                        evidence_warnings.append(
+                            f"ROI {entry.roi} evidence chunk {evidence.chunk_id} is not in active chunk inventory"
+                        )
+        else:
+            evidence_warnings.append("evidence chunk availability not checked in 4H1")
+
+        strategy_lines: list[str] = []
+        for entry in plan.roi_plan:
+            choice = entry.correction_strategy
+            if choice is None:
+                strategy_lines.append(f"{entry.roi}: no correction strategy marked")
+                continue
+            label = str(choice.strategy_label or choice.strategy)
+            if choice.strategy == "signal_only_f0":
+                label = "Signal-Only F0 (explicit user mark; not fallback)"
+            strategy_lines.append(f"{entry.roi}: {label} [{choice.strategy}]")
+        if not strategy_lines:
+            strategy_lines.append("none")
+
+        feature_lines = feature_event_profile_summary_lines(plan)
+        output_status, output_warnings = self._guided_output_policy_review_lines(plan)
+        contract_status = "valid" if not contract_errors else f"invalid ({len(contract_errors)} contract error(s))"
+        completeness_status = "incomplete" if (
+            not plan.roi_plan or not plan.feature_event_profiles or not plan.output_policy.output_root
+        ) else "configured"
+
+        return {
+            "file_path": str(file_path),
+            "parse_status": "success",
+            "schema_status": plan.schema_version,
+            "contract_status": contract_status,
+            "completeness_status": completeness_status,
+            "contract_errors": list(contract_errors),
+            "plan_id": plan.plan_id or "(none)",
+            "plan_mode": plan.mode,
+            "imported_source_path": imported_source or "(none)",
+            "imported_source_resolved_path": imported_resolved or "(none)",
+            "current_source_path": current_source or "(none)",
+            "current_source_resolved_path": current_resolved or "(none)",
+            "source_match_status": source_match_status,
+            "source_validity_status": source_validity,
+            "roi_status": roi_status,
+            "missing_imported_rois": missing_imported,
+            "extra_current_rois": extra_current,
+            "evidence_warnings": evidence_warnings,
+            "correction_strategy_status": f"{len(plan.roi_plan)} ROI plan entr{'y' if len(plan.roi_plan) == 1 else 'ies'}",
+            "correction_strategy_lines": strategy_lines,
+            "feature_event_status": f"{len(plan.feature_event_profiles)} profile(s)",
+            "feature_event_lines": feature_lines,
+            "output_policy_status": output_status,
+            "output_policy_warnings": output_warnings,
+            "adoption_status": "unavailable in this read-only stage",
+            "execution_status": "blocked: execution intentionally unavailable",
+            "files_written": "none",
+        }
+
+    def _guided_imported_plan_review_summary_text(self, review: dict[str, object]) -> str:
+        lines = [
+            f"File: {review['file_path']}",
+            f"Parse: {review['parse_status']}",
+            f"Schema: {review['schema_status']}",
+            f"Contract: {review['contract_status']}",
+            f"Completeness: {review['completeness_status']}",
+            f"Plan ID: {review['plan_id']}",
+            f"Plan mode: {review['plan_mode']}",
+            f"Imported source: {review['imported_source_path']}",
+            f"Imported source resolved: {review['imported_source_resolved_path']}",
+            f"Current source: {review['current_source_path']}",
+            f"Current source resolved: {review['current_source_resolved_path']}",
+            f"Source: {review['source_match_status']}",
+            f"Source validity: {review['source_validity_status']}",
+            f"ROI compatibility: {review['roi_status']}",
+        ]
+        missing = review.get("missing_imported_rois") or []
+        extra = review.get("extra_current_rois") or []
+        if missing:
+            lines.append("Missing imported ROIs: " + ", ".join(str(item) for item in missing))
+        if extra:
+            lines.append("Extra current ROIs: " + ", ".join(str(item) for item in extra))
+        evidence = review.get("evidence_warnings") or []
+        if evidence:
+            lines.append("Evidence warnings: " + "; ".join(str(item) for item in evidence))
+
+        lines.append(f"Correction strategies: {review['correction_strategy_status']}")
+        for line in review.get("correction_strategy_lines") or []:
+            lines.append(f"- {line}")
+
+        lines.append(f"Feature/event profiles: {review['feature_event_status']}")
+        for line in review.get("feature_event_lines") or []:
+            lines.append(f"- {line}")
+
+        lines.append(f"Output policy: {review['output_policy_status']}")
+        output_warnings = review.get("output_policy_warnings") or []
+        if output_warnings:
+            lines.append("Output policy warnings: " + "; ".join(str(item) for item in output_warnings))
+
+        errors = review.get("contract_errors") or []
+        if errors:
+            lines.append("Contract errors:")
+            lines.extend(f"- {err}" for err in errors)
+        lines.extend(
+            [
+                f"Adoption: {review['adoption_status']}",
+                f"Execution: {review['execution_status']}",
+                f"Files written: {review['files_written']}",
+            ]
+        )
+        return "\n".join(str(line) for line in lines)
 
     def _build_guided_planned_stages_panel(self) -> QGroupBox:
         group = QGroupBox("Planned stages / not yet wired")

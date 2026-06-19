@@ -10,10 +10,14 @@ import gui.main_window as main_window_module
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
 from photometry_pipeline.config import Config
 from photometry_pipeline.guided_run_plan import (
+    CorrectionStrategyChoice,
     EvidenceChunkReview,
     FeatureEventProfile,
     GuidedPlanSource,
     GuidedRunPlan,
+    OutputPolicy,
+    RoiPlanEntry,
+    plan_export_json_text,
 )
 
 
@@ -100,6 +104,62 @@ def _load_preview_completed_run(window, run_dir, monkeypatch):
     window._current_run_dir = str(run_dir)
     monkeypatch.setattr(window._report_viewer, "has_loaded_results", lambda: True)
     window._refresh_guided_diagnostics_panel()
+
+
+def _write_guided_plan_json(path, plan: GuidedRunPlan) -> None:
+    path.write_text(plan_export_json_text(plan), encoding="utf-8")
+
+
+def _review_plan(window: MainWindow, path) -> str:
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_imported_plan_path_edit.setText(str(path))
+    window._guided_imported_plan_open_btn.click()
+    return window._guided_imported_plan_summary_label.text()
+
+
+def _candidate_plan(run_dir, *, rois=None, strategy="robust_global_event_reject", profile=False, output_policy=None):
+    entries = []
+    for roi in rois or []:
+        entries.append(
+            RoiPlanEntry(
+                roi=roi,
+                correction_strategy=CorrectionStrategyChoice(
+                    strategy=strategy,
+                    strategy_label="Signal-Only F0" if strategy == "signal_only_f0" else "Robust Global Event-Reject Fit",
+                ),
+                evidence=[EvidenceChunkReview(chunk_id=0)],
+            )
+        )
+    profiles = []
+    if profile:
+        profiles.append(
+            FeatureEventProfile(
+                profile_id="default",
+                profile_label="Default",
+                scope="run",
+                status="draft",
+                config_fields={
+                    "event_signal": "dff",
+                    "signal_excursion_polarity": "positive",
+                    "peak_threshold_method": "mean_std",
+                    "peak_threshold_k": 3.0,
+                    "peak_threshold_percentile": 95.0,
+                    "peak_threshold_abs": 0.1,
+                    "peak_min_distance_sec": 1.0,
+                    "peak_min_prominence_k": 2.0,
+                    "peak_min_width_sec": 0.3,
+                    "peak_pre_filter": "none",
+                    "event_auc_baseline": "zero",
+                },
+            )
+        )
+    return GuidedRunPlan(
+        mode="completed_run_planning",
+        source=GuidedPlanSource(source_mode="completed_run", completed_run_dir=str(run_dir.resolve())),
+        roi_plan=entries,
+        feature_event_profiles=profiles,
+        output_policy=output_policy or OutputPolicy(),
+    )
 
 
 def _state_for_equivalence(window: MainWindow) -> dict[str, object]:
@@ -3083,6 +3143,286 @@ def test_gui_real_split_workflow_flow(window, tmp_path, monkeypatch):
     assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
     after_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
     assert after_files == before_files
+
+
+def test_gui_imported_plan_review_panel_is_draft_plan_only(window):
+    draft_idx = list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    confirm_idx = list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    draft_step = window._guided_workflow_stack.widget(draft_idx)
+    confirm_step = window._guided_workflow_stack.widget(confirm_idx)
+
+    panel = draft_step.findChild(QWidget, "guidedImportedPlanReviewPanel")
+    assert panel is not None
+    assert draft_step.findChild(QWidget, "guidedImportedPlanPathEdit") is not None
+    assert draft_step.findChild(QWidget, "guidedImportedPlanOpenButton") is not None
+    assert draft_step.findChild(QWidget, "guidedImportedPlanStatusLabel") is not None
+    assert draft_step.findChild(QWidget, "guidedImportedPlanSummaryLabel") is not None
+    assert "Open an exported GuidedRunPlan JSON for read-only review" in "\n".join(_label_texts(panel))
+    assert confirm_step.findChild(QWidget, "guidedImportedPlanReviewPanel") is None
+
+    panel_buttons = [button.text() for button in panel.findChildren(QPushButton)]
+    assert panel_buttons == ["Open plan for review"]
+    assert not any("Adopt" in text for text in panel_buttons)
+    assert not any("RunSpec" in text for text in panel_buttons)
+    assert not any(text == "Run" or "Guided Run" in text for text in panel_buttons)
+
+
+@pytest.mark.parametrize(
+    "path_text, expected",
+    [
+        ("   ", "Path cannot be empty"),
+        ("plan.txt", "Plan file must have .json extension"),
+        ("missing.json", "File does not exist"),
+    ],
+)
+def test_gui_imported_plan_review_invalid_paths_rejected(window, tmp_path, path_text, expected):
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_imported_plan_path_edit.setText(path_text)
+    window._guided_imported_plan_open_btn.click()
+
+    assert "Open plan failed" in window._guided_imported_plan_status_label.text()
+    assert expected in window._guided_imported_plan_status_label.text()
+    assert window._guided_imported_plan_candidate is None
+
+
+def test_gui_imported_plan_review_directory_path_rejected(window, tmp_path):
+    json_dir = tmp_path / "candidate.json"
+    json_dir.mkdir()
+    _review_plan(window, json_dir)
+
+    assert "Open plan failed: Path points to a directory, not a file." in window._guided_imported_plan_status_label.text()
+    assert window._guided_imported_plan_candidate is None
+
+
+@pytest.mark.parametrize(
+    "content, expected",
+    [
+        ("{not valid", "Invalid JSON format"),
+        ("[]", "JSON root must be an object"),
+        (json.dumps({"mode": "completed_run_planning"}), "Missing plan schema version"),
+        (json.dumps({"schema_version": 1}), "schema_version must be a string"),
+        (json.dumps({"schema_version": "guided_run_plan.v999"}), "Unsupported schema version"),
+    ],
+)
+def test_gui_imported_plan_review_invalid_json_and_schema_rejected(window, tmp_path, content, expected):
+    path = tmp_path / "bad_plan.json"
+    path.write_text(content, encoding="utf-8")
+
+    _review_plan(window, path)
+
+    assert "Open plan failed" in window._guided_imported_plan_status_label.text()
+    assert expected in window._guided_imported_plan_status_label.text()
+    assert window._guided_imported_plan_candidate is None
+
+
+def test_gui_imported_plan_review_valid_incomplete_plan_opens_without_live_mutation(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    path = tmp_path / "incomplete_plan.json"
+    _write_guided_plan_json(path, _candidate_plan(run_dir))
+    before_plan = window._build_guided_draft_run_plan()[0].to_dict()
+    before_readiness = window._guided_plan_readiness_summary_label.text()
+    before_preview = window._guided_draft_run_plan_preview_label.text()
+    before_checklist = window._guided_draft_run_plan_checklist_label.text()
+
+    summary = _review_plan(window, path)
+
+    assert "Contract: valid" in summary
+    assert "Completeness: incomplete" in summary
+    assert "ROI compatibility: incomplete: zero imported ROI choices" in summary
+    assert window._build_guided_draft_run_plan()[0].to_dict() == before_plan
+    assert window._guided_plan_readiness_summary_label.text() == before_readiness
+    assert window._guided_draft_run_plan_preview_label.text() == before_preview
+    assert window._guided_draft_run_plan_checklist_label.text() == before_checklist
+
+
+def test_gui_imported_plan_review_source_matched_no_mutation(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_output_path_edit.setText(str(tmp_path / "unsaved_output"))
+    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+    window._guided_export_path_edit.setText(str(tmp_path / "export_target.json"))
+    path = tmp_path / "matched_plan.json"
+    _write_guided_plan_json(path, _candidate_plan(run_dir, rois=["CH1"], profile=True))
+    before_plan = window._build_guided_draft_run_plan()[0].to_dict()
+    before_labels = (
+        window._guided_plan_readiness_summary_label.text(),
+        window._guided_draft_run_plan_preview_label.text(),
+        window._guided_draft_run_plan_checklist_label.text(),
+    )
+
+    summary = _review_plan(window, path)
+
+    assert "Source: source matched" in summary
+    assert "ROI compatibility: compatible partial" in summary
+    assert "Feature/event profile default" in summary
+    assert window._build_guided_draft_run_plan()[0].to_dict() == before_plan
+    assert (
+        window._guided_plan_readiness_summary_label.text(),
+        window._guided_draft_run_plan_preview_label.text(),
+        window._guided_draft_run_plan_checklist_label.text(),
+    ) == before_labels
+    assert window._guided_feature_event_signal_combo.currentText() == "delta_f"
+    assert window._guided_output_path_edit.text() == str(tmp_path / "unsaved_output")
+    assert window._guided_export_path_edit.text() == str(tmp_path / "export_target.json")
+
+
+def test_gui_imported_plan_review_source_mismatch_no_source_switch(window, tmp_path, monkeypatch):
+    run_a = _make_preview_completed_run(tmp_path / "run_a")
+    run_b = _make_preview_completed_run(tmp_path / "run_b")
+    _load_preview_completed_run(window, run_a, monkeypatch)
+    path = tmp_path / "mismatch_plan.json"
+    _write_guided_plan_json(path, _candidate_plan(run_b, rois=["CH1"]))
+    before_source = window._current_guided_completed_run_dir()
+    before_plan = window._build_guided_draft_run_plan()[0].to_dict()
+
+    summary = _review_plan(window, path)
+
+    assert "Source: source mismatch" in summary
+    assert window._current_guided_completed_run_dir() == before_source
+    assert window._build_guided_draft_run_plan()[0].to_dict() == before_plan
+
+
+def test_gui_imported_plan_review_no_current_run_loaded(window, tmp_path):
+    run_dir = _make_preview_completed_run(tmp_path)
+    path = tmp_path / "no_current_run_plan.json"
+    _write_guided_plan_json(path, _candidate_plan(run_dir, rois=["CH1"]))
+    window._current_run_dir = ""
+
+    summary = _review_plan(window, path)
+
+    assert "Source: not matched: no active completed run loaded" in summary
+    assert "ROI compatibility: unknown: no active completed run loaded" in summary
+    assert window._current_guided_completed_run_dir() == ""
+    assert window._build_guided_draft_run_plan()[0] is None
+
+
+def test_gui_imported_plan_review_roi_mismatch_display(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    path = tmp_path / "roi_mismatch_plan.json"
+    _write_guided_plan_json(path, _candidate_plan(run_dir, rois=["CH3"]))
+
+    summary = _review_plan(window, path)
+
+    assert "ROI compatibility: missing imported ROIs" in summary
+    assert "Missing imported ROIs: CH3" in summary
+
+
+def test_gui_imported_plan_review_signal_only_f0_display_without_execution(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    before_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    calls = {"signal": 0, "preview": 0}
+    monkeypatch.setattr(
+        main_window_module,
+        "run_signal_only_f0_diagnostic_review",
+        lambda *_args, **_kwargs: calls.__setitem__("signal", calls["signal"] + 1),
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "run_guided_correction_preview_comparison",
+        lambda *_args, **_kwargs: calls.__setitem__("preview", calls["preview"] + 1),
+    )
+    path = tmp_path / "signal_plan.json"
+    _write_guided_plan_json(path, _candidate_plan(run_dir, rois=["CH1"], strategy="signal_only_f0"))
+
+    summary = _review_plan(window, path)
+
+    assert "Signal-Only F0 (explicit user mark; not fallback)" in summary
+    assert calls == {"signal": 0, "preview": 0}
+    assert sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*")) == before_files
+    assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
+
+
+def test_gui_imported_plan_review_output_policy_warnings_no_live_policy_change(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    unsafe_out = run_dir / "_analysis" / "phasic_out" / "features" / "future"
+    path = tmp_path / "unsafe_output_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(
+            run_dir,
+            rois=["CH1"],
+            output_policy=OutputPolicy(
+                output_root=str(unsafe_out),
+                overwrite=True,
+                separate_from_source_required=False,
+                legacy_outputs_protected=False,
+            ),
+        ),
+    )
+
+    summary = _review_plan(window, path)
+
+    assert "Output policy warnings:" in summary
+    assert "Overwrite is enabled" in summary
+    assert "separate_from_source_required is disabled" in summary
+    assert "legacy_outputs_protected is disabled" in summary
+    assert "inside legacy output directory" in summary
+    assert window._build_guided_draft_run_plan()[0].output_policy.output_root is None
+    assert not unsafe_out.exists()
+
+
+def test_gui_imported_plan_review_candidate_clears_on_completed_run_switch(window, tmp_path, monkeypatch):
+    run_a = _make_preview_completed_run(tmp_path / "run_a")
+    run_b = _make_preview_completed_run(tmp_path / "run_b")
+    _load_preview_completed_run(window, run_a, monkeypatch)
+    path = tmp_path / "run_a_plan.json"
+    _write_guided_plan_json(path, _candidate_plan(run_a, rois=["CH1"]))
+    _review_plan(window, path)
+    assert window._guided_imported_plan_candidate is not None
+
+    _load_preview_completed_run(window, run_b, monkeypatch)
+
+    assert window._guided_imported_plan_candidate is None
+    assert "cleared because the loaded completed run changed" in window._guided_imported_plan_status_label.text()
+    assert window._build_guided_draft_run_plan()[0].source.completed_run_dir == str(run_b.resolve())
+
+
+def test_gui_imported_plan_review_candidate_replaced_on_new_open(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    first = tmp_path / "first_plan.json"
+    second = tmp_path / "second_plan.json"
+    first_plan = _candidate_plan(run_dir, rois=["CH1"])
+    first_plan.plan_id = "first"
+    second_plan = _candidate_plan(run_dir, rois=["CH2"])
+    second_plan.plan_id = "second"
+    _write_guided_plan_json(first, first_plan)
+    _write_guided_plan_json(second, second_plan)
+
+    first_summary = _review_plan(window, first)
+    second_summary = _review_plan(window, second)
+
+    assert "Plan ID: first" in first_summary
+    assert "Plan ID: second" in second_summary
+    assert "Plan ID: first" not in second_summary
+    assert window._guided_imported_plan_file_path == str(second.resolve())
+
+
+def test_gui_imported_plan_review_non_output_guarantee(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    before_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    output_root = tmp_path / "candidate_output"
+    path = tmp_path / "readonly_plan.json"
+    _write_guided_plan_json(
+        path,
+        _candidate_plan(run_dir, rois=["CH1"], profile=True, output_policy=OutputPolicy(output_root=str(output_root))),
+    )
+
+    _review_plan(window, path)
+
+    after_files = sorted(p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*"))
+    assert after_files == before_files
+    assert not output_root.exists()
+    assert not (run_dir / "manifest.csv").exists()
+    assert not (run_dir / "features.csv").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "applied_dff").exists()
+    assert not (run_dir / "_analysis" / "phasic_out" / "features").exists()
 
 
 def test_gui_no_draft_plan_tests_use_hidden_confirm_controls():
