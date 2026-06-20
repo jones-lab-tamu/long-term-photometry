@@ -5942,6 +5942,7 @@ class MainWindow(QMainWindow):
     def _guided_new_analysis_run_preview_text(self, preview, subset_readiness=None) -> str:
         source = preview.source or {}
         acquisition = preview.acquisition or {}
+        dataset_contract = preview.dataset_contract or {}
         roi_selection = preview.roi_selection or {}
         diagnostic_cache = preview.diagnostic_cache or {}
         correction_strategy = preview.correction_strategy or {}
@@ -5971,6 +5972,28 @@ class MainWindow(QMainWindow):
             f"Source/input: {self._display_path(str(source.get('authoritative_input_source_path') or source.get('input_source_path') or '')) if (source.get('authoritative_input_source_path') or source.get('input_source_path')) else 'none'}",
             f"Input format: {source.get('input_format') or 'unknown'}",
             f"Acquisition: {acquisition.get('acquisition_mode') or 'unknown'} ({acquisition.get('acquisition_structure_status') or 'unknown'})",
+            "Dataset contract snapshot:",
+            f"  stored status: {dataset_contract.get('status') or 'missing'}",
+            f"  current_applied: {str(bool(dataset_contract.get('current_applied'))).lower()}",
+            f"  explicitly_applied: {str(bool(dataset_contract.get('explicitly_applied'))).lower()}",
+            f"  input_format: {dataset_contract.get('input_format') or 'none'}",
+            f"  resolved_input_format: {dataset_contract.get('resolved_input_format') or 'none'}",
+            f"  acquisition_mode: {dataset_contract.get('acquisition_mode') or 'none'}",
+            "  validation issues: "
+            + (
+                "; ".join(str(item) for item in dataset_contract.get("validation_issues") or [])
+                if dataset_contract.get("validation_issues")
+                else "none"
+            ),
+            "  stale reasons: "
+            + (
+                "; ".join(str(item) for item in dataset_contract.get("stale_reasons") or [])
+                if dataset_contract.get("stale_reasons")
+                else "none"
+            ),
+            "  source identity: "
+            + self._guided_new_analysis_dataset_contract_preview_identity_text(dataset_contract),
+            "  execution consumption: not enabled in this stage",
             f"Included ROIs: {len(included_rois)}" + (f" ({', '.join(str(roi) for roi in included_rois)})" if included_rois else ""),
             f"Correction strategies: {len(per_roi_choices)} per-ROI choice(s); execution mapping {correction_strategy.get('execution_mapping_status') or 'unknown'}; global collapse {str(bool(correction_strategy.get('global_strategy_collapsed'))).lower()}",
         ]
@@ -6008,6 +6031,19 @@ class MainWindow(QMainWindow):
         lines.append("No files or directories were created.")
         lines.append("This preview is read-only and non-executing.")
         return "\n".join(lines)
+
+    def _guided_new_analysis_dataset_contract_preview_identity_text(self, dataset_contract: dict[str, object]) -> str:
+        identity = dataset_contract.get("source_identity") if isinstance(dataset_contract, dict) else {}
+        if not isinstance(identity, dict):
+            identity = {}
+        input_path = str(identity.get("input_source_path") or "none")
+        included = identity.get("included_roi_ids") or []
+        return (
+            f"input={self._display_path(input_path)}, "
+            f"format={identity.get('input_format') or 'none'}, "
+            f"acquisition={identity.get('acquisition_mode') or 'none'}, "
+            f"included_rois={len(included) if isinstance(included, list) else 0}"
+        )
 
     def _refresh_guided_new_analysis_draft_plan_checklist(self, plan, readiness) -> None:
         label = getattr(self, "_guided_draft_run_plan_checklist_label", None)

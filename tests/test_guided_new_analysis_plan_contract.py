@@ -324,6 +324,31 @@ def test_run_preview_keeps_handoff_readiness_separate_from_execution_contract_un
     assert preview.output_policy["files_written"] is False
 
 
+def test_run_preview_serializes_stored_dataset_contract_snapshot_only():
+    snapshot = GuidedNewAnalysisDatasetContractSnapshot(
+        status="applied",
+        input_format="rwd",
+        resolved_input_format="rwd",
+        acquisition_mode="intermittent",
+        contract_values={"rwd_time_col": "Time"},
+        explicitly_applied=True,
+        provenance={"explicit_guided_apply": True},
+    )
+    plan = _complete_new_analysis_plan(dataset_contract_snapshot=snapshot)
+
+    preview = build_guided_new_analysis_run_preview(plan)
+
+    assert preview.dataset_contract["status"] == "applied"
+    assert preview.dataset_contract["current_applied"] is True
+    assert preview.dataset_contract["explicitly_applied"] is True
+    assert preview.dataset_contract["input_format"] == "rwd"
+    assert preview.dataset_contract["contract_values"]["rwd_time_col"] == "Time"
+    assert preview.dataset_contract["provenance"]["explicit_guided_apply"] is True
+    assert preview.dataset_contract["provenance"]["no_runspec"] is True
+    assert preview.dataset_contract["provenance"]["no_config_written"] is True
+    assert preview.dataset_contract["execution_consumption_enabled"] is False
+
+
 def test_run_preview_marks_signal_only_f0_production_routing_unresolved():
     plan = _complete_new_analysis_plan(
         per_roi_correction_strategy_choices=[

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
 from photometry_pipeline.guided_new_analysis_plan import (
+    GuidedNewAnalysisDatasetContractSnapshot,
     GuidedNewAnalysisDraftPlan,
     GuidedPlanCorrectionChoice,
     evaluate_guided_new_analysis_execution_subset_readiness,
@@ -395,6 +396,116 @@ def test_new_analysis_dataset_contract_apply_clear_stale_do_not_create_files(
     assert _snapshot_files(tmp_path) == before_after_manual_dir
     assert changed_input.exists()
     assert before_after_manual_dir != before
+
+
+def test_new_analysis_run_preview_displays_missing_dataset_contract_snapshot(window, tmp_path, monkeypatch):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "Dataset contract snapshot:" in preview_text
+    assert "stored status: missing" in preview_text
+    assert "current_applied: false" in preview_text
+    assert "execution consumption: not enabled in this stage" in preview_text
+    assert "Execution: unavailable" in preview_text
+
+
+def test_new_analysis_run_preview_displays_applied_dataset_contract_without_satisfying_blockers(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.setText("120")
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_dataset_contract_apply_btn.click()
+
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "Dataset contract snapshot:" in preview_text
+    assert "stored status: applied" in preview_text
+    assert "current_applied: true" in preview_text
+    assert "explicitly_applied: true" in preview_text
+    assert "input_format: rwd" in preview_text
+    assert "acquisition_mode: intermittent" in preview_text
+    assert "validation issues: none" in preview_text
+    assert "stale reasons: none" in preview_text
+    assert "execution consumption: not enabled in this stage" in preview_text
+    assert "missing_rwd_dataset_contract" in preview_text
+    assert "execution_available: false" in preview_text
+    assert "ready to run" not in preview_text.lower()
+
+
+def test_new_analysis_run_preview_displays_stale_dataset_contract_snapshot(window, tmp_path, monkeypatch):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.setText("120")
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_dataset_contract_apply_btn.click()
+
+    changed_input = tmp_path / "changed_raw_input"
+    changed_input.mkdir()
+    window._guided_input_dir_edit.setText(str(changed_input))
+    window._refresh_guided_draft_run_plan_preview()
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "Dataset contract snapshot:" in preview_text
+    assert "stored status: stale" in preview_text
+    assert "current_applied: false" in preview_text
+    assert "explicitly_applied: true" in preview_text
+    assert "stale reasons:" in preview_text
+    assert "input_source_path changed" in preview_text
+    assert "execution consumption: not enabled in this stage" in preview_text
+
+
+def test_new_analysis_run_preview_displays_represented_unsupported_dataset_contract_snapshot(window):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_new_analysis_dataset_contract_snapshot = GuidedNewAnalysisDatasetContractSnapshot(
+        status="unsupported",
+        input_format="npm",
+        resolved_input_format="npm",
+        acquisition_mode="continuous",
+        validation_issues=("unsupported_npm_continuous",),
+    )
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._refresh_guided_draft_run_plan_preview()
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "Dataset contract snapshot:" in preview_text
+    assert "stored status: unsupported" in preview_text
+    assert "current_applied: false" in preview_text
+    assert "validation issues: unsupported_npm_continuous" in preview_text
+    assert "execution consumption: not enabled in this stage" in preview_text
+    assert "unsupported_npm_continuous" in preview_text
+
+
+def test_new_analysis_run_preview_keeps_existing_sections_with_dataset_contract(window, tmp_path, monkeypatch):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._guided_dataset_contract_apply_btn.click()
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "Preview schema version:" in preview_text
+    assert "Plan schema version:" in preview_text
+    assert "Source/input:" in preview_text
+    assert "Acquisition:" in preview_text
+    assert "Dataset contract snapshot:" in preview_text
+    assert "Included ROIs:" in preview_text
+    assert "Correction strategies:" in preview_text
+    assert "Feature/event:" in preview_text
+    assert "Output policy status:" in preview_text
+    assert "Diagnostic cache:" in preview_text
+    assert "First execution subset:" in preview_text
+    assert "Execution: unavailable" in preview_text
+    assert "No files or directories were created." in preview_text
+    assert "This preview is read-only and non-executing." in preview_text
 
 
 def test_new_analysis_draft_plan_reports_choices_as_current_after_build_and_mark(window, tmp_path, monkeypatch):

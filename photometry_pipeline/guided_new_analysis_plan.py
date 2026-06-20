@@ -81,6 +81,7 @@ class GuidedNewAnalysisRunPreview:
     plan_schema_version: str
     source: dict[str, Any]
     acquisition: dict[str, Any]
+    dataset_contract: dict[str, Any]
     roi_selection: dict[str, Any]
     diagnostic_cache: dict[str, Any]
     correction_strategy: dict[str, Any]
@@ -1117,6 +1118,51 @@ def _preview_issue_from_plan_issue(issue: GuidedPlanIssue) -> GuidedNewAnalysisR
     )
 
 
+def _dataset_contract_snapshot_preview_dict(
+    snapshot: GuidedNewAnalysisDatasetContractSnapshot,
+) -> dict[str, Any]:
+    identity = snapshot.source_identity
+    return {
+        "schema_version": snapshot.schema_version,
+        "status": snapshot.status,
+        "current_applied": snapshot.current_applied,
+        "explicitly_applied": snapshot.explicitly_applied,
+        "input_format": snapshot.input_format,
+        "resolved_input_format": snapshot.resolved_input_format,
+        "acquisition_mode": snapshot.acquisition_mode,
+        "validation_issues": list(snapshot.validation_issues),
+        "stale_reasons": list(snapshot.stale_reasons),
+        "source_identity": {
+            "input_source_path": identity.input_source_path,
+            "resolved_input_source_path": identity.resolved_input_source_path,
+            "input_format": identity.input_format,
+            "resolved_input_format": identity.resolved_input_format,
+            "acquisition_mode": identity.acquisition_mode,
+            "sessions_per_hour": identity.sessions_per_hour,
+            "session_duration_sec": identity.session_duration_sec,
+            "continuous_window_sec": identity.continuous_window_sec,
+            "continuous_step_sec": identity.continuous_step_sec,
+            "allow_partial_final_window": identity.allow_partial_final_window,
+            "exclude_incomplete_final_rwd_chunk": identity.exclude_incomplete_final_rwd_chunk,
+            "discovered_roi_ids": list(identity.discovered_roi_ids),
+            "included_roi_ids": list(identity.included_roi_ids),
+            "source_setup_signature": identity.source_setup_signature,
+            "config_fingerprint": identity.config_fingerprint,
+            "diagnostic_cache_contract_identity": identity.diagnostic_cache_contract_identity,
+        },
+        "contract_values": dict(snapshot.contract_values),
+        "format_specific": dict(snapshot.format_specific),
+        "provenance": {
+            **dict(snapshot.provenance),
+            "no_runspec": True,
+            "no_argv": True,
+            "no_config_written": True,
+            "no_files_written": True,
+        },
+        "execution_consumption_enabled": False,
+    }
+
+
 def _section_snapshot(section: GuidedNewAnalysisSectionReadiness) -> dict[str, Any]:
     return {
         "key": section.key,
@@ -1191,6 +1237,7 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
                 "reason": "GuidedNewAnalysisDraftPlan does not represent timeline anchor mode.",
             },
         },
+        dataset_contract=_dataset_contract_snapshot_preview_dict(plan.dataset_contract_snapshot),
         roi_selection={
             "discovered_roi_ids": list(plan.discovered_roi_ids),
             "included_roi_ids": list(plan.included_roi_ids),
