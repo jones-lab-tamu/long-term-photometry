@@ -752,9 +752,70 @@ def _execution_field(
     )
 
 
+def _same_optional_value(expected: Any, actual: Any) -> bool:
+    return expected == actual
+
+
+def _same_optional_path(expected: str | None, actual: str | None) -> bool:
+    return _paths_match(expected, actual)
+
+
+def _normalized_format(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
+def _dataset_contract_snapshot_plan_consistency_reasons(
+    plan: GuidedNewAnalysisDraftPlan,
+    snapshot: GuidedNewAnalysisDatasetContractSnapshot,
+) -> tuple[str, ...]:
+    identity = snapshot.source_identity
+    reasons: list[str] = []
+
+    if not _same_optional_path(plan.input_source_path, identity.input_source_path):
+        reasons.append("input_source_path mismatch")
+    if not _same_optional_path(plan.resolved_input_source_path, identity.resolved_input_source_path):
+        reasons.append("resolved_input_source_path mismatch")
+    if not _same_optional_value(_normalized_format(plan.input_format), _normalized_format(identity.input_format)):
+        reasons.append("input_format mismatch")
+    if not _same_optional_value(_normalized_format(plan.acquisition_mode), _normalized_format(identity.acquisition_mode)):
+        reasons.append("acquisition_mode mismatch")
+    if not _same_optional_value(plan.sessions_per_hour, identity.sessions_per_hour):
+        reasons.append("sessions_per_hour mismatch")
+    if not _same_optional_value(plan.session_duration_sec, identity.session_duration_sec):
+        reasons.append("session_duration_sec mismatch")
+    if not _same_optional_value(plan.continuous_window_sec, identity.continuous_window_sec):
+        reasons.append("continuous_window_sec mismatch")
+    if not _same_optional_value(plan.continuous_step_sec, identity.continuous_step_sec):
+        reasons.append("continuous_step_sec mismatch")
+    if not _same_optional_value(plan.allow_partial_final_window, identity.allow_partial_final_window):
+        reasons.append("allow_partial_final_window mismatch")
+    if not _same_optional_value(plan.exclude_incomplete_final_rwd_chunk, identity.exclude_incomplete_final_rwd_chunk):
+        reasons.append("exclude_incomplete_final_rwd_chunk mismatch")
+    if identity.included_roi_ids and tuple(plan.included_roi_ids) != identity.included_roi_ids:
+        reasons.append("included_roi_ids mismatch")
+
+    plan_fmt = _normalized_format(plan.input_format)
+    snapshot_input_fmt = _normalized_format(snapshot.input_format)
+    snapshot_resolved_fmt = _normalized_format(snapshot.resolved_input_format)
+    if snapshot_input_fmt and snapshot_input_fmt != plan_fmt:
+        reasons.append("snapshot input_format mismatch")
+    if snapshot_resolved_fmt and snapshot_resolved_fmt != plan_fmt:
+        reasons.append("snapshot resolved_input_format mismatch")
+    if _normalized_format(snapshot.acquisition_mode) and _normalized_format(snapshot.acquisition_mode) != _normalized_format(plan.acquisition_mode):
+        reasons.append("snapshot acquisition_mode mismatch")
+
+    return tuple(dict.fromkeys(reasons))
+
+
 def _dataset_contract_snapshot_execution_field(
     snapshot: GuidedNewAnalysisDatasetContractSnapshot,
+    plan: GuidedNewAnalysisDraftPlan | None = None,
 ) -> GuidedNewAnalysisExecutionFieldClassification:
+    consistency_reasons = (
+        _dataset_contract_snapshot_plan_consistency_reasons(plan, snapshot)
+        if plan is not None and snapshot.current_applied
+        else ()
+    )
     value = {
         "schema_version": snapshot.schema_version,
         "status": snapshot.status,
@@ -765,43 +826,92 @@ def _dataset_contract_snapshot_execution_field(
         "current_applied": snapshot.current_applied,
         "validation_issues": list(snapshot.validation_issues),
         "stale_reasons": list(snapshot.stale_reasons),
+        "consistency_reasons": list(consistency_reasons),
     }
     if snapshot.status == "missing":
         status = "required_missing"
         provenance = "dataset contract snapshot is not represented as applied Guided planning state"
+        blocks_subset = False
+        issue_category = None
     elif snapshot.status == "unsupported":
         status = "unsupported"
         provenance = "dataset contract snapshot records an unsupported format/acquisition combination"
+        blocks_subset = True
+        issue_category = "unsupported_dataset_contract_snapshot"
     elif snapshot.validation_issues or snapshot.status == "invalid":
         status = "invalid"
         provenance = "dataset contract snapshot failed structural or reviewed validation"
+        blocks_subset = True
+        issue_category = "invalid_dataset_contract_snapshot"
     elif snapshot.stale_reasons or snapshot.status == "stale":
         status = "stale"
         provenance = "dataset contract snapshot is applied or inferred but no longer current"
+        blocks_subset = True
+        issue_category = "stale_dataset_contract_snapshot"
+    elif consistency_reasons:
+        status = "stale"
+        provenance = "dataset contract snapshot source identity is inconsistent with current Guided plan state"
+        blocks_subset = True
+        issue_category = "inconsistent_dataset_contract_snapshot"
     elif snapshot.current_applied:
         status = "present"
         provenance = "applied GuidedNewAnalysisDraftPlan dataset contract snapshot"
+        blocks_subset = False
+        issue_category = None
     elif snapshot.status == "inferred":
         status = "selected"
         provenance = "dataset contract snapshot is visible/reviewable but not explicitly applied"
+        blocks_subset = False
+        issue_category = None
     elif snapshot.status == "applied" and not snapshot.explicitly_applied:
         status = "selected"
         provenance = "dataset contract snapshot status is applied but explicit apply provenance is missing"
+        blocks_subset = False
+        issue_category = None
     else:
         status = "selected"
         provenance = "dataset contract snapshot is not current applied planning state"
+        blocks_subset = False
+        issue_category = None
     return _execution_field(
         "dataset_contract_snapshot",
         status,
         value=value,
         provenance=provenance,
-        blocks_subset=False,
+        blocks_subset=blocks_subset,
+        issue_category=issue_category,
     )
 
 
+def _snapshot_field_value(snapshot: GuidedNewAnalysisDatasetContractSnapshot) -> dict[str, Any]:
+    return {
+        "schema_version": snapshot.schema_version,
+        "status": snapshot.status,
+        "input_format": snapshot.input_format,
+        "resolved_input_format": snapshot.resolved_input_format,
+        "acquisition_mode": snapshot.acquisition_mode,
+        "contract_keys": sorted(snapshot.contract_values.keys()),
+        "format_specific_keys": sorted(snapshot.format_specific.keys()),
+    }
+
+
+def _snapshot_has_mapping_fields(
+    snapshot: GuidedNewAnalysisDatasetContractSnapshot,
+    required_keys: tuple[str, ...],
+) -> bool:
+    values = {**dict(snapshot.contract_values), **dict(snapshot.format_specific)}
+    return all(bool(values.get(key)) for key in required_keys)
+
+
 def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[GuidedNewAnalysisExecutionFieldClassification, ...]:
+    dataset_snapshot_field = _dataset_contract_snapshot_execution_field(plan.dataset_contract_snapshot, plan)
+    dataset_snapshot_usable = (
+        dataset_snapshot_field.status == "present"
+        and not dataset_snapshot_field.blocks_subset
+        and plan.dataset_contract_snapshot.current_applied
+    )
     fields: list[GuidedNewAnalysisExecutionFieldClassification] = [
-        _dataset_contract_snapshot_execution_field(plan.dataset_contract_snapshot),
+        dataset_snapshot_field,
         _execution_field(
             "timeline_anchor_mode",
             "required_missing",
@@ -901,14 +1011,27 @@ def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[
     fmt = str(plan.input_format or "").strip().lower()
     acq = str(plan.acquisition_mode or "").strip().lower()
     if fmt == "rwd":
-        fields.append(_execution_field(
-            "dataset_contract_overrides",
-            "required_missing",
-            value=None,
-            provenance="RWD dataset contract snapshot is not represented in GuidedNewAnalysisDraftPlan",
-            blocks_subset=True,
-            issue_category="missing_rwd_dataset_contract",
-        ))
+        if dataset_snapshot_usable:
+            fields.append(_execution_field(
+                "dataset_contract_overrides",
+                "present",
+                value=_snapshot_field_value(plan.dataset_contract_snapshot),
+                provenance="applied GuidedNewAnalysisDraftPlan dataset contract snapshot consumed for first-subset readiness classification",
+            ))
+        else:
+            blocks_category = dataset_snapshot_field.issue_category or "missing_rwd_dataset_contract"
+            fields.append(_execution_field(
+                "dataset_contract_overrides",
+                dataset_snapshot_field.status if dataset_snapshot_field.status in {"invalid", "stale", "unsupported"} else "required_missing",
+                value=_snapshot_field_value(plan.dataset_contract_snapshot) if plan.dataset_contract_snapshot.status != "missing" else None,
+                provenance=(
+                    dataset_snapshot_field.provenance
+                    if dataset_snapshot_field.status in {"invalid", "stale", "unsupported"}
+                    else "RWD dataset contract snapshot is not represented as current applied GuidedNewAnalysisDraftPlan state"
+                ),
+                blocks_subset=True,
+                issue_category=blocks_category,
+            ))
         fields.append(_execution_field(
             "acquisition_repair_fields",
             "present",
@@ -926,38 +1049,62 @@ def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[
                 issue_category="unsupported_npm_continuous",
             ))
         else:
+            npm_has_mapping = dataset_snapshot_usable and _snapshot_has_mapping_fields(
+                plan.dataset_contract_snapshot,
+                ("signal_channel", "control_channel", "time_column"),
+            )
             fields.append(_execution_field(
                 "npm_channel_mapping",
-                "required_missing",
-                value=None,
-                provenance="NPM signal/control channel mapping is not represented in GuidedNewAnalysisDraftPlan",
-                blocks_subset=True,
-                issue_category="missing_npm_channel_mapping",
+                "present" if npm_has_mapping else "required_missing",
+                value=_snapshot_field_value(plan.dataset_contract_snapshot) if npm_has_mapping else None,
+                provenance=(
+                    "applied GuidedNewAnalysisDraftPlan dataset contract snapshot provides signal_channel/control_channel/time_column"
+                    if npm_has_mapping
+                    else "NPM signal/control/time channel mapping is not represented in current applied GuidedNewAnalysisDraftPlan dataset contract snapshot"
+                ),
+                blocks_subset=not npm_has_mapping,
+                issue_category=None if npm_has_mapping else "missing_npm_channel_mapping",
             ))
             fields.append(_execution_field(
                 "dataset_contract_overrides",
-                "required_missing",
-                value=None,
-                provenance="NPM dataset contract snapshot is not represented in GuidedNewAnalysisDraftPlan",
-                blocks_subset=True,
-                issue_category="missing_npm_dataset_contract",
+                "present" if npm_has_mapping else "required_missing",
+                value=_snapshot_field_value(plan.dataset_contract_snapshot) if npm_has_mapping else None,
+                provenance=(
+                    "applied GuidedNewAnalysisDraftPlan dataset contract snapshot consumed for NPM first-subset readiness classification"
+                    if npm_has_mapping
+                    else "NPM dataset contract snapshot does not contain required channel mapping fields"
+                ),
+                blocks_subset=not npm_has_mapping,
+                issue_category=None if npm_has_mapping else "missing_npm_dataset_contract",
             ))
     elif fmt == "custom_tabular":
+        custom_has_mapping = dataset_snapshot_usable and _snapshot_has_mapping_fields(
+            plan.dataset_contract_snapshot,
+            ("signal_column", "control_column", "time_column", "roi_column"),
+        )
         fields.append(_execution_field(
             "custom_tabular_column_mapping",
-            "required_missing",
-            value=None,
-            provenance="custom_tabular column mapping is not represented in GuidedNewAnalysisDraftPlan",
-            blocks_subset=True,
-            issue_category="missing_custom_tabular_column_mapping",
+            "present" if custom_has_mapping else "required_missing",
+            value=_snapshot_field_value(plan.dataset_contract_snapshot) if custom_has_mapping else None,
+            provenance=(
+                "applied GuidedNewAnalysisDraftPlan dataset contract snapshot provides signal/control/time/ROI column mapping"
+                if custom_has_mapping
+                else "custom_tabular signal/control/time/ROI column mapping is not represented in current applied GuidedNewAnalysisDraftPlan dataset contract snapshot"
+            ),
+            blocks_subset=not custom_has_mapping,
+            issue_category=None if custom_has_mapping else "missing_custom_tabular_column_mapping",
         ))
         fields.append(_execution_field(
             "dataset_contract_overrides",
-            "required_missing",
-            value=None,
-            provenance="custom_tabular dataset contract snapshot is not represented in GuidedNewAnalysisDraftPlan",
-            blocks_subset=True,
-            issue_category="missing_custom_tabular_dataset_contract",
+            "present" if custom_has_mapping else "required_missing",
+            value=_snapshot_field_value(plan.dataset_contract_snapshot) if custom_has_mapping else None,
+            provenance=(
+                "applied GuidedNewAnalysisDraftPlan dataset contract snapshot consumed for custom_tabular first-subset readiness classification"
+                if custom_has_mapping
+                else "custom_tabular dataset contract snapshot does not contain required column mapping fields"
+            ),
+            blocks_subset=not custom_has_mapping,
+            issue_category=None if custom_has_mapping else "missing_custom_tabular_dataset_contract",
         ))
     elif fmt == "auto":
         fields.append(_execution_field(
@@ -1120,6 +1267,8 @@ def _preview_issue_from_plan_issue(issue: GuidedPlanIssue) -> GuidedNewAnalysisR
 
 def _dataset_contract_snapshot_preview_dict(
     snapshot: GuidedNewAnalysisDatasetContractSnapshot,
+    *,
+    execution_consumption_enabled: bool = False,
 ) -> dict[str, Any]:
     identity = snapshot.source_identity
     return {
@@ -1159,7 +1308,7 @@ def _dataset_contract_snapshot_preview_dict(
             "no_config_written": True,
             "no_files_written": True,
         },
-        "execution_consumption_enabled": False,
+        "execution_consumption_enabled": execution_consumption_enabled,
     }
 
 
@@ -1214,6 +1363,14 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
         "execution_backend": "unavailable_in_this_stage",
     }
 
+    execution_fields = _execution_field_classifications(plan)
+    dataset_contract_consumed = any(
+        field.field_name in {"dataset_contract_overrides", "npm_channel_mapping", "custom_tabular_column_mapping"}
+        and field.status == "present"
+        and not field.blocks_subset
+        for field in execution_fields
+    )
+
     return GuidedNewAnalysisRunPreview(
         preview_schema_version=RUN_PREVIEW_SCHEMA_VERSION,
         plan_schema_version=plan.schema_version,
@@ -1237,7 +1394,10 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
                 "reason": "GuidedNewAnalysisDraftPlan does not represent timeline anchor mode.",
             },
         },
-        dataset_contract=_dataset_contract_snapshot_preview_dict(plan.dataset_contract_snapshot),
+        dataset_contract=_dataset_contract_snapshot_preview_dict(
+            plan.dataset_contract_snapshot,
+            execution_consumption_enabled=dataset_contract_consumed,
+        ),
         roi_selection={
             "discovered_roi_ids": list(plan.discovered_roi_ids),
             "included_roi_ids": list(plan.included_roi_ids),

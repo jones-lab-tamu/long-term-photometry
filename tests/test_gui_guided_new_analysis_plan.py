@@ -85,15 +85,19 @@ def _configure_complete_guided_new_analysis_draft(
     tmp_path,
     monkeypatch,
     *,
+    acquisition_mode="continuous",
     signal_only_f0=False,
     strategy_by_roi=None,
 ):
     window._guided_workflow_stepper.setCurrentRow(0)
     window._guided_start_setup_btn.click()
     _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
-    continuous_idx = window._guided_acquisition_mode_combo.findData("continuous")
-    if continuous_idx >= 0:
-        window._guided_acquisition_mode_combo.setCurrentIndex(continuous_idx)
+    acquisition_idx = window._guided_acquisition_mode_combo.findData(acquisition_mode)
+    if acquisition_idx >= 0:
+        window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_idx)
+    if acquisition_mode == "intermittent":
+        window._guided_sessions_per_hour_edit.setText("6")
+        window._guided_session_duration_edit.setText("120")
 
     fake_runner = _FakeDiagnosticCacheRunner()
     window._guided_diagnostic_cache_runner = fake_runner
@@ -321,7 +325,7 @@ def test_new_analysis_dataset_contract_marks_stale_on_setup_change(window, tmp_p
     assert "Dataset contract stale reasons:" in window._guided_draft_run_plan_preview_label.text()
 
 
-def test_new_analysis_dataset_contract_applied_does_not_satisfy_execution_subset_blockers(
+def test_new_analysis_dataset_contract_applied_satisfies_rwd_execution_subset_dataset_blocker(
     window,
     tmp_path,
     monkeypatch,
@@ -339,7 +343,8 @@ def test_new_analysis_dataset_contract_applied_does_not_satisfy_execution_subset
     fields = {field.field_name: field for field in subset.field_classifications}
 
     assert fields["dataset_contract_snapshot"].status == "present"
-    assert any(issue.category == "missing_rwd_dataset_contract" for issue in subset.blocking_issues)
+    assert fields["dataset_contract_overrides"].status == "present"
+    assert not any(issue.category == "missing_rwd_dataset_contract" for issue in subset.blocking_issues)
     assert subset.execution_available is False
 
 
@@ -413,7 +418,7 @@ def test_new_analysis_run_preview_displays_missing_dataset_contract_snapshot(win
     assert "Execution: unavailable" in preview_text
 
 
-def test_new_analysis_run_preview_displays_applied_dataset_contract_without_satisfying_blockers(
+def test_new_analysis_run_preview_displays_applied_dataset_contract_consumed_by_readiness(
     window,
     tmp_path,
     monkeypatch,
@@ -436,8 +441,8 @@ def test_new_analysis_run_preview_displays_applied_dataset_contract_without_sati
     assert "acquisition_mode: intermittent" in preview_text
     assert "validation issues: none" in preview_text
     assert "stale reasons: none" in preview_text
-    assert "execution consumption: not enabled in this stage" in preview_text
-    assert "missing_rwd_dataset_contract" in preview_text
+    assert "execution consumption: enabled for first-subset readiness classification" in preview_text
+    assert "missing_rwd_dataset_contract" not in preview_text
     assert "execution_available: false" in preview_text
     assert "ready to run" not in preview_text.lower()
 
@@ -638,6 +643,64 @@ def test_new_analysis_run_preview_shows_missing_execution_subset_fields(window, 
     assert "traces_only: fixed_default=False" in preview_text
     assert "preview_first_n: fixed_default" in preview_text
     assert "dataset_contract_overrides: required_missing, blocks subset" in preview_text
+
+
+def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset_blocker(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    _configure_complete_guided_new_analysis_draft(
+        window,
+        tmp_path,
+        monkeypatch,
+        acquisition_mode="intermittent",
+    )
+
+    window._guided_dataset_contract_apply_btn.click()
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "Dataset contract snapshot:" in preview_text
+    assert "stored status: applied" in preview_text
+    assert "current_applied: true" in preview_text
+    assert "execution consumption: enabled for first-subset readiness classification" in preview_text
+    assert "missing_rwd_dataset_contract" not in preview_text
+    assert "dataset_contract_overrides: present" in preview_text
+    assert "missing_timeline_anchor_mode" in preview_text
+    assert "missing_execution_mode" in preview_text
+    assert "missing_run_profile" in preview_text
+    assert "missing_output_creation_policy" in preview_text
+    assert "execution_available: false" in preview_text
+    assert "ready to run" not in preview_text.lower()
+    assert "ready for execution" not in preview_text.lower()
+
+
+def test_new_analysis_run_preview_stale_dataset_contract_keeps_dataset_blocker(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    _configure_complete_guided_new_analysis_draft(
+        window,
+        tmp_path,
+        monkeypatch,
+        acquisition_mode="intermittent",
+    )
+    window._guided_dataset_contract_apply_btn.click()
+
+    changed_input = tmp_path / "changed_raw_input"
+    changed_input.mkdir()
+    window._guided_input_dir_edit.setText(str(changed_input))
+    window._refresh_guided_draft_run_plan_preview()
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "Dataset contract snapshot:" in preview_text
+    assert "stored status: stale" in preview_text
+    assert "current_applied: false" in preview_text
+    assert "stale reasons:" in preview_text
+    assert "stale_dataset_contract_snapshot" in preview_text
+    assert "execution_available: false" in preview_text
+    assert "ready to run" not in preview_text.lower()
 
 
 def test_new_analysis_run_preview_panel_shows_incomplete_plan_unresolved_items(window):

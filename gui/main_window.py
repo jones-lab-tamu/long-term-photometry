@@ -5993,7 +5993,12 @@ class MainWindow(QMainWindow):
             ),
             "  source identity: "
             + self._guided_new_analysis_dataset_contract_preview_identity_text(dataset_contract),
-            "  execution consumption: not enabled in this stage",
+            "  execution consumption: "
+            + (
+                "enabled for first-subset readiness classification"
+                if dataset_contract.get("execution_consumption_enabled")
+                else "not enabled in this stage"
+            ),
             f"Included ROIs: {len(included_rois)}" + (f" ({', '.join(str(roi) for roi in included_rois)})" if included_rois else ""),
             f"Correction strategies: {len(per_roi_choices)} per-ROI choice(s); execution mapping {correction_strategy.get('execution_mapping_status') or 'unknown'}; global collapse {str(bool(correction_strategy.get('global_strategy_collapsed'))).lower()}",
         ]

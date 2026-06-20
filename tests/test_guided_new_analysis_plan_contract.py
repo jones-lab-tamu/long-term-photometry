@@ -1,5 +1,7 @@
 """Contract tests for the Guided new_analysis draft plan state and validation helpers."""
 
+import dataclasses
+
 import pytest
 from photometry_pipeline.guided_new_analysis_plan import (
     DATASET_CONTRACT_SNAPSHOT_SCHEMA_VERSION,
@@ -66,6 +68,41 @@ def _complete_new_analysis_plan(**overrides):
     for key, value in overrides.items():
         setattr(plan, key, value)
     return plan
+
+
+def _current_applied_snapshot_for_plan(plan, **overrides):
+    source_identity = GuidedNewAnalysisDatasetContractSourceIdentity(
+        input_source_path=plan.input_source_path,
+        resolved_input_source_path=plan.resolved_input_source_path,
+        input_format=plan.input_format,
+        resolved_input_format=plan.input_format,
+        acquisition_mode=plan.acquisition_mode,
+        sessions_per_hour=plan.sessions_per_hour,
+        session_duration_sec=plan.session_duration_sec,
+        continuous_window_sec=plan.continuous_window_sec,
+        continuous_step_sec=plan.continuous_step_sec,
+        allow_partial_final_window=plan.allow_partial_final_window,
+        exclude_incomplete_final_rwd_chunk=plan.exclude_incomplete_final_rwd_chunk,
+        discovered_roi_ids=tuple(plan.discovered_roi_ids),
+        included_roi_ids=tuple(plan.included_roi_ids),
+        source_setup_signature=plan.source_setup_signature,
+        diagnostic_cache_contract_identity=plan.build_request_signature,
+    )
+    snapshot = GuidedNewAnalysisDatasetContractSnapshot(
+        status="applied",
+        input_format=plan.input_format,
+        resolved_input_format=plan.input_format,
+        acquisition_mode=plan.acquisition_mode,
+        contract_values={
+            "input_format": plan.input_format,
+            "resolved_input_format": plan.input_format,
+            "acquisition_mode": plan.acquisition_mode,
+        },
+        source_identity=source_identity,
+        explicitly_applied=True,
+        provenance={"explicit_guided_apply": True, "no_files_written": True},
+    )
+    return dataclasses.replace(snapshot, **overrides) if overrides else snapshot
 
 
 def test_can_construct_incomplete_new_analysis_draft_plan():
@@ -432,25 +469,112 @@ def test_execution_subset_same_dynamic_strategy_preserves_planning_readiness_but
     assert "missing_output_creation_policy" in categories
 
 
-def test_execution_subset_reports_dataset_contract_snapshot_status_without_satisfying_blocker():
-    snapshot = GuidedNewAnalysisDatasetContractSnapshot(
-        status="applied",
-        input_format="rwd",
-        resolved_input_format="rwd",
-        acquisition_mode="intermittent",
-        contract_values={"rwd_time_col": "Time"},
-        explicitly_applied=True,
+def test_execution_subset_rwd_current_applied_snapshot_satisfies_rwd_dataset_contract_blocker():
+    plan = _complete_new_analysis_plan()
+    plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(
+        plan,
+        contract_values={
+            "input_format": "rwd",
+            "resolved_input_format": "rwd",
+            "acquisition_mode": "intermittent",
+            "rwd_time_col": "Time",
+            "sig_suffix": "_Signal",
+            "uv_suffix": "_UV",
+        },
     )
-    readiness = evaluate_guided_new_analysis_execution_subset_readiness(
-        _complete_new_analysis_plan(dataset_contract_snapshot=snapshot)
-    )
+
+    readiness = evaluate_guided_new_analysis_execution_subset_readiness(plan)
     fields = {field.field_name: field for field in readiness.field_classifications}
     categories = {issue.category for issue in readiness.blocking_issues}
 
     assert fields["dataset_contract_snapshot"].status == "present"
     assert fields["dataset_contract_snapshot"].value["current_applied"] is True
     assert fields["dataset_contract_snapshot"].blocks_subset is False
+    assert fields["dataset_contract_overrides"].status == "present"
+    assert fields["dataset_contract_overrides"].blocks_subset is False
+    assert "missing_rwd_dataset_contract" not in categories
+    assert "missing_timeline_anchor_mode" in categories
+    assert "missing_execution_mode" in categories
+    assert "missing_run_profile" in categories
+    assert "missing_output_creation_policy" in categories
+    assert readiness.execution_available is False
+
+
+def test_execution_subset_rwd_missing_snapshot_still_blocks_dataset_contract():
+    readiness = evaluate_guided_new_analysis_execution_subset_readiness(_complete_new_analysis_plan())
+    categories = {issue.category for issue in readiness.blocking_issues}
+    fields = {field.field_name: field for field in readiness.field_classifications}
+
     assert "missing_rwd_dataset_contract" in categories
+    assert fields["dataset_contract_snapshot"].status == "required_missing"
+    assert fields["dataset_contract_overrides"].status == "required_missing"
+
+
+def test_execution_subset_rwd_stale_or_inconsistent_snapshot_blocks_dataset_contract():
+    plan = _complete_new_analysis_plan()
+    stale_snapshot = _current_applied_snapshot_for_plan(
+        plan,
+        stale_reasons=("input_source_path changed",),
+    )
+    inconsistent_identity = dataclasses.replace(
+        _current_applied_snapshot_for_plan(plan).source_identity,
+        input_source_path="C:/different/input",
+    )
+    inconsistent_snapshot = _current_applied_snapshot_for_plan(
+        plan,
+        source_identity=inconsistent_identity,
+    )
+
+    stale_readiness = evaluate_guided_new_analysis_execution_subset_readiness(
+        _complete_new_analysis_plan(dataset_contract_snapshot=stale_snapshot)
+    )
+    inconsistent_readiness = evaluate_guided_new_analysis_execution_subset_readiness(
+        _complete_new_analysis_plan(dataset_contract_snapshot=inconsistent_snapshot)
+    )
+
+    stale_categories = {issue.category for issue in stale_readiness.blocking_issues}
+    inconsistent_categories = {issue.category for issue in inconsistent_readiness.blocking_issues}
+    stale_fields = {field.field_name: field for field in stale_readiness.field_classifications}
+    inconsistent_fields = {field.field_name: field for field in inconsistent_readiness.field_classifications}
+
+    assert "stale_dataset_contract_snapshot" in stale_categories
+    assert stale_fields["dataset_contract_snapshot"].status == "stale"
+    assert "inconsistent_dataset_contract_snapshot" in inconsistent_categories
+    assert inconsistent_fields["dataset_contract_snapshot"].status == "stale"
+    assert inconsistent_fields["dataset_contract_snapshot"].value["consistency_reasons"]
+
+
+def test_execution_subset_rwd_applied_without_explicit_apply_does_not_satisfy():
+    plan = _complete_new_analysis_plan()
+    plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(
+        plan,
+        explicitly_applied=False,
+    )
+
+    readiness = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    fields = {field.field_name: field for field in readiness.field_classifications}
+    categories = {issue.category for issue in readiness.blocking_issues}
+
+    assert fields["dataset_contract_snapshot"].status == "selected"
+    assert fields["dataset_contract_overrides"].status == "required_missing"
+    assert "missing_rwd_dataset_contract" in categories
+
+
+def test_execution_subset_rwd_invalid_snapshot_does_not_satisfy():
+    plan = _complete_new_analysis_plan()
+    plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(
+        plan,
+        status="invalid",
+        validation_issues=("missing rwd time column",),
+    )
+
+    readiness = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    fields = {field.field_name: field for field in readiness.field_classifications}
+    categories = {issue.category for issue in readiness.blocking_issues}
+
+    assert fields["dataset_contract_snapshot"].status == "invalid"
+    assert fields["dataset_contract_overrides"].status == "invalid"
+    assert "invalid_dataset_contract_snapshot" in categories
 
 
 @pytest.mark.parametrize(
@@ -467,8 +591,8 @@ def test_execution_subset_reports_dataset_contract_snapshot_status_without_satis
                 contract_values={"rwd_time_col": "Time"},
                 explicitly_applied=True,
             ),
-            "present",
-            "applied GuidedNewAnalysisDraftPlan",
+            "stale",
+            "source identity is inconsistent",
         ),
         (
             GuidedNewAnalysisDatasetContractSnapshot(
@@ -538,9 +662,22 @@ def test_execution_subset_classifies_dataset_contract_snapshot_structurally(
     field = next(field for field in readiness.field_classifications if field.field_name == "dataset_contract_snapshot")
 
     assert field.status == expected_status
-    assert field.blocks_subset is False
-    assert snapshot.current_applied is (expected_status == "present")
+    assert field.blocks_subset is (expected_status in {"invalid", "stale", "unsupported"})
+    assert snapshot.current_applied is (snapshot.status == "applied" and snapshot.explicitly_applied and not snapshot.validation_issues and not snapshot.stale_reasons)
     assert expected_provenance in field.provenance
+
+
+def test_execution_subset_classifies_consistent_current_applied_snapshot_as_present():
+    plan = _complete_new_analysis_plan()
+    plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(plan)
+
+    readiness = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    field = next(field for field in readiness.field_classifications if field.field_name == "dataset_contract_snapshot")
+
+    assert plan.dataset_contract_snapshot.current_applied is True
+    assert field.status == "present"
+    assert field.blocks_subset is False
+    assert "applied GuidedNewAnalysisDraftPlan" in field.provenance
 
 
 def test_execution_subset_mixed_dynamic_strategies_block_subset_not_planning_readiness():
@@ -707,6 +844,134 @@ def test_execution_subset_reports_specific_format_acquisition_field_gaps(input_f
         field.issue_category == expected_category and field.blocks_subset
         for field in subset.field_classifications
     )
+
+
+def test_execution_subset_npm_intermittent_without_mapping_remains_blocked():
+    plan = _complete_new_analysis_plan(input_format="npm", acquisition_mode="intermittent")
+    plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(plan)
+
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    categories = {issue.category for issue in subset.blocking_issues}
+    fields = {field.field_name: field for field in subset.field_classifications}
+
+    assert "missing_npm_channel_mapping" in categories
+    assert "missing_npm_dataset_contract" in categories
+    assert fields["npm_channel_mapping"].status == "required_missing"
+    assert fields["dataset_contract_overrides"].status == "required_missing"
+
+
+def test_execution_subset_npm_intermittent_with_explicit_mapping_satisfies_npm_dataset_blockers():
+    plan = _complete_new_analysis_plan(input_format="npm", acquisition_mode="intermittent")
+    plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(
+        plan,
+        contract_values={
+            "signal_channel": "465",
+            "control_channel": "405",
+            "time_column": "time_sec",
+        },
+    )
+
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    categories = {issue.category for issue in subset.blocking_issues}
+    fields = {field.field_name: field for field in subset.field_classifications}
+
+    assert "missing_npm_channel_mapping" not in categories
+    assert "missing_npm_dataset_contract" not in categories
+    assert fields["npm_channel_mapping"].status == "present"
+    assert fields["dataset_contract_overrides"].status == "present"
+    assert subset.execution_available is False
+
+
+def test_execution_subset_custom_tabular_without_mapping_remains_blocked():
+    plan = _complete_new_analysis_plan(input_format="custom_tabular", acquisition_mode="intermittent")
+    plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(plan)
+
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    categories = {issue.category for issue in subset.blocking_issues}
+    fields = {field.field_name: field for field in subset.field_classifications}
+
+    assert "missing_custom_tabular_column_mapping" in categories
+    assert "missing_custom_tabular_dataset_contract" in categories
+    assert fields["custom_tabular_column_mapping"].status == "required_missing"
+    assert fields["dataset_contract_overrides"].status == "required_missing"
+
+
+def test_execution_subset_custom_tabular_with_explicit_mapping_satisfies_custom_dataset_blockers():
+    plan = _complete_new_analysis_plan(input_format="custom_tabular", acquisition_mode="intermittent")
+    plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(
+        plan,
+        contract_values={
+            "signal_column": "signal",
+            "control_column": "control",
+            "time_column": "time_sec",
+            "roi_column": "roi",
+        },
+    )
+
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    categories = {issue.category for issue in subset.blocking_issues}
+    fields = {field.field_name: field for field in subset.field_classifications}
+
+    assert "missing_custom_tabular_column_mapping" not in categories
+    assert "missing_custom_tabular_dataset_contract" not in categories
+    assert fields["custom_tabular_column_mapping"].status == "present"
+    assert fields["dataset_contract_overrides"].status == "present"
+    assert subset.execution_available is False
+
+
+def test_execution_subset_npm_continuous_remains_unsupported_with_current_snapshot():
+    plan = _complete_new_analysis_plan(
+        input_format="npm",
+        acquisition_mode="continuous",
+        continuous_window_sec=600.0,
+        continuous_step_sec=600.0,
+    )
+    plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(
+        plan,
+        contract_values={
+            "signal_channel": "465",
+            "control_channel": "405",
+            "time_column": "time_sec",
+        },
+    )
+
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    categories = {issue.category for issue in subset.blocking_issues}
+
+    assert "unsupported_npm_continuous" in categories
+    assert subset.execution_available is False
+
+
+def test_execution_subset_auto_remains_blocked_even_with_concrete_snapshot_resolution():
+    plan = _complete_new_analysis_plan(input_format="auto", acquisition_mode="intermittent")
+    identity = GuidedNewAnalysisDatasetContractSourceIdentity(
+        input_source_path=plan.input_source_path,
+        resolved_input_source_path=plan.resolved_input_source_path,
+        input_format="auto",
+        resolved_input_format="rwd",
+        acquisition_mode=plan.acquisition_mode,
+        sessions_per_hour=plan.sessions_per_hour,
+        session_duration_sec=plan.session_duration_sec,
+        continuous_window_sec=plan.continuous_window_sec,
+        continuous_step_sec=plan.continuous_step_sec,
+        allow_partial_final_window=plan.allow_partial_final_window,
+        exclude_incomplete_final_rwd_chunk=plan.exclude_incomplete_final_rwd_chunk,
+        included_roi_ids=tuple(plan.included_roi_ids),
+    )
+    plan.dataset_contract_snapshot = GuidedNewAnalysisDatasetContractSnapshot(
+        status="applied",
+        input_format="auto",
+        resolved_input_format="rwd",
+        acquisition_mode="intermittent",
+        source_identity=identity,
+        explicitly_applied=True,
+    )
+
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    categories = {issue.category for issue in subset.blocking_issues}
+
+    assert "unsupported_auto_format_for_execution_subset" in categories
+    assert subset.execution_available is False
 
 
 def test_execution_subset_fixed_defaults_are_reported_as_provenance():
