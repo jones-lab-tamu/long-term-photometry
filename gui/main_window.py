@@ -5910,7 +5910,7 @@ class MainWindow(QMainWindow):
             f"  execution_available: {str(bool(subset_readiness.execution_available)).lower()}",
         ]
         if subset_readiness.first_subset_executable:
-            lines.append("  status: executable for future executable preview")
+            lines.append("  status: complete for future execution-spec preview; actual execution remains unavailable")
         else:
             lines.append(f"  status: not executable under {subset_readiness.subset_name}")
 
@@ -6031,6 +6031,12 @@ class MainWindow(QMainWindow):
             f"  precreate_during_preview: {str(bool(output_creation_policy.get('precreate_during_preview'))).lower()}",
             f"  config_write_timing: {output_creation_policy.get('config_write_timing') or 'none'}",
             f"  gui_preflight_writes_enabled: {str(bool(output_creation_policy.get('gui_preflight_writes_enabled'))).lower()}",
+            "  execution consumption: "
+            + (
+                "enabled for first-subset readiness classification"
+                if output_creation_policy.get("execution_consumption_enabled")
+                else "modeled only; readiness blockers not consumed in this stage"
+            ),
             f"Diagnostic cache: {diagnostic_cache.get('stale_or_current') or 'missing'}"
             + (f" ({diagnostic_cache.get('cache_id')})" if diagnostic_cache.get("cache_id") else ""),
             f"Diagnostic cache root: {self._display_path(str(diagnostic_cache.get('cache_root_path') or '')) if diagnostic_cache.get('cache_root_path') else 'none'}",

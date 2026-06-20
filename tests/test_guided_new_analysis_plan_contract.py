@@ -220,13 +220,16 @@ def test_output_creation_policy_defaults_and_provenance_are_non_writing():
     assert policy.provenance["no_files_written"] is True
 
 
-def test_output_creation_policy_rejects_write_enabling_options():
-    with pytest.raises(ValueError, match="overwrite"):
-        GuidedNewAnalysisOutputCreationPolicy(overwrite=True)
-    with pytest.raises(ValueError, match="precreate"):
-        GuidedNewAnalysisOutputCreationPolicy(precreate_during_preview=True)
-    with pytest.raises(ValueError, match="preflight writes"):
-        GuidedNewAnalysisOutputCreationPolicy(gui_preflight_writes_enabled=True)
+def test_output_creation_policy_can_represent_unsafe_state_for_readiness_refusal():
+    policy = GuidedNewAnalysisOutputCreationPolicy(
+        overwrite=True,
+        precreate_during_preview=True,
+        gui_preflight_writes_enabled=True,
+    )
+
+    assert policy.overwrite is True
+    assert policy.precreate_during_preview is True
+    assert policy.gui_preflight_writes_enabled is True
 
 
 def test_missing_input_produces_issue():
@@ -408,7 +411,7 @@ def test_run_preview_keeps_handoff_readiness_separate_from_execution_contract_un
     assert preview.execution_intent["fixed_daily_anchor_clock"] is None
     assert preview.execution_intent["execution_mode"] == "phasic"
     assert preview.execution_intent["run_profile"] == "full"
-    assert preview.execution_intent["execution_consumption_enabled"] is False
+    assert preview.execution_intent["execution_consumption_enabled"] is True
     assert preview.output_creation_policy["path_role"] == "output_base"
     assert preview.output_creation_policy["creation_timing"] == "future_execution_start_only"
     assert preview.output_creation_policy["run_directory_strategy"] == "derive_unique_run_id_under_output_base"
@@ -416,6 +419,7 @@ def test_run_preview_keeps_handoff_readiness_separate_from_execution_contract_un
     assert preview.output_creation_policy["precreate_during_preview"] is False
     assert preview.output_creation_policy["config_write_timing"] == "future_execution_or_validation_only"
     assert preview.output_creation_policy["gui_preflight_writes_enabled"] is False
+    assert preview.output_creation_policy["execution_consumption_enabled"] is True
     assert preview.output_creation_policy["directory_created"] is False
     assert preview.output_creation_policy["files_written"] is False
 
@@ -524,8 +528,9 @@ def test_run_preview_uses_only_plan_fields_and_marks_missing_execution_fields_un
     assert preview.source["resolved_input_source_path"] == "C:/resolved/raw"
     assert preview.source["authoritative_input_source_path"] == "C:/resolved/raw"
     assert preview.feature_event["values"] == {"event_signal": "delta_f", "peak_threshold_method": "mean_std"}
-    assert preview.acquisition["timeline_anchor_mode"]["status"] == "unresolved"
-    assert "timeline anchor mode" in preview.acquisition["timeline_anchor_mode"]["reason"]
+    assert preview.acquisition["timeline_anchor_mode"]["status"] == "represented"
+    assert preview.acquisition["timeline_anchor_mode"]["value"] == "civil"
+    assert preview.acquisition["timeline_anchor_mode"]["source"] == "GuidedNewAnalysisDraftPlan.execution_intent"
 
 
 def test_run_preview_does_not_create_output_directory(tmp_path):
@@ -553,7 +558,7 @@ def test_run_preview_rejects_malformed_input():
         build_guided_new_analysis_run_preview(object())
 
 
-def test_execution_subset_same_dynamic_strategy_preserves_planning_readiness_but_blocks_missing_fields():
+def test_execution_subset_same_dynamic_strategy_preserves_planning_readiness_but_blocks_missing_dataset_contract():
     readiness = evaluate_guided_new_analysis_execution_subset_readiness(_complete_new_analysis_plan())
 
     assert readiness.subset_name == FIRST_EXECUTION_SUBSET_NAME
@@ -565,9 +570,10 @@ def test_execution_subset_same_dynamic_strategy_preserves_planning_readiness_but
     assert "mixed_per_roi_strategies" not in categories
     assert "signal_only_f0_execution_not_supported" not in categories
     assert "missing_rwd_dataset_contract" in categories
-    assert "missing_execution_mode" in categories
-    assert "missing_run_profile" in categories
-    assert "missing_output_creation_policy" in categories
+    assert "missing_timeline_anchor_mode" not in categories
+    assert "missing_execution_mode" not in categories
+    assert "missing_run_profile" not in categories
+    assert "missing_output_creation_policy" not in categories
 
 
 def test_execution_subset_rwd_current_applied_snapshot_satisfies_rwd_dataset_contract_blocker():
@@ -594,11 +600,97 @@ def test_execution_subset_rwd_current_applied_snapshot_satisfies_rwd_dataset_con
     assert fields["dataset_contract_overrides"].status == "present"
     assert fields["dataset_contract_overrides"].blocks_subset is False
     assert "missing_rwd_dataset_contract" not in categories
-    assert "missing_timeline_anchor_mode" in categories
-    assert "missing_execution_mode" in categories
-    assert "missing_run_profile" in categories
-    assert "missing_output_creation_policy" in categories
+    assert "missing_timeline_anchor_mode" not in categories
+    assert "missing_execution_mode" not in categories
+    assert "missing_run_profile" not in categories
+    assert "missing_output_creation_policy" not in categories
+    assert readiness.first_subset_executable is True
     assert readiness.execution_available is False
+    assert "actual execution remains unavailable" in readiness.execution_blocked_reason
+
+
+def test_execution_subset_default_execution_intent_removes_intent_blockers():
+    readiness = evaluate_guided_new_analysis_execution_subset_readiness(_complete_new_analysis_plan())
+    fields = {field.field_name: field for field in readiness.field_classifications}
+    categories = {issue.category for issue in readiness.blocking_issues}
+
+    assert fields["timeline_anchor_mode"].status == "fixed_default"
+    assert fields["timeline_anchor_mode"].value == "civil"
+    assert fields["timeline_anchor_mode"].blocks_subset is False
+    assert fields["mode"].status == "fixed_default"
+    assert fields["mode"].value == "phasic"
+    assert fields["mode"].blocks_subset is False
+    assert fields["run_profile"].status == "fixed_default"
+    assert fields["run_profile"].value == "full"
+    assert fields["run_profile"].blocks_subset is False
+    assert "missing_timeline_anchor_mode" not in categories
+    assert "missing_execution_mode" not in categories
+    assert "missing_run_profile" not in categories
+
+
+def test_execution_subset_default_output_creation_policy_removes_output_creation_blocker():
+    readiness = evaluate_guided_new_analysis_execution_subset_readiness(_complete_new_analysis_plan())
+    fields = {field.field_name: field for field in readiness.field_classifications}
+    categories = {issue.category for issue in readiness.blocking_issues}
+
+    assert fields["output_creation_policy"].status == "present"
+    assert fields["output_creation_policy"].value["path_role"] == "output_base"
+    assert fields["output_creation_policy"].value["overwrite"] is False
+    assert fields["output_creation_policy"].value["precreate_during_preview"] is False
+    assert fields["output_creation_policy"].value["gui_preflight_writes_enabled"] is False
+    assert fields["output_creation_policy"].blocks_subset is False
+    assert "missing_output_creation_policy" not in categories
+
+
+def test_execution_subset_invalid_execution_intent_blocks_subset():
+    plan = _complete_new_analysis_plan(
+        execution_intent=GuidedNewAnalysisExecutionIntent(
+            timeline_anchor_mode="fixed_daily_anchor",
+            fixed_daily_anchor_clock=None,
+            execution_mode="both",
+            run_profile="tuning_prep",
+        )
+    )
+
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    categories = {issue.category for issue in subset.blocking_issues}
+    fields = {field.field_name: field for field in subset.field_classifications}
+
+    assert "invalid_timeline_anchor_mode" in categories
+    assert "invalid_execution_mode" in categories
+    assert "unsupported_run_profile_for_first_subset" in categories
+    assert fields["timeline_anchor_mode"].blocks_subset is True
+    assert fields["mode"].blocks_subset is True
+    assert fields["run_profile"].blocks_subset is True
+    assert subset.execution_available is False
+
+
+def test_execution_subset_unsafe_output_creation_policy_blocks_without_writes(tmp_path):
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_run_output"
+    plan = _complete_new_analysis_plan(
+        output_policy_path=str(target),
+        output_creation_policy=GuidedNewAnalysisOutputCreationPolicy(
+            overwrite=True,
+            precreate_during_preview=True,
+            gui_preflight_writes_enabled=True,
+        ),
+    )
+    before = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+
+    after = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    categories = {issue.category for issue in subset.blocking_issues}
+    fields = {field.field_name: field for field in subset.field_classifications}
+
+    assert after == before
+    assert not target.exists()
+    assert "unsafe_output_creation_policy" in categories
+    assert fields["output_creation_policy"].status == "invalid"
+    assert fields["output_creation_policy"].blocks_subset is True
+    assert subset.execution_available is False
 
 
 def test_execution_subset_rwd_missing_snapshot_still_blocks_dataset_contract():
@@ -1079,11 +1171,19 @@ def test_execution_subset_fixed_defaults_are_reported_as_provenance():
     subset = evaluate_guided_new_analysis_execution_subset_readiness(_complete_new_analysis_plan())
     fields = {field.field_name: field for field in subset.field_classifications}
 
-    assert fields["timeline_anchor_mode"].status == "required_missing"
-    assert fields["timeline_anchor_mode"].value is None
-    assert fields["timeline_anchor_mode"].blocks_subset is True
-    assert fields["timeline_anchor_mode"].issue_category == "missing_timeline_anchor_mode"
-    assert "no executable default is verified" in fields["timeline_anchor_mode"].provenance
+    assert fields["timeline_anchor_mode"].status == "fixed_default"
+    assert fields["timeline_anchor_mode"].value == "civil"
+    assert fields["timeline_anchor_mode"].blocks_subset is False
+    assert fields["timeline_anchor_mode"].issue_category is None
+    assert "matches backend/Full Control civil timeline anchor default" in fields["timeline_anchor_mode"].provenance
+    assert fields["mode"].status == "fixed_default"
+    assert fields["mode"].value == "phasic"
+    assert fields["mode"].blocks_subset is False
+    assert fields["run_profile"].status == "fixed_default"
+    assert fields["run_profile"].value == "full"
+    assert fields["run_profile"].blocks_subset is False
+    assert fields["output_creation_policy"].status == "present"
+    assert fields["output_creation_policy"].blocks_subset is False
     assert fields["traces_only"].status == "fixed_default"
     assert fields["traces_only"].value is False
     assert fields["preview_first_n"].status == "fixed_default"

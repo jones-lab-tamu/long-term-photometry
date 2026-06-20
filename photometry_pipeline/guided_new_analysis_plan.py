@@ -179,14 +179,7 @@ class GuidedNewAnalysisExecutionIntent:
     })
 
     def __post_init__(self) -> None:
-        if self.timeline_anchor_mode not in TIMELINE_ANCHOR_MODES:
-            raise ValueError(f"Unsupported timeline_anchor_mode: {self.timeline_anchor_mode}")
-        if self.execution_mode not in EXECUTION_MODES:
-            raise ValueError(f"Unsupported execution_mode: {self.execution_mode}")
-        if self.run_profile not in RUN_PROFILES:
-            raise ValueError(f"Unsupported run_profile: {self.run_profile}")
-        if self.timeline_anchor_mode != "fixed_daily_anchor" and self.fixed_daily_anchor_clock is not None:
-            raise ValueError("fixed_daily_anchor_clock is only valid with timeline_anchor_mode='fixed_daily_anchor'")
+        return None
 
 
 @dataclass(frozen=True)
@@ -213,20 +206,7 @@ class GuidedNewAnalysisOutputCreationPolicy:
     })
 
     def __post_init__(self) -> None:
-        if self.path_role not in OUTPUT_PATH_ROLES:
-            raise ValueError(f"Unsupported output creation path_role: {self.path_role}")
-        if self.creation_timing not in OUTPUT_CREATION_TIMINGS:
-            raise ValueError(f"Unsupported output creation_timing: {self.creation_timing}")
-        if self.run_directory_strategy not in RUN_DIRECTORY_STRATEGIES:
-            raise ValueError(f"Unsupported run_directory_strategy: {self.run_directory_strategy}")
-        if self.config_write_timing not in CONFIG_WRITE_TIMINGS:
-            raise ValueError(f"Unsupported config_write_timing: {self.config_write_timing}")
-        if self.overwrite:
-            raise ValueError("Guided new_analysis first subset output creation policy does not support overwrite")
-        if self.precreate_during_preview:
-            raise ValueError("Guided new_analysis preview must not precreate output directories")
-        if self.gui_preflight_writes_enabled:
-            raise ValueError("Guided new_analysis model policy must not enable GUI preflight writes")
+        return None
 
 
 @dataclass(frozen=True)
@@ -993,6 +973,138 @@ def _snapshot_has_mapping_fields(
     return all(bool(values.get(key)) for key in required_keys)
 
 
+def _valid_fixed_anchor_clock(value: str | None) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    parts = value.strip().split(":")
+    if len(parts) not in {2, 3}:
+        return False
+    try:
+        numbers = [int(part) for part in parts]
+    except ValueError:
+        return False
+    hour, minute = numbers[0], numbers[1]
+    second = numbers[2] if len(numbers) == 3 else 0
+    return 0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59
+
+
+def _execution_intent_value(intent: GuidedNewAnalysisExecutionIntent) -> dict[str, Any]:
+    return {
+        "schema_version": intent.schema_version,
+        "timeline_anchor_mode": intent.timeline_anchor_mode,
+        "fixed_daily_anchor_clock": intent.fixed_daily_anchor_clock,
+        "execution_mode": intent.execution_mode,
+        "run_profile": intent.run_profile,
+        "provenance": dict(intent.provenance),
+    }
+
+
+def _execution_intent_fields(
+    intent: GuidedNewAnalysisExecutionIntent,
+) -> tuple[GuidedNewAnalysisExecutionFieldClassification, ...]:
+    timeline_ok = intent.timeline_anchor_mode == "civil" and intent.fixed_daily_anchor_clock is None
+    if intent.timeline_anchor_mode == "fixed_daily_anchor" and not _valid_fixed_anchor_clock(intent.fixed_daily_anchor_clock):
+        timeline_provenance = "fixed_daily_anchor timeline mode requires a valid fixed_daily_anchor_clock"
+    elif intent.timeline_anchor_mode != "civil":
+        timeline_provenance = "first subset supports only civil timeline anchor mode"
+    elif intent.fixed_daily_anchor_clock is not None:
+        timeline_provenance = "civil timeline anchor mode must not carry fixed_daily_anchor_clock"
+    else:
+        timeline_provenance = "first subset fixed default; matches backend/Full Control civil timeline anchor default"
+
+    execution_mode_ok = intent.execution_mode == "phasic"
+    run_profile_ok = intent.run_profile == "full"
+
+    return (
+        _execution_field(
+            "timeline_anchor_mode",
+            "fixed_default" if timeline_ok else "invalid",
+            value=intent.timeline_anchor_mode,
+            provenance=timeline_provenance,
+            blocks_subset=not timeline_ok,
+            issue_category=None if timeline_ok else "invalid_timeline_anchor_mode",
+        ),
+        _execution_field(
+            "fixed_daily_anchor_clock",
+            "fixed_default" if intent.fixed_daily_anchor_clock is None else "invalid",
+            value=intent.fixed_daily_anchor_clock,
+            provenance=(
+                "first subset fixed default; no fixed daily anchor"
+                if intent.fixed_daily_anchor_clock is None
+                else "fixed_daily_anchor_clock is not used by first subset civil timeline default"
+            ),
+            blocks_subset=intent.fixed_daily_anchor_clock is not None and intent.timeline_anchor_mode != "fixed_daily_anchor",
+            issue_category="invalid_timeline_anchor_mode"
+            if intent.fixed_daily_anchor_clock is not None and intent.timeline_anchor_mode != "fixed_daily_anchor"
+            else None,
+        ),
+        _execution_field(
+            "mode",
+            "fixed_default" if execution_mode_ok else "unsupported",
+            value=intent.execution_mode,
+            provenance=(
+                "first subset fixed default phasic for global dynamic-fit/phasic-output subset"
+                if execution_mode_ok
+                else "first subset supports only phasic execution mode"
+            ),
+            blocks_subset=not execution_mode_ok,
+            issue_category=None if execution_mode_ok else "invalid_execution_mode",
+        ),
+        _execution_field(
+            "run_profile",
+            "fixed_default" if run_profile_ok else "unsupported",
+            value=intent.run_profile,
+            provenance=(
+                "first subset fixed default full; matches backend/Full Control run profile default"
+                if run_profile_ok
+                else "first subset supports only full run profile"
+            ),
+            blocks_subset=not run_profile_ok,
+            issue_category=None if run_profile_ok else "unsupported_run_profile_for_first_subset",
+        ),
+    )
+
+
+def _output_creation_policy_value(policy: GuidedNewAnalysisOutputCreationPolicy) -> dict[str, Any]:
+    return {
+        "schema_version": policy.schema_version,
+        "path_role": policy.path_role,
+        "creation_timing": policy.creation_timing,
+        "run_directory_strategy": policy.run_directory_strategy,
+        "overwrite": policy.overwrite,
+        "precreate_during_preview": policy.precreate_during_preview,
+        "config_write_timing": policy.config_write_timing,
+        "gui_preflight_writes_enabled": policy.gui_preflight_writes_enabled,
+        "provenance": dict(policy.provenance),
+    }
+
+
+def _output_creation_policy_field(
+    policy: GuidedNewAnalysisOutputCreationPolicy,
+) -> GuidedNewAnalysisExecutionFieldClassification:
+    safe = (
+        policy.path_role == "output_base"
+        and policy.creation_timing == "future_execution_start_only"
+        and policy.run_directory_strategy == "derive_unique_run_id_under_output_base"
+        and policy.overwrite is False
+        and policy.precreate_during_preview is False
+        and policy.config_write_timing == "future_execution_or_validation_only"
+        and policy.gui_preflight_writes_enabled is False
+    )
+    return _execution_field(
+        "output_creation_policy",
+        "present" if safe else "invalid",
+        value=_output_creation_policy_value(policy),
+        provenance=(
+            "safe first-subset output creation policy; classification only, no directories or files are created"
+            if safe
+            else "unsafe or unsupported output creation policy for first subset"
+        ),
+        blocks_subset=not safe,
+        issue_category=None if safe else "unsafe_output_creation_policy",
+    )
+
+
 def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[GuidedNewAnalysisExecutionFieldClassification, ...]:
     dataset_snapshot_field = _dataset_contract_snapshot_execution_field(plan.dataset_contract_snapshot, plan)
     dataset_snapshot_usable = (
@@ -1000,22 +1112,10 @@ def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[
         and not dataset_snapshot_field.blocks_subset
         and plan.dataset_contract_snapshot.current_applied
     )
+    execution_intent_fields = _execution_intent_fields(plan.execution_intent)
     fields: list[GuidedNewAnalysisExecutionFieldClassification] = [
         dataset_snapshot_field,
-        _execution_field(
-            "timeline_anchor_mode",
-            "required_missing",
-            value=None,
-            provenance="timeline anchor mode is not represented in GuidedNewAnalysisDraftPlan and no executable default is verified",
-            blocks_subset=True,
-            issue_category="missing_timeline_anchor_mode",
-        ),
-        _execution_field(
-            "fixed_daily_anchor_clock",
-            "fixed_default",
-            value=None,
-            provenance="first subset fixed default; no fixed daily anchor",
-        ),
+        *execution_intent_fields[:2],
         _execution_field(
             "render_modes",
             "fixed_default",
@@ -1063,30 +1163,8 @@ def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[
         ),
     ]
 
-    fields.append(_execution_field(
-        "mode",
-        "required_missing",
-        value=None,
-        provenance="execution mode both/tonic/phasic is not represented in GuidedNewAnalysisDraftPlan",
-        blocks_subset=True,
-        issue_category="missing_execution_mode",
-    ))
-    fields.append(_execution_field(
-        "run_profile",
-        "required_missing",
-        value=None,
-        provenance="execution run profile is not represented in GuidedNewAnalysisDraftPlan",
-        blocks_subset=True,
-        issue_category="missing_run_profile",
-    ))
-    fields.append(_execution_field(
-        "output_creation_policy",
-        "required_missing",
-        value=None,
-        provenance="output destination is stored, but creation/overwrite execution policy is not represented",
-        blocks_subset=True,
-        issue_category="missing_output_creation_policy",
-    ))
+    fields.extend(execution_intent_fields[2:])
+    fields.append(_output_creation_policy_field(plan.output_creation_policy))
 
     roi_identity_status = "present" if plan.included_roi_ids else "required_missing"
     fields.append(_execution_field(
@@ -1328,7 +1406,7 @@ def evaluate_guided_new_analysis_execution_subset_readiness(
     blocking = tuple(dict.fromkeys(issues))
     first_subset_executable = not blocking
     reason = (
-        "First execution subset is available for future executable preview; execution remains unavailable in this stage."
+        "First subset readiness is complete for future execution-spec preview; actual execution remains unavailable in this stage."
         if first_subset_executable
         else "; ".join(issue.category for issue in blocking)
     )
@@ -1402,7 +1480,11 @@ def _dataset_contract_snapshot_preview_dict(
     }
 
 
-def _execution_intent_preview_dict(intent: GuidedNewAnalysisExecutionIntent) -> dict[str, Any]:
+def _execution_intent_preview_dict(
+    intent: GuidedNewAnalysisExecutionIntent,
+    *,
+    execution_consumption_enabled: bool = False,
+) -> dict[str, Any]:
     return {
         "schema_version": intent.schema_version,
         "timeline_anchor_mode": intent.timeline_anchor_mode,
@@ -1410,7 +1492,7 @@ def _execution_intent_preview_dict(intent: GuidedNewAnalysisExecutionIntent) -> 
         "execution_mode": intent.execution_mode,
         "run_profile": intent.run_profile,
         "provenance": dict(intent.provenance),
-        "execution_consumption_enabled": False,
+        "execution_consumption_enabled": execution_consumption_enabled,
         "no_runspec": True,
         "no_argv": True,
         "no_config_written": True,
@@ -1418,7 +1500,11 @@ def _execution_intent_preview_dict(intent: GuidedNewAnalysisExecutionIntent) -> 
     }
 
 
-def _output_creation_policy_preview_dict(policy: GuidedNewAnalysisOutputCreationPolicy) -> dict[str, Any]:
+def _output_creation_policy_preview_dict(
+    policy: GuidedNewAnalysisOutputCreationPolicy,
+    *,
+    execution_consumption_enabled: bool = False,
+) -> dict[str, Any]:
     return {
         "schema_version": policy.schema_version,
         "path_role": policy.path_role,
@@ -1429,7 +1515,7 @@ def _output_creation_policy_preview_dict(policy: GuidedNewAnalysisOutputCreation
         "config_write_timing": policy.config_write_timing,
         "gui_preflight_writes_enabled": policy.gui_preflight_writes_enabled,
         "provenance": dict(policy.provenance),
-        "execution_consumption_enabled": False,
+        "execution_consumption_enabled": execution_consumption_enabled,
         "directory_created": False,
         "files_written": False,
         "no_runspec": True,
@@ -1561,6 +1647,16 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
         and not field.blocks_subset
         for field in execution_fields
     )
+    execution_intent_consumed = all(
+        any(field.field_name == name and field.status == "fixed_default" and not field.blocks_subset for field in execution_fields)
+        for name in ("timeline_anchor_mode", "mode", "run_profile")
+    )
+    output_creation_policy_consumed = any(
+        field.field_name == "output_creation_policy"
+        and field.status == "present"
+        and not field.blocks_subset
+        for field in execution_fields
+    )
 
     return GuidedNewAnalysisRunPreview(
         preview_schema_version=RUN_PREVIEW_SCHEMA_VERSION,
@@ -1581,11 +1677,16 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
             "exclude_incomplete_final_rwd_chunk": plan.exclude_incomplete_final_rwd_chunk,
             "acquisition_structure_status": plan.acquisition_structure_status,
             "timeline_anchor_mode": {
-                "status": "unresolved",
-                "reason": "GuidedNewAnalysisDraftPlan does not represent timeline anchor mode.",
+                "status": "represented",
+                "value": plan.execution_intent.timeline_anchor_mode,
+                "fixed_daily_anchor_clock": plan.execution_intent.fixed_daily_anchor_clock,
+                "source": "GuidedNewAnalysisDraftPlan.execution_intent",
             },
         },
-        execution_intent=_execution_intent_preview_dict(plan.execution_intent),
+        execution_intent=_execution_intent_preview_dict(
+            plan.execution_intent,
+            execution_consumption_enabled=execution_intent_consumed,
+        ),
         dataset_contract=_dataset_contract_snapshot_preview_dict(
             plan.dataset_contract_snapshot,
             execution_consumption_enabled=dataset_contract_consumed,
@@ -1675,7 +1776,10 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
             "directory_created": False,
             "files_written": False,
         },
-        output_creation_policy=_output_creation_policy_preview_dict(plan.output_creation_policy),
+        output_creation_policy=_output_creation_policy_preview_dict(
+            plan.output_creation_policy,
+            execution_consumption_enabled=output_creation_policy_consumed,
+        ),
         provenance={
             "plan_created_at_utc": plan.created_at_utc,
             "plan_updated_at_utc": plan.updated_at_utc,
@@ -1683,8 +1787,14 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
             "preliminary_cache": plan.preliminary_cache,
             "fixed_contract_defaults": {
                 **fixed_contract_defaults,
-                "execution_intent": _execution_intent_preview_dict(plan.execution_intent),
-                "output_creation_policy": _output_creation_policy_preview_dict(plan.output_creation_policy),
+                "execution_intent": _execution_intent_preview_dict(
+                    plan.execution_intent,
+                    execution_consumption_enabled=execution_intent_consumed,
+                ),
+                "output_creation_policy": _output_creation_policy_preview_dict(
+                    plan.output_creation_policy,
+                    execution_consumption_enabled=output_creation_policy_consumed,
+                ),
             },
             "no_gui_runspec": True,
             "no_argv_generated": True,
