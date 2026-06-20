@@ -10,6 +10,7 @@ from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
 from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDraftPlan,
     GuidedPlanCorrectionChoice,
+    evaluate_guided_new_analysis_execution_subset_readiness,
     evaluate_new_analysis_plan_readiness,
 )
 from tests.test_gui_guided_workflow import (
@@ -190,6 +191,212 @@ def test_new_analysis_readiness_rendering_shows_stale_feature_and_output_reasons
     assert "Output destination (stale)" in readiness_summary
     assert "Feature/event settings: fail - Feature/event profile is stale: baseline changed" in checklist
     assert "Output destination: fail - Output policy is stale: target appeared" in checklist
+
+
+def _snapshot_files(root: Path) -> list[str]:
+    return sorted(path.relative_to(root).as_posix() for path in root.rglob("*"))
+
+
+def test_new_analysis_dataset_contract_default_state_is_missing(window, tmp_path, monkeypatch):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+
+    plan = window._build_guided_new_analysis_draft_plan()
+
+    assert plan.dataset_contract_snapshot.status == "missing"
+    assert plan.dataset_contract_snapshot.current_applied is False
+    assert "Stored dataset contract snapshot: missing" in window._guided_dataset_contract_status_label.text()
+    assert "Dataset contract snapshot status: missing" in window._guided_draft_run_plan_preview_label.text()
+
+
+def test_new_analysis_dataset_contract_apply_valid_rwd_structural_snapshot_without_writes(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    input_dir, _output_dir = _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.setText("120")
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    before = _snapshot_files(tmp_path)
+
+    window._guided_dataset_contract_apply_btn.click()
+    plan = window._build_guided_new_analysis_draft_plan()
+    snapshot = plan.dataset_contract_snapshot
+
+    assert snapshot.status == "applied"
+    assert snapshot.explicitly_applied is True
+    assert snapshot.current_applied is True
+    assert snapshot.source_identity.input_source_path == str(input_dir)
+    assert snapshot.source_identity.input_format == "rwd"
+    assert snapshot.source_identity.acquisition_mode == "intermittent"
+    assert snapshot.source_identity.sessions_per_hour == 6
+    assert snapshot.source_identity.session_duration_sec == 120.0
+    assert snapshot.source_identity.exclude_incomplete_final_rwd_chunk is False
+    assert "explicit_guided_apply" in snapshot.provenance
+    assert "Dataset contract current_applied: true" in window._guided_draft_run_plan_preview_label.text()
+    assert _snapshot_files(tmp_path) == before
+
+
+def test_new_analysis_dataset_contract_invalid_candidate_cannot_apply(window, tmp_path, monkeypatch):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_format_combo.setCurrentText("npm")
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+
+    window._guided_dataset_contract_apply_btn.click()
+    plan = window._build_guided_new_analysis_draft_plan()
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+
+    assert plan.dataset_contract_snapshot.current_applied is False
+    assert "Dataset contract was not applied" in window._guided_dataset_contract_status_label.text()
+    assert "NPM channel mapping is not represented" in window._guided_dataset_contract_candidate_label.text()
+    assert any(issue.category == "missing_npm_channel_mapping" for issue in subset.blocking_issues)
+
+
+def test_new_analysis_dataset_contract_npm_continuous_remains_unsupported(window, tmp_path, monkeypatch):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_format_combo.setCurrentText("npm")
+    idx = window._guided_acquisition_mode_combo.findData("continuous")
+    window._guided_acquisition_mode_combo.setCurrentIndex(idx)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+
+    window._guided_dataset_contract_apply_btn.click()
+    plan = window._build_guided_new_analysis_draft_plan()
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+
+    assert plan.dataset_contract_snapshot.current_applied is False
+    assert "unsupported_npm_continuous" in window._guided_dataset_contract_candidate_label.text()
+    assert any(issue.category == "unsupported_npm_continuous" for issue in subset.blocking_issues)
+
+
+def test_new_analysis_dataset_contract_clear_preserves_other_draft_state(window, tmp_path, monkeypatch):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._guided_dataset_contract_apply_btn.click()
+    assert window._build_guided_new_analysis_draft_plan().dataset_contract_snapshot.current_applied is True
+    before_cache = window._guided_diagnostic_cache_record
+    before_choices = dict(window._guided_strategy_choices)
+    before_feature_status = window._guided_new_analysis_feature_event_profile_status
+    before_output_status = window._guided_new_analysis_output_policy_status
+
+    window._guided_dataset_contract_clear_btn.click()
+    plan = window._build_guided_new_analysis_draft_plan()
+
+    assert plan.dataset_contract_snapshot.status == "missing"
+    assert plan.dataset_contract_snapshot.current_applied is False
+    assert window._guided_diagnostic_cache_record is before_cache
+    assert window._guided_strategy_choices == before_choices
+    assert window._guided_new_analysis_feature_event_profile_status == before_feature_status
+    assert window._guided_new_analysis_output_policy_status == before_output_status
+
+
+def test_new_analysis_dataset_contract_marks_stale_on_setup_change(window, tmp_path, monkeypatch):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.setText("120")
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_dataset_contract_apply_btn.click()
+    assert window._build_guided_new_analysis_draft_plan().dataset_contract_snapshot.current_applied is True
+
+    changed_input = tmp_path / "changed_raw_input"
+    changed_input.mkdir()
+    window._guided_input_dir_edit.setText(str(changed_input))
+    window._refresh_guided_draft_run_plan_preview()
+    snapshot = window._build_guided_new_analysis_draft_plan().dataset_contract_snapshot
+
+    assert snapshot.status == "stale"
+    assert snapshot.explicitly_applied is True
+    assert snapshot.current_applied is False
+    assert any("input_source_path changed" in reason for reason in snapshot.stale_reasons)
+    assert "Dataset contract stale reasons:" in window._guided_draft_run_plan_preview_label.text()
+
+
+def test_new_analysis_dataset_contract_applied_does_not_satisfy_execution_subset_blockers(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.setText("120")
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_dataset_contract_apply_btn.click()
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    fields = {field.field_name: field for field in subset.field_classifications}
+
+    assert fields["dataset_contract_snapshot"].status == "present"
+    assert any(issue.category == "missing_rwd_dataset_contract" for issue in subset.blocking_issues)
+    assert subset.execution_available is False
+
+
+def test_new_analysis_dataset_contract_apply_clear_stale_do_not_call_execution_helpers(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+
+    called = []
+
+    def fail_helper(name):
+        def _fail(*_args, **_kwargs):
+            called.append(name)
+            raise AssertionError(f"{name} should not be called")
+        return _fail
+
+    monkeypatch.setattr(window, "_build_run_spec", fail_helper("_build_run_spec"))
+    monkeypatch.setattr(window, "_build_argv", fail_helper("_build_argv"))
+    monkeypatch.setattr(window, "_on_validate", fail_helper("_on_validate"))
+    monkeypatch.setattr(window, "_on_run", fail_helper("_on_run"))
+
+    window._guided_dataset_contract_apply_btn.click()
+    window._guided_input_dir_edit.setText(str(tmp_path / "changed_input"))
+    window._refresh_guided_draft_run_plan_preview()
+    window._guided_dataset_contract_clear_btn.click()
+
+    assert called == []
+
+
+def test_new_analysis_dataset_contract_apply_clear_stale_do_not_create_files(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    before = _snapshot_files(tmp_path)
+
+    window._guided_dataset_contract_apply_btn.click()
+    changed_input = tmp_path / "changed_raw_input"
+    changed_input.mkdir()
+    before_after_manual_dir = _snapshot_files(tmp_path)
+    window._guided_input_dir_edit.setText(str(changed_input))
+    window._refresh_guided_draft_run_plan_preview()
+    window._guided_dataset_contract_clear_btn.click()
+
+    assert _snapshot_files(tmp_path) == before_after_manual_dir
+    assert changed_input.exists()
+    assert before_after_manual_dir != before
+
+
 def test_new_analysis_draft_plan_reports_choices_as_current_after_build_and_mark(window, tmp_path, monkeypatch):
     # Enter new_analysis mode and configure
     window._guided_workflow_stepper.setCurrentRow(0)

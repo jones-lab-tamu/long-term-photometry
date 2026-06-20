@@ -1637,6 +1637,8 @@ class MainWindow(QMainWindow):
         self._guided_new_analysis_output_policy_source_path = None
         self._guided_new_analysis_output_policy_cache_root = None
         self._guided_new_analysis_output_policy_build_request_signature = None
+        self._guided_new_analysis_dataset_contract_snapshot = None
+        self._guided_new_analysis_dataset_contract_candidate_snapshot = None
         self._guided_draft_output_policy_by_run = {}
         self._guided_output_policy_editor_synced_run = None
         self._guided_export_editor_synced_run = None
@@ -2254,6 +2256,9 @@ class MainWindow(QMainWindow):
             panel.setVisible(skipped)
         for panel in getattr(self, "_guided_new_analysis_mode_panels", {}).values():
             panel.setVisible(not skipped)
+        dataset_group = getattr(self, "_guided_dataset_contract_group", None)
+        if dataset_group is not None:
+            dataset_group.setVisible(mode == "new_analysis")
         if hasattr(self, "_guided_confirm_context_label"):
             self._refresh_guided_confirm_strategy_panel()
         self._refresh_guided_draft_run_plan_preview()
@@ -5155,6 +5160,7 @@ class MainWindow(QMainWindow):
             return
 
         if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
+            self._refresh_guided_new_analysis_dataset_contract_staleness()
             plan = self._build_guided_new_analysis_draft_plan()
             from photometry_pipeline.guided_new_analysis_plan import (
                 build_guided_new_analysis_run_preview,
@@ -5182,6 +5188,7 @@ class MainWindow(QMainWindow):
             run_preview_group = getattr(self, "_guided_new_analysis_run_preview_group", None)
             if run_preview_group is not None:
                 run_preview_group.setVisible(True)
+            self._refresh_guided_dataset_contract_panel()
             return
 
         run_preview_group = getattr(self, "_guided_new_analysis_run_preview_group", None)
@@ -5210,6 +5217,326 @@ class MainWindow(QMainWindow):
                 readiness_label.setToolTip("")
 
         self._refresh_guided_draft_run_plan_checklist(plan, errors)
+
+    def _guided_dataset_contract_now_utc(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _guided_new_analysis_dataset_contract_source_identity(self):
+        from photometry_pipeline.guided_new_analysis_plan import (
+            GuidedNewAnalysisDatasetContractSourceIdentity,
+        )
+
+        input_path = self._guided_input_dir_edit.text().strip() if hasattr(self, "_guided_input_dir_edit") else ""
+        input_format = self._guided_format_combo.currentText() if hasattr(self, "_guided_format_combo") else "auto"
+        resolved_format = ""
+        if getattr(self, "_discovery_cache", None) is not None:
+            resolved_format = str(self._discovery_cache.get("resolved_format", "") or "")
+        acq_mode = "continuous"
+        if hasattr(self, "_guided_acquisition_mode_combo"):
+            acq_mode = (
+                self._guided_acquisition_mode_combo.currentData()
+                or self._guided_acquisition_mode_combo.currentText().lower()
+                or "continuous"
+            )
+        sph_val = None
+        if hasattr(self, "_guided_sessions_per_hour_edit"):
+            text = self._guided_sessions_per_hour_edit.text().strip()
+            if text:
+                try:
+                    sph_val = int(text)
+                except ValueError:
+                    sph_val = None
+        dur_val = None
+        if hasattr(self, "_guided_session_duration_edit"):
+            text = self._guided_session_duration_edit.text().strip()
+            if text:
+                try:
+                    dur_val = float(text)
+                except ValueError:
+                    dur_val = None
+        win_val = (
+            float(self._guided_continuous_window_sec_spin.value())
+            if hasattr(self, "_guided_continuous_window_sec_spin")
+            else None
+        )
+        discovered: list[str] = []
+        included: list[str] = []
+        if hasattr(self, "_guided_roi_list"):
+            for idx in range(self._guided_roi_list.count()):
+                item = self._guided_roi_list.item(idx)
+                if item is None:
+                    continue
+                discovered.append(item.text())
+                if item.checkState() == Qt.Checked:
+                    included.append(item.text())
+
+        record = getattr(self, "_guided_diagnostic_cache_record", None)
+        return GuidedNewAnalysisDatasetContractSourceIdentity(
+            input_source_path=input_path or None,
+            resolved_input_source_path=input_path or None,
+            input_format=input_format or None,
+            resolved_input_format=resolved_format or input_format or None,
+            acquisition_mode=acq_mode or None,
+            sessions_per_hour=sph_val,
+            session_duration_sec=dur_val,
+            continuous_window_sec=win_val,
+            continuous_step_sec=win_val,
+            allow_partial_final_window=(
+                bool(self._guided_allow_partial_final_window_cb.isChecked())
+                if hasattr(self, "_guided_allow_partial_final_window_cb")
+                else None
+            ),
+            exclude_incomplete_final_rwd_chunk=(
+                bool(self._guided_exclude_incomplete_final_rwd_chunk_cb.isChecked())
+                if hasattr(self, "_guided_exclude_incomplete_final_rwd_chunk_cb")
+                else None
+            ),
+            discovered_roi_ids=tuple(discovered),
+            included_roi_ids=tuple(included),
+            source_setup_signature=str(getattr(record, "source_setup_signature", "") or "") or None,
+            diagnostic_cache_contract_identity=str(getattr(record, "build_request_signature", "") or "") or None,
+        )
+
+    def _guided_new_analysis_dataset_contract_signatures(self) -> dict[str, str | None]:
+        record = getattr(self, "_guided_diagnostic_cache_record", None)
+        return {
+            "source_setup_signature": str(getattr(record, "source_setup_signature", "") or "") or None,
+            "diagnostic_scope_signature": str(getattr(record, "diagnostic_scope_signature", "") or "") or None,
+            "build_request_signature": str(getattr(record, "build_request_signature", "") or "") or None,
+        }
+
+    def _guided_new_analysis_dataset_contract_candidate(self):
+        from photometry_pipeline.guided_new_analysis_plan import (
+            GuidedNewAnalysisDatasetContractSnapshot,
+            GuidedNewAnalysisDatasetContractSourceIdentity,
+        )
+
+        identity = self._guided_new_analysis_dataset_contract_source_identity()
+        signatures = self._guided_new_analysis_dataset_contract_signatures()
+        identity = GuidedNewAnalysisDatasetContractSourceIdentity(
+            input_source_path=identity.input_source_path,
+            resolved_input_source_path=identity.resolved_input_source_path,
+            input_format=identity.input_format,
+            resolved_input_format=identity.resolved_input_format,
+            acquisition_mode=identity.acquisition_mode,
+            sessions_per_hour=identity.sessions_per_hour,
+            session_duration_sec=identity.session_duration_sec,
+            continuous_window_sec=identity.continuous_window_sec,
+            continuous_step_sec=identity.continuous_step_sec,
+            allow_partial_final_window=identity.allow_partial_final_window,
+            exclude_incomplete_final_rwd_chunk=identity.exclude_incomplete_final_rwd_chunk,
+            discovered_roi_ids=identity.discovered_roi_ids,
+            included_roi_ids=identity.included_roi_ids,
+            source_setup_signature=signatures["source_setup_signature"],
+            config_fingerprint=None,
+            diagnostic_cache_contract_identity=signatures["build_request_signature"],
+        )
+        fmt = str(identity.input_format or "").strip().lower()
+        acq = str(identity.acquisition_mode or "").strip().lower()
+        validation_issues: list[str] = []
+        status = "inferred"
+
+        if not identity.input_source_path:
+            validation_issues.append("input source path is missing")
+        if fmt not in {"rwd", "npm", "custom_tabular", "auto"}:
+            validation_issues.append(f"input format is unsupported: {fmt or 'missing'}")
+        if acq not in {"intermittent", "continuous"}:
+            validation_issues.append(f"acquisition mode is unsupported: {acq or 'missing'}")
+        if acq == "intermittent":
+            if identity.sessions_per_hour is None or identity.sessions_per_hour <= 0:
+                validation_issues.append("intermittent sessions/hour is missing or invalid")
+            if identity.session_duration_sec is None or identity.session_duration_sec <= 0:
+                validation_issues.append("intermittent session duration is missing or invalid")
+        if acq == "continuous":
+            if identity.continuous_window_sec is None or identity.continuous_window_sec <= 0:
+                validation_issues.append("continuous window duration is missing or invalid")
+
+        if fmt == "npm" and acq == "continuous":
+            status = "unsupported"
+            validation_issues.append("unsupported_npm_continuous")
+        elif fmt == "npm":
+            status = "invalid"
+            validation_issues.append("NPM channel mapping is not represented in Guided new_analysis state")
+        elif fmt == "custom_tabular":
+            status = "invalid"
+            validation_issues.append("custom_tabular column mapping is not represented in Guided new_analysis state")
+        elif fmt == "auto":
+            status = "invalid"
+            validation_issues.append("auto format is not an applied dataset contract; choose or discover a concrete format")
+        elif validation_issues:
+            status = "invalid"
+
+        return GuidedNewAnalysisDatasetContractSnapshot(
+            status=status,
+            input_format=identity.input_format,
+            resolved_input_format=identity.resolved_input_format,
+            acquisition_mode=identity.acquisition_mode,
+            contract_values={
+                "input_format": identity.input_format,
+                "resolved_input_format": identity.resolved_input_format,
+                "acquisition_mode": identity.acquisition_mode,
+                "sessions_per_hour": identity.sessions_per_hour,
+                "session_duration_sec": identity.session_duration_sec,
+                "continuous_window_sec": identity.continuous_window_sec,
+                "continuous_step_sec": identity.continuous_step_sec,
+                "allow_partial_final_window": identity.allow_partial_final_window,
+                "exclude_incomplete_final_rwd_chunk": identity.exclude_incomplete_final_rwd_chunk,
+            },
+            format_specific={
+                "structural_only": True,
+                "no_file_inspection": True,
+                "real_backend_contract_values_not_inferred": True,
+                "diagnostic_scope_signature": signatures["diagnostic_scope_signature"],
+            },
+            source_identity=identity,
+            validation_issues=tuple(dict.fromkeys(validation_issues)),
+            created_at_utc=self._guided_dataset_contract_now_utc(),
+            updated_at_utc=self._guided_dataset_contract_now_utc(),
+            explicitly_applied=False,
+            provenance={
+                "candidate_from_guided_setup_state": True,
+                "no_runspec": True,
+                "no_argv": True,
+                "no_config_written": True,
+                "no_files_written": True,
+            },
+        )
+
+    def _guided_dataset_contract_source_identity_differences(self, old, new) -> list[str]:
+        fields = (
+            "input_source_path",
+            "resolved_input_source_path",
+            "input_format",
+            "resolved_input_format",
+            "acquisition_mode",
+            "sessions_per_hour",
+            "session_duration_sec",
+            "continuous_window_sec",
+            "continuous_step_sec",
+            "allow_partial_final_window",
+            "exclude_incomplete_final_rwd_chunk",
+            "discovered_roi_ids",
+            "included_roi_ids",
+            "source_setup_signature",
+            "config_fingerprint",
+            "diagnostic_cache_contract_identity",
+        )
+        changed = []
+        for field_name in fields:
+            if getattr(old, field_name, None) != getattr(new, field_name, None):
+                changed.append(f"{field_name} changed")
+        return changed
+
+    def _refresh_guided_new_analysis_dataset_contract_staleness(self) -> None:
+        snapshot = getattr(self, "_guided_new_analysis_dataset_contract_snapshot", None)
+        if snapshot is None or not getattr(snapshot, "current_applied", False):
+            return
+        current_identity = self._guided_new_analysis_dataset_contract_source_identity()
+        differences = self._guided_dataset_contract_source_identity_differences(
+            snapshot.source_identity,
+            current_identity,
+        )
+        if not differences:
+            return
+        self._guided_new_analysis_dataset_contract_snapshot = dataclasses.replace(
+            snapshot,
+            status="stale",
+            stale_reasons=tuple(dict.fromkeys(differences)),
+            updated_at_utc=self._guided_dataset_contract_now_utc(),
+        )
+
+    def _guided_dataset_contract_snapshot_text(self, snapshot, *, heading: str) -> str:
+        status = getattr(snapshot, "status", "missing")
+        identity = getattr(snapshot, "source_identity", None)
+        lines = [
+            f"{heading}:",
+            f"  stored status: {status}",
+            f"  current_applied: {str(bool(getattr(snapshot, 'current_applied', False))).lower()}",
+            f"  input_format: {getattr(snapshot, 'input_format', None) or 'none'}",
+            f"  acquisition_mode: {getattr(snapshot, 'acquisition_mode', None) or 'none'}",
+            f"  explicitly_applied: {str(bool(getattr(snapshot, 'explicitly_applied', False))).lower()}",
+        ]
+        validation_issues = list(getattr(snapshot, "validation_issues", ()) or ())
+        stale_reasons = list(getattr(snapshot, "stale_reasons", ()) or ())
+        if validation_issues:
+            lines.append(f"  validation issues: {'; '.join(validation_issues)}")
+        if stale_reasons:
+            lines.append(f"  stale reasons: {'; '.join(stale_reasons)}")
+        if identity is not None:
+            lines.append(
+                "  source identity: "
+                f"input={self._display_path(str(identity.input_source_path or 'none'))}, "
+                f"format={identity.input_format or 'none'}, "
+                f"acquisition={identity.acquisition_mode or 'none'}, "
+                f"included_rois={len(identity.included_roi_ids)}"
+            )
+        return "\n".join(lines)
+
+    def _refresh_guided_dataset_contract_panel(self) -> None:
+        if not hasattr(self, "_guided_dataset_contract_status_label"):
+            return
+        self._refresh_guided_new_analysis_dataset_contract_staleness()
+        candidate = self._guided_new_analysis_dataset_contract_candidate()
+        self._guided_new_analysis_dataset_contract_candidate_snapshot = candidate
+        stored = (
+            getattr(self, "_guided_new_analysis_dataset_contract_snapshot", None)
+            or self._default_guided_new_analysis_dataset_contract_snapshot()
+        )
+        can_apply = candidate.status == "inferred" and not candidate.validation_issues
+        self._guided_dataset_contract_status_label.setText(
+            f"Stored dataset contract snapshot: {stored.status}; current_applied={str(stored.current_applied).lower()}.\n"
+            f"Candidate: {candidate.status}; can_apply={str(can_apply).lower()}."
+        )
+        self._guided_dataset_contract_candidate_label.setText(
+            self._guided_dataset_contract_snapshot_text(candidate, heading="Dataset contract candidate")
+        )
+        self._guided_dataset_contract_stored_label.setText(
+            self._guided_dataset_contract_snapshot_text(stored, heading="Dataset contract snapshot")
+        )
+
+    def _default_guided_new_analysis_dataset_contract_snapshot(self):
+        from photometry_pipeline.guided_new_analysis_plan import GuidedNewAnalysisDatasetContractSnapshot
+
+        return GuidedNewAnalysisDatasetContractSnapshot()
+
+    def _on_guided_apply_dataset_contract(self) -> None:
+        candidate = self._guided_new_analysis_dataset_contract_candidate()
+        self._guided_new_analysis_dataset_contract_candidate_snapshot = candidate
+        if candidate.status == "unsupported" or candidate.validation_issues:
+            self._refresh_guided_dataset_contract_panel()
+            self._refresh_guided_draft_run_plan_preview()
+            self._guided_dataset_contract_status_label.setText(
+                "Dataset contract was not applied: "
+                + ("; ".join(candidate.validation_issues) or candidate.status)
+            )
+            return
+        now = self._guided_dataset_contract_now_utc()
+        self._guided_new_analysis_dataset_contract_snapshot = dataclasses.replace(
+            candidate,
+            status="applied",
+            explicitly_applied=True,
+            stale_reasons=(),
+            validation_issues=(),
+            updated_at_utc=now,
+            created_at_utc=candidate.created_at_utc or now,
+            provenance={
+                **dict(candidate.provenance or {}),
+                "explicit_guided_apply": True,
+                "no_runspec": True,
+                "no_argv": True,
+                "no_config_written": True,
+                "no_files_written": True,
+            },
+        )
+        self._refresh_guided_dataset_contract_panel()
+        self._refresh_guided_draft_run_plan_preview()
+
+    def _on_guided_clear_dataset_contract(self) -> None:
+        self._guided_new_analysis_dataset_contract_snapshot = (
+            self._default_guided_new_analysis_dataset_contract_snapshot()
+        )
+        self._refresh_guided_dataset_contract_panel()
+        self._refresh_guided_draft_run_plan_preview()
 
     def _build_guided_new_analysis_draft_plan(self):
         from photometry_pipeline.guided_new_analysis_plan import (
@@ -5375,6 +5702,11 @@ class MainWindow(QMainWindow):
             sig_source_cache_id = sig_diag_cache.get("cache_id") or res.get("source_cache_id")
 
         self._refresh_guided_new_analysis_output_policy_staleness()
+        self._refresh_guided_new_analysis_dataset_contract_staleness()
+        dataset_contract_snapshot = (
+            getattr(self, "_guided_new_analysis_dataset_contract_snapshot", None)
+            or self._default_guided_new_analysis_dataset_contract_snapshot()
+        )
 
         return GuidedNewAnalysisDraftPlan(
             input_source_path=input_path,
@@ -5388,6 +5720,7 @@ class MainWindow(QMainWindow):
             allow_partial_final_window=allow_partial,
             exclude_incomplete_final_rwd_chunk=exclude_rwd,
             acquisition_structure_status=acq_status,
+            dataset_contract_snapshot=dataset_contract_snapshot,
             discovered_roi_ids=discovered,
             included_roi_ids=included,
             excluded_roi_ids=excluded,
@@ -5496,6 +5829,20 @@ class MainWindow(QMainWindow):
             f"Correction strategy coverage: {coverage_summary}",
         ]
         lines.extend(fe_lines)
+        snapshot = plan.dataset_contract_snapshot
+        lines.extend([
+            f"Dataset contract snapshot status: {snapshot.status}",
+            f"Dataset contract current_applied: {str(bool(snapshot.current_applied)).lower()}",
+            f"Dataset contract explicitly_applied: {str(bool(snapshot.explicitly_applied)).lower()}",
+        ])
+        if snapshot.input_format:
+            lines.append(f"Dataset contract input_format: {snapshot.input_format}")
+        if snapshot.acquisition_mode:
+            lines.append(f"Dataset contract acquisition_mode: {snapshot.acquisition_mode}")
+        if snapshot.validation_issues:
+            lines.append(f"Dataset contract validation issues: {'; '.join(snapshot.validation_issues)}")
+        if snapshot.stale_reasons:
+            lines.append(f"Dataset contract stale reasons: {'; '.join(snapshot.stale_reasons)}")
         lines.append(f"Output policy status: {plan.output_policy_status}")
         if plan.output_policy_path:
             lines.append(f"Output destination: {self._display_path(plan.output_policy_path)}")
@@ -6922,6 +7269,7 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(explain_label)
         layout.addWidget(explain_label)
 
+        layout.addWidget(self._build_guided_dataset_contract_panel())
         layout.addWidget(self._build_guided_feature_event_profile_editor())
         layout.addWidget(self._build_guided_output_policy_editor())
         layout.addWidget(self._build_guided_draft_plan_export_editor())
@@ -6987,6 +7335,65 @@ class MainWindow(QMainWindow):
             [],
             wrapper,
         )
+
+    def _build_guided_dataset_contract_panel(self) -> QGroupBox:
+        group = QGroupBox("Dataset contract snapshot")
+        group.setObjectName("guidedDatasetContractPanel")
+        self._guided_dataset_contract_group = group
+        group.setVisible(False)
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+
+        explain = QLabel(
+            "Review and explicitly apply an in-memory dataset contract snapshot for planning. "
+            "This does not generate RunSpec, argv, config files, validation, runs, or output folders."
+        )
+        explain.setObjectName("guidedDatasetContractExplanation")
+        explain.setProperty("guidedSecondaryText", True)
+        explain.setWordWrap(True)
+        self._make_guided_widget_shrinkable(explain)
+        layout.addWidget(explain)
+
+        button_row = QHBoxLayout()
+        self._guided_dataset_contract_apply_btn = QPushButton("Apply dataset contract")
+        self._guided_dataset_contract_apply_btn.setObjectName("guidedDatasetContractApplyButton")
+        self._guided_dataset_contract_apply_btn.clicked.connect(self._on_guided_apply_dataset_contract)
+        button_row.addWidget(self._guided_dataset_contract_apply_btn)
+
+        self._guided_dataset_contract_clear_btn = QPushButton("Clear dataset contract")
+        self._guided_dataset_contract_clear_btn.setObjectName("guidedDatasetContractClearButton")
+        self._guided_dataset_contract_clear_btn.clicked.connect(self._on_guided_clear_dataset_contract)
+        button_row.addWidget(self._guided_dataset_contract_clear_btn)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self._guided_dataset_contract_status_label = QLabel("Stored dataset contract snapshot: missing.")
+        self._guided_dataset_contract_status_label.setObjectName("guidedDatasetContractStatus")
+        self._guided_dataset_contract_status_label.setProperty("guidedSecondaryText", True)
+        self._guided_dataset_contract_status_label.setWordWrap(True)
+        self._guided_dataset_contract_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_dataset_contract_status_label)
+        layout.addWidget(self._guided_dataset_contract_status_label)
+
+        self._guided_dataset_contract_candidate_label = QLabel("Dataset contract candidate: not evaluated.")
+        self._guided_dataset_contract_candidate_label.setObjectName("guidedDatasetContractCandidate")
+        self._guided_dataset_contract_candidate_label.setProperty("guidedSecondaryText", True)
+        self._guided_dataset_contract_candidate_label.setWordWrap(True)
+        self._guided_dataset_contract_candidate_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_dataset_contract_candidate_label)
+        layout.addWidget(self._guided_dataset_contract_candidate_label)
+
+        self._guided_dataset_contract_stored_label = QLabel("Dataset contract snapshot: missing.")
+        self._guided_dataset_contract_stored_label.setObjectName("guidedDatasetContractStored")
+        self._guided_dataset_contract_stored_label.setProperty("guidedSecondaryText", True)
+        self._guided_dataset_contract_stored_label.setWordWrap(True)
+        self._guided_dataset_contract_stored_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_dataset_contract_stored_label)
+        layout.addWidget(self._guided_dataset_contract_stored_label)
+
+        self._guided_new_analysis_mode_panels["Dataset contract"] = group
+        return group
 
     def _build_guided_run_step(self) -> QWidget:
         wrapper = QWidget()
