@@ -5,10 +5,14 @@ import dataclasses
 import pytest
 from photometry_pipeline.guided_new_analysis_plan import (
     DATASET_CONTRACT_SNAPSHOT_SCHEMA_VERSION,
+    EXECUTION_INTENT_SCHEMA_VERSION,
+    OUTPUT_CREATION_POLICY_SCHEMA_VERSION,
     FIRST_EXECUTION_SUBSET_NAME,
     GuidedNewAnalysisDatasetContractSnapshot,
     GuidedNewAnalysisDatasetContractSourceIdentity,
     GuidedNewAnalysisDraftPlan,
+    GuidedNewAnalysisExecutionIntent,
+    GuidedNewAnalysisOutputCreationPolicy,
     GuidedPlanCorrectionChoice,
     GuidedPlanIssue,
     NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION,
@@ -184,6 +188,47 @@ def test_dataset_contract_snapshot_rejects_unknown_status():
         GuidedNewAnalysisDatasetContractSnapshot(status="ready")
 
 
+def test_execution_intent_defaults_and_provenance_are_model_only():
+    intent = GuidedNewAnalysisExecutionIntent()
+
+    assert intent.schema_version == EXECUTION_INTENT_SCHEMA_VERSION
+    assert intent.timeline_anchor_mode == "civil"
+    assert intent.fixed_daily_anchor_clock is None
+    assert intent.execution_mode == "phasic"
+    assert intent.run_profile == "full"
+    assert intent.provenance["execution_mode"] == "first_subset_fixed_default_phasic_for_global_dynamic_fit_only"
+    assert intent.provenance["no_runspec"] is True
+    assert intent.provenance["no_argv"] is True
+    assert intent.provenance["no_config_written"] is True
+    assert intent.provenance["no_files_written"] is True
+
+
+def test_output_creation_policy_defaults_and_provenance_are_non_writing():
+    policy = GuidedNewAnalysisOutputCreationPolicy()
+
+    assert policy.schema_version == OUTPUT_CREATION_POLICY_SCHEMA_VERSION
+    assert policy.path_role == "output_base"
+    assert policy.creation_timing == "future_execution_start_only"
+    assert policy.run_directory_strategy == "derive_unique_run_id_under_output_base"
+    assert policy.overwrite is False
+    assert policy.precreate_during_preview is False
+    assert policy.config_write_timing == "future_execution_or_validation_only"
+    assert policy.gui_preflight_writes_enabled is False
+    assert policy.provenance["no_runspec"] is True
+    assert policy.provenance["no_argv"] is True
+    assert policy.provenance["no_config_written"] is True
+    assert policy.provenance["no_files_written"] is True
+
+
+def test_output_creation_policy_rejects_write_enabling_options():
+    with pytest.raises(ValueError, match="overwrite"):
+        GuidedNewAnalysisOutputCreationPolicy(overwrite=True)
+    with pytest.raises(ValueError, match="precreate"):
+        GuidedNewAnalysisOutputCreationPolicy(precreate_during_preview=True)
+    with pytest.raises(ValueError, match="preflight writes"):
+        GuidedNewAnalysisOutputCreationPolicy(gui_preflight_writes_enabled=True)
+
+
 def test_missing_input_produces_issue():
     plan = GuidedNewAnalysisDraftPlan(input_source_path=None)
     issues = evaluate_new_analysis_plan_issues(plan)
@@ -353,12 +398,26 @@ def test_run_preview_keeps_handoff_readiness_separate_from_execution_contract_un
     assert preview.readiness_snapshot["plan_complete_for_handoff"] is True
     assert preview.execution_available is False
     categories = {item.category for item in preview.unresolved_items}
-    assert categories == {"per_roi_correction_execution_contract_unresolved"}
+    assert "per_roi_correction_execution_contract_unresolved" not in categories
     assert preview.correction_strategy["global_strategy_collapsed"] is False
     assert preview.correction_strategy["per_roi_choices"][0]["selected_strategy"] == "global_linear_regression"
     assert preview.output_policy["path"] == plan.output_policy_path
     assert preview.output_policy["directory_created"] is False
     assert preview.output_policy["files_written"] is False
+    assert preview.execution_intent["timeline_anchor_mode"] == "civil"
+    assert preview.execution_intent["fixed_daily_anchor_clock"] is None
+    assert preview.execution_intent["execution_mode"] == "phasic"
+    assert preview.execution_intent["run_profile"] == "full"
+    assert preview.execution_intent["execution_consumption_enabled"] is False
+    assert preview.output_creation_policy["path_role"] == "output_base"
+    assert preview.output_creation_policy["creation_timing"] == "future_execution_start_only"
+    assert preview.output_creation_policy["run_directory_strategy"] == "derive_unique_run_id_under_output_base"
+    assert preview.output_creation_policy["overwrite"] is False
+    assert preview.output_creation_policy["precreate_during_preview"] is False
+    assert preview.output_creation_policy["config_write_timing"] == "future_execution_or_validation_only"
+    assert preview.output_creation_policy["gui_preflight_writes_enabled"] is False
+    assert preview.output_creation_policy["directory_created"] is False
+    assert preview.output_creation_policy["files_written"] is False
 
 
 def test_run_preview_serializes_stored_dataset_contract_snapshot_only():
@@ -408,9 +467,47 @@ def test_run_preview_marks_signal_only_f0_production_routing_unresolved():
 
     assert preview.readiness_snapshot["plan_complete_for_handoff"] is True
     categories = {item.category for item in preview.unresolved_items}
-    assert "per_roi_correction_execution_contract_unresolved" in categories
     assert "signal_only_f0_production_routing_unresolved" in categories
     assert preview.correction_strategy["per_roi_choices"][0]["selected_strategy"] == "signal_only_f0"
+
+
+def test_run_preview_marks_mixed_dynamic_strategies_unresolved_without_generic_mapping_item():
+    plan = _complete_new_analysis_plan(
+        included_roi_ids=["ROI1", "ROI2"],
+        excluded_roi_ids=[],
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="global_linear_regression",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI2",
+                selected_strategy="robust_global_event_reject",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+        ],
+    )
+
+    preview = build_guided_new_analysis_run_preview(plan)
+    categories = {item.category for item in preview.unresolved_items}
+
+    assert "mixed_per_roi_strategies" in categories
+    assert "per_roi_correction_execution_contract_unresolved" not in categories
 
 
 def test_run_preview_uses_only_plan_fields_and_marks_missing_execution_fields_unresolved():
@@ -445,6 +542,10 @@ def test_run_preview_does_not_create_output_directory(tmp_path):
     assert not target.exists()
     assert preview.output_policy["path"] == str(target)
     assert preview.provenance["no_output_directory_created"] is True
+    assert preview.output_creation_policy["precreate_during_preview"] is False
+    assert preview.output_creation_policy["gui_preflight_writes_enabled"] is False
+    assert preview.output_creation_policy["directory_created"] is False
+    assert preview.output_creation_policy["files_written"] is False
 
 
 def test_run_preview_rejects_malformed_input():

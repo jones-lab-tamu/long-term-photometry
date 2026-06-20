@@ -15,6 +15,8 @@ SCHEMA_VERSION = "guided_new_analysis_plan.v1"
 RUN_PREVIEW_SCHEMA_VERSION = "guided_new_analysis_run_preview.v1"
 EXECUTION_SUBSET_SCHEMA_VERSION = "guided_new_analysis_execution_subset.v1"
 DATASET_CONTRACT_SNAPSHOT_SCHEMA_VERSION = "guided_new_analysis_dataset_contract_snapshot.v1"
+EXECUTION_INTENT_SCHEMA_VERSION = "guided_new_analysis_execution_intent.v1"
+OUTPUT_CREATION_POLICY_SCHEMA_VERSION = "guided_new_analysis_output_creation_policy.v1"
 FIRST_EXECUTION_SUBSET_NAME = "global_dynamic_fit_only.v1"
 SUPPORTED_INPUT_FORMATS = {"auto", "rwd", "npm", "custom_tabular"}
 SUPPORTED_ACQUISITION_MODES = {"intermittent", "continuous"}
@@ -38,6 +40,13 @@ FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES = {
     "robust_global_event_reject",
     "adaptive_event_gated_regression",
 }
+TIMELINE_ANCHOR_MODES = {"civil", "elapsed", "fixed_daily_anchor"}
+EXECUTION_MODES = {"both", "phasic", "tonic"}
+RUN_PROFILES = {"full", "tuning_prep"}
+OUTPUT_PATH_ROLES = {"output_base"}
+OUTPUT_CREATION_TIMINGS = {"future_execution_start_only"}
+RUN_DIRECTORY_STRATEGIES = {"derive_unique_run_id_under_output_base"}
+CONFIG_WRITE_TIMINGS = {"future_execution_or_validation_only"}
 
 
 @dataclass(frozen=True)
@@ -81,6 +90,7 @@ class GuidedNewAnalysisRunPreview:
     plan_schema_version: str
     source: dict[str, Any]
     acquisition: dict[str, Any]
+    execution_intent: dict[str, Any]
     dataset_contract: dict[str, Any]
     roi_selection: dict[str, Any]
     diagnostic_cache: dict[str, Any]
@@ -88,6 +98,7 @@ class GuidedNewAnalysisRunPreview:
     evidence_references: dict[str, Any]
     feature_event: dict[str, Any]
     output_policy: dict[str, Any]
+    output_creation_policy: dict[str, Any]
     provenance: dict[str, Any]
     readiness_snapshot: dict[str, Any]
     unresolved_items: tuple[GuidedNewAnalysisRunPreviewIssue, ...] = ()
@@ -147,6 +158,75 @@ class GuidedNewAnalysisDatasetContractSourceIdentity:
     source_setup_signature: str | None = None
     config_fingerprint: str | None = None
     diagnostic_cache_contract_identity: str | None = None
+
+
+@dataclass(frozen=True)
+class GuidedNewAnalysisExecutionIntent:
+    schema_version: str = EXECUTION_INTENT_SCHEMA_VERSION
+    timeline_anchor_mode: str = "civil"
+    fixed_daily_anchor_clock: str | None = None
+    execution_mode: str = "phasic"
+    run_profile: str = "full"
+    provenance: dict[str, Any] = field(default_factory=lambda: {
+        "timeline_anchor_mode": "first_subset_fixed_default_matches_backend_default",
+        "fixed_daily_anchor_clock": "not_relevant_for_civil_timeline_anchor",
+        "execution_mode": "first_subset_fixed_default_phasic_for_global_dynamic_fit_only",
+        "run_profile": "first_subset_fixed_default_matches_backend_default",
+        "no_runspec": True,
+        "no_argv": True,
+        "no_config_written": True,
+        "no_files_written": True,
+    })
+
+    def __post_init__(self) -> None:
+        if self.timeline_anchor_mode not in TIMELINE_ANCHOR_MODES:
+            raise ValueError(f"Unsupported timeline_anchor_mode: {self.timeline_anchor_mode}")
+        if self.execution_mode not in EXECUTION_MODES:
+            raise ValueError(f"Unsupported execution_mode: {self.execution_mode}")
+        if self.run_profile not in RUN_PROFILES:
+            raise ValueError(f"Unsupported run_profile: {self.run_profile}")
+        if self.timeline_anchor_mode != "fixed_daily_anchor" and self.fixed_daily_anchor_clock is not None:
+            raise ValueError("fixed_daily_anchor_clock is only valid with timeline_anchor_mode='fixed_daily_anchor'")
+
+
+@dataclass(frozen=True)
+class GuidedNewAnalysisOutputCreationPolicy:
+    schema_version: str = OUTPUT_CREATION_POLICY_SCHEMA_VERSION
+    path_role: str = "output_base"
+    creation_timing: str = "future_execution_start_only"
+    run_directory_strategy: str = "derive_unique_run_id_under_output_base"
+    overwrite: bool = False
+    precreate_during_preview: bool = False
+    config_write_timing: str = "future_execution_or_validation_only"
+    gui_preflight_writes_enabled: bool = False
+    provenance: dict[str, Any] = field(default_factory=lambda: {
+        "path_role": "output_policy_path_is_a_base_for_future_unique_run_directory",
+        "creation_timing": "no_directory_creation_until_future_execution_start",
+        "overwrite": "first_subset_fixed_default_false",
+        "precreate_during_preview": "disabled_for_non_executing_preview",
+        "config_write_timing": "no_config_write_until_future_execution_or_validation",
+        "gui_preflight_writes_enabled": "disabled_in_model_and_preview",
+        "no_runspec": True,
+        "no_argv": True,
+        "no_config_written": True,
+        "no_files_written": True,
+    })
+
+    def __post_init__(self) -> None:
+        if self.path_role not in OUTPUT_PATH_ROLES:
+            raise ValueError(f"Unsupported output creation path_role: {self.path_role}")
+        if self.creation_timing not in OUTPUT_CREATION_TIMINGS:
+            raise ValueError(f"Unsupported output creation_timing: {self.creation_timing}")
+        if self.run_directory_strategy not in RUN_DIRECTORY_STRATEGIES:
+            raise ValueError(f"Unsupported run_directory_strategy: {self.run_directory_strategy}")
+        if self.config_write_timing not in CONFIG_WRITE_TIMINGS:
+            raise ValueError(f"Unsupported config_write_timing: {self.config_write_timing}")
+        if self.overwrite:
+            raise ValueError("Guided new_analysis first subset output creation policy does not support overwrite")
+        if self.precreate_during_preview:
+            raise ValueError("Guided new_analysis preview must not precreate output directories")
+        if self.gui_preflight_writes_enabled:
+            raise ValueError("Guided new_analysis model policy must not enable GUI preflight writes")
 
 
 @dataclass(frozen=True)
@@ -265,6 +345,16 @@ class GuidedNewAnalysisDraftPlan:
     # state only; it does not infer fields or generate executable config.
     dataset_contract_snapshot: GuidedNewAnalysisDatasetContractSnapshot = field(
         default_factory=GuidedNewAnalysisDatasetContractSnapshot
+    )
+
+    # First-subset execution intent and output creation policy are model-only
+    # planning contracts. They do not instantiate RunSpec, generate argv/config,
+    # create directories, or run validation/execution.
+    execution_intent: GuidedNewAnalysisExecutionIntent = field(
+        default_factory=GuidedNewAnalysisExecutionIntent
+    )
+    output_creation_policy: GuidedNewAnalysisOutputCreationPolicy = field(
+        default_factory=GuidedNewAnalysisOutputCreationPolicy
     )
 
     # ROI inventory
@@ -1312,6 +1402,42 @@ def _dataset_contract_snapshot_preview_dict(
     }
 
 
+def _execution_intent_preview_dict(intent: GuidedNewAnalysisExecutionIntent) -> dict[str, Any]:
+    return {
+        "schema_version": intent.schema_version,
+        "timeline_anchor_mode": intent.timeline_anchor_mode,
+        "fixed_daily_anchor_clock": intent.fixed_daily_anchor_clock,
+        "execution_mode": intent.execution_mode,
+        "run_profile": intent.run_profile,
+        "provenance": dict(intent.provenance),
+        "execution_consumption_enabled": False,
+        "no_runspec": True,
+        "no_argv": True,
+        "no_config_written": True,
+        "no_files_written": True,
+    }
+
+
+def _output_creation_policy_preview_dict(policy: GuidedNewAnalysisOutputCreationPolicy) -> dict[str, Any]:
+    return {
+        "schema_version": policy.schema_version,
+        "path_role": policy.path_role,
+        "creation_timing": policy.creation_timing,
+        "run_directory_strategy": policy.run_directory_strategy,
+        "overwrite": policy.overwrite,
+        "precreate_during_preview": policy.precreate_during_preview,
+        "config_write_timing": policy.config_write_timing,
+        "gui_preflight_writes_enabled": policy.gui_preflight_writes_enabled,
+        "provenance": dict(policy.provenance),
+        "execution_consumption_enabled": False,
+        "directory_created": False,
+        "files_written": False,
+        "no_runspec": True,
+        "no_argv": True,
+        "no_config_written": True,
+    }
+
+
 def _section_snapshot(section: GuidedNewAnalysisSectionReadiness) -> dict[str, Any]:
     return {
         "key": section.key,
@@ -1321,6 +1447,85 @@ def _section_snapshot(section: GuidedNewAnalysisSectionReadiness) -> dict[str, A
         "warning_categories": [issue.category for issue in section.warning_issues],
         "info_categories": [issue.category for issue in section.info_issues],
     }
+
+
+def _correction_strategy_run_preview_unresolved_items(
+    plan: GuidedNewAnalysisDraftPlan,
+) -> tuple[GuidedNewAnalysisRunPreviewIssue, ...]:
+    choices = tuple(plan.per_roi_correction_strategy_choices)
+    if not choices:
+        return ()
+
+    unresolved: list[GuidedNewAnalysisRunPreviewIssue] = []
+    choices_by_roi: dict[str, GuidedPlanCorrectionChoice] = {}
+    counts_by_roi: dict[str, int] = {}
+    for choice in choices:
+        counts_by_roi[choice.roi_id] = counts_by_roi.get(choice.roi_id, 0) + 1
+        choices_by_roi[choice.roi_id] = choice
+
+    included_choices = [
+        choices_by_roi[roi]
+        for roi in plan.included_roi_ids
+        if roi in choices_by_roi
+    ]
+
+    if len(included_choices) != len(plan.included_roi_ids):
+        unresolved.append(GuidedNewAnalysisRunPreviewIssue(
+            category="missing_strategy_choice_for_execution_preview",
+            message="Every included ROI needs one explicit strategy choice before execution preview mapping can be resolved.",
+            severity="blocking",
+        ))
+
+    for roi in plan.included_roi_ids:
+        if counts_by_roi.get(roi, 0) > 1:
+            unresolved.append(GuidedNewAnalysisRunPreviewIssue(
+                category="duplicate_strategy_choice_for_execution_preview",
+                message=f"Included ROI '{roi}' has duplicate strategy choices.",
+                severity="blocking",
+            ))
+
+    selected = [choice.selected_strategy for choice in included_choices]
+    unique_strategies = tuple(dict.fromkeys(selected))
+    if len(unique_strategies) > 1:
+        unresolved.append(GuidedNewAnalysisRunPreviewIssue(
+            category="mixed_per_roi_strategies",
+            message="Included ROIs use mixed correction strategies; first subset requires one shared dynamic-fit strategy.",
+            severity="blocking",
+        ))
+
+    for choice in included_choices:
+        if not choice.explicit_user_mark:
+            unresolved.append(GuidedNewAnalysisRunPreviewIssue(
+                category="non_explicit_strategy_choice",
+                message=f"Strategy choice for ROI '{choice.roi_id}' is not explicitly user-marked.",
+                severity="blocking",
+            ))
+        if choice.current_or_stale != "current":
+            unresolved.append(GuidedNewAnalysisRunPreviewIssue(
+                category="stale_strategy_choice",
+                message=f"Strategy choice for ROI '{choice.roi_id}' is not current.",
+                severity="blocking",
+            ))
+        if choice.selected_strategy in FORBIDDEN_CORRECTION_STRATEGIES:
+            unresolved.append(GuidedNewAnalysisRunPreviewIssue(
+                category="forbidden_strategy_state",
+                message=f"Strategy '{choice.selected_strategy}' for ROI '{choice.roi_id}' is forbidden for execution.",
+                severity="blocking",
+            ))
+        elif choice.selected_strategy == "signal_only_f0":
+            unresolved.append(GuidedNewAnalysisRunPreviewIssue(
+                category="signal_only_f0_production_routing_unresolved",
+                message="Signal-Only F0 production routing is not implemented for Guided new_analysis.",
+                severity="blocking",
+            ))
+        elif choice.selected_strategy not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+            unresolved.append(GuidedNewAnalysisRunPreviewIssue(
+                category="unsupported_dynamic_fit_strategy_for_first_subset",
+                message=f"Strategy '{choice.selected_strategy}' is not supported by the first execution subset.",
+                severity="blocking",
+            ))
+
+    return tuple(dict.fromkeys(unresolved))
 
 
 def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> GuidedNewAnalysisRunPreview:
@@ -1342,21 +1547,7 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
     ]
 
     choices = tuple(plan.per_roi_correction_strategy_choices)
-    if choices:
-        unresolved.append(GuidedNewAnalysisRunPreviewIssue(
-            category="per_roi_correction_execution_contract_unresolved",
-            message=(
-                "Per-ROI correction strategy execution mapping is not implemented; "
-                "preview preserves choices without collapsing them to a global strategy."
-            ),
-            severity="blocking",
-        ))
-    if any(choice.selected_strategy == "signal_only_f0" for choice in choices):
-        unresolved.append(GuidedNewAnalysisRunPreviewIssue(
-            category="signal_only_f0_production_routing_unresolved",
-            message="Signal-Only F0 production routing is not implemented for Guided new_analysis.",
-            severity="blocking",
-        ))
+    unresolved.extend(_correction_strategy_run_preview_unresolved_items(plan))
 
     fixed_contract_defaults = {
         "execution_available": False,
@@ -1394,6 +1585,7 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
                 "reason": "GuidedNewAnalysisDraftPlan does not represent timeline anchor mode.",
             },
         },
+        execution_intent=_execution_intent_preview_dict(plan.execution_intent),
         dataset_contract=_dataset_contract_snapshot_preview_dict(
             plan.dataset_contract_snapshot,
             execution_consumption_enabled=dataset_contract_consumed,
@@ -1483,12 +1675,17 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
             "directory_created": False,
             "files_written": False,
         },
+        output_creation_policy=_output_creation_policy_preview_dict(plan.output_creation_policy),
         provenance={
             "plan_created_at_utc": plan.created_at_utc,
             "plan_updated_at_utc": plan.updated_at_utc,
             "production_analysis": plan.production_analysis,
             "preliminary_cache": plan.preliminary_cache,
-            "fixed_contract_defaults": fixed_contract_defaults,
+            "fixed_contract_defaults": {
+                **fixed_contract_defaults,
+                "execution_intent": _execution_intent_preview_dict(plan.execution_intent),
+                "output_creation_policy": _output_creation_policy_preview_dict(plan.output_creation_policy),
+            },
             "no_gui_runspec": True,
             "no_argv_generated": True,
             "no_config_written": True,

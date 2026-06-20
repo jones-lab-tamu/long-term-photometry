@@ -501,16 +501,45 @@ def test_new_analysis_run_preview_keeps_existing_sections_with_dataset_contract(
     assert "Plan schema version:" in preview_text
     assert "Source/input:" in preview_text
     assert "Acquisition:" in preview_text
+    assert "Execution intent:" in preview_text
     assert "Dataset contract snapshot:" in preview_text
     assert "Included ROIs:" in preview_text
     assert "Correction strategies:" in preview_text
     assert "Feature/event:" in preview_text
     assert "Output policy status:" in preview_text
+    assert "Output creation policy:" in preview_text
     assert "Diagnostic cache:" in preview_text
     assert "First execution subset:" in preview_text
     assert "Execution: unavailable" in preview_text
     assert "No files or directories were created." in preview_text
     assert "This preview is read-only and non-executing." in preview_text
+
+
+def test_new_analysis_run_preview_displays_execution_intent_and_output_creation_policy(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "Execution intent:" in preview_text
+    assert "timeline_anchor_mode: civil" in preview_text
+    assert "fixed_daily_anchor_clock: none" in preview_text
+    assert "execution_mode: phasic" in preview_text
+    assert "run_profile: full" in preview_text
+    assert "modeled only; readiness blockers not consumed in this stage" in preview_text
+    assert "Output creation policy:" in preview_text
+    assert "path_role: output_base" in preview_text
+    assert "creation_timing: future_execution_start_only" in preview_text
+    assert "run_directory_strategy: derive_unique_run_id_under_output_base" in preview_text
+    assert "overwrite: false" in preview_text
+    assert "precreate_during_preview: false" in preview_text
+    assert "config_write_timing: future_execution_or_validation_only" in preview_text
+    assert "gui_preflight_writes_enabled: false" in preview_text
+    assert "ready to run" not in preview_text.lower()
+    assert "execution-ready" not in preview_text.lower()
 
 
 def test_new_analysis_draft_plan_reports_choices_as_current_after_build_and_mark(window, tmp_path, monkeypatch):
@@ -661,6 +690,11 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
     assert "Dataset contract snapshot:" in preview_text
+    assert "Execution intent:" in preview_text
+    assert "timeline_anchor_mode: civil" in preview_text
+    assert "execution_mode: phasic" in preview_text
+    assert "run_profile: full" in preview_text
+    assert "modeled only; readiness blockers not consumed in this stage" in preview_text
     assert "stored status: applied" in preview_text
     assert "current_applied: true" in preview_text
     assert "execution consumption: enabled for first-subset readiness classification" in preview_text
@@ -673,6 +707,7 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "execution_available: false" in preview_text
     assert "ready to run" not in preview_text.lower()
     assert "ready for execution" not in preview_text.lower()
+    assert "execution-ready" not in preview_text.lower()
 
 
 def test_new_analysis_run_preview_stale_dataset_contract_keeps_dataset_blocker(
@@ -726,12 +761,16 @@ def test_new_analysis_run_preview_complete_plan_keeps_execution_unavailable(wind
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
     assert "Draft plan completeness: complete for future RunSpec handoff" in preview_text
-    assert "per_roi_correction_execution_contract_unresolved" in preview_text
-    assert "preview preserves choices without collapsing them to a global strategy" in preview_text
+    assert "per_roi_correction_execution_contract_unresolved" not in preview_text
     assert "global collapse false" in preview_text
+    assert "missing_timeline_anchor_mode" in preview_text
+    assert "missing_execution_mode" in preview_text
+    assert "missing_run_profile" in preview_text
+    assert "missing_output_creation_policy" in preview_text
     assert "Execution unavailable" in preview_text
     assert "ready to run" not in preview_text.lower()
     assert "ready for execution" not in preview_text.lower()
+    assert "execution-ready" not in preview_text.lower()
 
 
 def test_new_analysis_run_preview_signal_only_f0_unresolved_routing(window, tmp_path, monkeypatch):

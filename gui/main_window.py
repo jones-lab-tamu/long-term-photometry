@@ -5942,12 +5942,14 @@ class MainWindow(QMainWindow):
     def _guided_new_analysis_run_preview_text(self, preview, subset_readiness=None) -> str:
         source = preview.source or {}
         acquisition = preview.acquisition or {}
+        execution_intent = preview.execution_intent or {}
         dataset_contract = preview.dataset_contract or {}
         roi_selection = preview.roi_selection or {}
         diagnostic_cache = preview.diagnostic_cache or {}
         correction_strategy = preview.correction_strategy or {}
         feature_event = preview.feature_event or {}
         output_policy = preview.output_policy or {}
+        output_creation_policy = preview.output_creation_policy or {}
         readiness = preview.readiness_snapshot or {}
 
         included_rois = list(roi_selection.get("included_roi_ids") or [])
@@ -5972,6 +5974,17 @@ class MainWindow(QMainWindow):
             f"Source/input: {self._display_path(str(source.get('authoritative_input_source_path') or source.get('input_source_path') or '')) if (source.get('authoritative_input_source_path') or source.get('input_source_path')) else 'none'}",
             f"Input format: {source.get('input_format') or 'unknown'}",
             f"Acquisition: {acquisition.get('acquisition_mode') or 'unknown'} ({acquisition.get('acquisition_structure_status') or 'unknown'})",
+            "Execution intent:",
+            f"  timeline_anchor_mode: {execution_intent.get('timeline_anchor_mode') or 'none'}",
+            f"  fixed_daily_anchor_clock: {execution_intent.get('fixed_daily_anchor_clock') or 'none'}",
+            f"  execution_mode: {execution_intent.get('execution_mode') or 'none'}",
+            f"  run_profile: {execution_intent.get('run_profile') or 'none'}",
+            "  execution consumption: "
+            + (
+                "enabled for first-subset readiness classification"
+                if execution_intent.get("execution_consumption_enabled")
+                else "modeled only; readiness blockers not consumed in this stage"
+            ),
             "Dataset contract snapshot:",
             f"  stored status: {dataset_contract.get('status') or 'missing'}",
             f"  current_applied: {str(bool(dataset_contract.get('current_applied'))).lower()}",
@@ -6010,6 +6023,14 @@ class MainWindow(QMainWindow):
             + (f" ({feature_event.get('profile_id')})" if feature_event.get("profile_id") else ""),
             f"Output destination: {self._display_path(str(output_policy.get('path') or '')) if output_policy.get('path') else 'none'}",
             f"Output policy status: {output_policy.get('status') or 'unknown'}",
+            "Output creation policy:",
+            f"  path_role: {output_creation_policy.get('path_role') or 'none'}",
+            f"  creation_timing: {output_creation_policy.get('creation_timing') or 'none'}",
+            f"  run_directory_strategy: {output_creation_policy.get('run_directory_strategy') or 'none'}",
+            f"  overwrite: {str(bool(output_creation_policy.get('overwrite'))).lower()}",
+            f"  precreate_during_preview: {str(bool(output_creation_policy.get('precreate_during_preview'))).lower()}",
+            f"  config_write_timing: {output_creation_policy.get('config_write_timing') or 'none'}",
+            f"  gui_preflight_writes_enabled: {str(bool(output_creation_policy.get('gui_preflight_writes_enabled'))).lower()}",
             f"Diagnostic cache: {diagnostic_cache.get('stale_or_current') or 'missing'}"
             + (f" ({diagnostic_cache.get('cache_id')})" if diagnostic_cache.get("cache_id") else ""),
             f"Diagnostic cache root: {self._display_path(str(diagnostic_cache.get('cache_root_path') or '')) if diagnostic_cache.get('cache_root_path') else 'none'}",
