@@ -90,6 +90,7 @@ from photometry_pipeline.guided_run_plan import (
 from photometry_pipeline.feature_event_config import validate_feature_event_config_fields
 from photometry_pipeline.workflow_safety import (
     FeatureEventDefaultsResult,
+    WorkflowValidationResult,
     resolve_feature_event_defaults,
     validate_format_mode_compatibility,
     validate_output_write_safety,
@@ -1627,6 +1628,15 @@ class MainWindow(QMainWindow):
         self._guided_new_analysis_feature_event_profile_updated_at_utc = None
         self._guided_new_analysis_feature_event_profile_format = None
         self._guided_new_analysis_feature_event_profile_acq_mode = None
+        self._guided_new_analysis_output_policy_status = "missing"
+        self._guided_new_analysis_output_policy_path = None
+        self._guided_new_analysis_output_policy_validation_issues = []
+        self._guided_new_analysis_output_policy_stale_reasons = []
+        self._guided_new_analysis_output_policy_updated_at_utc = None
+        self._guided_new_analysis_output_policy_explicitly_applied = False
+        self._guided_new_analysis_output_policy_source_path = None
+        self._guided_new_analysis_output_policy_cache_root = None
+        self._guided_new_analysis_output_policy_build_request_signature = None
         self._guided_draft_output_policy_by_run = {}
         self._guided_output_policy_editor_synced_run = None
         self._guided_export_editor_synced_run = None
@@ -5004,7 +5014,7 @@ class MainWindow(QMainWindow):
             widget.setEnabled(source_ok)
 
         if hasattr(self, "_guided_output_path_edit"):
-            draft_controls_enabled = bool(source_ok and mode != "new_analysis")
+            draft_controls_enabled = True if mode == "new_analysis" else bool(source_ok)
             for widget in (
                 self._guided_output_path_edit,
                 self._guided_output_apply_btn,
@@ -5345,6 +5355,8 @@ class MainWindow(QMainWindow):
             sig_diag_cache = res.get("diagnostic_cache") or {}
             sig_source_cache_id = sig_diag_cache.get("cache_id") or res.get("source_cache_id")
 
+        self._refresh_guided_new_analysis_output_policy_staleness()
+
         return GuidedNewAnalysisDraftPlan(
             input_source_path=input_path,
             resolved_input_source_path=input_path,
@@ -5390,6 +5402,17 @@ class MainWindow(QMainWindow):
             feature_event_stale_reasons=self._guided_new_analysis_feature_event_profile_stale_reasons,
             feature_event_updated_at_utc=self._guided_new_analysis_feature_event_profile_updated_at_utc,
             feature_event_explicitly_applied=(getattr(self, "_guided_new_analysis_feature_event_profile_status", "missing") == "applied"),
+            output_policy_status=getattr(self, "_guided_new_analysis_output_policy_status", "missing"),
+            output_policy_path=getattr(self, "_guided_new_analysis_output_policy_path", None),
+            output_policy_validation_issues=getattr(self, "_guided_new_analysis_output_policy_validation_issues", []),
+            output_policy_stale_reasons=getattr(self, "_guided_new_analysis_output_policy_stale_reasons", []),
+            output_policy_updated_at_utc=getattr(self, "_guided_new_analysis_output_policy_updated_at_utc", None),
+            output_policy_explicitly_applied=bool(getattr(self, "_guided_new_analysis_output_policy_explicitly_applied", False)),
+            output_policy_safety_summary=(
+                "Output destination validated as planning state only; no directories or files were created."
+                if getattr(self, "_guided_new_analysis_output_policy_status", "missing") == "applied"
+                else ""
+            ),
         )
 
     def _guided_new_analysis_draft_plan_summary_text(self, plan, issues) -> str:
@@ -5449,6 +5472,14 @@ class MainWindow(QMainWindow):
         ]
         lines.extend(fe_lines)
         lines.append(f"Output policy status: {plan.output_policy_status}")
+        if plan.output_policy_path:
+            lines.append(f"Output destination: {self._display_path(plan.output_policy_path)}")
+        if plan.output_policy_validation_issues:
+            lines.append(f"Output policy validation issues: {'; '.join(plan.output_policy_validation_issues)}")
+        if plan.output_policy_stale_reasons:
+            lines.append(f"Output policy stale reasons: {'; '.join(plan.output_policy_stale_reasons)}")
+        if plan.output_policy_safety_summary:
+            lines.append(plan.output_policy_safety_summary)
         
         blocking = [iss for iss in issues if iss.severity == "blocking"]
         warnings = [iss for iss in issues if iss.severity == "warning"]
@@ -5506,7 +5537,7 @@ class MainWindow(QMainWindow):
         else:
             missing.append("feature/event profile")
             
-        if plan.output_policy_status == "ready":
+        if plan.output_policy_status == "applied":
             configured.append("output destination policy")
         else:
             missing.append("output destination policy")
@@ -5542,7 +5573,12 @@ class MainWindow(QMainWindow):
             ("diagnostic_cache", "Diagnostic cache", ["missing_diagnostic_cache", "stale_diagnostic_cache"]),
             ("roi_choices", "ROI choices", ["missing_strategy_choice_for_included_roi", "stale_strategy_choice", "forbidden_strategy"]),
             ("feature_event", "Feature/event settings", ["missing_feature_event_profile", "invalid_feature_event_profile", "feature_event_profile_not_applied", "stale_feature_event_profile"]),
-            ("output_destination", "Output destination", ["missing_output_policy", "unsafe_output_policy"]),
+            ("output_destination", "Output destination", [
+                "missing_output_policy",
+                "output_policy_not_applied",
+                "invalid_output_policy",
+                "stale_output_policy",
+            ]),
             ("execution", "Execution readiness", ["execution_not_implemented"])
         ]
         
@@ -6089,6 +6125,94 @@ class MainWindow(QMainWindow):
 
         return None
 
+    def _guided_new_analysis_output_policy_context(self) -> dict[str, str]:
+        input_path = self._guided_input_dir_edit.text().strip() if hasattr(self, "_guided_input_dir_edit") else ""
+        cache_root = ""
+        build_request_signature = ""
+        record = getattr(self, "_guided_diagnostic_cache_record", None)
+        if record is not None:
+            cache_root = str(getattr(record, "cache_root_path", "") or "")
+            build_request_signature = str(getattr(record, "build_request_signature", "") or "")
+        return {
+            "input_source_path": input_path,
+            "cache_root_path": cache_root,
+            "build_request_signature": build_request_signature,
+        }
+
+    def _known_guided_new_analysis_protected_roots(self) -> list[str]:
+        roots: list[str] = []
+        ctx = self._guided_new_analysis_output_policy_context()
+        cache_root = ctx.get("cache_root_path", "")
+        if cache_root:
+            roots.append(cache_root)
+            roots.append(os.path.join(cache_root, "_guided_workflow", "previews"))
+            roots.append(os.path.join(cache_root, "_guided_workflow", "signal_only_f0_diagnostics"))
+            roots.append(os.path.join(cache_root, "_analysis"))
+            roots.append(os.path.join(cache_root, "_analysis", "phasic_out"))
+            roots.append(os.path.join(cache_root, "_analysis", "phasic_out", "features"))
+            roots.append(os.path.join(cache_root, "_analysis", "phasic_out", "applied_dff"))
+        run_dir = self._current_guided_completed_run_dir()
+        if run_dir:
+            roots.append(run_dir)
+            roots.append(os.path.join(run_dir, "_analysis"))
+            roots.append(os.path.join(run_dir, "_analysis", "phasic_out"))
+            roots.append(os.path.join(run_dir, "_analysis", "phasic_out", "features"))
+            roots.append(os.path.join(run_dir, "_analysis", "phasic_out", "applied_dff"))
+        return [root for root in roots if str(root or "").strip()]
+
+    def _validate_guided_new_analysis_output_policy_path(self, path: str):
+        trimmed = str(path or "").strip()
+        if not trimmed:
+            return validate_output_write_safety(
+                source_root="",
+                output_base="",
+                target_path="",
+                operation_kind="production_run",
+                allow_existing_target=False,
+                overwrite=False,
+            )
+        ctx = self._guided_new_analysis_output_policy_context()
+        source_root = str(ctx.get("input_source_path", "") or "").strip()
+        if not source_root:
+            return WorkflowValidationResult(
+                ok=False,
+                code="source_missing",
+                message="Raw input/source path is required before applying an output destination.",
+            )
+        try:
+            source_path = Path(source_root).expanduser().resolve(strict=False)
+        except Exception as exc:
+            return WorkflowValidationResult(
+                ok=False,
+                code="invalid_source_path",
+                message=f"Invalid raw input/source path: {exc}",
+            )
+        if not source_path.is_dir():
+            return WorkflowValidationResult(
+                ok=False,
+                code="source_invalid",
+                message=f"Raw input/source path does not exist or is not a directory: {source_path}.",
+            )
+        try:
+            target = Path(trimmed).expanduser().resolve(strict=False)
+        except Exception as exc:
+            return WorkflowValidationResult(
+                ok=False,
+                code="invalid_path",
+                message=f"Invalid output destination path: {exc}",
+            )
+        parent = target.parent
+        protected_roots = self._known_guided_new_analysis_protected_roots()
+        return validate_output_write_safety(
+            source_root=str(source_path),
+            output_base=str(parent),
+            target_path=str(target),
+            operation_kind="production_run",
+            allow_existing_target=False,
+            overwrite=False,
+            protected_roots=protected_roots,
+        )
+
     def _guided_output_policy_for_current_run(self) -> OutputPolicy:
         run_dir = self._current_guided_completed_run_dir()
         if not run_dir:
@@ -6096,6 +6220,9 @@ class MainWindow(QMainWindow):
         return getattr(self, "_guided_draft_output_policy_by_run", {}).get(run_dir, OutputPolicy())
 
     def _sync_guided_output_policy_editor_to_current_run(self, *, force: bool = False) -> None:
+        if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
+            self._sync_guided_output_policy_editor_to_new_analysis(force=force)
+            return
         if not hasattr(self, "_guided_output_path_edit"):
             return
         run_dir = self._current_guided_completed_run_dir()
@@ -6116,7 +6243,60 @@ class MainWindow(QMainWindow):
             self._guided_output_status_label.setText("No output root is configured.")
         self._guided_output_policy_editor_synced_run = run_dir
 
+    def _sync_guided_output_policy_editor_to_new_analysis(self, *, force: bool = False) -> None:
+        if not hasattr(self, "_guided_output_path_edit"):
+            return
+        self._refresh_guided_new_analysis_output_policy_staleness()
+        synced = getattr(self, "_guided_output_policy_editor_synced_run", None)
+        if not force and synced == "new_analysis":
+            return
+        path = getattr(self, "_guided_new_analysis_output_policy_path", None)
+        with QSignalBlocker(self._guided_output_path_edit):
+            self._guided_output_path_edit.setText(str(path or ""))
+        status = getattr(self, "_guided_new_analysis_output_policy_status", "missing")
+        if status == "applied":
+            self._guided_output_status_label.setText(
+                "Showing applied new-analysis output policy. No directories or files were created."
+            )
+        elif status == "stale":
+            reasons = "; ".join(getattr(self, "_guided_new_analysis_output_policy_stale_reasons", []) or [])
+            self._guided_output_status_label.setText(
+                f"New-analysis output policy is stale: {reasons or 'source/cache context changed'}"
+            )
+        elif status == "invalid":
+            issues = "; ".join(getattr(self, "_guided_new_analysis_output_policy_validation_issues", []) or [])
+            self._guided_output_status_label.setText(
+                f"Output destination not applied: {issues or 'validation failed'}"
+            )
+        else:
+            self._guided_output_status_label.setText("No new-analysis output destination is applied.")
+        self._guided_output_policy_editor_synced_run = "new_analysis"
+
+    def _refresh_guided_new_analysis_output_policy_staleness(self) -> None:
+        if getattr(self, "_guided_new_analysis_output_policy_status", "missing") not in {"applied", "stale"}:
+            return
+        path = getattr(self, "_guided_new_analysis_output_policy_path", None)
+        if not path:
+            return
+        ctx = self._guided_new_analysis_output_policy_context()
+        stale_reasons: list[str] = []
+        if str(getattr(self, "_guided_new_analysis_output_policy_source_path", "") or "") != str(ctx.get("input_source_path", "") or ""):
+            stale_reasons.append("input source path changed")
+        if str(getattr(self, "_guided_new_analysis_output_policy_cache_root", "") or "") != str(ctx.get("cache_root_path", "") or ""):
+            stale_reasons.append("diagnostic cache root changed")
+        if str(getattr(self, "_guided_new_analysis_output_policy_build_request_signature", "") or "") != str(ctx.get("build_request_signature", "") or ""):
+            stale_reasons.append("diagnostic cache build request changed")
+        validation = self._validate_guided_new_analysis_output_policy_path(str(path))
+        if not validation.ok:
+            stale_reasons.append(validation.message)
+        if stale_reasons:
+            self._guided_new_analysis_output_policy_status = "stale"
+            self._guided_new_analysis_output_policy_stale_reasons = list(dict.fromkeys(stale_reasons))
+
     def _on_guided_apply_output_policy(self) -> None:
+        if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
+            self._on_guided_apply_output_policy_new_analysis()
+            return
         run_dir = self._current_guided_completed_run_dir()
         if not run_dir:
             self._guided_output_status_label.setText(
@@ -6165,7 +6345,38 @@ class MainWindow(QMainWindow):
         self._guided_output_policy_editor_synced_run = run_dir
         self._refresh_guided_draft_run_plan_preview()
 
+    def _on_guided_apply_output_policy_new_analysis(self) -> None:
+        path = self._guided_output_path_edit.text()
+        validation = self._validate_guided_new_analysis_output_policy_path(path)
+        if not validation.ok:
+            self._guided_new_analysis_output_policy_status = "invalid"
+            self._guided_new_analysis_output_policy_validation_issues = [validation.message]
+            self._guided_new_analysis_output_policy_stale_reasons = []
+            self._guided_new_analysis_output_policy_explicitly_applied = False
+            self._guided_output_status_label.setText(f"Output destination not applied: {validation.message}")
+            self._refresh_guided_draft_run_plan_preview()
+            return
+        resolved_root = str(Path(path.strip()).expanduser().resolve(strict=False))
+        ctx = self._guided_new_analysis_output_policy_context()
+        self._guided_new_analysis_output_policy_status = "applied"
+        self._guided_new_analysis_output_policy_path = resolved_root
+        self._guided_new_analysis_output_policy_validation_issues = []
+        self._guided_new_analysis_output_policy_stale_reasons = []
+        self._guided_new_analysis_output_policy_updated_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._guided_new_analysis_output_policy_explicitly_applied = True
+        self._guided_new_analysis_output_policy_source_path = ctx.get("input_source_path", "")
+        self._guided_new_analysis_output_policy_cache_root = ctx.get("cache_root_path", "")
+        self._guided_new_analysis_output_policy_build_request_signature = ctx.get("build_request_signature", "")
+        self._guided_output_status_label.setText(
+            "Output destination applied to new-analysis draft plan. No directories or files were created."
+        )
+        self._guided_output_policy_editor_synced_run = "new_analysis"
+        self._refresh_guided_draft_run_plan_preview()
+
     def _on_guided_clear_output_policy(self) -> None:
+        if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
+            self._on_guided_clear_output_policy_new_analysis()
+            return
         run_dir = self._current_guided_completed_run_dir()
         if run_dir:
             policies_by_run = getattr(self, "_guided_draft_output_policy_by_run", {})
@@ -6178,6 +6389,24 @@ class MainWindow(QMainWindow):
             "Draft output destination cleared from in-memory plan. No files were changed."
         )
         self._guided_output_policy_editor_synced_run = run_dir
+        self._refresh_guided_draft_run_plan_preview()
+
+    def _on_guided_clear_output_policy_new_analysis(self) -> None:
+        self._guided_new_analysis_output_policy_status = "missing"
+        self._guided_new_analysis_output_policy_path = None
+        self._guided_new_analysis_output_policy_validation_issues = []
+        self._guided_new_analysis_output_policy_stale_reasons = []
+        self._guided_new_analysis_output_policy_updated_at_utc = None
+        self._guided_new_analysis_output_policy_explicitly_applied = False
+        self._guided_new_analysis_output_policy_source_path = None
+        self._guided_new_analysis_output_policy_cache_root = None
+        self._guided_new_analysis_output_policy_build_request_signature = None
+        with QSignalBlocker(self._guided_output_path_edit):
+            self._guided_output_path_edit.setText("")
+        self._guided_output_status_label.setText(
+            "New-analysis output destination cleared from in-memory draft plan. No files were changed."
+        )
+        self._guided_output_policy_editor_synced_run = "new_analysis"
         self._refresh_guided_draft_run_plan_preview()
 
     def _build_guided_feature_event_profile_editor(self) -> QGroupBox:

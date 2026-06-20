@@ -115,9 +115,13 @@ class GuidedNewAnalysisDraftPlan:
     feature_event_explicitly_applied: bool = False
 
     # output policy status
-    output_policy_status: str = "unavailable"  # missing / selected / unsafe / ready / unavailable
-    output_policy_root: str | None = None
-    output_policy_not_represented_note: str = "output policy is not yet represented as new-analysis plan state"
+    output_policy_status: str = "missing"  # missing / applied / invalid / stale / unavailable
+    output_policy_path: str | None = None
+    output_policy_validation_issues: list[str] = field(default_factory=list)
+    output_policy_stale_reasons: list[str] = field(default_factory=list)
+    output_policy_updated_at_utc: str | None = None
+    output_policy_explicitly_applied: bool = False
+    output_policy_safety_summary: str = ""
 
     # user-visible list properties (mirroring fields if needed, or initialized directly)
     warnings: list[str] = field(default_factory=list)
@@ -388,21 +392,58 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
             severity="warning"
         ))
 
-    # 13. missing_output_policy
+    # 13. output policy
     if plan.output_policy_status in ("missing", "unavailable"):
         issues.append(GuidedPlanIssue(
             category="missing_output_policy",
-            message="Output policy is missing or unavailable in this stage.",
+            message="Output policy is missing or unavailable.",
             severity="warning" if plan.output_policy_status == "unavailable" else "blocking"
         ))
 
-    # 14. unsafe_output_policy
-    elif plan.output_policy_status == "unsafe":
+    elif plan.output_policy_status == "selected":
         issues.append(GuidedPlanIssue(
-            category="unsafe_output_policy",
-            message="Output policy root path is unsafe (e.g. conflicts with input source).",
+            category="output_policy_not_applied",
+            message="Output destination has been selected in the editor but not explicitly applied to the draft plan.",
             severity="blocking"
         ))
+
+    elif plan.output_policy_status == "invalid":
+        msg = "Output policy is invalid."
+        if plan.output_policy_validation_issues:
+            msg = f"Output policy is invalid: {'; '.join(plan.output_policy_validation_issues)}"
+        issues.append(GuidedPlanIssue(
+            category="invalid_output_policy",
+            message=msg,
+            severity="blocking"
+        ))
+
+    elif plan.output_policy_status == "stale":
+        reasons = "; ".join(plan.output_policy_stale_reasons) or "source or diagnostic-cache context changed"
+        issues.append(GuidedPlanIssue(
+            category="stale_output_policy",
+            message=f"Output policy is stale: {reasons}",
+            severity="blocking"
+        ))
+
+    elif plan.output_policy_status == "applied":
+        if not plan.output_policy_explicitly_applied:
+            issues.append(GuidedPlanIssue(
+                category="output_policy_not_applied",
+                message="Output policy status is applied but explicit apply provenance is missing.",
+                severity="blocking"
+            ))
+        if not plan.output_policy_path:
+            issues.append(GuidedPlanIssue(
+                category="invalid_output_policy",
+                message="Output policy is applied but output destination path is missing.",
+                severity="blocking"
+            ))
+        if plan.output_policy_validation_issues:
+            issues.append(GuidedPlanIssue(
+                category="invalid_output_policy",
+                message=f"Output policy has validation issues: {'; '.join(plan.output_policy_validation_issues)}",
+                severity="blocking"
+            ))
 
     # 15. execution_not_implemented
     issues.append(GuidedPlanIssue(

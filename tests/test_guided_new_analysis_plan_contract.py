@@ -113,6 +113,41 @@ def test_feature_event_and_output_policy_missing_are_represented():
     assert any(iss.category == "missing_output_policy" for iss in issues)
 
 
+def test_output_policy_statuses_are_represented():
+    plan_selected = GuidedNewAnalysisDraftPlan(
+        output_policy_status="selected",
+        output_policy_path="C:/planned/out",
+        output_policy_explicitly_applied=False,
+    )
+    issues_selected = evaluate_new_analysis_plan_issues(plan_selected)
+    assert any(iss.category == "output_policy_not_applied" and iss.severity == "blocking" for iss in issues_selected)
+
+    plan_invalid = GuidedNewAnalysisDraftPlan(
+        output_policy_status="invalid",
+        output_policy_validation_issues=["inside source"],
+    )
+    issues_invalid = evaluate_new_analysis_plan_issues(plan_invalid)
+    assert any(iss.category == "invalid_output_policy" and "inside source" in iss.message for iss in issues_invalid)
+
+    plan_stale = GuidedNewAnalysisDraftPlan(
+        output_policy_status="stale",
+        output_policy_path="C:/planned/out",
+        output_policy_stale_reasons=["diagnostic cache root changed"],
+        output_policy_explicitly_applied=True,
+    )
+    issues_stale = evaluate_new_analysis_plan_issues(plan_stale)
+    assert any(iss.category == "stale_output_policy" and "diagnostic cache root changed" in iss.message for iss in issues_stale)
+
+    plan_applied = GuidedNewAnalysisDraftPlan(
+        output_policy_status="applied",
+        output_policy_path="C:/planned/out",
+        output_policy_explicitly_applied=True,
+    )
+    issues_applied = evaluate_new_analysis_plan_issues(plan_applied)
+    assert not any(iss.category.startswith("missing_output_policy") for iss in issues_applied)
+    assert not any(iss.category in {"output_policy_not_applied", "invalid_output_policy", "stale_output_policy"} for iss in issues_applied)
+
+
 def test_strict_signature_matching_in_strategy_choices():
     # Test that mismatches in setup/scope/build request signatures raise blocking stale issues
     plan = GuidedNewAnalysisDraftPlan(
@@ -322,4 +357,3 @@ def test_feature_event_profile_statuses_validation():
     iss_e = [iss for iss in issues_e if iss.category == "missing_feature_event_profile"]
     assert len(iss_e) == 1
     assert iss_e[0].severity == "warning"
-

@@ -46,7 +46,7 @@ def test_new_analysis_draft_plan_displays_summary_fields(window, tmp_path, monke
     assert "Diagnostic cache: missing" in summary_text
     assert "Correction strategy coverage:" in summary_text
     assert "Feature/event profile status: default_initialized" in summary_text
-    assert "Output policy status: unavailable" in summary_text
+    assert "Output policy status: missing" in summary_text
     assert "This draft plan is not executable yet. Final Run is not implemented in this stage." in summary_text
 def test_new_analysis_draft_plan_reports_choices_as_current_after_build_and_mark(window, tmp_path, monkeypatch):
     # Enter new_analysis mode and configure
@@ -333,3 +333,249 @@ peak_threshold_abs: 0.123
     assert "Feature/event profile baseline status: custom_config" in summary_text
 
 
+def test_new_analysis_output_policy_typed_path_is_not_applied(window, tmp_path, monkeypatch):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_run_outputs"
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_output_path_edit.setText(str(target))
+    window._refresh_guided_draft_run_plan_preview()
+
+    assert window._guided_new_analysis_output_policy_status == "missing"
+    summary_text = window._guided_draft_run_plan_preview_label.text()
+    checklist_text = window._guided_draft_run_plan_checklist_label.text()
+    assert "Output policy status: missing" in summary_text
+    assert "Output destination: fail" in checklist_text
+    assert not target.exists()
+
+
+def test_new_analysis_output_policy_apply_valid_path_stores_state_without_creating_directory(
+    window, tmp_path, monkeypatch
+):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_run_outputs"
+
+    before_files = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_output_path_edit.setText(str(target))
+    window._guided_output_apply_btn.click()
+
+    assert window._guided_new_analysis_output_policy_status == "applied"
+    assert window._guided_new_analysis_output_policy_path == str(target.resolve())
+    assert window._guided_new_analysis_output_policy_explicitly_applied is True
+    assert "No directories or files were created" in window._guided_output_status_label.text()
+    assert "Output policy status: applied" in window._guided_draft_run_plan_preview_label.text()
+    assert target.name in window._guided_draft_run_plan_preview_label.text()
+    assert "Output destination: pass" in window._guided_draft_run_plan_checklist_label.text()
+    assert not target.exists()
+    after_files = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*"))
+    assert after_files == before_files
+
+
+def test_new_analysis_output_policy_invalid_paths_are_rejected_without_creating_outputs(
+    window, tmp_path, monkeypatch
+):
+    input_dir, _output_dir = _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._set_guided_workflow_mode("new_analysis")
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    valid_target = parent / "future_run_outputs"
+    existing_target = parent / "existing_target"
+    existing_target.mkdir()
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_output_path_edit.setText(str(existing_target))
+    window._guided_output_apply_btn.click()
+
+    assert window._guided_new_analysis_output_policy_status == "invalid"
+    assert "already exists" in window._guided_output_status_label.text()
+
+    window._guided_output_path_edit.setText(str(input_dir))
+    window._guided_output_apply_btn.click()
+
+    assert window._guided_new_analysis_output_policy_status == "invalid"
+    assert "must not be the same as the source path" in window._guided_output_status_label.text()
+
+    window._guided_output_path_edit.setText(str(Path(input_dir) / "inside_input_outputs"))
+    window._guided_output_apply_btn.click()
+
+    assert window._guided_new_analysis_output_policy_status == "invalid"
+    assert "source/input folder" in window._guided_output_status_label.text()
+    assert not (Path(input_dir) / "inside_input_outputs").exists()
+
+    containing_target = tmp_path / "container_for_input"
+    nested_source = containing_target / "raw_input"
+    nested_source.mkdir(parents=True)
+    nested_output = containing_target / "future_outputs"
+    window._guided_output_path_edit.setText(str(nested_output))
+    window._guided_input_dir_edit.setText(str(nested_source))
+    window._guided_output_apply_btn.click()
+
+    assert window._guided_new_analysis_output_policy_status == "invalid"
+    assert "Source/input folder must not be inside the output" in window._guided_output_status_label.text()
+    assert not nested_output.exists()
+    window._guided_input_dir_edit.setText(str(input_dir))
+
+    window._guided_output_path_edit.setText(str(valid_target))
+    window._guided_output_apply_btn.click()
+    assert window._guided_new_analysis_output_policy_status == "applied"
+    assert not valid_target.exists()
+
+    previous_path = window._guided_new_analysis_output_policy_path
+    window._guided_output_path_edit.setText(str(existing_target))
+    window._guided_output_apply_btn.click()
+    assert window._guided_new_analysis_output_policy_status == "invalid"
+    assert window._guided_new_analysis_output_policy_path == previous_path
+
+
+def test_new_analysis_output_policy_rejects_diagnostic_cache_overlap(window, tmp_path, monkeypatch):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    fake_runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = fake_runner
+    window._guided_diagnostic_cache_build_btn.click()
+    cache_path = Path(fake_runner.run_dir)
+    _write_minimal_guided_cache_outputs(cache_path)
+    fake_runner.succeed()
+    window._on_guided_diagnostic_cache_finished(0)
+
+    target = cache_path / "future_run_outputs"
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_output_path_edit.setText(str(target))
+    window._guided_output_apply_btn.click()
+
+    assert window._guided_new_analysis_output_policy_status == "invalid"
+    assert "protected output/source root" in window._guided_output_status_label.text()
+    assert not target.exists()
+
+    preview_target = cache_path / "_guided_workflow" / "previews" / "future_outputs"
+    window._guided_output_path_edit.setText(str(preview_target))
+    window._guided_output_apply_btn.click()
+    assert window._guided_new_analysis_output_policy_status == "invalid"
+    assert "protected output/source root" in window._guided_output_status_label.text()
+    assert not preview_target.exists()
+
+    signal_target = cache_path / "_guided_workflow" / "signal_only_f0_diagnostics" / "future_outputs"
+    window._guided_output_path_edit.setText(str(signal_target))
+    window._guided_output_apply_btn.click()
+    assert window._guided_new_analysis_output_policy_status == "invalid"
+    assert "protected output/source root" in window._guided_output_status_label.text()
+    assert not signal_target.exists()
+
+
+def test_new_analysis_output_policy_marks_stale_when_context_changes(window, tmp_path, monkeypatch):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    input_dir, _output_dir = _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_run_outputs"
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_output_path_edit.setText(str(target))
+    window._guided_output_apply_btn.click()
+    assert window._guided_new_analysis_output_policy_status == "applied"
+
+    new_input = tmp_path / "new_raw_input"
+    new_input.mkdir()
+    window._guided_input_dir_edit.setText(str(new_input))
+    window._refresh_guided_draft_run_plan_preview()
+
+    assert window._guided_new_analysis_output_policy_status == "stale"
+    assert "input source path changed" in window._guided_new_analysis_output_policy_stale_reasons
+    assert "Output policy status: stale" in window._guided_draft_run_plan_preview_label.text()
+    assert "Output destination: fail" in window._guided_draft_run_plan_checklist_label.text()
+    assert not target.exists()
+
+    window._guided_input_dir_edit.setText(str(input_dir))
+    window._refresh_guided_draft_run_plan_preview()
+
+    assert window._guided_new_analysis_output_policy_status == "stale"
+    assert "Output policy status: stale" in window._guided_draft_run_plan_preview_label.text()
+
+    window._guided_output_path_edit.setText(str(target))
+    window._guided_output_apply_btn.click()
+
+    assert window._guided_new_analysis_output_policy_status == "applied"
+    assert window._guided_new_analysis_output_policy_stale_reasons == []
+    assert not target.exists()
+
+
+def test_new_analysis_output_policy_apply_requires_valid_source_context(window, tmp_path):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_run_outputs"
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_input_dir_edit.setText("")
+    window._guided_output_path_edit.setText(str(target))
+    window._guided_output_apply_btn.click()
+
+    assert window._guided_new_analysis_output_policy_status == "invalid"
+    assert "Raw input/source path is required" in window._guided_output_status_label.text()
+    assert window._guided_new_analysis_output_policy_explicitly_applied is False
+    assert not target.exists()
+
+    missing_source = tmp_path / "missing_raw_source"
+    window._guided_input_dir_edit.setText(str(missing_source))
+    window._guided_output_path_edit.setText(str(target))
+    window._guided_output_apply_btn.click()
+
+    assert window._guided_new_analysis_output_policy_status == "invalid"
+    assert "does not exist or is not a directory" in window._guided_output_status_label.text()
+    assert window._guided_new_analysis_output_policy_explicitly_applied is False
+    assert not target.exists()
+
+
+def test_new_analysis_output_policy_marks_stale_when_target_appears(window, tmp_path, monkeypatch):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_run_outputs"
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_output_path_edit.setText(str(target))
+    window._guided_output_apply_btn.click()
+    assert window._guided_new_analysis_output_policy_status == "applied"
+
+    target.mkdir()
+    window._refresh_guided_draft_run_plan_preview()
+
+    assert window._guided_new_analysis_output_policy_status == "stale"
+    assert any("already exists" in reason for reason in window._guided_new_analysis_output_policy_stale_reasons)
+    assert "Output destination: fail" in window._guided_draft_run_plan_checklist_label.text()
+
+
+def test_new_analysis_output_policy_clear_removes_state(window, tmp_path, monkeypatch):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_run_outputs"
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_output_path_edit.setText(str(target))
+    window._guided_output_apply_btn.click()
+    assert window._guided_new_analysis_output_policy_status == "applied"
+
+    window._guided_output_clear_btn.click()
+
+    assert window._guided_new_analysis_output_policy_status == "missing"
+    assert window._guided_new_analysis_output_policy_path is None
+    assert window._guided_output_path_edit.text() == ""
+    assert "Output policy status: missing" in window._guided_draft_run_plan_preview_label.text()
+    assert not target.exists()
