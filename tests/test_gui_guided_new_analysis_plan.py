@@ -78,6 +78,44 @@ def _complete_new_analysis_plan_for_gui(**overrides):
     return plan
 
 
+def _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch, *, signal_only_f0=False):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    continuous_idx = window._guided_acquisition_mode_combo.findData("continuous")
+    if continuous_idx >= 0:
+        window._guided_acquisition_mode_combo.setCurrentIndex(continuous_idx)
+
+    fake_runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = fake_runner
+    window._guided_diagnostic_cache_build_btn.click()
+    cache_path = Path(fake_runner.run_dir)
+    _write_minimal_guided_cache_outputs(cache_path)
+    fake_runner.succeed()
+    window._on_guided_diagnostic_cache_finished(0)
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    for index, roi in enumerate(("CH1", "CH2", "CH3")):
+        window._guided_confirm_roi_combo.setCurrentIndex(window._guided_confirm_roi_combo.findData(roi))
+        window._guided_confirm_chunk_combo.setCurrentIndex(0)
+        strategy_text = "Signal-Only F0" if signal_only_f0 and index == 0 else "Global Linear Regression"
+        window._guided_confirm_strategy_combo.setCurrentIndex(
+            window._guided_confirm_strategy_combo.findText(strategy_text)
+        )
+        window._guided_confirm_ack_cb.setChecked(True)
+        window._guided_confirm_mark_btn.click()
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_feature_event_apply_btn.click()
+
+    output_parent = tmp_path / "planned_outputs"
+    output_parent.mkdir()
+    output_target = output_parent / "future_run_outputs"
+    window._guided_output_path_edit.setText(str(output_target))
+    window._guided_output_apply_btn.click()
+    return output_parent, output_target
+
+
 def test_new_analysis_draft_plan_displays_summary_fields(window, tmp_path, monkeypatch):
     # Enter new_analysis mode
     window._guided_workflow_stepper.setCurrentRow(0)
@@ -229,6 +267,120 @@ def test_new_analysis_draft_plan_no_runspec_or_outputs_written(window, tmp_path,
     # Assert no RunSpec was generated
     assert not hasattr(window, "_generated_run_spec") or window._generated_run_spec is None
     assert window._current_run_dir == ""
+
+
+def test_new_analysis_run_preview_panel_renders_complete_plan(window, tmp_path, monkeypatch):
+    _parent, output_target = _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "Non-executing preview" in preview_text
+    assert "Preview schema version: guided_new_analysis_run_preview.v1" in preview_text
+    assert "Plan schema version: guided_new_analysis_plan.v1" in preview_text
+    assert "Source/input:" in preview_text
+    assert "Included ROIs: 3 (CH1, CH2, CH3)" in preview_text
+    assert "Output destination:" in preview_text
+    assert output_target.name in preview_text
+    assert "Execution unavailable" in preview_text
+    assert "Final Guided Run/RunSpec is not implemented in this stage." in preview_text
+    assert "No files or directories were created." in preview_text
+    assert not output_target.exists()
+
+
+def test_new_analysis_run_preview_panel_shows_incomplete_plan_unresolved_items(window):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "Non-executing preview" in preview_text
+    assert "Draft plan completeness: incomplete for future RunSpec handoff" in preview_text
+    assert "Run preview unresolved items:" in preview_text
+    assert "missing_diagnostic_cache" in preview_text
+    assert "missing_output_policy" in preview_text
+    assert "Execution unavailable" in preview_text
+
+
+def test_new_analysis_run_preview_complete_plan_keeps_execution_unavailable(window, tmp_path, monkeypatch):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "Draft plan completeness: complete for future RunSpec handoff" in preview_text
+    assert "per_roi_correction_execution_contract_unresolved" in preview_text
+    assert "preview preserves choices without collapsing them to a global strategy" in preview_text
+    assert "global collapse false" in preview_text
+    assert "Execution unavailable" in preview_text
+    assert "ready to run" not in preview_text.lower()
+    assert "ready for execution" not in preview_text.lower()
+
+
+def test_new_analysis_run_preview_signal_only_f0_unresolved_routing(window, tmp_path, monkeypatch):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch, signal_only_f0=True)
+
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "CH1: signal_only_f0" in preview_text
+    assert "signal_only_f0_production_routing_unresolved" in preview_text
+    assert "Signal-Only F0 production routing is not implemented" in preview_text
+    assert "Execution unavailable" in preview_text
+
+
+def test_new_analysis_run_preview_rendering_does_not_create_output_files(window, tmp_path, monkeypatch):
+    output_parent, output_target = _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    before_files = sorted(str(path.relative_to(output_parent)) for path in output_parent.rglob("*"))
+
+    window._refresh_guided_draft_run_plan_preview()
+
+    after_files = sorted(str(path.relative_to(output_parent)) for path in output_parent.rglob("*"))
+    assert after_files == before_files
+    assert not output_target.exists()
+    assert "No files or directories were created." in window._guided_new_analysis_run_preview_label.text()
+
+
+def test_new_analysis_run_preview_rendering_does_not_mutate_completed_run_state(
+    window, tmp_path, monkeypatch
+):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._current_run_dir = str(tmp_path / "completed_run_sentinel")
+    window._guided_draft_output_policy_by_run = {"completed": "policy"}
+    window._guided_draft_feature_event_profiles_by_run = {"completed": [{"profile_id": "existing"}]}
+
+    before_current_run = window._current_run_dir
+    before_output_policies = dict(window._guided_draft_output_policy_by_run)
+    before_feature_profiles = {
+        key: list(value) for key, value in window._guided_draft_feature_event_profiles_by_run.items()
+    }
+
+    window._refresh_guided_draft_run_plan_preview()
+
+    assert window._current_run_dir == before_current_run
+    assert window._guided_draft_output_policy_by_run == before_output_policies
+    assert window._guided_draft_feature_event_profiles_by_run == before_feature_profiles
+
+
+def test_new_analysis_run_preview_rendering_does_not_call_execution_helpers(
+    window, tmp_path, monkeypatch
+):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    calls = []
+
+    def forbidden(name):
+        def _inner(*args, **kwargs):
+            calls.append(name)
+            raise AssertionError(f"{name} must not be called by non-executing preview rendering")
+        return _inner
+
+    monkeypatch.setattr(window, "_build_run_spec", forbidden("_build_run_spec"))
+    monkeypatch.setattr(window, "_build_argv", forbidden("_build_argv"))
+    monkeypatch.setattr(window, "_on_validate", forbidden("_on_validate"))
+    monkeypatch.setattr(window, "_on_run", forbidden("_on_run"))
+
+    window._refresh_guided_draft_run_plan_preview()
+
+    assert calls == []
+    assert "Non-executing preview" in window._guided_new_analysis_run_preview_label.text()
 
 
 def test_new_analysis_feature_event_profile_gui_flows(window, tmp_path, monkeypatch):

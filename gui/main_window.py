@@ -5156,8 +5156,12 @@ class MainWindow(QMainWindow):
 
         if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
             plan = self._build_guided_new_analysis_draft_plan()
-            from photometry_pipeline.guided_new_analysis_plan import evaluate_new_analysis_plan_readiness
+            from photometry_pipeline.guided_new_analysis_plan import (
+                build_guided_new_analysis_run_preview,
+                evaluate_new_analysis_plan_readiness,
+            )
             readiness = evaluate_new_analysis_plan_readiness(plan)
+            run_preview = build_guided_new_analysis_run_preview(plan)
             label.setText(self._guided_new_analysis_draft_plan_summary_text(plan, readiness))
             label.setToolTip("")
 
@@ -5167,7 +5171,18 @@ class MainWindow(QMainWindow):
                 readiness_label.setToolTip("")
 
             self._refresh_guided_new_analysis_draft_plan_checklist(plan, readiness)
+            run_preview_label = getattr(self, "_guided_new_analysis_run_preview_label", None)
+            if run_preview_label is not None:
+                run_preview_label.setText(self._guided_new_analysis_run_preview_text(run_preview))
+                run_preview_label.setToolTip("")
+            run_preview_group = getattr(self, "_guided_new_analysis_run_preview_group", None)
+            if run_preview_group is not None:
+                run_preview_group.setVisible(True)
             return
+
+        run_preview_group = getattr(self, "_guided_new_analysis_run_preview_group", None)
+        if run_preview_group is not None:
+            run_preview_group.setVisible(False)
 
         plan, preview_errors = self._build_guided_draft_run_plan()
         errors = list(preview_errors)
@@ -5533,6 +5548,73 @@ class MainWindow(QMainWindow):
             f"Execution: unavailable, {readiness.execution_blocked_reason}",
             "Files written: none"
         ])
+        return "\n".join(lines)
+
+    def _guided_new_analysis_run_preview_text(self, preview) -> str:
+        source = preview.source or {}
+        acquisition = preview.acquisition or {}
+        roi_selection = preview.roi_selection or {}
+        diagnostic_cache = preview.diagnostic_cache or {}
+        correction_strategy = preview.correction_strategy or {}
+        feature_event = preview.feature_event or {}
+        output_policy = preview.output_policy or {}
+        readiness = preview.readiness_snapshot or {}
+
+        included_rois = list(roi_selection.get("included_roi_ids") or [])
+        per_roi_choices = list(correction_strategy.get("per_roi_choices") or [])
+        choice_lines = [
+            f"  - {choice.get('roi_id')}: {choice.get('selected_strategy')}"
+            for choice in per_roi_choices
+        ]
+
+        lines = [
+            "Non-executing preview",
+            f"Preview schema version: {preview.preview_schema_version}",
+            f"Plan schema version: {preview.plan_schema_version}",
+            (
+                "Draft plan completeness: complete for future RunSpec handoff"
+                if readiness.get("plan_complete_for_handoff")
+                else "Draft plan completeness: incomplete for future RunSpec handoff"
+            ),
+            "Execution: unavailable",
+            f"Execution unavailable: {preview.execution_blocked_reason}",
+            "Final Guided Run/RunSpec is not implemented in this stage.",
+            f"Source/input: {self._display_path(str(source.get('authoritative_input_source_path') or source.get('input_source_path') or '')) if (source.get('authoritative_input_source_path') or source.get('input_source_path')) else 'none'}",
+            f"Input format: {source.get('input_format') or 'unknown'}",
+            f"Acquisition: {acquisition.get('acquisition_mode') or 'unknown'} ({acquisition.get('acquisition_structure_status') or 'unknown'})",
+            f"Included ROIs: {len(included_rois)}" + (f" ({', '.join(str(roi) for roi in included_rois)})" if included_rois else ""),
+            f"Correction strategies: {len(per_roi_choices)} per-ROI choice(s); execution mapping {correction_strategy.get('execution_mapping_status') or 'unknown'}; global collapse {str(bool(correction_strategy.get('global_strategy_collapsed'))).lower()}",
+        ]
+        if choice_lines:
+            lines.append("Per-ROI correction choices:")
+            lines.extend(choice_lines)
+        lines.extend([
+            f"Feature/event: {feature_event.get('status') or 'unknown'}"
+            + (f" ({feature_event.get('profile_id')})" if feature_event.get("profile_id") else ""),
+            f"Output destination: {self._display_path(str(output_policy.get('path') or '')) if output_policy.get('path') else 'none'}",
+            f"Output policy status: {output_policy.get('status') or 'unknown'}",
+            f"Diagnostic cache: {diagnostic_cache.get('stale_or_current') or 'missing'}"
+            + (f" ({diagnostic_cache.get('cache_id')})" if diagnostic_cache.get("cache_id") else ""),
+            f"Diagnostic cache root: {self._display_path(str(diagnostic_cache.get('cache_root_path') or '')) if diagnostic_cache.get('cache_root_path') else 'none'}",
+            f"Readiness snapshot: plan_complete_for_handoff={str(bool(readiness.get('plan_complete_for_handoff'))).lower()}, execution_available={str(bool(readiness.get('execution_available'))).lower()}",
+        ])
+
+        if preview.unresolved_items:
+            lines.append("Run preview unresolved items:")
+            for item in preview.unresolved_items:
+                lines.append(f"  - [{item.category}] {item.message}")
+        else:
+            lines.append("Run preview unresolved items: none")
+
+        if preview.warnings:
+            lines.append("Warnings:")
+            for item in preview.warnings:
+                lines.append(f"  - [{item.category}] {item.message}")
+        else:
+            lines.append("Warnings: none")
+
+        lines.append("No files or directories were created.")
+        lines.append("This preview is read-only and non-executing.")
         return "\n".join(lines)
 
     def _refresh_guided_new_analysis_draft_plan_checklist(self, plan, readiness) -> None:
@@ -6825,6 +6907,20 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_draft_run_plan_preview_label)
         draft_layout.addWidget(self._guided_draft_run_plan_preview_label)
         layout.addWidget(draft_group)
+
+        self._guided_new_analysis_run_preview_group = QGroupBox("Non-executing run preview")
+        self._guided_new_analysis_run_preview_group.setObjectName("guidedNewAnalysisRunPreviewPanel")
+        self._guided_new_analysis_run_preview_group.setVisible(False)
+        run_preview_layout = QVBoxLayout(self._guided_new_analysis_run_preview_group)
+        run_preview_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_new_analysis_run_preview_label = QLabel("")
+        self._guided_new_analysis_run_preview_label.setObjectName("guidedNewAnalysisRunPreview")
+        self._guided_new_analysis_run_preview_label.setProperty("guidedSecondaryText", True)
+        self._guided_new_analysis_run_preview_label.setWordWrap(True)
+        self._guided_new_analysis_run_preview_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._make_guided_widget_shrinkable(self._guided_new_analysis_run_preview_label)
+        run_preview_layout.addWidget(self._guided_new_analysis_run_preview_label)
+        layout.addWidget(self._guided_new_analysis_run_preview_group)
 
         checklist_group = QGroupBox("Draft plan checklist")
         checklist_group.setObjectName("guidedDraftRunPlanChecklistPanel")

@@ -3809,6 +3809,22 @@ def test_gui_draft_plan_contains_moved_plan_panels(window):
     assert draft_step_widget.findChild(QWidget, "guidedConfirmStrategyChoiceCombo") is None
 
 
+def test_gui_new_analysis_run_preview_panel_hidden_in_completed_run_mode(window, tmp_path, monkeypatch):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._set_guided_workflow_mode("open_results")
+
+    draft_step_widget = window._guided_workflow_stack.widget(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    preview_group = draft_step_widget.findChild(QWidget, "guidedNewAnalysisRunPreviewPanel")
+
+    assert preview_group is not None
+    assert preview_group.isHidden()
+
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+
+    assert preview_group.isHidden()
+
+
 def test_gui_real_split_workflow_flow(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
