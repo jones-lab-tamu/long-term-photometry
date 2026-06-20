@@ -78,7 +78,14 @@ def _complete_new_analysis_plan_for_gui(**overrides):
     return plan
 
 
-def _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch, *, signal_only_f0=False):
+def _configure_complete_guided_new_analysis_draft(
+    window,
+    tmp_path,
+    monkeypatch,
+    *,
+    signal_only_f0=False,
+    strategy_by_roi=None,
+):
     window._guided_workflow_stepper.setCurrentRow(0)
     window._guided_start_setup_btn.click()
     _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
@@ -99,9 +106,13 @@ def _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch,
         window._guided_confirm_roi_combo.setCurrentIndex(window._guided_confirm_roi_combo.findData(roi))
         window._guided_confirm_chunk_combo.setCurrentIndex(0)
         strategy_text = "Signal-Only F0" if signal_only_f0 and index == 0 else "Global Linear Regression"
-        window._guided_confirm_strategy_combo.setCurrentIndex(
-            window._guided_confirm_strategy_combo.findText(strategy_text)
-        )
+        if strategy_by_roi and roi in strategy_by_roi:
+            strategy_text = strategy_by_roi[roi]
+        strategy_index = window._guided_confirm_strategy_combo.findText(strategy_text)
+        if strategy_index < 0:
+            strategy_index = window._guided_confirm_strategy_combo.findData(strategy_text)
+        assert strategy_index >= 0
+        window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
         window._guided_confirm_ack_cb.setChecked(True)
         window._guided_confirm_mark_btn.click()
 
@@ -283,8 +294,32 @@ def test_new_analysis_run_preview_panel_renders_complete_plan(window, tmp_path, 
     assert output_target.name in preview_text
     assert "Execution unavailable" in preview_text
     assert "Final Guided Run/RunSpec is not implemented in this stage." in preview_text
+    assert "First execution subset:" in preview_text
+    assert "subset: global_dynamic_fit_only.v1" in preview_text
+    assert "first_subset_executable: false" in preview_text
+    assert "allowed_dynamic_fit_strategy: global_linear_regression" in preview_text
+    assert "execution_available: false" in preview_text
     assert "No files or directories were created." in preview_text
     assert not output_target.exists()
+
+
+def test_new_analysis_run_preview_shows_missing_execution_subset_fields(window, tmp_path, monkeypatch):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "Draft plan completeness: complete for future RunSpec handoff" in preview_text
+    assert "status: not executable under global_dynamic_fit_only.v1" in preview_text
+    assert "Execution-subset blockers:" in preview_text
+    assert "missing_rwd_dataset_contract" in preview_text
+    assert "missing_timeline_anchor_mode" in preview_text
+    assert "missing_execution_mode" in preview_text
+    assert "missing_run_profile" in preview_text
+    assert "missing_output_creation_policy" in preview_text
+    assert "timeline_anchor_mode: required_missing, blocks subset" in preview_text
+    assert "traces_only: fixed_default=False" in preview_text
+    assert "preview_first_n: fixed_default" in preview_text
+    assert "dataset_contract_overrides: required_missing, blocks subset" in preview_text
 
 
 def test_new_analysis_run_preview_panel_shows_incomplete_plan_unresolved_items(window):
@@ -299,6 +334,8 @@ def test_new_analysis_run_preview_panel_shows_incomplete_plan_unresolved_items(w
     assert "Run preview unresolved items:" in preview_text
     assert "missing_diagnostic_cache" in preview_text
     assert "missing_output_policy" in preview_text
+    assert "First execution subset:" in preview_text
+    assert "incomplete_planning_readiness" in preview_text
     assert "Execution unavailable" in preview_text
 
 
@@ -324,7 +361,33 @@ def test_new_analysis_run_preview_signal_only_f0_unresolved_routing(window, tmp_
     assert "CH1: signal_only_f0" in preview_text
     assert "signal_only_f0_production_routing_unresolved" in preview_text
     assert "Signal-Only F0 production routing is not implemented" in preview_text
+    assert "signal_only_f0_execution_not_supported" in preview_text
+    assert "Signal-Only F0 remains planning/diagnostic only" in preview_text
     assert "Execution unavailable" in preview_text
+
+
+def test_new_analysis_run_preview_mixed_per_roi_strategies_subset_blocked_not_planning_blocked(
+    window, tmp_path, monkeypatch
+):
+    _configure_complete_guided_new_analysis_draft(
+        window,
+        tmp_path,
+        monkeypatch,
+        strategy_by_roi={
+            "CH1": "Global Linear Regression",
+            "CH2": "robust_global_event_reject",
+            "CH3": "Global Linear Regression",
+        },
+    )
+
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "Draft plan completeness: complete for future RunSpec handoff" in preview_text
+    assert "mixed_per_roi_strategies" in preview_text
+    assert "status: not executable under global_dynamic_fit_only.v1" in preview_text
+    assert "mixed per-ROI strategies remain planning-valid" in preview_text
+    assert "Execution unavailable" in preview_text
+    assert "ready to run" not in preview_text.lower()
 
 
 def test_new_analysis_run_preview_rendering_does_not_create_output_files(window, tmp_path, monkeypatch):

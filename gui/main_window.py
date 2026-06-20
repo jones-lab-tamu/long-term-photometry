@@ -5158,10 +5158,12 @@ class MainWindow(QMainWindow):
             plan = self._build_guided_new_analysis_draft_plan()
             from photometry_pipeline.guided_new_analysis_plan import (
                 build_guided_new_analysis_run_preview,
+                evaluate_guided_new_analysis_execution_subset_readiness,
                 evaluate_new_analysis_plan_readiness,
             )
             readiness = evaluate_new_analysis_plan_readiness(plan)
             run_preview = build_guided_new_analysis_run_preview(plan)
+            subset_readiness = evaluate_guided_new_analysis_execution_subset_readiness(plan)
             label.setText(self._guided_new_analysis_draft_plan_summary_text(plan, readiness))
             label.setToolTip("")
 
@@ -5173,7 +5175,9 @@ class MainWindow(QMainWindow):
             self._refresh_guided_new_analysis_draft_plan_checklist(plan, readiness)
             run_preview_label = getattr(self, "_guided_new_analysis_run_preview_label", None)
             if run_preview_label is not None:
-                run_preview_label.setText(self._guided_new_analysis_run_preview_text(run_preview))
+                run_preview_label.setText(
+                    self._guided_new_analysis_run_preview_text(run_preview, subset_readiness)
+                )
                 run_preview_label.setToolTip("")
             run_preview_group = getattr(self, "_guided_new_analysis_run_preview_group", None)
             if run_preview_group is not None:
@@ -5550,7 +5554,45 @@ class MainWindow(QMainWindow):
         ])
         return "\n".join(lines)
 
-    def _guided_new_analysis_run_preview_text(self, preview) -> str:
+    def _guided_new_analysis_execution_subset_text(self, subset_readiness) -> list[str]:
+        lines = [
+            "First execution subset:",
+            f"  subset: {subset_readiness.subset_name}",
+            f"  first_subset_executable: {str(bool(subset_readiness.first_subset_executable)).lower()}",
+            f"  allowed_dynamic_fit_strategy: {subset_readiness.allowed_dynamic_fit_strategy or 'none'}",
+            f"  execution_available: {str(bool(subset_readiness.execution_available)).lower()}",
+        ]
+        if subset_readiness.first_subset_executable:
+            lines.append("  status: executable for future executable preview")
+        else:
+            lines.append(f"  status: not executable under {subset_readiness.subset_name}")
+
+        if subset_readiness.blocking_issues:
+            lines.append("Execution-subset blockers:")
+            for issue in subset_readiness.blocking_issues:
+                lines.append(f"  - {issue.category}")
+                if issue.category == "mixed_per_roi_strategies":
+                    lines.append(
+                        "    Note: mixed per-ROI strategies remain planning-valid but are not supported by the first execution subset."
+                    )
+                elif issue.category == "signal_only_f0_execution_not_supported":
+                    lines.append(
+                        "    Note: Signal-Only F0 remains planning/diagnostic only until applied-dF/F routing is designed."
+                    )
+        else:
+            lines.append("Execution-subset blockers: none")
+
+        if subset_readiness.field_classifications:
+            lines.append("Execution-field classifications:")
+            for field in subset_readiness.field_classifications:
+                value = f"={field.value}" if field.value is not None else ""
+                suffix = ", blocks subset" if field.blocks_subset else ""
+                lines.append(f"  - {field.field_name}: {field.status}{value}{suffix}")
+        else:
+            lines.append("Execution-field classifications: none")
+        return lines
+
+    def _guided_new_analysis_run_preview_text(self, preview, subset_readiness=None) -> str:
         source = preview.source or {}
         acquisition = preview.acquisition or {}
         roi_selection = preview.roi_selection or {}
@@ -5612,6 +5654,9 @@ class MainWindow(QMainWindow):
                 lines.append(f"  - [{item.category}] {item.message}")
         else:
             lines.append("Warnings: none")
+
+        if subset_readiness is not None:
+            lines.extend(self._guided_new_analysis_execution_subset_text(subset_readiness))
 
         lines.append("No files or directories were created.")
         lines.append("This preview is read-only and non-executing.")
