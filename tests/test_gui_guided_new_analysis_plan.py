@@ -7,7 +7,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
-from photometry_pipeline.guided_new_analysis_plan import GuidedNewAnalysisDraftPlan
+from photometry_pipeline.guided_new_analysis_plan import (
+    GuidedNewAnalysisDraftPlan,
+    GuidedPlanCorrectionChoice,
+    evaluate_new_analysis_plan_readiness,
+)
 from tests.test_gui_guided_workflow import (
     _configure_guided_raw_cache_setup,
     _write_minimal_guided_cache_outputs,
@@ -26,6 +30,52 @@ def window(qapp):
     yield w
     w.close()
     w.deleteLater()
+
+
+def _complete_new_analysis_plan_for_gui(**overrides):
+    plan = GuidedNewAnalysisDraftPlan(
+        input_source_path="C:/raw/input",
+        resolved_input_source_path="C:/raw/input",
+        input_format="rwd",
+        acquisition_mode="intermittent",
+        sessions_per_hour=6,
+        session_duration_sec=120.0,
+        acquisition_structure_status="ready",
+        discovered_roi_ids=["CH1"],
+        included_roi_ids=["CH1"],
+        cache_id="cache-1",
+        cache_root_path="C:/cache",
+        artifact_record_path="C:/cache/guided_diagnostic_cache_artifact.json",
+        provenance_path="C:/cache/guided_diagnostic_cache_provenance.json",
+        source_setup_signature="setup-1",
+        diagnostic_scope_signature="scope-1",
+        build_request_signature="build-1",
+        stale_or_current="current",
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="CH1",
+                selected_strategy="global_linear_regression",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            )
+        ],
+        feature_event_profile_status="applied",
+        feature_event_profile_id="feature-profile-1",
+        feature_event_values={"event_signal": "dff"},
+        feature_event_explicitly_applied=True,
+        output_policy_status="applied",
+        output_policy_path="C:/planned/output",
+        output_policy_explicitly_applied=True,
+    )
+    for key, value in overrides.items():
+        setattr(plan, key, value)
+    return plan
 
 
 def test_new_analysis_draft_plan_displays_summary_fields(window, tmp_path, monkeypatch):
@@ -47,7 +97,50 @@ def test_new_analysis_draft_plan_displays_summary_fields(window, tmp_path, monke
     assert "Correction strategy coverage:" in summary_text
     assert "Feature/event profile status: default_initialized" in summary_text
     assert "Output policy status: missing" in summary_text
+    assert "Draft plan completeness: incomplete for future RunSpec handoff" in summary_text
+    assert "Execution: unavailable, Final Guided Run/RunSpec is not implemented in this stage." in summary_text
     assert "This draft plan is not executable yet. Final Run is not implemented in this stage." in summary_text
+
+
+def test_new_analysis_readiness_rendering_separates_planning_complete_from_execution_unavailable(window):
+    plan = _complete_new_analysis_plan_for_gui()
+    readiness = evaluate_new_analysis_plan_readiness(plan)
+
+    summary = window._guided_new_analysis_draft_plan_summary_text(plan, readiness)
+    readiness_summary = window._guided_new_analysis_readiness_summary_text(plan, readiness)
+    window._refresh_guided_new_analysis_draft_plan_checklist(plan, readiness)
+    checklist = window._guided_draft_run_plan_checklist_label.text()
+
+    assert "Draft plan completeness: complete for future RunSpec handoff" in summary
+    assert "Execution: unavailable, Final Guided Run/RunSpec is not implemented in this stage." in summary
+    assert "Draft plan completeness: complete for future RunSpec handoff" in readiness_summary
+    assert "Execution: unavailable, Final Guided Run/RunSpec is not implemented in this stage." in readiness_summary
+    assert "Execution availability: unavailable" in checklist
+    assert "Draft plan complete for handoff: true" in checklist
+    assert "Execution available: false" in checklist
+
+
+def test_new_analysis_readiness_rendering_shows_stale_feature_and_output_reasons(window):
+    plan = _complete_new_analysis_plan_for_gui(
+        feature_event_profile_status="stale",
+        feature_event_stale_reasons=["baseline changed"],
+        output_policy_status="stale",
+        output_policy_stale_reasons=["target appeared"],
+    )
+    readiness = evaluate_new_analysis_plan_readiness(plan)
+
+    summary = window._guided_new_analysis_draft_plan_summary_text(plan, readiness)
+    readiness_summary = window._guided_new_analysis_readiness_summary_text(plan, readiness)
+    window._refresh_guided_new_analysis_draft_plan_checklist(plan, readiness)
+    checklist = window._guided_draft_run_plan_checklist_label.text()
+
+    assert readiness.plan_complete_for_handoff is False
+    assert "Feature/event profile stale reasons: baseline changed" in summary
+    assert "Output policy stale reasons: target appeared" in summary
+    assert "Feature/event settings (stale)" in readiness_summary
+    assert "Output destination (stale)" in readiness_summary
+    assert "Feature/event settings: fail - Feature/event profile is stale: baseline changed" in checklist
+    assert "Output destination: fail - Output policy is stale: target appeared" in checklist
 def test_new_analysis_draft_plan_reports_choices_as_current_after_build_and_mark(window, tmp_path, monkeypatch):
     # Enter new_analysis mode and configure
     window._guided_workflow_stepper.setCurrentRow(0)

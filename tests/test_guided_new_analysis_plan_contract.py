@@ -5,8 +5,60 @@ from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDraftPlan,
     GuidedPlanCorrectionChoice,
     GuidedPlanIssue,
+    NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION,
     evaluate_new_analysis_plan_issues,
+    evaluate_new_analysis_plan_readiness,
 )
+
+
+def _complete_new_analysis_plan(**overrides):
+    plan = GuidedNewAnalysisDraftPlan(
+        input_source_path="C:/raw/input",
+        resolved_input_source_path="C:/raw/input",
+        input_format="rwd",
+        acquisition_mode="intermittent",
+        sessions_per_hour=6,
+        session_duration_sec=120.0,
+        acquisition_structure_status="ready",
+        discovered_roi_ids=["ROI1", "ROI2"],
+        included_roi_ids=["ROI1"],
+        excluded_roi_ids=["ROI2"],
+        cache_id="cache-1",
+        cache_root_path="C:/cache",
+        artifact_record_path="C:/cache/guided_diagnostic_cache_artifact.json",
+        request_json_path="C:/cache/guided_diagnostic_cache_request.json",
+        provenance_path="C:/cache/guided_diagnostic_cache_provenance.json",
+        phasic_trace_cache_path="C:/cache/phasic_trace_cache.h5",
+        config_used_path="C:/cache/config_used.json",
+        source_setup_signature="setup-1",
+        diagnostic_scope_signature="scope-1",
+        build_request_signature="build-1",
+        stale_or_current="current",
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="global_linear_regression",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            )
+        ],
+        feature_event_profile_status="applied",
+        feature_event_profile_id="feature-profile-1",
+        feature_event_values={"signal_column": "dff"},
+        feature_event_explicitly_applied=True,
+        output_policy_status="applied",
+        output_policy_path="C:/planned/output",
+        output_policy_explicitly_applied=True,
+    )
+    for key, value in overrides.items():
+        setattr(plan, key, value)
+    return plan
 
 
 def test_can_construct_incomplete_new_analysis_draft_plan():
@@ -100,7 +152,68 @@ def test_forbidden_strategy_is_reported():
 def test_plan_reports_execution_not_implemented():
     plan = GuidedNewAnalysisDraftPlan()
     issues = evaluate_new_analysis_plan_issues(plan)
-    assert any(iss.category == "execution_not_implemented" for iss in issues)
+    assert any(iss.category == "execution_not_implemented" and iss.severity == "info" for iss in issues)
+
+
+def test_readiness_complete_plan_allows_future_handoff_but_not_execution():
+    readiness = evaluate_new_analysis_plan_readiness(_complete_new_analysis_plan())
+
+    assert readiness.plan_complete_for_handoff is True
+    assert readiness.execution_available is False
+    assert "Final Guided Run/RunSpec is not implemented" in readiness.execution_blocked_reason
+    assert not readiness.blocking_issues
+    execution_section = next(section for section in readiness.sections if section.key == "execution")
+    assert execution_section.status == "info"
+
+
+@pytest.mark.parametrize(
+    ("override", "category", "section_key"),
+    [
+        ({"cache_id": None}, "missing_diagnostic_cache", "diagnostic_cache"),
+        ({"stale_or_current": "stale", "stale_reasons": ["ROI changed"]}, "stale_diagnostic_cache", "diagnostic_cache"),
+        ({"per_roi_correction_strategy_choices": []}, "missing_strategy_choice_for_included_roi", "correction_strategies"),
+        ({"feature_event_profile_status": "default_initialized", "feature_event_explicitly_applied": False}, "feature_event_profile_not_applied", "feature_event"),
+        ({"feature_event_profile_status": "stale", "feature_event_stale_reasons": ["baseline changed"]}, "stale_feature_event_profile", "feature_event"),
+        ({"output_policy_status": "missing", "output_policy_path": None, "output_policy_explicitly_applied": False}, "missing_output_policy", "output_policy"),
+        ({"output_policy_status": "stale", "output_policy_stale_reasons": ["target appeared"]}, "stale_output_policy", "output_policy"),
+    ],
+)
+def test_readiness_blocking_sections_prevent_future_handoff(override, category, section_key):
+    readiness = evaluate_new_analysis_plan_readiness(_complete_new_analysis_plan(**override))
+
+    assert readiness.plan_complete_for_handoff is False
+    assert any(issue.category == category for issue in readiness.blocking_issues)
+    section = next(section for section in readiness.sections if section.key == section_key)
+    assert section.status in {"missing", "stale", "invalid", "blocked"}
+    assert any(issue.category == category for issue in section.blocking_issues)
+
+
+def test_readiness_warning_only_evidence_does_not_block_future_handoff():
+    plan = _complete_new_analysis_plan(
+        correction_preview_result_id="preview-1",
+        correction_preview_path=None,
+        correction_preview_source_cache_id=None,
+        signal_only_f0_result_id="signal-1",
+        signal_only_f0_path=None,
+        signal_only_f0_source_cache_id=None,
+    )
+    readiness = evaluate_new_analysis_plan_readiness(plan)
+
+    assert readiness.plan_complete_for_handoff is True
+    assert not readiness.blocking_issues
+    evidence_section = next(section for section in readiness.sections if section.key == "evidence_references")
+    assert evidence_section.status == "warning"
+    assert {issue.category for issue in evidence_section.warning_issues} == {
+        "correction_preview_evidence_path_missing",
+        "correction_preview_source_identity_missing",
+        "signal_only_f0_evidence_path_missing",
+        "signal_only_f0_source_identity_missing",
+    }
+
+
+def test_readiness_category_map_contains_evidence_section():
+    assert NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION["correction_preview_evidence_path_missing"] == "evidence_references"
+    assert NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION["signal_only_f0_source_identity_missing"] == "evidence_references"
 
 
 def test_feature_event_and_output_policy_missing_are_represented():
@@ -312,7 +425,8 @@ def test_feature_event_profile_statuses_validation():
     # Case A: Applied status with no validation issues has no feature/event issues
     plan_a = GuidedNewAnalysisDraftPlan(
         feature_event_profile_status="applied",
-        feature_event_validation_issues=[]
+        feature_event_validation_issues=[],
+        feature_event_explicitly_applied=True,
     )
     issues_a = evaluate_new_analysis_plan_issues(plan_a)
     assert not any(iss.category.startswith("missing_feature_event") or iss.category.startswith("feature_event") or iss.category.startswith("invalid_feature_event") or iss.category.startswith("stale_feature_event") for iss in issues_a)
@@ -338,7 +452,7 @@ def test_feature_event_profile_statuses_validation():
     assert iss_c[0].severity == "blocking"
     assert "Window size must be positive" in iss_c[0].message
 
-    # Case D: stale status results in warning stale_feature_event_profile
+    # Case D: stale status results in blocking stale_feature_event_profile
     plan_d = GuidedNewAnalysisDraftPlan(
         feature_event_profile_status="stale",
         feature_event_stale_reasons=["active baseline config changed", "format changed"]
@@ -346,14 +460,14 @@ def test_feature_event_profile_statuses_validation():
     issues_d = evaluate_new_analysis_plan_issues(plan_d)
     iss_d = [iss for iss in issues_d if iss.category == "stale_feature_event_profile"]
     assert len(iss_d) == 1
-    assert iss_d[0].severity == "warning"
+    assert iss_d[0].severity == "blocking"
     assert "active baseline config changed" in iss_d[0].message
 
-    # Case E: unavailable status results in warning missing_feature_event_profile
+    # Case E: unavailable status results in blocking missing_feature_event_profile
     plan_e = GuidedNewAnalysisDraftPlan(
         feature_event_profile_status="unavailable"
     )
     issues_e = evaluate_new_analysis_plan_issues(plan_e)
     iss_e = [iss for iss in issues_e if iss.category == "missing_feature_event_profile"]
     assert len(iss_e) == 1
-    assert iss_e[0].severity == "warning"
+    assert iss_e[0].severity == "blocking"

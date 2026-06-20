@@ -5156,17 +5156,17 @@ class MainWindow(QMainWindow):
 
         if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
             plan = self._build_guided_new_analysis_draft_plan()
-            from photometry_pipeline.guided_new_analysis_plan import evaluate_new_analysis_plan_issues
-            issues = evaluate_new_analysis_plan_issues(plan)
-            label.setText(self._guided_new_analysis_draft_plan_summary_text(plan, issues))
+            from photometry_pipeline.guided_new_analysis_plan import evaluate_new_analysis_plan_readiness
+            readiness = evaluate_new_analysis_plan_readiness(plan)
+            label.setText(self._guided_new_analysis_draft_plan_summary_text(plan, readiness))
             label.setToolTip("")
 
             readiness_label = getattr(self, "_guided_plan_readiness_summary_label", None)
             if readiness_label is not None:
-                readiness_label.setText(self._guided_new_analysis_readiness_summary_text(plan, issues))
+                readiness_label.setText(self._guided_new_analysis_readiness_summary_text(plan, readiness))
                 readiness_label.setToolTip("")
 
-            self._refresh_guided_new_analysis_draft_plan_checklist(plan, issues)
+            self._refresh_guided_new_analysis_draft_plan_checklist(plan, readiness)
             return
 
         plan, preview_errors = self._build_guided_draft_run_plan()
@@ -5415,7 +5415,7 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _guided_new_analysis_draft_plan_summary_text(self, plan, issues) -> str:
+    def _guided_new_analysis_draft_plan_summary_text(self, plan, readiness) -> str:
         acq_mode = plan.acquisition_mode
         if acq_mode == "continuous":
             timing_summary = f"continuous (window={plan.continuous_window_sec}s, step={plan.continuous_step_sec}s)"
@@ -5462,6 +5462,12 @@ class MainWindow(QMainWindow):
 
         lines = [
             "Status: new_analysis draft plan",
+            (
+                "Draft plan completeness: complete for future RunSpec handoff"
+                if readiness.plan_complete_for_handoff
+                else "Draft plan completeness: incomplete for future RunSpec handoff"
+            ),
+            f"Execution: unavailable, {readiness.execution_blocked_reason}",
             f"Input/source: {self._display_path(plan.input_source_path or '') if plan.input_source_path else 'none'}",
             f"Format: {plan.input_format}",
             f"Acquisition mode: {acq_mode}",
@@ -5481,117 +5487,78 @@ class MainWindow(QMainWindow):
         if plan.output_policy_safety_summary:
             lines.append(plan.output_policy_safety_summary)
         
-        blocking = [iss for iss in issues if iss.severity == "blocking"]
-        warnings = [iss for iss in issues if iss.severity == "warning"]
-        infos = [iss for iss in issues if iss.severity == "info"]
-        
-        if blocking:
+        if readiness.blocking_issues:
             lines.append("Blocking issues:")
-            for iss in blocking:
+            for iss in readiness.blocking_issues:
                 lines.append(f"  - [{iss.category}] {iss.message}")
-        if warnings:
+        if readiness.warning_issues:
             lines.append("Warnings:")
-            for iss in warnings:
+            for iss in readiness.warning_issues:
                 lines.append(f"  - [{iss.category}] {iss.message}")
-        if infos:
+        if readiness.info_issues:
             lines.append("Information:")
-            for iss in infos:
+            for iss in readiness.info_issues:
                 lines.append(f"  - [{iss.category}] {iss.message}")
 
         lines.append("This draft plan is not executable yet. Final Run is not implemented in this stage.")
         return "\n".join(lines)
 
-    def _guided_new_analysis_readiness_summary_text(self, plan, issues) -> str:
-        configured = []
-        missing = []
-        if plan.input_source_path:
-            configured.append("raw input path")
-        else:
-            missing.append("raw input path")
-            
-        if plan.discovered_roi_ids:
-            configured.append("discovered ROIs")
-        else:
-            missing.append("discovered ROIs")
-            
-        if plan.included_roi_ids:
-            configured.append("included ROIs")
-        else:
-            missing.append("included ROIs")
-            
-        if plan.cache_id:
-            configured.append("diagnostic cache")
-        else:
-            missing.append("diagnostic cache")
-            
-        total_rois = len(plan.included_roi_ids)
-        choices_by_roi = {choice.roi_id: choice for choice in plan.per_roi_correction_strategy_choices}
-        missing_choices = [r for r in plan.included_roi_ids if r not in choices_by_roi]
-        if total_rois > 0 and not missing_choices:
-            configured.append("correction strategy choices")
-        else:
-            missing.append("correction strategy choices")
-            
-        if plan.feature_event_profile_status == "applied":
-            configured.append("feature/event profile")
-        else:
-            missing.append("feature/event profile")
-            
-        if plan.output_policy_status == "applied":
-            configured.append("output destination policy")
-        else:
-            missing.append("output destination policy")
-
-        configured_str = "; ".join(configured) if configured else "none"
-        missing_str = "; ".join(missing) if missing else "none"
-
-        lines = [
-            f"Configured: {configured_str}",
-            f"Missing: {missing_str}",
+    def _guided_new_analysis_readiness_summary_text(self, plan, readiness) -> str:
+        ready_sections = [section.label for section in readiness.sections if section.status == "ready"]
+        not_ready_sections = [
+            f"{section.label} ({section.status})"
+            for section in readiness.sections
+            if section.status not in {"ready", "warning", "info"} and section.key != "execution"
         ]
-
-        problems = [iss.message for iss in issues if iss.severity in ("blocking", "warning") and iss.category != "execution_not_implemented"]
-        if problems:
-            lines.append(f"Problems: {'; '.join(problems)}")
+        warning_sections = [
+            f"{section.label} ({'; '.join(issue.message for issue in section.warning_issues)})"
+            for section in readiness.sections
+            if section.warning_issues
+        ]
+        lines = [
+            (
+                "Draft plan completeness: complete for future RunSpec handoff"
+                if readiness.plan_complete_for_handoff
+                else "Draft plan completeness: incomplete for future RunSpec handoff"
+            ),
+            f"Ready sections: {'; '.join(ready_sections) if ready_sections else 'none'}",
+            f"Not ready sections: {'; '.join(not_ready_sections) if not_ready_sections else 'none'}",
+        ]
+        if warning_sections:
+            lines.append(f"Warnings: {'; '.join(warning_sections)}")
+        if readiness.blocking_issues:
+            lines.append(f"Blocking issues: {'; '.join(issue.message for issue in readiness.blocking_issues)}")
 
         lines.extend([
-            "Blocked: execution intentionally unavailable until a later Guided Run/RunSpec stage",
+            f"Execution: unavailable, {readiness.execution_blocked_reason}",
             "Files written: none"
         ])
         return "\n".join(lines)
 
-    def _refresh_guided_new_analysis_draft_plan_checklist(self, plan, issues) -> None:
+    def _refresh_guided_new_analysis_draft_plan_checklist(self, plan, readiness) -> None:
         label = getattr(self, "_guided_draft_run_plan_checklist_label", None)
         if label is None:
             return
         
         lines = []
-        groups = [
-            ("source", "Source", ["missing_input_source", "invalid_or_missing_input_format"]),
-            ("recording_structure", "Recording structure", ["missing_or_invalid_acquisition_structure"]),
-            ("roi_inclusion", "ROI inclusion", ["no_roi_inventory", "no_included_rois"]),
-            ("diagnostic_cache", "Diagnostic cache", ["missing_diagnostic_cache", "stale_diagnostic_cache"]),
-            ("roi_choices", "ROI choices", ["missing_strategy_choice_for_included_roi", "stale_strategy_choice", "forbidden_strategy"]),
-            ("feature_event", "Feature/event settings", ["missing_feature_event_profile", "invalid_feature_event_profile", "feature_event_profile_not_applied", "stale_feature_event_profile"]),
-            ("output_destination", "Output destination", [
-                "missing_output_policy",
-                "output_policy_not_applied",
-                "invalid_output_policy",
-                "stale_output_policy",
-            ]),
-            ("execution", "Execution readiness", ["execution_not_implemented"])
-        ]
-        
-        for key, name, cats in groups:
-            matching_issues = [iss for iss in issues if iss.category in cats]
-            if matching_issues:
-                worst_iss = matching_issues[0]
-                status = "fail" if worst_iss.severity == "blocking" else "warning" if worst_iss.severity == "warning" else "info"
-                lines.append(f"{name}: {status} - {worst_iss.message}")
+        for section in readiness.sections:
+            issues = list(section.blocking_issues or section.warning_issues or section.info_issues)
+            if issues:
+                first_issue = issues[0]
+                if section.key == "execution":
+                    status = "unavailable"
+                elif section.blocking_issues:
+                    status = "fail"
+                elif section.warning_issues:
+                    status = "warning"
+                else:
+                    status = "info"
+                lines.append(f"{section.label}: {status} - {first_issue.message}")
             else:
-                lines.append(f"{name}: pass - Ready.")
+                lines.append(f"{section.label}: pass - Ready.")
                 
-        lines.append("Execution ready: false")
+        lines.append(f"Draft plan complete for handoff: {str(readiness.plan_complete_for_handoff).lower()}")
+        lines.append(f"Execution available: {str(readiness.execution_available).lower()}")
         label.setText("\n".join(lines))
         label.setToolTip("")
 

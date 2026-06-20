@@ -31,6 +31,68 @@ class GuidedPlanIssue:
 
 
 @dataclass(frozen=True)
+class GuidedNewAnalysisSectionReadiness:
+    key: str
+    label: str
+    status: str  # ready / missing / invalid / stale / warning / info / blocked
+    blocking_issues: tuple[GuidedPlanIssue, ...] = ()
+    warning_issues: tuple[GuidedPlanIssue, ...] = ()
+    info_issues: tuple[GuidedPlanIssue, ...] = ()
+
+
+@dataclass(frozen=True)
+class GuidedNewAnalysisReadiness:
+    sections: tuple[GuidedNewAnalysisSectionReadiness, ...]
+    plan_complete_for_handoff: bool
+    execution_available: bool
+    execution_blocked_reason: str
+    blocking_issues: tuple[GuidedPlanIssue, ...] = ()
+    warning_issues: tuple[GuidedPlanIssue, ...] = ()
+    info_issues: tuple[GuidedPlanIssue, ...] = ()
+
+
+NEW_ANALYSIS_READINESS_SECTIONS: tuple[tuple[str, str], ...] = (
+    ("source_setup", "Source/setup"),
+    ("roi_inclusion", "ROI inclusion"),
+    ("diagnostic_cache", "Diagnostic cache"),
+    ("correction_strategies", "Correction strategies"),
+    ("evidence_references", "Evidence references"),
+    ("feature_event", "Feature/event settings"),
+    ("output_policy", "Output destination"),
+    ("execution", "Execution availability"),
+)
+
+
+NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION: dict[str, str] = {
+    "missing_input_source": "source_setup",
+    "invalid_or_missing_input_format": "source_setup",
+    "missing_or_invalid_acquisition_structure": "source_setup",
+    "no_roi_inventory": "roi_inclusion",
+    "no_included_rois": "roi_inclusion",
+    "missing_diagnostic_cache": "diagnostic_cache",
+    "missing_diagnostic_cache_artifact_path": "diagnostic_cache",
+    "missing_diagnostic_cache_provenance_path": "diagnostic_cache",
+    "stale_diagnostic_cache": "diagnostic_cache",
+    "missing_strategy_choice_for_included_roi": "correction_strategies",
+    "stale_strategy_choice": "correction_strategies",
+    "forbidden_strategy": "correction_strategies",
+    "correction_preview_evidence_path_missing": "evidence_references",
+    "correction_preview_source_identity_missing": "evidence_references",
+    "signal_only_f0_evidence_path_missing": "evidence_references",
+    "signal_only_f0_source_identity_missing": "evidence_references",
+    "missing_feature_event_profile": "feature_event",
+    "feature_event_profile_not_applied": "feature_event",
+    "invalid_feature_event_profile": "feature_event",
+    "stale_feature_event_profile": "feature_event",
+    "missing_output_policy": "output_policy",
+    "output_policy_not_applied": "output_policy",
+    "invalid_output_policy": "output_policy",
+    "stale_output_policy": "output_policy",
+    "execution_not_implemented": "execution",
+}
+
+
+@dataclass(frozen=True)
 class GuidedPlanCorrectionChoice:
     roi_id: str
     selected_strategy: str
@@ -361,7 +423,7 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
         issues.append(GuidedPlanIssue(
             category="missing_feature_event_profile",
             message="Feature/event profile settings are missing or unavailable in this stage.",
-            severity="warning" if plan.feature_event_profile_status == "unavailable" else "blocking"
+            severity="blocking"
         ))
 
     # 12. feature_event_profile_not_applied
@@ -389,15 +451,29 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
         issues.append(GuidedPlanIssue(
             category="stale_feature_event_profile",
             message=f"Feature/event profile is stale: {reasons}",
-            severity="warning"
+            severity="blocking"
         ))
+
+    elif plan.feature_event_profile_status == "applied":
+        if not plan.feature_event_explicitly_applied:
+            issues.append(GuidedPlanIssue(
+                category="feature_event_profile_not_applied",
+                message="Feature/event profile status is applied but explicit apply provenance is missing.",
+                severity="blocking"
+            ))
+        if plan.feature_event_validation_issues:
+            issues.append(GuidedPlanIssue(
+                category="invalid_feature_event_profile",
+                message=f"Feature/event profile has validation issues: {'; '.join(plan.feature_event_validation_issues)}",
+                severity="blocking"
+            ))
 
     # 13. output policy
     if plan.output_policy_status in ("missing", "unavailable"):
         issues.append(GuidedPlanIssue(
             category="missing_output_policy",
             message="Output policy is missing or unavailable.",
-            severity="warning" if plan.output_policy_status == "unavailable" else "blocking"
+            severity="blocking"
         ))
 
     elif plan.output_policy_status == "selected":
@@ -449,7 +525,64 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
     issues.append(GuidedPlanIssue(
         category="execution_not_implemented",
         message="This draft plan is not executable yet. Final Run is not implemented in this stage.",
-        severity="blocking"
+        severity="info"
     ))
 
     return issues
+
+
+def _readiness_status_from_issues(issues: list[GuidedPlanIssue]) -> str:
+    if not issues:
+        return "ready"
+    blocking = [issue for issue in issues if issue.severity == "blocking"]
+    if blocking:
+        categories = {issue.category for issue in blocking}
+        if any("stale" in category for category in categories):
+            return "stale"
+        if any("invalid" in category or category == "forbidden_strategy" for category in categories):
+            return "invalid"
+        if any("missing" in category or category.startswith("no_") or "not_applied" in category for category in categories):
+            return "missing"
+        return "blocked"
+    if any(issue.severity == "warning" for issue in issues):
+        return "warning"
+    return "info"
+
+
+def evaluate_new_analysis_plan_readiness(plan: GuidedNewAnalysisDraftPlan) -> GuidedNewAnalysisReadiness:
+    """Evaluate new_analysis draft completeness without touching Qt, widgets, or files."""
+    issues = evaluate_new_analysis_plan_issues(plan)
+    issues_by_section: dict[str, list[GuidedPlanIssue]] = {
+        key: [] for key, _label in NEW_ANALYSIS_READINESS_SECTIONS
+    }
+    for issue in issues:
+        section_key = NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION.get(issue.category, "source_setup")
+        issues_by_section.setdefault(section_key, []).append(issue)
+
+    sections: list[GuidedNewAnalysisSectionReadiness] = []
+    for key, label in NEW_ANALYSIS_READINESS_SECTIONS:
+        section_issues = issues_by_section.get(key, [])
+        sections.append(GuidedNewAnalysisSectionReadiness(
+            key=key,
+            label=label,
+            status=_readiness_status_from_issues(section_issues),
+            blocking_issues=tuple(issue for issue in section_issues if issue.severity == "blocking"),
+            warning_issues=tuple(issue for issue in section_issues if issue.severity == "warning"),
+            info_issues=tuple(issue for issue in section_issues if issue.severity == "info"),
+        ))
+
+    blocking_for_handoff = tuple(
+        issue for issue in issues
+        if issue.severity == "blocking" and issue.category != "execution_not_implemented"
+    )
+    warning_issues = tuple(issue for issue in issues if issue.severity == "warning")
+    info_issues = tuple(issue for issue in issues if issue.severity == "info")
+    return GuidedNewAnalysisReadiness(
+        sections=tuple(sections),
+        plan_complete_for_handoff=not blocking_for_handoff,
+        execution_available=False,
+        execution_blocked_reason="Final Guided Run/RunSpec is not implemented in this stage.",
+        blocking_issues=blocking_for_handoff,
+        warning_issues=warning_issues,
+        info_issues=info_issues,
+    )
