@@ -14,9 +14,18 @@ from typing import Any
 SCHEMA_VERSION = "guided_new_analysis_plan.v1"
 RUN_PREVIEW_SCHEMA_VERSION = "guided_new_analysis_run_preview.v1"
 EXECUTION_SUBSET_SCHEMA_VERSION = "guided_new_analysis_execution_subset.v1"
+DATASET_CONTRACT_SNAPSHOT_SCHEMA_VERSION = "guided_new_analysis_dataset_contract_snapshot.v1"
 FIRST_EXECUTION_SUBSET_NAME = "global_dynamic_fit_only.v1"
 SUPPORTED_INPUT_FORMATS = {"auto", "rwd", "npm", "custom_tabular"}
 SUPPORTED_ACQUISITION_MODES = {"intermittent", "continuous"}
+DATASET_CONTRACT_SNAPSHOT_STATUSES = {
+    "missing",
+    "inferred",
+    "applied",
+    "invalid",
+    "stale",
+    "unsupported",
+}
 RUNNABLE_CORRECTION_STRATEGIES = {
     "robust_global_event_reject",
     "adaptive_event_gated_regression",
@@ -97,7 +106,7 @@ class GuidedNewAnalysisExecutionSubsetIssue:
 @dataclass(frozen=True)
 class GuidedNewAnalysisExecutionFieldClassification:
     field_name: str
-    status: str  # present / fixed_default / required_missing / deferred_full_control / not_relevant
+    status: str  # present / fixed_default / required_missing / deferred_full_control / not_relevant / selected / invalid / stale / unsupported
     value: Any | None = None
     provenance: str = ""
     blocks_subset: bool = False
@@ -117,6 +126,59 @@ class GuidedNewAnalysisExecutionSubsetReadiness:
     warning_issues: tuple[GuidedNewAnalysisExecutionSubsetIssue, ...] = ()
     info_issues: tuple[GuidedNewAnalysisExecutionSubsetIssue, ...] = ()
     field_classifications: tuple[GuidedNewAnalysisExecutionFieldClassification, ...] = ()
+
+
+@dataclass(frozen=True)
+class GuidedNewAnalysisDatasetContractSourceIdentity:
+    input_source_path: str | None = None
+    resolved_input_source_path: str | None = None
+    input_format: str | None = None
+    resolved_input_format: str | None = None
+    acquisition_mode: str | None = None
+    sessions_per_hour: int | None = None
+    session_duration_sec: float | None = None
+    continuous_window_sec: float | None = None
+    continuous_step_sec: float | None = None
+    allow_partial_final_window: bool | None = None
+    exclude_incomplete_final_rwd_chunk: bool | None = None
+    discovered_roi_ids: tuple[str, ...] = ()
+    included_roi_ids: tuple[str, ...] = ()
+    source_setup_signature: str | None = None
+    config_fingerprint: str | None = None
+    diagnostic_cache_contract_identity: str | None = None
+
+
+@dataclass(frozen=True)
+class GuidedNewAnalysisDatasetContractSnapshot:
+    schema_version: str = DATASET_CONTRACT_SNAPSHOT_SCHEMA_VERSION
+    status: str = "missing"  # missing / inferred / applied / invalid / stale / unsupported
+    input_format: str | None = None
+    resolved_input_format: str | None = None
+    acquisition_mode: str | None = None
+    contract_values: dict[str, Any] = field(default_factory=dict)
+    format_specific: dict[str, Any] = field(default_factory=dict)
+    source_identity: GuidedNewAnalysisDatasetContractSourceIdentity = field(
+        default_factory=GuidedNewAnalysisDatasetContractSourceIdentity
+    )
+    validation_issues: tuple[str, ...] = ()
+    stale_reasons: tuple[str, ...] = ()
+    created_at_utc: str | None = None
+    updated_at_utc: str | None = None
+    explicitly_applied: bool = False
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.status not in DATASET_CONTRACT_SNAPSHOT_STATUSES:
+            raise ValueError(f"Unsupported dataset contract snapshot status: {self.status}")
+
+    @property
+    def current_applied(self) -> bool:
+        return (
+            self.status == "applied"
+            and self.explicitly_applied
+            and not self.validation_issues
+            and not self.stale_reasons
+        )
 
 
 NEW_ANALYSIS_READINESS_SECTIONS: tuple[tuple[str, str], ...] = (
@@ -197,6 +259,12 @@ class GuidedNewAnalysisDraftPlan:
     allow_partial_final_window: bool = False
     exclude_incomplete_final_rwd_chunk: bool = False
     acquisition_structure_status: str = "unknown"  # "ready", "incomplete", "invalid", "unknown"
+
+    # Dataset contract snapshot planning state. This is reviewed/applied plan
+    # state only; it does not infer fields or generate executable config.
+    dataset_contract_snapshot: GuidedNewAnalysisDatasetContractSnapshot = field(
+        default_factory=GuidedNewAnalysisDatasetContractSnapshot
+    )
 
     # ROI inventory
     discovered_roi_ids: list[str] = field(default_factory=list)
@@ -683,8 +751,56 @@ def _execution_field(
     )
 
 
+def _dataset_contract_snapshot_execution_field(
+    snapshot: GuidedNewAnalysisDatasetContractSnapshot,
+) -> GuidedNewAnalysisExecutionFieldClassification:
+    value = {
+        "schema_version": snapshot.schema_version,
+        "status": snapshot.status,
+        "input_format": snapshot.input_format,
+        "resolved_input_format": snapshot.resolved_input_format,
+        "acquisition_mode": snapshot.acquisition_mode,
+        "explicitly_applied": snapshot.explicitly_applied,
+        "current_applied": snapshot.current_applied,
+        "validation_issues": list(snapshot.validation_issues),
+        "stale_reasons": list(snapshot.stale_reasons),
+    }
+    if snapshot.status == "missing":
+        status = "required_missing"
+        provenance = "dataset contract snapshot is not represented as applied Guided planning state"
+    elif snapshot.status == "unsupported":
+        status = "unsupported"
+        provenance = "dataset contract snapshot records an unsupported format/acquisition combination"
+    elif snapshot.validation_issues or snapshot.status == "invalid":
+        status = "invalid"
+        provenance = "dataset contract snapshot failed structural or reviewed validation"
+    elif snapshot.stale_reasons or snapshot.status == "stale":
+        status = "stale"
+        provenance = "dataset contract snapshot is applied or inferred but no longer current"
+    elif snapshot.current_applied:
+        status = "present"
+        provenance = "applied GuidedNewAnalysisDraftPlan dataset contract snapshot"
+    elif snapshot.status == "inferred":
+        status = "selected"
+        provenance = "dataset contract snapshot is visible/reviewable but not explicitly applied"
+    elif snapshot.status == "applied" and not snapshot.explicitly_applied:
+        status = "selected"
+        provenance = "dataset contract snapshot status is applied but explicit apply provenance is missing"
+    else:
+        status = "selected"
+        provenance = "dataset contract snapshot is not current applied planning state"
+    return _execution_field(
+        "dataset_contract_snapshot",
+        status,
+        value=value,
+        provenance=provenance,
+        blocks_subset=False,
+    )
+
+
 def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[GuidedNewAnalysisExecutionFieldClassification, ...]:
     fields: list[GuidedNewAnalysisExecutionFieldClassification] = [
+        _dataset_contract_snapshot_execution_field(plan.dataset_contract_snapshot),
         _execution_field(
             "timeline_anchor_mode",
             "required_missing",

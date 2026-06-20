@@ -2,7 +2,10 @@
 
 import pytest
 from photometry_pipeline.guided_new_analysis_plan import (
+    DATASET_CONTRACT_SNAPSHOT_SCHEMA_VERSION,
     FIRST_EXECUTION_SUBSET_NAME,
+    GuidedNewAnalysisDatasetContractSnapshot,
+    GuidedNewAnalysisDatasetContractSourceIdentity,
     GuidedNewAnalysisDraftPlan,
     GuidedPlanCorrectionChoice,
     GuidedPlanIssue,
@@ -71,6 +74,77 @@ def test_can_construct_incomplete_new_analysis_draft_plan():
     assert plan.execution_ready is False
     assert plan.executable is False
     assert plan.production_run_enabled is False
+    assert plan.dataset_contract_snapshot.status == "missing"
+    assert plan.dataset_contract_snapshot.schema_version == DATASET_CONTRACT_SNAPSHOT_SCHEMA_VERSION
+
+
+def test_dataset_contract_snapshot_represents_reviewed_applied_planning_state():
+    source_identity = GuidedNewAnalysisDatasetContractSourceIdentity(
+        input_source_path="C:/raw/input",
+        resolved_input_source_path="C:/raw/input",
+        input_format="rwd",
+        resolved_input_format="rwd",
+        acquisition_mode="intermittent",
+        sessions_per_hour=6,
+        session_duration_sec=120.0,
+        exclude_incomplete_final_rwd_chunk=True,
+        discovered_roi_ids=("ROI1", "ROI2"),
+        included_roi_ids=("ROI1",),
+        source_setup_signature="setup-1",
+        config_fingerprint="dataset-config-1",
+    )
+    snapshot = GuidedNewAnalysisDatasetContractSnapshot(
+        status="applied",
+        input_format="rwd",
+        resolved_input_format="rwd",
+        acquisition_mode="intermittent",
+        contract_values={
+            "rwd_time_col": "Time",
+            "uv_suffix": "_UV",
+            "sig_suffix": "_Signal",
+            "exclude_incomplete_final_rwd_chunk": True,
+        },
+        format_specific={"excluded_source_files": ["chunk_99.csv"]},
+        source_identity=source_identity,
+        explicitly_applied=True,
+        provenance={"reviewed_inference": True, "no_files_written": True},
+    )
+    plan = GuidedNewAnalysisDraftPlan(dataset_contract_snapshot=snapshot)
+
+    assert plan.dataset_contract_snapshot.current_applied is True
+    assert plan.dataset_contract_snapshot.contract_values["rwd_time_col"] == "Time"
+    assert plan.dataset_contract_snapshot.source_identity.config_fingerprint == "dataset-config-1"
+    assert plan.dataset_contract_snapshot.provenance["reviewed_inference"] is True
+
+
+def test_dataset_contract_snapshot_stale_invalid_and_unsupported_statuses_are_structural():
+    stale = GuidedNewAnalysisDatasetContractSnapshot(
+        status="stale",
+        stale_reasons=("input source path changed",),
+        explicitly_applied=True,
+    )
+    invalid = GuidedNewAnalysisDatasetContractSnapshot(
+        status="invalid",
+        validation_issues=("missing npm LED column",),
+    )
+    unsupported = GuidedNewAnalysisDatasetContractSnapshot(
+        status="unsupported",
+        input_format="npm",
+        acquisition_mode="continuous",
+        validation_issues=("unsupported_npm_continuous",),
+    )
+
+    assert stale.current_applied is False
+    assert invalid.current_applied is False
+    assert unsupported.current_applied is False
+    assert stale.stale_reasons == ("input source path changed",)
+    assert invalid.validation_issues == ("missing npm LED column",)
+    assert unsupported.validation_issues == ("unsupported_npm_continuous",)
+
+
+def test_dataset_contract_snapshot_rejects_unknown_status():
+    with pytest.raises(ValueError, match="Unsupported dataset contract snapshot status"):
+        GuidedNewAnalysisDatasetContractSnapshot(status="ready")
 
 
 def test_missing_input_produces_issue():
@@ -331,6 +405,117 @@ def test_execution_subset_same_dynamic_strategy_preserves_planning_readiness_but
     assert "missing_execution_mode" in categories
     assert "missing_run_profile" in categories
     assert "missing_output_creation_policy" in categories
+
+
+def test_execution_subset_reports_dataset_contract_snapshot_status_without_satisfying_blocker():
+    snapshot = GuidedNewAnalysisDatasetContractSnapshot(
+        status="applied",
+        input_format="rwd",
+        resolved_input_format="rwd",
+        acquisition_mode="intermittent",
+        contract_values={"rwd_time_col": "Time"},
+        explicitly_applied=True,
+    )
+    readiness = evaluate_guided_new_analysis_execution_subset_readiness(
+        _complete_new_analysis_plan(dataset_contract_snapshot=snapshot)
+    )
+    fields = {field.field_name: field for field in readiness.field_classifications}
+    categories = {issue.category for issue in readiness.blocking_issues}
+
+    assert fields["dataset_contract_snapshot"].status == "present"
+    assert fields["dataset_contract_snapshot"].value["current_applied"] is True
+    assert fields["dataset_contract_snapshot"].blocks_subset is False
+    assert "missing_rwd_dataset_contract" in categories
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "expected_status", "expected_provenance"),
+    [
+        (
+            GuidedNewAnalysisDatasetContractSnapshot(status="missing"),
+            "required_missing",
+            "not represented as applied",
+        ),
+        (
+            GuidedNewAnalysisDatasetContractSnapshot(
+                status="applied",
+                contract_values={"rwd_time_col": "Time"},
+                explicitly_applied=True,
+            ),
+            "present",
+            "applied GuidedNewAnalysisDraftPlan",
+        ),
+        (
+            GuidedNewAnalysisDatasetContractSnapshot(
+                status="applied",
+                validation_issues=("missing rwd time column",),
+                explicitly_applied=True,
+            ),
+            "invalid",
+            "failed structural or reviewed validation",
+        ),
+        (
+            GuidedNewAnalysisDatasetContractSnapshot(
+                status="applied",
+                stale_reasons=("input source path changed",),
+                explicitly_applied=True,
+            ),
+            "stale",
+            "no longer current",
+        ),
+        (
+            GuidedNewAnalysisDatasetContractSnapshot(
+                status="applied",
+                contract_values={"rwd_time_col": "Time"},
+                explicitly_applied=False,
+            ),
+            "selected",
+            "explicit apply provenance is missing",
+        ),
+        (
+            GuidedNewAnalysisDatasetContractSnapshot(
+                status="inferred",
+                contract_values={"npm_time_axis": "system_time"},
+                explicitly_applied=False,
+            ),
+            "selected",
+            "visible/reviewable but not explicitly applied",
+        ),
+        (
+            GuidedNewAnalysisDatasetContractSnapshot(
+                status="stale",
+                stale_reasons=("input source path changed",),
+                explicitly_applied=True,
+            ),
+            "stale",
+            "no longer current",
+        ),
+        (
+            GuidedNewAnalysisDatasetContractSnapshot(
+                status="unsupported",
+                input_format="npm",
+                acquisition_mode="continuous",
+                validation_issues=("unsupported_npm_continuous",),
+            ),
+            "unsupported",
+            "unsupported format/acquisition",
+        ),
+    ],
+)
+def test_execution_subset_classifies_dataset_contract_snapshot_structurally(
+    snapshot,
+    expected_status,
+    expected_provenance,
+):
+    readiness = evaluate_guided_new_analysis_execution_subset_readiness(
+        _complete_new_analysis_plan(dataset_contract_snapshot=snapshot)
+    )
+    field = next(field for field in readiness.field_classifications if field.field_name == "dataset_contract_snapshot")
+
+    assert field.status == expected_status
+    assert field.blocks_subset is False
+    assert snapshot.current_applied is (expected_status == "present")
+    assert expected_provenance in field.provenance
 
 
 def test_execution_subset_mixed_dynamic_strategies_block_subset_not_planning_readiness():
