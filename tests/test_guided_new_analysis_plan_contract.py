@@ -2,12 +2,14 @@
 
 import pytest
 from photometry_pipeline.guided_new_analysis_plan import (
+    FIRST_EXECUTION_SUBSET_NAME,
     GuidedNewAnalysisDraftPlan,
     GuidedPlanCorrectionChoice,
     GuidedPlanIssue,
     NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION,
     RUN_PREVIEW_SCHEMA_VERSION,
     build_guided_new_analysis_run_preview,
+    evaluate_guided_new_analysis_execution_subset_readiness,
     evaluate_new_analysis_plan_issues,
     evaluate_new_analysis_plan_readiness,
 )
@@ -312,6 +314,226 @@ def test_run_preview_does_not_create_output_directory(tmp_path):
 def test_run_preview_rejects_malformed_input():
     with pytest.raises(TypeError, match="GuidedNewAnalysisDraftPlan"):
         build_guided_new_analysis_run_preview(object())
+
+
+def test_execution_subset_same_dynamic_strategy_preserves_planning_readiness_but_blocks_missing_fields():
+    readiness = evaluate_guided_new_analysis_execution_subset_readiness(_complete_new_analysis_plan())
+
+    assert readiness.subset_name == FIRST_EXECUTION_SUBSET_NAME
+    assert readiness.planning_complete_for_handoff is True
+    assert readiness.execution_available is False
+    assert readiness.first_subset_executable is False
+    assert readiness.allowed_dynamic_fit_strategy == "global_linear_regression"
+    categories = {issue.category for issue in readiness.blocking_issues}
+    assert "mixed_per_roi_strategies" not in categories
+    assert "signal_only_f0_execution_not_supported" not in categories
+    assert "missing_rwd_dataset_contract" in categories
+    assert "missing_execution_mode" in categories
+    assert "missing_run_profile" in categories
+    assert "missing_output_creation_policy" in categories
+
+
+def test_execution_subset_mixed_dynamic_strategies_block_subset_not_planning_readiness():
+    plan = _complete_new_analysis_plan(
+        included_roi_ids=["ROI1", "ROI2"],
+        excluded_roi_ids=[],
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="global_linear_regression",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI2",
+                selected_strategy="robust_global_event_reject",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+        ],
+    )
+
+    planning = evaluate_new_analysis_plan_readiness(plan)
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+
+    assert planning.plan_complete_for_handoff is True
+    assert subset.planning_complete_for_handoff is True
+    assert subset.first_subset_executable is False
+    assert subset.allowed_dynamic_fit_strategy is None
+    assert any(issue.category == "mixed_per_roi_strategies" for issue in subset.blocking_issues)
+
+
+def test_execution_subset_signal_only_blocks_subset_not_planning_readiness():
+    plan = _complete_new_analysis_plan(
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="signal_only_f0",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            )
+        ]
+    )
+
+    planning = evaluate_new_analysis_plan_readiness(plan)
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+
+    assert planning.plan_complete_for_handoff is True
+    assert subset.planning_complete_for_handoff is True
+    assert subset.first_subset_executable is False
+    assert subset.allowed_dynamic_fit_strategy is None
+    assert any(issue.category == "signal_only_f0_execution_not_supported" for issue in subset.blocking_issues)
+
+
+def test_execution_subset_duplicate_strategy_choice_for_included_roi_blocks_subset():
+    plan = _complete_new_analysis_plan(
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="global_linear_regression",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="robust_global_event_reject",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+        ]
+    )
+
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+
+    assert subset.first_subset_executable is False
+    assert any(
+        issue.category == "duplicate_strategy_choice_for_execution_subset"
+        for issue in subset.blocking_issues
+    )
+
+
+def test_execution_subset_forbidden_strategy_blocks_planning_and_subset():
+    plan = _complete_new_analysis_plan(
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="auto",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            )
+        ]
+    )
+
+    planning = evaluate_new_analysis_plan_readiness(plan)
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+
+    assert planning.plan_complete_for_handoff is False
+    assert subset.planning_complete_for_handoff is False
+    categories = {issue.category for issue in subset.blocking_issues}
+    assert "incomplete_planning_readiness" in categories
+    assert "forbidden_strategy_state" in categories
+
+
+@pytest.mark.parametrize(
+    ("input_format", "acquisition_mode", "expected_category"),
+    [
+        ("rwd", "intermittent", "missing_rwd_dataset_contract"),
+        ("rwd", "continuous", "missing_rwd_dataset_contract"),
+        ("npm", "intermittent", "missing_npm_channel_mapping"),
+        ("npm", "continuous", "unsupported_npm_continuous"),
+        ("custom_tabular", "intermittent", "missing_custom_tabular_column_mapping"),
+        ("custom_tabular", "continuous", "missing_custom_tabular_column_mapping"),
+        ("auto", "intermittent", "unsupported_auto_format_for_execution_subset"),
+    ],
+)
+def test_execution_subset_reports_specific_format_acquisition_field_gaps(input_format, acquisition_mode, expected_category):
+    plan = _complete_new_analysis_plan(
+        input_format=input_format,
+        acquisition_mode=acquisition_mode,
+        continuous_window_sec=600.0,
+        continuous_step_sec=600.0,
+    )
+
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+
+    assert any(issue.category == expected_category for issue in subset.blocking_issues)
+    assert any(
+        field.issue_category == expected_category and field.blocks_subset
+        for field in subset.field_classifications
+    )
+
+
+def test_execution_subset_fixed_defaults_are_reported_as_provenance():
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(_complete_new_analysis_plan())
+    fields = {field.field_name: field for field in subset.field_classifications}
+
+    assert fields["timeline_anchor_mode"].status == "required_missing"
+    assert fields["timeline_anchor_mode"].value is None
+    assert fields["timeline_anchor_mode"].blocks_subset is True
+    assert fields["timeline_anchor_mode"].issue_category == "missing_timeline_anchor_mode"
+    assert "no executable default is verified" in fields["timeline_anchor_mode"].provenance
+    assert fields["traces_only"].status == "fixed_default"
+    assert fields["traces_only"].value is False
+    assert fields["preview_first_n"].status == "fixed_default"
+    assert fields["preview_first_n"].value is None
+
+
+def test_execution_subset_is_pure_no_files_and_no_plan_mutation(tmp_path):
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_run_output"
+    plan = _complete_new_analysis_plan(output_policy_path=str(target))
+    before_state = dict(plan.__dict__)
+    before_files = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+
+    after_files = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    assert after_files == before_files
+    assert not target.exists()
+    assert dict(plan.__dict__) == before_state
+    assert subset.execution_available is False
+
+
+def test_execution_subset_rejects_malformed_input():
+    with pytest.raises(TypeError, match="GuidedNewAnalysisDraftPlan"):
+        evaluate_guided_new_analysis_execution_subset_readiness(object())
 
 
 def test_feature_event_and_output_policy_missing_are_represented():

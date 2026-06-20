@@ -13,6 +13,8 @@ from typing import Any
 
 SCHEMA_VERSION = "guided_new_analysis_plan.v1"
 RUN_PREVIEW_SCHEMA_VERSION = "guided_new_analysis_run_preview.v1"
+EXECUTION_SUBSET_SCHEMA_VERSION = "guided_new_analysis_execution_subset.v1"
+FIRST_EXECUTION_SUBSET_NAME = "global_dynamic_fit_only.v1"
 SUPPORTED_INPUT_FORMATS = {"auto", "rwd", "npm", "custom_tabular"}
 SUPPORTED_ACQUISITION_MODES = {"intermittent", "continuous"}
 RUNNABLE_CORRECTION_STRATEGIES = {
@@ -22,6 +24,11 @@ RUNNABLE_CORRECTION_STRATEGIES = {
     "signal_only_f0",
 }
 FORBIDDEN_CORRECTION_STRATEGIES = {"auto", "needs_review", "no_correction"}
+FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES = {
+    "global_linear_regression",
+    "robust_global_event_reject",
+    "adaptive_event_gated_regression",
+}
 
 
 @dataclass(frozen=True)
@@ -77,6 +84,39 @@ class GuidedNewAnalysisRunPreview:
     warnings: tuple[GuidedNewAnalysisRunPreviewIssue, ...] = ()
     execution_available: bool = False
     execution_blocked_reason: str = "Final Guided Run/RunSpec is not implemented in this stage."
+
+
+@dataclass(frozen=True)
+class GuidedNewAnalysisExecutionSubsetIssue:
+    category: str
+    message: str
+    severity: str  # "blocking", "warning", "info"
+    section: str = "execution_subset"
+
+
+@dataclass(frozen=True)
+class GuidedNewAnalysisExecutionFieldClassification:
+    field_name: str
+    status: str  # present / fixed_default / required_missing / deferred_full_control / not_relevant
+    value: Any | None = None
+    provenance: str = ""
+    blocks_subset: bool = False
+    issue_category: str | None = None
+
+
+@dataclass(frozen=True)
+class GuidedNewAnalysisExecutionSubsetReadiness:
+    subset_name: str
+    subset_schema_version: str
+    first_subset_executable: bool
+    planning_complete_for_handoff: bool
+    execution_available: bool
+    execution_blocked_reason: str
+    allowed_dynamic_fit_strategy: str | None = None
+    blocking_issues: tuple[GuidedNewAnalysisExecutionSubsetIssue, ...] = ()
+    warning_issues: tuple[GuidedNewAnalysisExecutionSubsetIssue, ...] = ()
+    info_issues: tuple[GuidedNewAnalysisExecutionSubsetIssue, ...] = ()
+    field_classifications: tuple[GuidedNewAnalysisExecutionFieldClassification, ...] = ()
 
 
 NEW_ANALYSIS_READINESS_SECTIONS: tuple[tuple[str, str], ...] = (
@@ -613,6 +653,343 @@ def evaluate_new_analysis_plan_readiness(plan: GuidedNewAnalysisDraftPlan) -> Gu
         blocking_issues=blocking_for_handoff,
         warning_issues=warning_issues,
         info_issues=info_issues,
+    )
+
+
+def _execution_subset_issue(category: str, message: str, severity: str = "blocking") -> GuidedNewAnalysisExecutionSubsetIssue:
+    return GuidedNewAnalysisExecutionSubsetIssue(
+        category=category,
+        message=message,
+        severity=severity,
+    )
+
+
+def _execution_field(
+    field_name: str,
+    status: str,
+    *,
+    value: Any | None = None,
+    provenance: str,
+    blocks_subset: bool = False,
+    issue_category: str | None = None,
+) -> GuidedNewAnalysisExecutionFieldClassification:
+    return GuidedNewAnalysisExecutionFieldClassification(
+        field_name=field_name,
+        status=status,
+        value=value,
+        provenance=provenance,
+        blocks_subset=blocks_subset,
+        issue_category=issue_category,
+    )
+
+
+def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[GuidedNewAnalysisExecutionFieldClassification, ...]:
+    fields: list[GuidedNewAnalysisExecutionFieldClassification] = [
+        _execution_field(
+            "timeline_anchor_mode",
+            "required_missing",
+            value=None,
+            provenance="timeline anchor mode is not represented in GuidedNewAnalysisDraftPlan and no executable default is verified",
+            blocks_subset=True,
+            issue_category="missing_timeline_anchor_mode",
+        ),
+        _execution_field(
+            "fixed_daily_anchor_clock",
+            "fixed_default",
+            value=None,
+            provenance="first subset fixed default; no fixed daily anchor",
+        ),
+        _execution_field(
+            "render_modes",
+            "fixed_default",
+            value={
+                "signal_iso_render_mode": "default_backend_behavior",
+                "dff_render_mode": "default_backend_behavior",
+                "stacked_render_mode": "default_backend_behavior",
+            },
+            provenance="first subset fixed default; detailed render controls remain Full Control-only",
+        ),
+        _execution_field(
+            "traces_only",
+            "fixed_default",
+            value=False,
+            provenance="first subset fixed default for production feature/event handoff",
+        ),
+        _execution_field(
+            "preview_first_n",
+            "fixed_default",
+            value=None,
+            provenance="first subset fixed default; preview-first-N remains Full Control-only",
+        ),
+        _execution_field(
+            "representative_session",
+            "deferred_full_control",
+            value=None,
+            provenance="representative-session preview behavior is not part of first Guided execution subset",
+        ),
+        _execution_field(
+            "validate_only_behavior",
+            "fixed_default",
+            value="explicit_future_validate_action_only",
+            provenance="classification only; no validation process is implemented here",
+        ),
+        _execution_field(
+            "provenance_run_metadata_fields",
+            "present",
+            value={
+                "plan_schema_version": plan.schema_version,
+                "created_at_utc": plan.created_at_utc,
+                "updated_at_utc": plan.updated_at_utc,
+                "cache_id": plan.cache_id,
+            },
+            provenance="stored GuidedNewAnalysisDraftPlan fields only",
+        ),
+    ]
+
+    fields.append(_execution_field(
+        "mode",
+        "required_missing",
+        value=None,
+        provenance="execution mode both/tonic/phasic is not represented in GuidedNewAnalysisDraftPlan",
+        blocks_subset=True,
+        issue_category="missing_execution_mode",
+    ))
+    fields.append(_execution_field(
+        "run_profile",
+        "required_missing",
+        value=None,
+        provenance="execution run profile is not represented in GuidedNewAnalysisDraftPlan",
+        blocks_subset=True,
+        issue_category="missing_run_profile",
+    ))
+    fields.append(_execution_field(
+        "output_creation_policy",
+        "required_missing",
+        value=None,
+        provenance="output destination is stored, but creation/overwrite execution policy is not represented",
+        blocks_subset=True,
+        issue_category="missing_output_creation_policy",
+    ))
+
+    roi_identity_status = "present" if plan.included_roi_ids else "required_missing"
+    fields.append(_execution_field(
+        "roi_identity",
+        roi_identity_status,
+        value=list(plan.included_roi_ids),
+        provenance="GuidedNewAnalysisDraftPlan included_roi_ids",
+        blocks_subset=roi_identity_status != "present",
+        issue_category=None if roi_identity_status == "present" else "missing_roi_identity",
+    ))
+
+    fmt = str(plan.input_format or "").strip().lower()
+    acq = str(plan.acquisition_mode or "").strip().lower()
+    if fmt == "rwd":
+        fields.append(_execution_field(
+            "dataset_contract_overrides",
+            "required_missing",
+            value=None,
+            provenance="RWD dataset contract snapshot is not represented in GuidedNewAnalysisDraftPlan",
+            blocks_subset=True,
+            issue_category="missing_rwd_dataset_contract",
+        ))
+        fields.append(_execution_field(
+            "acquisition_repair_fields",
+            "present",
+            value={"exclude_incomplete_final_rwd_chunk": plan.exclude_incomplete_final_rwd_chunk},
+            provenance="GuidedNewAnalysisDraftPlan acquisition repair field",
+        ))
+    elif fmt == "npm":
+        if acq == "continuous":
+            fields.append(_execution_field(
+                "format_acquisition_support",
+                "required_missing",
+                value={"input_format": fmt, "acquisition_mode": acq},
+                provenance="first subset blocks NPM continuous before execution-field mapping",
+                blocks_subset=True,
+                issue_category="unsupported_npm_continuous",
+            ))
+        else:
+            fields.append(_execution_field(
+                "npm_channel_mapping",
+                "required_missing",
+                value=None,
+                provenance="NPM signal/control channel mapping is not represented in GuidedNewAnalysisDraftPlan",
+                blocks_subset=True,
+                issue_category="missing_npm_channel_mapping",
+            ))
+            fields.append(_execution_field(
+                "dataset_contract_overrides",
+                "required_missing",
+                value=None,
+                provenance="NPM dataset contract snapshot is not represented in GuidedNewAnalysisDraftPlan",
+                blocks_subset=True,
+                issue_category="missing_npm_dataset_contract",
+            ))
+    elif fmt == "custom_tabular":
+        fields.append(_execution_field(
+            "custom_tabular_column_mapping",
+            "required_missing",
+            value=None,
+            provenance="custom_tabular column mapping is not represented in GuidedNewAnalysisDraftPlan",
+            blocks_subset=True,
+            issue_category="missing_custom_tabular_column_mapping",
+        ))
+        fields.append(_execution_field(
+            "dataset_contract_overrides",
+            "required_missing",
+            value=None,
+            provenance="custom_tabular dataset contract snapshot is not represented in GuidedNewAnalysisDraftPlan",
+            blocks_subset=True,
+            issue_category="missing_custom_tabular_dataset_contract",
+        ))
+    elif fmt == "auto":
+        fields.append(_execution_field(
+            "format_acquisition_support",
+            "required_missing",
+            value={"input_format": fmt, "acquisition_mode": acq},
+            provenance="first subset requires an explicit resolved input format; auto is planning-only here",
+            blocks_subset=True,
+            issue_category="unsupported_auto_format_for_execution_subset",
+        ))
+    else:
+        fields.append(_execution_field(
+            "format_acquisition_support",
+            "required_missing",
+            value={"input_format": fmt, "acquisition_mode": acq},
+            provenance="input format is missing or unsupported by GuidedNewAnalysisDraftPlan",
+            blocks_subset=True,
+            issue_category="unsupported_input_format_for_execution_subset",
+        ))
+
+    if acq not in SUPPORTED_ACQUISITION_MODES:
+        fields.append(_execution_field(
+            "format_acquisition_support",
+            "required_missing",
+            value={"input_format": fmt, "acquisition_mode": acq},
+            provenance="acquisition mode is missing or unsupported by GuidedNewAnalysisDraftPlan",
+            blocks_subset=True,
+            issue_category="unsupported_acquisition_mode_for_execution_subset",
+        ))
+
+    return tuple(fields)
+
+
+def evaluate_guided_new_analysis_execution_subset_readiness(
+    plan: GuidedNewAnalysisDraftPlan,
+) -> GuidedNewAnalysisExecutionSubsetReadiness:
+    """Evaluate first-subset execution readiness without side effects.
+
+    This helper is model-only. It does not inspect files, instantiate RunSpec,
+    build argv, read GUI widgets, write config, create directories, or mutate plan.
+    """
+    if not isinstance(plan, GuidedNewAnalysisDraftPlan):
+        raise TypeError("plan must be a GuidedNewAnalysisDraftPlan")
+
+    planning_readiness = evaluate_new_analysis_plan_readiness(plan)
+    issues: list[GuidedNewAnalysisExecutionSubsetIssue] = []
+    warnings: list[GuidedNewAnalysisExecutionSubsetIssue] = []
+    info: list[GuidedNewAnalysisExecutionSubsetIssue] = [
+        _execution_subset_issue(
+            "execution_not_implemented",
+            "Final Guided Run/RunSpec is not implemented in this stage.",
+            severity="info",
+        )
+    ]
+
+    if not planning_readiness.plan_complete_for_handoff:
+        issues.append(_execution_subset_issue(
+            "incomplete_planning_readiness",
+            "Planning readiness is incomplete; first execution subset cannot be entered.",
+        ))
+        for planning_issue in planning_readiness.blocking_issues:
+            issues.append(_execution_subset_issue(
+                f"planning_{planning_issue.category}",
+                planning_issue.message,
+            ))
+
+    choices_by_roi = {choice.roi_id: choice for choice in plan.per_roi_correction_strategy_choices}
+    choice_counts_by_roi: dict[str, int] = {}
+    for choice in plan.per_roi_correction_strategy_choices:
+        choice_counts_by_roi[choice.roi_id] = choice_counts_by_roi.get(choice.roi_id, 0) + 1
+    included_choices = [
+        choices_by_roi[roi]
+        for roi in plan.included_roi_ids
+        if roi in choices_by_roi
+    ]
+    selected_strategies = [choice.selected_strategy for choice in included_choices]
+    unique_strategies = tuple(dict.fromkeys(selected_strategies))
+    allowed_dynamic_fit_strategy: str | None = None
+
+    if len(included_choices) != len(plan.included_roi_ids):
+        issues.append(_execution_subset_issue(
+            "missing_strategy_choice_for_execution_subset",
+            "Every included ROI must have one explicit strategy choice for the first execution subset.",
+        ))
+
+    for roi in plan.included_roi_ids:
+        if choice_counts_by_roi.get(roi, 0) > 1:
+            issues.append(_execution_subset_issue(
+                "duplicate_strategy_choice_for_execution_subset",
+                f"Included ROI '{roi}' has duplicate strategy choices; first subset requires exactly one choice per ROI.",
+            ))
+
+    for choice in included_choices:
+        if not choice.explicit_user_mark:
+            issues.append(_execution_subset_issue(
+                "non_explicit_strategy_choice",
+                f"Strategy choice for ROI '{choice.roi_id}' is not explicitly user-marked.",
+            ))
+        if choice.selected_strategy in FORBIDDEN_CORRECTION_STRATEGIES:
+            issues.append(_execution_subset_issue(
+                "forbidden_strategy_state",
+                f"Strategy '{choice.selected_strategy}' for ROI '{choice.roi_id}' is forbidden for execution.",
+            ))
+        elif choice.selected_strategy == "signal_only_f0":
+            issues.append(_execution_subset_issue(
+                "signal_only_f0_execution_not_supported",
+                "Signal-Only F0 remains planning/diagnostic only until applied-dF/F routing is designed.",
+            ))
+        elif choice.selected_strategy not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+            issues.append(_execution_subset_issue(
+                "unsupported_dynamic_fit_strategy_for_first_subset",
+                f"Strategy '{choice.selected_strategy}' is not supported by the first execution subset.",
+            ))
+
+    if len(unique_strategies) > 1:
+        issues.append(_execution_subset_issue(
+            "mixed_per_roi_strategies",
+            "Included ROIs use mixed correction strategies; first subset requires one shared dynamic-fit strategy.",
+        ))
+    elif len(unique_strategies) == 1 and unique_strategies[0] in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+        allowed_dynamic_fit_strategy = unique_strategies[0]
+
+    field_classifications = _execution_field_classifications(plan)
+    for field in field_classifications:
+        if field.blocks_subset:
+            issues.append(_execution_subset_issue(
+                field.issue_category or f"{field.field_name}_blocks_execution_subset",
+                f"Execution field '{field.field_name}' is {field.status}: {field.provenance}.",
+            ))
+
+    blocking = tuple(dict.fromkeys(issues))
+    first_subset_executable = not blocking
+    reason = (
+        "First execution subset is available for future executable preview; execution remains unavailable in this stage."
+        if first_subset_executable
+        else "; ".join(issue.category for issue in blocking)
+    )
+    return GuidedNewAnalysisExecutionSubsetReadiness(
+        subset_name=FIRST_EXECUTION_SUBSET_NAME,
+        subset_schema_version=EXECUTION_SUBSET_SCHEMA_VERSION,
+        first_subset_executable=first_subset_executable,
+        planning_complete_for_handoff=planning_readiness.plan_complete_for_handoff,
+        execution_available=False,
+        execution_blocked_reason=reason,
+        allowed_dynamic_fit_strategy=allowed_dynamic_fit_strategy,
+        blocking_issues=blocking,
+        warning_issues=tuple(warnings),
+        info_issues=tuple(info),
+        field_classifications=field_classifications,
     )
 
 
