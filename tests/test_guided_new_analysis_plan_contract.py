@@ -6,6 +6,8 @@ from photometry_pipeline.guided_new_analysis_plan import (
     GuidedPlanCorrectionChoice,
     GuidedPlanIssue,
     NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION,
+    RUN_PREVIEW_SCHEMA_VERSION,
+    build_guided_new_analysis_run_preview,
     evaluate_new_analysis_plan_issues,
     evaluate_new_analysis_plan_readiness,
 )
@@ -214,6 +216,102 @@ def test_readiness_warning_only_evidence_does_not_block_future_handoff():
 def test_readiness_category_map_contains_evidence_section():
     assert NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION["correction_preview_evidence_path_missing"] == "evidence_references"
     assert NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION["signal_only_f0_source_identity_missing"] == "evidence_references"
+
+
+def test_run_preview_returns_object_for_incomplete_plan_with_unresolved_items():
+    preview = build_guided_new_analysis_run_preview(GuidedNewAnalysisDraftPlan())
+
+    assert preview.preview_schema_version == RUN_PREVIEW_SCHEMA_VERSION
+    assert preview.readiness_snapshot["plan_complete_for_handoff"] is False
+    assert preview.execution_available is False
+    categories = {item.category for item in preview.unresolved_items}
+    assert "missing_input_source" in categories
+    assert "missing_diagnostic_cache" in categories
+    assert "missing_output_policy" in categories
+    assert preview.provenance["no_gui_runspec"] is True
+    assert preview.provenance["no_argv_generated"] is True
+    assert preview.provenance["no_config_written"] is True
+
+
+def test_run_preview_keeps_handoff_readiness_separate_from_execution_contract_unresolved_items():
+    plan = _complete_new_analysis_plan()
+    preview = build_guided_new_analysis_run_preview(plan)
+
+    assert preview.readiness_snapshot["plan_complete_for_handoff"] is True
+    assert preview.execution_available is False
+    categories = {item.category for item in preview.unresolved_items}
+    assert categories == {"per_roi_correction_execution_contract_unresolved"}
+    assert preview.correction_strategy["global_strategy_collapsed"] is False
+    assert preview.correction_strategy["per_roi_choices"][0]["selected_strategy"] == "global_linear_regression"
+    assert preview.output_policy["path"] == plan.output_policy_path
+    assert preview.output_policy["directory_created"] is False
+    assert preview.output_policy["files_written"] is False
+
+
+def test_run_preview_marks_signal_only_f0_production_routing_unresolved():
+    plan = _complete_new_analysis_plan(
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="signal_only_f0",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            )
+        ]
+    )
+
+    preview = build_guided_new_analysis_run_preview(plan)
+
+    assert preview.readiness_snapshot["plan_complete_for_handoff"] is True
+    categories = {item.category for item in preview.unresolved_items}
+    assert "per_roi_correction_execution_contract_unresolved" in categories
+    assert "signal_only_f0_production_routing_unresolved" in categories
+    assert preview.correction_strategy["per_roi_choices"][0]["selected_strategy"] == "signal_only_f0"
+
+
+def test_run_preview_uses_only_plan_fields_and_marks_missing_execution_fields_unresolved():
+    plan = _complete_new_analysis_plan(
+        input_source_path="C:/typed/raw",
+        resolved_input_source_path="C:/resolved/raw",
+        output_policy_path="C:/planned/future_output",
+        feature_event_values={"event_signal": "delta_f", "peak_threshold_method": "mean_std"},
+    )
+
+    preview = build_guided_new_analysis_run_preview(plan)
+
+    assert preview.source["input_source_path"] == "C:/typed/raw"
+    assert preview.source["resolved_input_source_path"] == "C:/resolved/raw"
+    assert preview.source["authoritative_input_source_path"] == "C:/resolved/raw"
+    assert preview.feature_event["values"] == {"event_signal": "delta_f", "peak_threshold_method": "mean_std"}
+    assert preview.acquisition["timeline_anchor_mode"]["status"] == "unresolved"
+    assert "timeline anchor mode" in preview.acquisition["timeline_anchor_mode"]["reason"]
+
+
+def test_run_preview_does_not_create_output_directory(tmp_path):
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_run_output"
+    plan = _complete_new_analysis_plan(output_policy_path=str(target))
+    before = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+
+    preview = build_guided_new_analysis_run_preview(plan)
+
+    after = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    assert after == before
+    assert not target.exists()
+    assert preview.output_policy["path"] == str(target)
+    assert preview.provenance["no_output_directory_created"] is True
+
+
+def test_run_preview_rejects_malformed_input():
+    with pytest.raises(TypeError, match="GuidedNewAnalysisDraftPlan"):
+        build_guided_new_analysis_run_preview(object())
 
 
 def test_feature_event_and_output_policy_missing_are_represented():

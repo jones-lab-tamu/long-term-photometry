@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 SCHEMA_VERSION = "guided_new_analysis_plan.v1"
+RUN_PREVIEW_SCHEMA_VERSION = "guided_new_analysis_run_preview.v1"
 SUPPORTED_INPUT_FORMATS = {"auto", "rwd", "npm", "custom_tabular"}
 SUPPORTED_ACQUISITION_MODES = {"intermittent", "continuous"}
 RUNNABLE_CORRECTION_STRATEGIES = {
@@ -49,6 +50,33 @@ class GuidedNewAnalysisReadiness:
     blocking_issues: tuple[GuidedPlanIssue, ...] = ()
     warning_issues: tuple[GuidedPlanIssue, ...] = ()
     info_issues: tuple[GuidedPlanIssue, ...] = ()
+
+
+@dataclass(frozen=True)
+class GuidedNewAnalysisRunPreviewIssue:
+    category: str
+    message: str
+    severity: str  # "blocking", "warning", "info"
+
+
+@dataclass(frozen=True)
+class GuidedNewAnalysisRunPreview:
+    preview_schema_version: str
+    plan_schema_version: str
+    source: dict[str, Any]
+    acquisition: dict[str, Any]
+    roi_selection: dict[str, Any]
+    diagnostic_cache: dict[str, Any]
+    correction_strategy: dict[str, Any]
+    evidence_references: dict[str, Any]
+    feature_event: dict[str, Any]
+    output_policy: dict[str, Any]
+    provenance: dict[str, Any]
+    readiness_snapshot: dict[str, Any]
+    unresolved_items: tuple[GuidedNewAnalysisRunPreviewIssue, ...] = ()
+    warnings: tuple[GuidedNewAnalysisRunPreviewIssue, ...] = ()
+    execution_available: bool = False
+    execution_blocked_reason: str = "Final Guided Run/RunSpec is not implemented in this stage."
 
 
 NEW_ANALYSIS_READINESS_SECTIONS: tuple[tuple[str, str], ...] = (
@@ -585,4 +613,198 @@ def evaluate_new_analysis_plan_readiness(plan: GuidedNewAnalysisDraftPlan) -> Gu
         blocking_issues=blocking_for_handoff,
         warning_issues=warning_issues,
         info_issues=info_issues,
+    )
+
+
+def _preview_issue_from_plan_issue(issue: GuidedPlanIssue) -> GuidedNewAnalysisRunPreviewIssue:
+    return GuidedNewAnalysisRunPreviewIssue(
+        category=issue.category,
+        message=issue.message,
+        severity=issue.severity,
+    )
+
+
+def _section_snapshot(section: GuidedNewAnalysisSectionReadiness) -> dict[str, Any]:
+    return {
+        "key": section.key,
+        "label": section.label,
+        "status": section.status,
+        "blocking_categories": [issue.category for issue in section.blocking_issues],
+        "warning_categories": [issue.category for issue in section.warning_issues],
+        "info_categories": [issue.category for issue in section.info_issues],
+    }
+
+
+def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> GuidedNewAnalysisRunPreview:
+    """Build a pure, non-executing preview contract from Guided new_analysis plan state.
+
+    This function does not create directories, write files, generate argv, instantiate
+    GUI RunSpec, inspect widgets, or read the filesystem. Ordinary incomplete plans
+    still return a preview with unresolved_items populated.
+    """
+    if not isinstance(plan, GuidedNewAnalysisDraftPlan):
+        raise TypeError("plan must be a GuidedNewAnalysisDraftPlan")
+
+    readiness = evaluate_new_analysis_plan_readiness(plan)
+    unresolved: list[GuidedNewAnalysisRunPreviewIssue] = [
+        _preview_issue_from_plan_issue(issue) for issue in readiness.blocking_issues
+    ]
+    warnings: list[GuidedNewAnalysisRunPreviewIssue] = [
+        _preview_issue_from_plan_issue(issue) for issue in readiness.warning_issues
+    ]
+
+    choices = tuple(plan.per_roi_correction_strategy_choices)
+    if choices:
+        unresolved.append(GuidedNewAnalysisRunPreviewIssue(
+            category="per_roi_correction_execution_contract_unresolved",
+            message=(
+                "Per-ROI correction strategy execution mapping is not implemented; "
+                "preview preserves choices without collapsing them to a global strategy."
+            ),
+            severity="blocking",
+        ))
+    if any(choice.selected_strategy == "signal_only_f0" for choice in choices):
+        unresolved.append(GuidedNewAnalysisRunPreviewIssue(
+            category="signal_only_f0_production_routing_unresolved",
+            message="Signal-Only F0 production routing is not implemented for Guided new_analysis.",
+            severity="blocking",
+        ))
+
+    fixed_contract_defaults = {
+        "execution_available": False,
+        "execution_backend": "unavailable_in_this_stage",
+    }
+
+    return GuidedNewAnalysisRunPreview(
+        preview_schema_version=RUN_PREVIEW_SCHEMA_VERSION,
+        plan_schema_version=plan.schema_version,
+        source={
+            "input_source_path": plan.input_source_path,
+            "resolved_input_source_path": plan.resolved_input_source_path,
+            "authoritative_input_source_path": plan.resolved_input_source_path or plan.input_source_path,
+            "input_format": plan.input_format,
+        },
+        acquisition={
+            "acquisition_mode": plan.acquisition_mode,
+            "sessions_per_hour": plan.sessions_per_hour,
+            "session_duration_sec": plan.session_duration_sec,
+            "continuous_window_sec": plan.continuous_window_sec,
+            "continuous_step_sec": plan.continuous_step_sec,
+            "allow_partial_final_window": plan.allow_partial_final_window,
+            "exclude_incomplete_final_rwd_chunk": plan.exclude_incomplete_final_rwd_chunk,
+            "acquisition_structure_status": plan.acquisition_structure_status,
+            "timeline_anchor_mode": {
+                "status": "unresolved",
+                "reason": "GuidedNewAnalysisDraftPlan does not represent timeline anchor mode.",
+            },
+        },
+        roi_selection={
+            "discovered_roi_ids": list(plan.discovered_roi_ids),
+            "included_roi_ids": list(plan.included_roi_ids),
+            "excluded_roi_ids": list(plan.excluded_roi_ids),
+            "execution_roi_filter": {
+                "mode": "include",
+                "roi_ids": list(plan.included_roi_ids),
+            },
+        },
+        diagnostic_cache={
+            "cache_id": plan.cache_id,
+            "cache_root_path": plan.cache_root_path,
+            "artifact_record_path": plan.artifact_record_path,
+            "request_json_path": plan.request_json_path,
+            "provenance_path": plan.provenance_path,
+            "phasic_trace_cache_path": plan.phasic_trace_cache_path,
+            "config_used_path": plan.config_used_path,
+            "source_setup_signature": plan.source_setup_signature,
+            "diagnostic_scope_signature": plan.diagnostic_scope_signature,
+            "build_request_signature": plan.build_request_signature,
+            "stale_or_current": plan.stale_or_current,
+            "stale_reasons": list(plan.stale_reasons),
+            "execution_consumes_cache_artifacts": False,
+        },
+        correction_strategy={
+            "per_roi_choices": [
+                {
+                    "roi_id": choice.roi_id,
+                    "selected_strategy": choice.selected_strategy,
+                    "source_type": choice.source_type,
+                    "diagnostic_cache_id": choice.diagnostic_cache_id,
+                    "diagnostic_cache_root": choice.diagnostic_cache_root,
+                    "diagnostic_cache_signature": choice.diagnostic_cache_signature,
+                    "source_setup_signature": choice.source_setup_signature,
+                    "diagnostic_scope_signature": choice.diagnostic_scope_signature,
+                    "build_request_signature": choice.build_request_signature,
+                    "evidence_chunk": choice.evidence_chunk,
+                    "evidence_summary": choice.evidence_summary,
+                    "current_or_stale": choice.current_or_stale,
+                    "explicit_user_mark": choice.explicit_user_mark,
+                    "selected_at_utc": choice.selected_at_utc,
+                }
+                for choice in choices
+            ],
+            "execution_mapping_status": "unresolved" if choices else "no_choices",
+            "global_strategy_collapsed": False,
+        },
+        evidence_references={
+            "correction_preview": {
+                "result_id": plan.correction_preview_result_id,
+                "path": plan.correction_preview_path,
+                "status": plan.correction_preview_status,
+                "source_cache_id": plan.correction_preview_source_cache_id,
+            },
+            "signal_only_f0": {
+                "result_id": plan.signal_only_f0_result_id,
+                "path": plan.signal_only_f0_path,
+                "status": plan.signal_only_f0_status,
+                "source_cache_id": plan.signal_only_f0_source_cache_id,
+            },
+            "selected_evidence_context": dict(plan.selected_evidence_context),
+            "execution_input": False,
+        },
+        feature_event={
+            "status": plan.feature_event_profile_status,
+            "profile_id": plan.feature_event_profile_id,
+            "values": dict(plan.feature_event_values),
+            "validation_issues": list(plan.feature_event_validation_issues),
+            "stale_reasons": list(plan.feature_event_stale_reasons),
+            "explicitly_applied": plan.feature_event_explicitly_applied,
+            "baseline_config_source": plan.feature_event_baseline_config_source,
+            "baseline_status": plan.feature_event_baseline_status,
+            "updated_at_utc": plan.feature_event_updated_at_utc,
+        },
+        output_policy={
+            "status": plan.output_policy_status,
+            "path": plan.output_policy_path,
+            "validation_issues": list(plan.output_policy_validation_issues),
+            "stale_reasons": list(plan.output_policy_stale_reasons),
+            "updated_at_utc": plan.output_policy_updated_at_utc,
+            "explicitly_applied": plan.output_policy_explicitly_applied,
+            "safety_summary": plan.output_policy_safety_summary,
+            "directory_created": False,
+            "files_written": False,
+        },
+        provenance={
+            "plan_created_at_utc": plan.created_at_utc,
+            "plan_updated_at_utc": plan.updated_at_utc,
+            "production_analysis": plan.production_analysis,
+            "preliminary_cache": plan.preliminary_cache,
+            "fixed_contract_defaults": fixed_contract_defaults,
+            "no_gui_runspec": True,
+            "no_argv_generated": True,
+            "no_config_written": True,
+            "no_output_directory_created": True,
+        },
+        readiness_snapshot={
+            "plan_complete_for_handoff": readiness.plan_complete_for_handoff,
+            "execution_available": readiness.execution_available,
+            "execution_blocked_reason": readiness.execution_blocked_reason,
+            "sections": [_section_snapshot(section) for section in readiness.sections],
+            "blocking_categories": [issue.category for issue in readiness.blocking_issues],
+            "warning_categories": [issue.category for issue in readiness.warning_issues],
+            "info_categories": [issue.category for issue in readiness.info_issues],
+        },
+        unresolved_items=tuple(unresolved),
+        warnings=tuple(warnings),
+        execution_available=False,
+        execution_blocked_reason=readiness.execution_blocked_reason,
     )
