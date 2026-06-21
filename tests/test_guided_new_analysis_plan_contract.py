@@ -412,6 +412,27 @@ def test_run_preview_keeps_handoff_readiness_separate_from_execution_contract_un
     assert preview.execution_intent["execution_mode"] == "phasic"
     assert preview.execution_intent["run_profile"] == "full"
     assert preview.execution_intent["execution_consumption_enabled"] is True
+    assert preview.feature_event_consumption == {
+        "execution_mode": "phasic",
+        "run_profile": "full",
+        "traces_only": False,
+        "feature_event_profile_required": True,
+        "feature_event_profile_current_applied": True,
+        "feature_event_values_consumed": True,
+        "feature_extraction_in_scope": True,
+        "feature_dependent_phasic_summaries_in_scope": True,
+        "tonic_outputs_in_scope": False,
+        "full_both_mode_outputs_in_scope": False,
+        "execution_consumption_enabled": True,
+        "provenance": (
+            "first subset phasic full execution preview includes phasic feature extraction "
+            "and feature-dependent summaries"
+        ),
+        "no_runspec": True,
+        "no_argv": True,
+        "no_config_written": True,
+        "no_files_written": True,
+    }
     assert preview.output_creation_policy["path_role"] == "output_base"
     assert preview.output_creation_policy["creation_timing"] == "future_execution_start_only"
     assert preview.output_creation_policy["run_directory_strategy"] == "derive_unique_run_id_under_output_base"
@@ -533,6 +554,73 @@ def test_run_preview_uses_only_plan_fields_and_marks_missing_execution_fields_un
     assert preview.acquisition["timeline_anchor_mode"]["source"] == "GuidedNewAnalysisDraftPlan.execution_intent"
 
 
+def test_run_preview_feature_event_consumption_contract_requires_current_applied_profile():
+    plan = _complete_new_analysis_plan(
+        feature_event_profile_status="default_initialized",
+        feature_event_explicitly_applied=False,
+    )
+
+    readiness = evaluate_new_analysis_plan_readiness(plan)
+    preview = build_guided_new_analysis_run_preview(plan)
+    categories = {issue.category for issue in readiness.blocking_issues}
+
+    assert "feature_event_profile_not_applied" in categories
+    assert preview.feature_event_consumption["execution_mode"] == "phasic"
+    assert preview.feature_event_consumption["run_profile"] == "full"
+    assert preview.feature_event_consumption["traces_only"] is False
+    assert preview.feature_event_consumption["feature_event_profile_required"] is True
+    assert preview.feature_event_consumption["feature_event_profile_current_applied"] is False
+    assert preview.feature_event_consumption["feature_event_values_consumed"] is False
+    assert preview.feature_event_consumption["feature_extraction_in_scope"] is True
+    assert preview.feature_event_consumption["feature_dependent_phasic_summaries_in_scope"] is True
+    assert preview.feature_event_consumption["tonic_outputs_in_scope"] is False
+    assert preview.feature_event_consumption["full_both_mode_outputs_in_scope"] is False
+    assert preview.feature_event_consumption["execution_consumption_enabled"] is False
+    assert preview.execution_available is False
+
+
+@pytest.mark.parametrize(
+    ("overrides", "category"),
+    [
+        ({"feature_event_profile_status": "missing"}, "missing_feature_event_profile"),
+        (
+            {
+                "feature_event_profile_status": "invalid",
+                "feature_event_validation_issues": ["bad threshold"],
+            },
+            "invalid_feature_event_profile",
+        ),
+        (
+            {
+                "feature_event_profile_status": "stale",
+                "feature_event_stale_reasons": ["baseline changed"],
+            },
+            "stale_feature_event_profile",
+        ),
+        (
+            {
+                "feature_event_profile_status": "applied",
+                "feature_event_explicitly_applied": False,
+            },
+            "feature_event_profile_not_applied",
+        ),
+    ],
+)
+def test_feature_event_non_current_states_still_block_first_subset_preview_contract(overrides, category):
+    plan = _complete_new_analysis_plan(**overrides)
+
+    readiness = evaluate_new_analysis_plan_readiness(plan)
+    preview = build_guided_new_analysis_run_preview(plan)
+    categories = {issue.category for issue in readiness.blocking_issues}
+
+    assert category in categories
+    assert preview.feature_event_consumption["feature_event_profile_required"] is True
+    assert preview.feature_event_consumption["feature_event_profile_current_applied"] is False
+    assert preview.feature_event_consumption["feature_event_values_consumed"] is False
+    assert preview.feature_event_consumption["execution_consumption_enabled"] is False
+    assert preview.execution_available is False
+
+
 def test_run_preview_does_not_create_output_directory(tmp_path):
     parent = tmp_path / "planned_outputs"
     parent.mkdir()
@@ -599,11 +687,17 @@ def test_execution_subset_rwd_current_applied_snapshot_satisfies_rwd_dataset_con
     assert fields["dataset_contract_snapshot"].blocks_subset is False
     assert fields["dataset_contract_overrides"].status == "present"
     assert fields["dataset_contract_overrides"].blocks_subset is False
+    preview = build_guided_new_analysis_run_preview(plan)
+
     assert "missing_rwd_dataset_contract" not in categories
     assert "missing_timeline_anchor_mode" not in categories
     assert "missing_execution_mode" not in categories
     assert "missing_run_profile" not in categories
     assert "missing_output_creation_policy" not in categories
+    assert preview.feature_event_consumption["execution_mode"] == "phasic"
+    assert preview.feature_event_consumption["run_profile"] == "full"
+    assert preview.feature_event_consumption["traces_only"] is False
+    assert preview.feature_event_consumption["feature_event_values_consumed"] is True
     assert readiness.first_subset_executable is True
     assert readiness.execution_available is False
     assert "actual execution remains unavailable" in readiness.execution_blocked_reason

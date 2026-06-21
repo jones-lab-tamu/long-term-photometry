@@ -5948,6 +5948,7 @@ class MainWindow(QMainWindow):
         diagnostic_cache = preview.diagnostic_cache or {}
         correction_strategy = preview.correction_strategy or {}
         feature_event = preview.feature_event or {}
+        feature_event_consumption = preview.feature_event_consumption or {}
         output_policy = preview.output_policy or {}
         output_creation_policy = preview.output_creation_policy or {}
         readiness = preview.readiness_snapshot or {}
@@ -6021,6 +6022,30 @@ class MainWindow(QMainWindow):
         lines.extend([
             f"Feature/event: {feature_event.get('status') or 'unknown'}"
             + (f" ({feature_event.get('profile_id')})" if feature_event.get("profile_id") else ""),
+            "Feature/event consumption:",
+            f"  execution_mode: {feature_event_consumption.get('execution_mode') or 'none'}",
+            f"  run_profile: {feature_event_consumption.get('run_profile') or 'none'}",
+            f"  traces_only: {str(bool(feature_event_consumption.get('traces_only'))).lower()}",
+            "  feature_event_profile_required: "
+            + str(bool(feature_event_consumption.get("feature_event_profile_required"))).lower(),
+            "  feature_event_profile_current_applied: "
+            + str(bool(feature_event_consumption.get("feature_event_profile_current_applied"))).lower(),
+            "  feature_event_values_consumed: "
+            + str(bool(feature_event_consumption.get("feature_event_values_consumed"))).lower(),
+            "  feature_extraction_in_scope: "
+            + str(bool(feature_event_consumption.get("feature_extraction_in_scope"))).lower(),
+            "  feature_dependent_phasic_summaries_in_scope: "
+            + str(bool(feature_event_consumption.get("feature_dependent_phasic_summaries_in_scope"))).lower(),
+            "  tonic_outputs_in_scope: "
+            + str(bool(feature_event_consumption.get("tonic_outputs_in_scope"))).lower(),
+            "  full_both_mode_outputs_in_scope: "
+            + str(bool(feature_event_consumption.get("full_both_mode_outputs_in_scope"))).lower(),
+            "  execution consumption: "
+            + (
+                "enabled for first-subset readiness classification"
+                if feature_event_consumption.get("execution_consumption_enabled")
+                else "not enabled until feature/event profile is applied and current"
+            ),
             f"Output destination: {self._display_path(str(output_policy.get('path') or '')) if output_policy.get('path') else 'none'}",
             f"Output policy status: {output_policy.get('status') or 'unknown'}",
             "Output creation policy:",

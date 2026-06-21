@@ -506,6 +506,7 @@ def test_new_analysis_run_preview_keeps_existing_sections_with_dataset_contract(
     assert "Included ROIs:" in preview_text
     assert "Correction strategies:" in preview_text
     assert "Feature/event:" in preview_text
+    assert "Feature/event consumption:" in preview_text
     assert "Output policy status:" in preview_text
     assert "Output creation policy:" in preview_text
     assert "Diagnostic cache:" in preview_text
@@ -530,6 +531,17 @@ def test_new_analysis_run_preview_displays_execution_intent_and_output_creation_
     assert "execution_mode: phasic" in preview_text
     assert "run_profile: full" in preview_text
     assert "execution consumption: enabled for first-subset readiness classification" in preview_text
+    assert "Feature/event consumption:" in preview_text
+    assert "  execution_mode: phasic" in preview_text
+    assert "  run_profile: full" in preview_text
+    assert "  traces_only: false" in preview_text
+    assert "  feature_event_profile_required: true" in preview_text
+    assert "  feature_event_profile_current_applied: true" in preview_text
+    assert "  feature_event_values_consumed: true" in preview_text
+    assert "  feature_extraction_in_scope: true" in preview_text
+    assert "  feature_dependent_phasic_summaries_in_scope: true" in preview_text
+    assert "  tonic_outputs_in_scope: false" in preview_text
+    assert "  full_both_mode_outputs_in_scope: false" in preview_text
     assert "Output creation policy:" in preview_text
     assert "path_role: output_base" in preview_text
     assert "creation_timing: future_execution_start_only" in preview_text
@@ -540,6 +552,73 @@ def test_new_analysis_run_preview_displays_execution_intent_and_output_creation_
     assert "gui_preflight_writes_enabled: false" in preview_text
     assert "ready to run" not in preview_text.lower()
     assert "execution-ready" not in preview_text.lower()
+    assert "runnable" not in preview_text.lower()
+    assert "RunSpec generated" not in preview_text
+    assert "config generated" not in preview_text
+    assert "output folder created" not in preview_text
+
+
+def test_new_analysis_run_preview_feature_event_consumption_requires_applied_profile(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._guided_new_analysis_feature_event_profile_status = "default_initialized"
+    window._guided_new_analysis_feature_event_profile_errors = []
+    window._guided_new_analysis_feature_event_profile_stale_reasons = []
+    window._guided_new_analysis_feature_event_profile_explicitly_applied = False
+    window._refresh_guided_draft_run_plan_preview()
+
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert "feature_event_profile_not_applied" in preview_text
+    assert "Feature/event consumption:" in preview_text
+    assert "  execution_mode: phasic" in preview_text
+    assert "  run_profile: full" in preview_text
+    assert "  traces_only: false" in preview_text
+    assert "  feature_event_profile_required: true" in preview_text
+    assert "  feature_event_profile_current_applied: false" in preview_text
+    assert "  feature_event_values_consumed: false" in preview_text
+    assert "  feature_extraction_in_scope: true" in preview_text
+    assert "  feature_dependent_phasic_summaries_in_scope: true" in preview_text
+    assert "  execution consumption: not enabled until feature/event profile is applied and current" in preview_text
+    assert "Execution unavailable" in preview_text
+    assert "ready to run" not in preview_text.lower()
+    assert "execution-ready" not in preview_text.lower()
+    assert "runnable" not in preview_text.lower()
+
+
+@pytest.mark.parametrize(
+    ("status", "issues_attr", "issues", "expected_category"),
+    [
+        ("invalid", "_guided_new_analysis_feature_event_profile_errors", ["bad threshold"], "invalid_feature_event_profile"),
+        ("stale", "_guided_new_analysis_feature_event_profile_stale_reasons", ["baseline changed"], "stale_feature_event_profile"),
+    ],
+)
+def test_new_analysis_run_preview_feature_event_invalid_or_stale_blocks_consumption(
+    window,
+    tmp_path,
+    monkeypatch,
+    status,
+    issues_attr,
+    issues,
+    expected_category,
+):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._guided_new_analysis_feature_event_profile_status = status
+    setattr(window, issues_attr, issues)
+    window._refresh_guided_draft_run_plan_preview()
+
+    preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    assert expected_category in preview_text
+    assert "Feature/event consumption:" in preview_text
+    assert "  feature_event_profile_required: true" in preview_text
+    assert "  feature_event_profile_current_applied: false" in preview_text
+    assert "  feature_event_values_consumed: false" in preview_text
+    assert "  execution consumption: not enabled until feature/event profile is applied and current" in preview_text
+    assert "Execution unavailable" in preview_text
 
 
 def test_new_analysis_draft_plan_reports_choices_as_current_after_build_and_mark(window, tmp_path, monkeypatch):
@@ -707,11 +786,20 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "missing_run_profile" not in preview_text
     assert "missing_output_creation_policy" not in preview_text
     assert "first_subset_executable: true" in preview_text
+    assert "Feature/event consumption:" in preview_text
+    assert "  feature_event_profile_current_applied: true" in preview_text
+    assert "  feature_event_values_consumed: true" in preview_text
+    assert "  feature_extraction_in_scope: true" in preview_text
+    assert "  feature_dependent_phasic_summaries_in_scope: true" in preview_text
     assert "status: complete for future execution-spec preview; actual execution remains unavailable" in preview_text
     assert "execution_available: false" in preview_text
     assert "ready to run" not in preview_text.lower()
     assert "ready for execution" not in preview_text.lower()
     assert "execution-ready" not in preview_text.lower()
+    assert "runnable" not in preview_text.lower()
+    assert "RunSpec generated" not in preview_text
+    assert "config generated" not in preview_text
+    assert "output folder created" not in preview_text
 
 
 def test_new_analysis_run_preview_stale_dataset_contract_keeps_dataset_blocker(

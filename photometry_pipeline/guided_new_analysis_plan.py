@@ -97,6 +97,7 @@ class GuidedNewAnalysisRunPreview:
     correction_strategy: dict[str, Any]
     evidence_references: dict[str, Any]
     feature_event: dict[str, Any]
+    feature_event_consumption: dict[str, Any]
     output_policy: dict[str, Any]
     output_creation_policy: dict[str, Any]
     provenance: dict[str, Any]
@@ -1524,6 +1525,47 @@ def _output_creation_policy_preview_dict(
     }
 
 
+def _feature_event_profile_current_for_first_subset(plan: GuidedNewAnalysisDraftPlan) -> bool:
+    return (
+        plan.feature_event_profile_status == "applied"
+        and bool(plan.feature_event_explicitly_applied)
+        and not plan.feature_event_validation_issues
+        and not plan.feature_event_stale_reasons
+    )
+
+
+def _feature_event_consumption_preview_dict(plan: GuidedNewAnalysisDraftPlan) -> dict[str, Any]:
+    traces_only = False
+    first_subset_contract = (
+        plan.execution_intent.execution_mode == "phasic"
+        and plan.execution_intent.run_profile == "full"
+        and traces_only is False
+    )
+    current_profile = _feature_event_profile_current_for_first_subset(plan)
+    consumption_enabled = bool(first_subset_contract and current_profile)
+    return {
+        "execution_mode": plan.execution_intent.execution_mode,
+        "run_profile": plan.execution_intent.run_profile,
+        "traces_only": traces_only,
+        "feature_event_profile_required": True,
+        "feature_event_profile_current_applied": current_profile,
+        "feature_event_values_consumed": consumption_enabled,
+        "feature_extraction_in_scope": bool(first_subset_contract),
+        "feature_dependent_phasic_summaries_in_scope": bool(first_subset_contract),
+        "tonic_outputs_in_scope": False,
+        "full_both_mode_outputs_in_scope": False,
+        "execution_consumption_enabled": consumption_enabled,
+        "provenance": (
+            "first subset phasic full execution preview includes phasic feature extraction "
+            "and feature-dependent summaries"
+        ),
+        "no_runspec": True,
+        "no_argv": True,
+        "no_config_written": True,
+        "no_files_written": True,
+    }
+
+
 def _section_snapshot(section: GuidedNewAnalysisSectionReadiness) -> dict[str, Any]:
     return {
         "key": section.key,
@@ -1765,6 +1807,7 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
             "baseline_status": plan.feature_event_baseline_status,
             "updated_at_utc": plan.feature_event_updated_at_utc,
         },
+        feature_event_consumption=_feature_event_consumption_preview_dict(plan),
         output_policy={
             "status": plan.output_policy_status,
             "path": plan.output_policy_path,
