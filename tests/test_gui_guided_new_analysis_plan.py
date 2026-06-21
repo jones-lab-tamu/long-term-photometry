@@ -511,6 +511,11 @@ def test_new_analysis_run_preview_keeps_existing_sections_with_dataset_contract(
     assert "Output creation policy:" in preview_text
     assert "Diagnostic cache:" in preview_text
     assert "First execution subset:" in preview_text
+    assert "Guided execution-spec preview:" in preview_text
+    assert "backend_mapping_status: preview_only_not_mapped_to_RunSpec" in preview_text
+    assert "dynamic_fit_parameter_contract:" in preview_text
+    assert "backend_config_mapping_status: label_and_parameters_ready_for_future_mapping" in preview_text
+    assert "output: no directories or files created" in preview_text
     assert "Execution: unavailable" in preview_text
     assert "No files or directories were created." in preview_text
     assert "This preview is read-only and non-executing." in preview_text
@@ -792,6 +797,17 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "  feature_extraction_in_scope: true" in preview_text
     assert "  feature_dependent_phasic_summaries_in_scope: true" in preview_text
     assert "status: complete for future execution-spec preview; actual execution remains unavailable" in preview_text
+    assert "Guided execution-spec preview:" in preview_text
+    assert "spec_preview_available: true" in preview_text
+    assert "first_subset_executable: true" in preview_text
+    assert "backend_mapping_status: preview_only_not_mapped_to_RunSpec" in preview_text
+    assert "dynamic_fit_parameter_contract:" in preview_text
+    assert "dynamic_fit_mode: global_linear_regression" in preview_text
+    assert "selected_strategy: global_linear_regression" in preview_text
+    assert "active_parameter_set: global_linear_regression" in preview_text
+    assert "backend_config_mapping_status: label_and_parameters_ready_for_future_mapping" in preview_text
+    assert "output: no directories or files created" in preview_text
+    assert "blockers: none" in preview_text
     assert "execution_available: false" in preview_text
     assert "ready to run" not in preview_text.lower()
     assert "ready for execution" not in preview_text.lower()
@@ -861,9 +877,17 @@ def test_new_analysis_run_preview_complete_plan_keeps_execution_unavailable(wind
     assert "missing_run_profile" not in preview_text
     assert "missing_output_creation_policy" not in preview_text
     assert "Execution unavailable" in preview_text
+    assert "Guided execution-spec preview:" in preview_text
+    assert "spec_preview_available: false" in preview_text
+    assert "first_subset_executable: false" in preview_text
+    assert "dynamic_fit_parameter_contract:" in preview_text
     assert "ready to run" not in preview_text.lower()
     assert "ready for execution" not in preview_text.lower()
     assert "execution-ready" not in preview_text.lower()
+    assert "runnable" not in preview_text.lower()
+    assert "RunSpec generated" not in preview_text
+    assert "config generated" not in preview_text
+    assert "output folder created" not in preview_text
 
 
 def test_new_analysis_run_preview_signal_only_f0_unresolved_routing(window, tmp_path, monkeypatch):

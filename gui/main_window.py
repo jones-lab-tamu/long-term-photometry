@@ -5163,12 +5163,14 @@ class MainWindow(QMainWindow):
             self._refresh_guided_new_analysis_dataset_contract_staleness()
             plan = self._build_guided_new_analysis_draft_plan()
             from photometry_pipeline.guided_new_analysis_plan import (
+                build_guided_new_analysis_execution_spec_preview,
                 build_guided_new_analysis_run_preview,
                 evaluate_guided_new_analysis_execution_subset_readiness,
                 evaluate_new_analysis_plan_readiness,
             )
             readiness = evaluate_new_analysis_plan_readiness(plan)
             run_preview = build_guided_new_analysis_run_preview(plan)
+            execution_spec_preview = build_guided_new_analysis_execution_spec_preview(plan)
             subset_readiness = evaluate_guided_new_analysis_execution_subset_readiness(plan)
             label.setText(self._guided_new_analysis_draft_plan_summary_text(plan, readiness))
             label.setToolTip("")
@@ -5182,7 +5184,11 @@ class MainWindow(QMainWindow):
             run_preview_label = getattr(self, "_guided_new_analysis_run_preview_label", None)
             if run_preview_label is not None:
                 run_preview_label.setText(
-                    self._guided_new_analysis_run_preview_text(run_preview, subset_readiness)
+                    self._guided_new_analysis_run_preview_text(
+                        run_preview,
+                        subset_readiness,
+                        execution_spec_preview,
+                    )
                 )
                 run_preview_label.setToolTip("")
             run_preview_group = getattr(self, "_guided_new_analysis_run_preview_group", None)
@@ -5939,7 +5945,7 @@ class MainWindow(QMainWindow):
             lines.append("Execution-field classifications: none")
         return lines
 
-    def _guided_new_analysis_run_preview_text(self, preview, subset_readiness=None) -> str:
+    def _guided_new_analysis_run_preview_text(self, preview, subset_readiness=None, execution_spec_preview=None) -> str:
         source = preview.source or {}
         acquisition = preview.acquisition or {}
         execution_intent = preview.execution_intent or {}
@@ -6084,6 +6090,37 @@ class MainWindow(QMainWindow):
 
         if subset_readiness is not None:
             lines.extend(self._guided_new_analysis_execution_subset_text(subset_readiness))
+
+        if execution_spec_preview is not None:
+            output = execution_spec_preview.output or {}
+            correction = execution_spec_preview.correction or {}
+            dyn_contract = correction.get("dynamic_fit_parameter_contract") or {}
+            lines.extend([
+                "Guided execution-spec preview:",
+                f"  spec_preview_available: {str(bool(execution_spec_preview.spec_preview_available)).lower()}",
+                f"  first_subset_executable: {str(bool(execution_spec_preview.first_subset_executable)).lower()}",
+                f"  execution_available: {str(bool(execution_spec_preview.execution_available)).lower()}",
+                f"  backend_mapping_status: {execution_spec_preview.backend_mapping_status}",
+                "  dynamic_fit_parameter_contract:",
+                f"    dynamic_fit_mode: {dyn_contract.get('dynamic_fit_mode') or 'none'}",
+                f"    selected_strategy: {dyn_contract.get('selected_strategy') or 'none'}",
+                f"    active_parameter_set: {dyn_contract.get('active_parameter_set') or 'none'}",
+                f"    backend_config_mapping_status: {dyn_contract.get('backend_config_mapping_status') or 'none'}",
+                "  output: no directories or files created",
+                "  output_base: "
+                + (
+                    self._display_path(str(output.get("output_base") or ""))
+                    if output.get("output_base")
+                    else "none"
+                ),
+            ])
+            if execution_spec_preview.blocking_issue_categories:
+                lines.append(
+                    "  blockers: "
+                    + "; ".join(str(category) for category in execution_spec_preview.blocking_issue_categories)
+                )
+            else:
+                lines.append("  blockers: none")
 
         lines.append("No files or directories were created.")
         lines.append("This preview is read-only and non-executing.")

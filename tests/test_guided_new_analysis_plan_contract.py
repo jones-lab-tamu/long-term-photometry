@@ -3,21 +3,30 @@
 import dataclasses
 
 import pytest
+from photometry_pipeline.config import Config
 from photometry_pipeline.guided_new_analysis_plan import (
+    BACKEND_DYNAMIC_FIT_DEFAULT_FIELD_MAP,
+    BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+    BACKEND_DYNAMIC_FIT_DEFAULT_SOURCE,
     DATASET_CONTRACT_SNAPSHOT_SCHEMA_VERSION,
+    DYNAMIC_FIT_PARAMETER_CONTRACT_SCHEMA_VERSION,
+    EXECUTION_SPEC_PREVIEW_SCHEMA_VERSION,
     EXECUTION_INTENT_SCHEMA_VERSION,
     OUTPUT_CREATION_POLICY_SCHEMA_VERSION,
     FIRST_EXECUTION_SUBSET_NAME,
     GuidedNewAnalysisDatasetContractSnapshot,
     GuidedNewAnalysisDatasetContractSourceIdentity,
     GuidedNewAnalysisDraftPlan,
+    GuidedNewAnalysisDynamicFitParameterContract,
     GuidedNewAnalysisExecutionIntent,
     GuidedNewAnalysisOutputCreationPolicy,
     GuidedPlanCorrectionChoice,
     GuidedPlanIssue,
     NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION,
     RUN_PREVIEW_SCHEMA_VERSION,
+    build_guided_new_analysis_execution_spec_preview,
     build_guided_new_analysis_run_preview,
+    canonical_dynamic_fit_backend_defaults,
     evaluate_guided_new_analysis_execution_subset_readiness,
     evaluate_new_analysis_plan_issues,
     evaluate_new_analysis_plan_readiness,
@@ -230,6 +239,49 @@ def test_output_creation_policy_can_represent_unsafe_state_for_readiness_refusal
     assert policy.overwrite is True
     assert policy.precreate_during_preview is True
     assert policy.gui_preflight_writes_enabled is True
+
+
+def test_dynamic_fit_parameter_contract_defaults_are_mechanically_derived_from_backend_config():
+    cfg = Config()
+    backend_defaults = canonical_dynamic_fit_backend_defaults()
+    contract = GuidedNewAnalysisDynamicFitParameterContract()
+
+    assert contract.schema_version == DYNAMIC_FIT_PARAMETER_CONTRACT_SCHEMA_VERSION
+    assert BACKEND_DYNAMIC_FIT_DEFAULT_SOURCE == "photometry_pipeline.config.Config"
+    assert backend_defaults == {
+        contract_field: getattr(cfg, config_field)
+        for contract_field, config_field in BACKEND_DYNAMIC_FIT_DEFAULT_FIELD_MAP.items()
+    }
+
+    # The first subset uses an explicit model default strategy label. It is not
+    # falsely claimed as a backend Config mirror.
+    assert backend_defaults["dynamic_fit_mode"] == "robust_global_event_reject"
+    assert contract.dynamic_fit_mode == "global_linear_regression"
+    assert "not mirrored from backend Config dynamic_fit_mode" in contract.provenance["dynamic_fit_mode"]
+    assert contract.provenance["backend_config_dynamic_fit_mode"] == backend_defaults["dynamic_fit_mode"]
+
+    mirrored_contract_fields = tuple(
+        field for field in BACKEND_DYNAMIC_FIT_DEFAULT_FIELD_MAP
+        if field != "dynamic_fit_mode"
+    )
+    for field in mirrored_contract_fields:
+        assert getattr(contract, field) == backend_defaults[field]
+        assert contract.provenance[field] == BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE
+
+    assert contract.unresolved_parameters == ()
+    assert contract.provenance["no_runspec"] is True
+    assert contract.provenance["no_argv"] is True
+    assert contract.provenance["no_config_written"] is True
+    assert contract.provenance["no_files_written"] is True
+
+
+def test_dynamic_fit_parameter_contract_rejects_invalid_values():
+    with pytest.raises(ValueError, match="Unsupported dynamic_fit_mode"):
+        GuidedNewAnalysisDynamicFitParameterContract(dynamic_fit_mode="rolling_local_regression")
+    with pytest.raises(ValueError, match="Unsupported dynamic_fit slope_constraint"):
+        GuidedNewAnalysisDynamicFitParameterContract(slope_constraint="bad")
+    with pytest.raises(ValueError, match="robust_event_reject_max_iters"):
+        GuidedNewAnalysisDynamicFitParameterContract(robust_event_reject_max_iters=0)
 
 
 def test_missing_input_produces_issue():
@@ -1278,6 +1330,12 @@ def test_execution_subset_fixed_defaults_are_reported_as_provenance():
     assert fields["run_profile"].blocks_subset is False
     assert fields["output_creation_policy"].status == "present"
     assert fields["output_creation_policy"].blocks_subset is False
+    assert fields["dynamic_fit_parameter_contract"].status == "present"
+    assert fields["dynamic_fit_parameter_contract"].value["dynamic_fit_mode"] == "global_linear_regression"
+    assert fields["dynamic_fit_parameter_contract"].value["backend_default_source"] == BACKEND_DYNAMIC_FIT_DEFAULT_SOURCE
+    assert fields["dynamic_fit_parameter_contract"].value["backend_default_values"] == canonical_dynamic_fit_backend_defaults()
+    assert fields["dynamic_fit_parameter_contract"].value["unresolved_parameters"] == []
+    assert fields["dynamic_fit_parameter_contract"].blocks_subset is False
     assert fields["traces_only"].status == "fixed_default"
     assert fields["traces_only"].value is False
     assert fields["preview_first_n"].status == "fixed_default"
@@ -1304,6 +1362,386 @@ def test_execution_subset_is_pure_no_files_and_no_plan_mutation(tmp_path):
 def test_execution_subset_rejects_malformed_input():
     with pytest.raises(TypeError, match="GuidedNewAnalysisDraftPlan"):
         evaluate_guided_new_analysis_execution_subset_readiness(object())
+
+
+def _complete_new_analysis_plan_with_current_snapshot(**overrides):
+    plan = _complete_new_analysis_plan(**overrides)
+    plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(
+        plan,
+        contract_values={
+            "input_format": plan.input_format,
+            "resolved_input_format": plan.input_format,
+            "acquisition_mode": plan.acquisition_mode,
+            "rwd_time_col": "Time",
+            "sig_suffix": "_Signal",
+            "uv_suffix": "_UV",
+        },
+    )
+    return plan
+
+
+def test_execution_spec_preview_best_case_rwd_available_but_never_executable():
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert preview.spec_preview_schema_version == EXECUTION_SPEC_PREVIEW_SCHEMA_VERSION
+    assert preview.plan_schema_version == plan.schema_version
+    assert preview.subset_name == FIRST_EXECUTION_SUBSET_NAME
+    assert preview.spec_preview_available is True
+    assert preview.first_subset_executable is True
+    assert preview.execution_available is False
+    assert preview.backend_mapping_status == "preview_only_not_mapped_to_RunSpec"
+    assert preview.blocking_issue_categories == ()
+    assert preview.source_acquisition["authoritative_input_source_path"] == "C:/raw/input"
+    assert preview.source_acquisition["input_format"] == "rwd"
+    assert preview.source_acquisition["acquisition_mode"] == "intermittent"
+    assert preview.dataset_contract["current_applied"] is True
+    assert preview.dataset_contract["execution_consumption_enabled"] is True
+    assert preview.roi["included_roi_ids"] == ["ROI1"]
+    assert preview.roi["include_list_is_authoritative"] is True
+    assert preview.correction["selected_global_dynamic_fit_strategy"] == "global_linear_regression"
+    assert preview.correction["global_strategy_derivation"] == "unanimous_explicit_per_roi_choices"
+    assert preview.correction["global_strategy_collapsed"] is False
+    assert preview.correction["per_roi_choices"][0]["roi_id"] == "ROI1"
+    dyn_contract = preview.correction["dynamic_fit_parameter_contract"]
+    assert dyn_contract["dynamic_fit_mode"] == "global_linear_regression"
+    assert dyn_contract["selected_strategy"] == "global_linear_regression"
+    assert dyn_contract["active_parameter_set"] == "global_linear_regression"
+    assert dyn_contract["active_parameters"]["slope_constraint"] == "unconstrained"
+    assert dyn_contract["active_parameters"]["window_sec"] == 60.0
+    assert dyn_contract["backend_default_source"] == BACKEND_DYNAMIC_FIT_DEFAULT_SOURCE
+    assert dyn_contract["backend_default_values"] == canonical_dynamic_fit_backend_defaults()
+    assert "robust_event_rejection" in dyn_contract["inactive_parameter_sets"]
+    assert "adaptive_event_gate" in dyn_contract["inactive_parameter_sets"]
+    assert dyn_contract["unresolved_parameters"] == []
+    assert dyn_contract["execution_consumption_enabled"] is True
+    assert dyn_contract["backend_config_mapping_status"] == "label_and_parameters_ready_for_future_mapping"
+    assert dyn_contract["no_runspec"] is True
+    assert dyn_contract["no_argv"] is True
+    assert dyn_contract["no_config_written"] is True
+    assert dyn_contract["no_files_written"] is True
+    assert preview.execution_intent["timeline_anchor_mode"] == "civil"
+    assert preview.execution_intent["execution_mode"] == "phasic"
+    assert preview.execution_intent["run_profile"] == "full"
+    assert preview.execution_intent["traces_only"] is False
+    assert preview.execution_intent["tonic_outputs_in_scope"] is False
+    assert preview.feature_event["values"] == {"signal_column": "dff"}
+    assert preview.feature_event["consumption"]["feature_event_values_consumed"] is True
+    assert preview.output["output_base"] == "C:/planned/output"
+    assert preview.output["path_role"] == "output_base"
+    assert preview.output["future_run_directory_strategy"] == "derive_unique_run_id_under_output_base"
+    assert preview.output["future_run_dir"] == "unresolved_until_execution_start"
+    assert preview.output["overwrite"] is False
+    assert preview.output["directory_created"] is False
+    assert preview.output["config_written"] is False
+    assert preview.output["RunSpec_instantiated"] is False
+    assert preview.output["argv_generated"] is False
+    assert preview.diagnostic_cache_provenance["cache_id"] == "cache-1"
+    assert preview.diagnostic_cache_provenance["execution_consumes_cache_artifacts"] is False
+    assert preview.provenance["no_gui_runspec"] is True
+    assert preview.provenance["no_argv_generated"] is True
+    assert preview.provenance["no_config_written"] is True
+    assert preview.provenance["no_output_directory_created"] is True
+    assert preview.provenance["no_validation_run"] is True
+    assert preview.provenance["no_pipeline_run"] is True
+
+
+def _strategy_choice(strategy: str, *, roi_id: str = "ROI1"):
+    return GuidedPlanCorrectionChoice(
+        roi_id=roi_id,
+        selected_strategy=strategy,
+        source_type="diagnostic_cache",
+        diagnostic_cache_id="cache-1",
+        diagnostic_cache_root="C:/cache",
+        source_setup_signature="setup-1",
+        diagnostic_scope_signature="scope-1",
+        build_request_signature="build-1",
+        current_or_stale="current",
+        explicit_user_mark=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("strategy", "active_parameter_set", "expected_active_key"),
+    [
+        ("robust_global_event_reject", "robust_event_rejection", "robust_event_reject_residual_z_thresh"),
+        ("adaptive_event_gated_regression", "adaptive_event_gate", "adaptive_event_gate_smooth_window_sec"),
+    ],
+)
+def test_execution_spec_preview_matching_robust_and_adaptive_contracts_are_ready(
+    strategy,
+    active_parameter_set,
+    expected_active_key,
+):
+    plan = _complete_new_analysis_plan_with_current_snapshot(
+        per_roi_correction_strategy_choices=[_strategy_choice(strategy)],
+        dynamic_fit_parameter_contract=GuidedNewAnalysisDynamicFitParameterContract(
+            dynamic_fit_mode=strategy
+        ),
+    )
+
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+    dyn_contract = preview.correction["dynamic_fit_parameter_contract"]
+
+    assert preview.spec_preview_available is True
+    assert preview.correction["selected_global_dynamic_fit_strategy"] == strategy
+    assert dyn_contract["dynamic_fit_mode"] == strategy
+    assert dyn_contract["selected_strategy"] == strategy
+    assert dyn_contract["active_parameter_set"] == active_parameter_set
+    assert expected_active_key in dyn_contract["active_parameters"]
+    assert dyn_contract["backend_config_mapping_status"] == "label_and_parameters_ready_for_future_mapping"
+    assert dyn_contract["execution_consumption_enabled"] is True
+    assert preview.execution_available is False
+
+
+def test_execution_spec_preview_dynamic_fit_contract_mismatch_blocks():
+    plan = _complete_new_analysis_plan_with_current_snapshot(
+        per_roi_correction_strategy_choices=[_strategy_choice("robust_global_event_reject")],
+        dynamic_fit_parameter_contract=GuidedNewAnalysisDynamicFitParameterContract(
+            dynamic_fit_mode="global_linear_regression"
+        ),
+    )
+
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+    dyn_contract = preview.correction["dynamic_fit_parameter_contract"]
+
+    assert preview.spec_preview_available is False
+    assert "dynamic_fit_parameter_contract_mismatch" in preview.blocking_issue_categories
+    assert preview.correction["selected_global_dynamic_fit_strategy"] is None
+    assert dyn_contract["dynamic_fit_mode"] == "global_linear_regression"
+    assert dyn_contract["selected_strategy"] == "robust_global_event_reject"
+    assert dyn_contract["backend_config_mapping_status"] == "contract_mismatch"
+    assert dyn_contract["execution_consumption_enabled"] is False
+    assert preview.execution_available is False
+
+
+def test_execution_spec_preview_unresolved_dynamic_fit_parameter_contract_blocks():
+    plan = _complete_new_analysis_plan_with_current_snapshot(
+        dynamic_fit_parameter_contract=GuidedNewAnalysisDynamicFitParameterContract(
+            unresolved_parameters=("legacy_global_settings",)
+        ),
+    )
+
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+    dyn_contract = preview.correction["dynamic_fit_parameter_contract"]
+
+    assert preview.spec_preview_available is False
+    assert "unresolved_dynamic_fit_parameter_contract" in preview.blocking_issue_categories
+    assert dyn_contract["unresolved_parameters"] == ["legacy_global_settings"]
+    assert dyn_contract["backend_config_mapping_status"] == "label_ready_parameters_unresolved"
+    assert dyn_contract["execution_consumption_enabled"] is False
+
+
+def test_execution_spec_preview_signal_only_f0_blocks_without_global_strategy():
+    plan = _complete_new_analysis_plan_with_current_snapshot(
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="signal_only_f0",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            )
+        ]
+    )
+
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert preview.spec_preview_available is False
+    assert "signal_only_f0_execution_not_supported" in preview.blocking_issue_categories
+    assert preview.correction["selected_global_dynamic_fit_strategy"] is None
+    assert preview.correction["signal_only_f0_production_routing_supported"] is False
+    assert "signal_only_f0_execution_not_supported" in preview.correction["blocker_categories"]
+    assert preview.execution_available is False
+
+
+def test_execution_spec_preview_mixed_per_roi_strategies_block_without_collapse():
+    plan = _complete_new_analysis_plan_with_current_snapshot(
+        included_roi_ids=["ROI1", "ROI2"],
+        excluded_roi_ids=[],
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="global_linear_regression",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI2",
+                selected_strategy="robust_global_event_reject",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+        ],
+    )
+    plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(
+        plan,
+        contract_values={
+            "input_format": "rwd",
+            "resolved_input_format": "rwd",
+            "acquisition_mode": "intermittent",
+            "rwd_time_col": "Time",
+        },
+    )
+
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert preview.spec_preview_available is False
+    assert "mixed_per_roi_strategies" in preview.blocking_issue_categories
+    assert preview.correction["selected_global_dynamic_fit_strategy"] is None
+    assert preview.correction["global_strategy_collapsed"] is False
+    assert preview.correction["mixed_strategy_supported"] is False
+    assert len(preview.correction["per_roi_choices"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "expected_category"),
+    [
+        (GuidedNewAnalysisDatasetContractSnapshot(status="missing"), "missing_rwd_dataset_contract"),
+        (
+            GuidedNewAnalysisDatasetContractSnapshot(
+                status="applied",
+                input_format="rwd",
+                resolved_input_format="rwd",
+                acquisition_mode="intermittent",
+                validation_issues=("missing rwd time column",),
+                explicitly_applied=True,
+            ),
+            "invalid_dataset_contract_snapshot",
+        ),
+        (
+            GuidedNewAnalysisDatasetContractSnapshot(
+                status="applied",
+                input_format="rwd",
+                resolved_input_format="rwd",
+                acquisition_mode="intermittent",
+                stale_reasons=("input changed",),
+                explicitly_applied=True,
+            ),
+            "stale_dataset_contract_snapshot",
+        ),
+    ],
+)
+def test_execution_spec_preview_dataset_contract_blockers(snapshot, expected_category):
+    preview = build_guided_new_analysis_execution_spec_preview(
+        _complete_new_analysis_plan(dataset_contract_snapshot=snapshot)
+    )
+
+    assert preview.spec_preview_available is False
+    assert expected_category in preview.blocking_issue_categories
+    assert preview.dataset_contract["execution_consumption_enabled"] is False
+    assert preview.execution_available is False
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"feature_event_profile_status": "missing", "feature_event_explicitly_applied": False},
+        {"feature_event_profile_status": "default_initialized", "feature_event_explicitly_applied": False},
+        {
+            "feature_event_profile_status": "invalid",
+            "feature_event_validation_issues": ["bad threshold"],
+            "feature_event_explicitly_applied": False,
+        },
+        {
+            "feature_event_profile_status": "stale",
+            "feature_event_stale_reasons": ["baseline changed"],
+            "feature_event_explicitly_applied": True,
+        },
+        {"feature_event_profile_status": "applied", "feature_event_explicitly_applied": False},
+    ],
+)
+def test_execution_spec_preview_feature_event_blockers(overrides):
+    plan = _complete_new_analysis_plan_with_current_snapshot(**overrides)
+
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert preview.spec_preview_available is False
+    assert "incomplete_planning_readiness" in preview.blocking_issue_categories
+    assert any(
+        category.startswith("planning_")
+        and (
+            "feature_event" in category
+            or category == "planning_missing_feature_event_profile"
+        )
+        for category in preview.blocking_issue_categories
+    )
+    assert preview.feature_event["consumption"]["feature_event_profile_required"] is True
+    assert preview.feature_event["consumption"]["feature_event_values_consumed"] is False
+    assert preview.execution_available is False
+
+
+def test_execution_spec_preview_unsafe_output_creation_policy_blocks_without_writes(tmp_path):
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_run_output"
+    plan = _complete_new_analysis_plan_with_current_snapshot(
+        output_policy_path=str(target),
+        output_creation_policy=GuidedNewAnalysisOutputCreationPolicy(
+            overwrite=True,
+            precreate_during_preview=True,
+            gui_preflight_writes_enabled=True,
+        ),
+    )
+    before = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    after = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    assert after == before
+    assert not target.exists()
+    assert preview.spec_preview_available is False
+    assert "unsafe_output_creation_policy" in preview.blocking_issue_categories
+    assert preview.output["directory_created"] is False
+    assert preview.output["files_written"] is False
+    assert preview.output["config_written"] is False
+    assert preview.output["command_written"] is False
+    assert preview.output["validation_run"] is False
+    assert preview.output["execution_started"] is False
+
+
+def test_execution_spec_preview_is_pure_no_files_and_no_plan_mutation(tmp_path):
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_run_output"
+    plan = _complete_new_analysis_plan_with_current_snapshot(output_policy_path=str(target))
+    before_state = dict(plan.__dict__)
+    before_files = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    after_files = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    assert after_files == before_files
+    assert not target.exists()
+    assert dict(plan.__dict__) == before_state
+    assert preview.execution_available is False
+    assert preview.provenance["no_gui_runspec"] is True
+    assert preview.provenance["no_argv_generated"] is True
+    assert preview.provenance["no_config_written"] is True
+    assert preview.provenance["no_output_directory_created"] is True
+
+
+def test_execution_spec_preview_rejects_malformed_input():
+    with pytest.raises(TypeError, match="GuidedNewAnalysisDraftPlan"):
+        build_guided_new_analysis_execution_spec_preview(object())
 
 
 def test_feature_event_and_output_policy_missing_are_represented():

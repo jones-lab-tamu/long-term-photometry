@@ -11,12 +11,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from photometry_pipeline.config import Config
+
 SCHEMA_VERSION = "guided_new_analysis_plan.v1"
 RUN_PREVIEW_SCHEMA_VERSION = "guided_new_analysis_run_preview.v1"
+EXECUTION_SPEC_PREVIEW_SCHEMA_VERSION = "guided_new_analysis_execution_spec_preview.v1"
 EXECUTION_SUBSET_SCHEMA_VERSION = "guided_new_analysis_execution_subset.v1"
 DATASET_CONTRACT_SNAPSHOT_SCHEMA_VERSION = "guided_new_analysis_dataset_contract_snapshot.v1"
 EXECUTION_INTENT_SCHEMA_VERSION = "guided_new_analysis_execution_intent.v1"
 OUTPUT_CREATION_POLICY_SCHEMA_VERSION = "guided_new_analysis_output_creation_policy.v1"
+DYNAMIC_FIT_PARAMETER_CONTRACT_SCHEMA_VERSION = "guided_new_analysis_dynamic_fit_parameter_contract.v1"
 FIRST_EXECUTION_SUBSET_NAME = "global_dynamic_fit_only.v1"
 SUPPORTED_INPUT_FORMATS = {"auto", "rwd", "npm", "custom_tabular"}
 SUPPORTED_ACQUISITION_MODES = {"intermittent", "continuous"}
@@ -47,6 +51,53 @@ OUTPUT_PATH_ROLES = {"output_base"}
 OUTPUT_CREATION_TIMINGS = {"future_execution_start_only"}
 RUN_DIRECTORY_STRATEGIES = {"derive_unique_run_id_under_output_base"}
 CONFIG_WRITE_TIMINGS = {"future_execution_or_validation_only"}
+DYNAMIC_FIT_SLOPE_CONSTRAINTS = {"unconstrained", "nonnegative"}
+ADAPTIVE_EVENT_GATE_FREEZE_INTERP_METHODS = {"linear_hold"}
+
+BACKEND_DYNAMIC_FIT_DEFAULT_SOURCE = "photometry_pipeline.config.Config"
+BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE = (
+    "backend Config default mechanically derived from "
+    f"{BACKEND_DYNAMIC_FIT_DEFAULT_SOURCE}"
+)
+BACKEND_DYNAMIC_FIT_DEFAULT_FIELD_MAP: dict[str, str] = {
+    "dynamic_fit_mode": "dynamic_fit_mode",
+    "slope_constraint": "dynamic_fit_slope_constraint",
+    "min_slope": "dynamic_fit_min_slope",
+    "robust_event_reject_max_iters": "robust_event_reject_max_iters",
+    "robust_event_reject_residual_z_thresh": "robust_event_reject_residual_z_thresh",
+    "robust_event_reject_local_var_window_sec": "robust_event_reject_local_var_window_sec",
+    "robust_event_reject_local_var_ratio_thresh": "robust_event_reject_local_var_ratio_thresh",
+    "robust_event_reject_min_keep_fraction": "robust_event_reject_min_keep_fraction",
+    "adaptive_event_gate_residual_z_thresh": "adaptive_event_gate_residual_z_thresh",
+    "adaptive_event_gate_local_var_window_sec": "adaptive_event_gate_local_var_window_sec",
+    "adaptive_event_gate_local_var_ratio_thresh": "adaptive_event_gate_local_var_ratio_thresh",
+    "adaptive_event_gate_smooth_window_sec": "adaptive_event_gate_smooth_window_sec",
+    "adaptive_event_gate_min_trust_fraction": "adaptive_event_gate_min_trust_fraction",
+    "adaptive_event_gate_freeze_interp_method": "adaptive_event_gate_freeze_interp_method",
+    "window_sec": "window_sec",
+    "step_sec": "step_sec",
+    "r_low": "r_low",
+    "r_high": "r_high",
+    "g_min": "g_min",
+    "min_samples_per_window": "min_samples_per_window",
+    "min_valid_windows": "min_valid_windows",
+}
+
+
+def canonical_dynamic_fit_backend_defaults() -> dict[str, Any]:
+    """Return dynamic-fit defaults from the canonical backend Config dataclass."""
+    cfg = Config()
+    return {
+        contract_field: getattr(cfg, config_field)
+        for contract_field, config_field in BACKEND_DYNAMIC_FIT_DEFAULT_FIELD_MAP.items()
+    }
+
+
+_CANONICAL_DYNAMIC_FIT_BACKEND_DEFAULTS = canonical_dynamic_fit_backend_defaults()
+
+
+def _backend_dynamic_fit_default(field_name: str) -> Any:
+    return _CANONICAL_DYNAMIC_FIT_BACKEND_DEFAULTS[field_name]
 
 
 @dataclass(frozen=True)
@@ -106,6 +157,31 @@ class GuidedNewAnalysisRunPreview:
     warnings: tuple[GuidedNewAnalysisRunPreviewIssue, ...] = ()
     execution_available: bool = False
     execution_blocked_reason: str = "Final Guided Run/RunSpec is not implemented in this stage."
+
+
+@dataclass(frozen=True)
+class GuidedNewAnalysisExecutionSpecPreview:
+    spec_preview_schema_version: str
+    plan_schema_version: str
+    subset_name: str
+    spec_preview_available: bool
+    first_subset_executable: bool
+    execution_available: bool
+    execution_blocked_reason: str
+    backend_mapping_status: str
+    source_acquisition: dict[str, Any]
+    dataset_contract: dict[str, Any]
+    roi: dict[str, Any]
+    correction: dict[str, Any]
+    execution_intent: dict[str, Any]
+    feature_event: dict[str, Any]
+    output: dict[str, Any]
+    diagnostic_cache_provenance: dict[str, Any]
+    provenance: dict[str, Any]
+    blocked_reasons: tuple[str, ...] = ()
+    blocking_issue_categories: tuple[str, ...] = ()
+    field_classifications: tuple[GuidedNewAnalysisExecutionFieldClassification, ...] = ()
+    warning_issue_categories: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -208,6 +284,133 @@ class GuidedNewAnalysisOutputCreationPolicy:
 
     def __post_init__(self) -> None:
         return None
+
+
+@dataclass(frozen=True)
+class GuidedNewAnalysisDynamicFitParameterContract:
+    schema_version: str = DYNAMIC_FIT_PARAMETER_CONTRACT_SCHEMA_VERSION
+    dynamic_fit_mode: str = "global_linear_regression"
+    slope_constraint: str = _backend_dynamic_fit_default("slope_constraint")
+    min_slope: float = _backend_dynamic_fit_default("min_slope")
+    robust_event_reject_max_iters: int = _backend_dynamic_fit_default("robust_event_reject_max_iters")
+    robust_event_reject_residual_z_thresh: float = _backend_dynamic_fit_default(
+        "robust_event_reject_residual_z_thresh"
+    )
+    robust_event_reject_local_var_window_sec: float | None = _backend_dynamic_fit_default(
+        "robust_event_reject_local_var_window_sec"
+    )
+    robust_event_reject_local_var_ratio_thresh: float | None = _backend_dynamic_fit_default(
+        "robust_event_reject_local_var_ratio_thresh"
+    )
+    robust_event_reject_min_keep_fraction: float = _backend_dynamic_fit_default(
+        "robust_event_reject_min_keep_fraction"
+    )
+    adaptive_event_gate_residual_z_thresh: float = _backend_dynamic_fit_default(
+        "adaptive_event_gate_residual_z_thresh"
+    )
+    adaptive_event_gate_local_var_window_sec: float | None = _backend_dynamic_fit_default(
+        "adaptive_event_gate_local_var_window_sec"
+    )
+    adaptive_event_gate_local_var_ratio_thresh: float | None = _backend_dynamic_fit_default(
+        "adaptive_event_gate_local_var_ratio_thresh"
+    )
+    adaptive_event_gate_smooth_window_sec: float = _backend_dynamic_fit_default(
+        "adaptive_event_gate_smooth_window_sec"
+    )
+    adaptive_event_gate_min_trust_fraction: float = _backend_dynamic_fit_default(
+        "adaptive_event_gate_min_trust_fraction"
+    )
+    adaptive_event_gate_freeze_interp_method: str = _backend_dynamic_fit_default(
+        "adaptive_event_gate_freeze_interp_method"
+    )
+    window_sec: float = _backend_dynamic_fit_default("window_sec")
+    step_sec: float = _backend_dynamic_fit_default("step_sec")
+    r_low: float = _backend_dynamic_fit_default("r_low")
+    r_high: float = _backend_dynamic_fit_default("r_high")
+    g_min: float = _backend_dynamic_fit_default("g_min")
+    min_samples_per_window: int = _backend_dynamic_fit_default("min_samples_per_window")
+    min_valid_windows: int = _backend_dynamic_fit_default("min_valid_windows")
+    unresolved_parameters: tuple[str, ...] = ()
+    provenance: dict[str, Any] = field(default_factory=lambda: {
+        "dynamic_fit_mode": (
+            "first_subset_model_default; must match unanimous explicit per-ROI strategy; "
+            "not mirrored from backend Config dynamic_fit_mode"
+        ),
+        "backend_config_dynamic_fit_mode": _backend_dynamic_fit_default("dynamic_fit_mode"),
+        "slope_constraint": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "min_slope": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "robust_event_reject_max_iters": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "robust_event_reject_residual_z_thresh": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "robust_event_reject_local_var_window_sec": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "robust_event_reject_local_var_ratio_thresh": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "robust_event_reject_min_keep_fraction": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "adaptive_event_gate_residual_z_thresh": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "adaptive_event_gate_local_var_window_sec": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "adaptive_event_gate_local_var_ratio_thresh": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "adaptive_event_gate_smooth_window_sec": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "adaptive_event_gate_min_trust_fraction": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "adaptive_event_gate_freeze_interp_method": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "window_sec": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "step_sec": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "r_low": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "r_high": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "g_min": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "min_samples_per_window": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "min_valid_windows": BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE,
+        "legacy_global_settings": (
+            "inactive parameter defaults mechanically derived from backend Config; "
+            "represented for provenance, not read from widgets"
+        ),
+        "no_runspec": True,
+        "no_argv": True,
+        "no_config_written": True,
+        "no_files_written": True,
+    })
+
+    def __post_init__(self) -> None:
+        if self.dynamic_fit_mode not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+            raise ValueError(f"Unsupported dynamic_fit_mode for first subset: {self.dynamic_fit_mode}")
+        if self.slope_constraint not in DYNAMIC_FIT_SLOPE_CONSTRAINTS:
+            raise ValueError(f"Unsupported dynamic_fit slope_constraint: {self.slope_constraint}")
+        if self.adaptive_event_gate_freeze_interp_method not in ADAPTIVE_EVENT_GATE_FREEZE_INTERP_METHODS:
+            raise ValueError(
+                "adaptive_event_gate_freeze_interp_method must be one of "
+                f"{sorted(ADAPTIVE_EVENT_GATE_FREEZE_INTERP_METHODS)}"
+            )
+        if self.robust_event_reject_max_iters < 1:
+            raise ValueError("robust_event_reject_max_iters must be >= 1")
+        if self.min_samples_per_window < 0:
+            raise ValueError("min_samples_per_window must be >= 0")
+        if self.min_valid_windows < 1:
+            raise ValueError("min_valid_windows must be >= 1")
+        positive_fields = (
+            ("robust_event_reject_residual_z_thresh", self.robust_event_reject_residual_z_thresh),
+            ("robust_event_reject_min_keep_fraction", self.robust_event_reject_min_keep_fraction),
+            ("adaptive_event_gate_residual_z_thresh", self.adaptive_event_gate_residual_z_thresh),
+            ("adaptive_event_gate_smooth_window_sec", self.adaptive_event_gate_smooth_window_sec),
+            ("adaptive_event_gate_min_trust_fraction", self.adaptive_event_gate_min_trust_fraction),
+            ("window_sec", self.window_sec),
+            ("step_sec", self.step_sec),
+        )
+        for name, value in positive_fields:
+            if float(value) <= 0.0:
+                raise ValueError(f"{name} must be > 0")
+        optional_positive_fields = (
+            ("robust_event_reject_local_var_window_sec", self.robust_event_reject_local_var_window_sec),
+            ("robust_event_reject_local_var_ratio_thresh", self.robust_event_reject_local_var_ratio_thresh),
+            ("adaptive_event_gate_local_var_window_sec", self.adaptive_event_gate_local_var_window_sec),
+            ("adaptive_event_gate_local_var_ratio_thresh", self.adaptive_event_gate_local_var_ratio_thresh),
+        )
+        for name, value in optional_positive_fields:
+            if value is not None and float(value) <= 0.0:
+                raise ValueError(f"{name} must be > 0 when provided")
+        fraction_fields = (
+            ("robust_event_reject_min_keep_fraction", self.robust_event_reject_min_keep_fraction),
+            ("adaptive_event_gate_min_trust_fraction", self.adaptive_event_gate_min_trust_fraction),
+        )
+        for name, value in fraction_fields:
+            if not (0.0 < float(value) <= 1.0):
+                raise ValueError(f"{name} must be in (0, 1]")
 
 
 @dataclass(frozen=True)
@@ -336,6 +539,9 @@ class GuidedNewAnalysisDraftPlan:
     )
     output_creation_policy: GuidedNewAnalysisOutputCreationPolicy = field(
         default_factory=GuidedNewAnalysisOutputCreationPolicy
+    )
+    dynamic_fit_parameter_contract: GuidedNewAnalysisDynamicFitParameterContract = field(
+        default_factory=GuidedNewAnalysisDynamicFitParameterContract
     )
 
     # ROI inventory
@@ -1106,6 +1312,58 @@ def _output_creation_policy_field(
     )
 
 
+def _dynamic_fit_parameter_contract_value(
+    contract: GuidedNewAnalysisDynamicFitParameterContract,
+) -> dict[str, Any]:
+    return {
+        "schema_version": contract.schema_version,
+        "dynamic_fit_mode": contract.dynamic_fit_mode,
+        "slope_constraint": contract.slope_constraint,
+        "min_slope": contract.min_slope,
+        "robust_event_reject_max_iters": contract.robust_event_reject_max_iters,
+        "robust_event_reject_residual_z_thresh": contract.robust_event_reject_residual_z_thresh,
+        "robust_event_reject_local_var_window_sec": contract.robust_event_reject_local_var_window_sec,
+        "robust_event_reject_local_var_ratio_thresh": contract.robust_event_reject_local_var_ratio_thresh,
+        "robust_event_reject_min_keep_fraction": contract.robust_event_reject_min_keep_fraction,
+        "adaptive_event_gate_residual_z_thresh": contract.adaptive_event_gate_residual_z_thresh,
+        "adaptive_event_gate_local_var_window_sec": contract.adaptive_event_gate_local_var_window_sec,
+        "adaptive_event_gate_local_var_ratio_thresh": contract.adaptive_event_gate_local_var_ratio_thresh,
+        "adaptive_event_gate_smooth_window_sec": contract.adaptive_event_gate_smooth_window_sec,
+        "adaptive_event_gate_min_trust_fraction": contract.adaptive_event_gate_min_trust_fraction,
+        "adaptive_event_gate_freeze_interp_method": contract.adaptive_event_gate_freeze_interp_method,
+        "window_sec": contract.window_sec,
+        "step_sec": contract.step_sec,
+        "r_low": contract.r_low,
+        "r_high": contract.r_high,
+        "g_min": contract.g_min,
+        "min_samples_per_window": contract.min_samples_per_window,
+        "min_valid_windows": contract.min_valid_windows,
+        "backend_default_source": BACKEND_DYNAMIC_FIT_DEFAULT_SOURCE,
+        "backend_default_values": dict(_CANONICAL_DYNAMIC_FIT_BACKEND_DEFAULTS),
+        "unresolved_parameters": list(contract.unresolved_parameters),
+        "provenance": dict(contract.provenance),
+    }
+
+
+def _dynamic_fit_parameter_contract_field(
+    contract: GuidedNewAnalysisDynamicFitParameterContract,
+) -> GuidedNewAnalysisExecutionFieldClassification:
+    unresolved = tuple(contract.unresolved_parameters)
+    return _execution_field(
+        "dynamic_fit_parameter_contract",
+        "present" if not unresolved else "required_missing",
+        value=_dynamic_fit_parameter_contract_value(contract),
+        provenance=(
+            "stored GuidedNewAnalysisDraftPlan dynamic-fit parameter contract; "
+            "backend defaults mechanically derived from Config where marked"
+            if not unresolved
+            else "dynamic-fit parameter contract has unresolved parameters for future executable mapping"
+        ),
+        blocks_subset=bool(unresolved),
+        issue_category=None if not unresolved else "unresolved_dynamic_fit_parameter_contract",
+    )
+
+
 def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[GuidedNewAnalysisExecutionFieldClassification, ...]:
     dataset_snapshot_field = _dataset_contract_snapshot_execution_field(plan.dataset_contract_snapshot, plan)
     dataset_snapshot_usable = (
@@ -1166,6 +1424,7 @@ def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[
 
     fields.extend(execution_intent_fields[2:])
     fields.append(_output_creation_policy_field(plan.output_creation_policy))
+    fields.append(_dynamic_fit_parameter_contract_field(plan.dynamic_fit_parameter_contract))
 
     roi_identity_status = "present" if plan.included_roi_ids else "required_missing"
     fields.append(_execution_field(
@@ -1395,6 +1654,19 @@ def evaluate_guided_new_analysis_execution_subset_readiness(
         ))
     elif len(unique_strategies) == 1 and unique_strategies[0] in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
         allowed_dynamic_fit_strategy = unique_strategies[0]
+
+    if (
+        allowed_dynamic_fit_strategy
+        and plan.dynamic_fit_parameter_contract.dynamic_fit_mode != allowed_dynamic_fit_strategy
+    ):
+        issues.append(_execution_subset_issue(
+            "dynamic_fit_parameter_contract_mismatch",
+            (
+                "Dynamic-fit parameter contract mode "
+                f"'{plan.dynamic_fit_parameter_contract.dynamic_fit_mode}' does not match "
+                f"the unanimous selected per-ROI strategy '{allowed_dynamic_fit_strategy}'."
+            ),
+        ))
 
     field_classifications = _execution_field_classifications(plan)
     for field in field_classifications:
@@ -1857,4 +2129,316 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
         warnings=tuple(warnings),
         execution_available=False,
         execution_blocked_reason=readiness.execution_blocked_reason,
+    )
+
+
+_CORRECTION_EXECUTION_SPEC_BLOCKERS = {
+    "missing_strategy_choice_for_execution_subset",
+    "duplicate_strategy_choice_for_execution_subset",
+    "non_explicit_strategy_choice",
+    "forbidden_strategy_state",
+    "signal_only_f0_execution_not_supported",
+    "unsupported_dynamic_fit_strategy_for_first_subset",
+    "mixed_per_roi_strategies",
+    "dynamic_fit_parameter_contract_mismatch",
+    "unresolved_dynamic_fit_parameter_contract",
+    "planning_missing_strategy_choice_for_included_roi",
+    "planning_stale_strategy_choice",
+    "planning_forbidden_strategy",
+}
+
+
+def _per_roi_choice_preview_dict(choice: GuidedPlanCorrectionChoice) -> dict[str, Any]:
+    return {
+        "roi_id": choice.roi_id,
+        "selected_strategy": choice.selected_strategy,
+        "source_type": choice.source_type,
+        "diagnostic_cache_id": choice.diagnostic_cache_id,
+        "diagnostic_cache_root": choice.diagnostic_cache_root,
+        "diagnostic_cache_signature": choice.diagnostic_cache_signature,
+        "source_setup_signature": choice.source_setup_signature,
+        "diagnostic_scope_signature": choice.diagnostic_scope_signature,
+        "build_request_signature": choice.build_request_signature,
+        "evidence_chunk": choice.evidence_chunk,
+        "evidence_summary": choice.evidence_summary,
+        "current_or_stale": choice.current_or_stale,
+        "explicit_user_mark": choice.explicit_user_mark,
+        "selected_at_utc": choice.selected_at_utc,
+    }
+
+
+def _execution_spec_correction_preview_dict(
+    plan: GuidedNewAnalysisDraftPlan,
+    subset_readiness: GuidedNewAnalysisExecutionSubsetReadiness,
+) -> dict[str, Any]:
+    issue_categories = tuple(issue.category for issue in subset_readiness.blocking_issues)
+    correction_blockers = tuple(
+        category for category in issue_categories
+        if category in _CORRECTION_EXECUTION_SPEC_BLOCKERS
+    )
+    selected_global_strategy = (
+        subset_readiness.allowed_dynamic_fit_strategy
+        if subset_readiness.allowed_dynamic_fit_strategy and not correction_blockers
+        else None
+    )
+    contract_preview = _dynamic_fit_parameter_contract_preview_dict(
+        plan.dynamic_fit_parameter_contract,
+        selected_strategy=subset_readiness.allowed_dynamic_fit_strategy,
+        issue_categories=issue_categories,
+        execution_consumption_enabled=bool(selected_global_strategy),
+    )
+    return {
+        "selected_global_dynamic_fit_strategy": selected_global_strategy,
+        "global_strategy_derivation": (
+            "unanimous_explicit_per_roi_choices"
+            if selected_global_strategy
+            else "unresolved"
+        ),
+        "global_strategy_collapsed": False,
+        "per_roi_choices": [
+            _per_roi_choice_preview_dict(choice)
+            for choice in plan.per_roi_correction_strategy_choices
+        ],
+        "per_roi_choice_provenance_preserved": True,
+        "signal_only_f0_production_routing_supported": False,
+        "mixed_strategy_supported": False,
+        "blocker_categories": list(correction_blockers),
+        "dynamic_fit_parameter_contract": contract_preview,
+    }
+
+
+def _dynamic_fit_parameter_contract_preview_dict(
+    contract: GuidedNewAnalysisDynamicFitParameterContract,
+    *,
+    selected_strategy: str | None,
+    issue_categories: tuple[str, ...] = (),
+    execution_consumption_enabled: bool = False,
+) -> dict[str, Any]:
+    robust_parameters = {
+        "robust_event_reject_max_iters": contract.robust_event_reject_max_iters,
+        "robust_event_reject_residual_z_thresh": contract.robust_event_reject_residual_z_thresh,
+        "robust_event_reject_local_var_window_sec": contract.robust_event_reject_local_var_window_sec,
+        "robust_event_reject_local_var_ratio_thresh": contract.robust_event_reject_local_var_ratio_thresh,
+        "robust_event_reject_min_keep_fraction": contract.robust_event_reject_min_keep_fraction,
+    }
+    adaptive_parameters = {
+        "adaptive_event_gate_residual_z_thresh": contract.adaptive_event_gate_residual_z_thresh,
+        "adaptive_event_gate_local_var_window_sec": contract.adaptive_event_gate_local_var_window_sec,
+        "adaptive_event_gate_local_var_ratio_thresh": contract.adaptive_event_gate_local_var_ratio_thresh,
+        "adaptive_event_gate_smooth_window_sec": contract.adaptive_event_gate_smooth_window_sec,
+        "adaptive_event_gate_min_trust_fraction": contract.adaptive_event_gate_min_trust_fraction,
+        "adaptive_event_gate_freeze_interp_method": contract.adaptive_event_gate_freeze_interp_method,
+    }
+    legacy_global_parameters = {
+        "window_sec": contract.window_sec,
+        "step_sec": contract.step_sec,
+        "r_low": contract.r_low,
+        "r_high": contract.r_high,
+        "g_min": contract.g_min,
+        "min_samples_per_window": contract.min_samples_per_window,
+        "min_valid_windows": contract.min_valid_windows,
+    }
+    common_parameters = {
+        "slope_constraint": contract.slope_constraint,
+        "min_slope": contract.min_slope,
+    }
+    if "dynamic_fit_parameter_contract_mismatch" in issue_categories:
+        mapping_status = "contract_mismatch"
+    elif contract.dynamic_fit_mode not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+        mapping_status = "unsupported_strategy"
+    elif contract.unresolved_parameters:
+        mapping_status = "label_ready_parameters_unresolved"
+    else:
+        mapping_status = "label_and_parameters_ready_for_future_mapping"
+
+    active_parameter_set = "global_linear_regression"
+    if contract.dynamic_fit_mode == "robust_global_event_reject":
+        active_parameter_set = "robust_event_rejection"
+    elif contract.dynamic_fit_mode == "adaptive_event_gated_regression":
+        active_parameter_set = "adaptive_event_gate"
+
+    inactive_parameter_sets: dict[str, dict[str, Any]] = {}
+    if active_parameter_set != "robust_event_rejection":
+        inactive_parameter_sets["robust_event_rejection"] = {
+            "status": "inactive_parameter_defaults",
+            "parameters": robust_parameters,
+        }
+    if active_parameter_set != "adaptive_event_gate":
+        inactive_parameter_sets["adaptive_event_gate"] = {
+            "status": "inactive_parameter_defaults",
+            "parameters": adaptive_parameters,
+        }
+    if active_parameter_set != "global_linear_regression":
+        inactive_parameter_sets["global_linear_regression_legacy_defaults"] = {
+            "status": "inactive_parameter_defaults",
+            "parameters": legacy_global_parameters,
+        }
+
+    active_parameters = dict(common_parameters)
+    if active_parameter_set == "robust_event_rejection":
+        active_parameters.update(robust_parameters)
+        active_parameters["legacy_global_defaults"] = legacy_global_parameters
+    elif active_parameter_set == "adaptive_event_gate":
+        active_parameters.update(adaptive_parameters)
+        active_parameters["legacy_global_defaults"] = legacy_global_parameters
+    else:
+        active_parameters.update(legacy_global_parameters)
+
+    return {
+        "schema_version": contract.schema_version,
+        "dynamic_fit_mode": contract.dynamic_fit_mode,
+        "selected_strategy": selected_strategy,
+        "active_parameter_set": active_parameter_set,
+        "active_parameters": active_parameters,
+        "inactive_parameter_sets": inactive_parameter_sets,
+        "unresolved_parameters": list(contract.unresolved_parameters),
+        "backend_default_source": BACKEND_DYNAMIC_FIT_DEFAULT_SOURCE,
+        "backend_default_values": dict(_CANONICAL_DYNAMIC_FIT_BACKEND_DEFAULTS),
+        "provenance": dict(contract.provenance),
+        "execution_consumption_enabled": execution_consumption_enabled,
+        "backend_config_mapping_status": mapping_status,
+        "no_runspec": True,
+        "no_argv": True,
+        "no_config_written": True,
+        "no_files_written": True,
+    }
+
+
+def _execution_spec_output_preview_dict(plan: GuidedNewAnalysisDraftPlan) -> dict[str, Any]:
+    policy = _output_creation_policy_preview_dict(
+        plan.output_creation_policy,
+        execution_consumption_enabled=True,
+    )
+    return {
+        "output_policy_status": plan.output_policy_status,
+        "output_base": plan.output_policy_path,
+        "output_policy_validation_issues": list(plan.output_policy_validation_issues),
+        "output_policy_stale_reasons": list(plan.output_policy_stale_reasons),
+        "output_policy_explicitly_applied": plan.output_policy_explicitly_applied,
+        "path_role": policy["path_role"],
+        "future_run_directory_strategy": policy["run_directory_strategy"],
+        "future_run_dir": "unresolved_until_execution_start",
+        "overwrite": policy["overwrite"],
+        "precreate_during_preview": policy["precreate_during_preview"],
+        "config_write_timing": policy["config_write_timing"],
+        "gui_preflight_writes_enabled": policy["gui_preflight_writes_enabled"],
+        "directory_created": False,
+        "files_written": False,
+        "config_written": False,
+        "command_written": False,
+        "validation_run": False,
+        "execution_started": False,
+        "RunSpec_instantiated": False,
+        "argv_generated": False,
+    }
+
+
+def build_guided_new_analysis_execution_spec_preview(
+    plan: GuidedNewAnalysisDraftPlan,
+) -> GuidedNewAnalysisExecutionSpecPreview:
+    """Build a pure, non-writing execution-spec preview contract.
+
+    This preview consumes only stored GuidedNewAnalysisDraftPlan state and
+    documented first-subset defaults. It does not instantiate RunSpec, build
+    argv, write config, create directories, validate, run, or mutate the plan.
+    """
+    if not isinstance(plan, GuidedNewAnalysisDraftPlan):
+        raise TypeError("plan must be a GuidedNewAnalysisDraftPlan")
+
+    subset_readiness = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    issue_categories = tuple(issue.category for issue in subset_readiness.blocking_issues)
+    blocked_reasons = tuple(issue.message for issue in subset_readiness.blocking_issues)
+    spec_preview_available = bool(subset_readiness.first_subset_executable)
+    dataset_contract = _dataset_contract_snapshot_preview_dict(
+        plan.dataset_contract_snapshot,
+        execution_consumption_enabled=spec_preview_available,
+    )
+    execution_intent = _execution_intent_preview_dict(
+        plan.execution_intent,
+        execution_consumption_enabled=spec_preview_available,
+    )
+    feature_event_consumption = _feature_event_consumption_preview_dict(plan)
+
+    return GuidedNewAnalysisExecutionSpecPreview(
+        spec_preview_schema_version=EXECUTION_SPEC_PREVIEW_SCHEMA_VERSION,
+        plan_schema_version=plan.schema_version,
+        subset_name=subset_readiness.subset_name,
+        spec_preview_available=spec_preview_available,
+        first_subset_executable=subset_readiness.first_subset_executable,
+        execution_available=False,
+        execution_blocked_reason="Final Guided Run/RunSpec is not implemented in this stage.",
+        backend_mapping_status="preview_only_not_mapped_to_RunSpec",
+        source_acquisition={
+            "input_source_path": plan.input_source_path,
+            "resolved_input_source_path": plan.resolved_input_source_path,
+            "authoritative_input_source_path": plan.resolved_input_source_path or plan.input_source_path,
+            "input_format": plan.input_format,
+            "acquisition_mode": plan.acquisition_mode,
+            "sessions_per_hour": plan.sessions_per_hour,
+            "session_duration_sec": plan.session_duration_sec,
+            "continuous_window_sec": plan.continuous_window_sec,
+            "continuous_step_sec": plan.continuous_step_sec,
+            "allow_partial_final_window": plan.allow_partial_final_window,
+            "exclude_incomplete_final_rwd_chunk": plan.exclude_incomplete_final_rwd_chunk,
+        },
+        dataset_contract=dataset_contract,
+        roi={
+            "included_roi_ids": list(plan.included_roi_ids),
+            "excluded_roi_ids": list(plan.excluded_roi_ids),
+            "discovered_roi_ids": list(plan.discovered_roi_ids),
+            "include_list_is_authoritative": True,
+            "excluded_rois_are_provenance_only": True,
+        },
+        correction=_execution_spec_correction_preview_dict(plan, subset_readiness),
+        execution_intent={
+            **execution_intent,
+            "traces_only": False,
+            "tonic_outputs_in_scope": False,
+            "full_both_mode_outputs_in_scope": False,
+        },
+        feature_event={
+            "status": plan.feature_event_profile_status,
+            "profile_id": plan.feature_event_profile_id,
+            "values": dict(plan.feature_event_values),
+            "validation_issues": list(plan.feature_event_validation_issues),
+            "stale_reasons": list(plan.feature_event_stale_reasons),
+            "explicitly_applied": plan.feature_event_explicitly_applied,
+            "baseline_config_source": plan.feature_event_baseline_config_source,
+            "baseline_status": plan.feature_event_baseline_status,
+            "updated_at_utc": plan.feature_event_updated_at_utc,
+            "consumption": feature_event_consumption,
+        },
+        output=_execution_spec_output_preview_dict(plan),
+        diagnostic_cache_provenance={
+            "cache_id": plan.cache_id,
+            "cache_root_path": plan.cache_root_path,
+            "artifact_record_path": plan.artifact_record_path,
+            "request_json_path": plan.request_json_path,
+            "provenance_path": plan.provenance_path,
+            "phasic_trace_cache_path": plan.phasic_trace_cache_path,
+            "config_used_path": plan.config_used_path,
+            "source_setup_signature": plan.source_setup_signature,
+            "diagnostic_scope_signature": plan.diagnostic_scope_signature,
+            "build_request_signature": plan.build_request_signature,
+            "stale_or_current": plan.stale_or_current,
+            "stale_reasons": list(plan.stale_reasons),
+            "execution_consumes_cache_artifacts": False,
+        },
+        provenance={
+            "plan_created_at_utc": plan.created_at_utc,
+            "plan_updated_at_utc": plan.updated_at_utc,
+            "production_analysis": plan.production_analysis,
+            "preliminary_cache": plan.preliminary_cache,
+            "stored_plan_state_only": True,
+            "no_gui_runspec": True,
+            "no_argv_generated": True,
+            "no_config_written": True,
+            "no_output_directory_created": True,
+            "no_validation_run": True,
+            "no_pipeline_run": True,
+        },
+        blocked_reasons=blocked_reasons,
+        blocking_issue_categories=issue_categories,
+        field_classifications=subset_readiness.field_classifications,
+        warning_issue_categories=tuple(issue.category for issue in subset_readiness.warning_issues),
     )
