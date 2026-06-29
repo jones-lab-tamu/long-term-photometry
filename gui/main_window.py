@@ -6095,6 +6095,8 @@ class MainWindow(QMainWindow):
             output = execution_spec_preview.output or {}
             correction = execution_spec_preview.correction or {}
             dyn_contract = correction.get("dynamic_fit_parameter_contract") or {}
+            feature_event = execution_spec_preview.feature_event or {}
+            feature_effective = feature_event.get("feature_event_effective_values") or {}
             lines.extend([
                 "Guided execution-spec preview:",
                 f"  spec_preview_available: {str(bool(execution_spec_preview.spec_preview_available)).lower()}",
@@ -6106,6 +6108,12 @@ class MainWindow(QMainWindow):
                 f"    selected_strategy: {dyn_contract.get('selected_strategy') or 'none'}",
                 f"    active_parameter_set: {dyn_contract.get('active_parameter_set') or 'none'}",
                 f"    backend_config_mapping_status: {dyn_contract.get('backend_config_mapping_status') or 'none'}",
+                "  feature_event_effective_values:",
+                f"    backend_config_mapping_status: {feature_effective.get('backend_config_mapping_status') or 'none'}",
+                "    unresolved_fields: "
+                + "; ".join(str(field) for field in feature_effective.get("unresolved_fields") or [])
+                if feature_effective.get("unresolved_fields")
+                else "    unresolved_fields: none",
                 "  output: no directories or files created",
                 "  output_base: "
                 + (

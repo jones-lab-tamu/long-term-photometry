@@ -3,6 +3,7 @@
 import dataclasses
 
 import pytest
+import photometry_pipeline.guided_new_analysis_plan as guided_plan_model
 from photometry_pipeline.config import Config
 from photometry_pipeline.guided_new_analysis_plan import (
     BACKEND_DYNAMIC_FIT_DEFAULT_FIELD_MAP,
@@ -12,6 +13,9 @@ from photometry_pipeline.guided_new_analysis_plan import (
     DYNAMIC_FIT_PARAMETER_CONTRACT_SCHEMA_VERSION,
     EXECUTION_SPEC_PREVIEW_SCHEMA_VERSION,
     EXECUTION_INTENT_SCHEMA_VERSION,
+    FEATURE_EVENT_BACKEND_DEFAULT_SOURCE,
+    FEATURE_EVENT_CONFIG_FIELDS,
+    FEATURE_EVENT_EFFECTIVE_VALUE_FIELDS,
     OUTPUT_CREATION_POLICY_SCHEMA_VERSION,
     FIRST_EXECUTION_SUBSET_NAME,
     GuidedNewAnalysisDatasetContractSnapshot,
@@ -25,12 +29,15 @@ from photometry_pipeline.guided_new_analysis_plan import (
     NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION,
     RUN_PREVIEW_SCHEMA_VERSION,
     build_guided_new_analysis_execution_spec_preview,
+    build_guided_feature_event_effective_values_preview,
     build_guided_new_analysis_run_preview,
+    canonical_feature_event_backend_defaults,
     canonical_dynamic_fit_backend_defaults,
     evaluate_guided_new_analysis_execution_subset_readiness,
     evaluate_new_analysis_plan_issues,
     evaluate_new_analysis_plan_readiness,
 )
+from photometry_pipeline.workflow_safety import feature_event_defaults_from_config
 
 
 def _complete_new_analysis_plan(**overrides):
@@ -72,7 +79,7 @@ def _complete_new_analysis_plan(**overrides):
         ],
         feature_event_profile_status="applied",
         feature_event_profile_id="feature-profile-1",
-        feature_event_values={"signal_column": "dff"},
+        feature_event_values={"event_signal": "dff"},
         feature_event_explicitly_applied=True,
         output_policy_status="applied",
         output_policy_path="C:/planned/output",
@@ -464,27 +471,28 @@ def test_run_preview_keeps_handoff_readiness_separate_from_execution_contract_un
     assert preview.execution_intent["execution_mode"] == "phasic"
     assert preview.execution_intent["run_profile"] == "full"
     assert preview.execution_intent["execution_consumption_enabled"] is True
-    assert preview.feature_event_consumption == {
-        "execution_mode": "phasic",
-        "run_profile": "full",
-        "traces_only": False,
-        "feature_event_profile_required": True,
-        "feature_event_profile_current_applied": True,
-        "feature_event_values_consumed": True,
-        "feature_extraction_in_scope": True,
-        "feature_dependent_phasic_summaries_in_scope": True,
-        "tonic_outputs_in_scope": False,
-        "full_both_mode_outputs_in_scope": False,
-        "execution_consumption_enabled": True,
-        "provenance": (
-            "first subset phasic full execution preview includes phasic feature extraction "
-            "and feature-dependent summaries"
-        ),
-        "no_runspec": True,
-        "no_argv": True,
-        "no_config_written": True,
-        "no_files_written": True,
-    }
+    assert preview.feature_event_consumption["execution_mode"] == "phasic"
+    assert preview.feature_event_consumption["run_profile"] == "full"
+    assert preview.feature_event_consumption["traces_only"] is False
+    assert preview.feature_event_consumption["feature_event_profile_required"] is True
+    assert preview.feature_event_consumption["feature_event_profile_current_applied"] is True
+    assert preview.feature_event_consumption["feature_event_values_consumed"] is True
+    assert preview.feature_event_consumption["feature_extraction_in_scope"] is True
+    assert preview.feature_event_consumption["feature_dependent_phasic_summaries_in_scope"] is True
+    assert preview.feature_event_consumption["tonic_outputs_in_scope"] is False
+    assert preview.feature_event_consumption["full_both_mode_outputs_in_scope"] is False
+    assert preview.feature_event_consumption["execution_consumption_enabled"] is True
+    assert preview.feature_event_consumption["effective_values_preview"]["backend_config_mapping_status"] == (
+        "effective_values_ready_for_future_mapping"
+    )
+    assert preview.feature_event_consumption["provenance"] == (
+        "first subset phasic full execution preview includes phasic feature extraction "
+        "and feature-dependent summaries"
+    )
+    assert preview.feature_event_consumption["no_runspec"] is True
+    assert preview.feature_event_consumption["no_argv"] is True
+    assert preview.feature_event_consumption["no_config_written"] is True
+    assert preview.feature_event_consumption["no_files_written"] is True
     assert preview.output_creation_policy["path_role"] == "output_base"
     assert preview.output_creation_policy["creation_timing"] == "future_execution_start_only"
     assert preview.output_creation_policy["run_directory_strategy"] == "derive_unique_run_id_under_output_base"
@@ -671,6 +679,121 @@ def test_feature_event_non_current_states_still_block_first_subset_preview_contr
     assert preview.feature_event_consumption["feature_event_values_consumed"] is False
     assert preview.feature_event_consumption["execution_consumption_enabled"] is False
     assert preview.execution_available is False
+
+
+def _effective_values_by_field(preview: dict[str, object]) -> dict[str, dict[str, object]]:
+    return {
+        str(item["field_name"]): item
+        for item in preview["effective_values"]
+    }
+
+
+def test_feature_event_effective_values_defaults_are_mechanically_derived_from_backend_config():
+    cfg = Config()
+    defaults = canonical_feature_event_backend_defaults()
+
+    assert set(FEATURE_EVENT_EFFECTIVE_VALUE_FIELDS) == set(FEATURE_EVENT_CONFIG_FIELDS)
+    assert defaults == feature_event_defaults_from_config(cfg)
+
+    preview = build_guided_feature_event_effective_values_preview(_complete_new_analysis_plan())
+    assert preview["backend_default_source"] == FEATURE_EVENT_BACKEND_DEFAULT_SOURCE
+    assert preview["backend_default_values"] == defaults
+    assert preview["backend_config_mapping_status"] == "effective_values_ready_for_future_mapping"
+    assert preview["execution_consumption_enabled"] is True
+    assert preview["unresolved_fields"] == []
+    assert preview["blocker_categories"] == []
+
+
+def test_feature_event_effective_values_applied_values_override_backend_defaults():
+    plan = _complete_new_analysis_plan(
+        feature_event_values={
+            "event_signal": "delta_f",
+            "peak_threshold_method": "percentile",
+            "peak_threshold_percentile": 91.0,
+            "peak_pre_filter": "lowpass",
+            "event_auc_baseline": "median",
+        }
+    )
+
+    preview = build_guided_feature_event_effective_values_preview(plan)
+    values = _effective_values_by_field(preview)
+
+    assert preview["backend_config_mapping_status"] == "effective_values_ready_for_future_mapping"
+    assert values["event_signal"]["effective_value"] == "delta_f"
+    assert values["event_signal"]["source"] == "applied_guided_profile"
+    assert values["peak_threshold_percentile"]["effective_value"] == pytest.approx(91.0)
+    assert values["peak_threshold_percentile"]["active_or_inactive"] == "active"
+    assert values["peak_threshold_k"]["active_or_inactive"] == "inactive_for_threshold_method"
+    assert values["peak_threshold_abs"]["active_or_inactive"] == "inactive_for_threshold_method"
+    assert values["peak_pre_filter"]["effective_value"] == "lowpass"
+    assert values["event_auc_baseline"]["effective_value"] == "median"
+
+
+def test_feature_event_effective_values_fill_missing_applied_fields_from_verified_defaults():
+    plan = _complete_new_analysis_plan(feature_event_values={"event_signal": "dff"})
+
+    preview = build_guided_feature_event_effective_values_preview(plan)
+    values = _effective_values_by_field(preview)
+
+    assert values["event_signal"]["source"] == "applied_guided_profile"
+    assert values["peak_threshold_method"]["source"] == "backend_config_default"
+    assert values["peak_threshold_method"]["provenance"].startswith("backend Config default mechanically derived")
+    assert values["peak_pre_filter"]["source"] == "backend_config_default"
+    assert values["event_auc_baseline"]["source"] == "backend_config_default"
+    assert preview["unresolved_fields"] == []
+
+
+def test_feature_event_effective_values_missing_unverified_default_blocks(monkeypatch):
+    defaults = dict(canonical_feature_event_backend_defaults())
+    defaults.pop("peak_min_width_sec")
+    monkeypatch.setattr(guided_plan_model, "_CANONICAL_FEATURE_EVENT_BACKEND_DEFAULTS", defaults)
+    plan = _complete_new_analysis_plan(feature_event_values={"event_signal": "dff"})
+
+    preview = build_guided_feature_event_effective_values_preview(plan)
+    spec_preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert "peak_min_width_sec" in preview["unresolved_fields"]
+    assert "unresolved_feature_event_effective_values" in preview["blocker_categories"]
+    assert preview["backend_config_mapping_status"] == "effective_values_unresolved"
+    assert spec_preview.spec_preview_available is False
+    assert "unresolved_feature_event_effective_values" in spec_preview.blocking_issue_categories
+
+
+def test_feature_event_effective_values_unsupported_threshold_method_blocks_spec_preview():
+    plan = _complete_new_analysis_plan(
+        feature_event_values={
+            "event_signal": "dff",
+            "peak_threshold_method": "not_supported",
+        }
+    )
+
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+    effective = preview.feature_event["feature_event_effective_values"]
+
+    assert preview.spec_preview_available is False
+    assert "unsupported_threshold_method" in preview.blocking_issue_categories
+    assert effective["backend_config_mapping_status"] == "unsupported_threshold_method"
+    assert effective["threshold_activity"]["supported"] is False
+
+
+def test_feature_event_effective_values_threshold_specific_inactive_fields_are_shown():
+    plan = _complete_new_analysis_plan(
+        feature_event_values={
+            "event_signal": "dff",
+            "peak_threshold_method": "absolute",
+            "peak_threshold_abs": 0.25,
+        }
+    )
+
+    preview = build_guided_feature_event_effective_values_preview(plan)
+    values = _effective_values_by_field(preview)
+
+    assert values["peak_threshold_abs"]["active_or_inactive"] == "active"
+    assert values["peak_threshold_abs"]["consumed_by_first_subset"] is True
+    assert values["peak_threshold_k"]["active_or_inactive"] == "inactive_for_threshold_method"
+    assert values["peak_threshold_percentile"]["active_or_inactive"] == "inactive_for_threshold_method"
+    assert "peak_threshold_k" in preview["inactive_fields"]
+    assert "peak_threshold_percentile" in preview["inactive_fields"]
 
 
 def test_run_preview_does_not_create_output_directory(tmp_path):
@@ -1426,8 +1549,21 @@ def test_execution_spec_preview_best_case_rwd_available_but_never_executable():
     assert preview.execution_intent["run_profile"] == "full"
     assert preview.execution_intent["traces_only"] is False
     assert preview.execution_intent["tonic_outputs_in_scope"] is False
-    assert preview.feature_event["values"] == {"signal_column": "dff"}
+    assert preview.feature_event["values"] == {"event_signal": "dff"}
     assert preview.feature_event["consumption"]["feature_event_values_consumed"] is True
+    feature_effective = preview.feature_event["feature_event_effective_values"]
+    assert feature_effective["backend_config_mapping_status"] == "effective_values_ready_for_future_mapping"
+    assert feature_effective["execution_consumption_enabled"] is True
+    assert feature_effective["backend_default_source"] == FEATURE_EVENT_BACKEND_DEFAULT_SOURCE
+    assert feature_effective["backend_default_values"] == canonical_feature_event_backend_defaults()
+    assert feature_effective["unresolved_fields"] == []
+    assert feature_effective["blocker_categories"] == []
+    feature_effective_values = _effective_values_by_field(feature_effective)
+    assert feature_effective_values["event_signal"]["effective_value"] == "dff"
+    assert feature_effective_values["event_signal"]["source"] == "applied_guided_profile"
+    assert feature_effective_values["peak_threshold_method"]["source"] == "backend_config_default"
+    assert feature_effective_values["peak_pre_filter"]["active_or_inactive"] == "active"
+    assert feature_effective_values["event_auc_baseline"]["active_or_inactive"] == "active"
     assert preview.output["output_base"] == "C:/planned/output"
     assert preview.output["path_role"] == "output_base"
     assert preview.output["future_run_directory_strategy"] == "derive_unique_run_id_under_output_base"

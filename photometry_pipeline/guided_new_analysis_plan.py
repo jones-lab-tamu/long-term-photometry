@@ -12,6 +12,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from photometry_pipeline.config import Config
+from photometry_pipeline.feature_event_config import (
+    FEATURE_EVENT_CONFIG_FIELDS,
+    FEATURE_EVENT_THRESHOLD_METHODS,
+    validate_feature_event_config_fields,
+)
+from photometry_pipeline.workflow_safety import feature_event_defaults_from_config
 
 SCHEMA_VERSION = "guided_new_analysis_plan.v1"
 RUN_PREVIEW_SCHEMA_VERSION = "guided_new_analysis_run_preview.v1"
@@ -53,6 +59,30 @@ RUN_DIRECTORY_STRATEGIES = {"derive_unique_run_id_under_output_base"}
 CONFIG_WRITE_TIMINGS = {"future_execution_or_validation_only"}
 DYNAMIC_FIT_SLOPE_CONSTRAINTS = {"unconstrained", "nonnegative"}
 ADAPTIVE_EVENT_GATE_FREEZE_INTERP_METHODS = {"linear_hold"}
+FEATURE_EVENT_BACKEND_DEFAULT_SOURCE = "photometry_pipeline.config.Config"
+FEATURE_EVENT_BACKEND_DEFAULT_PROVENANCE = (
+    "backend Config default mechanically derived from "
+    f"{FEATURE_EVENT_BACKEND_DEFAULT_SOURCE}"
+)
+FEATURE_EVENT_EFFECTIVE_VALUE_FIELDS = tuple(sorted(FEATURE_EVENT_CONFIG_FIELDS))
+FEATURE_EVENT_THRESHOLD_PARAMETER_FIELDS = {
+    "mean_std": "peak_threshold_k",
+    "median_mad": "peak_threshold_k",
+    "percentile": "peak_threshold_percentile",
+    "absolute": "peak_threshold_abs",
+}
+
+
+def canonical_feature_event_backend_defaults() -> dict[str, Any]:
+    """Return feature/event defaults from the canonical backend Config dataclass."""
+    defaults = feature_event_defaults_from_config(Config())
+    return {
+        field_name: defaults[field_name]
+        for field_name in FEATURE_EVENT_EFFECTIVE_VALUE_FIELDS
+    }
+
+
+_CANONICAL_FEATURE_EVENT_BACKEND_DEFAULTS = canonical_feature_event_backend_defaults()
 
 BACKEND_DYNAMIC_FIT_DEFAULT_SOURCE = "photometry_pipeline.config.Config"
 BACKEND_DYNAMIC_FIT_DEFAULT_PROVENANCE = (
@@ -1806,6 +1836,136 @@ def _feature_event_profile_current_for_first_subset(plan: GuidedNewAnalysisDraft
     )
 
 
+def _feature_event_field_activity(field_name: str, method: str) -> str:
+    active_threshold_field = FEATURE_EVENT_THRESHOLD_PARAMETER_FIELDS.get(method)
+    if field_name in {"peak_threshold_k", "peak_threshold_percentile", "peak_threshold_abs"}:
+        if active_threshold_field is None:
+            return "unresolved"
+        if field_name == active_threshold_field:
+            return "active"
+        return "inactive_for_threshold_method"
+    return "active"
+
+
+def build_guided_feature_event_effective_values_preview(plan: GuidedNewAnalysisDraftPlan) -> dict[str, Any]:
+    """Build a pure feature/event effective-value preview from stored plan state.
+
+    The merge consumes only GuidedNewAnalysisDraftPlan feature/event fields plus
+    canonical backend Config defaults. It does not inspect GUI widgets, generate
+    config, instantiate RunSpec, write files, validate, run, or mutate the plan.
+    """
+    if not isinstance(plan, GuidedNewAnalysisDraftPlan):
+        raise TypeError("plan must be a GuidedNewAnalysisDraftPlan")
+
+    backend_defaults = dict(_CANONICAL_FEATURE_EVENT_BACKEND_DEFAULTS)
+    applied_values = {
+        key: value for key, value in dict(plan.feature_event_values).items()
+        if key in FEATURE_EVENT_CONFIG_FIELDS
+    }
+    ignored_applied_fields = sorted(set(plan.feature_event_values) - FEATURE_EVENT_CONFIG_FIELDS)
+    effective: dict[str, Any] = {}
+    effective_values: list[dict[str, Any]] = []
+    default_values: dict[str, Any] = {}
+    unresolved_fields: list[str] = []
+    inactive_fields: list[str] = []
+    field_activity: dict[str, str] = {}
+
+    profile_current = _feature_event_profile_current_for_first_subset(plan)
+    method_value = applied_values.get(
+        "peak_threshold_method",
+        backend_defaults.get("peak_threshold_method"),
+    )
+    method = str(method_value or "")
+    unsupported_threshold = method not in FEATURE_EVENT_THRESHOLD_METHODS
+
+    for field_name in FEATURE_EVENT_EFFECTIVE_VALUE_FIELDS:
+        if field_name in applied_values:
+            value = applied_values[field_name]
+            source = "applied_guided_profile"
+            provenance = "stored GuidedNewAnalysisDraftPlan.feature_event_values"
+        elif field_name in backend_defaults:
+            value = backend_defaults[field_name]
+            source = "backend_config_default"
+            default_values[field_name] = value
+            provenance = FEATURE_EVENT_BACKEND_DEFAULT_PROVENANCE
+        else:
+            value = None
+            source = "unresolved"
+            provenance = "no applied Guided value and no canonical backend Config default"
+            unresolved_fields.append(field_name)
+
+        activity = _feature_event_field_activity(field_name, method)
+        if activity == "unresolved":
+            unresolved_fields.append(field_name)
+        elif activity != "active":
+            inactive_fields.append(field_name)
+        field_activity[field_name] = activity
+
+        effective[field_name] = value
+        effective_values.append({
+            "field_name": field_name,
+            "effective_value": value,
+            "source": source,
+            "consumed_by_first_subset": bool(profile_current and activity == "active" and source != "unresolved"),
+            "active_or_inactive": activity,
+            "provenance": provenance,
+        })
+
+    validation_payload = {
+        field_name: value for field_name, value in effective.items()
+        if field_activity.get(field_name) == "active"
+    }
+    validation_errors = validate_feature_event_config_fields(validation_payload)
+    unresolved_unique = tuple(dict.fromkeys(unresolved_fields))
+    inactive_unique = tuple(dict.fromkeys(inactive_fields))
+    blocker_categories: list[str] = []
+    if not profile_current:
+        blocker_categories.append("feature_event_profile_not_current")
+    if unsupported_threshold:
+        blocker_categories.append("unsupported_threshold_method")
+    if validation_errors:
+        blocker_categories.append("invalid_feature_event_effective_values")
+    if unresolved_unique:
+        blocker_categories.append("unresolved_feature_event_effective_values")
+
+    if "unsupported_threshold_method" in blocker_categories:
+        mapping_status = "unsupported_threshold_method"
+    elif "feature_event_profile_not_current" in blocker_categories:
+        mapping_status = "feature_event_profile_not_current"
+    elif unresolved_unique or validation_errors:
+        mapping_status = "effective_values_unresolved"
+    else:
+        mapping_status = "effective_values_ready_for_future_mapping"
+
+    return {
+        "effective_values": effective_values,
+        "applied_values": applied_values,
+        "default_values": default_values,
+        "unresolved_fields": list(unresolved_unique),
+        "inactive_fields": list(inactive_unique),
+        "ignored_applied_fields": ignored_applied_fields,
+        "validation_errors": validation_errors,
+        "backend_default_source": FEATURE_EVENT_BACKEND_DEFAULT_SOURCE,
+        "backend_default_values": backend_defaults,
+        "threshold_method": method,
+        "threshold_activity": {
+            "method": method,
+            "active_threshold_field": FEATURE_EVENT_THRESHOLD_PARAMETER_FIELDS.get(method),
+            "supported": not unsupported_threshold,
+        },
+        "execution_consumption_enabled": (
+            mapping_status == "effective_values_ready_for_future_mapping"
+            and profile_current
+        ),
+        "backend_config_mapping_status": mapping_status,
+        "blocker_categories": list(dict.fromkeys(blocker_categories)),
+        "no_runspec": True,
+        "no_argv": True,
+        "no_config_written": True,
+        "no_files_written": True,
+    }
+
+
 def _feature_event_consumption_preview_dict(plan: GuidedNewAnalysisDraftPlan) -> dict[str, Any]:
     traces_only = False
     first_subset_contract = (
@@ -1814,7 +1974,12 @@ def _feature_event_consumption_preview_dict(plan: GuidedNewAnalysisDraftPlan) ->
         and traces_only is False
     )
     current_profile = _feature_event_profile_current_for_first_subset(plan)
-    consumption_enabled = bool(first_subset_contract and current_profile)
+    effective_preview = build_guided_feature_event_effective_values_preview(plan)
+    consumption_enabled = bool(
+        first_subset_contract
+        and current_profile
+        and effective_preview["backend_config_mapping_status"] == "effective_values_ready_for_future_mapping"
+    )
     return {
         "execution_mode": plan.execution_intent.execution_mode,
         "run_profile": plan.execution_intent.run_profile,
@@ -1827,6 +1992,7 @@ def _feature_event_consumption_preview_dict(plan: GuidedNewAnalysisDraftPlan) ->
         "tonic_outputs_in_scope": False,
         "full_both_mode_outputs_in_scope": False,
         "execution_consumption_enabled": consumption_enabled,
+        "effective_values_preview": effective_preview,
         "provenance": (
             "first subset phasic full execution preview includes phasic feature extraction "
             "and feature-dependent summaries"
@@ -2346,9 +2512,20 @@ def build_guided_new_analysis_execution_spec_preview(
         raise TypeError("plan must be a GuidedNewAnalysisDraftPlan")
 
     subset_readiness = evaluate_guided_new_analysis_execution_subset_readiness(plan)
-    issue_categories = tuple(issue.category for issue in subset_readiness.blocking_issues)
-    blocked_reasons = tuple(issue.message for issue in subset_readiness.blocking_issues)
-    spec_preview_available = bool(subset_readiness.first_subset_executable)
+    feature_event_consumption = _feature_event_consumption_preview_dict(plan)
+    feature_event_effective_values = feature_event_consumption["effective_values_preview"]
+    feature_event_blockers = tuple(feature_event_effective_values["blocker_categories"])
+    issue_categories = tuple(
+        dict.fromkeys(
+            tuple(issue.category for issue in subset_readiness.blocking_issues)
+            + feature_event_blockers
+        )
+    )
+    blocked_reasons = tuple(issue.message for issue in subset_readiness.blocking_issues) + tuple(
+        f"Feature/event effective-value preview blocker: {category}"
+        for category in feature_event_blockers
+    )
+    spec_preview_available = bool(subset_readiness.first_subset_executable and not feature_event_blockers)
     dataset_contract = _dataset_contract_snapshot_preview_dict(
         plan.dataset_contract_snapshot,
         execution_consumption_enabled=spec_preview_available,
@@ -2357,7 +2534,6 @@ def build_guided_new_analysis_execution_spec_preview(
         plan.execution_intent,
         execution_consumption_enabled=spec_preview_available,
     )
-    feature_event_consumption = _feature_event_consumption_preview_dict(plan)
 
     return GuidedNewAnalysisExecutionSpecPreview(
         spec_preview_schema_version=EXECUTION_SPEC_PREVIEW_SCHEMA_VERSION,
@@ -2407,6 +2583,7 @@ def build_guided_new_analysis_execution_spec_preview(
             "baseline_status": plan.feature_event_baseline_status,
             "updated_at_utc": plan.feature_event_updated_at_utc,
             "consumption": feature_event_consumption,
+            "feature_event_effective_values": feature_event_effective_values,
         },
         output=_execution_spec_output_preview_dict(plan),
         diagnostic_cache_provenance={

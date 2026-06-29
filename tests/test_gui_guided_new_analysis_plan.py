@@ -547,6 +547,9 @@ def test_new_analysis_run_preview_displays_execution_intent_and_output_creation_
     assert "  feature_dependent_phasic_summaries_in_scope: true" in preview_text
     assert "  tonic_outputs_in_scope: false" in preview_text
     assert "  full_both_mode_outputs_in_scope: false" in preview_text
+    assert "feature_event_effective_values:" in preview_text
+    assert "backend_config_mapping_status: effective_values_ready_for_future_mapping" in preview_text
+    assert "unresolved_fields: none" in preview_text
     assert "Output creation policy:" in preview_text
     assert "path_role: output_base" in preview_text
     assert "creation_timing: future_execution_start_only" in preview_text
@@ -806,6 +809,9 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "selected_strategy: global_linear_regression" in preview_text
     assert "active_parameter_set: global_linear_regression" in preview_text
     assert "backend_config_mapping_status: label_and_parameters_ready_for_future_mapping" in preview_text
+    assert "feature_event_effective_values:" in preview_text
+    assert "backend_config_mapping_status: effective_values_ready_for_future_mapping" in preview_text
+    assert "unresolved_fields: none" in preview_text
     assert "output: no directories or files created" in preview_text
     assert "blockers: none" in preview_text
     assert "execution_available: false" in preview_text
