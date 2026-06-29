@@ -801,7 +801,7 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "  feature_dependent_phasic_summaries_in_scope: true" in preview_text
     assert "status: complete for future execution-spec preview; actual execution remains unavailable" in preview_text
     assert "Guided execution-spec preview:" in preview_text
-    assert "spec_preview_available: true" in preview_text
+    assert "spec_preview_available: false" in preview_text
     assert "first_subset_executable: true" in preview_text
     assert "backend_mapping_status: preview_only_not_mapped_to_RunSpec" in preview_text
     assert "dynamic_fit_parameter_contract:" in preview_text
@@ -812,8 +812,13 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "feature_event_effective_values:" in preview_text
     assert "backend_config_mapping_status: effective_values_ready_for_future_mapping" in preview_text
     assert "unresolved_fields: none" in preview_text
+    assert "rwd_dataset_normalization:" in preview_text
+    assert "backend_config_mapping_status: rwd_dataset_contract_unresolved" in preview_text
+    assert "missing_required_fields: rwd_time_col; sig_suffix; uv_suffix" in preview_text
+    assert "inconsistent_fields: none" in preview_text
     assert "output: no directories or files created" in preview_text
-    assert "blockers: none" in preview_text
+    assert "missing_required_rwd_contract_field" in preview_text
+    assert "unresolved_rwd_dataset_contract_normalization" in preview_text
     assert "execution_available: false" in preview_text
     assert "ready to run" not in preview_text.lower()
     assert "ready for execution" not in preview_text.lower()

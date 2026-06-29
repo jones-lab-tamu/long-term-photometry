@@ -17,6 +17,8 @@ from photometry_pipeline.guided_new_analysis_plan import (
     FEATURE_EVENT_CONFIG_FIELDS,
     FEATURE_EVENT_EFFECTIVE_VALUE_FIELDS,
     OUTPUT_CREATION_POLICY_SCHEMA_VERSION,
+    RWD_NORMALIZATION_BACKEND_CONFIG_FIELDS,
+    RWD_NORMALIZATION_REQUIRED_SNAPSHOT_FIELDS,
     FIRST_EXECUTION_SUBSET_NAME,
     GuidedNewAnalysisDatasetContractSnapshot,
     GuidedNewAnalysisDatasetContractSourceIdentity,
@@ -31,6 +33,7 @@ from photometry_pipeline.guided_new_analysis_plan import (
     build_guided_new_analysis_execution_spec_preview,
     build_guided_feature_event_effective_values_preview,
     build_guided_new_analysis_run_preview,
+    build_guided_rwd_dataset_contract_normalization_preview,
     canonical_feature_event_backend_defaults,
     canonical_dynamic_fit_backend_defaults,
     evaluate_guided_new_analysis_execution_subset_readiness,
@@ -1501,6 +1504,185 @@ def _complete_new_analysis_plan_with_current_snapshot(**overrides):
         },
     )
     return plan
+
+
+def test_rwd_dataset_normalization_best_case_is_ready_and_separates_field_roles():
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+    plan.dataset_contract_snapshot = dataclasses.replace(
+        plan.dataset_contract_snapshot,
+        contract_values={
+            **plan.dataset_contract_snapshot.contract_values,
+            "rwd_contract_validation": {"status": "reviewed"},
+            "rwd_excluded_source_files": ["chunk_99.rwd"],
+            "unknown_structural_note": "reviewed manually",
+        },
+    )
+
+    normalization = build_guided_rwd_dataset_contract_normalization_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert normalization["normalization_status"] == "ready_for_future_mapping"
+    assert normalization["backend_config_mapping_status"] == "rwd_dataset_contract_ready_for_future_mapping"
+    assert normalization["execution_consumption_enabled"] is True
+    assert normalization["backend_config_values"] == {
+        "rwd_time_col": "Time",
+        "sig_suffix": "_Signal",
+        "uv_suffix": "_UV",
+        "exclude_incomplete_final_rwd_chunk": False,
+    }
+    assert set(normalization["backend_config_values"]) == RWD_NORMALIZATION_BACKEND_CONFIG_FIELDS
+    assert normalization["structural_values"]["input_format"] == "rwd"
+    assert normalization["structural_values"]["acquisition_mode"] == "intermittent"
+    assert "input_format" not in normalization["backend_config_values"]
+    assert normalization["provenance_values"]["rwd_contract_validation"] == {"status": "reviewed"}
+    assert normalization["provenance_values"]["rwd_excluded_source_files"] == ["chunk_99.rwd"]
+    assert "rwd_contract_validation" not in normalization["backend_config_values"]
+    assert normalization["rejected_fields"] == {"unknown_structural_note": "reviewed manually"}
+    assert normalization["missing_required_fields"] == []
+    assert normalization["inconsistent_fields"] == []
+    assert normalization["unresolved_fields"] == []
+    assert normalization["blocker_categories"] == []
+    assert normalization["no_file_inspection"] is True
+    assert normalization["no_runspec"] is True
+    assert normalization["no_argv"] is True
+    assert normalization["no_config_written"] is True
+    assert normalization["no_files_written"] is True
+    assert preview.spec_preview_available is True
+    assert preview.execution_available is False
+    assert preview.dataset_contract["rwd_normalization"]["execution_consumption_enabled"] is True
+
+
+@pytest.mark.parametrize("missing_field", RWD_NORMALIZATION_REQUIRED_SNAPSHOT_FIELDS)
+def test_rwd_dataset_normalization_missing_required_backend_field_blocks(missing_field):
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+    contract_values = dict(plan.dataset_contract_snapshot.contract_values)
+    contract_values.pop(missing_field)
+    plan.dataset_contract_snapshot = dataclasses.replace(
+        plan.dataset_contract_snapshot,
+        contract_values=contract_values,
+    )
+
+    normalization = build_guided_rwd_dataset_contract_normalization_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert missing_field in normalization["missing_required_fields"]
+    assert missing_field in normalization["unresolved_fields"]
+    assert "missing_required_rwd_contract_field" in normalization["blocker_categories"]
+    assert "unresolved_rwd_dataset_contract_normalization" in normalization["blocker_categories"]
+    assert normalization["backend_config_mapping_status"] == "rwd_dataset_contract_unresolved"
+    assert preview.spec_preview_available is False
+    assert "missing_required_rwd_contract_field" in preview.blocking_issue_categories
+
+
+@pytest.mark.parametrize(
+    ("snapshot_overrides", "identity_overrides", "expected_field"),
+    [
+        ({"input_format": "npm"}, {}, "input_format"),
+        ({"resolved_input_format": "npm"}, {}, "resolved_input_format"),
+        ({"acquisition_mode": "continuous"}, {}, "acquisition_mode"),
+        ({}, {"exclude_incomplete_final_rwd_chunk": True}, "exclude_incomplete_final_rwd_chunk"),
+    ],
+)
+def test_rwd_dataset_normalization_inconsistent_duplicate_fields_block(
+    snapshot_overrides,
+    identity_overrides,
+    expected_field,
+):
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+    identity = dataclasses.replace(
+        plan.dataset_contract_snapshot.source_identity,
+        **identity_overrides,
+    )
+    plan.dataset_contract_snapshot = dataclasses.replace(
+        plan.dataset_contract_snapshot,
+        source_identity=identity,
+        **snapshot_overrides,
+    )
+
+    normalization = build_guided_rwd_dataset_contract_normalization_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert expected_field in {item["field_name"] for item in normalization["inconsistent_fields"]}
+    assert "inconsistent_rwd_contract_field" in normalization["blocker_categories"]
+    assert normalization["backend_config_mapping_status"] == "rwd_dataset_contract_inconsistent"
+    assert preview.spec_preview_available is False
+    assert "inconsistent_rwd_contract_field" in preview.blocking_issue_categories
+
+
+@pytest.mark.parametrize("input_format", ["npm", "custom_tabular", "auto"])
+def test_rwd_dataset_normalization_unsupported_formats_are_not_coerced(input_format):
+    plan = _complete_new_analysis_plan_with_current_snapshot(input_format=input_format)
+
+    normalization = build_guided_rwd_dataset_contract_normalization_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert normalization["structural_values"]["input_format"] == input_format
+    assert normalization["normalization_status"] == "unsupported_format_for_rwd_first_subset"
+    assert "unsupported_format_for_rwd_first_subset" in normalization["blocker_categories"]
+    assert preview.spec_preview_available is False
+    assert "unsupported_format_for_rwd_first_subset" in preview.blocking_issue_categories
+
+
+def test_rwd_dataset_normalization_continuous_rwd_is_unsupported():
+    plan = _complete_new_analysis_plan_with_current_snapshot(acquisition_mode="continuous")
+
+    normalization = build_guided_rwd_dataset_contract_normalization_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert normalization["structural_values"]["input_format"] == "rwd"
+    assert normalization["structural_values"]["acquisition_mode"] == "continuous"
+    assert normalization["normalization_status"] == "unsupported_acquisition_mode_for_rwd_first_subset"
+    assert "unsupported_acquisition_mode_for_rwd_first_subset" in normalization["blocker_categories"]
+    assert preview.spec_preview_available is False
+
+
+@pytest.mark.parametrize(
+    "snapshot_overrides",
+    [
+        {"status": "missing", "explicitly_applied": False},
+        {"status": "stale", "stale_reasons": ("source changed",)},
+        {"status": "invalid", "validation_issues": ("invalid contract",)},
+        {"status": "applied", "explicitly_applied": False},
+    ],
+)
+def test_rwd_dataset_normalization_noncurrent_snapshot_blocks(snapshot_overrides):
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+    plan.dataset_contract_snapshot = dataclasses.replace(
+        plan.dataset_contract_snapshot,
+        **snapshot_overrides,
+    )
+
+    normalization = build_guided_rwd_dataset_contract_normalization_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert normalization["normalization_status"] == "dataset_contract_snapshot_not_current"
+    assert "dataset_contract_snapshot_not_current" in normalization["blocker_categories"]
+    assert normalization["execution_consumption_enabled"] is False
+    assert preview.spec_preview_available is False
+    assert "dataset_contract_snapshot_not_current" in preview.blocking_issue_categories
+
+
+def test_rwd_dataset_normalization_is_pure_and_performs_no_file_inspection(tmp_path):
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_run_output"
+    plan = _complete_new_analysis_plan_with_current_snapshot(output_policy_path=str(target))
+    before_state = dict(plan.__dict__)
+    before_files = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+
+    normalization = build_guided_rwd_dataset_contract_normalization_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    after_files = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    assert after_files == before_files
+    assert not target.exists()
+    assert dict(plan.__dict__) == before_state
+    assert normalization["no_file_inspection"] is True
+    assert normalization["no_runspec"] is True
+    assert normalization["no_argv"] is True
+    assert normalization["no_config_written"] is True
+    assert normalization["no_files_written"] is True
+    assert preview.execution_available is False
 
 
 def test_execution_spec_preview_best_case_rwd_available_but_never_executable():

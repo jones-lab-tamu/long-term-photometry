@@ -1783,6 +1783,284 @@ def _dataset_contract_snapshot_preview_dict(
     }
 
 
+RWD_NORMALIZATION_REQUIRED_SNAPSHOT_FIELDS = (
+    "rwd_time_col",
+    "sig_suffix",
+    "uv_suffix",
+)
+RWD_NORMALIZATION_BACKEND_CONFIG_FIELDS = {
+    *RWD_NORMALIZATION_REQUIRED_SNAPSHOT_FIELDS,
+    "exclude_incomplete_final_rwd_chunk",
+}
+RWD_NORMALIZATION_STRUCTURAL_FIELDS = {
+    "input_format",
+    "resolved_input_format",
+    "acquisition_mode",
+    "sessions_per_hour",
+    "session_duration_sec",
+    "allow_partial_final_window",
+}
+RWD_NORMALIZATION_PROVENANCE_FIELDS = {
+    "structural_only",
+    "no_file_inspection",
+    "real_backend_contract_values_not_inferred",
+    "rwd_contract_validation",
+    "rwd_excluded_source_files",
+}
+
+
+def _rwd_normalization_consistency_record(
+    field_name: str,
+    plan_value: Any,
+    snapshot_value: Any,
+    snapshot_location: str,
+) -> dict[str, Any]:
+    return {
+        "field_name": field_name,
+        "plan_value": plan_value,
+        "snapshot_value": snapshot_value,
+        "snapshot_location": snapshot_location,
+    }
+
+
+def build_guided_rwd_dataset_contract_normalization_preview(
+    plan: GuidedNewAnalysisDraftPlan,
+) -> dict[str, Any]:
+    """Normalize stored RWD/intermittent plan state without I/O or inference."""
+    if not isinstance(plan, GuidedNewAnalysisDraftPlan):
+        raise TypeError("plan must be a GuidedNewAnalysisDraftPlan")
+
+    snapshot = plan.dataset_contract_snapshot
+    identity = snapshot.source_identity
+    contract_values = dict(snapshot.contract_values)
+    format_specific = dict(snapshot.format_specific)
+    combined_values = {**contract_values, **format_specific}
+
+    backend_config_values: dict[str, Any] = {}
+    structural_values = {
+        "input_format": plan.input_format,
+        "resolved_input_format": snapshot.resolved_input_format,
+        "acquisition_mode": plan.acquisition_mode,
+        "sessions_per_hour": plan.sessions_per_hour,
+        "session_duration_sec": plan.session_duration_sec,
+        "allow_partial_final_window": plan.allow_partial_final_window,
+    }
+    provenance_values: dict[str, Any] = {
+        "source_identity": {
+            "input_source_path": identity.input_source_path,
+            "resolved_input_source_path": identity.resolved_input_source_path,
+            "input_format": identity.input_format,
+            "resolved_input_format": identity.resolved_input_format,
+            "acquisition_mode": identity.acquisition_mode,
+            "sessions_per_hour": identity.sessions_per_hour,
+            "session_duration_sec": identity.session_duration_sec,
+            "allow_partial_final_window": identity.allow_partial_final_window,
+            "exclude_incomplete_final_rwd_chunk": identity.exclude_incomplete_final_rwd_chunk,
+            "source_setup_signature": identity.source_setup_signature,
+            "config_fingerprint": identity.config_fingerprint,
+            "diagnostic_cache_contract_identity": identity.diagnostic_cache_contract_identity,
+        }
+    }
+    for field_name in RWD_NORMALIZATION_PROVENANCE_FIELDS:
+        if field_name in combined_values:
+            provenance_values[field_name] = combined_values[field_name]
+
+    missing_required_fields: list[str] = []
+    unresolved_fields: list[str] = []
+    for field_name in RWD_NORMALIZATION_REQUIRED_SNAPSHOT_FIELDS:
+        value = combined_values.get(field_name)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_required_fields.append(field_name)
+            unresolved_fields.append(field_name)
+        elif not isinstance(value, str) or not value.strip():
+            unresolved_fields.append(field_name)
+        else:
+            backend_config_values[field_name] = value
+    if isinstance(plan.exclude_incomplete_final_rwd_chunk, bool):
+        backend_config_values["exclude_incomplete_final_rwd_chunk"] = (
+            plan.exclude_incomplete_final_rwd_chunk
+        )
+    else:
+        unresolved_fields.append("exclude_incomplete_final_rwd_chunk")
+
+    inconsistent_fields: list[dict[str, Any]] = []
+    plan_format = _normalized_format(plan.input_format)
+    plan_acquisition = _normalized_format(plan.acquisition_mode)
+    consistency_candidates = (
+        ("input_format", plan_format, _normalized_format(snapshot.input_format), "snapshot.input_format"),
+        (
+            "resolved_input_format",
+            plan_format,
+            _normalized_format(snapshot.resolved_input_format),
+            "snapshot.resolved_input_format",
+        ),
+        (
+            "acquisition_mode",
+            plan_acquisition,
+            _normalized_format(snapshot.acquisition_mode),
+            "snapshot.acquisition_mode",
+        ),
+    )
+    for field_name, plan_value, snapshot_value, location in consistency_candidates:
+        if snapshot_value and plan_value != snapshot_value:
+            inconsistent_fields.append(
+                _rwd_normalization_consistency_record(
+                    field_name,
+                    plan_value,
+                    snapshot_value,
+                    location,
+                )
+            )
+
+    identity_candidates = (
+        ("input_format", plan_format, _normalized_format(identity.input_format), "source_identity.input_format"),
+        (
+            "resolved_input_format",
+            plan_format,
+            _normalized_format(identity.resolved_input_format),
+            "source_identity.resolved_input_format",
+        ),
+        (
+            "acquisition_mode",
+            plan_acquisition,
+            _normalized_format(identity.acquisition_mode),
+            "source_identity.acquisition_mode",
+        ),
+        (
+            "exclude_incomplete_final_rwd_chunk",
+            bool(plan.exclude_incomplete_final_rwd_chunk),
+            identity.exclude_incomplete_final_rwd_chunk,
+            "source_identity.exclude_incomplete_final_rwd_chunk",
+        ),
+    )
+    for field_name, plan_value, snapshot_value, location in identity_candidates:
+        if snapshot_value is not None and plan_value != snapshot_value:
+            inconsistent_fields.append(
+                _rwd_normalization_consistency_record(
+                    field_name,
+                    plan_value,
+                    snapshot_value,
+                    location,
+                )
+            )
+
+    for source_name, values in (
+        ("contract_values", contract_values),
+        ("format_specific", format_specific),
+    ):
+        for field_name in (
+            "input_format",
+            "resolved_input_format",
+            "acquisition_mode",
+            "exclude_incomplete_final_rwd_chunk",
+        ):
+            if field_name not in values:
+                continue
+            expected = (
+                plan.exclude_incomplete_final_rwd_chunk
+                if field_name == "exclude_incomplete_final_rwd_chunk"
+                else plan_acquisition
+                if field_name == "acquisition_mode"
+                else plan_format
+            )
+            actual = (
+                values[field_name]
+                if field_name == "exclude_incomplete_final_rwd_chunk"
+                else _normalized_format(values[field_name])
+            )
+            if expected != actual:
+                inconsistent_fields.append(
+                    _rwd_normalization_consistency_record(
+                        field_name,
+                        expected,
+                        actual,
+                        f"snapshot.{source_name}.{field_name}",
+                    )
+                )
+
+    duplicate_keys = set(contract_values).intersection(format_specific)
+    for field_name in sorted(duplicate_keys):
+        if contract_values[field_name] != format_specific[field_name]:
+            inconsistent_fields.append(
+                _rwd_normalization_consistency_record(
+                    field_name,
+                    contract_values[field_name],
+                    format_specific[field_name],
+                    "snapshot.contract_values_vs_format_specific",
+                )
+            )
+
+    recognized_fields = (
+        RWD_NORMALIZATION_BACKEND_CONFIG_FIELDS
+        | RWD_NORMALIZATION_STRUCTURAL_FIELDS
+        | RWD_NORMALIZATION_PROVENANCE_FIELDS
+    )
+    rejected_fields = {
+        field_name: value
+        for field_name, value in combined_values.items()
+        if field_name not in recognized_fields
+    }
+
+    blocker_categories: list[str] = []
+    if plan_format != "rwd":
+        blocker_categories.append("unsupported_format_for_rwd_first_subset")
+    if plan_acquisition != "intermittent":
+        blocker_categories.append("unsupported_acquisition_mode_for_rwd_first_subset")
+    if not snapshot.current_applied:
+        blocker_categories.append("dataset_contract_snapshot_not_current")
+    if _dataset_contract_snapshot_plan_consistency_reasons(plan, snapshot):
+        blocker_categories.append("inconsistent_rwd_contract_field")
+    if inconsistent_fields:
+        blocker_categories.append("inconsistent_rwd_contract_field")
+    if missing_required_fields:
+        blocker_categories.append("missing_required_rwd_contract_field")
+    if unresolved_fields:
+        blocker_categories.append("unresolved_rwd_dataset_contract_normalization")
+    blocker_categories = list(dict.fromkeys(blocker_categories))
+
+    if "unsupported_format_for_rwd_first_subset" in blocker_categories:
+        normalization_status = "unsupported_format_for_rwd_first_subset"
+        mapping_status = normalization_status
+    elif "unsupported_acquisition_mode_for_rwd_first_subset" in blocker_categories:
+        normalization_status = "unsupported_acquisition_mode_for_rwd_first_subset"
+        mapping_status = normalization_status
+    elif "dataset_contract_snapshot_not_current" in blocker_categories:
+        normalization_status = "dataset_contract_snapshot_not_current"
+        mapping_status = normalization_status
+    elif "inconsistent_rwd_contract_field" in blocker_categories:
+        normalization_status = "inconsistent_rwd_contract_field"
+        mapping_status = "rwd_dataset_contract_inconsistent"
+    elif blocker_categories:
+        normalization_status = "unresolved_rwd_dataset_contract_normalization"
+        mapping_status = "rwd_dataset_contract_unresolved"
+    else:
+        normalization_status = "ready_for_future_mapping"
+        mapping_status = "rwd_dataset_contract_ready_for_future_mapping"
+
+    return {
+        "normalization_status": normalization_status,
+        "backend_config_values": backend_config_values,
+        "structural_values": structural_values,
+        "provenance_values": provenance_values,
+        "rejected_fields": rejected_fields,
+        "missing_required_fields": missing_required_fields,
+        "inconsistent_fields": inconsistent_fields,
+        "unresolved_fields": unresolved_fields,
+        "blocker_categories": blocker_categories,
+        "execution_consumption_enabled": normalization_status == "ready_for_future_mapping",
+        "backend_config_mapping_status": mapping_status,
+        "supported_subset": {
+            "input_format": "rwd",
+            "acquisition_mode": "intermittent",
+        },
+        "no_file_inspection": True,
+        "no_runspec": True,
+        "no_argv": True,
+        "no_config_written": True,
+        "no_files_written": True,
+    }
+
+
 def _execution_intent_preview_dict(
     intent: GuidedNewAnalysisExecutionIntent,
     *,
@@ -2515,21 +2793,38 @@ def build_guided_new_analysis_execution_spec_preview(
     feature_event_consumption = _feature_event_consumption_preview_dict(plan)
     feature_event_effective_values = feature_event_consumption["effective_values_preview"]
     feature_event_blockers = tuple(feature_event_effective_values["blocker_categories"])
+    rwd_normalization = build_guided_rwd_dataset_contract_normalization_preview(plan)
+    rwd_normalization_blockers = tuple(rwd_normalization["blocker_categories"])
     issue_categories = tuple(
         dict.fromkeys(
             tuple(issue.category for issue in subset_readiness.blocking_issues)
             + feature_event_blockers
+            + rwd_normalization_blockers
         )
     )
     blocked_reasons = tuple(issue.message for issue in subset_readiness.blocking_issues) + tuple(
         f"Feature/event effective-value preview blocker: {category}"
         for category in feature_event_blockers
+    ) + tuple(
+        f"RWD dataset normalization blocker: {category}"
+        for category in rwd_normalization_blockers
     )
-    spec_preview_available = bool(subset_readiness.first_subset_executable and not feature_event_blockers)
+    spec_preview_available = bool(
+        subset_readiness.first_subset_executable
+        and not feature_event_blockers
+        and not rwd_normalization_blockers
+    )
     dataset_contract = _dataset_contract_snapshot_preview_dict(
         plan.dataset_contract_snapshot,
         execution_consumption_enabled=spec_preview_available,
     )
+    dataset_contract["rwd_normalization"] = {
+        **rwd_normalization,
+        "execution_consumption_enabled": bool(
+            spec_preview_available
+            and rwd_normalization["normalization_status"] == "ready_for_future_mapping"
+        ),
+    }
     execution_intent = _execution_intent_preview_dict(
         plan.execution_intent,
         execution_consumption_enabled=spec_preview_available,

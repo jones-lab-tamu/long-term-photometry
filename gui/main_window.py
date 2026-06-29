@@ -6097,6 +6097,8 @@ class MainWindow(QMainWindow):
             dyn_contract = correction.get("dynamic_fit_parameter_contract") or {}
             feature_event = execution_spec_preview.feature_event or {}
             feature_effective = feature_event.get("feature_event_effective_values") or {}
+            dataset_contract = execution_spec_preview.dataset_contract or {}
+            rwd_normalization = dataset_contract.get("rwd_normalization") or {}
             lines.extend([
                 "Guided execution-spec preview:",
                 f"  spec_preview_available: {str(bool(execution_spec_preview.spec_preview_available)).lower()}",
@@ -6114,6 +6116,19 @@ class MainWindow(QMainWindow):
                 + "; ".join(str(field) for field in feature_effective.get("unresolved_fields") or [])
                 if feature_effective.get("unresolved_fields")
                 else "    unresolved_fields: none",
+                "  rwd_dataset_normalization:",
+                f"    backend_config_mapping_status: {rwd_normalization.get('backend_config_mapping_status') or 'none'}",
+                "    missing_required_fields: "
+                + "; ".join(str(field) for field in rwd_normalization.get("missing_required_fields") or [])
+                if rwd_normalization.get("missing_required_fields")
+                else "    missing_required_fields: none",
+                "    inconsistent_fields: "
+                + "; ".join(
+                    str(item.get("field_name") or "unknown")
+                    for item in rwd_normalization.get("inconsistent_fields") or []
+                )
+                if rwd_normalization.get("inconsistent_fields")
+                else "    inconsistent_fields: none",
                 "  output: no directories or files created",
                 "  output_base: "
                 + (
