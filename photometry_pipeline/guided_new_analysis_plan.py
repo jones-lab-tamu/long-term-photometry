@@ -634,6 +634,12 @@ class GuidedNewAnalysisDraftPlan:
     exclude_incomplete_final_rwd_chunk: bool = False
     acquisition_structure_status: str = "unknown"  # "ready", "incomplete", "invalid", "unknown"
 
+    # output and strategy planning state (4J11i)
+    output_base_path: str | None = None
+    output_overwrite: bool = False
+    global_correction_strategy: str | None = None
+    dynamic_fit_mode: str | None = None
+
     # Dataset contract snapshot planning state. This is reviewed/applied plan
     # state only; it does not infer fields or generate executable config.
     dataset_contract_snapshot: GuidedNewAnalysisDatasetContractSnapshot = field(

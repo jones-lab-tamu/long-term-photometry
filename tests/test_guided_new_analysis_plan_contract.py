@@ -3235,3 +3235,54 @@ def test_feature_event_profile_statuses_validation():
     iss_e = [iss for iss in issues_e if iss.category == "missing_feature_event_profile"]
     assert len(iss_e) == 1
     assert iss_e[0].severity == "blocking"
+
+
+def test_guided_new_analysis_durable_fields_4J11i():
+    # 1. Defaults
+    plan = GuidedNewAnalysisDraftPlan()
+    assert plan.output_base_path is None
+    assert plan.output_overwrite is False
+    assert plan.global_correction_strategy is None
+    assert plan.dynamic_fit_mode is None
+
+    # 2. Assignment
+    plan_assigned = GuidedNewAnalysisDraftPlan(
+        output_base_path="C:/some/output",
+        output_overwrite=True,
+        global_correction_strategy="dynamic_fit",
+        dynamic_fit_mode="global_linear_regression"
+    )
+    assert plan_assigned.output_base_path == "C:/some/output"
+    assert plan_assigned.output_overwrite is True
+    assert plan_assigned.global_correction_strategy == "dynamic_fit"
+    assert plan_assigned.dynamic_fit_mode == "global_linear_regression"
+
+    # 3. Serialization simulation
+    from dataclasses import asdict
+    d = asdict(plan_assigned)
+    assert d["output_base_path"] == "C:/some/output"
+    assert d["output_overwrite"] is True
+    assert d["global_correction_strategy"] == "dynamic_fit"
+    assert d["dynamic_fit_mode"] == "global_linear_regression"
+
+    # 4. Deserialization backward compatibility simulation
+    # Older plan dict lacking new fields
+    old_dict = {
+        "schema_version": "guided_new_analysis_plan.v1",
+        "mode": "new_analysis",
+        "input_source_path": "C:/raw/input"
+    }
+    # Should load cleanly without crash, defaulting the missing fields
+    restored = GuidedNewAnalysisDraftPlan(
+        input_source_path=old_dict.get("input_source_path"),
+        output_base_path=old_dict.get("output_base_path", None),
+        output_overwrite=old_dict.get("output_overwrite", False),
+        global_correction_strategy=old_dict.get("global_correction_strategy", None),
+        dynamic_fit_mode=old_dict.get("dynamic_fit_mode", None)
+    )
+    assert restored.input_source_path == "C:/raw/input"
+    assert restored.output_base_path is None
+    assert restored.output_overwrite is False
+    assert restored.global_correction_strategy is None
+    assert restored.dynamic_fit_mode is None
+

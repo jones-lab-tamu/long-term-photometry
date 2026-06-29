@@ -1452,3 +1452,37 @@ def test_new_analysis_output_policy_clear_removes_state(window, tmp_path, monkey
     assert window._guided_output_path_edit.text() == ""
     assert "Output policy status: missing" in window._guided_draft_run_plan_preview_label.text()
     assert not target.exists()
+
+
+def test_guided_new_analysis_compilation_bindings_4J11i(window, tmp_path, monkeypatch):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+
+    # 1. Output base path mapping
+    window._guided_output_dir_edit.setText("C:/guided_test_output")
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.output_base_path == "C:/guided_test_output"
+
+    # 2. Rejects completed-run-scoped _guided_strategy_choices mapping
+    window._guided_correction_intent = None
+    window._guided_strategy_choices = {
+        ("cache_key", "ROI0"): {"strategy": "robust_global_event_reject", "source_type": "diagnostic_cache"}
+    }
+    plan_with_choices = window._build_guided_new_analysis_draft_plan()
+    assert plan_with_choices.global_correction_strategy is None
+    assert plan_with_choices.dynamic_fit_mode is None
+
+    # 3. Dynamic fit mode mapping from _guided_correction_intent
+    window._guided_correction_intent = "Global Linear Regression"
+    plan_with_intent = window._build_guided_new_analysis_draft_plan()
+    assert plan_with_intent.global_correction_strategy == "dynamic_fit"
+    assert plan_with_intent.dynamic_fit_mode == "global_linear_regression"
+
+    # 4. Signal-only F0 mapping from _guided_correction_intent
+    from gui.main_window import GUIDED_SIGNAL_ONLY_F0_CARD
+    window._guided_correction_intent = GUIDED_SIGNAL_ONLY_F0_CARD
+    plan_signal_only = window._build_guided_new_analysis_draft_plan()
+    assert plan_signal_only.global_correction_strategy == "signal_only_f0"
+    assert plan_signal_only.dynamic_fit_mode is None
+

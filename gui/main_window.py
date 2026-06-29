@@ -5715,6 +5715,22 @@ class MainWindow(QMainWindow):
             or self._default_guided_new_analysis_dataset_contract_snapshot()
         )
 
+        out_base_path = None
+        if hasattr(self, "_guided_output_dir_edit"):
+            out_base_path = self._guided_output_dir_edit.text().strip() or None
+        if out_base_path is None:
+            out_base_path = getattr(self, "_guided_new_analysis_output_policy_path", None)
+
+        global_corr_strategy = None
+        df_mode = None
+        intent = getattr(self, "_guided_correction_intent", None)
+        if intent:
+            if intent == GUIDED_SIGNAL_ONLY_F0_CARD:
+                global_corr_strategy = "signal_only_f0"
+            elif intent in GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE:
+                global_corr_strategy = "dynamic_fit"
+                df_mode = GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE[intent]
+
         return GuidedNewAnalysisDraftPlan(
             input_source_path=input_path,
             resolved_input_source_path=input_path,
@@ -5728,6 +5744,10 @@ class MainWindow(QMainWindow):
             exclude_incomplete_final_rwd_chunk=exclude_rwd,
             acquisition_structure_status=acq_status,
             dataset_contract_snapshot=dataset_contract_snapshot,
+            output_base_path=out_base_path,
+            output_overwrite=False,
+            global_correction_strategy=global_corr_strategy,
+            dynamic_fit_mode=df_mode,
             discovered_roi_ids=discovered,
             included_roi_ids=included,
             excluded_roi_ids=excluded,
