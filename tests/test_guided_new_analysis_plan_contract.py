@@ -33,7 +33,9 @@ from photometry_pipeline.guided_new_analysis_plan import (
     build_guided_new_analysis_execution_spec_preview,
     build_guided_feature_event_effective_values_preview,
     build_guided_new_analysis_run_preview,
+    build_guided_output_base_safety_ownership_preview,
     build_guided_rwd_dataset_contract_normalization_preview,
+    classify_output_base_safety_ownership,
     canonical_feature_event_backend_defaults,
     canonical_dynamic_fit_backend_defaults,
     evaluate_guided_new_analysis_execution_subset_readiness,
@@ -1685,6 +1687,347 @@ def test_rwd_dataset_normalization_is_pure_and_performs_no_file_inspection(tmp_p
     assert preview.execution_available is False
 
 
+def test_output_safety_ownership_best_case_is_runner_owned_pattern_only():
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+
+    safety = build_guided_output_base_safety_ownership_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+    preview_safety = preview.output["output_safety_ownership"]
+
+    assert safety["output_safety_status"] == "output_base_ready_for_runner_owned_future_mapping"
+    assert safety["backend_config_mapping_status"] == "output_base_ready_for_runner_owned_future_mapping"
+    assert safety["future_output_owner"] == "runner"
+    assert safety["path_role"] == "output_base"
+    assert safety["run_directory_strategy"] == "derive_unique_run_id_under_output_base"
+    assert safety["future_run_dir"] == "unresolved_until_execution_start"
+    assert safety["future_run_directory_pattern"] == "<output_base>/<runner-generated-run-id>"
+    assert safety["preview_path_kind"] == "pattern_only"
+    assert safety["concrete_run_dir_known"] is False
+    assert safety["overwrite_requested"] is False
+    assert safety["filesystem_facts"]["facts_source"] == "not_inspected"
+    assert safety["filesystem_facts"]["writability_status"] == "unknown"
+    assert safety["filesystem_facts"]["filesystem_facts_required_for_planning_mapping"] is False
+    assert safety["blocker_categories"] == []
+    assert safety["execution_consumption_enabled"] is True
+    assert safety["no_directory_creation"] is True
+    assert safety["no_directory_reservation"] is True
+    assert safety["no_config_written"] is True
+    assert safety["no_command_written"] is True
+    assert safety["no_files_written"] is True
+    assert safety["no_validation"] is True
+    assert safety["no_run"] is True
+    assert preview.spec_preview_available is True
+    assert preview.execution_available is False
+    assert preview_safety["execution_consumption_enabled"] is True
+    assert preview_safety["future_run_dir"] == "unresolved_until_execution_start"
+    assert preview_safety["concrete_run_dir_known"] is False
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_status"),
+    [
+        (
+            {
+                "output_policy_status": "missing",
+                "output_policy_path": None,
+                "output_policy_explicitly_applied": False,
+            },
+            "output_policy_not_current",
+        ),
+        (
+            {
+                "output_policy_status": "stale",
+                "output_policy_stale_reasons": ["target changed"],
+            },
+            "output_policy_not_current",
+        ),
+        (
+            {
+                "output_policy_status": "invalid",
+                "output_policy_validation_issues": ["inside source"],
+            },
+            "output_policy_not_current",
+        ),
+        (
+            {
+                "output_policy_status": "applied",
+                "output_policy_explicitly_applied": False,
+            },
+            "output_policy_not_current",
+        ),
+    ],
+)
+def test_output_safety_noncurrent_output_policy_blocks(overrides, expected_status):
+    plan = _complete_new_analysis_plan_with_current_snapshot(**overrides)
+
+    safety = build_guided_output_base_safety_ownership_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert safety["output_safety_status"] == expected_status
+    assert "output_policy_not_current" in safety["blocker_categories"]
+    assert preview.spec_preview_available is False
+    assert "output_policy_not_current" in preview.blocking_issue_categories
+    assert preview.output["output_safety_ownership"]["execution_consumption_enabled"] is False
+
+
+def test_output_safety_missing_output_base_blocks_even_when_policy_claims_applied():
+    plan = _complete_new_analysis_plan_with_current_snapshot(output_policy_path=None)
+
+    safety = build_guided_output_base_safety_ownership_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert safety["output_safety_status"] == "output_base_missing"
+    assert "output_base_missing" in safety["blocker_categories"]
+    assert preview.spec_preview_available is False
+    assert "output_base_missing" in preview.blocking_issue_categories
+
+
+def test_output_safety_relative_output_base_blocks():
+    plan = _complete_new_analysis_plan_with_current_snapshot(output_policy_path="relative/output")
+
+    safety = build_guided_output_base_safety_ownership_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert safety["output_safety_status"] == "output_base_relative"
+    assert "output_base_relative" in safety["blocker_categories"]
+    assert preview.spec_preview_available is False
+    assert "output_base_relative" in preview.blocking_issue_categories
+
+
+def test_output_safety_windows_drive_paths_are_platform_stable():
+    safety = classify_output_base_safety_ownership(
+        output_base="C:/raw/input/future_output",
+        source_path="C:/raw/input",
+        output_policy_status="applied",
+        output_policy_explicitly_applied=True,
+    )
+
+    relationship_status = {
+        item["relationship"]: item["status"]
+        for item in safety["path_relationships"]
+    }
+    relationship_evidence = {
+        item["relationship"]: item["evidence"]
+        for item in safety["path_relationships"]
+    }
+    assert safety["normalized_output_base"] == "c:/raw/input/future_output"
+    assert relationship_evidence["output_base_inside_source"]["output_path_style"] == "windows_drive"
+    assert relationship_evidence["output_base_inside_source"]["source_path_style"] == "windows_drive"
+    assert relationship_status["output_base_equals_source"] == "safe"
+    assert relationship_status["output_base_inside_source"] == "unsafe"
+    assert relationship_status["source_inside_output_base"] == "safe"
+    assert safety["output_safety_status"] == "unsafe_source_output_relationship"
+
+
+def test_output_safety_windows_backslash_paths_normalize_like_windows_drive_paths():
+    safety = classify_output_base_safety_ownership(
+        output_base=r"C:\raw\input\future_output",
+        source_path=r"C:\raw\input",
+        output_policy_status="applied",
+        output_policy_explicitly_applied=True,
+    )
+
+    relationship_status = {
+        item["relationship"]: item["status"]
+        for item in safety["path_relationships"]
+    }
+    assert safety["normalized_output_base"] == "c:/raw/input/future_output"
+    assert relationship_status["output_base_inside_source"] == "unsafe"
+    assert "unsafe_source_output_relationship" in safety["blocker_categories"]
+
+
+def test_output_safety_posix_absolute_paths_are_platform_stable():
+    safety = classify_output_base_safety_ownership(
+        output_base="/raw/input/future_output",
+        source_path="/raw/input",
+        output_policy_status="applied",
+        output_policy_explicitly_applied=True,
+    )
+
+    relationship_status = {
+        item["relationship"]: item["status"]
+        for item in safety["path_relationships"]
+    }
+    relationship_evidence = {
+        item["relationship"]: item["evidence"]
+        for item in safety["path_relationships"]
+    }
+    assert safety["normalized_output_base"] == "/raw/input/future_output"
+    assert relationship_evidence["output_base_inside_source"]["output_path_style"] == "posix"
+    assert relationship_evidence["output_base_inside_source"]["source_path_style"] == "posix"
+    assert relationship_status["output_base_inside_source"] == "unsafe"
+    assert safety["output_safety_status"] == "unsafe_source_output_relationship"
+
+
+def test_output_safety_mixed_path_styles_block_instead_of_silent_safe():
+    safety = classify_output_base_safety_ownership(
+        output_base="C:/planned/output",
+        source_path="/raw/input",
+        output_policy_status="applied",
+        output_policy_explicitly_applied=True,
+    )
+
+    relationship_status = {
+        item["relationship"]: item["status"]
+        for item in safety["path_relationships"]
+    }
+    assert set(relationship_status.values()) == {"unknown_mixed_path_style"}
+    assert safety["output_safety_status"] == "output_path_style_mismatch"
+    assert "output_path_style_mismatch" in safety["blocker_categories"]
+
+
+@pytest.mark.parametrize(
+    ("output_path", "relationship"),
+    [
+        ("C:/raw/input", "output_base_equals_source"),
+        ("C:/raw/input/future_output", "output_base_inside_source"),
+        ("C:/raw", "source_inside_output_base"),
+    ],
+)
+def test_output_safety_source_output_relationships_block(output_path, relationship):
+    plan = _complete_new_analysis_plan_with_current_snapshot(output_policy_path=output_path)
+
+    safety = build_guided_output_base_safety_ownership_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    relationship_status = {
+        item["relationship"]: item["status"]
+        for item in safety["path_relationships"]
+    }
+    assert relationship_status[relationship] == "unsafe"
+    assert safety["output_safety_status"] == "unsafe_source_output_relationship"
+    assert "unsafe_source_output_relationship" in safety["blocker_categories"]
+    assert preview.spec_preview_available is False
+    assert "unsafe_source_output_relationship" in preview.blocking_issue_categories
+
+
+@pytest.mark.parametrize(
+    ("root_kind", "root_path", "output_path"),
+    [
+        ("completed_run", "C:/completed/run-1", "C:/completed/run-1/future_output"),
+        ("legacy_output", "C:/legacy/output", "C:/legacy/output/future_output"),
+        ("diagnostic_cache", "C:/cache", "C:/cache/future_output"),
+    ],
+)
+def test_output_safety_protected_roots_block(root_kind, root_path, output_path):
+    safety = classify_output_base_safety_ownership(
+        output_base=output_path,
+        source_path="C:/raw/input",
+        output_policy_status="applied",
+        output_policy_explicitly_applied=True,
+        protected_roots=((root_kind, root_path),),
+        protected_root_context_complete=True,
+    )
+
+    assert safety["output_safety_status"] == "unsafe_protected_output_location"
+    assert safety["protected_root_status"] == "unsafe"
+    assert "unsafe_protected_output_location" in safety["blocker_categories"]
+    assert safety["protected_root_relationships"][0]["root_kind"] == root_kind
+    assert safety["protected_root_relationships"][0]["status"] == "unsafe"
+
+
+def test_output_safety_mixed_protected_root_style_blocks_when_context_present():
+    safety = classify_output_base_safety_ownership(
+        output_base="C:/planned/output",
+        source_path="C:/raw/input",
+        output_policy_status="applied",
+        output_policy_explicitly_applied=True,
+        protected_roots=(("completed_run", "/completed/run-1"),),
+        protected_root_context_complete=True,
+    )
+
+    assert safety["output_safety_status"] == "unsafe_protected_output_location"
+    assert safety["protected_root_status"] == "unsafe"
+    assert safety["protected_root_relationships"][0]["status"] == "unknown_mixed_path_style"
+    assert "unsafe_protected_output_location" in safety["blocker_categories"]
+
+
+def test_output_safety_overwrite_intent_blocks():
+    plan = _complete_new_analysis_plan_with_current_snapshot(
+        output_creation_policy=GuidedNewAnalysisOutputCreationPolicy(overwrite=True),
+    )
+
+    safety = build_guided_output_base_safety_ownership_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert safety["output_safety_status"] == "unsafe_overwrite_for_guided_first_subset"
+    assert "unsafe_overwrite_for_guided_first_subset" in safety["blocker_categories"]
+    assert preview.spec_preview_available is False
+    assert "unsafe_overwrite_for_guided_first_subset" in preview.blocking_issue_categories
+
+
+def test_output_safety_filesystem_facts_are_explicit_and_non_required():
+    safety = classify_output_base_safety_ownership(
+        output_base="C:/planned/output",
+        source_path="C:/raw/input",
+        output_policy_status="applied",
+        output_policy_explicitly_applied=True,
+        filesystem_facts={
+            "exists": True,
+            "is_directory": True,
+            "is_file": False,
+            "directory_empty": False,
+            "writable": None,
+        },
+    )
+
+    assert safety["output_safety_status"] == "output_base_ready_for_runner_owned_future_mapping"
+    assert safety["filesystem_facts"]["facts_source"] == "supplied_read_only_facts"
+    assert safety["filesystem_facts"]["exists"] is True
+    assert safety["filesystem_facts"]["is_directory"] is True
+    assert safety["filesystem_facts"]["directory_empty"] is False
+    assert safety["filesystem_facts"]["directory_non_empty"] is True
+    assert safety["filesystem_facts"]["requires_creation"] is False
+    assert safety["filesystem_facts"]["writability_status"] == "unknown"
+    assert safety["filesystem_facts"]["filesystem_facts_required_for_planning_mapping"] is False
+    assert safety["blocker_categories"] == []
+
+
+def test_output_safety_supplied_file_or_not_writable_facts_block():
+    safety = classify_output_base_safety_ownership(
+        output_base="C:/planned/output.txt",
+        source_path="C:/raw/input",
+        output_policy_status="applied",
+        output_policy_explicitly_applied=True,
+        filesystem_facts={
+            "exists": True,
+            "is_file": True,
+            "is_directory": False,
+            "writable": False,
+        },
+    )
+
+    assert safety["output_safety_status"] == "output_base_safety_unresolved"
+    assert "output_base_is_file" in safety["blocker_categories"]
+    assert "output_base_not_writable" in safety["blocker_categories"]
+
+
+def test_output_safety_preview_is_pure_no_files_no_concrete_run_dir(tmp_path):
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_output_base"
+    plan = _complete_new_analysis_plan_with_current_snapshot(output_policy_path=str(target))
+    before_state = dict(plan.__dict__)
+    before_files = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+
+    safety = build_guided_output_base_safety_ownership_preview(plan)
+    preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    after_files = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    assert after_files == before_files
+    assert not target.exists()
+    assert dict(plan.__dict__) == before_state
+    assert safety["future_run_dir"] == "unresolved_until_execution_start"
+    assert safety["preview_path_kind"] == "pattern_only"
+    assert safety["concrete_run_dir_known"] is False
+    assert preview.output["future_run_dir"] == "unresolved_until_execution_start"
+    assert preview.output["output_safety_ownership"]["concrete_run_dir_known"] is False
+    assert preview.output["output_safety_ownership"]["no_directory_creation"] is True
+    assert preview.output["output_safety_ownership"]["no_directory_reservation"] is True
+    assert preview.output["output_safety_ownership"]["no_files_written"] is True
+    assert preview.execution_available is False
+
+
 def test_execution_spec_preview_best_case_rwd_available_but_never_executable():
     plan = _complete_new_analysis_plan_with_current_snapshot()
 
@@ -1751,6 +2094,24 @@ def test_execution_spec_preview_best_case_rwd_available_but_never_executable():
     assert preview.output["future_run_directory_strategy"] == "derive_unique_run_id_under_output_base"
     assert preview.output["future_run_dir"] == "unresolved_until_execution_start"
     assert preview.output["overwrite"] is False
+    output_safety = preview.output["output_safety_ownership"]
+    assert output_safety["output_safety_status"] == "output_base_ready_for_runner_owned_future_mapping"
+    assert output_safety["backend_config_mapping_status"] == "output_base_ready_for_runner_owned_future_mapping"
+    assert output_safety["future_output_owner"] == "runner"
+    assert output_safety["path_role"] == "output_base"
+    assert output_safety["run_directory_strategy"] == "derive_unique_run_id_under_output_base"
+    assert output_safety["future_run_dir"] == "unresolved_until_execution_start"
+    assert output_safety["preview_path_kind"] == "pattern_only"
+    assert output_safety["concrete_run_dir_known"] is False
+    assert output_safety["blocker_categories"] == []
+    assert output_safety["execution_consumption_enabled"] is True
+    assert output_safety["filesystem_facts"]["facts_source"] == "not_inspected"
+    assert output_safety["filesystem_facts"]["writability_status"] == "unknown"
+    assert output_safety["no_directory_creation"] is True
+    assert output_safety["no_directory_reservation"] is True
+    assert output_safety["no_files_written"] is True
+    assert output_safety["no_validation"] is True
+    assert output_safety["no_run"] is True
     assert preview.output["directory_created"] is False
     assert preview.output["config_written"] is False
     assert preview.output["RunSpec_instantiated"] is False

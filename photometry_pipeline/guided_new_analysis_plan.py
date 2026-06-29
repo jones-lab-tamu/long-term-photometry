@@ -2748,7 +2748,377 @@ def _dynamic_fit_parameter_contract_preview_dict(
     }
 
 
-def _execution_spec_output_preview_dict(plan: GuidedNewAnalysisDraftPlan) -> dict[str, Any]:
+def _output_safety_normalized_path(value: str | None) -> str:
+    return _output_safety_parse_path(value)["normalized_path"]
+
+
+def _output_safety_parse_path(value: str | None) -> dict[str, Any]:
+    raw = str(value or "").strip()
+    if not raw:
+        return {
+            "raw_path": raw,
+            "path_style": "missing",
+            "is_absolute": False,
+            "anchor": "",
+            "parts": (),
+            "normalized_path": "",
+        }
+    text = raw.replace("\\", "/")
+    while "//" in text:
+        text = text.replace("//", "/")
+    path_style = "relative"
+    anchor = ""
+    remainder = text
+    is_absolute = False
+    if len(text) >= 3 and text[1] == ":" and text[0].isalpha() and text[2] == "/":
+        path_style = "windows_drive"
+        anchor = f"{text[0].lower()}:"
+        remainder = text[3:]
+        is_absolute = True
+    elif text.startswith("/"):
+        path_style = "posix"
+        anchor = "/"
+        remainder = text[1:]
+        is_absolute = True
+
+    parts: list[str] = []
+    for raw_part in remainder.split("/"):
+        if raw_part in ("", "."):
+            continue
+        if raw_part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(raw_part.lower() if path_style == "windows_drive" else raw_part)
+
+    if not is_absolute:
+        normalized = ""
+    elif path_style == "windows_drive":
+        normalized = f"{anchor}/" + "/".join(parts) if parts else f"{anchor}/"
+    else:
+        normalized = "/" + "/".join(parts) if parts else "/"
+
+    return {
+        "raw_path": raw,
+        "path_style": path_style,
+        "is_absolute": is_absolute,
+        "anchor": anchor,
+        "parts": tuple(parts),
+        "normalized_path": normalized,
+    }
+
+
+def _output_safety_same_or_child(path_info: dict[str, Any], root_info: dict[str, Any]) -> bool | None:
+    if not path_info.get("is_absolute") or not root_info.get("is_absolute"):
+        return None
+    if path_info.get("path_style") != root_info.get("path_style"):
+        return None
+    if path_info.get("anchor") != root_info.get("anchor"):
+        return False
+    path_parts = tuple(path_info.get("parts") or ())
+    root_parts = tuple(root_info.get("parts") or ())
+    return path_parts[:len(root_parts)] == root_parts
+
+
+def classify_output_base_safety_ownership(
+    *,
+    output_base: str | None,
+    source_path: str | None,
+    output_policy_status: str,
+    output_policy_explicitly_applied: bool,
+    output_policy_validation_issues: tuple[str, ...] = (),
+    output_policy_stale_reasons: tuple[str, ...] = (),
+    path_role: str = "output_base",
+    run_directory_strategy: str = "derive_unique_run_id_under_output_base",
+    overwrite_requested: bool | None = False,
+    precreate_during_preview: bool = False,
+    protected_roots: tuple[tuple[str, str], ...] = (),
+    protected_root_context_complete: bool = False,
+    filesystem_facts: dict[str, Any] | None = None,
+    write_context: str = "planning_preview",
+) -> dict[str, Any]:
+    """Classify output-base safety without filesystem I/O or side effects."""
+    raw_output_base = str(output_base or "").strip()
+    raw_source_path = str(source_path or "").strip()
+    output_path_info = _output_safety_parse_path(raw_output_base)
+    source_path_info = _output_safety_parse_path(raw_source_path)
+    output_is_absolute = bool(output_path_info["is_absolute"])
+    source_is_absolute = bool(source_path_info["is_absolute"])
+    normalized_output = output_path_info["normalized_path"]
+    normalized_source = source_path_info["normalized_path"]
+
+    blockers: list[str] = []
+    relationships: list[dict[str, Any]] = []
+
+    def add_relationship(
+        name: str,
+        status: str,
+        *,
+        evidence: dict[str, Any],
+        blocker_category: str | None = None,
+    ) -> None:
+        relationships.append({
+            "relationship": name,
+            "status": status,
+            "evidence": evidence,
+            "blocker_category": blocker_category,
+        })
+        if blocker_category:
+            blockers.append(blocker_category)
+
+    policy_current = (
+        output_policy_status == "applied"
+        and output_policy_explicitly_applied
+        and not output_policy_validation_issues
+        and not output_policy_stale_reasons
+    )
+    if not policy_current:
+        blockers.append("output_policy_not_current")
+    if not raw_output_base:
+        blockers.append("output_base_missing")
+    elif not output_is_absolute:
+        blockers.append("output_base_relative")
+
+    if normalized_output and normalized_source:
+        styles_match = (
+            output_path_info["path_style"] == source_path_info["path_style"]
+            and output_path_info["anchor"] == source_path_info["anchor"]
+        )
+        evidence = {
+            "output_base": normalized_output,
+            "source_path": normalized_source,
+            "output_path_style": output_path_info["path_style"],
+            "source_path_style": source_path_info["path_style"],
+        }
+        if not styles_match:
+            for name in (
+                "output_base_equals_source",
+                "output_base_inside_source",
+                "source_inside_output_base",
+            ):
+                add_relationship(
+                    name,
+                    "unknown_mixed_path_style",
+                    evidence=evidence,
+                    blocker_category="output_path_style_mismatch",
+                )
+        elif normalized_output == normalized_source:
+            add_relationship(
+                "output_base_equals_source",
+                "unsafe",
+                evidence=evidence,
+                blocker_category="unsafe_source_output_relationship",
+            )
+        else:
+            add_relationship(
+                "output_base_equals_source",
+                "safe",
+                evidence=evidence,
+            )
+
+        if styles_match:
+            output_inside_source = _output_safety_same_or_child(output_path_info, source_path_info)
+            add_relationship(
+                "output_base_inside_source",
+                "unsafe" if output_inside_source else "safe",
+                evidence=evidence,
+                blocker_category=(
+                    "unsafe_source_output_relationship"
+                    if output_inside_source
+                    else None
+                ),
+            )
+            source_inside_output = _output_safety_same_or_child(source_path_info, output_path_info)
+            add_relationship(
+                "source_inside_output_base",
+                "unsafe" if source_inside_output else "safe",
+                evidence=evidence,
+                blocker_category=(
+                    "unsafe_source_output_relationship"
+                    if source_inside_output
+                    else None
+                ),
+            )
+    else:
+        relationship_status = "not_applicable" if not raw_source_path else "unknown"
+        evidence = {
+            "output_base": raw_output_base,
+            "source_path": raw_source_path,
+            "output_path_style": output_path_info["path_style"],
+            "source_path_style": source_path_info["path_style"],
+        }
+        for name in (
+            "output_base_equals_source",
+            "output_base_inside_source",
+            "source_inside_output_base",
+        ):
+            add_relationship(
+                name,
+                relationship_status,
+                evidence=evidence,
+            )
+
+    protected_relationships: list[dict[str, Any]] = []
+    for root_kind, root_path in protected_roots:
+        root_path_info = _output_safety_parse_path(root_path)
+        normalized_root = root_path_info["normalized_path"]
+        blocker_category = None
+        if not normalized_output or not normalized_root:
+            status = "unknown"
+        elif (
+            output_path_info["path_style"] != root_path_info["path_style"]
+            or output_path_info["anchor"] != root_path_info["anchor"]
+        ):
+            status = "unknown_mixed_path_style"
+            blocker_category = "unsafe_protected_output_location"
+        else:
+            output_inside_root = _output_safety_same_or_child(output_path_info, root_path_info)
+            root_inside_output = _output_safety_same_or_child(root_path_info, output_path_info)
+            if output_inside_root or root_inside_output:
+                status = "unsafe"
+                blocker_category = "unsafe_protected_output_location"
+            else:
+                status = "safe"
+        if blocker_category:
+            blockers.append(blocker_category)
+        protected_relationships.append({
+            "root_kind": root_kind,
+            "root_path": normalized_root or str(root_path or ""),
+            "root_path_style": root_path_info["path_style"],
+            "status": status,
+        })
+    protected_root_status = (
+        "verified_safe"
+        if protected_root_context_complete
+        and protected_relationships
+        and all(item["status"] == "safe" for item in protected_relationships)
+        else "unsafe"
+        if any(item["status"] in ("unsafe", "unknown_mixed_path_style") for item in protected_relationships)
+        else "unknown"
+    )
+
+    if overwrite_requested is not False:
+        blockers.append("unsafe_overwrite_for_guided_first_subset")
+    if path_role != "output_base" or run_directory_strategy != "derive_unique_run_id_under_output_base":
+        blockers.append("output_ownership_policy_mismatch")
+    if precreate_during_preview:
+        blockers.append("output_ownership_policy_mismatch")
+
+    supplied_facts = dict(filesystem_facts or {})
+    exists = supplied_facts.get("exists")
+    is_file = supplied_facts.get("is_file")
+    is_directory = supplied_facts.get("is_directory")
+    directory_empty = supplied_facts.get("directory_empty")
+    writable = supplied_facts.get("writable")
+    facts = {
+        "facts_source": "supplied_read_only_facts" if filesystem_facts is not None else "not_inspected",
+        "exists": exists if isinstance(exists, bool) else None,
+        "is_file": is_file if isinstance(is_file, bool) else None,
+        "is_directory": is_directory if isinstance(is_directory, bool) else None,
+        "directory_empty": directory_empty if isinstance(directory_empty, bool) else None,
+        "directory_non_empty": (
+            not directory_empty if isinstance(directory_empty, bool) else None
+        ),
+        "requires_creation": not exists if isinstance(exists, bool) else None,
+        "writable": writable if isinstance(writable, bool) else None,
+        "writability_status": (
+            "writable" if writable is True else "not_writable" if writable is False else "unknown"
+        ),
+        "filesystem_facts_required_for_planning_mapping": False,
+    }
+    if is_file is True:
+        blockers.append("output_base_is_file")
+    if writable is False:
+        blockers.append("output_base_not_writable")
+
+    blockers = list(dict.fromkeys(blockers))
+    if "output_policy_not_current" in blockers:
+        safety_status = "output_policy_not_current"
+    elif "output_base_missing" in blockers:
+        safety_status = "output_base_missing"
+    elif "output_base_relative" in blockers:
+        safety_status = "output_base_relative"
+    elif "unsafe_overwrite_for_guided_first_subset" in blockers:
+        safety_status = "unsafe_overwrite_for_guided_first_subset"
+    elif "unsafe_source_output_relationship" in blockers:
+        safety_status = "unsafe_source_output_relationship"
+    elif "unsafe_protected_output_location" in blockers:
+        safety_status = "unsafe_protected_output_location"
+    elif "output_path_style_mismatch" in blockers:
+        safety_status = "output_path_style_mismatch"
+    elif blockers:
+        safety_status = "output_base_safety_unresolved"
+    else:
+        safety_status = "output_base_ready_for_runner_owned_future_mapping"
+
+    return {
+        "output_safety_status": safety_status,
+        "future_output_owner": "runner",
+        "path_role": path_role,
+        "run_directory_strategy": run_directory_strategy,
+        "future_run_dir": "unresolved_until_execution_start",
+        "future_run_directory_pattern": "<output_base>/<runner-generated-run-id>",
+        "preview_path_kind": "pattern_only",
+        "concrete_run_dir_known": False,
+        "output_base": raw_output_base or None,
+        "normalized_output_base": normalized_output or None,
+        "write_context": write_context,
+        "path_relationships": relationships,
+        "filesystem_facts": facts,
+        "overwrite_requested": overwrite_requested,
+        "protected_root_status": protected_root_status,
+        "protected_root_context_complete": protected_root_context_complete,
+        "protected_root_relationships": protected_relationships,
+        "blocker_categories": blockers,
+        "execution_consumption_enabled": not blockers,
+        "backend_config_mapping_status": safety_status,
+        "no_directory_creation": True,
+        "no_directory_reservation": True,
+        "no_config_written": True,
+        "no_command_written": True,
+        "no_files_written": True,
+        "no_validation": True,
+        "no_run": True,
+    }
+
+
+def build_guided_output_base_safety_ownership_preview(
+    plan: GuidedNewAnalysisDraftPlan,
+    *,
+    protected_roots: tuple[tuple[str, str], ...] | None = None,
+    protected_root_context_complete: bool = False,
+    filesystem_facts: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build Guided output safety from stored plan state only."""
+    if not isinstance(plan, GuidedNewAnalysisDraftPlan):
+        raise TypeError("plan must be a GuidedNewAnalysisDraftPlan")
+    stored_protected_roots: list[tuple[str, str]] = []
+    if plan.cache_root_path:
+        stored_protected_roots.append(("diagnostic_cache", plan.cache_root_path))
+    stored_protected_roots.extend(protected_roots or ())
+    source_path = plan.resolved_input_source_path or plan.input_source_path
+    return classify_output_base_safety_ownership(
+        output_base=plan.output_policy_path,
+        source_path=source_path,
+        output_policy_status=plan.output_policy_status,
+        output_policy_explicitly_applied=plan.output_policy_explicitly_applied,
+        output_policy_validation_issues=tuple(plan.output_policy_validation_issues),
+        output_policy_stale_reasons=tuple(plan.output_policy_stale_reasons),
+        path_role=plan.output_creation_policy.path_role,
+        run_directory_strategy=plan.output_creation_policy.run_directory_strategy,
+        overwrite_requested=plan.output_creation_policy.overwrite,
+        precreate_during_preview=plan.output_creation_policy.precreate_during_preview,
+        protected_roots=tuple(stored_protected_roots),
+        protected_root_context_complete=protected_root_context_complete,
+        filesystem_facts=filesystem_facts,
+        write_context="planning_preview",
+    )
+
+
+def _execution_spec_output_preview_dict(
+    plan: GuidedNewAnalysisDraftPlan,
+    output_safety_ownership: dict[str, Any],
+) -> dict[str, Any]:
     policy = _output_creation_policy_preview_dict(
         plan.output_creation_policy,
         execution_consumption_enabled=True,
@@ -2774,6 +3144,7 @@ def _execution_spec_output_preview_dict(plan: GuidedNewAnalysisDraftPlan) -> dic
         "execution_started": False,
         "RunSpec_instantiated": False,
         "argv_generated": False,
+        "output_safety_ownership": output_safety_ownership,
     }
 
 
@@ -2795,11 +3166,14 @@ def build_guided_new_analysis_execution_spec_preview(
     feature_event_blockers = tuple(feature_event_effective_values["blocker_categories"])
     rwd_normalization = build_guided_rwd_dataset_contract_normalization_preview(plan)
     rwd_normalization_blockers = tuple(rwd_normalization["blocker_categories"])
+    output_safety_ownership = build_guided_output_base_safety_ownership_preview(plan)
+    output_safety_blockers = tuple(output_safety_ownership["blocker_categories"])
     issue_categories = tuple(
         dict.fromkeys(
             tuple(issue.category for issue in subset_readiness.blocking_issues)
             + feature_event_blockers
             + rwd_normalization_blockers
+            + output_safety_blockers
         )
     )
     blocked_reasons = tuple(issue.message for issue in subset_readiness.blocking_issues) + tuple(
@@ -2808,12 +3182,24 @@ def build_guided_new_analysis_execution_spec_preview(
     ) + tuple(
         f"RWD dataset normalization blocker: {category}"
         for category in rwd_normalization_blockers
+    ) + tuple(
+        f"Output safety/ownership blocker: {category}"
+        for category in output_safety_blockers
     )
     spec_preview_available = bool(
         subset_readiness.first_subset_executable
         and not feature_event_blockers
         and not rwd_normalization_blockers
+        and not output_safety_blockers
     )
+    output_safety_ownership = {
+        **output_safety_ownership,
+        "execution_consumption_enabled": bool(
+            spec_preview_available
+            and output_safety_ownership["output_safety_status"]
+            == "output_base_ready_for_runner_owned_future_mapping"
+        ),
+    }
     dataset_contract = _dataset_contract_snapshot_preview_dict(
         plan.dataset_contract_snapshot,
         execution_consumption_enabled=spec_preview_available,
@@ -2880,7 +3266,7 @@ def build_guided_new_analysis_execution_spec_preview(
             "consumption": feature_event_consumption,
             "feature_event_effective_values": feature_event_effective_values,
         },
-        output=_execution_spec_output_preview_dict(plan),
+        output=_execution_spec_output_preview_dict(plan, output_safety_ownership),
         diagnostic_cache_provenance={
             "cache_id": plan.cache_id,
             "cache_root_path": plan.cache_root_path,

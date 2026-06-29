@@ -816,6 +816,11 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "backend_config_mapping_status: rwd_dataset_contract_unresolved" in preview_text
     assert "missing_required_fields: rwd_time_col; sig_suffix; uv_suffix" in preview_text
     assert "inconsistent_fields: none" in preview_text
+    assert "output_safety_ownership:" in preview_text
+    assert "backend_config_mapping_status: output_base_ready_for_runner_owned_future_mapping" in preview_text
+    assert "future_output_owner: runner" in preview_text
+    assert "future_run_dir: unresolved_until_execution_start" in preview_text
+    assert "blockers: none" in preview_text
     assert "output: no directories or files created" in preview_text
     assert "missing_required_rwd_contract_field" in preview_text
     assert "unresolved_rwd_dataset_contract_normalization" in preview_text

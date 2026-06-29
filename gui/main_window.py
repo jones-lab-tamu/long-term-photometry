@@ -6099,6 +6099,7 @@ class MainWindow(QMainWindow):
             feature_effective = feature_event.get("feature_event_effective_values") or {}
             dataset_contract = execution_spec_preview.dataset_contract or {}
             rwd_normalization = dataset_contract.get("rwd_normalization") or {}
+            output_safety = output.get("output_safety_ownership") or {}
             lines.extend([
                 "Guided execution-spec preview:",
                 f"  spec_preview_available: {str(bool(execution_spec_preview.spec_preview_available)).lower()}",
@@ -6129,6 +6130,14 @@ class MainWindow(QMainWindow):
                 )
                 if rwd_normalization.get("inconsistent_fields")
                 else "    inconsistent_fields: none",
+                "  output_safety_ownership:",
+                f"    backend_config_mapping_status: {output_safety.get('backend_config_mapping_status') or 'none'}",
+                f"    future_output_owner: {output_safety.get('future_output_owner') or 'none'}",
+                f"    future_run_dir: {output_safety.get('future_run_dir') or 'none'}",
+                "    blockers: "
+                + "; ".join(str(category) for category in output_safety.get("blocker_categories") or [])
+                if output_safety.get("blocker_categories")
+                else "    blockers: none",
                 "  output: no directories or files created",
                 "  output_base: "
                 + (
