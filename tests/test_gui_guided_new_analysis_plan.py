@@ -1486,3 +1486,55 @@ def test_guided_new_analysis_compilation_bindings_4J11i(window, tmp_path, monkey
     assert plan_signal_only.global_correction_strategy == "signal_only_f0"
     assert plan_signal_only.dynamic_fit_mode is None
 
+
+def test_guided_new_analysis_preview_request_checks_4J11m(window, tmp_path, monkeypatch):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+
+    # Base state: default layout refresh without base path or strategy
+    window._guided_output_dir_edit.setText("")
+    window._guided_correction_intent = None
+    window._refresh_guided_draft_run_plan_preview()
+    text = window._guided_draft_run_plan_preview_label.text()
+
+    # 1. Preview includes local check section
+    assert "Local setup verification (in-memory only):" in text
+
+    # 2. Missing output_base_path appears as a local blocking issue
+    assert "Blocking local setup issues:" in text
+    assert "[missing_output_base]" in text
+
+    # 3. Missing strategy appears as a local blocking issue
+    assert "[unsupported_correction_strategy]" in text
+
+    # 4. signal_only_f0 appears as a local blocking issue
+    from gui.main_window import GUIDED_SIGNAL_ONLY_F0_CARD
+    window._guided_correction_intent = GUIDED_SIGNAL_ONLY_F0_CARD
+    window._refresh_guided_draft_run_plan_preview()
+    assert "[unsupported_correction_strategy]" in window._guided_draft_run_plan_preview_label.text()
+
+    # 5. dynamic_fit with allowed mode passes local checks once output path is valid
+    window._guided_correction_intent = "Global Linear Regression"
+    window._guided_output_dir_edit.setText(str(tmp_path / "valid_output"))
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.setText("120")
+    window._refresh_guided_draft_run_plan_preview()
+    text_passed = window._guided_draft_run_plan_preview_label.text()
+    assert "Draft plan local checks: Passed" in text_passed
+    assert "Draft request fingerprint:" in text_passed
+
+    # 6. Preview wording does not include unsafe terms
+    for term in ["Backend validation passed", "Ready to run", "Plan validated", "Preflight complete"]:
+        assert term not in text_passed
+
+    # 7. No Run button or Full Control run state is enabled by local checks
+    window._new_run_btn.setEnabled(False)
+    window._refresh_guided_draft_run_plan_preview()
+    assert not window._new_run_btn.isEnabled()
+
+    # 8. No files or directories are created by preview refresh
+    output_dir = tmp_path / "valid_output"
+    assert not output_dir.exists()
+
+

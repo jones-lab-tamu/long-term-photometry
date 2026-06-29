@@ -5893,6 +5893,38 @@ class MainWindow(QMainWindow):
             for iss in readiness.info_issues:
                 lines.append(f"  - [{iss.category}] {iss.message}")
 
+        try:
+            from photometry_pipeline.guided_validation_request import (
+                build_guided_validation_request_from_plan,
+                validate_guided_validation_request,
+                compute_request_identity,
+            )
+            req = build_guided_validation_request_from_plan(plan)
+            req_issues = validate_guided_validation_request(req)
+            req_fingerprint = compute_request_identity(req)
+
+            lines.append("")
+            lines.append("Local setup verification (in-memory only):")
+            lines.append(f"  Draft request fingerprint: {req_fingerprint}")
+
+            blocking_req = [iss for iss in req_issues if iss.severity == "blocking"]
+            warning_req = [iss for iss in req_issues if iss.severity == "warning"]
+
+            if blocking_req:
+                lines.append("  Blocking local setup issues:")
+                for iss in blocking_req:
+                    lines.append(f"    - [{iss.category}] {iss.message}")
+            else:
+                lines.append("  Draft plan local checks: Passed")
+
+            if warning_req:
+                lines.append("  Local setup warnings:")
+                for iss in warning_req:
+                    lines.append(f"    - [{iss.category}] {iss.message}")
+        except Exception as exc:
+            lines.append("")
+            lines.append(f"Local setup verification failed: {exc}")
+
         lines.append("This draft plan is not executable yet. Final Run is not implemented in this stage.")
         return "\n".join(lines)
 

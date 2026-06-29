@@ -50,48 +50,51 @@ def build_guided_validation_request_from_plan(plan: GuidedNewAnalysisDraftPlan) 
     Compile a GuidedNewAnalysisDraftPlan into a GuidedValidationRequest in memory.
     """
     # Sourced from GuidedNewAnalysisDraftPlan
-    source_path = plan.input_source_path
-    source_format = plan.input_format
-    acq_mode = plan.acquisition_mode
-    sessions_per_hour = plan.sessions_per_hour
-    session_duration_sec = plan.session_duration_sec
-    exclude_incomplete_final_rwd_chunk = plan.exclude_incomplete_final_rwd_chunk
+    source_path = getattr(plan, "input_source_path", None)
+    source_format = getattr(plan, "input_format", "auto")
+    acq_mode = getattr(plan, "acquisition_mode", "continuous")
+    sessions_per_hour = getattr(plan, "sessions_per_hour", None)
+    session_duration_sec = getattr(plan, "session_duration_sec", None)
+    exclude_incomplete_final_rwd_chunk = getattr(plan, "exclude_incomplete_final_rwd_chunk", False)
     
     # ROI selection
-    included_roi_ids = list(plan.included_roi_ids)
-    excluded_roi_ids = list(plan.excluded_roi_ids)
-    discovered_roi_ids = list(plan.discovered_roi_ids)
-    roi_state_status = plan.acquisition_structure_status
+    included_roi_ids = list(getattr(plan, "included_roi_ids", []) or [])
+    excluded_roi_ids = list(getattr(plan, "excluded_roi_ids", []) or [])
+    discovered_roi_ids = list(getattr(plan, "discovered_roi_ids", []) or [])
+    roi_state_status = getattr(plan, "acquisition_structure_status", "unknown")
     
     # Execution intent
     timeline_anchor_mode = "civil"
     execution_mode = "phasic"
     run_profile = "full"
-    if plan.execution_intent:
-        timeline_anchor_mode = plan.execution_intent.timeline_anchor_mode
-        execution_mode = plan.execution_intent.execution_mode
-        run_profile = plan.execution_intent.run_profile
+    exec_intent = getattr(plan, "execution_intent", None)
+    if exec_intent:
+        timeline_anchor_mode = getattr(exec_intent, "timeline_anchor_mode", "civil")
+        execution_mode = getattr(exec_intent, "execution_mode", "phasic")
+        run_profile = getattr(exec_intent, "run_profile", "full")
         
     # Output policy fields
-    output_base_path = plan.output_base_path
-    output_overwrite = plan.output_overwrite
+    output_base_path = getattr(plan, "output_base_path", None)
+    output_overwrite = getattr(plan, "output_overwrite", False)
     
     output_path_role = "output_base"
     output_creation_timing = "future_execution_start_only"
     run_directory_strategy = "derive_unique_run_id_under_output_base"
-    if plan.output_creation_policy:
-        output_path_role = plan.output_creation_policy.path_role
-        output_creation_timing = getattr(plan.output_creation_policy, "creation_timing", "future_execution_start_only")
-        run_directory_strategy = plan.output_creation_policy.run_directory_strategy
+    out_policy = getattr(plan, "output_creation_policy", None)
+    if out_policy:
+        output_path_role = getattr(out_policy, "path_role", "output_base")
+        output_creation_timing = getattr(out_policy, "creation_timing", "future_execution_start_only")
+        run_directory_strategy = getattr(out_policy, "run_directory_strategy", "derive_unique_run_id_under_output_base")
         
     # Correction strategy fields
-    global_correction_strategy = plan.global_correction_strategy
-    dynamic_fit_mode = plan.dynamic_fit_mode
+    global_correction_strategy = getattr(plan, "global_correction_strategy", None)
+    dynamic_fit_mode = getattr(plan, "dynamic_fit_mode", None)
     
     dynamic_fit_parameter_contract = {}
-    if plan.dynamic_fit_parameter_contract:
+    df_contract = getattr(plan, "dynamic_fit_parameter_contract", None)
+    if df_contract:
         from dataclasses import asdict
-        dynamic_fit_parameter_contract = asdict(plan.dynamic_fit_parameter_contract)
+        dynamic_fit_parameter_contract = asdict(df_contract)
 
     return GuidedValidationRequest(
         source_path=source_path,
