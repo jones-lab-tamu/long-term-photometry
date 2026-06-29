@@ -23,6 +23,7 @@ SCHEMA_VERSION = "guided_new_analysis_plan.v1"
 RUN_PREVIEW_SCHEMA_VERSION = "guided_new_analysis_run_preview.v1"
 EXECUTION_SPEC_PREVIEW_SCHEMA_VERSION = "guided_new_analysis_execution_spec_preview.v1"
 FIRST_SUBSET_MAPPING_PREVIEW_SCHEMA_VERSION = "guided_first_subset_executable_mapping_preview.v1"
+RUNNER_REQUEST_PREVIEW_SCHEMA_VERSION = "guided_runner_request_preview.v1"
 EXECUTION_SUBSET_SCHEMA_VERSION = "guided_new_analysis_execution_subset.v1"
 DATASET_CONTRACT_SNAPSHOT_SCHEMA_VERSION = "guided_new_analysis_dataset_contract_snapshot.v1"
 EXECUTION_INTENT_SCHEMA_VERSION = "guided_new_analysis_execution_intent.v1"
@@ -231,6 +232,41 @@ class GuidedFirstSubsetExecutableMappingPreview:
 
 
 @dataclass(frozen=True)
+class GuidedRunnerRequestPreview:
+    runner_request_preview_schema_version: str
+    runner_request_preview_available: bool
+    request_kind: str
+    first_subset_name: str
+    supported_scope: dict[str, Any]
+    future_runner_owner: str
+    future_cli_target_concept: str
+    request_sections: dict[str, Any]
+    config_conversion_preview: dict[str, Any]
+    argv_conversion_preview: dict[str, Any]
+    output_request_preview: dict[str, Any]
+    identity_preview: dict[str, Any]
+    validation_boundary_preview: dict[str, Any]
+    execution_boundary_preview: dict[str, Any]
+    provenance_preview: dict[str, Any]
+    blocking_issue_categories: tuple[str, ...] = ()
+    blocked_reasons: tuple[str, ...] = ()
+    unsupported_reasons: tuple[str, ...] = ()
+    no_real_runner_request: bool = True
+    no_runspec: bool = True
+    no_argv: bool = True
+    no_command_text: bool = True
+    no_config_dict: bool = True
+    no_config_serialization: bool = True
+    no_yaml: bool = True
+    no_json: bool = True
+    no_file_writes: bool = True
+    no_directory_creation: bool = True
+    no_directory_reservation: bool = True
+    no_validation: bool = True
+    no_run: bool = True
+
+
+@dataclass(frozen=True)
 class GuidedNewAnalysisExecutionSpecPreview:
     spec_preview_schema_version: str
     plan_schema_version: str
@@ -254,6 +290,7 @@ class GuidedNewAnalysisExecutionSpecPreview:
     field_classifications: tuple[GuidedNewAnalysisExecutionFieldClassification, ...] = ()
     warning_issue_categories: tuple[str, ...] = ()
     first_subset_executable_mapping_preview: GuidedFirstSubsetExecutableMappingPreview | None = None
+    guided_runner_request_preview: GuidedRunnerRequestPreview | None = None
 
 
 @dataclass(frozen=True)
@@ -3807,6 +3844,418 @@ def build_guided_first_subset_executable_mapping_preview(
     )
 
 
+def _runner_request_section(
+    section_name: str,
+    mapping_section: dict[str, Any],
+    *,
+    request_role: str,
+    contributes_config: bool,
+    contributes_cli: bool,
+    contributes_metadata: bool,
+) -> dict[str, Any]:
+    mapping_status = str(mapping_section.get("section_status") or "blocked")
+    if mapping_status == "ready_for_first_subset_mapping":
+        section_status = "ready_for_runner_request_preview"
+    elif mapping_status == "display_only_provenance":
+        section_status = "metadata_only"
+    else:
+        section_status = "blocked"
+    return {
+        "section_status": section_status,
+        "source_mapping_section": section_name,
+        "source_mapping_section_status": mapping_status,
+        "request_role": request_role,
+        "would_contribute_to_future_config": contributes_config,
+        "would_contribute_to_future_cli": contributes_cli,
+        "would_contribute_to_future_metadata": contributes_metadata,
+        "entries": tuple(mapping_section.get("entries") or ()),
+    }
+
+
+def _all_runner_request_mapping_entries(mapping_preview: GuidedFirstSubsetExecutableMappingPreview) -> tuple[dict[str, Any], ...]:
+    entries: list[dict[str, Any]] = []
+    for section in (
+        mapping_preview.source_acquisition_mapping,
+        mapping_preview.dataset_mapping,
+        mapping_preview.roi_mapping,
+        mapping_preview.correction_mapping,
+        mapping_preview.feature_event_mapping,
+        mapping_preview.execution_intent_mapping,
+        mapping_preview.output_mapping,
+        mapping_preview.provenance_mapping,
+    ):
+        entries.extend(dict(entry) for entry in section.get("entries") or ())
+    return tuple(entries)
+
+
+def _config_conversion_preview(
+    mapping_preview: GuidedFirstSubsetExecutableMappingPreview,
+) -> dict[str, Any]:
+    conversion_by_mapping_status = {
+        "would_emit_override": "future_config_override_candidate",
+        "would_rely_on_backend_default": "future_backend_default_reliance",
+        "display_only_inactive": "omit_from_future_config_inactive",
+        "display_only_provenance": "future_metadata_only",
+        "should_not_emit": "omit_from_future_config",
+        "not_applicable": "omit_not_applicable",
+        "unsupported_first_subset": "block_future_request",
+        "blocked": "block_future_request",
+    }
+    fields_by_conversion_class: dict[str, list[dict[str, Any]]] = {
+        conversion_class: []
+        for conversion_class in tuple(dict.fromkeys(conversion_by_mapping_status.values()))
+    }
+    blocking_fields: list[str] = []
+    for entry in _all_runner_request_mapping_entries(mapping_preview):
+        mapping_status = str(entry.get("mapping_status") or "blocked")
+        conversion_class = conversion_by_mapping_status.get(mapping_status, "block_future_request")
+        summary = {
+            "field": entry.get("field"),
+            "source_mapping_status": mapping_status,
+            "source": entry.get("source"),
+            "production_input": bool(entry.get("production_input")),
+        }
+        fields_by_conversion_class.setdefault(conversion_class, []).append(summary)
+        if conversion_class == "block_future_request" and summary["production_input"]:
+            blocking_fields.append(str(summary["field"]))
+    return {
+        "conversion_by_mapping_status": conversion_by_mapping_status,
+        "fields_by_conversion_class": {
+            key: tuple(value)
+            for key, value in fields_by_conversion_class.items()
+        },
+        "blocking_fields": tuple(dict.fromkeys(blocking_fields)),
+        "config_payload_generated": False,
+        "config_serialization_generated": False,
+        "default_reliance_recorded": True,
+        "inactive_fields_omitted": True,
+        "provenance_fields_metadata_only": True,
+        "no_config_dict": True,
+        "no_yaml": True,
+        "no_json": True,
+    }
+
+
+def _argv_conversion_preview(
+    mapping_preview: GuidedFirstSubsetExecutableMappingPreview,
+) -> dict[str, Any]:
+    roi_entries = {
+        entry.get("field"): entry
+        for entry in mapping_preview.roi_mapping.get("entries") or ()
+    }
+    return {
+        "argv_generated": False,
+        "command_text_generated": False,
+        "future_cli_target_concept": "out_base",
+        "uses_out_base_concept": True,
+        "uses_out_concept": False,
+        "future_format_concept": "rwd",
+        "future_mode_concept": "phasic",
+        "future_profile_concept": "full",
+        "roi_filter_concept": {
+            "include_filter_kind": mapping_preview.roi_mapping.get("include_filter_kind"),
+            "included_roi_ids": (roi_entries.get("included_roi_ids") or {}).get("value"),
+            "would_emit_include_filter": mapping_preview.roi_mapping.get("would_emit_include_filter"),
+            "would_emit_exclude_filter": mapping_preview.roi_mapping.get("would_emit_exclude_filter"),
+        },
+        "no_argv_list": True,
+        "no_arg_ordering_decided": True,
+        "no_path_quoting_decided": True,
+    }
+
+
+def _runner_output_request_preview(mapping_preview: GuidedFirstSubsetExecutableMappingPreview) -> dict[str, Any]:
+    output = mapping_preview.output_mapping
+    entries = {
+        entry.get("field"): entry
+        for entry in output.get("entries") or ()
+    }
+    return {
+        "output_base": (entries.get("output_base") or {}).get("value"),
+        "future_output_owner": output.get("future_output_owner"),
+        "future_cli_target_concept": output.get("future_cli_target_concept"),
+        "future_run_directory_strategy": output.get("future_run_directory_strategy"),
+        "future_run_directory_pattern": output.get("future_run_directory_pattern"),
+        "future_run_dir": (entries.get("future_run_dir") or {}).get("value"),
+        "concrete_run_dir_known": False,
+        "preview_path_kind": "pattern_only",
+        "overwrite": (entries.get("overwrite") or {}).get("value"),
+        "directory_creation_timing": "future_explicit_action_only",
+        "validation_side_effects": "deferred_unresolved",
+        "directory_created": False,
+        "directory_reserved": False,
+    }
+
+
+def _freeze_preview_identity_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return tuple(
+            (str(key), _freeze_preview_identity_value(value[key]))
+            for key in sorted(value)
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_preview_identity_value(item) for item in value)
+    if isinstance(value, set):
+        return tuple(sorted(_freeze_preview_identity_value(item) for item in value))
+    return value
+
+
+def _preview_identity_hash(identity_inputs: dict[str, Any]) -> str:
+    import hashlib
+
+    frozen = _freeze_preview_identity_value(identity_inputs)
+    return hashlib.sha256(repr(frozen).encode("utf-8")).hexdigest()
+
+
+def _runner_request_identity_preview(
+    plan: GuidedNewAnalysisDraftPlan,
+    mapping_preview: GuidedFirstSubsetExecutableMappingPreview,
+) -> dict[str, Any]:
+    identity_inputs = {
+        "source_setup_signature": plan.source_setup_signature,
+        "dataset_contract_snapshot_identity": {
+            "schema_version": plan.dataset_contract_snapshot.schema_version,
+            "status": plan.dataset_contract_snapshot.status,
+            "current_applied": plan.dataset_contract_snapshot.current_applied,
+            "resolved_input_format": plan.dataset_contract_snapshot.resolved_input_format,
+            "acquisition_mode": plan.dataset_contract_snapshot.acquisition_mode,
+        },
+        "rwd_normalization_status": mapping_preview.dataset_mapping.get("normalization_status"),
+        "roi_selection_identity": {
+            "included_roi_ids": tuple(plan.included_roi_ids),
+            "excluded_roi_ids": tuple(plan.excluded_roi_ids),
+            "discovered_roi_ids": tuple(plan.discovered_roi_ids),
+        },
+        "correction_strategy_identity": {
+            "active_parameter_set": mapping_preview.correction_mapping.get("active_parameter_set"),
+            "strategy_choices": tuple(
+                (choice.roi_id, choice.selected_strategy, choice.selected_at_utc)
+                for choice in plan.per_roi_correction_strategy_choices
+            ),
+        },
+        "dynamic_fit_parameter_contract_identity": {
+            "schema_version": plan.dynamic_fit_parameter_contract.schema_version,
+            "dynamic_fit_mode": plan.dynamic_fit_parameter_contract.dynamic_fit_mode,
+            "backend_default_source": BACKEND_DYNAMIC_FIT_DEFAULT_SOURCE,
+        },
+        "feature_event_profile_identity": {
+            "status": plan.feature_event_profile_status,
+            "profile_id": plan.feature_event_profile_id,
+            "updated_at_utc": plan.feature_event_updated_at_utc,
+            "explicitly_applied": plan.feature_event_explicitly_applied,
+        },
+        "output_policy_identity": {
+            "status": plan.output_policy_status,
+            "path": plan.output_policy_path,
+            "updated_at_utc": plan.output_policy_updated_at_utc,
+            "explicitly_applied": plan.output_policy_explicitly_applied,
+        },
+        "output_safety_identity": {
+            "output_safety_status": mapping_preview.output_mapping.get("output_safety_status"),
+            "future_output_owner": mapping_preview.output_mapping.get("future_output_owner"),
+            "future_run_directory_strategy": mapping_preview.output_mapping.get("future_run_directory_strategy"),
+        },
+        "mapping_preview_schema_version": mapping_preview.mapping_preview_schema_version,
+        "runner_request_preview_schema_version": RUNNER_REQUEST_PREVIEW_SCHEMA_VERSION,
+    }
+    return {
+        "identity_inputs": identity_inputs,
+        "preview_identity_hash": _preview_identity_hash(identity_inputs),
+        "preview_identity_hash_source": "in_memory_guided_preview_state_only",
+        "config_hash_generated": False,
+        "argv_hash_generated": False,
+        "validation_identity_generated": False,
+        "run_identity_generated": False,
+        "no_file_hashes": True,
+    }
+
+
+def build_guided_runner_request_preview(
+    plan: GuidedNewAnalysisDraftPlan,
+    mapping_preview: GuidedFirstSubsetExecutableMappingPreview | None = None,
+) -> GuidedRunnerRequestPreview:
+    """Build a pure, non-executable Guided runner request preview.
+
+    This preview describes future runner-facing request intent only. It does not
+    instantiate RunSpec, create a real runner request, generate argv, command
+    text, a serializable config dict, YAML/JSON, write files, create/reserve
+    directories, validate, run, inspect widgets, or read the filesystem.
+    """
+    if not isinstance(plan, GuidedNewAnalysisDraftPlan):
+        raise TypeError("plan must be a GuidedNewAnalysisDraftPlan")
+    mapping = mapping_preview or build_guided_first_subset_executable_mapping_preview(plan)
+    if not isinstance(mapping, GuidedFirstSubsetExecutableMappingPreview):
+        raise TypeError("mapping_preview must be a GuidedFirstSubsetExecutableMappingPreview")
+
+    request_sections = {
+        "source_input_request": _runner_request_section(
+            "source_acquisition_mapping",
+            mapping.source_acquisition_mapping,
+            request_role="future raw input, format, and acquisition CLI/config intent",
+            contributes_config=True,
+            contributes_cli=True,
+            contributes_metadata=True,
+        ),
+        "dataset_contract_request": _runner_request_section(
+            "dataset_mapping",
+            mapping.dataset_mapping,
+            request_role="future dataset contract override intent",
+            contributes_config=True,
+            contributes_cli=False,
+            contributes_metadata=True,
+        ),
+        "roi_request": _runner_request_section(
+            "roi_mapping",
+            mapping.roi_mapping,
+            request_role="future ROI filter intent",
+            contributes_config=False,
+            contributes_cli=True,
+            contributes_metadata=True,
+        ),
+        "correction_request": _runner_request_section(
+            "correction_mapping",
+            mapping.correction_mapping,
+            request_role="future dynamic-fit correction config intent",
+            contributes_config=True,
+            contributes_cli=False,
+            contributes_metadata=True,
+        ),
+        "feature_event_request": _runner_request_section(
+            "feature_event_mapping",
+            mapping.feature_event_mapping,
+            request_role="future phasic feature/event config intent",
+            contributes_config=True,
+            contributes_cli=False,
+            contributes_metadata=True,
+        ),
+        "execution_intent_request": _runner_request_section(
+            "execution_intent_mapping",
+            mapping.execution_intent_mapping,
+            request_role="future mode/profile/timeline CLI/config intent",
+            contributes_config=True,
+            contributes_cli=True,
+            contributes_metadata=True,
+        ),
+        "output_request": _runner_request_section(
+            "output_mapping",
+            mapping.output_mapping,
+            request_role="future runner-owned output-base CLI intent",
+            contributes_config=False,
+            contributes_cli=True,
+            contributes_metadata=True,
+        ),
+        "decision_provenance_request": _runner_request_section(
+            "provenance_mapping",
+            mapping.provenance_mapping,
+            request_role="decision provenance metadata only",
+            contributes_config=False,
+            contributes_cli=False,
+            contributes_metadata=True,
+        ),
+    }
+    config_conversion = _config_conversion_preview(mapping)
+    argv_conversion = _argv_conversion_preview(mapping)
+    output_request = _runner_output_request_preview(mapping)
+    identity_preview = _runner_request_identity_preview(plan, mapping)
+
+    section_blockers = tuple(
+        section_name
+        for section_name, section in request_sections.items()
+        if section.get("section_status") == "blocked"
+    )
+    blocking_issue_categories = tuple(dict.fromkeys(
+        tuple(mapping.blocking_issue_categories)
+        + tuple(f"{section_name}_not_ready" for section_name in section_blockers)
+    ))
+    runner_request_preview_available = bool(
+        mapping.mapping_preview_available
+        and not section_blockers
+        and not config_conversion["blocking_fields"]
+    )
+    blocked_reasons = tuple(mapping.blocked_reasons) + tuple(
+        f"Runner request preview blocker: {section_name}"
+        for section_name in section_blockers
+    ) + tuple(
+        f"Runner request config conversion blocker: {field_name}"
+        for field_name in config_conversion["blocking_fields"]
+    )
+
+    return GuidedRunnerRequestPreview(
+        runner_request_preview_schema_version=RUNNER_REQUEST_PREVIEW_SCHEMA_VERSION,
+        runner_request_preview_available=runner_request_preview_available,
+        request_kind="guided_first_subset_runner_request_preview",
+        first_subset_name=mapping.first_subset_name,
+        supported_scope=dict(mapping.supported_scope),
+        future_runner_owner="runner",
+        future_cli_target_concept="out_base",
+        request_sections=request_sections,
+        config_conversion_preview=config_conversion,
+        argv_conversion_preview=argv_conversion,
+        output_request_preview=output_request,
+        identity_preview=identity_preview,
+        validation_boundary_preview={
+            "validation_available": False,
+            "validation_namespace_designed": False,
+            "validation_artifact_ownership_designed": False,
+            "generated_config_timing_implemented": False,
+            "argv_generation_implemented": False,
+            "runner_validate_only_side_effects_isolated": False,
+            "no_validation_subprocess": True,
+            "deferred_requirements": (
+                "validation namespace not designed",
+                "validation artifact ownership not designed",
+                "generated config timing not implemented",
+                "argv generation not implemented",
+                "runner validate-only side effects not isolated",
+            ),
+        },
+        execution_boundary_preview={
+            "execution_available": False,
+            "explicit_run_action_implemented": False,
+            "generated_config_argv_command_provenance_implemented": False,
+            "runner_owned_output_directory_reporting_implemented": False,
+            "production_run_id_final_directory_capture_implemented": False,
+            "completed_run_metadata_write_contract_implemented": False,
+            "no_pipeline_run": True,
+            "deferred_requirements": (
+                "explicit Run action not implemented",
+                "generated config/argv/command provenance not implemented",
+                "runner-owned output directory reporting not implemented",
+                "production run ID/final directory capture not implemented",
+                "completed-run metadata write contract not implemented",
+            ),
+        },
+        provenance_preview={
+            "diagnostic_cache_identity": plan.cache_id,
+            "diagnostic_cache_root_path": plan.cache_root_path,
+            "source_setup_signature": plan.source_setup_signature,
+            "diagnostic_scope_signature": plan.diagnostic_scope_signature,
+            "build_request_signature": plan.build_request_signature,
+            "execution_consumes_cache_artifacts": False,
+            "evidence_chunks_are_production_scope": False,
+            "decision_provenance_only": True,
+            "mapping_preview_identity": identity_preview["identity_inputs"]["mapping_preview_schema_version"],
+            "runner_request_preview_identity": identity_preview["preview_identity_hash"],
+        },
+        blocking_issue_categories=blocking_issue_categories,
+        blocked_reasons=blocked_reasons,
+        unsupported_reasons=mapping.unsupported_reasons,
+        no_real_runner_request=True,
+        no_runspec=True,
+        no_argv=True,
+        no_command_text=True,
+        no_config_dict=True,
+        no_config_serialization=True,
+        no_yaml=True,
+        no_json=True,
+        no_file_writes=True,
+        no_directory_creation=True,
+        no_directory_reservation=True,
+        no_validation=True,
+        no_run=True,
+    )
+
+
 def build_guided_new_analysis_execution_spec_preview(
     plan: GuidedNewAnalysisDraftPlan,
 ) -> GuidedNewAnalysisExecutionSpecPreview:
@@ -3959,10 +4408,15 @@ def build_guided_new_analysis_execution_spec_preview(
         field_classifications=subset_readiness.field_classifications,
         warning_issue_categories=tuple(issue.category for issue in subset_readiness.warning_issues),
     )
+    mapping_preview = build_guided_first_subset_executable_mapping_preview(
+        plan,
+        execution_spec_preview=preview,
+    )
     return replace(
         preview,
-        first_subset_executable_mapping_preview=build_guided_first_subset_executable_mapping_preview(
+        first_subset_executable_mapping_preview=mapping_preview,
+        guided_runner_request_preview=build_guided_runner_request_preview(
             plan,
-            execution_spec_preview=preview,
+            mapping_preview=mapping_preview,
         ),
     )

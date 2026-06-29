@@ -17,11 +17,13 @@ from photometry_pipeline.guided_new_analysis_plan import (
     FEATURE_EVENT_CONFIG_FIELDS,
     FEATURE_EVENT_EFFECTIVE_VALUE_FIELDS,
     FIRST_SUBSET_MAPPING_PREVIEW_SCHEMA_VERSION,
+    RUNNER_REQUEST_PREVIEW_SCHEMA_VERSION,
     OUTPUT_CREATION_POLICY_SCHEMA_VERSION,
     RWD_NORMALIZATION_BACKEND_CONFIG_FIELDS,
     RWD_NORMALIZATION_REQUIRED_SNAPSHOT_FIELDS,
     FIRST_EXECUTION_SUBSET_NAME,
     GuidedFirstSubsetExecutableMappingPreview,
+    GuidedRunnerRequestPreview,
     GuidedNewAnalysisDatasetContractSnapshot,
     GuidedNewAnalysisDatasetContractSourceIdentity,
     GuidedNewAnalysisDraftPlan,
@@ -35,6 +37,7 @@ from photometry_pipeline.guided_new_analysis_plan import (
     build_guided_new_analysis_execution_spec_preview,
     build_guided_feature_event_effective_values_preview,
     build_guided_first_subset_executable_mapping_preview,
+    build_guided_runner_request_preview,
     build_guided_new_analysis_run_preview,
     build_guided_output_base_safety_ownership_preview,
     build_guided_rwd_dataset_contract_normalization_preview,
@@ -2419,6 +2422,265 @@ def test_first_subset_mapping_preview_is_pure_no_files_and_no_plan_mutation(tmp_
     assert mapping.no_directory_reservation is True
     assert mapping.no_validation is True
     assert mapping.no_run is True
+
+
+def test_guided_runner_request_preview_best_case_is_available_and_pure():
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+
+    runner_preview = build_guided_runner_request_preview(plan)
+    spec_preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert isinstance(runner_preview, GuidedRunnerRequestPreview)
+    assert type(runner_preview).__name__ != "RunSpec"
+    assert runner_preview.runner_request_preview_schema_version == RUNNER_REQUEST_PREVIEW_SCHEMA_VERSION
+    assert runner_preview.runner_request_preview_available is True
+    assert runner_preview.request_kind == "guided_first_subset_runner_request_preview"
+    assert runner_preview.first_subset_name == FIRST_EXECUTION_SUBSET_NAME
+    assert runner_preview.future_runner_owner == "runner"
+    assert runner_preview.future_cli_target_concept == "out_base"
+    assert spec_preview.guided_runner_request_preview is not None
+    assert spec_preview.guided_runner_request_preview.runner_request_preview_available is True
+    assert spec_preview.execution_available is False
+    assert runner_preview.no_real_runner_request is True
+    assert runner_preview.no_runspec is True
+    assert runner_preview.no_argv is True
+    assert runner_preview.no_command_text is True
+    assert runner_preview.no_config_dict is True
+    assert runner_preview.no_config_serialization is True
+    assert runner_preview.no_yaml is True
+    assert runner_preview.no_json is True
+    assert runner_preview.no_file_writes is True
+    assert runner_preview.no_directory_creation is True
+    assert runner_preview.no_directory_reservation is True
+    assert runner_preview.no_validation is True
+    assert runner_preview.no_run is True
+
+
+def test_guided_runner_request_sections_preserve_mapping_entries_without_config_dict():
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+    mapping = build_guided_first_subset_executable_mapping_preview(plan)
+
+    runner_preview = build_guided_runner_request_preview(plan, mapping_preview=mapping)
+
+    source_request = runner_preview.request_sections["source_input_request"]
+    dataset_request = runner_preview.request_sections["dataset_contract_request"]
+    provenance_request = runner_preview.request_sections["decision_provenance_request"]
+    assert source_request["section_status"] == "ready_for_runner_request_preview"
+    assert source_request["source_mapping_section"] == "source_acquisition_mapping"
+    assert source_request["entries"] == mapping.source_acquisition_mapping["entries"]
+    assert source_request["would_contribute_to_future_config"] is True
+    assert source_request["would_contribute_to_future_cli"] is True
+    assert dataset_request["entries"] == mapping.dataset_mapping["entries"]
+    assert provenance_request["section_status"] == "metadata_only"
+    assert provenance_request["would_contribute_to_future_config"] is False
+    assert provenance_request["would_contribute_to_future_cli"] is False
+    assert provenance_request["would_contribute_to_future_metadata"] is True
+    assert runner_preview.config_conversion_preview["no_config_dict"] is True
+    assert "config" not in runner_preview.request_sections
+
+
+def test_guided_runner_request_config_conversion_preview_classifies_without_generating_config():
+    plan = _complete_new_analysis_plan_with_current_snapshot(
+        dynamic_fit_parameter_contract=GuidedNewAnalysisDynamicFitParameterContract(
+            dynamic_fit_mode="global_linear_regression",
+            window_sec=90.0,
+        ),
+        feature_event_values={
+            "event_signal": "dff",
+            "peak_threshold_method": "absolute",
+            "peak_threshold_abs": 0.25,
+        },
+    )
+
+    runner_preview = build_guided_runner_request_preview(plan)
+    conversion = runner_preview.config_conversion_preview
+
+    assert conversion["conversion_by_mapping_status"]["would_emit_override"] == "future_config_override_candidate"
+    assert conversion["conversion_by_mapping_status"]["would_rely_on_backend_default"] == "future_backend_default_reliance"
+    assert conversion["conversion_by_mapping_status"]["display_only_inactive"] == "omit_from_future_config_inactive"
+    assert conversion["conversion_by_mapping_status"]["display_only_provenance"] == "future_metadata_only"
+    assert conversion["conversion_by_mapping_status"]["should_not_emit"] == "omit_from_future_config"
+    assert conversion["conversion_by_mapping_status"]["not_applicable"] == "omit_not_applicable"
+    assert conversion["conversion_by_mapping_status"]["unsupported_first_subset"] == "block_future_request"
+    override_fields = {
+        item["field"]
+        for item in conversion["fields_by_conversion_class"]["future_config_override_candidate"]
+    }
+    default_fields = {
+        item["field"]
+        for item in conversion["fields_by_conversion_class"]["future_backend_default_reliance"]
+    }
+    inactive_fields = {
+        item["field"]
+        for item in conversion["fields_by_conversion_class"]["omit_from_future_config_inactive"]
+    }
+    assert "window_sec" in override_fields
+    assert "peak_threshold_abs" in override_fields
+    assert "slope_constraint" in default_fields
+    assert "peak_pre_filter" in default_fields
+    assert "robust_event_rejection.robust_event_reject_max_iters" in inactive_fields
+    assert "peak_threshold_k" in inactive_fields
+    assert conversion["config_payload_generated"] is False
+    assert conversion["config_serialization_generated"] is False
+    assert conversion["default_reliance_recorded"] is True
+    assert conversion["inactive_fields_omitted"] is True
+    assert conversion["provenance_fields_metadata_only"] is True
+    assert conversion["blocking_fields"] == ()
+
+
+def test_guided_runner_request_argv_and_output_previews_are_conceptual_only():
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+
+    runner_preview = build_guided_runner_request_preview(plan)
+    argv_preview = runner_preview.argv_conversion_preview
+    output_preview = runner_preview.output_request_preview
+
+    assert argv_preview["argv_generated"] is False
+    assert argv_preview["command_text_generated"] is False
+    assert argv_preview["future_cli_target_concept"] == "out_base"
+    assert argv_preview["uses_out_base_concept"] is True
+    assert argv_preview["uses_out_concept"] is False
+    assert argv_preview["future_format_concept"] == "rwd"
+    assert argv_preview["future_mode_concept"] == "phasic"
+    assert argv_preview["future_profile_concept"] == "full"
+    assert argv_preview["roi_filter_concept"]["included_roi_ids"] == ["ROI1"]
+    assert argv_preview["no_argv_list"] is True
+    assert argv_preview["no_arg_ordering_decided"] is True
+    assert argv_preview["no_path_quoting_decided"] is True
+    assert output_preview["output_base"] == "C:/planned/output"
+    assert output_preview["future_output_owner"] == "runner"
+    assert output_preview["future_cli_target_concept"] == "out_base"
+    assert output_preview["future_run_directory_strategy"] == "derive_unique_run_id_under_output_base"
+    assert output_preview["future_run_dir"] == "unresolved_until_execution_start"
+    assert output_preview["concrete_run_dir_known"] is False
+    assert output_preview["preview_path_kind"] == "pattern_only"
+    assert output_preview["overwrite"] is False
+    assert output_preview["directory_creation_timing"] == "future_explicit_action_only"
+    assert output_preview["validation_side_effects"] == "deferred_unresolved"
+    assert output_preview["directory_created"] is False
+    assert output_preview["directory_reserved"] is False
+
+
+def test_guided_runner_request_identity_and_boundaries_are_preview_only():
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+
+    runner_preview = build_guided_runner_request_preview(plan)
+    identity = runner_preview.identity_preview
+    validation = runner_preview.validation_boundary_preview
+    execution = runner_preview.execution_boundary_preview
+    provenance = runner_preview.provenance_preview
+
+    assert identity["identity_inputs"]["source_setup_signature"] == "setup-1"
+    assert identity["identity_inputs"]["mapping_preview_schema_version"] == FIRST_SUBSET_MAPPING_PREVIEW_SCHEMA_VERSION
+    assert identity["identity_inputs"]["runner_request_preview_schema_version"] == RUNNER_REQUEST_PREVIEW_SCHEMA_VERSION
+    assert identity["preview_identity_hash"]
+    assert identity["preview_identity_hash_source"] == "in_memory_guided_preview_state_only"
+    assert identity["config_hash_generated"] is False
+    assert identity["argv_hash_generated"] is False
+    assert identity["validation_identity_generated"] is False
+    assert identity["run_identity_generated"] is False
+    assert identity["no_file_hashes"] is True
+    assert validation["validation_available"] is False
+    assert validation["validation_namespace_designed"] is False
+    assert validation["validation_artifact_ownership_designed"] is False
+    assert validation["no_validation_subprocess"] is True
+    assert execution["execution_available"] is False
+    assert execution["explicit_run_action_implemented"] is False
+    assert execution["production_run_id_final_directory_capture_implemented"] is False
+    assert execution["no_pipeline_run"] is True
+    assert provenance["diagnostic_cache_identity"] == "cache-1"
+    assert provenance["execution_consumes_cache_artifacts"] is False
+    assert provenance["evidence_chunks_are_production_scope"] is False
+    assert provenance["decision_provenance_only"] is True
+
+
+@pytest.mark.parametrize(
+    ("case_name", "plan_overrides", "expected_category"),
+    [
+        ("npm", {"input_format": "npm"}, "unsupported_input_format_for_first_subset_mapping"),
+        ("custom_tabular", {"input_format": "custom_tabular"}, "unsupported_input_format_for_first_subset_mapping"),
+        ("auto", {"input_format": "auto"}, "unsupported_input_format_for_first_subset_mapping"),
+        ("continuous", {"acquisition_mode": "continuous"}, "unsupported_acquisition_mode_for_first_subset_mapping"),
+        ("signal_only_f0", {}, "signal_only_f0_production_routing_not_supported"),
+        ("mixed_strategies", {}, "mixed_per_roi_strategy_execution_not_supported"),
+    ],
+)
+def test_guided_runner_request_unsupported_mapping_keeps_request_unavailable(
+    case_name,
+    plan_overrides,
+    expected_category,
+):
+    if case_name == "signal_only_f0":
+        plan_overrides = {
+            "per_roi_correction_strategy_choices": [_strategy_choice("signal_only_f0")]
+        }
+    elif case_name == "mixed_strategies":
+        plan_overrides = {
+            "included_roi_ids": ["ROI1", "ROI2"],
+            "excluded_roi_ids": [],
+            "per_roi_correction_strategy_choices": [
+                _strategy_choice("global_linear_regression", roi_id="ROI1"),
+                _strategy_choice("robust_global_event_reject", roi_id="ROI2"),
+            ],
+        }
+    plan = _complete_new_analysis_plan_with_current_snapshot(**plan_overrides)
+    if plan_overrides.get("included_roi_ids") == ["ROI1", "ROI2"]:
+        plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(
+            plan,
+            contract_values={
+                "input_format": "rwd",
+                "resolved_input_format": "rwd",
+                "acquisition_mode": "intermittent",
+                "rwd_time_col": "Time",
+                "sig_suffix": "_Signal",
+                "uv_suffix": "_UV",
+            },
+        )
+
+    runner_preview = build_guided_runner_request_preview(plan)
+
+    assert runner_preview.runner_request_preview_available is False
+    assert expected_category in runner_preview.blocking_issue_categories
+    assert expected_category in runner_preview.unsupported_reasons
+    assert runner_preview.no_real_runner_request is True
+    assert runner_preview.no_runspec is True
+    assert runner_preview.no_argv is True
+    assert runner_preview.no_command_text is True
+    assert runner_preview.no_config_dict is True
+    assert runner_preview.no_file_writes is True
+    assert runner_preview.no_directory_creation is True
+    assert runner_preview.no_directory_reservation is True
+    assert runner_preview.no_validation is True
+    assert runner_preview.no_run is True
+
+
+def test_guided_runner_request_preview_is_pure_no_files_and_no_plan_mutation(tmp_path):
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_output_base"
+    plan = _complete_new_analysis_plan_with_current_snapshot(output_policy_path=str(target))
+    before_state = dict(plan.__dict__)
+    before_files = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+
+    runner_preview = build_guided_runner_request_preview(plan)
+
+    after_files = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    assert after_files == before_files
+    assert not target.exists()
+    assert dict(plan.__dict__) == before_state
+    assert runner_preview.no_real_runner_request is True
+    assert runner_preview.no_runspec is True
+    assert runner_preview.no_argv is True
+    assert runner_preview.no_command_text is True
+    assert runner_preview.no_config_dict is True
+    assert runner_preview.no_config_serialization is True
+    assert runner_preview.no_yaml is True
+    assert runner_preview.no_json is True
+    assert runner_preview.no_file_writes is True
+    assert runner_preview.no_directory_creation is True
+    assert runner_preview.no_directory_reservation is True
+    assert runner_preview.no_validation is True
+    assert runner_preview.no_run is True
 
 
 def _strategy_choice(strategy: str, *, roi_id: str = "ROI1"):

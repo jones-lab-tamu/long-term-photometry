@@ -827,6 +827,12 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "future_cli_target: out_base_concept_only" in preview_text
     assert "config_generated: false" in preview_text
     assert "argv_generated: false" in preview_text
+    assert "guided_runner_request_preview:" in preview_text
+    assert "runner_request_preview_available: false" in preview_text
+    assert "future_runner_owner: runner" in preview_text
+    assert "config_payload_generated: false" in preview_text
+    assert "validation_run: false" in preview_text
+    assert "execution_run: false" in preview_text
     assert "output: no directories or files created" in preview_text
     assert "missing_required_rwd_contract_field" in preview_text
     assert "unresolved_rwd_dataset_contract_normalization" in preview_text

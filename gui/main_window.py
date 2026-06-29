@@ -6101,6 +6101,7 @@ class MainWindow(QMainWindow):
             rwd_normalization = dataset_contract.get("rwd_normalization") or {}
             output_safety = output.get("output_safety_ownership") or {}
             mapping_preview = execution_spec_preview.first_subset_executable_mapping_preview
+            runner_request_preview = execution_spec_preview.guided_runner_request_preview
             lines.extend([
                 "Guided execution-spec preview:",
                 f"  spec_preview_available: {str(bool(execution_spec_preview.spec_preview_available)).lower()}",
@@ -6150,6 +6151,19 @@ class MainWindow(QMainWindow):
                 "    future_cli_target: out_base_concept_only",
                 "    config_generated: false",
                 "    argv_generated: false",
+                "  guided_runner_request_preview:",
+                "    runner_request_preview_available: "
+                + (
+                    str(bool(runner_request_preview.runner_request_preview_available)).lower()
+                    if runner_request_preview is not None
+                    else "false"
+                ),
+                "    future_runner_owner: runner",
+                "    future_cli_target: out_base_concept_only",
+                "    config_payload_generated: false",
+                "    argv_generated: false",
+                "    validation_run: false",
+                "    execution_run: false",
                 "  output: no directories or files created",
                 "  output_base: "
                 + (
