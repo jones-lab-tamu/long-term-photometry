@@ -44,6 +44,109 @@ def _read_json_dict(path: str) -> Tuple[Dict[str, Any], str | None]:
     return data, None
 
 
+def is_preflight_or_ineligible(run_dir: str) -> Tuple[bool, str]:
+    """
+    Determine if run_dir is marked as a non-production preflight or completed-run-ineligible.
+
+    NOTE: The following are reserved loader-side rejection markers only:
+    - preflight_marker.json
+    - preflight.manifest
+    - completed_run_ineligible: true
+    - preflight: true
+
+    These markers are used solely to trigger completed-run loader rejection.
+    They are not production acceptance evidence and do not define a full preflight schema.
+    """
+    run_dir = os.path.realpath(run_dir)
+    # Check for explicit preflight marker file
+    if os.path.isfile(os.path.join(run_dir, "preflight_marker.json")) or os.path.isfile(os.path.join(run_dir, "preflight.manifest")):
+        return True, "Directory contains preflight marker file."
+
+    # Check status.json
+    status_path = os.path.join(run_dir, "status.json")
+    status_data, status_err = _read_json_dict(status_path)
+    if status_err is None:
+        if status_data.get("completed_run_ineligible") is True or status_data.get("preflight") is True:
+            return True, "status.json marks directory as completed-run-ineligible/preflight."
+
+    # Check run_report.json
+    report_path = os.path.join(run_dir, "run_report.json")
+    report, report_err = parse_run_report(report_path)
+    if report_err is None:
+        if report.get("completed_run_ineligible") is True or report.get("preflight") is True:
+            return True, "run_report.json marks directory as completed-run-ineligible/preflight."
+        run_ctx = report.get("run_context", {})
+        if isinstance(run_ctx, dict):
+            if run_ctx.get("completed_run_ineligible") is True or run_ctx.get("preflight") is True:
+                return True, "run_report.json run_context marks directory as completed-run-ineligible/preflight."
+
+    return False, ""
+
+
+def detect_metadata_conflict(run_dir: str) -> Tuple[bool, str]:
+    """
+    Check if any recognized metadata file explicitly reports a non-successful,
+    failed, aborted, active, or in-progress state.
+    """
+    run_dir = os.path.realpath(run_dir)
+
+    conflict_statuses = {"failed", "error", "cancelled", "aborted", "in-progress", "active", "running"}
+    conflict_phases = {"aborted", "cancelled", "in-progress", "active", "running", "non-final"}
+
+    # 1) Check run_report.json
+    report_path = os.path.join(run_dir, "run_report.json")
+    report, report_err = parse_run_report(report_path)
+    if report_err is None:
+        status_vals = [
+            str(report.get("status", "")).strip().lower(),
+            str(report.get("run_status", "")).strip().lower(),
+            str(report.get("final_status", "")).strip().lower(),
+            str(report.get("result", "")).strip().lower(),
+        ]
+        phase_vals = [
+            str(report.get("phase", "")).strip().lower(),
+            str(report.get("run_phase", "")).strip().lower(),
+            str(report.get("final_phase", "")).strip().lower(),
+        ]
+
+        for val in status_vals:
+            if val in conflict_statuses:
+                return True, f"run_report.json reports status={val}"
+        for val in phase_vals:
+            if val in conflict_phases:
+                return True, f"run_report.json reports phase={val}"
+
+        run_ctx = report.get("run_context", {})
+        if isinstance(run_ctx, dict):
+            ctx_status = str(run_ctx.get("status", "")).strip().lower()
+            ctx_phase = str(run_ctx.get("phase", "")).strip().lower()
+            if ctx_status in conflict_statuses:
+                return True, f"run_report.json run_context reports status={ctx_status}"
+            if ctx_phase in conflict_phases:
+                return True, f"run_report.json run_context reports phase={ctx_phase}"
+
+    # 2) Check status.json
+    status_path = os.path.join(run_dir, "status.json")
+    status_data, status_err = _read_json_dict(status_path)
+    if status_err is None:
+        status_val = str(status_data.get("status", "")).strip().lower()
+        phase_val = str(status_data.get("phase", "")).strip().lower()
+        if status_val in conflict_statuses:
+            return True, f"status.json reports status={status_val}"
+        if phase_val in conflict_phases:
+            return True, f"status.json reports phase={phase_val}"
+
+    # 3) Check MANIFEST.json
+    manifest_path = os.path.join(run_dir, "MANIFEST.json")
+    manifest, manifest_err = _read_json_dict(manifest_path)
+    if manifest_err is None:
+        manifest_status = str(manifest.get("status", "")).strip().lower()
+        if manifest_status in conflict_statuses:
+            return True, f"MANIFEST.json reports status={manifest_status}"
+
+    return False, ""
+
+
 def is_successful_completed_run_dir(run_dir: str) -> Tuple[bool, str]:
     """
     Determine whether run_dir represents a completed successful run.
@@ -56,6 +159,14 @@ def is_successful_completed_run_dir(run_dir: str) -> Tuple[bool, str]:
     run_dir = os.path.realpath(run_dir)
     if not os.path.isdir(run_dir):
         return False, f"Directory does not exist: {run_dir}"
+
+    ineligible, inel_reason = is_preflight_or_ineligible(run_dir)
+    if ineligible:
+        return False, f"Directory is flagged as non-production/completed-run-ineligible: {inel_reason}"
+
+    has_conflict, conflict_reason = detect_metadata_conflict(run_dir)
+    if has_conflict:
+        return False, f"Directory contains conflicting metadata: {conflict_reason}"
 
     # 1) run_report.json explicit success/completion metadata
     report_path = os.path.join(run_dir, "run_report.json")
@@ -291,3 +402,20 @@ def resolve_primary_artifacts(run_dir: str, report_data: Dict[str, Any]) -> List
 def resolve_quick_links(run_dir: str, report_data: Dict[str, Any]) -> List[Tuple[str, str, str]]:
     """Backward compatibility wrapper for root-level artifact resolution."""
     return resolve_primary_artifacts(run_dir, report_data)
+
+
+def classify_completed_run_candidate(run_dir: str) -> Tuple[bool, str]:
+    """
+    Classify if a run directory satisfies the completed-run contract.
+    Combines is_successful_completed_run_dir success metadata checks with
+    resolve_region_deliverables region verification.
+    """
+    ok, evidence = is_successful_completed_run_dir(run_dir)
+    if not ok:
+        return False, evidence
+
+    regions = resolve_region_deliverables(run_dir)
+    if not regions:
+        return False, "Completed-run metadata found, but no region deliverables (summary, day_plots, or tables folders) discovered."
+
+    return True, evidence

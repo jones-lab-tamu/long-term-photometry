@@ -52,6 +52,7 @@ from gui.run_report_parser import (
     get_run_type,
     is_successful_completed_run_dir,
     resolve_region_deliverables,
+    classify_completed_run_candidate,
 )
 from gui.validate_run_policy import (
     compute_run_signature,
@@ -17268,16 +17269,7 @@ class MainWindow(QMainWindow):
         """Completed-run gate for Open Results; accepts continuous Summary/Tables-only runs."""
         if not path or not os.path.isdir(path):
             return False, "No existing directory is selected."
-        is_successful_complete, evidence = is_successful_completed_run_dir(path)
-        if not is_successful_complete:
-            return False, evidence
-        regions = resolve_region_deliverables(path)
-        if not regions:
-            return False, (
-                "Completed-run metadata was found, but no region deliverables "
-                "(summary, day_plots, or tables folders) were found."
-            )
-        return True, evidence
+        return classify_completed_run_candidate(path)
 
     def _compute_run_readiness_reason(self) -> tuple[str, str]:
         """
