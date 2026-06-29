@@ -305,3 +305,101 @@ def test_request_identity_hashing(tmp_path: Path):
         output_base_path=str(tmp_path / "out")
     )
     assert compute_request_identity(req1) != compute_request_identity(req2)
+
+
+def test_guided_validation_result_state_4J11q():
+    from photometry_pipeline.guided_validation_request import (
+        GuidedValidationResultState,
+        make_unvalidated_guided_validation_state,
+        make_passed_guided_validation_state,
+        make_failed_guided_validation_state,
+        make_error_guided_validation_state,
+        is_guided_validation_state_stale,
+        can_guided_run_unlock,
+    )
+    from photometry_pipeline.guided_new_analysis_plan import GuidedPlanIssue
+
+    # 1. default state is unvalidated
+    state = make_unvalidated_guided_validation_state()
+    assert state.backend_validation_status == "unvalidated"
+    assert state.backend_validated_request_identity == ""
+
+    # 2. forbidden fields are absent
+    forbidden = {
+        "run_dir", "run_id", "production_run_id", "output_artifact_path",
+        "config_path", "command_path", "status_path", "run_report_path",
+        "manifest_path", "completed_run_path", "argv", "command",
+        "status_json", "run_report_json", "manifest_json"
+    }
+    fields = GuidedValidationResultState.__dataclass_fields__
+    for f in forbidden:
+        assert f not in fields
+
+    # 3. passed state stores values but no run IDs/paths
+    passed = make_passed_guided_validation_state(
+        req_identity="hash123",
+        result_identity="res456",
+        warnings=["warning1"],
+        info=["info1"],
+        validator_version="v2"
+    )
+    assert passed.backend_validation_status == "passed"
+    assert passed.backend_validated_request_identity == "hash123"
+    assert passed.validation_result_identity == "res456"
+    assert passed.backend_warnings == ["warning1"]
+    assert passed.backend_info == ["info1"]
+    assert passed.validator_version == "v2"
+
+    # 4. failed/error states store errors and cannot unlock
+    failed = make_failed_guided_validation_state("hash123", ["error1"])
+    assert failed.backend_validation_status == "failed"
+    assert failed.backend_errors == ["error1"]
+    assert not can_guided_run_unlock(failed, "hash123", [])
+
+    err_state = make_error_guided_validation_state("hash123", ["critical_error"])
+    assert err_state.backend_validation_status == "error"
+    assert err_state.backend_errors == ["critical_error"]
+    assert not can_guided_run_unlock(err_state, "hash123", [])
+
+    # 5. unvalidated state is stale
+    assert is_guided_validation_state_stale(state, "hash123")
+
+    # 6. matching passed identity is not stale, mismatched is stale
+    assert not is_guided_validation_state_stale(passed, "hash123")
+    assert is_guided_validation_state_stale(passed, "hash999")
+
+    # 7. failed/error matching identity is not stale but cannot unlock
+    assert not is_guided_validation_state_stale(failed, "hash123")
+    assert not is_guided_validation_state_stale(err_state, "hash123")
+
+    # 8. can_guided_run_unlock triggers
+    # passed + matching + zero blocking issues + no run allocated -> True
+    assert can_guided_run_unlock(passed, "hash123", [])
+
+    # passed state with empty backend identity cannot unlock
+    passed_empty_backend = make_passed_guided_validation_state(
+        req_identity="",
+        result_identity="res456"
+    )
+    assert not can_guided_run_unlock(passed_empty_backend, "hash123", [])
+
+    # passed state with non-empty backend identity but empty current identity cannot unlock
+    assert not can_guided_run_unlock(passed, "", [])
+
+    # passed state with matching non-empty identity still can unlock Run
+    assert can_guided_run_unlock(passed, "hash123", [])
+
+    # warning-only local issues still do not block
+    warn_issue = GuidedPlanIssue(category="some_warning", message="warning", severity="warning")
+    assert can_guided_run_unlock(passed, "hash123", [warn_issue])
+
+    # blocking local issues still block
+    block_issue = GuidedPlanIssue(category="some_block", message="blocking issue", severity="blocking")
+    assert not can_guided_run_unlock(passed, "hash123", [block_issue])
+
+    # local checks passing without backend state -> False
+    assert not can_guided_run_unlock(state, "hash123", [])
+
+    # production run allocated -> False
+    assert not can_guided_run_unlock(passed, "hash123", [], production_run_allocated=True)
+

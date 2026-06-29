@@ -231,3 +231,126 @@ def validate_guided_validation_request(request: GuidedValidationRequest) -> list
             issues.append(GuidedPlanIssue(category="unsupported_dynamic_fit_mode", message=f"Unsupported dynamic fit mode: {request.dynamic_fit_mode}", severity="blocking"))
 
     return issues
+
+
+@dataclass(frozen=True)
+class GuidedValidationResultState:
+    backend_validation_status: str = "unvalidated"
+    backend_validated_request_identity: str = ""
+    validation_result_identity: str = ""
+    validator_version: str = ""
+    validation_scope: str = "guided_first_subset"
+    validation_timestamp: str | None = None
+    backend_errors: list[str] = field(default_factory=list)
+    backend_warnings: list[str] = field(default_factory=list)
+    backend_info: list[str] = field(default_factory=list)
+    validation_subset_contract_version: str = "global_dynamic_fit_only.v1"
+
+
+def make_unvalidated_guided_validation_state() -> GuidedValidationResultState:
+    return GuidedValidationResultState()
+
+
+def make_passed_guided_validation_state(
+    req_identity: str,
+    result_identity: str,
+    *,
+    warnings: list[str] | None = None,
+    info: list[str] | None = None,
+    validator_version: str = "",
+    validation_scope: str = "guided_first_subset",
+    validation_timestamp: str | None = None,
+    validation_subset_contract_version: str = "global_dynamic_fit_only.v1",
+) -> GuidedValidationResultState:
+    return GuidedValidationResultState(
+        backend_validation_status="passed",
+        backend_validated_request_identity=req_identity,
+        validation_result_identity=result_identity,
+        validator_version=validator_version,
+        validation_scope=validation_scope,
+        validation_timestamp=validation_timestamp,
+        backend_errors=[],
+        backend_warnings=list(warnings or []),
+        backend_info=list(info or []),
+        validation_subset_contract_version=validation_subset_contract_version,
+    )
+
+
+def make_failed_guided_validation_state(
+    req_identity: str,
+    errors: list[str],
+    *,
+    warnings: list[str] | None = None,
+    info: list[str] | None = None,
+    validator_version: str = "",
+    validation_scope: str = "guided_first_subset",
+    validation_timestamp: str | None = None,
+    validation_subset_contract_version: str = "global_dynamic_fit_only.v1",
+) -> GuidedValidationResultState:
+    return GuidedValidationResultState(
+        backend_validation_status="failed",
+        backend_validated_request_identity=req_identity,
+        validation_result_identity="",
+        validator_version=validator_version,
+        validation_scope=validation_scope,
+        validation_timestamp=validation_timestamp,
+        backend_errors=list(errors or []),
+        backend_warnings=list(warnings or []),
+        backend_info=list(info or []),
+        validation_subset_contract_version=validation_subset_contract_version,
+    )
+
+
+def make_error_guided_validation_state(
+    req_identity: str,
+    errors: list[str],
+    *,
+    warnings: list[str] | None = None,
+    info: list[str] | None = None,
+    validator_version: str = "",
+    validation_scope: str = "guided_first_subset",
+    validation_timestamp: str | None = None,
+    validation_subset_contract_version: str = "global_dynamic_fit_only.v1",
+) -> GuidedValidationResultState:
+    return GuidedValidationResultState(
+        backend_validation_status="error",
+        backend_validated_request_identity=req_identity,
+        validation_result_identity="",
+        validator_version=validator_version,
+        validation_scope=validation_scope,
+        validation_timestamp=validation_timestamp,
+        backend_errors=list(errors or []),
+        backend_warnings=list(warnings or []),
+        backend_info=list(info or []),
+        validation_subset_contract_version=validation_subset_contract_version,
+    )
+
+
+def is_guided_validation_state_stale(
+    state: GuidedValidationResultState,
+    current_request_identity: str,
+) -> bool:
+    if state.backend_validation_status == "unvalidated":
+        return True
+    if not state.backend_validated_request_identity or not current_request_identity:
+        return True
+    return state.backend_validated_request_identity != current_request_identity
+
+
+def can_guided_run_unlock(
+    state: GuidedValidationResultState,
+    current_request_identity: str,
+    local_issues: list[Any],
+    production_run_allocated: bool = False,
+) -> bool:
+    if state.backend_validation_status != "passed":
+        return False
+    if is_guided_validation_state_stale(state, current_request_identity):
+        return False
+    if production_run_allocated:
+        return False
+    for iss in local_issues:
+        if getattr(iss, "severity", None) == "blocking":
+            return False
+    return True
+
