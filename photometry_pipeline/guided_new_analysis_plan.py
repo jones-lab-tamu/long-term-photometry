@@ -7,7 +7,7 @@ validation helpers for the new_analysis Guided draft plan state.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,6 +22,7 @@ from photometry_pipeline.workflow_safety import feature_event_defaults_from_conf
 SCHEMA_VERSION = "guided_new_analysis_plan.v1"
 RUN_PREVIEW_SCHEMA_VERSION = "guided_new_analysis_run_preview.v1"
 EXECUTION_SPEC_PREVIEW_SCHEMA_VERSION = "guided_new_analysis_execution_spec_preview.v1"
+FIRST_SUBSET_MAPPING_PREVIEW_SCHEMA_VERSION = "guided_first_subset_executable_mapping_preview.v1"
 EXECUTION_SUBSET_SCHEMA_VERSION = "guided_new_analysis_execution_subset.v1"
 DATASET_CONTRACT_SNAPSHOT_SCHEMA_VERSION = "guided_new_analysis_dataset_contract_snapshot.v1"
 EXECUTION_INTENT_SCHEMA_VERSION = "guided_new_analysis_execution_intent.v1"
@@ -190,6 +191,46 @@ class GuidedNewAnalysisRunPreview:
 
 
 @dataclass(frozen=True)
+class GuidedFirstSubsetMappingEntry:
+    field: str
+    value: Any
+    mapping_status: str
+    source: str
+    provenance: str
+    future_backend_meaning: str
+    production_input: bool = True
+
+
+@dataclass(frozen=True)
+class GuidedFirstSubsetExecutableMappingPreview:
+    mapping_preview_schema_version: str
+    mapping_preview_available: bool
+    first_subset_name: str
+    supported_scope: dict[str, Any]
+    source_acquisition_mapping: dict[str, Any]
+    dataset_mapping: dict[str, Any]
+    roi_mapping: dict[str, Any]
+    correction_mapping: dict[str, Any]
+    feature_event_mapping: dict[str, Any]
+    execution_intent_mapping: dict[str, Any]
+    output_mapping: dict[str, Any]
+    provenance_mapping: dict[str, Any]
+    blocking_issue_categories: tuple[str, ...] = ()
+    blocked_reasons: tuple[str, ...] = ()
+    unsupported_reasons: tuple[str, ...] = ()
+    no_runspec: bool = True
+    no_argv: bool = True
+    no_config_dict: bool = True
+    no_config_serialization: bool = True
+    no_yaml: bool = True
+    no_json: bool = True
+    no_directory_creation: bool = True
+    no_directory_reservation: bool = True
+    no_validation: bool = True
+    no_run: bool = True
+
+
+@dataclass(frozen=True)
 class GuidedNewAnalysisExecutionSpecPreview:
     spec_preview_schema_version: str
     plan_schema_version: str
@@ -212,6 +253,7 @@ class GuidedNewAnalysisExecutionSpecPreview:
     blocking_issue_categories: tuple[str, ...] = ()
     field_classifications: tuple[GuidedNewAnalysisExecutionFieldClassification, ...] = ()
     warning_issue_categories: tuple[str, ...] = ()
+    first_subset_executable_mapping_preview: GuidedFirstSubsetExecutableMappingPreview | None = None
 
 
 @dataclass(frozen=True)
@@ -3148,6 +3190,623 @@ def _execution_spec_output_preview_dict(
     }
 
 
+def _mapping_entry(
+    field_name: str,
+    value: Any,
+    mapping_status: str,
+    source: str,
+    provenance: str,
+    future_backend_meaning: str,
+    *,
+    production_input: bool = True,
+) -> GuidedFirstSubsetMappingEntry:
+    return GuidedFirstSubsetMappingEntry(
+        field=field_name,
+        value=value,
+        mapping_status=mapping_status,
+        source=source,
+        provenance=provenance,
+        future_backend_meaning=future_backend_meaning,
+        production_input=production_input,
+    )
+
+
+def _mapping_entry_dicts(entries: list[GuidedFirstSubsetMappingEntry]) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        {
+            "field": entry.field,
+            "value": entry.value,
+            "mapping_status": entry.mapping_status,
+            "source": entry.source,
+            "provenance": entry.provenance,
+            "future_backend_meaning": entry.future_backend_meaning,
+            "production_input": entry.production_input,
+        }
+        for entry in entries
+    )
+
+
+def _mapping_status_for_value(
+    *,
+    source: str,
+    field_name: str,
+    value: Any,
+    backend_defaults: dict[str, Any],
+    inactive: bool = False,
+) -> str:
+    if inactive:
+        return "display_only_inactive"
+    if source == "backend_config_default":
+        return "would_rely_on_backend_default"
+    if field_name in backend_defaults and value == backend_defaults[field_name]:
+        return "would_rely_on_backend_default"
+    return "would_emit_override"
+
+
+def _source_acquisition_mapping_section(
+    spec_preview: GuidedNewAnalysisExecutionSpecPreview,
+) -> dict[str, Any]:
+    source = spec_preview.source_acquisition
+    entries = [
+        _mapping_entry(
+            "input_source_path",
+            source.get("authoritative_input_source_path"),
+            "would_emit_override",
+            "guided_plan",
+            "GuidedNewAnalysisDraftPlan resolved/input source path",
+            "future backend raw input/source path",
+        ),
+        _mapping_entry(
+            "input_format",
+            source.get("input_format"),
+            "would_emit_override" if source.get("input_format") == "rwd" else "unsupported_first_subset",
+            "guided_plan",
+            "first subset supports only concrete RWD format",
+            "future backend input format",
+        ),
+        _mapping_entry(
+            "acquisition_mode",
+            source.get("acquisition_mode"),
+            "would_emit_override" if source.get("acquisition_mode") == "intermittent" else "unsupported_first_subset",
+            "guided_plan",
+            "first subset supports only intermittent acquisition",
+            "future backend acquisition mode",
+        ),
+        _mapping_entry(
+            "sessions_per_hour",
+            source.get("sessions_per_hour"),
+            "would_emit_override",
+            "guided_plan",
+            "stored intermittent timing field",
+            "future backend intermittent sessions-per-hour input",
+        ),
+        _mapping_entry(
+            "session_duration_sec",
+            source.get("session_duration_sec"),
+            "would_emit_override",
+            "guided_plan",
+            "stored intermittent timing field",
+            "future backend intermittent session-duration input",
+        ),
+        _mapping_entry(
+            "continuous_window_sec",
+            source.get("continuous_window_sec"),
+            "not_applicable",
+            "guided_plan",
+            "continuous fields are visible plan state but outside first subset",
+            "not mapped for RWD/intermittent first subset",
+            production_input=False,
+        ),
+        _mapping_entry(
+            "continuous_step_sec",
+            source.get("continuous_step_sec"),
+            "not_applicable",
+            "guided_plan",
+            "continuous fields are visible plan state but outside first subset",
+            "not mapped for RWD/intermittent first subset",
+            production_input=False,
+        ),
+    ]
+    return {
+        "section_status": "ready_for_first_subset_mapping"
+        if source.get("input_format") == "rwd" and source.get("acquisition_mode") == "intermittent"
+        else "unsupported_first_subset",
+        "entries": _mapping_entry_dicts(entries),
+        "no_file_inspection": True,
+        "no_config_dict": True,
+    }
+
+
+def _dataset_mapping_section(spec_preview: GuidedNewAnalysisExecutionSpecPreview) -> dict[str, Any]:
+    normalization = spec_preview.dataset_contract.get("rwd_normalization") or {}
+    backend_values = normalization.get("backend_config_values") or {}
+    entries: list[GuidedFirstSubsetMappingEntry] = []
+    for field_name in ("rwd_time_col", "sig_suffix", "uv_suffix", "exclude_incomplete_final_rwd_chunk"):
+        entries.append(_mapping_entry(
+            field_name,
+            backend_values.get(field_name),
+            "would_emit_override" if normalization.get("normalization_status") == "ready_for_future_mapping" else "blocked",
+            "dataset_normalization",
+            "current applied RWD dataset contract normalization preview",
+            f"future backend RWD dataset contract field {field_name}",
+        ))
+    for field_name in ("npm_channel_mapping", "custom_tabular_column_mapping", "continuous_window_sec"):
+        entries.append(_mapping_entry(
+            field_name,
+            None,
+            "unsupported_first_subset",
+            "dataset_normalization",
+            "first subset is RWD/intermittent only",
+            "not mapped by first-subset executable mapping preview",
+            production_input=False,
+        ))
+    return {
+        "section_status": (
+            "ready_for_first_subset_mapping"
+            if normalization.get("normalization_status") == "ready_for_future_mapping"
+            else "blocked"
+        ),
+        "normalization_status": normalization.get("normalization_status"),
+        "entries": _mapping_entry_dicts(entries),
+        "blocker_categories": tuple(normalization.get("blocker_categories") or ()),
+        "no_config_dict": True,
+    }
+
+
+def _roi_mapping_section(spec_preview: GuidedNewAnalysisExecutionSpecPreview) -> dict[str, Any]:
+    roi = spec_preview.roi
+    discovered = list(roi.get("discovered_roi_ids") or [])
+    included = list(roi.get("included_roi_ids") or [])
+    excluded = list(roi.get("excluded_roi_ids") or [])
+    all_discovered_included = bool(discovered) and set(included) == set(discovered)
+    include_filter_kind = "all_rois" if all_discovered_included else "explicit_include_filter"
+    included_status = "would_rely_on_backend_default" if all_discovered_included else "would_emit_override"
+    entries = [
+        _mapping_entry(
+            "included_roi_ids",
+            included,
+            included_status,
+            "guided_plan",
+            "GuidedNewAnalysisDraftPlan included_roi_ids are authoritative",
+            "future backend ROI include filter intent",
+        ),
+        _mapping_entry(
+            "excluded_roi_ids",
+            excluded,
+            "display_only_provenance",
+            "guided_plan",
+            "excluded ROI IDs are retained for audit; include list remains authoritative",
+            "not emitted as a simultaneous exclude filter",
+            production_input=False,
+        ),
+        _mapping_entry(
+            "discovered_roi_ids",
+            discovered,
+            "display_only_provenance",
+            "guided_plan",
+            "ROI inventory provenance",
+            "not an execution filter payload",
+            production_input=False,
+        ),
+    ]
+    return {
+        "section_status": "ready_for_first_subset_mapping" if included else "blocked",
+        "include_filter_kind": include_filter_kind,
+        "all_rois_policy": (
+            "omit_include_filter_and_rely_on_backend_all_rois"
+            if all_discovered_included
+            else "conceptual_future_include_filter_from_included_roi_ids"
+        ),
+        "would_emit_include_filter": bool(included and not all_discovered_included),
+        "would_emit_exclude_filter": False,
+        "entries": _mapping_entry_dicts(entries),
+        "no_cli_flags_generated": True,
+    }
+
+
+def _correction_mapping_section(spec_preview: GuidedNewAnalysisExecutionSpecPreview) -> dict[str, Any]:
+    correction = spec_preview.correction
+    contract = correction.get("dynamic_fit_parameter_contract") or {}
+    backend_defaults = contract.get("backend_default_values") or {}
+    entries: list[GuidedFirstSubsetMappingEntry] = [
+        _mapping_entry(
+            "selected_global_dynamic_fit_strategy",
+            correction.get("selected_global_dynamic_fit_strategy"),
+            "would_emit_override" if correction.get("selected_global_dynamic_fit_strategy") else "blocked",
+            "dynamic_fit_parameter_contract",
+            "unanimous explicit per-ROI dynamic-fit strategy",
+            "future backend dynamic-fit strategy selection",
+        ),
+        _mapping_entry(
+            "dynamic_fit_mode",
+            contract.get("dynamic_fit_mode"),
+            _mapping_status_for_value(
+                source="dynamic_fit_parameter_contract",
+                field_name="dynamic_fit_mode",
+                value=contract.get("dynamic_fit_mode"),
+                backend_defaults=backend_defaults,
+            ),
+            "dynamic_fit_parameter_contract",
+            "stored Guided dynamic-fit parameter contract; must match selected strategy",
+            "future backend dynamic_fit_mode",
+        ),
+    ]
+    for field_name, value in dict(contract.get("active_parameters") or {}).items():
+        if isinstance(value, dict):
+            for nested_field, nested_value in value.items():
+                entries.append(_mapping_entry(
+                    f"{field_name}.{nested_field}",
+                    nested_value,
+                    _mapping_status_for_value(
+                        source="dynamic_fit_parameter_contract",
+                        field_name=nested_field,
+                        value=nested_value,
+                        backend_defaults=backend_defaults,
+                    ),
+                    "dynamic_fit_parameter_contract",
+                    "active dynamic-fit parameter with backend-default provenance",
+                    f"future backend dynamic-fit parameter {nested_field}",
+                ))
+        else:
+            entries.append(_mapping_entry(
+                field_name,
+                value,
+                _mapping_status_for_value(
+                    source="dynamic_fit_parameter_contract",
+                    field_name=field_name,
+                    value=value,
+                    backend_defaults=backend_defaults,
+                ),
+                "dynamic_fit_parameter_contract",
+                "active dynamic-fit parameter with backend-default provenance",
+                f"future backend dynamic-fit parameter {field_name}",
+            ))
+    for set_name, payload in dict(contract.get("inactive_parameter_sets") or {}).items():
+        for field_name, value in dict(payload.get("parameters") or {}).items():
+            entries.append(_mapping_entry(
+                f"{set_name}.{field_name}",
+                value,
+                "display_only_inactive",
+                "dynamic_fit_parameter_contract",
+                "inactive strategy-specific parameter retained for preview provenance",
+                "not emitted by first-subset mapping while inactive",
+                production_input=False,
+            ))
+    blockers = tuple(correction.get("blocker_categories") or ()) + tuple(
+        contract.get("unresolved_parameters") or ()
+    )
+    section_status = (
+        "ready_for_first_subset_mapping"
+        if correction.get("selected_global_dynamic_fit_strategy")
+        and contract.get("backend_config_mapping_status") == "label_and_parameters_ready_for_future_mapping"
+        and not correction.get("blocker_categories")
+        else "blocked"
+    )
+    return {
+        "section_status": section_status,
+        "active_parameter_set": contract.get("active_parameter_set"),
+        "inactive_parameter_sets": tuple((contract.get("inactive_parameter_sets") or {}).keys()),
+        "entries": _mapping_entry_dicts(entries),
+        "blocker_categories": blockers,
+        "no_config_dict": True,
+    }
+
+
+def _feature_event_mapping_section(spec_preview: GuidedNewAnalysisExecutionSpecPreview) -> dict[str, Any]:
+    feature = spec_preview.feature_event
+    effective = feature.get("feature_event_effective_values") or {}
+    backend_defaults = effective.get("backend_default_values") or {}
+    entries: list[GuidedFirstSubsetMappingEntry] = []
+    active_threshold_field = (effective.get("threshold_activity") or {}).get("active_threshold_field")
+    for item in effective.get("effective_values") or []:
+        field_name = item.get("field_name")
+        value = item.get("effective_value")
+        inactive = item.get("active_or_inactive") != "active"
+        entries.append(_mapping_entry(
+            field_name,
+            value,
+            _mapping_status_for_value(
+                source=str(item.get("source") or ""),
+                field_name=str(field_name),
+                value=value,
+                backend_defaults=backend_defaults,
+                inactive=inactive,
+            ),
+            str(item.get("source") or "feature_event_effective_values"),
+            str(item.get("provenance") or ""),
+            (
+                "future backend active feature/event field"
+                if not inactive
+                else "inactive threshold/feature field displayed but not emitted"
+            ),
+            production_input=not inactive,
+        ))
+    section_status = (
+        "ready_for_first_subset_mapping"
+        if effective.get("backend_config_mapping_status") == "effective_values_ready_for_future_mapping"
+        else "blocked"
+    )
+    return {
+        "section_status": section_status,
+        "active_threshold_field": active_threshold_field,
+        "threshold_method": effective.get("threshold_method"),
+        "entries": _mapping_entry_dicts(entries),
+        "blocker_categories": tuple(effective.get("blocker_categories") or ()),
+        "no_config_dict": True,
+    }
+
+
+def _execution_intent_mapping_section(spec_preview: GuidedNewAnalysisExecutionSpecPreview) -> dict[str, Any]:
+    intent = spec_preview.execution_intent
+    entries = [
+        _mapping_entry(
+            "execution_mode",
+            intent.get("execution_mode"),
+            "would_emit_override",
+            "execution_intent",
+            "first-subset fixed default phasic for global dynamic-fit-only execution preview",
+            "future backend run mode concept",
+        ),
+        _mapping_entry(
+            "run_profile",
+            intent.get("run_profile"),
+            "would_rely_on_backend_default",
+            "execution_intent",
+            "first-subset fixed default matches backend full run profile",
+            "future backend run profile concept",
+        ),
+        _mapping_entry(
+            "traces_only",
+            intent.get("traces_only"),
+            "would_rely_on_backend_default",
+            "execution_intent",
+            "first subset includes phasic feature extraction and summaries",
+            "future backend traces-only behavior",
+        ),
+        _mapping_entry(
+            "timeline_anchor_mode",
+            intent.get("timeline_anchor_mode"),
+            "would_rely_on_backend_default",
+            "execution_intent",
+            "first-subset fixed default civil timeline anchor",
+            "future backend timeline anchor concept",
+        ),
+        _mapping_entry(
+            "fixed_daily_anchor_clock",
+            intent.get("fixed_daily_anchor_clock"),
+            "not_applicable",
+            "execution_intent",
+            "not relevant for civil timeline anchor",
+            "future backend fixed anchor clock only if fixed_daily_anchor is selected",
+            production_input=False,
+        ),
+    ]
+    return {
+        "section_status": "ready_for_first_subset_mapping",
+        "feature_extraction_in_scope": True,
+        "feature_dependent_phasic_summaries_in_scope": True,
+        "tonic_outputs_in_scope": False,
+        "full_both_mode_outputs_in_scope": False,
+        "entries": _mapping_entry_dicts(entries),
+        "no_cli_args_generated": True,
+    }
+
+
+def _output_mapping_section(spec_preview: GuidedNewAnalysisExecutionSpecPreview) -> dict[str, Any]:
+    output = spec_preview.output
+    safety = output.get("output_safety_ownership") or {}
+    entries = [
+        _mapping_entry(
+            "output_base",
+            output.get("output_base"),
+            "would_emit_override",
+            "output_safety_ownership",
+            "applied Guided output policy path classified as output base",
+            "future runner-owned output base concept",
+        ),
+        _mapping_entry(
+            "future_cli_target_concept",
+            "out_base",
+            "should_not_emit",
+            "output_safety_ownership",
+            "conceptual CLI target only; argv is not generated",
+            "future mapping would target runner-owned out-base semantics",
+            production_input=False,
+        ),
+        _mapping_entry(
+            "future_run_dir",
+            safety.get("future_run_dir"),
+            "should_not_emit",
+            "output_safety_ownership",
+            "concrete run directory is unresolved until future execution start",
+            "not a concrete path in preview",
+            production_input=False,
+        ),
+        _mapping_entry(
+            "overwrite",
+            output.get("overwrite"),
+            "would_rely_on_backend_default",
+            "output_safety_ownership",
+            "first subset keeps overwrite disabled",
+            "future backend overwrite behavior",
+        ),
+    ]
+    return {
+        "section_status": (
+            "ready_for_first_subset_mapping"
+            if safety.get("output_safety_status") == "output_base_ready_for_runner_owned_future_mapping"
+            else "blocked"
+        ),
+        "future_output_owner": safety.get("future_output_owner"),
+        "future_cli_target_concept": "out_base",
+        "future_run_directory_strategy": safety.get("run_directory_strategy"),
+        "future_run_directory_pattern": safety.get("future_run_directory_pattern"),
+        "concrete_run_dir_known": False,
+        "output_safety_status": safety.get("output_safety_status"),
+        "entries": _mapping_entry_dicts(entries),
+        "blocker_categories": tuple(safety.get("blocker_categories") or ()),
+        "no_argv": True,
+        "no_directory_creation": True,
+        "no_directory_reservation": True,
+    }
+
+
+def _provenance_mapping_section(spec_preview: GuidedNewAnalysisExecutionSpecPreview) -> dict[str, Any]:
+    diag = spec_preview.diagnostic_cache_provenance
+    entries = [
+        _mapping_entry(
+            "diagnostic_cache_identity",
+            diag.get("cache_id"),
+            "display_only_provenance",
+            "diagnostic_cache_provenance",
+            "diagnostic cache identity proves planning evidence/currentness only",
+            "not a production execution input",
+            production_input=False,
+        ),
+        _mapping_entry(
+            "diagnostic_cache_root_path",
+            diag.get("cache_root_path"),
+            "display_only_provenance",
+            "diagnostic_cache_provenance",
+            "diagnostic cache root is retained for audit/currentness only",
+            "not a production execution input",
+            production_input=False,
+        ),
+        _mapping_entry(
+            "source_setup_signature",
+            diag.get("source_setup_signature"),
+            "display_only_provenance",
+            "diagnostic_cache_provenance",
+            "source setup signature supports stale/current decisions",
+            "not a production execution input",
+            production_input=False,
+        ),
+        _mapping_entry(
+            "diagnostic_scope_signature",
+            diag.get("diagnostic_scope_signature"),
+            "display_only_provenance",
+            "diagnostic_cache_provenance",
+            "diagnostic scope signature supports stale/current decisions",
+            "not a production execution input",
+            production_input=False,
+        ),
+    ]
+    return {
+        "section_status": "display_only_provenance",
+        "execution_consumes_cache_artifacts": False,
+        "evidence_chunks_are_production_scope": False,
+        "entries": _mapping_entry_dicts(entries),
+    }
+
+
+def build_guided_first_subset_executable_mapping_preview(
+    plan: GuidedNewAnalysisDraftPlan,
+    execution_spec_preview: GuidedNewAnalysisExecutionSpecPreview | None = None,
+) -> GuidedFirstSubsetExecutableMappingPreview:
+    """Build a pure, non-writing first-subset executable mapping preview.
+
+    This function produces explanatory mapping-intent data only. It does not
+    instantiate RunSpec, generate argv, build a serializable config dict, write
+    YAML/JSON, create or reserve directories, validate, run, inspect widgets, or
+    read the filesystem.
+    """
+    if not isinstance(plan, GuidedNewAnalysisDraftPlan):
+        raise TypeError("plan must be a GuidedNewAnalysisDraftPlan")
+    spec_preview = execution_spec_preview or build_guided_new_analysis_execution_spec_preview(plan)
+    if not isinstance(spec_preview, GuidedNewAnalysisExecutionSpecPreview):
+        raise TypeError("execution_spec_preview must be a GuidedNewAnalysisExecutionSpecPreview")
+
+    source_mapping = _source_acquisition_mapping_section(spec_preview)
+    dataset_mapping = _dataset_mapping_section(spec_preview)
+    roi_mapping = _roi_mapping_section(spec_preview)
+    correction_mapping = _correction_mapping_section(spec_preview)
+    feature_event_mapping = _feature_event_mapping_section(spec_preview)
+    execution_intent_mapping = _execution_intent_mapping_section(spec_preview)
+    output_mapping = _output_mapping_section(spec_preview)
+    provenance_mapping = _provenance_mapping_section(spec_preview)
+
+    unsupported_categories = []
+    if spec_preview.source_acquisition.get("input_format") != "rwd":
+        unsupported_categories.append("unsupported_input_format_for_first_subset_mapping")
+    if spec_preview.source_acquisition.get("acquisition_mode") != "intermittent":
+        unsupported_categories.append("unsupported_acquisition_mode_for_first_subset_mapping")
+    if "signal_only_f0_execution_not_supported" in spec_preview.blocking_issue_categories:
+        unsupported_categories.append("signal_only_f0_production_routing_not_supported")
+    if "mixed_per_roi_strategies" in spec_preview.blocking_issue_categories:
+        unsupported_categories.append("mixed_per_roi_strategy_execution_not_supported")
+
+    section_blockers = []
+    for section_name, section in (
+        ("source_acquisition_mapping", source_mapping),
+        ("dataset_mapping", dataset_mapping),
+        ("roi_mapping", roi_mapping),
+        ("correction_mapping", correction_mapping),
+        ("feature_event_mapping", feature_event_mapping),
+        ("output_mapping", output_mapping),
+    ):
+        if section.get("section_status") not in (
+            "ready_for_first_subset_mapping",
+            "display_only_provenance",
+        ):
+            section_blockers.append(f"{section_name}_not_ready")
+
+    issue_categories = tuple(dict.fromkeys(
+        tuple(spec_preview.blocking_issue_categories)
+        + tuple(unsupported_categories)
+        + tuple(section_blockers)
+    ))
+    blocked_reasons = tuple(spec_preview.blocked_reasons) + tuple(
+        f"First-subset mapping blocker: {category}"
+        for category in tuple(unsupported_categories) + tuple(section_blockers)
+    )
+    mapping_available = bool(
+        spec_preview.spec_preview_available
+        and not unsupported_categories
+        and not section_blockers
+        and correction_mapping.get("section_status") == "ready_for_first_subset_mapping"
+        and feature_event_mapping.get("section_status") == "ready_for_first_subset_mapping"
+        and output_mapping.get("section_status") == "ready_for_first_subset_mapping"
+    )
+    return GuidedFirstSubsetExecutableMappingPreview(
+        mapping_preview_schema_version=FIRST_SUBSET_MAPPING_PREVIEW_SCHEMA_VERSION,
+        mapping_preview_available=mapping_available,
+        first_subset_name=FIRST_EXECUTION_SUBSET_NAME,
+        supported_scope={
+            "input_format": "rwd",
+            "acquisition_mode": "intermittent",
+            "execution_mode": "phasic",
+            "run_profile": "full",
+            "traces_only": False,
+            "correction_scope": "unanimous_global_dynamic_fit_only",
+            "output_owner": "runner",
+            "future_cli_target_concept": "out_base",
+            "no_validation": True,
+            "no_execution": True,
+        },
+        source_acquisition_mapping=source_mapping,
+        dataset_mapping=dataset_mapping,
+        roi_mapping=roi_mapping,
+        correction_mapping=correction_mapping,
+        feature_event_mapping=feature_event_mapping,
+        execution_intent_mapping=execution_intent_mapping,
+        output_mapping=output_mapping,
+        provenance_mapping=provenance_mapping,
+        blocking_issue_categories=issue_categories,
+        blocked_reasons=blocked_reasons,
+        unsupported_reasons=tuple(dict.fromkeys(unsupported_categories)),
+        no_runspec=True,
+        no_argv=True,
+        no_config_dict=True,
+        no_config_serialization=True,
+        no_yaml=True,
+        no_json=True,
+        no_directory_creation=True,
+        no_directory_reservation=True,
+        no_validation=True,
+        no_run=True,
+    )
+
+
 def build_guided_new_analysis_execution_spec_preview(
     plan: GuidedNewAnalysisDraftPlan,
 ) -> GuidedNewAnalysisExecutionSpecPreview:
@@ -3216,7 +3875,7 @@ def build_guided_new_analysis_execution_spec_preview(
         execution_consumption_enabled=spec_preview_available,
     )
 
-    return GuidedNewAnalysisExecutionSpecPreview(
+    preview = GuidedNewAnalysisExecutionSpecPreview(
         spec_preview_schema_version=EXECUTION_SPEC_PREVIEW_SCHEMA_VERSION,
         plan_schema_version=plan.schema_version,
         subset_name=subset_readiness.subset_name,
@@ -3299,4 +3958,11 @@ def build_guided_new_analysis_execution_spec_preview(
         blocking_issue_categories=issue_categories,
         field_classifications=subset_readiness.field_classifications,
         warning_issue_categories=tuple(issue.category for issue in subset_readiness.warning_issues),
+    )
+    return replace(
+        preview,
+        first_subset_executable_mapping_preview=build_guided_first_subset_executable_mapping_preview(
+            plan,
+            execution_spec_preview=preview,
+        ),
     )

@@ -16,10 +16,12 @@ from photometry_pipeline.guided_new_analysis_plan import (
     FEATURE_EVENT_BACKEND_DEFAULT_SOURCE,
     FEATURE_EVENT_CONFIG_FIELDS,
     FEATURE_EVENT_EFFECTIVE_VALUE_FIELDS,
+    FIRST_SUBSET_MAPPING_PREVIEW_SCHEMA_VERSION,
     OUTPUT_CREATION_POLICY_SCHEMA_VERSION,
     RWD_NORMALIZATION_BACKEND_CONFIG_FIELDS,
     RWD_NORMALIZATION_REQUIRED_SNAPSHOT_FIELDS,
     FIRST_EXECUTION_SUBSET_NAME,
+    GuidedFirstSubsetExecutableMappingPreview,
     GuidedNewAnalysisDatasetContractSnapshot,
     GuidedNewAnalysisDatasetContractSourceIdentity,
     GuidedNewAnalysisDraftPlan,
@@ -32,6 +34,7 @@ from photometry_pipeline.guided_new_analysis_plan import (
     RUN_PREVIEW_SCHEMA_VERSION,
     build_guided_new_analysis_execution_spec_preview,
     build_guided_feature_event_effective_values_preview,
+    build_guided_first_subset_executable_mapping_preview,
     build_guided_new_analysis_run_preview,
     build_guided_output_base_safety_ownership_preview,
     build_guided_rwd_dataset_contract_normalization_preview,
@@ -690,6 +693,13 @@ def _effective_values_by_field(preview: dict[str, object]) -> dict[str, dict[str
     return {
         str(item["field_name"]): item
         for item in preview["effective_values"]
+    }
+
+
+def _mapping_entries_by_field(section: dict[str, object]) -> dict[str, dict[str, object]]:
+    return {
+        str(item["field"]): item
+        for item in section["entries"]
     }
 
 
@@ -2124,6 +2134,291 @@ def test_execution_spec_preview_best_case_rwd_available_but_never_executable():
     assert preview.provenance["no_output_directory_created"] is True
     assert preview.provenance["no_validation_run"] is True
     assert preview.provenance["no_pipeline_run"] is True
+
+
+def test_first_subset_mapping_preview_best_case_is_available_and_pure():
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+
+    mapping = build_guided_first_subset_executable_mapping_preview(plan)
+    spec_preview = build_guided_new_analysis_execution_spec_preview(plan)
+
+    assert isinstance(mapping, GuidedFirstSubsetExecutableMappingPreview)
+    assert type(mapping).__name__ != "RunSpec"
+    assert mapping.mapping_preview_schema_version == FIRST_SUBSET_MAPPING_PREVIEW_SCHEMA_VERSION
+    assert mapping.mapping_preview_available is True
+    assert mapping.first_subset_name == FIRST_EXECUTION_SUBSET_NAME
+    assert spec_preview.first_subset_executable_mapping_preview is not None
+    assert spec_preview.first_subset_executable_mapping_preview.mapping_preview_available is True
+    assert spec_preview.execution_available is False
+    assert mapping.supported_scope == {
+        "input_format": "rwd",
+        "acquisition_mode": "intermittent",
+        "execution_mode": "phasic",
+        "run_profile": "full",
+        "traces_only": False,
+        "correction_scope": "unanimous_global_dynamic_fit_only",
+        "output_owner": "runner",
+        "future_cli_target_concept": "out_base",
+        "no_validation": True,
+        "no_execution": True,
+    }
+    assert mapping.no_runspec is True
+    assert mapping.no_argv is True
+    assert mapping.no_config_dict is True
+    assert mapping.no_config_serialization is True
+    assert mapping.no_yaml is True
+    assert mapping.no_json is True
+    assert mapping.no_directory_creation is True
+    assert mapping.no_directory_reservation is True
+    assert mapping.no_validation is True
+    assert mapping.no_run is True
+
+
+def test_first_subset_mapping_dataset_and_source_are_rwd_intermittent_only():
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+
+    mapping = build_guided_first_subset_executable_mapping_preview(plan)
+    source_entries = _mapping_entries_by_field(mapping.source_acquisition_mapping)
+    dataset_entries = _mapping_entries_by_field(mapping.dataset_mapping)
+
+    assert mapping.source_acquisition_mapping["section_status"] == "ready_for_first_subset_mapping"
+    assert source_entries["input_source_path"]["value"] == "C:/raw/input"
+    assert source_entries["input_source_path"]["mapping_status"] == "would_emit_override"
+    assert source_entries["input_format"]["value"] == "rwd"
+    assert source_entries["acquisition_mode"]["value"] == "intermittent"
+    assert source_entries["continuous_window_sec"]["mapping_status"] == "not_applicable"
+    assert source_entries["continuous_step_sec"]["mapping_status"] == "not_applicable"
+    assert mapping.dataset_mapping["section_status"] == "ready_for_first_subset_mapping"
+    assert dataset_entries["rwd_time_col"]["value"] == "Time"
+    assert dataset_entries["rwd_time_col"]["mapping_status"] == "would_emit_override"
+    assert dataset_entries["sig_suffix"]["value"] == "_Signal"
+    assert dataset_entries["uv_suffix"]["value"] == "_UV"
+    assert dataset_entries["npm_channel_mapping"]["mapping_status"] == "unsupported_first_subset"
+    assert dataset_entries["custom_tabular_column_mapping"]["mapping_status"] == "unsupported_first_subset"
+
+
+def test_first_subset_mapping_roi_semantics_subset_and_all_rois():
+    subset_plan = _complete_new_analysis_plan_with_current_snapshot()
+    subset_mapping = build_guided_first_subset_executable_mapping_preview(subset_plan)
+    subset_entries = _mapping_entries_by_field(subset_mapping.roi_mapping)
+
+    assert subset_mapping.roi_mapping["include_filter_kind"] == "explicit_include_filter"
+    assert subset_mapping.roi_mapping["would_emit_include_filter"] is True
+    assert subset_mapping.roi_mapping["would_emit_exclude_filter"] is False
+    assert subset_entries["included_roi_ids"]["mapping_status"] == "would_emit_override"
+    assert subset_entries["excluded_roi_ids"]["mapping_status"] == "display_only_provenance"
+    assert subset_entries["excluded_roi_ids"]["production_input"] is False
+
+    all_roi_plan = _complete_new_analysis_plan_with_current_snapshot(
+        included_roi_ids=["ROI1", "ROI2"],
+        excluded_roi_ids=[],
+        per_roi_correction_strategy_choices=[_strategy_choice("global_linear_regression", roi_id="ROI1"),
+                                             _strategy_choice("global_linear_regression", roi_id="ROI2")],
+    )
+    all_roi_plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(
+        all_roi_plan,
+        contract_values={
+            "input_format": "rwd",
+            "resolved_input_format": "rwd",
+            "acquisition_mode": "intermittent",
+            "rwd_time_col": "Time",
+            "sig_suffix": "_Signal",
+            "uv_suffix": "_UV",
+        },
+    )
+    all_roi_mapping = build_guided_first_subset_executable_mapping_preview(all_roi_plan)
+    all_entries = _mapping_entries_by_field(all_roi_mapping.roi_mapping)
+
+    assert all_roi_mapping.roi_mapping["include_filter_kind"] == "all_rois"
+    assert all_roi_mapping.roi_mapping["all_rois_policy"] == "omit_include_filter_and_rely_on_backend_all_rois"
+    assert all_roi_mapping.roi_mapping["would_emit_include_filter"] is False
+    assert all_entries["included_roi_ids"]["mapping_status"] == "would_rely_on_backend_default"
+
+
+def test_first_subset_mapping_dynamic_fit_emit_omit_policy():
+    plan = _complete_new_analysis_plan_with_current_snapshot(
+        dynamic_fit_parameter_contract=GuidedNewAnalysisDynamicFitParameterContract(
+            dynamic_fit_mode="global_linear_regression",
+            window_sec=90.0,
+        ),
+    )
+
+    mapping = build_guided_first_subset_executable_mapping_preview(plan)
+    entries = _mapping_entries_by_field(mapping.correction_mapping)
+
+    assert mapping.correction_mapping["section_status"] == "ready_for_first_subset_mapping"
+    assert entries["dynamic_fit_mode"]["mapping_status"] == "would_emit_override"
+    assert entries["slope_constraint"]["mapping_status"] == "would_rely_on_backend_default"
+    assert entries["window_sec"]["mapping_status"] == "would_emit_override"
+    assert entries["robust_event_rejection.robust_event_reject_max_iters"]["mapping_status"] == "display_only_inactive"
+    assert entries["adaptive_event_gate.adaptive_event_gate_smooth_window_sec"]["mapping_status"] == "display_only_inactive"
+    assert entries["robust_event_rejection.robust_event_reject_max_iters"]["production_input"] is False
+    assert mapping.correction_mapping["no_config_dict"] is True
+
+
+def test_first_subset_mapping_feature_event_emit_omit_policy():
+    plan = _complete_new_analysis_plan_with_current_snapshot(
+        feature_event_values={
+            "event_signal": "dff",
+            "peak_threshold_method": "absolute",
+            "peak_threshold_abs": 0.25,
+        },
+    )
+
+    mapping = build_guided_first_subset_executable_mapping_preview(plan)
+    entries = _mapping_entries_by_field(mapping.feature_event_mapping)
+
+    assert mapping.feature_event_mapping["section_status"] == "ready_for_first_subset_mapping"
+    assert mapping.feature_event_mapping["active_threshold_field"] == "peak_threshold_abs"
+    assert entries["event_signal"]["mapping_status"] == "would_rely_on_backend_default"
+    assert entries["peak_threshold_method"]["mapping_status"] == "would_emit_override"
+    assert entries["peak_threshold_abs"]["mapping_status"] == "would_emit_override"
+    assert entries["peak_threshold_k"]["mapping_status"] == "display_only_inactive"
+    assert entries["peak_threshold_k"]["production_input"] is False
+    assert entries["peak_pre_filter"]["mapping_status"] == "would_rely_on_backend_default"
+    assert mapping.feature_event_mapping["no_config_dict"] is True
+
+
+def test_first_subset_mapping_output_is_runner_owned_out_base_concept_only():
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+
+    mapping = build_guided_first_subset_executable_mapping_preview(plan)
+    entries = _mapping_entries_by_field(mapping.output_mapping)
+
+    assert mapping.output_mapping["section_status"] == "ready_for_first_subset_mapping"
+    assert mapping.output_mapping["future_output_owner"] == "runner"
+    assert mapping.output_mapping["future_cli_target_concept"] == "out_base"
+    assert mapping.output_mapping["concrete_run_dir_known"] is False
+    assert entries["output_base"]["value"] == "C:/planned/output"
+    assert entries["future_cli_target_concept"]["mapping_status"] == "should_not_emit"
+    assert entries["future_run_dir"]["value"] == "unresolved_until_execution_start"
+    assert entries["future_run_dir"]["mapping_status"] == "should_not_emit"
+    assert mapping.output_mapping["no_argv"] is True
+    assert mapping.output_mapping["no_directory_creation"] is True
+    assert mapping.output_mapping["no_directory_reservation"] is True
+
+
+def test_first_subset_mapping_diagnostic_and_evidence_are_provenance_only():
+    plan = _complete_new_analysis_plan_with_current_snapshot()
+
+    mapping = build_guided_first_subset_executable_mapping_preview(plan)
+    entries = _mapping_entries_by_field(mapping.provenance_mapping)
+
+    assert mapping.provenance_mapping["section_status"] == "display_only_provenance"
+    assert mapping.provenance_mapping["execution_consumes_cache_artifacts"] is False
+    assert mapping.provenance_mapping["evidence_chunks_are_production_scope"] is False
+    assert entries["diagnostic_cache_identity"]["mapping_status"] == "display_only_provenance"
+    assert entries["diagnostic_cache_identity"]["production_input"] is False
+    assert entries["diagnostic_cache_root_path"]["production_input"] is False
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_category"),
+    [
+        ({"input_format": "npm"}, "unsupported_input_format_for_first_subset_mapping"),
+        ({"input_format": "custom_tabular"}, "unsupported_input_format_for_first_subset_mapping"),
+        ({"input_format": "auto"}, "unsupported_input_format_for_first_subset_mapping"),
+        ({"acquisition_mode": "continuous"}, "unsupported_acquisition_mode_for_first_subset_mapping"),
+    ],
+)
+def test_first_subset_mapping_unsupported_formats_and_modes_are_unavailable(overrides, expected_category):
+    plan = _complete_new_analysis_plan_with_current_snapshot(**overrides)
+
+    mapping = build_guided_first_subset_executable_mapping_preview(plan)
+
+    assert mapping.mapping_preview_available is False
+    assert expected_category in mapping.blocking_issue_categories
+    assert expected_category in mapping.unsupported_reasons
+
+
+@pytest.mark.parametrize(
+    ("plan_overrides", "expected_category"),
+    [
+        (
+            {
+                "dynamic_fit_parameter_contract": GuidedNewAnalysisDynamicFitParameterContract(
+                    unresolved_parameters=("legacy_global_settings",)
+                )
+            },
+            "unresolved_dynamic_fit_parameter_contract",
+        ),
+        ({"feature_event_profile_status": "stale", "feature_event_stale_reasons": ["baseline changed"]},
+         "incomplete_planning_readiness"),
+        ({"output_policy_path": "relative/output"}, "output_base_relative"),
+    ],
+)
+def test_first_subset_mapping_upstream_blockers_keep_mapping_unavailable(plan_overrides, expected_category):
+    plan = _complete_new_analysis_plan_with_current_snapshot(**plan_overrides)
+
+    mapping = build_guided_first_subset_executable_mapping_preview(plan)
+
+    assert mapping.mapping_preview_available is False
+    assert expected_category in mapping.blocking_issue_categories
+    assert mapping.no_runspec is True
+    assert mapping.no_argv is True
+    assert mapping.no_config_dict is True
+    assert mapping.no_directory_creation is True
+    assert mapping.no_validation is True
+    assert mapping.no_run is True
+
+
+def test_first_subset_mapping_signal_only_and_mixed_strategies_are_unavailable():
+    signal_plan = _complete_new_analysis_plan_with_current_snapshot(
+        per_roi_correction_strategy_choices=[_strategy_choice("signal_only_f0")]
+    )
+    mixed_plan = _complete_new_analysis_plan_with_current_snapshot(
+        included_roi_ids=["ROI1", "ROI2"],
+        excluded_roi_ids=[],
+        per_roi_correction_strategy_choices=[
+            _strategy_choice("global_linear_regression", roi_id="ROI1"),
+            _strategy_choice("robust_global_event_reject", roi_id="ROI2"),
+        ],
+    )
+    mixed_plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(
+        mixed_plan,
+        contract_values={
+            "input_format": "rwd",
+            "resolved_input_format": "rwd",
+            "acquisition_mode": "intermittent",
+            "rwd_time_col": "Time",
+            "sig_suffix": "_Signal",
+            "uv_suffix": "_UV",
+        },
+    )
+
+    signal_mapping = build_guided_first_subset_executable_mapping_preview(signal_plan)
+    mixed_mapping = build_guided_first_subset_executable_mapping_preview(mixed_plan)
+
+    assert signal_mapping.mapping_preview_available is False
+    assert "signal_only_f0_production_routing_not_supported" in signal_mapping.unsupported_reasons
+    assert mixed_mapping.mapping_preview_available is False
+    assert "mixed_per_roi_strategy_execution_not_supported" in mixed_mapping.unsupported_reasons
+
+
+def test_first_subset_mapping_preview_is_pure_no_files_and_no_plan_mutation(tmp_path):
+    parent = tmp_path / "planned_outputs"
+    parent.mkdir()
+    target = parent / "future_output_base"
+    plan = _complete_new_analysis_plan_with_current_snapshot(output_policy_path=str(target))
+    before_state = dict(plan.__dict__)
+    before_files = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+
+    mapping = build_guided_first_subset_executable_mapping_preview(plan)
+
+    after_files = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    assert after_files == before_files
+    assert not target.exists()
+    assert dict(plan.__dict__) == before_state
+    assert mapping.no_runspec is True
+    assert mapping.no_argv is True
+    assert mapping.no_config_dict is True
+    assert mapping.no_config_serialization is True
+    assert mapping.no_yaml is True
+    assert mapping.no_json is True
+    assert mapping.no_directory_creation is True
+    assert mapping.no_directory_reservation is True
+    assert mapping.no_validation is True
+    assert mapping.no_run is True
 
 
 def _strategy_choice(strategy: str, *, roi_id: str = "ROI1"):

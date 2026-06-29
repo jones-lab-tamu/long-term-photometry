@@ -6100,6 +6100,7 @@ class MainWindow(QMainWindow):
             dataset_contract = execution_spec_preview.dataset_contract or {}
             rwd_normalization = dataset_contract.get("rwd_normalization") or {}
             output_safety = output.get("output_safety_ownership") or {}
+            mapping_preview = execution_spec_preview.first_subset_executable_mapping_preview
             lines.extend([
                 "Guided execution-spec preview:",
                 f"  spec_preview_available: {str(bool(execution_spec_preview.spec_preview_available)).lower()}",
@@ -6138,6 +6139,17 @@ class MainWindow(QMainWindow):
                 + "; ".join(str(category) for category in output_safety.get("blocker_categories") or [])
                 if output_safety.get("blocker_categories")
                 else "    blockers: none",
+                "  first_subset_mapping_preview:",
+                "    mapping_preview_available: "
+                + (
+                    str(bool(mapping_preview.mapping_preview_available)).lower()
+                    if mapping_preview is not None
+                    else "false"
+                ),
+                "    scope: rwd_intermittent_phasic_full_dynamic_fit",
+                "    future_cli_target: out_base_concept_only",
+                "    config_generated: false",
+                "    argv_generated: false",
                 "  output: no directories or files created",
                 "  output_base: "
                 + (
