@@ -4,6 +4,7 @@ import json
 import pytest
 from pathlib import Path
 import gui.run_report_parser as run_report_parser
+import photometry_pipeline.guided_completed_run_rejection_policy as rejection_policy
 from gui.run_report_parser import (
     AMBIGUOUS_GUIDED_DIAGNOSTIC_CACHE_METADATA,
     GUIDED_DIAGNOSTIC_CACHE_INELIGIBLE,
@@ -638,12 +639,14 @@ def test_diagnostic_cache_classification_has_no_side_effects(tmp_path: Path):
 
 
 def test_completed_run_policy_has_no_forbidden_imports():
-    source = Path(run_report_parser.__file__).read_text(encoding="utf-8")
+    source = Path(rejection_policy.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
     forbidden_roots = {
         "PySide6",
         "subprocess",
         "gui.main_window",
+        "gui.run_report_parser",
+        "gui.run_report_viewer",
         "gui.run_spec",
         "photometry_pipeline.runner",
     }
@@ -658,4 +661,24 @@ def test_completed_run_policy_has_no_forbidden_imports():
         name == forbidden or name.startswith(f"{forbidden}.")
         for name in imported
         for forbidden in forbidden_roots
+    )
+
+
+def test_run_report_parser_reexports_backend_neutral_rejection_policy():
+    assert (
+        run_report_parser.detect_guided_diagnostic_cache_candidate
+        is rejection_policy.detect_guided_diagnostic_cache_candidate
+    )
+    assert run_report_parser.CompletedRunRejection is rejection_policy.CompletedRunRejection
+    assert (
+        run_report_parser.GUIDED_DIAGNOSTIC_CACHE_INELIGIBLE
+        == rejection_policy.GUIDED_DIAGNOSTIC_CACHE_INELIGIBLE
+    )
+    assert (
+        run_report_parser.MALFORMED_GUIDED_DIAGNOSTIC_CACHE_METADATA
+        == rejection_policy.MALFORMED_GUIDED_DIAGNOSTIC_CACHE_METADATA
+    )
+    assert (
+        run_report_parser.AMBIGUOUS_GUIDED_DIAGNOSTIC_CACHE_METADATA
+        == rejection_policy.AMBIGUOUS_GUIDED_DIAGNOSTIC_CACHE_METADATA
     )
