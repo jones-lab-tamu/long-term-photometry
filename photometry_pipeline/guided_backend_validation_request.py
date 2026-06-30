@@ -575,6 +575,11 @@ class GuidedBackendEvidenceReference:
     diagnostic_cache_id: str
     source_setup_signature: str
     current: bool = True
+    diagnostic_scope_signature: str = ""
+    build_request_signature: str = ""
+    evidence_chunk: int | None = None
+    roi_id: str = ""
+    selected_dynamic_fit_mode: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -584,6 +589,20 @@ class GuidedBackendEvidenceReference:
             "source_setup_signature",
         ):
             _require_non_empty(getattr(self, name), name)
+        if self.evidence_chunk is not None and (
+            isinstance(self.evidence_chunk, bool)
+            or not isinstance(self.evidence_chunk, int)
+            or self.evidence_chunk < 0
+        ):
+            raise GuidedBackendValidationRequestContractError(
+                "evidence_chunk must be a non-negative integer."
+            )
+        if self.roi_id or self.selected_dynamic_fit_mode:
+            _require_non_empty(self.roi_id, "roi_id")
+            _require_non_empty(
+                self.selected_dynamic_fit_mode,
+                "selected_dynamic_fit_mode",
+            )
         if self.current is not True:
             raise GuidedBackendValidationRequestContractError(
                 "Evidence references must be current."
@@ -882,6 +901,9 @@ class GuidedBackendDiagnosticCacheFacts:
     provenance_semantic_digest: str = ""
     completed_run_rejection_category: str = ""
     resolver_status: str = ""
+    source_setup_signature: str = ""
+    diagnostic_scope_signature: str = ""
+    build_request_signature: str = ""
     preliminary_cache: bool = False
     production_analysis: bool = False
 
