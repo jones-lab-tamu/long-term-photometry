@@ -912,6 +912,16 @@ class GuidedBackendDiagnosticCacheFacts:
 class GuidedBackendOutputFacts:
     available: bool = False
     output_base_canonical: str = ""
+    output_base_path_style: str = ""
+    path_role: str = ""
+    future_output_owner: str = ""
+    run_directory_strategy: str = ""
+    creation_timing: str = ""
+    overwrite: bool = False
+    precreate: bool = False
+    policy_status: str = ""
+    policy_current: bool = False
+    safety_classifier_version: str = ""
     protected_root_context_complete: bool = False
     relationships: tuple[GuidedBackendOutputRelationship, ...] = ()
     blocker_categories: tuple[str, ...] = ()

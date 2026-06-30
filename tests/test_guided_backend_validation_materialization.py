@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import ast
 import builtins
+from dataclasses import replace
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 import pytest
 
@@ -171,6 +173,11 @@ def _apply_valid_diagnostic_cache_and_evidence(
             explicit_user_mark=True,
         )
     ]
+    draft.output_policy_status = "applied"
+    draft.output_policy_path = str(source_root.parent / "planned_outputs")
+    draft.output_policy_validation_issues = []
+    draft.output_policy_stale_reasons = []
+    draft.output_policy_explicitly_applied = True
     return cache_root
 
 
@@ -455,7 +462,7 @@ def test_stage_2c_unresolved_inputs(tmp_path: Path):
     assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
     assert result.facts.complete_for_compilation is False
 
-    expected_unresolved = {"output_facts"}
+    expected_unresolved = set()
     assert set(result.facts.unresolved_required_inputs) == expected_unresolved
 
 
@@ -495,8 +502,8 @@ def test_stage_2c_materializes_cache_and_evidence_facts(tmp_path: Path):
     assert reference.selected_dynamic_fit_mode == "global_linear_regression"
     assert not hasattr(reference, "evidence_summary")
     assert not hasattr(reference, "selected_at_utc")
-    assert result.facts.output.available is False
-    assert result.facts.unresolved_required_inputs == ("output_facts",)
+    assert result.facts.output.available is True
+    assert result.facts.unresolved_required_inputs == ()
 
 
 def test_missing_diagnostic_cache_pointer_blocks(tmp_path: Path):
@@ -778,6 +785,256 @@ def test_draft_marks_alone_cannot_materialize_evidence(tmp_path: Path):
     assert result.no_usable_facts is True
 
 
+def test_stage_2d_materializes_output_facts(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    expected_base = os.path.realpath(os.path.abspath(draft.output_policy_path or ""))
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    output = result.facts.output
+    assert output.available is True
+    assert output.output_base_canonical == expected_base
+    assert output.output_base_path_style == "windows_drive"
+    assert output.path_role == "output_base"
+    assert output.future_output_owner == "runner"
+    assert output.run_directory_strategy == "derive_unique_run_id_under_output_base"
+    assert output.creation_timing == "future_execution_start_only"
+    assert output.overwrite is False
+    assert output.precreate is False
+    assert output.policy_status == "applied"
+    assert output.policy_current is True
+    assert output.safety_classifier_version
+    assert output.protected_root_context_complete is True
+    assert output.blocker_categories == ()
+    assert (
+        output.filesystem_fact_scope
+        == "read_only_path_relationships_no_writability_probe"
+    )
+    assert result.facts.unresolved_required_inputs == ()
+    assert result.facts.complete_for_compilation is False
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_output_base_existing_or_nonexistent_is_allowed_without_changes(
+    tmp_path: Path,
+    existing: bool,
+):
+    draft = _valid_stage2c_draft(tmp_path)
+    output_base = Path(draft.output_policy_path or "")
+    if existing:
+        output_base.mkdir()
+        marker = output_base / "existing.txt"
+        marker.write_text("unchanged", encoding="utf-8")
+    before = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    after = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    assert after == before
+    assert output_base.exists() is existing
+
+
+@pytest.mark.parametrize(
+    "mutation,expected",
+    [
+        ("missing", "output_policy_missing"),
+        ("stale", "output_policy_stale"),
+        ("validation_issue", "output_policy_unapplied_changes"),
+        ("not_explicit", "output_policy_unapplied_changes"),
+    ],
+)
+def test_output_policy_failures_block(
+    tmp_path: Path,
+    mutation: str,
+    expected: str,
+):
+    draft = _valid_stage2c_draft(tmp_path)
+    if mutation == "missing":
+        draft.output_policy_status = "missing"
+    elif mutation == "stale":
+        draft.output_policy_stale_reasons = ["source changed"]
+    elif mutation == "validation_issue":
+        draft.output_policy_validation_issues = ["invalid"]
+    else:
+        draft.output_policy_explicitly_applied = False
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == expected
+    assert result.no_usable_facts is True
+
+
+@pytest.mark.parametrize(
+    "mutation,expected",
+    [
+        ("missing_base", "output_base_missing"),
+        ("relative_base", "output_base_invalid"),
+        ("mixed_path_style", "output_base_invalid"),
+        ("path_role", "output_safety_facts_unavailable"),
+        ("creation_timing", "output_safety_facts_unavailable"),
+        ("run_strategy", "output_safety_facts_unavailable"),
+    ],
+)
+def test_invalid_output_base_or_ownership_policy_blocks(
+    tmp_path: Path,
+    mutation: str,
+    expected: str,
+):
+    draft = _valid_stage2c_draft(tmp_path)
+    if mutation == "missing_base":
+        draft.output_policy_path = None
+    elif mutation == "relative_base":
+        draft.output_policy_path = "relative/output"
+    elif mutation == "mixed_path_style":
+        draft.output_policy_path = "/posix/output"
+    elif mutation == "path_role":
+        draft.output_creation_policy = replace(
+            draft.output_creation_policy, path_role="run_directory"
+        )
+    elif mutation == "creation_timing":
+        draft.output_creation_policy = replace(
+            draft.output_creation_policy, creation_timing="preview"
+        )
+    else:
+        draft.output_creation_policy = replace(
+            draft.output_creation_policy, run_directory_strategy="fixed"
+        )
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == expected
+
+
+@pytest.mark.parametrize(
+    "field,value,expected",
+    [
+        ("overwrite", True, "output_overwrite_not_allowed"),
+        ("precreate_during_preview", True, "output_precreate_not_allowed"),
+        ("gui_preflight_writes_enabled", True, "output_safety_facts_unavailable"),
+    ],
+)
+def test_output_write_intent_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: bool,
+    expected: str,
+):
+    draft = _valid_stage2c_draft(tmp_path)
+    draft.output_creation_policy = replace(
+        draft.output_creation_policy, **{field: value}
+    )
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == expected
+
+
+@pytest.mark.parametrize("relationship", ["equal", "output_inside", "source_inside"])
+def test_output_source_overlap_blocks(tmp_path: Path, relationship: str):
+    draft = _valid_stage2c_draft(tmp_path)
+    source = Path(draft.input_source_path or "")
+    if relationship == "equal":
+        draft.output_policy_path = str(source)
+    elif relationship == "output_inside":
+        draft.output_policy_path = str(source / "outputs")
+    else:
+        draft.output_policy_path = str(source.parent)
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "output_overlaps_source"
+
+
+@pytest.mark.parametrize("relationship", ["equal", "output_inside", "cache_inside"])
+def test_output_diagnostic_cache_overlap_blocks(
+    tmp_path: Path,
+    relationship: str,
+):
+    draft = _valid_stage2c_draft(tmp_path)
+    cache = Path(draft.cache_root_path or "")
+    additional_roots: tuple[tuple[str, str], ...] = ()
+    if relationship == "equal":
+        draft.output_policy_path = str(cache)
+    elif relationship == "output_inside":
+        draft.output_policy_path = str(cache / "outputs")
+    else:
+        containing_root = tmp_path / "cache_output_parent"
+        draft.output_policy_path = str(containing_root)
+        additional_roots = (("diagnostic_cache", str(containing_root / "cache")),)
+
+    result = materialize_guided_backend_validation_facts(
+        draft,
+        parser_contract=_valid_parser_contract(),
+        additional_protected_roots=additional_roots,
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert (
+        result.blocking_issues[0].category
+        == "output_overlaps_diagnostic_cache"
+    )
+
+
+@pytest.mark.parametrize(
+    "root_kind,expected",
+    [
+        ("completed_run", "output_overlaps_completed_run"),
+        ("legacy_output", "output_overlaps_protected_root"),
+    ],
+)
+def test_additional_backend_neutral_protected_root_overlap_blocks(
+    tmp_path: Path,
+    root_kind: str,
+    expected: str,
+):
+    draft = _valid_stage2c_draft(tmp_path)
+    protected = tmp_path / f"{root_kind}_root"
+    draft.output_policy_path = str(protected / "future")
+
+    result = materialize_guided_backend_validation_facts(
+        draft,
+        parser_contract=_valid_parser_contract(),
+        additional_protected_roots=((root_kind, str(protected)),),
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == expected
+
+
+def test_invalid_additional_protected_root_context_blocks(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+
+    result = materialize_guided_backend_validation_facts(
+        draft,
+        parser_contract=_valid_parser_contract(),
+        additional_protected_roots=(("", ""),),
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert (
+        result.blocking_issues[0].category
+        == "output_protected_root_context_incomplete"
+    )
+
+
 @pytest.mark.parametrize(
     "mutation,expected",
     [
@@ -824,6 +1081,8 @@ def test_no_write_guarantee_stage_2b(tmp_path: Path, monkeypatch: pytest.MonkeyP
     )
     _apply_valid_feature_event_profile(draft)
     parser = _valid_parser_contract()
+    output_base = Path(draft.output_policy_path or "")
+    assert not output_base.exists()
 
     original_open = builtins.open
 
@@ -838,12 +1097,23 @@ def test_no_write_guarantee_stage_2b(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(builtins, "open", mock_open)
     monkeypatch.setattr(Path, "write_text", raise_write_error)
     monkeypatch.setattr(Path, "write_bytes", raise_write_error)
+    monkeypatch.setattr(Path, "touch", raise_write_error)
     monkeypatch.setattr(Path, "mkdir", raise_write_error)
     monkeypatch.setattr(os, "mkdir", raise_write_error)
     monkeypatch.setattr(os, "makedirs", raise_write_error)
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", raise_write_error)
+    import photometry_pipeline.workflow_safety as workflow_safety
+    monkeypatch.setattr(
+        workflow_safety,
+        "validate_output_write_safety",
+        lambda *args, **kwargs: pytest.fail(
+            "validate_output_write_safety must not be called by materialization."
+        ),
+    )
 
     result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
     assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    assert not output_base.exists()
 
 
 # M. Compiler Handoff Still Refuses

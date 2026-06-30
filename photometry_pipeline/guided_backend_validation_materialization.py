@@ -24,6 +24,7 @@ from photometry_pipeline.guided_backend_validation_request import (
     GuidedBackendEvidenceReference,
     GuidedBackendDiagnosticCacheFacts,
     GuidedBackendOutputFacts,
+    GuidedBackendOutputRelationship,
     GuidedBackendTypedFieldValue,
 )
 from photometry_pipeline.guided_new_analysis_plan import (
@@ -32,6 +33,7 @@ from photometry_pipeline.guided_new_analysis_plan import (
     FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
     FORBIDDEN_CORRECTION_STRATEGIES,
     build_guided_feature_event_effective_values_preview,
+    classify_output_base_safety_ownership,
 )
 from photometry_pipeline.guided_completed_run_rejection_policy import (
     AMBIGUOUS_GUIDED_DIAGNOSTIC_CACHE_METADATA,
@@ -69,7 +71,10 @@ GUIDED_BACKEND_VALIDATION_MATERIALIZER_VERSION = (
     "guided_backend_validation_materializer.v1"
 )
 GUIDED_BACKEND_VALIDATION_MATERIALIZATION_STAGE = (
-    "stage_2c_diagnostic_cache_and_evidence"
+    "stage_2d_output_facts"
+)
+GUIDED_BACKEND_OUTPUT_SAFETY_CLASSIFIER_VERSION = (
+    "guided_output_base_safety_ownership.v1"
 )
 
 STAGE_2C_VALID_ISSUES = {
@@ -121,6 +126,21 @@ STAGE_2C_VALID_ISSUES = {
     "mixed_dynamic_fit_modes",
     "signal_only_not_supported_for_validate",
     "forbidden_strategy_state",
+    # Stage 2d categories
+    "output_policy_missing",
+    "output_policy_stale",
+    "output_policy_unapplied_changes",
+    "output_base_missing",
+    "output_base_invalid",
+    "output_protected_root_context_incomplete",
+    "output_overlaps_source",
+    "output_overlaps_diagnostic_cache",
+    "output_overlaps_completed_run",
+    "output_overlaps_protected_root",
+    "output_overwrite_not_allowed",
+    "output_precreate_not_allowed",
+    "output_safety_facts_unavailable",
+    "output_materialization_requires_write",
 }
 
 # Backward-compatible name retained for callers/tests from Stage 2b.
@@ -709,13 +729,278 @@ def _materialize_evidence_references(
     ), None
 
 
+def _materialize_output_facts(
+    draft: GuidedNewAnalysisDraftPlan,
+    source_facts: GuidedBackendSourceSnapshotFacts,
+    cache_facts: GuidedBackendDiagnosticCacheFacts,
+    *,
+    additional_protected_roots: tuple[tuple[str, str], ...],
+) -> tuple[
+    GuidedBackendOutputFacts | None,
+    GuidedBackendValidationMaterializationFailure | None,
+]:
+    if draft.output_policy_status in ("missing", "unavailable"):
+        return None, _failure(
+            "output_policy_missing",
+            "output",
+            "An applied output policy is required.",
+            detail_code="output_policy_missing",
+        )
+    if draft.output_policy_status == "stale" or draft.output_policy_stale_reasons:
+        return None, _failure(
+            "output_policy_stale",
+            "output",
+            "The applied output policy is stale.",
+            detail_code="output_policy_stale",
+        )
+    if (
+        draft.output_policy_status != "applied"
+        or draft.output_policy_explicitly_applied is not True
+        or draft.output_policy_validation_issues
+    ):
+        return None, _failure(
+            "output_policy_unapplied_changes",
+            "output",
+            "The output policy is invalid or has unapplied changes.",
+            detail_code="output_policy_not_current",
+        )
+
+    output_base = str(draft.output_policy_path or "").strip()
+    if not output_base:
+        return None, _failure(
+            "output_base_missing",
+            "output",
+            "The applied output policy has no output base.",
+            detail_code="output_base_missing",
+        )
+
+    policy = draft.output_creation_policy
+    if policy.overwrite is not False:
+        return None, _failure(
+            "output_overwrite_not_allowed",
+            "output",
+            "Overwrite is not allowed for the first Guided validation subset.",
+            detail_code="overwrite_requested",
+        )
+    if policy.precreate_during_preview is not False:
+        return None, _failure(
+            "output_precreate_not_allowed",
+            "output",
+            "Output precreation is not allowed during materialization.",
+            detail_code="precreate_requested",
+        )
+    if (
+        policy.path_role != "output_base"
+        or policy.creation_timing != "future_execution_start_only"
+        or policy.run_directory_strategy
+        != "derive_unique_run_id_under_output_base"
+        or policy.gui_preflight_writes_enabled is not False
+    ):
+        return None, _failure(
+            "output_safety_facts_unavailable",
+            "output",
+            "The output creation policy is not supported by the first subset.",
+            detail_code="output_ownership_policy_mismatch",
+        )
+
+    if (
+        not source_facts.available
+        or not source_facts.source_root_canonical
+        or not cache_facts.available
+        or not cache_facts.cache_root_canonical
+    ):
+        return None, _failure(
+            "output_protected_root_context_incomplete",
+            "output",
+            "Source and diagnostic-cache protected-root facts are required.",
+            detail_code="fact_derived_roots_missing",
+        )
+    if not isinstance(additional_protected_roots, tuple):
+        return None, _failure(
+            "output_protected_root_context_incomplete",
+            "output",
+            "Additional protected roots must be supplied as a tuple.",
+            detail_code="additional_roots_invalid",
+        )
+
+    protected_roots: list[tuple[str, str]] = [
+        ("diagnostic_cache", cache_facts.cache_root_canonical)
+    ]
+    for item in additional_protected_roots:
+        if (
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or not item[0].strip()
+            or not isinstance(item[1], str)
+            or not item[1].strip()
+        ):
+            return None, _failure(
+                "output_protected_root_context_incomplete",
+                "output",
+                "An additional protected-root entry is invalid.",
+                detail_code="additional_root_entry_invalid",
+            )
+        try:
+            canonical_root = os.path.realpath(item[1])
+        except (OSError, TypeError, ValueError):
+            return None, _failure(
+                "output_protected_root_context_incomplete",
+                "output",
+                "An additional protected-root path cannot be canonicalized.",
+                detail_code="additional_root_path_invalid",
+            )
+        protected_roots.append((item[0].strip(), canonical_root))
+
+    try:
+        classification = classify_output_base_safety_ownership(
+            output_base=output_base,
+            source_path=source_facts.source_root_canonical,
+            output_policy_status=draft.output_policy_status,
+            output_policy_explicitly_applied=draft.output_policy_explicitly_applied,
+            output_policy_validation_issues=tuple(
+                draft.output_policy_validation_issues
+            ),
+            output_policy_stale_reasons=tuple(draft.output_policy_stale_reasons),
+            path_role=policy.path_role,
+            run_directory_strategy=policy.run_directory_strategy,
+            overwrite_requested=policy.overwrite,
+            precreate_during_preview=policy.precreate_during_preview,
+            protected_roots=tuple(protected_roots),
+            protected_root_context_complete=True,
+            filesystem_facts=None,
+            write_context="backend_validation_materialization",
+        )
+    except Exception as exc:
+        return None, _failure(
+            "output_safety_facts_unavailable",
+            "output",
+            f"Output safety classification failed: {exc}",
+            detail_code="classifier_failed",
+        )
+
+    blockers = tuple(classification.get("blocker_categories") or ())
+    if blockers:
+        if "output_base_missing" in blockers:
+            category = "output_base_missing"
+        elif (
+            "output_base_relative" in blockers
+            or "output_path_style_mismatch" in blockers
+        ):
+            category = "output_base_invalid"
+        elif "unsafe_overwrite_for_guided_first_subset" in blockers:
+            category = "output_overwrite_not_allowed"
+        elif "unsafe_source_output_relationship" in blockers:
+            category = "output_overlaps_source"
+        elif "unsafe_protected_output_location" in blockers:
+            unsafe_root_kinds = {
+                item.get("root_kind")
+                for item in classification.get("protected_root_relationships", ())
+                if item.get("status") in ("unsafe", "unknown_mixed_path_style")
+            }
+            if "diagnostic_cache" in unsafe_root_kinds:
+                category = "output_overlaps_diagnostic_cache"
+            elif "completed_run" in unsafe_root_kinds:
+                category = "output_overlaps_completed_run"
+            else:
+                category = "output_overlaps_protected_root"
+        else:
+            category = "output_safety_facts_unavailable"
+        return None, _failure(
+            category,
+            "output",
+            "The output base failed read-only safety classification.",
+            detail_code=str(classification.get("output_safety_status") or "blocked"),
+        )
+
+    if (
+        classification.get("output_safety_status")
+        != "output_base_ready_for_runner_owned_future_mapping"
+        or classification.get("future_output_owner") != "runner"
+        or classification.get("no_directory_creation") is not True
+        or classification.get("no_directory_reservation") is not True
+        or classification.get("no_files_written") is not True
+    ):
+        return None, _failure(
+            "output_safety_facts_unavailable",
+            "output",
+            "Output safety classification did not establish runner-owned future mapping.",
+            detail_code="classifier_contract_incomplete",
+        )
+
+    relationships: list[GuidedBackendOutputRelationship] = []
+    for relationship in classification.get("path_relationships", ()):
+        relationships.append(
+            GuidedBackendOutputRelationship(
+                relationship=str(relationship.get("relationship") or ""),
+                root_kind="source",
+                status=str(relationship.get("status") or ""),
+            )
+        )
+    for relationship in classification.get("protected_root_relationships", ()):
+        relationships.append(
+            GuidedBackendOutputRelationship(
+                relationship="output_base_vs_protected_root",
+                root_kind=str(relationship.get("root_kind") or ""),
+                status=str(relationship.get("status") or ""),
+            )
+        )
+
+    path_relationships = classification.get("path_relationships") or ()
+    output_path_style = ""
+    if path_relationships:
+        evidence = path_relationships[0].get("evidence") or {}
+        output_path_style = str(evidence.get("output_path_style") or "")
+    if not output_path_style:
+        return None, _failure(
+            "output_base_invalid",
+            "output",
+            "The output base path style could not be determined.",
+            detail_code="path_style_missing",
+        )
+    try:
+        output_base_canonical = os.path.realpath(os.path.abspath(output_base))
+    except (OSError, TypeError, ValueError):
+        return None, _failure(
+            "output_base_invalid",
+            "output",
+            "The output base cannot be canonicalized.",
+            detail_code="output_base_canonicalization_failed",
+        )
+
+    return (
+        GuidedBackendOutputFacts(
+            available=True,
+            output_base_canonical=output_base_canonical,
+            output_base_path_style=output_path_style,
+            path_role=str(classification["path_role"]),
+            future_output_owner=str(classification["future_output_owner"]),
+            run_directory_strategy=str(classification["run_directory_strategy"]),
+            creation_timing=policy.creation_timing,
+            overwrite=False,
+            precreate=False,
+            policy_status=draft.output_policy_status,
+            policy_current=True,
+            safety_classifier_version=GUIDED_BACKEND_OUTPUT_SAFETY_CLASSIFIER_VERSION,
+            protected_root_context_complete=True,
+            relationships=tuple(relationships),
+            blocker_categories=(),
+            filesystem_fact_scope=(
+                "read_only_path_relationships_no_writability_probe"
+            ),
+        ),
+        None,
+    )
+
+
 def materialize_guided_backend_validation_facts(
     draft: GuidedNewAnalysisDraftPlan,
     *,
     parser_contract: RwdHeaderParsingContract | None = None,
     cancellation_check: Callable[[], bool] | None = None,
+    additional_protected_roots: tuple[tuple[str, str], ...] = (),
 ) -> GuidedBackendValidationMaterializationSuccess | GuidedBackendValidationMaterializationFailure:
-    """Materialize the Stage 2c subset of validation facts (read-only).
+    """Materialize the Stage 2d subset of validation facts (read-only).
 
     Currently compiles:
       - Source snapshot facts
@@ -724,8 +1009,9 @@ def materialize_guided_backend_validation_facts(
       - Feature/event effective values
       - Diagnostic-cache facts
       - Evidence-reference facts
+      - Output safety/ownership facts
 
-    Output facts remain unavailable, and compiler handoff will block.
+    Compiler request population remains deferred, so compiler handoff blocks.
     """
     if not isinstance(draft, GuidedNewAnalysisDraftPlan):
         return _failure(
@@ -1001,18 +1287,26 @@ def materialize_guided_backend_validation_facts(
         return evidence_failure
     assert evidence_facts is not None
 
-    unresolved = ("output_facts",)
+    output_facts, output_failure = _materialize_output_facts(
+        draft,
+        source_snapshot_facts,
+        cache_facts,
+        additional_protected_roots=additional_protected_roots,
+    )
+    if output_failure is not None:
+        return output_failure
+    assert output_facts is not None
 
     facts = GuidedBackendValidationMaterializedFacts(
         source_snapshot=source_snapshot_facts,
         incomplete_final_classification=classification_facts,
         parser=parser_facts,
         diagnostic_cache=cache_facts,
-        output=GuidedBackendOutputFacts(available=False),
+        output=output_facts,
         evidence_references=evidence_facts,
         effective_feature_event_values=tuple(backend_typed_values),
         complete_for_compilation=False,
-        unresolved_required_inputs=unresolved,
+        unresolved_required_inputs=(),
     )
 
     return GuidedBackendValidationMaterializationSuccess(facts=facts)
