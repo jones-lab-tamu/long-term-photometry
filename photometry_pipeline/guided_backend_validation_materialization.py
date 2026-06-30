@@ -1,0 +1,296 @@
+"""Read-only materialized facts layer for Guided Mode validation.
+
+This module performs all read-only I/O (files presence, size checks, and digests)
+to gather filesystem facts into immutable dataclasses before pure compilation.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import os
+from pathlib import Path
+from typing import Any, Callable
+
+# Importing needed elements from request contract and draft plan
+from photometry_pipeline.guided_backend_validation_request import (
+    GuidedBackendSourceCandidateFile,
+    GuidedBackendSourceSnapshotFacts,
+    GuidedBackendIncompleteFinalClassificationFacts,
+    GuidedBackendValidationMaterializedFacts,
+    GuidedBackendParserFacts,
+    GuidedBackendEvidenceReferenceFacts,
+    GuidedBackendDiagnosticCacheFacts,
+    GuidedBackendOutputFacts,
+)
+from photometry_pipeline.guided_new_analysis_plan import GuidedNewAnalysisDraftPlan
+
+# Importing RWD helpers
+from photometry_pipeline.io.rwd_source_snapshot import (
+    build_rwd_source_candidate_snapshot,
+    compute_rwd_source_candidate_set_digest,
+    compute_rwd_source_candidate_content_digest,
+    make_not_requested_incomplete_final_chunk_classification,
+    compute_incomplete_final_chunk_classification_digest,
+    RwdSourceSnapshotError,
+)
+
+# Constants for Stage 2a
+GUIDED_BACKEND_VALIDATION_MATERIALIZATION_SCOPE = (
+    "guided_rwd_intermittent_phasic_full_materialization"
+)
+GUIDED_BACKEND_VALIDATION_MATERIALIZER_VERSION = (
+    "guided_backend_validation_materializer.v1"
+)
+GUIDED_BACKEND_VALIDATION_MATERIALIZATION_STAGE = (
+    "stage_2a_source_snapshot_and_not_requested"
+)
+
+STAGE_2A_VALID_ISSUES = {
+    "missing_source",
+    "unsupported_source_format",
+    "source_snapshot_unavailable",
+    "source_snapshot_cancelled",
+    "source_snapshot_unstable",
+    "source_snapshot_digest_mismatch",
+    "unsupported_incomplete_final_exclusion",
+    "incomplete_final_classification_mismatch",
+    "materialization_cancelled",
+    "materializer_internal_error",
+    "unsupported_stage_2a_state",
+}
+
+
+@dataclass(frozen=True)
+class GuidedBackendValidationMaterializationIssue:
+    category: str
+    section: str
+    message: str
+    detail_code: str | None = None
+    debug_context: tuple[Any, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.category, str) or not self.category:
+            raise ValueError("category must be a non-empty string.")
+        if self.category not in STAGE_2A_VALID_ISSUES:
+            raise ValueError(f"Unsupported materialization issue category: {self.category}")
+        if not isinstance(self.section, str) or not self.section:
+            raise ValueError("section must be a non-empty string.")
+        if not isinstance(self.message, str) or not self.message:
+            raise ValueError("message must be a non-empty string.")
+        if not isinstance(self.debug_context, tuple):
+            raise ValueError("debug_context must be a tuple.")
+
+
+@dataclass(frozen=True)
+class GuidedBackendValidationMaterializationSuccess:
+    facts: GuidedBackendValidationMaterializedFacts
+    materialization_scope: str = GUIDED_BACKEND_VALIDATION_MATERIALIZATION_SCOPE
+    materializer_version: str = GUIDED_BACKEND_VALIDATION_MATERIALIZER_VERSION
+    warning_categories: tuple[str, ...] = ()
+    status: str = field(default="materialized", init=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.facts, GuidedBackendValidationMaterializedFacts):
+            raise TypeError("facts must be an instance of GuidedBackendValidationMaterializedFacts.")
+
+
+@dataclass(frozen=True)
+class GuidedBackendValidationMaterializationFailure:
+    blocking_issues: tuple[GuidedBackendValidationMaterializationIssue, ...]
+    warning_categories: tuple[str, ...] = ()
+    status: str = field(default="refused", init=False)
+    no_usable_facts: bool = field(default=True, init=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.blocking_issues, tuple):
+            raise ValueError("blocking_issues must be a tuple.")
+        if not self.blocking_issues:
+            raise ValueError("At least one blocking issue is required for failure.")
+
+
+def _failure(
+    category: str,
+    section: str,
+    message: str,
+    *,
+    detail_code: str | None = None,
+) -> GuidedBackendValidationMaterializationFailure:
+    return GuidedBackendValidationMaterializationFailure(
+        blocking_issues=(
+            GuidedBackendValidationMaterializationIssue(
+                category=category,
+                section=section,
+                message=message,
+                detail_code=detail_code,
+            ),
+        )
+    )
+
+
+def materialize_guided_backend_validation_facts(
+    draft: GuidedNewAnalysisDraftPlan,
+    *,
+    cancellation_check: Callable[[], bool] | None = None,
+) -> GuidedBackendValidationMaterializationSuccess | GuidedBackendValidationMaterializationFailure:
+    """Materialize the Stage 2a subset of validation facts (read-only).
+
+    Currently compiles:
+      - Source snapshot facts
+      - Incomplete-final not_requested classification facts
+
+    Remaining fact groups are marked unavailable, and compiler handoff will block.
+    """
+    if not isinstance(draft, GuidedNewAnalysisDraftPlan):
+        return _failure(
+            "unsupported_stage_2a_state",
+            "draft",
+            "A GuidedNewAnalysisDraftPlan is required.",
+            detail_code="invalid_draft_type",
+        )
+
+    # 1. Cancellation check before starting
+    if cancellation_check and cancellation_check():
+        return _failure(
+            "materialization_cancelled",
+            "cancellation",
+            "Materialization was cancelled before starting.",
+            detail_code="cancelled_preflight",
+        )
+
+    # 2. Input Format and Acquisition Mode Audit
+    if draft.input_format not in ("rwd", "auto"):
+        return _failure(
+            "unsupported_source_format",
+            "source",
+            f"Input format '{draft.input_format}' is not supported by Guided Mode.",
+            detail_code="format_unsupported",
+        )
+
+    if draft.acquisition_mode != "intermittent":
+        return _failure(
+            "unsupported_stage_2a_state",
+            "source",
+            f"Acquisition mode '{draft.acquisition_mode}' is not supported by the first subset.",
+            detail_code="acquisition_mode_unsupported",
+        )
+
+    # 3. Path Audit
+    source_path = draft.resolved_input_source_path or draft.input_source_path
+    if not source_path:
+        return _failure(
+            "missing_source",
+            "source",
+            "No source path specified in the draft plan.",
+            detail_code="source_path_missing",
+        )
+
+    # 4. Incomplete-Final Policy Audit (Before Snapshot)
+    if draft.exclude_incomplete_final_rwd_chunk:
+        return _failure(
+            "unsupported_incomplete_final_exclusion",
+            "incomplete_final",
+            "Excluding incomplete final chunk is not supported by the first subset.",
+            detail_code="exclusion_enabled_unsupported",
+        )
+
+    # 5. Source Snapshot Materialization (I/O Read-Only)
+    try:
+        snapshot = build_rwd_source_candidate_snapshot(
+            source_path,
+            cancellation_check=cancellation_check,
+        )
+    except RwdSourceSnapshotError as exc:
+        category = "source_snapshot_unavailable"
+        if exc.category in ("source_root_missing", "source_root_not_directory"):
+            category = "missing_source"
+        elif exc.category == "unstable_filesystem_facts":
+            category = "source_snapshot_unstable"
+        elif exc.category in ("snapshot_cancelled", "source_candidate_snapshot_cancelled"):
+            category = "source_snapshot_cancelled"
+
+        return _failure(
+            category,
+            "source",
+            f"Failed to build source candidate snapshot: {exc.message}",
+            detail_code=exc.category,
+        )
+    except Exception as exc:
+        return _failure(
+            "materializer_internal_error",
+            "source",
+            f"Internal error during snapshot build: {exc}",
+            detail_code="internal_snapshot_error",
+        )
+
+    # 6. Cancellation check after potentially expensive snapshot build
+    if cancellation_check and cancellation_check():
+        return _failure(
+            "materialization_cancelled",
+            "cancellation",
+            "Materialization was cancelled after snapshot generation.",
+            detail_code="cancelled_post_snapshot",
+        )
+
+    # Map candidate files into request contract type
+    backend_candidate_files = []
+    for f in snapshot.candidates:
+        backend_candidate_files.append(
+            GuidedBackendSourceCandidateFile(
+                canonical_relative_path=f.canonical_relative_path,
+                size_bytes=f.size_bytes,
+                sha256_content_digest=f.sha256_content_digest,
+            )
+        )
+
+    source_snapshot_facts = GuidedBackendSourceSnapshotFacts(
+        available=True,
+        source_root_canonical=snapshot.source_root_canonical,
+        source_candidate_set_digest=snapshot.source_candidate_set_digest,
+        source_candidate_content_digest=snapshot.source_candidate_content_digest,
+        candidate_files=tuple(backend_candidate_files),
+        stale=False,
+    )
+
+    # 7. Incomplete-Final not_requested Classification Materialization
+
+    try:
+        classification = make_not_requested_incomplete_final_chunk_classification(snapshot)
+        classification_digest = compute_incomplete_final_chunk_classification_digest(classification)
+    except Exception as exc:
+        return _failure(
+            "materializer_internal_error",
+            "incomplete_final",
+            f"Failed to generate incomplete-final classification: {exc}",
+            detail_code="internal_classification_error",
+        )
+
+    classification_facts = GuidedBackendIncompleteFinalClassificationFacts(
+        available=True,
+        classification_status="not_requested",
+        classification_digest=classification_digest,
+        source_candidate_set_digest=snapshot.source_candidate_set_digest,
+        source_candidate_content_digest=snapshot.source_candidate_content_digest,
+    )
+
+    # 8. Unresolved required inputs lists the other fact groups for Stage 2a
+    unresolved = (
+        "parser_facts",
+        "diagnostic_cache_facts",
+        "output_facts",
+        "evidence_references",
+        "effective_feature_event_values",
+    )
+
+    facts = GuidedBackendValidationMaterializedFacts(
+        source_snapshot=source_snapshot_facts,
+        incomplete_final_classification=classification_facts,
+        parser=GuidedBackendParserFacts(available=False),
+        diagnostic_cache=GuidedBackendDiagnosticCacheFacts(available=False),
+        output=GuidedBackendOutputFacts(available=False),
+        evidence_references=GuidedBackendEvidenceReferenceFacts(complete=False),
+        effective_feature_event_values=(),
+        complete_for_compilation=False,
+        unresolved_required_inputs=unresolved,
+    )
+
+    return GuidedBackendValidationMaterializationSuccess(facts=facts)
