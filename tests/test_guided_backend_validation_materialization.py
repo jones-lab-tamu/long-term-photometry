@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import builtins
 import os
 import sys
@@ -11,14 +12,16 @@ from photometry_pipeline.guided_backend_validation_request import (
     compile_guided_backend_validation_request,
     GuidedBackendValidatorContract,
     GuidedBackendValidationCompileFailure,
+    GuidedBackendValidationMaterializedFacts,
 )
 from photometry_pipeline.guided_backend_validation_materialization import (
     materialize_guided_backend_validation_facts,
     GuidedBackendValidationMaterializationIssue,
     GuidedBackendValidationMaterializationSuccess,
     GuidedBackendValidationMaterializationFailure,
-    STAGE_2A_VALID_ISSUES,
+    STAGE_2B_VALID_ISSUES,
 )
+from photometry_pipeline.io.rwd_contract import RwdHeaderParsingContract
 
 
 def _write_session(root: Path, name: str, content: bytes) -> Path:
@@ -36,9 +39,38 @@ def _create_tiny_rwd_fixture(tmp_path: Path) -> Path:
     return root
 
 
+def _valid_parser_contract() -> RwdHeaderParsingContract:
+    return RwdHeaderParsingContract(
+        time_column_candidates=("Time(s)", "TimeStamp"),
+        uv_suffix_candidates=("-410", "-415"),
+        signal_suffix_candidates=("-470",),
+    )
+
+
+def _apply_valid_feature_event_profile(draft: GuidedNewAnalysisDraftPlan) -> None:
+    draft.feature_event_profile_status = "applied"
+    draft.feature_event_explicitly_applied = True
+    draft.feature_event_values = {
+        "event_signal": "dff",
+        "signal_excursion_polarity": "positive",
+        "peak_threshold_method": "percentile",
+        "peak_threshold_percentile": 90.0,
+        "peak_min_distance_sec": 1.0,
+        "peak_min_prominence_k": 2.0,
+        "peak_min_width_sec": 0.5,
+        "peak_pre_filter": "none",
+        "event_auc_baseline": "zero",
+        # Inactive threshold fields explicitly provided to avoid default falling
+        "peak_threshold_k": 1.0,
+        "peak_threshold_abs": 0.2,
+    }
+    draft.feature_event_validation_issues = []
+    draft.feature_event_stale_reasons = []
+
+
 # A. Import and Boundary Tests
 def test_import_boundaries():
-    import ast
+    # Verify module does not import prohibited packages using AST
     prohibited = {
         "PySide6",
         "gui.main_window",
@@ -57,7 +89,6 @@ def test_import_boundaries():
                 assert name.name not in prohibited, f"Prohibited import: {name.name}"
         elif isinstance(node, ast.ImportFrom):
             if node.module:
-                # check both absolute and relative module namespaces
                 for prohibited_name in prohibited:
                     if node.module == prohibited_name or node.module.startswith(prohibited_name + "."):
                         pytest.fail(f"Prohibited import from module: {node.module}")
@@ -65,7 +96,6 @@ def test_import_boundaries():
 
 # B. Result Model Tests
 def test_result_models_frozen():
-    from photometry_pipeline.guided_backend_validation_request import GuidedBackendValidationMaterializedFacts
     issue = GuidedBackendValidationMaterializationIssue(
         category="missing_source",
         section="source",
@@ -80,7 +110,6 @@ def test_result_models_frozen():
     with pytest.raises(Exception):
         failure.blocking_issues = ()  # type: ignore
 
-    # Success facts must be instances of GuidedBackendValidationMaterializedFacts
     with pytest.raises(TypeError):
         GuidedBackendValidationMaterializationSuccess(facts=None)  # type: ignore
 
@@ -114,147 +143,201 @@ def test_unknown_issue_category_rejected():
         )
 
 
-# C. Stage 2a Success Path with Tiny RWD Fixture
-def test_stage_2a_success_path(tmp_path: Path):
+# C. Parser Materialization Success
+def test_parser_materialization_success(tmp_path: Path):
     source_root = _create_tiny_rwd_fixture(tmp_path)
     draft = GuidedNewAnalysisDraftPlan(
         input_source_path=str(source_root),
         input_format="rwd",
         acquisition_mode="intermittent",
-        exclude_incomplete_final_rwd_chunk=False,
     )
+    _apply_valid_feature_event_profile(draft)
+    parser = _valid_parser_contract()
 
-    result = materialize_guided_backend_validation_facts(draft)
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
     assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
-    assert result.facts.source_snapshot.available is True
-    assert result.facts.source_snapshot.source_root_canonical != ""
-    assert result.facts.source_snapshot.source_candidate_content_digest != ""
-    assert len(result.facts.source_snapshot.candidate_files) == 1
-    assert result.facts.source_snapshot.stale is False
+    assert result.facts.parser.available is True
+    assert result.facts.parser.parser_contract_digest != ""
+    assert result.facts.parser.unresolved_inputs == ()
 
-    assert result.facts.incomplete_final_classification.available is True
-    assert result.facts.incomplete_final_classification.classification_status == "not_requested"
-    assert result.facts.incomplete_final_classification.classification_digest != ""
 
-    # Other facts remain unavailable
-    assert result.facts.parser.available is False
-    assert result.facts.diagnostic_cache.available is False
-    assert result.facts.output.available is False
-    assert result.facts.evidence_references.complete is False
+# D. Parser Contract Missing Blocks
+def test_parser_contract_missing(tmp_path: Path):
+    source_root = _create_tiny_rwd_fixture(tmp_path)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(source_root),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+    )
+    _apply_valid_feature_event_profile(draft)
+
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=None)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "parser_contract_missing"
+
+
+# E. Parser Unresolved Inputs Block
+def test_parser_unresolved_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source_root = _create_tiny_rwd_fixture(tmp_path)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(source_root),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+    )
+    _apply_valid_feature_event_profile(draft)
+
+    # Disable validation temporarily to allow construction of incomplete contract
+    import photometry_pipeline.io.rwd_contract as rwd_c
+    monkeypatch.setattr(rwd_c, "_validate_parsing_contract", lambda *args, **kwargs: None)
+
+    # Incomplete parser contract
+    parser = RwdHeaderParsingContract(unresolved_inputs=("time_column_candidates",))
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "parser_unresolved_inputs"
+
+
+# F. No Header Inspection in Materializer
+def test_no_header_inspection_in_materializer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source_root = _create_tiny_rwd_fixture(tmp_path)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(source_root),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+    )
+    _apply_valid_feature_event_profile(draft)
+    parser = _valid_parser_contract()
+
+    # Monkeypatch inspect_rwd_header_contract to fail if called
+    import photometry_pipeline.io.rwd_contract as rwd_c
+    def fail_if_called(*args, **kwargs):
+        pytest.fail("inspect_rwd_header_contract should not be called in materializer.")
+    monkeypatch.setattr(rwd_c, "inspect_rwd_header_contract", fail_if_called)
+
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+
+
+# G. Feature/Event Materialization Success
+def test_feature_event_materialization_success(tmp_path: Path):
+    source_root = _create_tiny_rwd_fixture(tmp_path)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(source_root),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+    )
+    _apply_valid_feature_event_profile(draft)
+    parser = _valid_parser_contract()
+
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    assert len(result.facts.effective_feature_event_values) > 0
+    # Assert explicitly applied values are classified as explicit
+    for val in result.facts.effective_feature_event_values:
+        assert val.field_name != ""
+        assert val.value_type != ""
+        if val.field_name == "event_signal":
+            assert val.source_classification == "explicit"
+
+
+# H. Missing Feature/Event Values Block (Active missing / default)
+def test_missing_feature_event_values_block(tmp_path: Path):
+    source_root = _create_tiny_rwd_fixture(tmp_path)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(source_root),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+    )
+    _apply_valid_feature_event_profile(draft)
+    # Remove a required active field so it falls back to backend_default
+    draft.feature_event_values.pop("peak_threshold_percentile")
+    parser = _valid_parser_contract()
+
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "unresolved_feature_event_effective_value"
+
+
+# I. Feature/Event Provenance Audits
+def test_feature_event_provenance_mapping(tmp_path: Path):
+    source_root = _create_tiny_rwd_fixture(tmp_path)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(source_root),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+    )
+    _apply_valid_feature_event_profile(draft)
+    
+    # We explicitly pop an inactive field so it falls back to backend_config_default
+    draft.feature_event_values.pop("peak_threshold_k", None)
+    parser = _valid_parser_contract()
+
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    
+    found_default = False
+    for val in result.facts.effective_feature_event_values:
+        # No default value should be stored as applied_profile or explicit
+        if val.source_classification == "backend_default":
+            found_default = True
+            assert val.field_name == "peak_threshold_k"
+        else:
+            assert val.source_classification == "explicit"
+
+    assert found_default is True
+
+
+# J. Unapplied Feature/Event Changes Block
+def test_unapplied_feature_event_changes_block(tmp_path: Path):
+    source_root = _create_tiny_rwd_fixture(tmp_path)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(source_root),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+    )
+    _apply_valid_feature_event_profile(draft)
+    # Set status to invalid / stale / not explicitly applied
+    draft.feature_event_explicitly_applied = False
+    parser = _valid_parser_contract()
+
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "feature_event_unapplied_changes"
+
+
+# K. Stage 2b Unresolved Inputs
+def test_stage_2b_unresolved_inputs(tmp_path: Path):
+    source_root = _create_tiny_rwd_fixture(tmp_path)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(source_root),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+    )
+    _apply_valid_feature_event_profile(draft)
+    parser = _valid_parser_contract()
+
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
     assert result.facts.complete_for_compilation is False
 
     expected_unresolved = {
-        "parser_facts",
         "diagnostic_cache_facts",
         "output_facts",
         "evidence_references",
-        "effective_feature_event_values",
     }
     assert set(result.facts.unresolved_required_inputs) == expected_unresolved
 
 
-# D. Exclusion True Blocks
-def test_exclusion_true_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    source_root = _create_tiny_rwd_fixture(tmp_path)
-    draft = GuidedNewAnalysisDraftPlan(
-        input_source_path=str(source_root),
-        input_format="rwd",
-        acquisition_mode="intermittent",
-        exclude_incomplete_final_rwd_chunk=True,
-    )
-
-    # Monkeypatch snapshot helper to fail if called, proving it is never executed
-    def fail_if_called(*args, **kwargs):
-        pytest.fail("build_rwd_source_candidate_snapshot should not be called when exclusion is enabled.")
-
-    import photometry_pipeline.guided_backend_validation_materialization as mat
-    monkeypatch.setattr(mat, "build_rwd_source_candidate_snapshot", fail_if_called)
-
-    result = materialize_guided_backend_validation_facts(draft)
-    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
-    assert result.blocking_issues[0].category == "unsupported_incomplete_final_exclusion"
-
-
-# E. Missing / Invalid Source Blocks
-def test_missing_source_blocks():
-    draft = GuidedNewAnalysisDraftPlan(
-        input_source_path="C:/nonexistent_directory_path_xyz",
-        input_format="rwd",
-        acquisition_mode="intermittent",
-    )
-    result = materialize_guided_backend_validation_facts(draft)
-    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
-    assert result.blocking_issues[0].category in ("missing_source", "source_snapshot_unavailable")
-
-
-def test_unsupported_source_format(tmp_path: Path):
-    source_root = _create_tiny_rwd_fixture(tmp_path)
-    draft = GuidedNewAnalysisDraftPlan(
-        input_source_path=str(source_root),
-        input_format="npm",
-        acquisition_mode="intermittent",
-    )
-    result = materialize_guided_backend_validation_facts(draft)
-    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
-    assert result.blocking_issues[0].category == "unsupported_source_format"
-
-
-# F. Cancellation
-def test_cancellation_preflight(tmp_path: Path):
+# L. No-Write Guarantee (extended)
+def test_no_write_guarantee_stage_2b(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     source_root = _create_tiny_rwd_fixture(tmp_path)
     draft = GuidedNewAnalysisDraftPlan(
         input_source_path=str(source_root),
         input_format="rwd",
         acquisition_mode="intermittent",
     )
-
-    def cancel_always():
-        return True
-
-    result = materialize_guided_backend_validation_facts(draft, cancellation_check=cancel_always)
-    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
-    assert result.blocking_issues[0].category == "materialization_cancelled"
-
-
-def test_cancellation_post_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    source_root = _create_tiny_rwd_fixture(tmp_path)
-    draft = GuidedNewAnalysisDraftPlan(
-        input_source_path=str(source_root),
-        input_format="rwd",
-        acquisition_mode="intermittent",
-    )
-
-    cancelled = False
-
-    import photometry_pipeline.guided_backend_validation_materialization as mat
-    original_build = mat.build_rwd_source_candidate_snapshot
-
-    def mock_build(*args, **kwargs):
-        res = original_build(*args, **kwargs)
-        nonlocal cancelled
-        cancelled = True
-        return res
-
-    monkeypatch.setattr(mat, "build_rwd_source_candidate_snapshot", mock_build)
-
-    def cancellation_check():
-        return cancelled
-
-    result = materialize_guided_backend_validation_facts(
-        draft, cancellation_check=cancellation_check
-    )
-    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
-    assert result.blocking_issues[0].category == "materialization_cancelled"
-
-
-# G. No-Write Guarantee
-def test_no_write_guarantee(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    source_root = _create_tiny_rwd_fixture(tmp_path)
-    draft = GuidedNewAnalysisDraftPlan(
-        input_source_path=str(source_root),
-        input_format="rwd",
-        acquisition_mode="intermittent",
-    )
+    _apply_valid_feature_event_profile(draft)
+    parser = _valid_parser_contract()
 
     original_open = builtins.open
 
@@ -273,19 +356,22 @@ def test_no_write_guarantee(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(os, "mkdir", raise_write_error)
     monkeypatch.setattr(os, "makedirs", raise_write_error)
 
-    result = materialize_guided_backend_validation_facts(draft)
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
     assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
 
 
-# H. Compiler Handoff
-def test_compiler_handoff_refuses(tmp_path: Path):
+# M. Compiler Handoff Still Refuses
+def test_compiler_handoff_refuses_stage_2b(tmp_path: Path):
     source_root = _create_tiny_rwd_fixture(tmp_path)
     draft = GuidedNewAnalysisDraftPlan(
         input_source_path=str(source_root),
         input_format="rwd",
         acquisition_mode="intermittent",
     )
-    result = materialize_guided_backend_validation_facts(draft)
+    _apply_valid_feature_event_profile(draft)
+    parser = _valid_parser_contract()
+
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
     assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
 
     validator_contract = GuidedBackendValidatorContract(
@@ -303,3 +389,100 @@ def test_compiler_handoff_refuses(tmp_path: Path):
     assert isinstance(compile_result, GuidedBackendValidationCompileFailure)
     assert compile_result.status == "refused"
     assert compile_result.no_request_identity is True
+
+
+# Preservation: Exclusion True Refused
+def test_exclusion_true_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source_root = _create_tiny_rwd_fixture(tmp_path)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(source_root),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+        exclude_incomplete_final_rwd_chunk=True,
+    )
+    parser = _valid_parser_contract()
+
+    def fail_if_called(*args, **kwargs):
+        pytest.fail("build_rwd_source_candidate_snapshot should not be called when exclusion is enabled.")
+
+    import photometry_pipeline.guided_backend_validation_materialization as mat
+    monkeypatch.setattr(mat, "build_rwd_source_candidate_snapshot", fail_if_called)
+
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "unsupported_incomplete_final_exclusion"
+
+
+# Preservation: Cancellation
+def test_cancellation_post_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source_root = _create_tiny_rwd_fixture(tmp_path)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(source_root),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+    )
+    parser = _valid_parser_contract()
+
+    cancelled = False
+
+    import photometry_pipeline.guided_backend_validation_materialization as mat
+    original_build = mat.build_rwd_source_candidate_snapshot
+
+    def mock_build(*args, **kwargs):
+        res = original_build(*args, **kwargs)
+        nonlocal cancelled
+        cancelled = True
+        return res
+
+    monkeypatch.setattr(mat, "build_rwd_source_candidate_snapshot", mock_build)
+
+    def cancellation_check():
+        return cancelled
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=parser, cancellation_check=cancellation_check
+    )
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "materialization_cancelled"
+
+
+def test_missing_source_blocks():
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path="C:/nonexistent_directory_path_xyz",
+        input_format="rwd",
+        acquisition_mode="intermittent",
+    )
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category in ("missing_source", "source_snapshot_unavailable")
+
+
+def test_unsupported_source_format(tmp_path: Path):
+    source_root = _create_tiny_rwd_fixture(tmp_path)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(source_root),
+        input_format="npm",
+        acquisition_mode="intermittent",
+    )
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "unsupported_source_format"
+
+
+def test_cancellation_preflight(tmp_path: Path):
+    source_root = _create_tiny_rwd_fixture(tmp_path)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(source_root),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+    )
+    parser = _valid_parser_contract()
+
+    def cancel_always():
+        return True
+
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser, cancellation_check=cancel_always)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "materialization_cancelled"
