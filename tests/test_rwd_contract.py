@@ -12,6 +12,7 @@ from photometry_pipeline.io.rwd_contract import (
     ROI_NAME_RULE,
     RwdHeaderInspectionError,
     RwdHeaderParsingContract,
+    compute_rwd_header_parsing_contract_digest,
     inspect_rwd_header_contract,
 )
 
@@ -271,6 +272,81 @@ def test_candidate_lists_are_accepted_and_normalized_to_tuples():
     assert contract.uv_suffix_candidates == ("-410",)
     assert contract.signal_suffix_candidates == ("-470",)
     assert contract.unresolved_inputs == ()
+
+
+def test_parser_contract_digest_is_deterministic_lowercase_sha256():
+    contract = _contract()
+    first = compute_rwd_header_parsing_contract_digest(contract)
+    second = compute_rwd_header_parsing_contract_digest(contract)
+    assert first == second
+    assert len(first) == 64
+    assert first == first.lower()
+    int(first, 16)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"header_search_line_limit": 7},
+        {"time_column_candidates": ("TimeStamp", "Time(s)")},
+        {"uv_suffix_candidates": ("-415", "-410")},
+        {"signal_suffix_candidates": ("-480", "-470")},
+    ],
+)
+def test_parser_contract_digest_changes_with_semantic_fields(
+    overrides: dict[str, object],
+):
+    assert compute_rwd_header_parsing_contract_digest(
+        _contract()
+    ) != compute_rwd_header_parsing_contract_digest(_contract(**overrides))
+
+
+def test_parser_contract_digest_list_and_tuple_inputs_are_equivalent():
+    tuple_contract = _contract()
+    list_contract = _contract(
+        time_column_candidates=list(tuple_contract.time_column_candidates),
+        uv_suffix_candidates=list(tuple_contract.uv_suffix_candidates),
+        signal_suffix_candidates=list(tuple_contract.signal_suffix_candidates),
+        unresolved_inputs=[],
+    )
+    assert compute_rwd_header_parsing_contract_digest(
+        tuple_contract
+    ) == compute_rwd_header_parsing_contract_digest(list_contract)
+
+
+@pytest.mark.parametrize("value", [None, {}, object()])
+def test_parser_contract_digest_rejects_non_contract_inputs(value: object):
+    with pytest.raises(RwdHeaderInspectionError) as excinfo:
+        compute_rwd_header_parsing_contract_digest(value)  # type: ignore[arg-type]
+    assert excinfo.value.category == "invalid_rwd_parsing_contract"
+
+
+def test_parser_contract_digest_rejects_unresolved_contract_instance():
+    contract = object.__new__(RwdHeaderParsingContract)
+    for name, value in _contract().__dict__.items():
+        object.__setattr__(contract, name, value)
+    object.__setattr__(contract, "unresolved_inputs", ("dataset_contract",))
+
+    with pytest.raises(RwdHeaderInspectionError) as excinfo:
+        compute_rwd_header_parsing_contract_digest(contract)
+    assert excinfo.value.category == "invalid_rwd_parsing_contract"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("column_normalization_rule", "unsupported"),
+        ("roi_name_rule", "unsupported"),
+        ("ambiguity_policy", "unsupported"),
+    ],
+)
+def test_parser_contract_digest_rule_changes_must_be_supported(
+    field_name: str,
+    value: str,
+):
+    with pytest.raises(RwdHeaderInspectionError) as excinfo:
+        _contract(**{field_name: value})
+    assert excinfo.value.category == "invalid_rwd_parsing_contract"
 
 
 def test_parser_module_has_no_forbidden_imports_or_config_instantiation():

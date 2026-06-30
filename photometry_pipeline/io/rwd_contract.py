@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, field
+import hashlib
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from ..guided_identity import encode_canonical_value
+
 
 PARSING_CONTRACT_SCHEMA_NAME = "rwd_header_parsing_contract"
 PARSING_CONTRACT_SCHEMA_VERSION = "v1"
+RWD_HEADER_PARSING_CONTRACT_DIGEST_DOMAIN = "rwd-header-parsing-contract:v1"
 INSPECTION_SCHEMA_NAME = "rwd_header_contract_inspection"
 INSPECTION_SCHEMA_VERSION = "v1"
 COLUMN_NORMALIZATION_RULE = "strip_whitespace_and_bom.v1"
@@ -213,6 +217,38 @@ def _validate_parsing_contract(contract: RwdHeaderParsingContract) -> None:
             "Parsing contract has unresolved inputs.",
             unresolved_inputs=contract.unresolved_inputs,
         )
+
+
+def compute_rwd_header_parsing_contract_digest(
+    contract: RwdHeaderParsingContract,
+) -> str:
+    """Identify parser semantics without authorizing validation or execution.
+
+    This digest does not establish source identity, dataset validity,
+    final-chunk classification, backend validation, or Run authorization.
+    """
+    if not isinstance(contract, RwdHeaderParsingContract):
+        raise _invalid_contract(
+            "contract must be an RwdHeaderParsingContract.",
+            received_type=type(contract).__name__,
+        )
+    _validate_parsing_contract(contract)
+
+    payload = {
+        "schema_name": contract.schema_name,
+        "schema_version": contract.schema_version,
+        "header_search_line_limit": contract.header_search_line_limit,
+        "time_column_candidates": contract.time_column_candidates,
+        "uv_suffix_candidates": contract.uv_suffix_candidates,
+        "signal_suffix_candidates": contract.signal_suffix_candidates,
+        "column_normalization_rule": contract.column_normalization_rule,
+        "roi_name_rule": contract.roi_name_rule,
+        "ambiguity_policy": contract.ambiguity_policy,
+        "unresolved_inputs": contract.unresolved_inputs,
+    }
+    canonical_payload = encode_canonical_value(payload)
+    domain = RWD_HEADER_PARSING_CONTRACT_DIGEST_DOMAIN.encode("utf-8")
+    return hashlib.sha256(domain + b"\x00" + canonical_payload).hexdigest()
 
 
 def _normalize_column(value: str) -> str:
