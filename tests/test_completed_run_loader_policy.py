@@ -1,11 +1,23 @@
+import ast
 import os
 import json
 import pytest
 from pathlib import Path
+import gui.run_report_parser as run_report_parser
 from gui.run_report_parser import (
+    AMBIGUOUS_GUIDED_DIAGNOSTIC_CACHE_METADATA,
+    GUIDED_DIAGNOSTIC_CACHE_INELIGIBLE,
+    MALFORMED_GUIDED_DIAGNOSTIC_CACHE_METADATA,
+    detect_guided_diagnostic_cache_candidate,
     is_successful_completed_run_dir,
     is_preflight_or_ineligible,
     classify_completed_run_candidate,
+)
+from photometry_pipeline.guided_diagnostic_cache import (
+    DIAGNOSTIC_CACHE_ARTIFACT_FILENAME,
+    DIAGNOSTIC_CACHE_PROVENANCE_FILENAME,
+    DIAGNOSTIC_CACHE_PURPOSE,
+    DIAGNOSTIC_CACHE_SCHEMA_VERSION,
 )
 
 # Call-chain testing for the actual completed-run acceptance path
@@ -20,6 +32,47 @@ def _write_json(path: Path, data: dict) -> None:
 def _write_region_deliverable(run_dir: Path, region_name: str, subfolder: str = "summary") -> None:
     sub = run_dir / region_name / subfolder
     sub.mkdir(parents=True, exist_ok=True)
+
+
+def _diagnostic_cache_artifact(run_dir: Path, **overrides: object) -> dict:
+    payload = {
+        "artifact_contract_version": DIAGNOSTIC_CACHE_SCHEMA_VERSION,
+        "cache_id": "cache_001",
+        "purpose": DIAGNOSTIC_CACHE_PURPOSE,
+        "production_analysis": False,
+        "cache_root_path": str(run_dir),
+        "source_setup_signature": "source-signature",
+        "build_request_signature": "request-signature",
+        "diagnostic_scope_signature": "scope-signature",
+        "session_chunk_inventory_summary": {
+            "preliminary_cache": True,
+            "production_analysis": False,
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _write_diagnostic_cache_metadata(
+    run_dir: Path,
+    *,
+    artifact_overrides: dict | None = None,
+    provenance_overrides: dict | None = None,
+) -> tuple[dict, dict]:
+    artifact = _diagnostic_cache_artifact(run_dir, **(artifact_overrides or {}))
+    provenance = {
+        "schema_version": DIAGNOSTIC_CACHE_SCHEMA_VERSION,
+        "purpose": DIAGNOSTIC_CACHE_PURPOSE,
+        "preliminary_cache": True,
+        "production_analysis": False,
+        "build_request": {"schema_version": DIAGNOSTIC_CACHE_SCHEMA_VERSION},
+        "artifact": dict(artifact),
+    }
+    provenance.update(provenance_overrides or {})
+    _write_json(run_dir / DIAGNOSTIC_CACHE_ARTIFACT_FILENAME, artifact)
+    _write_json(run_dir / DIAGNOSTIC_CACHE_PROVENANCE_FILENAME, provenance)
+    return artifact, provenance
+
 
 # 1. Positive Acceptance Tests (protecting Full Control compatibility)
 
@@ -357,3 +410,252 @@ def test_actual_open_results_path_rejects_conflict(tmp_path: Path):
     ok, reason = MockMainWindow()._is_openable_completed_results_dir(str(run_dir))
     assert ok is False
     assert "conflicting metadata" in reason
+
+
+# 7. Guided Diagnostic-Cache Completed-Run Rejection
+
+def test_valid_diagnostic_cache_pair_is_ineligible(tmp_path: Path):
+    run_dir = tmp_path / "valid_cache"
+    _write_diagnostic_cache_metadata(run_dir)
+
+    rejection = detect_guided_diagnostic_cache_candidate(run_dir)
+
+    assert rejection is not None
+    assert rejection.category == GUIDED_DIAGNOSTIC_CACHE_INELIGIBLE
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        DIAGNOSTIC_CACHE_ARTIFACT_FILENAME,
+        DIAGNOSTIC_CACHE_PROVENANCE_FILENAME,
+    ],
+)
+def test_single_recognized_cache_file_is_ambiguous(
+    tmp_path: Path,
+    filename: str,
+):
+    run_dir = tmp_path / "single_cache_file"
+    _write_json(run_dir / filename, {})
+
+    ok, reason = classify_completed_run_candidate(str(run_dir))
+
+    assert ok is False
+    assert reason.startswith(AMBIGUOUS_GUIDED_DIAGNOSTIC_CACHE_METADATA)
+
+
+@pytest.mark.parametrize("success_source", ["report", "status", "manifest"])
+def test_completed_run_success_cannot_override_diagnostic_cache(
+    tmp_path: Path,
+    success_source: str,
+):
+    run_dir = tmp_path / f"cache_with_{success_source}_success"
+    if success_source == "report":
+        _write_json(
+            run_dir / "run_report.json",
+            {"run_context": {"status": "success", "phase": "final"}},
+        )
+    elif success_source == "status":
+        _write_json(
+            run_dir / "status.json",
+            {"schema_version": 1, "phase": "final", "status": "success"},
+        )
+    else:
+        _write_json(run_dir / "MANIFEST.json", {"status": "success"})
+    _write_region_deliverable(run_dir, "Region0", "summary")
+    _write_diagnostic_cache_metadata(run_dir)
+
+    ok, reason = classify_completed_run_candidate(str(run_dir))
+
+    assert ok is False
+    assert reason.startswith(GUIDED_DIAGNOSTIC_CACHE_INELIGIBLE)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        DIAGNOSTIC_CACHE_ARTIFACT_FILENAME,
+        DIAGNOSTIC_CACHE_PROVENANCE_FILENAME,
+    ],
+)
+def test_invalid_cache_json_is_malformed(tmp_path: Path, filename: str):
+    run_dir = tmp_path / "invalid_cache_json"
+    _write_diagnostic_cache_metadata(run_dir)
+    (run_dir / filename).write_text("{invalid", encoding="utf-8")
+
+    ok, reason = classify_completed_run_candidate(str(run_dir))
+
+    assert ok is False
+    assert reason.startswith(MALFORMED_GUIDED_DIAGNOSTIC_CACHE_METADATA)
+
+
+@pytest.mark.parametrize(
+    "filename,value",
+    [
+        (DIAGNOSTIC_CACHE_ARTIFACT_FILENAME, []),
+        (DIAGNOSTIC_CACHE_PROVENANCE_FILENAME, []),
+    ],
+)
+def test_non_object_cache_metadata_is_malformed(
+    tmp_path: Path,
+    filename: str,
+    value: list,
+):
+    run_dir = tmp_path / "non_object_cache_metadata"
+    _write_diagnostic_cache_metadata(run_dir)
+    (run_dir / filename).write_text(json.dumps(value), encoding="utf-8")
+
+    ok, reason = classify_completed_run_candidate(str(run_dir))
+
+    assert ok is False
+    assert reason.startswith(MALFORMED_GUIDED_DIAGNOSTIC_CACHE_METADATA)
+
+
+@pytest.mark.parametrize(
+    "artifact_overrides,provenance_overrides",
+    [
+        ({"artifact_contract_version": None}, None),
+        ({"purpose": None}, None),
+        ({"production_analysis": "false"}, None),
+        (
+            {"session_chunk_inventory_summary": {"production_analysis": False}},
+            None,
+        ),
+        (None, {"schema_version": "unsupported"}),
+        (None, {"purpose": None}),
+        (None, {"preliminary_cache": "true"}),
+        (None, {"production_analysis": "false"}),
+    ],
+)
+def test_missing_wrong_type_or_unsupported_cache_fields_are_malformed(
+    tmp_path: Path,
+    artifact_overrides: dict | None,
+    provenance_overrides: dict | None,
+):
+    run_dir = tmp_path / "malformed_cache_fields"
+    _write_diagnostic_cache_metadata(
+        run_dir,
+        artifact_overrides=artifact_overrides,
+        provenance_overrides=provenance_overrides,
+    )
+
+    ok, reason = classify_completed_run_candidate(str(run_dir))
+
+    assert ok is False
+    assert reason.startswith(MALFORMED_GUIDED_DIAGNOSTIC_CACHE_METADATA)
+
+
+def test_artifact_provenance_identity_mismatch_is_ambiguous(tmp_path: Path):
+    run_dir = tmp_path / "cache_identity_mismatch"
+    artifact, provenance = _write_diagnostic_cache_metadata(run_dir)
+    provenance["artifact"] = dict(artifact, cache_id="different-cache")
+    _write_json(run_dir / DIAGNOSTIC_CACHE_PROVENANCE_FILENAME, provenance)
+
+    ok, reason = classify_completed_run_candidate(str(run_dir))
+
+    assert ok is False
+    assert reason.startswith(AMBIGUOUS_GUIDED_DIAGNOSTIC_CACHE_METADATA)
+
+
+@pytest.mark.parametrize(
+    "artifact_overrides,provenance_overrides",
+    [
+        ({"production_analysis": True}, None),
+        (
+            {
+                "session_chunk_inventory_summary": {
+                    "preliminary_cache": False,
+                    "production_analysis": False,
+                }
+            },
+            None,
+        ),
+        (None, {"production_analysis": True}),
+        (None, {"preliminary_cache": False}),
+    ],
+)
+def test_contradictory_cache_boundary_fields_are_ambiguous(
+    tmp_path: Path,
+    artifact_overrides: dict | None,
+    provenance_overrides: dict | None,
+):
+    run_dir = tmp_path / "ambiguous_cache_fields"
+    _write_diagnostic_cache_metadata(
+        run_dir,
+        artifact_overrides=artifact_overrides,
+        provenance_overrides=provenance_overrides,
+    )
+
+    ok, reason = classify_completed_run_candidate(str(run_dir))
+
+    assert ok is False
+    assert reason.startswith(AMBIGUOUS_GUIDED_DIAGNOSTIC_CACHE_METADATA)
+
+
+def test_recognized_cache_path_that_is_not_file_is_malformed(tmp_path: Path):
+    run_dir = tmp_path / "cache_path_not_file"
+    _write_diagnostic_cache_metadata(run_dir)
+    artifact_path = run_dir / DIAGNOSTIC_CACHE_ARTIFACT_FILENAME
+    artifact_path.unlink()
+    artifact_path.mkdir()
+
+    ok, reason = classify_completed_run_candidate(str(run_dir))
+
+    assert ok is False
+    assert reason.startswith(MALFORMED_GUIDED_DIAGNOSTIC_CACHE_METADATA)
+
+
+def test_success_helper_and_main_window_gate_cannot_bypass_cache_rejection(
+    tmp_path: Path,
+):
+    run_dir = tmp_path / "cache_bypass"
+    _write_json(
+        run_dir / "status.json",
+        {"schema_version": 1, "phase": "final", "status": "success"},
+    )
+    _write_region_deliverable(run_dir, "Region0", "summary")
+    _write_diagnostic_cache_metadata(run_dir)
+
+    success_ok, success_reason = is_successful_completed_run_dir(str(run_dir))
+    window_ok, window_reason = MockMainWindow()._is_openable_completed_results_dir(
+        str(run_dir)
+    )
+
+    assert success_ok is False
+    assert success_reason.startswith(GUIDED_DIAGNOSTIC_CACHE_INELIGIBLE)
+    assert window_ok is False
+    assert window_reason.startswith(GUIDED_DIAGNOSTIC_CACHE_INELIGIBLE)
+
+
+def test_diagnostic_cache_classification_has_no_side_effects(tmp_path: Path):
+    run_dir = tmp_path / "cache_side_effects"
+    _write_diagnostic_cache_metadata(run_dir)
+    before = _get_dir_snapshot(run_dir)
+
+    classify_completed_run_candidate(str(run_dir))
+
+    assert _get_dir_snapshot(run_dir) == before
+
+
+def test_completed_run_policy_has_no_forbidden_imports():
+    source = Path(run_report_parser.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    forbidden_roots = {
+        "PySide6",
+        "subprocess",
+        "gui.main_window",
+        "gui.run_spec",
+        "photometry_pipeline.runner",
+    }
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+
+    assert not any(
+        name == forbidden or name.startswith(f"{forbidden}.")
+        for name in imported
+        for forbidden in forbidden_roots
+    )
