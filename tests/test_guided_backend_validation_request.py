@@ -56,7 +56,7 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         discovery_rule_version="immediate_child_exact_fluorescence_csv.v1",
         path_canonicalization_version="typed_json_utf8.v1",
         relative_path_rule_version="canonical_forward_slash_relative_path.v1",
-        ignored_files_policy="ignore_non_target_entries.v1",
+        ignored_files_policy=contracts.GUIDED_BACKEND_SOURCE_IGNORED_FILES_POLICY,
         build_mode="read_only",
         source_candidate_set_digest=_DIGEST_A,
         source_candidate_content_digest=_DIGEST_B,
@@ -188,7 +188,7 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         ),
         protected_root_context_complete=True,
         blocker_categories=(),
-        filesystem_fact_scope="read_only_supplied_facts",
+        filesystem_fact_scope="read_only_path_relationships_no_writability_probe",
     )
     local_contract = contracts.GuidedBackendLocalContractState(
         local_check_contract_version="guided_backend_local_checks.v1",
@@ -197,9 +197,10 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         unsupported_state_flags=(),
         unresolved_required_inputs=(),
         deferred_capabilities=(
+            "backend_validation",
+            "run_authorization",
             "app_build_identity",
             "full_source_manifest_identity",
-            "run_authorization",
             "strict_roi_inventory_identity",
         ),
     )
@@ -823,6 +824,29 @@ def test_complete_facts_compile_populated_request_with_identity():
     )
 
 
+def test_compiler_success_is_accepted_by_pure_backend_validator():
+    from photometry_pipeline.guided_backend_validator import (
+        validate_guided_backend_validation_request,
+    )
+
+    contract = _validator_contract()
+    compiled = contracts.compile_guided_backend_validation_request(
+        _compiler_draft(),
+        facts=_complete_facts(),
+        validator_contract=contract,
+    )
+    assert isinstance(compiled, contracts.GuidedBackendValidationCompileSuccess)
+
+    result = validate_guided_backend_validation_request(
+        compiled.request,
+        canonical_request_identity=compiled.canonical_request_identity,
+        validator_contract=contract,
+    )
+    assert result.accepted is True
+    assert result.request_identity == compiled.canonical_request_identity
+    assert result.run_authorization is False
+
+
 @pytest.mark.parametrize(
     "identity,deferred",
     [
@@ -1076,7 +1100,7 @@ def test_identity_is_deterministic_digest_with_pinned_vector():
     first = contracts.compute_guided_backend_validation_request_identity(request)
 
     assert first == (
-        "953c33bac832171cf16531b97a3558f49929da785ac6662e14481986e9095a88"
+        "17fe9ee6da083961883703994ca375e62abbe7d9cdac71575950928dbb2ce653"
     )
     assert first == contracts.compute_guided_backend_validation_request_identity(
         request
