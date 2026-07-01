@@ -30,7 +30,9 @@ GUIDED_EXECUTION_PAYLOAD_STATUS_REFUSED = "refused"
 
 GUIDED_EXECUTION_STARTUP_MAPPING_CONTRACT_SCHEMA_NAME = "guided_execution_startup_mapping_contract"
 GUIDED_EXECUTION_STARTUP_MAPPING_CONTRACT_SCHEMA_VERSION = "v1"
-GUIDED_EXECUTION_STARTUP_MAPPING_CONTRACT_VERSION = "guided_execution_startup_mapping.v1"
+GUIDED_EXECUTION_STARTUP_MAPPING_CONTRACT_VERSION = (
+    "guided_execution_startup_mapping.post_4J14l.v2"
+)
 
 
 @dataclass(frozen=True)
@@ -475,8 +477,8 @@ def _freeze_override_value(value: Any) -> Any:
 
 def build_guided_execution_startup_mapping_contract(
     *,
-    exact_candidate_manifest_consumption_capable: bool = False,
-    exact_roi_consumption_capable: bool = False,
+    exact_candidate_manifest_consumption_capable: bool = True,
+    exact_roi_consumption_capable: bool = True,
     fixed_config_overrides: Mapping[str, Any] | None = None,
 ) -> GuidedExecutionStartupMappingContract:
     """Build a frozen GuidedExecutionStartupMappingContract instance."""
@@ -839,7 +841,8 @@ def derive_guided_execution_payloads(
         manifest_id = compute_guided_runner_candidate_manifest_payload_identity(provisional_manifest)
         candidate_manifest_payload = replace_manifest_payload_identity(provisional_manifest, manifest_id)
 
-        # 14. Option A: Always return payloads_derived_nonrunnable in 4J14i
+        # Runner exact consumption exists post-4J14l, but no startup
+        # transaction serializes these payloads or launches execution.
         # Derive provenance seed with runner_request_identity=None and runnable=False
         provisional_seed = GuidedStartupProvenanceSeed(
             provenance_schema_name="guided_startup_provenance_seed",
@@ -863,9 +866,13 @@ def derive_guided_execution_payloads(
         provenance_seed = replace_provenance_seed_identity(provisional_seed, seed_id)
 
         limiting_issue = GuidedExecutionPayloadIssue(
-            category="runner_contract_missing_exact_manifest",
+            category="startup_transaction_unavailable",
             section="guided_execution_payload",
-            message="Runner does not yet support exact candidate-manifest / ROI consumption verification.",
+            message=(
+                "Exact runner manifest/ROI consumption is available, but no "
+                "startup transaction exists to serialize payloads, allocate "
+                "output, build an invocation, or launch the runner."
+            ),
         )
 
         return GuidedExecutionPayloadDerivationResult(

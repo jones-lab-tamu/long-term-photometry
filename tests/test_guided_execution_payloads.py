@@ -162,12 +162,15 @@ def auth_result(monkeypatch):
 
 # Test A: Default/current contract returns nonrunnable
 def test_valid_authorized_result_derives_nonrunnable(auth_result):
-    contract = payloads.build_guided_execution_startup_mapping_contract(
-        exact_candidate_manifest_consumption_capable=False,
-        exact_roi_consumption_capable=False,
-    )
+    contract = payloads.build_guided_execution_startup_mapping_contract()
     result = payloads.derive_guided_execution_payloads(auth_result, startup_mapping_contract=contract)
 
+    assert (
+        contract.contract_version
+        == "guided_execution_startup_mapping.post_4J14l.v2"
+    )
+    assert contract.exact_candidate_manifest_consumption_capable is True
+    assert contract.exact_roi_consumption_capable is True
     assert result.status == payloads.GUIDED_EXECUTION_PAYLOAD_STATUS_NONRUNNABLE
     assert result.ok is True
     assert result.runnable is False
@@ -176,7 +179,7 @@ def test_valid_authorized_result_derives_nonrunnable(auth_result):
     assert result.provenance_seed is not None
     assert result.runner_request is None
     assert len(result.limiting_issues) == 1
-    assert result.limiting_issues[0].category == "runner_contract_missing_exact_manifest"
+    assert result.limiting_issues[0].category == "startup_transaction_unavailable"
     assert len(result.blocking_issues) == 0
 
     # Ensure no side effects are marked True
@@ -190,7 +193,7 @@ def test_valid_authorized_result_derives_nonrunnable(auth_result):
     assert result.no_runner_invoked is True
 
 
-# Test B: Under Option A, even if booleans are true, normal contract still emits nonrunnable
+# Test B: Runner consumption capability does not imply startup/runnability.
 def test_valid_authorized_result_remains_nonrunnable_when_booleans_true(auth_result):
     contract = payloads.build_guided_execution_startup_mapping_contract(
         exact_candidate_manifest_consumption_capable=True,
@@ -206,8 +209,13 @@ def test_valid_authorized_result_remains_nonrunnable_when_booleans_true(auth_res
     assert result.provenance_seed is not None
     assert result.runner_request is None
     assert len(result.limiting_issues) == 1
-    assert result.limiting_issues[0].category == "runner_contract_missing_exact_manifest"
+    assert result.limiting_issues[0].category == "startup_transaction_unavailable"
     assert len(result.blocking_issues) == 0
+
+
+def test_successful_nonrunnable_path_has_no_stale_runner_limiter():
+    source = Path(payloads.__file__).read_text(encoding="utf-8")
+    assert "runner_contract_missing_exact_manifest" not in source
 
 
 # Test C
