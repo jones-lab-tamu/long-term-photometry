@@ -14,7 +14,10 @@ import math
 from typing import Any
 
 from photometry_pipeline.guided_identity import CANONICALIZATION_ALGORITHM_VERSION
-from photometry_pipeline.guided_new_analysis_plan import GuidedNewAnalysisDraftPlan
+from photometry_pipeline.guided_new_analysis_plan import (
+    FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
+    GuidedNewAnalysisDraftPlan,
+)
 
 
 GUIDED_BACKEND_VALIDATION_REQUEST_SCHEMA_NAME = (
@@ -37,6 +40,26 @@ GUIDED_BACKEND_VALIDATION_IDENTITY_DOMAIN = (
 GUIDED_BACKEND_FEATURE_EVENT_PROFILE_SCHEMA_VERSION = (
     "guided_feature_event_profile.v1"
 )
+GUIDED_BACKEND_LOCAL_CHECK_CONTRACT_VERSION = "guided_backend_local_checks.v1"
+GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION = "guided_diagnostic_cache.v1"
+GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_NAME = (
+    "guided_rwd_source_candidate_snapshot"
+)
+GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_VERSION = "v1"
+GUIDED_BACKEND_SOURCE_DISCOVERY_RULE_VERSION = (
+    "immediate_child_exact_fluorescence_csv.v1"
+)
+GUIDED_BACKEND_SOURCE_RELATIVE_PATH_RULE_VERSION = (
+    "canonical_forward_slash_relative_path.v1"
+)
+GUIDED_BACKEND_SOURCE_IGNORED_FILES_POLICY = (
+    "ignore_non_target_entries_bounded_nested_root_check.v1"
+)
+GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME = (
+    "guided_rwd_incomplete_final_chunk_classification"
+)
+GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_VERSION = "v1"
+GUIDED_BACKEND_INCOMPLETE_FINAL_CLASSIFIER_VERSION = "not_requested_only.v1"
 
 
 SOURCE_DATASET_REFUSAL_CATEGORIES = (
@@ -103,6 +126,16 @@ IDENTITY_SUPPORT_REFUSAL_CATEGORIES = (
     "unsupported_first_subset_state",
     "compiler_contract_unavailable",
     "validator_contract_unavailable",
+    "incomplete_materialized_facts",
+    "unresolved_materialized_inputs",
+    "missing_source_snapshot",
+    "unsupported_analysis_scope",
+    "incomplete_final_policy_not_supported",
+    "parser_contract_unavailable",
+    "parser_unresolved_inputs",
+    "feature_event_effective_value_unresolved",
+    "unsupported_request_field",
+    "compiler_internal_error",
 )
 GUIDED_BACKEND_VALIDATION_REFUSAL_CATEGORIES = (
     SOURCE_DATASET_REFUSAL_CATEGORIES
@@ -1189,7 +1222,8 @@ class GuidedBackendValidationCompileFailure:
 @dataclass(frozen=True)
 class GuidedBackendValidationCompileSuccess:
     request: GuidedBackendValidationRequest
-    canonical_request_identity: str
+    canonical_request_identity: str | None = None
+    request_identity_deferred: bool = True
     status: str = field(default="compiled", init=False)
 
     def __post_init__(self) -> None:
@@ -1197,10 +1231,14 @@ class GuidedBackendValidationCompileSuccess:
             raise GuidedBackendValidationRequestContractError(
                 "Compile success requires a GuidedBackendValidationRequest."
             )
-        _require_sha256(
-            self.canonical_request_identity,
-            "canonical_request_identity",
-        )
+        if self.request_identity_deferred is not True:
+            raise GuidedBackendValidationRequestContractError(
+                "Request identity must remain explicitly deferred."
+            )
+        if self.canonical_request_identity is not None:
+            raise GuidedBackendValidationRequestContractError(
+                "Deferred request identity must be None."
+            )
 
 
 GuidedBackendValidationCompileResult = (
@@ -1228,29 +1266,13 @@ def _failure(
     )
 
 
-def _validator_contract_is_accepted(value: Any) -> bool:
-    if not isinstance(value, GuidedBackendValidatorContract):
-        return False
-    return (
-        getattr(value, "validation_scope", None)
-        == GUIDED_BACKEND_VALIDATION_SCOPE
-        and getattr(value, "validation_contract_version", None)
-        == GUIDED_BACKEND_VALIDATION_CONTRACT_VERSION
-        and getattr(value, "supported_subset_rule_version", None)
-        == GUIDED_BACKEND_VALIDATION_SUBSET_RULE_VERSION
-        and isinstance(getattr(value, "validator_capability_version", None), str)
-        and bool(value.validator_capability_version.strip())
-        and value.validator_capability_version.strip().lower() != "unknown"
-    )
-
-
 def compile_guided_backend_validation_request(
     draft: GuidedNewAnalysisDraftPlan | None,
     *,
     facts: GuidedBackendValidationMaterializedFacts | None,
     validator_contract: GuidedBackendValidatorContract | None,
 ) -> GuidedBackendValidationCompileResult:
-    """Refuse until the separately scoped read-only materializer is available."""
+    """Compile a request from complete immutable facts without performing I/O."""
     if not isinstance(draft, GuidedNewAnalysisDraftPlan):
         return _failure(
             "compiler_contract_unavailable",
@@ -1265,21 +1287,715 @@ def compile_guided_backend_validation_request(
             "Read-only materialized validation facts are required.",
             detail_code="facts_missing_or_invalid",
         )
-    if not _validator_contract_is_accepted(validator_contract):
+    if not isinstance(validator_contract, GuidedBackendValidatorContract):
         return _failure(
             "validator_contract_unavailable",
             "validator_contract",
             "An accepted backend validator contract is required.",
-            detail_code="validator_contract_missing_or_invalid",
+            detail_code="validator_contract_missing_or_invalid_type",
         )
-    return _failure(
-        "compiler_contract_unavailable",
-        "compiler",
-        (
-            "Guided backend validation request population is not implemented "
-            "in the Stage 1 contract checkpoint."
-        ),
-        detail_code="stage_1_refusal_only",
+    if (
+        getattr(validator_contract, "validation_scope", None)
+        != GUIDED_BACKEND_VALIDATION_SCOPE
+    ):
+        return _failure(
+            "validator_contract_unavailable",
+            "validator_contract",
+            "Validator contract validation scope is unsupported.",
+            detail_code="validation_scope_mismatch",
+        )
+    if (
+        getattr(validator_contract, "validation_contract_version", None)
+        != GUIDED_BACKEND_VALIDATION_CONTRACT_VERSION
+    ):
+        return _failure(
+            "validator_contract_unavailable",
+            "validator_contract",
+            "Validator contract version is unsupported.",
+            detail_code="validation_contract_version_mismatch",
+        )
+    if (
+        getattr(validator_contract, "supported_subset_rule_version", None)
+        != GUIDED_BACKEND_VALIDATION_SUBSET_RULE_VERSION
+    ):
+        return _failure(
+            "validator_contract_unavailable",
+            "validator_contract",
+            "Validator contract subset rule is unsupported.",
+            detail_code="supported_subset_rule_version_mismatch",
+        )
+    validator_capability_version = getattr(
+        validator_contract,
+        "validator_capability_version",
+        None,
+    )
+    if (
+        not isinstance(validator_capability_version, str)
+        or not validator_capability_version.strip()
+        or validator_capability_version.strip().lower()
+        in {"unknown", "placeholder", "unset", "none"}
+    ):
+        return _failure(
+            "validator_contract_unavailable",
+            "validator_contract",
+            "Validator capability version is missing or a placeholder.",
+            detail_code="validator_capability_version_invalid",
+        )
+
+    if facts.complete_for_compilation is not True:
+        return _failure(
+            "incomplete_materialized_facts",
+            "materialized_facts",
+            "Materialized facts are not complete for request compilation.",
+            detail_code="complete_for_compilation_false",
+        )
+    if facts.unresolved_required_inputs:
+        return _failure(
+            "unresolved_materialized_inputs",
+            "materialized_facts",
+            "Materialized facts contain unresolved required inputs.",
+            detail_code="unresolved_required_inputs",
+        )
+
+    if draft.input_format != "rwd":
+        return _failure(
+            "unsupported_source_format",
+            "source",
+            "The first compiler subset requires RWD input.",
+            detail_code="source_format_not_rwd",
+        )
+    if draft.acquisition_mode != "intermittent":
+        return _failure(
+            "unsupported_acquisition_mode",
+            "acquisition",
+            "The first compiler subset requires intermittent acquisition.",
+            detail_code="acquisition_not_intermittent",
+        )
+    if (
+        draft.execution_intent.execution_mode != "phasic"
+        or draft.execution_intent.run_profile != "full"
+        or draft.execution_intent.timeline_anchor_mode != "civil"
+        or draft.execution_intent.fixed_daily_anchor_clock is not None
+        or getattr(draft, "traces_only", False) is not False
+    ):
+        return _failure(
+            "unsupported_analysis_scope",
+            "analysis_scope",
+            "The first compiler subset requires civil phasic/full analysis.",
+            detail_code="analysis_scope_unsupported",
+        )
+    if (
+        draft.exclude_incomplete_final_rwd_chunk is not False
+        or draft.allow_partial_final_window is not False
+    ):
+        return _failure(
+            "incomplete_final_policy_not_supported",
+            "incomplete_final",
+            "The first compiler subset requires the no-exclusion final-chunk policy.",
+            detail_code="incomplete_final_policy_unsupported",
+        )
+
+    source_facts = facts.source_snapshot
+    if (
+        not source_facts.available
+        or source_facts.stale
+        or not source_facts.source_root_canonical
+        or not source_facts.source_root_path_style
+        or not source_facts.candidate_files
+    ):
+        return _failure(
+            "missing_source_snapshot",
+            "source",
+            "A current request-ready source snapshot is required.",
+            detail_code="source_snapshot_incomplete",
+        )
+
+    incomplete_facts = facts.incomplete_final_classification
+    if (
+        not incomplete_facts.available
+        or incomplete_facts.classification_status != "not_requested"
+        or incomplete_facts.source_candidate_set_digest
+        != source_facts.source_candidate_set_digest
+        or incomplete_facts.source_candidate_content_digest
+        != source_facts.source_candidate_content_digest
+    ):
+        return _failure(
+            "incomplete_final_policy_not_supported",
+            "incomplete_final",
+            "Incomplete-final facts are unavailable or do not match the source snapshot.",
+            detail_code="incomplete_final_facts_invalid",
+        )
+
+    parser_facts = facts.parser
+    if (
+        not parser_facts.available
+        or not parser_facts.schema_name
+        or not parser_facts.schema_version
+        or parser_facts.header_search_line_limit is None
+        or not parser_facts.time_column_candidates
+        or not parser_facts.uv_suffix_candidates
+        or not parser_facts.signal_suffix_candidates
+        or not parser_facts.column_normalization_rule
+        or not parser_facts.roi_name_rule
+        or not parser_facts.ambiguity_policy
+        or not parser_facts.parser_contract_digest
+    ):
+        return _failure(
+            "parser_contract_unavailable",
+            "parser",
+            "Request-ready parser contract facts are required.",
+            detail_code="parser_facts_incomplete",
+        )
+    if parser_facts.unresolved_inputs:
+        return _failure(
+            "parser_unresolved_inputs",
+            "parser",
+            "Parser facts contain unresolved inputs.",
+            detail_code="parser_inputs_unresolved",
+        )
+
+    dataset_facts = facts.acquisition_dataset
+    if not dataset_facts.available:
+        return _failure(
+            "missing_or_stale_dataset_contract",
+            "dataset",
+            "Request-ready acquisition/dataset facts are required.",
+            detail_code="dataset_facts_unavailable",
+        )
+    if (
+        dataset_facts.acquisition_mode != "intermittent"
+        or dataset_facts.sessions_per_hour is None
+        or dataset_facts.sessions_per_hour <= 0
+        or dataset_facts.session_duration_sec is None
+        or dataset_facts.session_duration_sec <= 0
+        or dataset_facts.timeline_anchor_mode != "civil"
+        or dataset_facts.fixed_daily_anchor_clock is not None
+        or dataset_facts.allow_partial_final_window is not False
+        or dataset_facts.exclude_incomplete_final_rwd_chunk is not False
+        or dataset_facts.dataset_status != "applied"
+        or dataset_facts.dataset_current_applied is not True
+        or not dataset_facts.rwd_time_col
+        or not dataset_facts.uv_suffix
+        or not dataset_facts.sig_suffix
+        or not dataset_facts.semantic_values
+        or dataset_facts.validation_issue_categories
+        or dataset_facts.stale_reason_categories
+    ):
+        return _failure(
+            "missing_or_stale_dataset_contract",
+            "dataset",
+            "Acquisition/dataset facts are incomplete, stale, or unsupported.",
+            detail_code="dataset_facts_invalid",
+        )
+
+    roi_facts = facts.roi_scope
+    if not roi_facts.available:
+        return _failure(
+            "missing_roi_inventory",
+            "roi_scope",
+            "Request-ready ROI scope facts are required.",
+            detail_code="roi_facts_unavailable",
+        )
+    discovered = set(roi_facts.discovered_roi_ids)
+    included = set(roi_facts.included_roi_ids)
+    excluded = set(roi_facts.excluded_roi_ids)
+    if not discovered or not included:
+        return _failure(
+            "empty_included_roi_set",
+            "roi_scope",
+            "Discovered and included ROI sets must be non-empty.",
+            detail_code="roi_scope_empty",
+        )
+    if (
+        len(discovered) != len(roi_facts.discovered_roi_ids)
+        or len(included) != len(roi_facts.included_roi_ids)
+        or len(excluded) != len(roi_facts.excluded_roi_ids)
+    ):
+        return _failure(
+            "duplicate_roi_id",
+            "roi_scope",
+            "ROI scope facts contain duplicate IDs.",
+            detail_code="duplicate_roi_id",
+        )
+    if included & excluded or included | excluded != discovered:
+        return _failure(
+            "included_excluded_roi_conflict",
+            "roi_scope",
+            "Included and excluded ROI sets must partition discovered ROIs.",
+            detail_code="roi_partition_invalid",
+        )
+    if (
+        roi_facts.selection_mode != "include"
+        or not roi_facts.inventory_status
+        or not roi_facts.inventory_source_content_digest
+        or not roi_facts.roi_inventory_identity_status
+    ):
+        return _failure(
+            "roi_selection_stale",
+            "roi_scope",
+            "ROI scope metadata is unavailable or stale.",
+            detail_code="roi_scope_metadata_invalid",
+        )
+
+    correction_facts = facts.correction
+    if (
+        not correction_facts.available
+        or correction_facts.strategy_scope != "global"
+        or correction_facts.global_correction_strategy != "dynamic_fit"
+        or not correction_facts.global_dynamic_fit_mode
+        or not correction_facts.dynamic_fit_parameter_values
+        or not correction_facts.confirmed_marks
+        or correction_facts.blocked_strategy_states
+    ):
+        return _failure(
+            "missing_confirmed_strategy_mark",
+            "correction",
+            "Request-ready correction facts are required.",
+            detail_code="correction_facts_incomplete",
+        )
+    global_mode = correction_facts.global_dynamic_fit_mode
+    if global_mode == "signal_only_f0":
+        return _failure(
+            "signal_only_not_supported_for_validate",
+            "correction",
+            "Signal-Only is not supported by the first validation subset.",
+            detail_code="signal_only",
+        )
+    if global_mode not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+        return _failure(
+            "forbidden_strategy_state",
+            "correction",
+            "The selected correction mode is unsupported.",
+            detail_code="correction_mode_forbidden",
+        )
+    mark_rois = [mark.roi_id for mark in correction_facts.confirmed_marks]
+    if len(mark_rois) != len(set(mark_rois)):
+        return _failure(
+            "duplicate_confirmed_strategy_mark",
+            "correction",
+            "Correction facts contain duplicate confirmed marks.",
+            detail_code="duplicate_confirmed_mark",
+        )
+    if set(mark_rois) != included:
+        return _failure(
+            "missing_confirmed_strategy_mark",
+            "correction",
+            "Every included ROI must have exactly one confirmed mark.",
+            detail_code="confirmed_mark_coverage_mismatch",
+        )
+    if {mark.selected_dynamic_fit_mode for mark in correction_facts.confirmed_marks} != {
+        global_mode
+    }:
+        return _failure(
+            "mixed_dynamic_fit_modes",
+            "correction",
+            "Confirmed marks must resolve to one global dynamic-fit mode.",
+            detail_code="confirmed_mark_modes_mixed",
+        )
+    if any(
+        mark.explicit_user_mark is not True or mark.current is not True
+        for mark in correction_facts.confirmed_marks
+    ):
+        return _failure(
+            "stale_strategy_mark",
+            "correction",
+            "Confirmed marks must be explicit and current.",
+            detail_code="confirmed_mark_not_current",
+        )
+
+    cache_facts = facts.diagnostic_cache
+    if (
+        not cache_facts.available
+        or cache_facts.resolver_status != "current"
+        or cache_facts.preliminary_cache is not True
+        or cache_facts.production_analysis is not False
+    ):
+        return _failure(
+            "missing_or_stale_diagnostic_cache",
+            "diagnostic_evidence",
+            "A current preliminary diagnostic cache is required.",
+            detail_code="diagnostic_cache_unavailable",
+        )
+    if (
+        cache_facts.completed_run_rejection_category
+        != "guided_diagnostic_cache_ineligible"
+    ):
+        return _failure(
+            "diagnostic_cache_not_completed_run_ineligible",
+            "diagnostic_evidence",
+            "Diagnostic cache lacks the required completed-run rejection category.",
+            detail_code="completed_run_rejection_mismatch",
+        )
+    if (
+        not cache_facts.cache_id
+        or not cache_facts.cache_root_canonical
+        or not cache_facts.source_setup_signature
+        or not cache_facts.diagnostic_scope_signature
+        or not cache_facts.build_request_signature
+        or not cache_facts.artifact_semantic_digest
+        or not cache_facts.provenance_semantic_digest
+        or dataset_facts.dataset_source_setup_signature
+        != cache_facts.source_setup_signature
+        or dataset_facts.diagnostic_cache_contract_identity
+        != cache_facts.build_request_signature
+    ):
+        return _failure(
+            "diagnostic_cache_identity_mismatch",
+            "diagnostic_evidence",
+            "Diagnostic cache identity is incomplete or disagrees with dataset facts.",
+            detail_code="diagnostic_cache_identity_mismatch",
+        )
+
+    evidence_facts = facts.evidence_references
+    if not evidence_facts.complete or not evidence_facts.references:
+        return _failure(
+            "evidence_reference_missing_or_stale",
+            "diagnostic_evidence",
+            "Complete current evidence references are required.",
+            detail_code="evidence_facts_incomplete",
+        )
+    evidence_by_roi = {
+        reference.roi_id: reference for reference in evidence_facts.references
+    }
+    if set(evidence_by_roi) != included:
+        return _failure(
+            "evidence_reference_missing_or_stale",
+            "diagnostic_evidence",
+            "Evidence references must cover every included ROI exactly once.",
+            detail_code="evidence_roi_coverage_mismatch",
+        )
+    for mark in correction_facts.confirmed_marks:
+        reference = evidence_by_roi.get(mark.roi_id)
+        if (
+            reference is None
+            or reference.current is not True
+            or reference.evidence_reference_id != mark.evidence_reference_id
+            or reference.selected_dynamic_fit_mode
+            != mark.selected_dynamic_fit_mode
+            or reference.diagnostic_cache_id != cache_facts.cache_id
+            or mark.diagnostic_cache_id != cache_facts.cache_id
+            or reference.source_setup_signature
+            != cache_facts.source_setup_signature
+            or mark.source_setup_signature != cache_facts.source_setup_signature
+            or reference.diagnostic_scope_signature
+            != cache_facts.diagnostic_scope_signature
+            or mark.diagnostic_scope_signature
+            != cache_facts.diagnostic_scope_signature
+            or reference.build_request_signature
+            != cache_facts.build_request_signature
+            or mark.build_request_signature != cache_facts.build_request_signature
+        ):
+            return _failure(
+                "diagnostic_cache_identity_mismatch",
+                "diagnostic_evidence",
+                "Correction marks and evidence references do not bind to cache identity.",
+                detail_code="mark_evidence_cache_binding_mismatch",
+            )
+
+    feature_facts = facts.feature_event
+    if (
+        not feature_facts.available
+        or feature_facts.profile_status != "applied"
+        or feature_facts.explicitly_applied is not True
+        or feature_facts.current is not True
+        or feature_facts.visible_unapplied_changes is not False
+        or not feature_facts.profile_schema_version
+        or not feature_facts.profile_id
+        or not feature_facts.effective_values
+        or not feature_facts.active_fields
+        or feature_facts.validation_issue_categories
+        or feature_facts.stale_reason_categories
+    ):
+        return _failure(
+            "invalid_feature_event_profile",
+            "feature_event",
+            "Request-ready feature/event facts are required.",
+            detail_code="feature_event_facts_invalid",
+        )
+    if any(
+        value.source_classification == "unresolved"
+        for value in feature_facts.effective_values
+    ):
+        return _failure(
+            "feature_event_effective_value_unresolved",
+            "feature_event",
+            "Feature/event facts contain unresolved effective values.",
+            detail_code="feature_event_value_unresolved",
+        )
+
+    output_facts = facts.output
+    if not output_facts.available:
+        return _failure(
+            "missing_output_policy",
+            "output",
+            "Request-ready output facts are required.",
+            detail_code="output_facts_unavailable",
+        )
+    if output_facts.policy_status != "applied" or output_facts.policy_current is not True:
+        return _failure(
+            "stale_output_policy",
+            "output",
+            "Output policy facts are not current and applied.",
+            detail_code="output_policy_not_current",
+        )
+    if output_facts.overwrite is not False:
+        return _failure(
+            "overwrite_not_allowed",
+            "output",
+            "Overwrite is prohibited.",
+            detail_code="output_overwrite_true",
+        )
+    if (
+        output_facts.blocker_categories
+        or output_facts.protected_root_context_complete is not True
+    ):
+        return _failure(
+            "protected_root_context_incomplete",
+            "output",
+            "Output safety facts contain blockers or incomplete protected-root context.",
+            detail_code="output_safety_incomplete",
+        )
+    if (
+        not output_facts.output_base_canonical
+        or not output_facts.output_base_path_style
+        or output_facts.path_role != "output_base"
+        or output_facts.future_output_owner != "runner"
+        or output_facts.run_directory_strategy
+        != "derive_unique_run_id_under_output_base"
+        or output_facts.creation_timing != "future_execution_start_only"
+        or output_facts.precreate is not False
+        or not output_facts.safety_classifier_version
+        or not output_facts.filesystem_fact_scope
+    ):
+        return _failure(
+            "unsupported_request_field",
+            "output",
+            "Output facts are outside the supported runner-owned future mapping.",
+            detail_code="output_ownership_unsupported",
+        )
+
+    try:
+        source_request = GuidedBackendSourceRequest(
+            source_root_canonical=source_facts.source_root_canonical,
+            source_root_path_style=source_facts.source_root_path_style,
+            source_format="rwd",
+            snapshot_schema_name=GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_NAME,
+            snapshot_schema_version=GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_VERSION,
+            discovery_rule_version=GUIDED_BACKEND_SOURCE_DISCOVERY_RULE_VERSION,
+            path_canonicalization_version=CANONICALIZATION_ALGORITHM_VERSION,
+            relative_path_rule_version=(
+                GUIDED_BACKEND_SOURCE_RELATIVE_PATH_RULE_VERSION
+            ),
+            ignored_files_policy=GUIDED_BACKEND_SOURCE_IGNORED_FILES_POLICY,
+            build_mode="read_only",
+            source_candidate_set_digest=source_facts.source_candidate_set_digest,
+            source_candidate_content_digest=(
+                source_facts.source_candidate_content_digest
+            ),
+            candidate_files=source_facts.candidate_files,
+            unresolved_source_identity_inputs=(),
+            source_identity_level="content_bound_candidate_snapshot",
+        )
+        acquisition_request = GuidedBackendAcquisitionDatasetRequest(
+            acquisition_mode=dataset_facts.acquisition_mode,
+            sessions_per_hour=dataset_facts.sessions_per_hour,
+            session_duration_sec=dataset_facts.session_duration_sec,
+            timeline_anchor_mode=dataset_facts.timeline_anchor_mode,
+            fixed_daily_anchor_clock=dataset_facts.fixed_daily_anchor_clock,
+            allow_partial_final_window=dataset_facts.allow_partial_final_window,
+            exclude_incomplete_final_rwd_chunk=(
+                dataset_facts.exclude_incomplete_final_rwd_chunk
+            ),
+            classification_schema_name=(
+                GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME
+            ),
+            classification_schema_version=(
+                GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_VERSION
+            ),
+            classifier_version=GUIDED_BACKEND_INCOMPLETE_FINAL_CLASSIFIER_VERSION,
+            classification_status=incomplete_facts.classification_status,
+            not_requested_classification_digest=(
+                incomplete_facts.classification_digest
+            ),
+            dataset_snapshot_schema_version=(
+                dataset_facts.dataset_snapshot_schema_version
+            ),
+            dataset_status=dataset_facts.dataset_status,
+            dataset_current_applied=dataset_facts.dataset_current_applied,
+            rwd_time_col=dataset_facts.rwd_time_col,
+            uv_suffix=dataset_facts.uv_suffix,
+            sig_suffix=dataset_facts.sig_suffix,
+            semantic_values=dataset_facts.semantic_values,
+            dataset_source_setup_signature=(
+                dataset_facts.dataset_source_setup_signature
+            ),
+            diagnostic_cache_contract_identity=(
+                dataset_facts.diagnostic_cache_contract_identity
+            ),
+            validation_issue_categories=dataset_facts.validation_issue_categories,
+            stale_reason_categories=dataset_facts.stale_reason_categories,
+        )
+        parser_request = GuidedBackendRwdParserRequest(
+            schema_name=parser_facts.schema_name,
+            schema_version=parser_facts.schema_version,
+            header_search_line_limit=parser_facts.header_search_line_limit,
+            time_column_candidates=parser_facts.time_column_candidates,
+            uv_suffix_candidates=parser_facts.uv_suffix_candidates,
+            signal_suffix_candidates=parser_facts.signal_suffix_candidates,
+            column_normalization_rule=parser_facts.column_normalization_rule,
+            roi_name_rule=parser_facts.roi_name_rule,
+            ambiguity_policy=parser_facts.ambiguity_policy,
+            parser_contract_digest=parser_facts.parser_contract_digest,
+            unresolved_inputs=parser_facts.unresolved_inputs,
+        )
+        roi_request = GuidedBackendRoiScopeRequest(
+            discovered_roi_ids=roi_facts.discovered_roi_ids,
+            included_roi_ids=roi_facts.included_roi_ids,
+            excluded_roi_ids=roi_facts.excluded_roi_ids,
+            selection_mode=roi_facts.selection_mode,
+            inventory_status=roi_facts.inventory_status,
+            inventory_source_content_digest=(
+                roi_facts.inventory_source_content_digest
+            ),
+            roi_inventory_identity_status=roi_facts.roi_inventory_identity_status,
+        )
+        confirmed_marks = tuple(
+            GuidedBackendConfirmedStrategyMark(
+                roi_id=mark.roi_id,
+                selected_dynamic_fit_mode=mark.selected_dynamic_fit_mode,
+                diagnostic_cache_id=mark.diagnostic_cache_id,
+                source_setup_signature=mark.source_setup_signature,
+                diagnostic_scope_signature=mark.diagnostic_scope_signature,
+                build_request_signature=mark.build_request_signature,
+                evidence_reference_id=mark.evidence_reference_id,
+                evidence_chunk=mark.evidence_chunk,
+                explicit_user_mark=mark.explicit_user_mark,
+                current=mark.current,
+            )
+            for mark in correction_facts.confirmed_marks
+        )
+        correction_request = GuidedBackendCorrectionRequest(
+            strategy_scope=correction_facts.strategy_scope,
+            global_correction_strategy=(
+                correction_facts.global_correction_strategy
+            ),
+            global_dynamic_fit_mode=correction_facts.global_dynamic_fit_mode,
+            dynamic_fit_parameter_values=(
+                correction_facts.dynamic_fit_parameter_values
+            ),
+            confirmed_marks=confirmed_marks,
+            mark_rule_version=correction_facts.mark_rule_version,
+            currentness_rule_version=correction_facts.currentness_rule_version,
+            unanimity_rule_version=correction_facts.unanimity_rule_version,
+            blocked_strategy_states=correction_facts.blocked_strategy_states,
+        )
+        diagnostic_request = GuidedBackendDiagnosticEvidenceRequest(
+            cache_id=cache_facts.cache_id,
+            cache_root_canonical=cache_facts.cache_root_canonical,
+            source_setup_signature=cache_facts.source_setup_signature,
+            diagnostic_scope_signature=cache_facts.diagnostic_scope_signature,
+            build_request_signature=cache_facts.build_request_signature,
+            artifact_contract_version=(
+                GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION
+            ),
+            provenance_schema_version=(
+                GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION
+            ),
+            artifact_semantic_digest=cache_facts.artifact_semantic_digest,
+            provenance_semantic_digest=cache_facts.provenance_semantic_digest,
+            evidence_references=evidence_facts.references,
+            completed_run_rejection_category=(
+                cache_facts.completed_run_rejection_category
+            ),
+            resolver_status=cache_facts.resolver_status,
+            preliminary_cache=cache_facts.preliminary_cache,
+            production_analysis=cache_facts.production_analysis,
+            stale_reasons=(),
+            unresolved_inputs=(),
+        )
+        feature_request = GuidedBackendFeatureEventRequest(
+            profile_schema_version=feature_facts.profile_schema_version,
+            profile_id=feature_facts.profile_id,
+            effective_values=feature_facts.effective_values,
+            active_fields=feature_facts.active_fields,
+            inactive_fields=feature_facts.inactive_fields,
+            profile_status=feature_facts.profile_status,
+            explicitly_applied=feature_facts.explicitly_applied,
+            current=feature_facts.current,
+            visible_unapplied_changes=feature_facts.visible_unapplied_changes,
+            validation_issue_categories=feature_facts.validation_issue_categories,
+            stale_reason_categories=feature_facts.stale_reason_categories,
+        )
+        output_request = GuidedBackendOutputRequest(
+            output_base_canonical=output_facts.output_base_canonical,
+            output_base_path_style=output_facts.output_base_path_style,
+            path_role=output_facts.path_role,
+            future_output_owner=output_facts.future_output_owner,
+            run_directory_strategy=output_facts.run_directory_strategy,
+            creation_timing=output_facts.creation_timing,
+            overwrite=output_facts.overwrite,
+            precreate=output_facts.precreate,
+            policy_status=output_facts.policy_status,
+            policy_current=output_facts.policy_current,
+            safety_classifier_version=output_facts.safety_classifier_version,
+            relationships=output_facts.relationships,
+            protected_root_context_complete=(
+                output_facts.protected_root_context_complete
+            ),
+            blocker_categories=output_facts.blocker_categories,
+            filesystem_fact_scope=output_facts.filesystem_fact_scope,
+        )
+        local_contract = GuidedBackendLocalContractState(
+            local_check_contract_version=GUIDED_BACKEND_LOCAL_CHECK_CONTRACT_VERSION,
+            blocking_issue_categories=(),
+            warning_categories=(),
+            unsupported_state_flags=(),
+            unresolved_required_inputs=(),
+            deferred_capabilities=(
+                "canonical_request_identity",
+                "backend_validation",
+                "run_authorization",
+                "app_build_identity",
+                "full_source_manifest_identity",
+                "strict_roi_inventory_identity",
+            ),
+        )
+        request = GuidedBackendValidationRequest(
+            request_schema_name=GUIDED_BACKEND_VALIDATION_REQUEST_SCHEMA_NAME,
+            request_schema_version=GUIDED_BACKEND_VALIDATION_REQUEST_SCHEMA_VERSION,
+            validation_scope=GUIDED_BACKEND_VALIDATION_SCOPE,
+            validation_contract_version=(
+                GUIDED_BACKEND_VALIDATION_CONTRACT_VERSION
+            ),
+            validator_capability_version=(
+                validator_contract.validator_capability_version
+            ),
+            compiler_version=GUIDED_BACKEND_VALIDATION_COMPILER_VERSION,
+            subset_rule_version=GUIDED_BACKEND_VALIDATION_SUBSET_RULE_VERSION,
+            canonicalization_algorithm_version=(
+                CANONICALIZATION_ALGORITHM_VERSION
+            ),
+            source=source_request,
+            acquisition_dataset=acquisition_request,
+            parser=parser_request,
+            roi_scope=roi_request,
+            correction=correction_request,
+            diagnostic_evidence=diagnostic_request,
+            feature_event=feature_request,
+            output=output_request,
+            local_contract=local_contract,
+        )
+    except Exception:
+        return _failure(
+            "compiler_internal_error",
+            "compiler",
+            "Request construction failed after completeness gates passed.",
+            detail_code="request_contract_construction_failed",
+        )
+    return GuidedBackendValidationCompileSuccess(
+        request=request,
+        canonical_request_identity=None,
+        request_identity_deferred=True,
     )
 
 

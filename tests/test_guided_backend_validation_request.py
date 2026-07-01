@@ -87,7 +87,7 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         sig_suffix="-470",
         semantic_values=(_typed_value("rwd_time_col", "Time(s)"),),
         dataset_source_setup_signature="source-signature",
-        diagnostic_cache_contract_identity="cache-contract",
+        diagnostic_cache_contract_identity="request-signature",
     )
     parser = contracts.GuidedBackendRwdParserRequest(
         schema_name="rwd_header_parsing_contract",
@@ -134,6 +134,11 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         evidence_kind="correction_preview",
         diagnostic_cache_id="cache-001",
         source_setup_signature="source-signature",
+        diagnostic_scope_signature="scope-signature",
+        build_request_signature="request-signature",
+        evidence_chunk=0,
+        roi_id="ROI0",
+        selected_dynamic_fit_mode="global_linear_regression",
     )
     diagnostic = contracts.GuidedBackendDiagnosticEvidenceRequest(
         cache_id="cache-001",
@@ -224,6 +229,174 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         feature_event=feature_event,
         output=output,
         local_contract=local_contract,
+    )
+
+
+def _complete_facts() -> contracts.GuidedBackendValidationMaterializedFacts:
+    request = _request()
+    source = request.source
+    acquisition = request.acquisition_dataset
+    parser = request.parser
+    roi = request.roi_scope
+    correction = request.correction
+    diagnostic = request.diagnostic_evidence
+    feature = request.feature_event
+    output = request.output
+    return contracts.GuidedBackendValidationMaterializedFacts(
+        source_snapshot=contracts.GuidedBackendSourceSnapshotFacts(
+            available=True,
+            source_root_canonical=source.source_root_canonical,
+            source_root_path_style=source.source_root_path_style,
+            source_candidate_set_digest=source.source_candidate_set_digest,
+            source_candidate_content_digest=source.source_candidate_content_digest,
+            candidate_files=source.candidate_files,
+            stale=False,
+        ),
+        incomplete_final_classification=(
+            contracts.GuidedBackendIncompleteFinalClassificationFacts(
+                available=True,
+                classification_status=acquisition.classification_status,
+                classification_digest=acquisition.not_requested_classification_digest,
+                source_candidate_set_digest=source.source_candidate_set_digest,
+                source_candidate_content_digest=source.source_candidate_content_digest,
+            )
+        ),
+        parser=contracts.GuidedBackendParserFacts(
+            available=True,
+            schema_name=parser.schema_name,
+            schema_version=parser.schema_version,
+            header_search_line_limit=parser.header_search_line_limit,
+            time_column_candidates=parser.time_column_candidates,
+            uv_suffix_candidates=parser.uv_suffix_candidates,
+            signal_suffix_candidates=parser.signal_suffix_candidates,
+            column_normalization_rule=parser.column_normalization_rule,
+            roi_name_rule=parser.roi_name_rule,
+            ambiguity_policy=parser.ambiguity_policy,
+            parser_contract_digest=parser.parser_contract_digest,
+            unresolved_inputs=(),
+        ),
+        acquisition_dataset=contracts.GuidedBackendAcquisitionDatasetFacts(
+            available=True,
+            acquisition_mode=acquisition.acquisition_mode,
+            sessions_per_hour=acquisition.sessions_per_hour,
+            session_duration_sec=acquisition.session_duration_sec,
+            timeline_anchor_mode=acquisition.timeline_anchor_mode,
+            fixed_daily_anchor_clock=acquisition.fixed_daily_anchor_clock,
+            allow_partial_final_window=acquisition.allow_partial_final_window,
+            exclude_incomplete_final_rwd_chunk=(
+                acquisition.exclude_incomplete_final_rwd_chunk
+            ),
+            dataset_snapshot_schema_version=(
+                acquisition.dataset_snapshot_schema_version
+            ),
+            dataset_status=acquisition.dataset_status,
+            dataset_current_applied=acquisition.dataset_current_applied,
+            rwd_time_col=acquisition.rwd_time_col,
+            uv_suffix=acquisition.uv_suffix,
+            sig_suffix=acquisition.sig_suffix,
+            semantic_values=acquisition.semantic_values,
+            dataset_source_setup_signature=(
+                acquisition.dataset_source_setup_signature
+            ),
+            diagnostic_cache_contract_identity=(
+                acquisition.diagnostic_cache_contract_identity
+            ),
+        ),
+        roi_scope=contracts.GuidedBackendRoiScopeFacts(
+            available=True,
+            discovered_roi_ids=roi.discovered_roi_ids,
+            included_roi_ids=roi.included_roi_ids,
+            excluded_roi_ids=roi.excluded_roi_ids,
+            selection_mode=roi.selection_mode,
+            inventory_status=roi.inventory_status,
+            inventory_source_content_digest=roi.inventory_source_content_digest,
+            roi_inventory_identity_status=roi.roi_inventory_identity_status,
+        ),
+        correction=contracts.GuidedBackendCorrectionFacts(
+            available=True,
+            strategy_scope=correction.strategy_scope,
+            global_correction_strategy=correction.global_correction_strategy,
+            global_dynamic_fit_mode=correction.global_dynamic_fit_mode,
+            dynamic_fit_parameter_values=correction.dynamic_fit_parameter_values,
+            confirmed_marks=tuple(
+                contracts.GuidedBackendConfirmedStrategyMarkFacts(
+                    roi_id=mark.roi_id,
+                    selected_dynamic_fit_mode=mark.selected_dynamic_fit_mode,
+                    diagnostic_cache_id=mark.diagnostic_cache_id,
+                    source_setup_signature=mark.source_setup_signature,
+                    diagnostic_scope_signature=mark.diagnostic_scope_signature,
+                    build_request_signature=mark.build_request_signature,
+                    evidence_reference_id=mark.evidence_reference_id,
+                    evidence_chunk=mark.evidence_chunk,
+                    explicit_user_mark=mark.explicit_user_mark,
+                    current=mark.current,
+                )
+                for mark in correction.confirmed_marks
+            ),
+            mark_rule_version=correction.mark_rule_version,
+            currentness_rule_version=correction.currentness_rule_version,
+            unanimity_rule_version=correction.unanimity_rule_version,
+        ),
+        diagnostic_cache=contracts.GuidedBackendDiagnosticCacheFacts(
+            available=True,
+            cache_id=diagnostic.cache_id,
+            cache_root_canonical=diagnostic.cache_root_canonical,
+            artifact_semantic_digest=diagnostic.artifact_semantic_digest,
+            provenance_semantic_digest=diagnostic.provenance_semantic_digest,
+            completed_run_rejection_category=(
+                diagnostic.completed_run_rejection_category
+            ),
+            resolver_status=diagnostic.resolver_status,
+            source_setup_signature=diagnostic.source_setup_signature,
+            diagnostic_scope_signature=diagnostic.diagnostic_scope_signature,
+            build_request_signature=diagnostic.build_request_signature,
+            preliminary_cache=diagnostic.preliminary_cache,
+            production_analysis=diagnostic.production_analysis,
+        ),
+        output=contracts.GuidedBackendOutputFacts(
+            available=True,
+            output_base_canonical=output.output_base_canonical,
+            output_base_path_style=output.output_base_path_style,
+            path_role=output.path_role,
+            future_output_owner=output.future_output_owner,
+            run_directory_strategy=output.run_directory_strategy,
+            creation_timing=output.creation_timing,
+            overwrite=output.overwrite,
+            precreate=output.precreate,
+            policy_status=output.policy_status,
+            policy_current=output.policy_current,
+            safety_classifier_version=output.safety_classifier_version,
+            protected_root_context_complete=output.protected_root_context_complete,
+            relationships=output.relationships,
+            blocker_categories=output.blocker_categories,
+            filesystem_fact_scope=output.filesystem_fact_scope,
+        ),
+        evidence_references=contracts.GuidedBackendEvidenceReferenceFacts(
+            references=diagnostic.evidence_references,
+            complete=True,
+        ),
+        feature_event=contracts.GuidedBackendFeatureEventFacts(
+            available=True,
+            profile_schema_version=feature.profile_schema_version,
+            profile_id=feature.profile_id,
+            effective_values=feature.effective_values,
+            active_fields=feature.active_fields,
+            inactive_fields=feature.inactive_fields,
+            profile_status=feature.profile_status,
+            explicitly_applied=feature.explicitly_applied,
+            current=feature.current,
+            visible_unapplied_changes=feature.visible_unapplied_changes,
+        ),
+        effective_feature_event_values=feature.effective_values,
+        complete_for_compilation=True,
+        unresolved_required_inputs=(),
+    )
+
+
+def _compiler_draft() -> GuidedNewAnalysisDraftPlan:
+    return GuidedNewAnalysisDraftPlan(
+        input_format="rwd",
+        acquisition_mode="intermittent",
     )
 
 
@@ -330,6 +503,16 @@ def test_refusal_taxonomy_is_complete_and_duplicate_free():
         "unsupported_first_subset_state",
         "compiler_contract_unavailable",
         "validator_contract_unavailable",
+        "incomplete_materialized_facts",
+        "unresolved_materialized_inputs",
+        "missing_source_snapshot",
+        "unsupported_analysis_scope",
+        "incomplete_final_policy_not_supported",
+        "parser_contract_unavailable",
+        "parser_unresolved_inputs",
+        "feature_event_effective_value_unresolved",
+        "unsupported_request_field",
+        "compiler_internal_error",
     }
     categories = contracts.GUIDED_BACKEND_VALIDATION_REFUSAL_CATEGORIES
     assert set(categories) == required
@@ -439,7 +622,7 @@ def test_none_draft_refuses_cleanly():
 
 def test_none_facts_refuses_cleanly():
     result = contracts.compile_guided_backend_validation_request(
-        GuidedNewAnalysisDraftPlan(),
+        _compiler_draft(),
         facts=None,
         validator_contract=_validator_contract(),
     )
@@ -476,17 +659,321 @@ def test_corrupted_validator_contract_refuses():
     assert result.blocking_issues[0].category == "validator_contract_unavailable"
 
 
-def test_stage_one_compiler_intentionally_never_returns_success():
+@pytest.mark.parametrize(
+    "field,value,detail_code",
+    [
+        ("validation_scope", "wrong-scope", "validation_scope_mismatch"),
+        (
+            "validation_contract_version",
+            "wrong-version",
+            "validation_contract_version_mismatch",
+        ),
+        (
+            "supported_subset_rule_version",
+            "wrong-subset",
+            "supported_subset_rule_version_mismatch",
+        ),
+        (
+            "validator_capability_version",
+            "unknown",
+            "validator_capability_version_invalid",
+        ),
+        (
+            "validator_capability_version",
+            "",
+            "validator_capability_version_invalid",
+        ),
+    ],
+)
+def test_validator_contract_value_gate_refusals(
+    field: str,
+    value: str,
+    detail_code: str,
+):
+    contract = object.__new__(contracts.GuidedBackendValidatorContract)
+    object.__setattr__(
+        contract,
+        "validation_scope",
+        contracts.GUIDED_BACKEND_VALIDATION_SCOPE,
+    )
+    object.__setattr__(
+        contract,
+        "validation_contract_version",
+        contracts.GUIDED_BACKEND_VALIDATION_CONTRACT_VERSION,
+    )
+    object.__setattr__(
+        contract,
+        "supported_subset_rule_version",
+        contracts.GUIDED_BACKEND_VALIDATION_SUBSET_RULE_VERSION,
+    )
+    object.__setattr__(
+        contract,
+        "validator_capability_version",
+        "guided_backend_validator.test_fixture.v1",
+    )
+    object.__setattr__(contract, field, value)
+
     result = contracts.compile_guided_backend_validation_request(
-        GuidedNewAnalysisDraftPlan(),
+        _compiler_draft(),
+        facts=_complete_facts(),
+        validator_contract=contract,
+    )
+
+    assert isinstance(result, contracts.GuidedBackendValidationCompileFailure)
+    issue = result.blocking_issues[0]
+    assert issue.category == "validator_contract_unavailable"
+    assert issue.section == "validator_contract"
+    assert issue.detail_code == detail_code
+    assert result.no_partial_request is True
+    assert result.no_request_identity is True
+    assert not hasattr(result, "request")
+    assert not hasattr(result, "canonical_request_identity")
+
+
+def test_incomplete_fact_groups_refuse_even_when_flag_claims_complete():
+    result = contracts.compile_guided_backend_validation_request(
+        _compiler_draft(),
         facts=contracts.GuidedBackendValidationMaterializedFacts(
             complete_for_compilation=True
         ),
         validator_contract=_validator_contract(),
     )
     assert isinstance(result, contracts.GuidedBackendValidationCompileFailure)
-    assert result.blocking_issues[0].category == "compiler_contract_unavailable"
-    assert result.blocking_issues[0].detail_code == "stage_1_refusal_only"
+    assert result.blocking_issues[0].category == "missing_source_snapshot"
+
+
+def test_complete_facts_compile_populated_request_with_identity_deferred():
+    facts = _complete_facts()
+
+    result = contracts.compile_guided_backend_validation_request(
+        _compiler_draft(),
+        facts=facts,
+        validator_contract=_validator_contract(),
+    )
+
+    assert isinstance(result, contracts.GuidedBackendValidationCompileSuccess)
+    assert result.status == "compiled"
+    assert result.canonical_request_identity is None
+    assert result.request_identity_deferred is True
+    request = result.request
+    assert isinstance(request, contracts.GuidedBackendValidationRequest)
+    assert request.request_schema_name == contracts.GUIDED_BACKEND_VALIDATION_REQUEST_SCHEMA_NAME
+    assert request.request_schema_version == contracts.GUIDED_BACKEND_VALIDATION_REQUEST_SCHEMA_VERSION
+    assert request.validation_scope == contracts.GUIDED_BACKEND_VALIDATION_SCOPE
+    assert request.validation_contract_version == contracts.GUIDED_BACKEND_VALIDATION_CONTRACT_VERSION
+    assert request.compiler_version == contracts.GUIDED_BACKEND_VALIDATION_COMPILER_VERSION
+    assert request.subset_rule_version == contracts.GUIDED_BACKEND_VALIDATION_SUBSET_RULE_VERSION
+    assert request.canonicalization_algorithm_version == contracts.CANONICALIZATION_ALGORITHM_VERSION
+
+    assert request.source.source_root_canonical == facts.source_snapshot.source_root_canonical
+    assert request.source.source_root_path_style == facts.source_snapshot.source_root_path_style
+    assert request.source.candidate_files is facts.source_snapshot.candidate_files
+    assert request.source.source_identity_level == "content_bound_candidate_snapshot"
+
+    assert request.acquisition_dataset.acquisition_mode == "intermittent"
+    assert request.acquisition_dataset.sessions_per_hour == 6
+    assert request.acquisition_dataset.timeline_anchor_mode == "civil"
+    assert request.acquisition_dataset.classification_status == "not_requested"
+    assert request.acquisition_dataset.semantic_values is facts.acquisition_dataset.semantic_values
+
+    assert request.parser.time_column_candidates == facts.parser.time_column_candidates
+    assert request.parser.parser_contract_digest == facts.parser.parser_contract_digest
+    assert request.parser.unresolved_inputs == ()
+
+    assert request.roi_scope.discovered_roi_ids == facts.roi_scope.discovered_roi_ids
+    assert request.roi_scope.included_roi_ids == facts.roi_scope.included_roi_ids
+    assert request.roi_scope.roi_inventory_identity_status == "deferred_not_authoritative"
+
+    assert request.correction.global_dynamic_fit_mode == facts.correction.global_dynamic_fit_mode
+    assert request.correction.dynamic_fit_parameter_values is facts.correction.dynamic_fit_parameter_values
+    assert {mark.roi_id for mark in request.correction.confirmed_marks} == {"ROI0"}
+
+    assert request.diagnostic_evidence.cache_id == facts.diagnostic_cache.cache_id
+    assert request.diagnostic_evidence.evidence_references is facts.evidence_references.references
+    evidence = request.diagnostic_evidence.evidence_references[0]
+    assert evidence.roi_id == "ROI0"
+    assert evidence.selected_dynamic_fit_mode == "global_linear_regression"
+
+    assert request.feature_event.profile_id == facts.feature_event.profile_id
+    assert request.feature_event.effective_values is facts.feature_event.effective_values
+    assert request.output.output_base_canonical == facts.output.output_base_canonical
+    assert request.output.relationships is facts.output.relationships
+    assert request.local_contract.blocking_issue_categories == ()
+    assert request.local_contract.unresolved_required_inputs == ()
+    assert "canonical_request_identity" in request.local_contract.deferred_capabilities
+    assert "backend_validation" in request.local_contract.deferred_capabilities
+
+
+def test_compile_success_rejects_placeholder_identity():
+    with pytest.raises(
+        contracts.GuidedBackendValidationRequestContractError,
+        match="must be None",
+    ):
+        contracts.GuidedBackendValidationCompileSuccess(
+            request=_request(),
+            canonical_request_identity=_DIGEST_A,
+            request_identity_deferred=True,
+        )
+
+
+def test_compiler_uses_facts_not_mutable_draft_payload_fields():
+    facts = _complete_facts()
+    draft = _compiler_draft()
+    draft.discovered_roi_ids = ["MUTATED"]
+    draft.included_roi_ids = ["MUTATED"]
+    draft.excluded_roi_ids = []
+    draft.cache_root_path = "C:/mutated/cache"
+    draft.cache_id = "mutated-cache"
+    draft.feature_event_values = {"event_signal": "mutated"}
+    draft.feature_event_profile_id = "mutated-profile"
+    draft.output_policy_path = "C:/mutated/output"
+    draft.per_roi_correction_strategy_choices = []
+
+    result = contracts.compile_guided_backend_validation_request(
+        draft,
+        facts=facts,
+        validator_contract=_validator_contract(),
+    )
+
+    assert isinstance(result, contracts.GuidedBackendValidationCompileSuccess)
+    request = result.request
+    assert request.roi_scope.included_roi_ids == ("ROI0",)
+    assert request.diagnostic_evidence.cache_id == "cache-001"
+    assert request.feature_event.profile_id == "profile-001"
+    assert request.output.output_base_canonical == r"c:\output"
+
+
+@pytest.mark.parametrize(
+    "mutation,expected",
+    [
+        ("incomplete", "incomplete_materialized_facts"),
+        ("unresolved", "unresolved_materialized_inputs"),
+        ("source", "missing_source_snapshot"),
+        ("incomplete_final", "incomplete_final_policy_not_supported"),
+        ("parser", "parser_contract_unavailable"),
+        ("parser_unresolved", "parser_unresolved_inputs"),
+        ("dataset", "missing_or_stale_dataset_contract"),
+        ("roi", "missing_roi_inventory"),
+        ("correction", "missing_confirmed_strategy_mark"),
+        ("cache", "missing_or_stale_diagnostic_cache"),
+        ("cache_rejection", "diagnostic_cache_not_completed_run_ineligible"),
+        ("evidence", "evidence_reference_missing_or_stale"),
+        ("feature", "invalid_feature_event_profile"),
+        ("output", "missing_output_policy"),
+        ("output_blocker", "protected_root_context_incomplete"),
+        ("protected_context", "protected_root_context_incomplete"),
+    ],
+)
+def test_complete_fact_gate_refusals(mutation: str, expected: str):
+    facts = _complete_facts()
+    if mutation == "incomplete":
+        facts = replace(facts, complete_for_compilation=False)
+    elif mutation == "unresolved":
+        facts = replace(facts, unresolved_required_inputs=("parser",))
+    elif mutation == "source":
+        facts = replace(
+            facts, source_snapshot=replace(facts.source_snapshot, available=False)
+        )
+    elif mutation == "incomplete_final":
+        facts = replace(
+            facts,
+            incomplete_final_classification=replace(
+                facts.incomplete_final_classification,
+                classification_status="excluded",
+            ),
+        )
+    elif mutation == "parser":
+        facts = replace(facts, parser=replace(facts.parser, available=False))
+    elif mutation == "parser_unresolved":
+        facts = replace(
+            facts, parser=replace(facts.parser, unresolved_inputs=("time",))
+        )
+    elif mutation == "dataset":
+        facts = replace(
+            facts,
+            acquisition_dataset=replace(
+                facts.acquisition_dataset, available=False
+            ),
+        )
+    elif mutation == "roi":
+        facts = replace(facts, roi_scope=replace(facts.roi_scope, available=False))
+    elif mutation == "correction":
+        facts = replace(
+            facts, correction=replace(facts.correction, available=False)
+        )
+    elif mutation == "cache":
+        facts = replace(
+            facts,
+            diagnostic_cache=replace(facts.diagnostic_cache, available=False),
+        )
+    elif mutation == "cache_rejection":
+        facts = replace(
+            facts,
+            diagnostic_cache=replace(
+                facts.diagnostic_cache,
+                completed_run_rejection_category="wrong",
+            ),
+        )
+    elif mutation == "evidence":
+        facts = replace(
+            facts,
+            evidence_references=replace(
+                facts.evidence_references, complete=False
+            ),
+        )
+    elif mutation == "feature":
+        facts = replace(
+            facts, feature_event=replace(facts.feature_event, available=False)
+        )
+    elif mutation == "output":
+        facts = replace(facts, output=replace(facts.output, available=False))
+    elif mutation == "output_blocker":
+        facts = replace(
+            facts,
+            output=replace(facts.output, blocker_categories=("unsafe",)),
+        )
+    else:
+        facts = replace(
+            facts,
+            output=replace(
+                facts.output, protected_root_context_complete=False
+            ),
+        )
+
+    result = contracts.compile_guided_backend_validation_request(
+        _compiler_draft(),
+        facts=facts,
+        validator_contract=_validator_contract(),
+    )
+
+    assert isinstance(result, contracts.GuidedBackendValidationCompileFailure)
+    assert result.blocking_issues[0].category == expected
+    assert result.no_partial_request is True
+    assert result.no_request_identity is True
+    assert not hasattr(result, "request")
+
+
+@pytest.mark.parametrize(
+    "field,value,expected",
+    [
+        ("input_format", "npm", "unsupported_source_format"),
+        ("acquisition_mode", "continuous", "unsupported_acquisition_mode"),
+        ("exclude_incomplete_final_rwd_chunk", True, "incomplete_final_policy_not_supported"),
+        ("allow_partial_final_window", True, "incomplete_final_policy_not_supported"),
+    ],
+)
+def test_draft_first_subset_gate_refusals(field: str, value: object, expected: str):
+    draft = _compiler_draft()
+    setattr(draft, field, value)
+
+    result = contracts.compile_guided_backend_validation_request(
+        draft,
+        facts=_complete_facts(),
+        validator_contract=_validator_contract(),
+    )
+
+    assert isinstance(result, contracts.GuidedBackendValidationCompileFailure)
+    assert result.blocking_issues[0].category == expected
 
 
 def test_compiler_performs_no_filesystem_io(monkeypatch: pytest.MonkeyPatch):
@@ -503,6 +990,30 @@ def test_compiler_performs_no_filesystem_io(monkeypatch: pytest.MonkeyPatch):
         validator_contract=_validator_contract(),
     )
     assert isinstance(result, contracts.GuidedBackendValidationCompileFailure)
+
+
+def test_compiler_success_performs_no_filesystem_io(monkeypatch: pytest.MonkeyPatch):
+    def fail(*_args, **_kwargs):
+        raise AssertionError("filesystem I/O is prohibited")
+
+    monkeypatch.setattr(builtins, "open", fail)
+    monkeypatch.setattr(Path, "read_text", fail)
+    monkeypatch.setattr(Path, "read_bytes", fail)
+    monkeypatch.setattr(Path, "write_text", fail)
+    monkeypatch.setattr(Path, "write_bytes", fail)
+    monkeypatch.setattr(Path, "mkdir", fail)
+    monkeypatch.setattr(Path, "touch", fail)
+    monkeypatch.setattr(os, "stat", fail)
+    monkeypatch.setattr(os, "scandir", fail)
+    monkeypatch.setattr(os, "mkdir", fail)
+
+    result = contracts.compile_guided_backend_validation_request(
+        _compiler_draft(),
+        facts=_complete_facts(),
+        validator_contract=_validator_contract(),
+    )
+
+    assert isinstance(result, contracts.GuidedBackendValidationCompileSuccess)
 
 
 def test_compiler_creates_no_files_or_directories(tmp_path: Path):

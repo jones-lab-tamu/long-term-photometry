@@ -19,7 +19,7 @@ from photometry_pipeline.guided_new_analysis_plan import (
 from photometry_pipeline.guided_backend_validation_request import (
     compile_guided_backend_validation_request,
     GuidedBackendValidatorContract,
-    GuidedBackendValidationCompileFailure,
+    GuidedBackendValidationCompileSuccess,
     GuidedBackendValidationMaterializedFacts,
 )
 from photometry_pipeline.guided_backend_validation_materialization import (
@@ -1352,8 +1352,8 @@ def test_no_write_guarantee_stage_2b(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert not output_base.exists()
 
 
-# M. Compiler Handoff Still Refuses
-def test_compiler_handoff_refuses_stage_2b(tmp_path: Path):
+# M. Compiler Handoff Populates Request With Identity Deferred
+def test_compiler_handoff_succeeds_with_identity_deferred(tmp_path: Path):
     source_root = _create_tiny_rwd_fixture(tmp_path)
     draft = GuidedNewAnalysisDraftPlan(
         input_source_path=str(source_root),
@@ -1379,11 +1379,11 @@ def test_compiler_handoff_refuses_stage_2b(tmp_path: Path):
         facts=result.facts,
         validator_contract=validator_contract,
     )
-    assert isinstance(compile_result, GuidedBackendValidationCompileFailure)
-    assert compile_result.status == "refused"
-    assert compile_result.no_partial_request is True
-    assert compile_result.no_request_identity is True
-    assert not hasattr(compile_result, "request")
+    assert isinstance(compile_result, GuidedBackendValidationCompileSuccess)
+    assert compile_result.status == "compiled"
+    assert compile_result.request is not None
+    assert compile_result.canonical_request_identity is None
+    assert compile_result.request_identity_deferred is True
 
 
 # Preservation: Exclusion True Refused
