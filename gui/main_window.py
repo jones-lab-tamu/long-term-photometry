@@ -1662,6 +1662,7 @@ class MainWindow(QMainWindow):
         self._guided_backend_validation_outcome = None
         self._guided_backend_validation_outcome_revision = None
         self._guided_backend_validation_stale_reason = ""
+        self._guided_backend_validation_active = False
         self._guided_raw_setup_controls = {}
         self._guided_open_results_mode_panels = {}
         self._guided_new_analysis_mode_panels = {}
@@ -5627,6 +5628,7 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError):
                 self._guided_backend_validation_outcome = None
         self._guided_backend_validation_outcome_revision = None
+        self._refresh_guided_backend_validation_display()
 
     def _is_guided_backend_validation_outcome_current(self) -> bool:
         outcome = getattr(self, "_guided_backend_validation_outcome", None)
@@ -5665,6 +5667,176 @@ class MainWindow(QMainWindow):
             validator_contract=self._guided_backend_validator_contract,
             revision=int(self._guided_backend_validation_revision),
         )
+
+    def _run_guided_backend_validation_workflow(self, context):
+        from photometry_pipeline import (
+            guided_backend_validation_workflow as workflow,
+        )
+
+        return workflow.validate_current_guided_draft_for_backend(
+            context.draft,
+            parser_contract=context.parser_contract,
+            additional_protected_roots=context.additional_protected_roots,
+            validator_contract=context.validator_contract,
+        )
+
+    def _make_guided_backend_validation_internal_error(self):
+        from photometry_pipeline import (
+            guided_backend_validation_workflow as workflow,
+        )
+
+        return workflow.make_guided_backend_validation_workflow_internal_error(
+            "context"
+        )
+
+    def _on_guided_backend_validate_clicked(self) -> None:
+        if getattr(self, "_guided_backend_validation_active", False):
+            return
+        self._guided_backend_validation_active = True
+        self._guided_backend_validate_btn.setEnabled(False)
+        self._refresh_guided_backend_validation_display()
+        context = None
+        try:
+            try:
+                context = self._capture_guided_backend_validation_context()
+                outcome = (
+                    self._run_guided_backend_validation_workflow(context)
+                )
+            except Exception:
+                outcome = self._make_guided_backend_validation_internal_error()
+            outcome_revision = (
+                context.revision
+                if context is not None
+                else int(self._guided_backend_validation_revision)
+            )
+            if outcome_revision != int(
+                self._guided_backend_validation_revision
+            ):
+                outcome = dataclasses.replace(outcome, stale=True)
+            self._guided_backend_validation_outcome = outcome
+            self._guided_backend_validation_outcome_revision = outcome_revision
+        finally:
+            self._guided_backend_validation_active = False
+            self._guided_backend_validate_btn.setEnabled(True)
+            self._refresh_guided_backend_validation_display()
+
+    def _refresh_guided_backend_validation_display(self) -> None:
+        status_label = getattr(
+            self,
+            "_guided_backend_validation_status_label",
+            None,
+        )
+        details_label = getattr(
+            self,
+            "_guided_backend_validation_details_label",
+            None,
+        )
+        if status_label is None or details_label is None:
+            return
+        if getattr(self, "_guided_backend_validation_active", False):
+            status_label.setText(
+                "Backend validation is checking the current Guided request "
+                "in memory. No run is being started."
+            )
+            details_label.setText("")
+            return
+
+        outcome = getattr(self, "_guided_backend_validation_outcome", None)
+        if outcome is None:
+            status_label.setText(
+                "Backend validation has not been run for this Guided setup."
+            )
+            details_label.setText(
+                "Guided Run remains unavailable."
+            )
+            return
+
+        same_revision = getattr(
+            self,
+            "_guided_backend_validation_outcome_revision",
+            None,
+        ) == getattr(self, "_guided_backend_validation_revision", 0)
+        if (
+            getattr(outcome, "status", "") == "cancelled"
+            and not getattr(outcome, "stale", False)
+            and same_revision
+        ):
+            status_label.setText(
+                "Guided backend validation was cancelled. No files were "
+                "written and no run was started."
+            )
+            details_label.setText("")
+            return
+        if not self._is_guided_backend_validation_outcome_current():
+            reason = str(
+                getattr(
+                    self,
+                    "_guided_backend_validation_stale_reason",
+                    "",
+                )
+                or "the setup changed"
+            )
+            status_label.setText(
+                "Guided validation is stale because the setup changed. "
+                "Validate again before relying on this result."
+            )
+            details_label.setText(f"Stale reason: {reason}")
+            return
+
+        status = getattr(outcome, "status", "")
+        if status == "validator_accepted":
+            status_label.setText(
+                "Backend validation accepted the current Guided request. "
+                "This confirms the request is structurally and semantically "
+                "valid for the first Guided validation subset. It does not "
+                "authorize or start a run."
+            )
+            identity = str(getattr(outcome, "request_identity", "") or "")
+            details_label.setText(
+                f"Request identity: {identity}\n"
+                "Guided Run remains unavailable."
+            )
+            return
+
+        summaries = {
+            "materialization_failed": (
+                "Guided setup is incomplete or stale. Fix the issue below "
+                "and validate again."
+            ),
+            "compile_failed": (
+                "The Guided request could not be compiled. Fix the issue "
+                "below and validate again."
+            ),
+            "validator_refused": (
+                "Backend validation refused the current Guided request. Fix "
+                "the issue below and validate again."
+            ),
+            "internal_error": (
+                "Guided backend validation could not complete safely. Fix "
+                "any setup issues and validate again."
+            ),
+        }
+        status_label.setText(
+            summaries.get(
+                status,
+                "Guided backend validation could not complete safely.",
+            )
+        )
+        issues = tuple(getattr(outcome, "blocking_issues", ()) or ())
+        if not issues:
+            details_label.setText("Guided Run remains unavailable.")
+            return
+        issue = issues[0]
+        detail_code = str(getattr(issue, "detail_code", "") or "")
+        lines = [
+            f"Category: {getattr(issue, 'category', '')}",
+            f"Section: {getattr(issue, 'section', '')}",
+            f"Message: {getattr(issue, 'message', '')}",
+        ]
+        if detail_code:
+            lines.append(f"Detail code: {detail_code}")
+        lines.append("Guided Run remains unavailable.")
+        details_label.setText("\n".join(lines))
 
     def _build_guided_new_analysis_draft_plan(self):
         from photometry_pipeline.guided_new_analysis_plan import (
@@ -7784,16 +7956,68 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
+        new_analysis_panel = QWidget()
+        new_analysis_panel.setObjectName("guidedRunNewAnalysisPanel")
+        new_analysis_layout = QVBoxLayout(new_analysis_panel)
+        new_analysis_layout.setContentsMargins(0, 0, 0, 0)
+        new_analysis_layout.setSpacing(10)
         normal = QLabel(
-            "Future stage: validation, dry-run, and run controls for the guided path.\n"
-            "Existing Full Control buttons remain the only active validation/run path. "
-            "This Guided step does not execute analysis."
+            "Backend validation checks the current Guided request in memory. "
+            "Guided Run remains unavailable and this step does not execute analysis."
         )
         normal.setObjectName("guidedRunNewAnalysisContent")
         normal.setProperty("guidedSecondaryText", True)
         normal.setWordWrap(True)
-        self._guided_new_analysis_mode_panels["Run"] = normal
-        layout.addWidget(normal)
+        new_analysis_layout.addWidget(normal)
+
+        validation_group = QGroupBox("Backend validation")
+        validation_group.setObjectName("guidedBackendValidationPanel")
+        validation_layout = QVBoxLayout(validation_group)
+        validation_layout.setContentsMargins(10, 8, 10, 8)
+        validation_layout.setSpacing(8)
+        self._guided_backend_validate_btn = QPushButton(
+            "Validate Guided request"
+        )
+        self._guided_backend_validate_btn.setObjectName(
+            "guidedBackendValidateButton"
+        )
+        self._guided_backend_validate_btn.clicked.connect(
+            self._on_guided_backend_validate_clicked
+        )
+        validation_layout.addWidget(
+            self._guided_backend_validate_btn,
+            alignment=Qt.AlignLeft,
+        )
+        self._guided_backend_validation_status_label = QLabel("")
+        self._guided_backend_validation_status_label.setObjectName(
+            "guidedBackendValidationStatus"
+        )
+        self._guided_backend_validation_status_label.setWordWrap(True)
+        self._guided_backend_validation_status_label.setProperty(
+            "guidedSecondaryText",
+            True,
+        )
+        validation_layout.addWidget(
+            self._guided_backend_validation_status_label
+        )
+        self._guided_backend_validation_details_label = QLabel("")
+        self._guided_backend_validation_details_label.setObjectName(
+            "guidedBackendValidationDetails"
+        )
+        self._guided_backend_validation_details_label.setWordWrap(True)
+        self._guided_backend_validation_details_label.setProperty(
+            "guidedMutedText",
+            True,
+        )
+        self._guided_backend_validation_details_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        validation_layout.addWidget(
+            self._guided_backend_validation_details_label
+        )
+        new_analysis_layout.addWidget(validation_group)
+        self._guided_new_analysis_mode_panels["Run"] = new_analysis_panel
+        layout.addWidget(new_analysis_panel)
         open_panel = self._build_guided_open_results_unavailable_panel(
             "Run is skipped in Open Results mode",
             "Open Results mode reviews an existing completed run. It does not validate, "
@@ -7802,6 +8026,7 @@ class MainWindow(QMainWindow):
         )
         self._guided_open_results_mode_panels["Run"] = open_panel
         layout.addWidget(open_panel)
+        self._refresh_guided_backend_validation_display()
         return self._build_guided_step_scroll(
             "guidedStepRun",
             "Run",

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PySide6.QtWidgets import QApplication
@@ -11,6 +14,7 @@ from photometry_pipeline.guided_backend_validation_workflow import (
     GuidedBackendValidationWorkflowIssue,
     GuidedBackendValidationWorkflowOutcome,
 )
+import photometry_pipeline.guided_backend_validation_workflow as workflow
 from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDraftPlan,
 )
@@ -178,6 +182,240 @@ def test_dataset_clear_handler_invalidates_backend_validation(window):
     assert window._guided_backend_validation_revision > before
 
 
-def test_no_guided_validate_button_or_panel_was_added(window):
-    assert not hasattr(window, "_guided_validate_btn")
-    assert not hasattr(window, "_guided_backend_validation_panel")
+def _accepted_outcome():
+    return GuidedBackendValidationWorkflowOutcome(
+        status="validator_accepted",
+        accepted_for_backend_validation=True,
+        run_authorization=False,
+        request_identity="a" * 64,
+        validation_result=SimpleNamespace(accepted=True),
+        compile_result=SimpleNamespace(),
+        materialization_result=SimpleNamespace(),
+        blocking_issues=(),
+        user_summary="accepted",
+    )
+
+
+def _failure_outcome(status: str):
+    return GuidedBackendValidationWorkflowOutcome(
+        status=status,
+        accepted_for_backend_validation=False,
+        run_authorization=False,
+        request_identity=None,
+        validation_result=None,
+        compile_result=None,
+        materialization_result=None,
+        blocking_issues=(
+            GuidedBackendValidationWorkflowIssue(
+                stage="test",
+                category="test_category",
+                section="test_section",
+                message="test message",
+                detail_code="test_detail",
+            ),
+        ),
+        user_summary="failed",
+    )
+
+
+def test_guided_validate_widgets_exist_without_run_or_artifact_controls(window):
+    assert window._guided_backend_validate_btn.text() == (
+        "Validate Guided request"
+    )
+    assert window._guided_backend_validation_status_label is not None
+    assert window._guided_backend_validation_details_label is not None
+    assert not hasattr(window, "_guided_run_btn")
+    assert not hasattr(window, "_guided_validation_artifact_link")
+
+
+def test_validate_button_calls_workflow_through_module_namespace(
+    window,
+    monkeypatch,
+):
+    draft = GuidedNewAnalysisDraftPlan()
+    context = GuidedBackendValidationGuiContext(
+        draft=draft,
+        parser_contract=window._guided_backend_validation_parser_contract,
+        additional_protected_roots=(),
+        validator_contract=window._guided_backend_validator_contract,
+        revision=window._guided_backend_validation_revision,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        window,
+        "_capture_guided_backend_validation_context",
+        lambda: context,
+    )
+
+    def validate(draft_arg, **kwargs):
+        captured["draft"] = draft_arg
+        captured.update(kwargs)
+        return _accepted_outcome()
+
+    monkeypatch.setattr(
+        workflow,
+        "validate_current_guided_draft_for_backend",
+        validate,
+    )
+    for name in ("_on_validate", "_on_run", "_build_run_spec", "_build_argv"):
+        monkeypatch.setattr(
+            window,
+            name,
+            lambda *args, _name=name, **kwargs: pytest.fail(
+                f"{_name} must not be called"
+            ),
+        )
+
+    window._guided_backend_validate_btn.click()
+
+    assert captured["draft"] is draft
+    assert captured["parser_contract"] is context.parser_contract
+    assert captured["validator_contract"] is context.validator_contract
+    assert window._guided_backend_validation_outcome.status == (
+        "validator_accepted"
+    )
+    assert window._guided_backend_validation_outcome_revision == (
+        context.revision
+    )
+    assert "accepted the current Guided request" in (
+        window._guided_backend_validation_status_label.text()
+    )
+    assert "does not authorize or start a run" in (
+        window._guided_backend_validation_status_label.text()
+    )
+    assert window._guided_backend_validation_outcome.run_authorization is False
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        ("materialization_failed", "setup is incomplete or stale"),
+        ("compile_failed", "could not be compiled"),
+        ("validator_refused", "Backend validation refused"),
+        ("internal_error", "could not complete safely"),
+    ],
+)
+def test_refused_and_error_outcome_display(
+    window,
+    status: str,
+    expected: str,
+):
+    window._guided_backend_validation_outcome = _failure_outcome(status)
+    window._guided_backend_validation_outcome_revision = (
+        window._guided_backend_validation_revision
+    )
+    window._refresh_guided_backend_validation_display()
+    assert expected in window._guided_backend_validation_status_label.text()
+    details = window._guided_backend_validation_details_label.text()
+    assert "Category: test_category" in details
+    assert "Section: test_section" in details
+    assert "Message: test message" in details
+    assert "Detail code: test_detail" in details
+    assert "Guided Run remains unavailable" in details
+
+
+def test_stale_accepted_outcome_never_displays_current_acceptance(window):
+    window._guided_backend_validation_outcome = _accepted_outcome()
+    window._guided_backend_validation_outcome_revision = (
+        window._guided_backend_validation_revision
+    )
+    window._invalidate_guided_backend_validation("ROI changed")
+    status = window._guided_backend_validation_status_label.text()
+    assert "validation is stale" in status
+    assert "accepted the current Guided request" not in status
+
+
+def test_context_capture_exception_is_safe(window, monkeypatch):
+    monkeypatch.setattr(
+        window,
+        "_capture_guided_backend_validation_context",
+        lambda: (_ for _ in ()).throw(RuntimeError("sensitive traceback")),
+    )
+    monkeypatch.setattr(
+        window,
+        "_on_validate",
+        lambda: pytest.fail("Full Control Validate must not be called"),
+    )
+    window._guided_backend_validate_btn.click()
+    assert window._guided_backend_validation_outcome.status == "internal_error"
+    text = window._guided_backend_validation_status_label.text()
+    assert "could not complete safely" in text
+    assert "traceback" not in text
+    assert window._guided_backend_validation_outcome.run_authorization is False
+
+
+def test_validate_click_calls_no_write_run_or_allocation_api(
+    window,
+    monkeypatch,
+):
+    context = GuidedBackendValidationGuiContext(
+        draft=GuidedNewAnalysisDraftPlan(),
+        parser_contract=window._guided_backend_validation_parser_contract,
+        additional_protected_roots=(),
+        validator_contract=window._guided_backend_validator_contract,
+        revision=window._guided_backend_validation_revision,
+    )
+    monkeypatch.setattr(
+        window,
+        "_capture_guided_backend_validation_context",
+        lambda: context,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "validate_current_guided_draft_for_backend",
+        lambda *_args, **_kwargs: _accepted_outcome(),
+    )
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("write/run/allocation API is prohibited")
+
+    monkeypatch.setattr(Path, "write_text", fail)
+    monkeypatch.setattr(Path, "write_bytes", fail)
+    monkeypatch.setattr(Path, "mkdir", fail)
+    monkeypatch.setattr(Path, "touch", fail)
+    monkeypatch.setattr(os, "mkdir", fail)
+    monkeypatch.setattr(os, "makedirs", fail)
+    monkeypatch.setattr(window, "_on_validate", fail)
+    monkeypatch.setattr(window, "_on_run", fail)
+    monkeypatch.setattr(window, "_build_run_spec", fail)
+    monkeypatch.setattr(window, "_build_argv", fail)
+    monkeypatch.setattr(window._runner, "start", fail)
+
+    window._guided_backend_validate_btn.click()
+    assert window._guided_backend_validation_outcome.status == (
+        "validator_accepted"
+    )
+
+
+def test_revision_change_during_workflow_stores_stale_outcome(
+    window,
+    monkeypatch,
+):
+    revision = window._guided_backend_validation_revision
+    context = GuidedBackendValidationGuiContext(
+        draft=GuidedNewAnalysisDraftPlan(),
+        parser_contract=window._guided_backend_validation_parser_contract,
+        additional_protected_roots=(),
+        validator_contract=window._guided_backend_validator_contract,
+        revision=revision,
+    )
+    monkeypatch.setattr(
+        window,
+        "_capture_guided_backend_validation_context",
+        lambda: context,
+    )
+
+    def validate(*_args, **_kwargs):
+        window._guided_backend_validation_revision += 1
+        return _accepted_outcome()
+
+    monkeypatch.setattr(
+        workflow,
+        "validate_current_guided_draft_for_backend",
+        validate,
+    )
+    window._guided_backend_validate_btn.click()
+    assert window._guided_backend_validation_outcome.stale is True
+    assert "validation is stale" in (
+        window._guided_backend_validation_status_label.text()
+    )

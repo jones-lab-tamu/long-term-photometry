@@ -245,6 +245,16 @@ def _internal_error(stage: str) -> GuidedBackendValidationWorkflowOutcome:
     )
 
 
+def make_guided_backend_validation_workflow_internal_error(
+    stage: str = "context",
+) -> GuidedBackendValidationWorkflowOutcome:
+    """Return a safe in-memory outcome for an adapter boundary exception."""
+    normalized_stage = (
+        stage if isinstance(stage, str) and stage else "context"
+    )
+    return _internal_error(normalized_stage)
+
+
 def _is_cancelled(
     cancellation_check: Callable[[], bool] | None,
 ) -> bool:
