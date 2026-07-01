@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import builtins
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 import json
 import os
 import sys
@@ -12,6 +12,8 @@ import pytest
 
 from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDraftPlan,
+    GuidedNewAnalysisDatasetContractSnapshot,
+    GuidedNewAnalysisDatasetContractSourceIdentity,
     GuidedPlanCorrectionChoice,
 )
 from photometry_pipeline.guided_backend_validation_request import (
@@ -55,6 +57,7 @@ def _valid_parser_contract() -> RwdHeaderParsingContract:
 
 def _apply_valid_feature_event_profile(draft: GuidedNewAnalysisDraftPlan) -> None:
     draft.feature_event_profile_status = "applied"
+    draft.feature_event_profile_id = "feature-profile-001"
     draft.feature_event_explicitly_applied = True
     draft.feature_event_values = {
         "event_signal": "dff",
@@ -155,6 +158,8 @@ def _apply_valid_diagnostic_cache_and_evidence(
     draft.discovered_roi_ids = [roi_id]
     draft.included_roi_ids = [roi_id]
     draft.excluded_roi_ids = []
+    draft.sessions_per_hour = 6
+    draft.session_duration_sec = 120.0
     draft.correction_preview_result_id = evidence_id
     draft.correction_preview_status = "current"
     draft.correction_preview_source_cache_id = cache_id
@@ -173,6 +178,34 @@ def _apply_valid_diagnostic_cache_and_evidence(
             explicit_user_mark=True,
         )
     ]
+    draft.dataset_contract_snapshot = GuidedNewAnalysisDatasetContractSnapshot(
+        status="applied",
+        input_format="rwd",
+        resolved_input_format="rwd",
+        acquisition_mode="intermittent",
+        contract_values={
+            "rwd_time_col": "Time(s)",
+            "uv_suffix": "-410",
+            "sig_suffix": "-470",
+            "exclude_incomplete_final_rwd_chunk": False,
+        },
+        source_identity=GuidedNewAnalysisDatasetContractSourceIdentity(
+            input_source_path=str(source_root),
+            resolved_input_source_path=str(source_root),
+            input_format="rwd",
+            resolved_input_format="rwd",
+            acquisition_mode="intermittent",
+            sessions_per_hour=6,
+            session_duration_sec=120.0,
+            allow_partial_final_window=False,
+            exclude_incomplete_final_rwd_chunk=False,
+            discovered_roi_ids=(roi_id,),
+            included_roi_ids=(roi_id,),
+            source_setup_signature=source_signature,
+            diagnostic_cache_contract_identity=build_signature,
+        ),
+        explicitly_applied=True,
+    )
     draft.output_policy_status = "applied"
     draft.output_policy_path = str(source_root.parent / "planned_outputs")
     draft.output_policy_validation_issues = []
@@ -298,6 +331,7 @@ def test_parser_materialization_success(tmp_path: Path):
 
     result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
     assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    assert result.facts.complete_for_compilation is True
     assert result.facts.parser.available is True
     assert result.facts.parser.parser_contract_digest != ""
     assert result.facts.parser.unresolved_inputs == ()
@@ -460,7 +494,7 @@ def test_stage_2c_unresolved_inputs(tmp_path: Path):
 
     result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
     assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
-    assert result.facts.complete_for_compilation is False
+    assert result.facts.complete_for_compilation is True
 
     expected_unresolved = set()
     assert set(result.facts.unresolved_required_inputs) == expected_unresolved
@@ -729,6 +763,14 @@ def test_excluded_roi_strategy_marks_are_ignored(tmp_path: Path):
             }
         )
     )
+    draft.dataset_contract_snapshot = replace(
+        draft.dataset_contract_snapshot,
+        source_identity=replace(
+            draft.dataset_contract_snapshot.source_identity,
+            discovered_roi_ids=("CH1", "EXCLUDED"),
+            included_roi_ids=("CH1",),
+        ),
+    )
 
     result = materialize_guided_backend_validation_facts(
         draft, parser_contract=_valid_parser_contract()
@@ -814,7 +856,201 @@ def test_stage_2d_materializes_output_facts(tmp_path: Path):
         == "read_only_path_relationships_no_writability_probe"
     )
     assert result.facts.unresolved_required_inputs == ()
-    assert result.facts.complete_for_compilation is False
+    assert result.facts.complete_for_compilation is True
+
+
+def test_request_ready_enriched_facts_are_complete_and_immutable(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    parser = _valid_parser_contract()
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=parser
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    facts = result.facts
+    assert facts.complete_for_compilation is True
+    assert facts.unresolved_required_inputs == ()
+    assert facts.source_snapshot.source_root_path_style == "windows_drive"
+
+    parser_facts = facts.parser
+    assert parser_facts.available is True
+    assert parser_facts.schema_name == parser.schema_name
+    assert parser_facts.schema_version == parser.schema_version
+    assert parser_facts.header_search_line_limit == parser.header_search_line_limit
+    assert parser_facts.time_column_candidates == parser.time_column_candidates
+    assert parser_facts.uv_suffix_candidates == parser.uv_suffix_candidates
+    assert parser_facts.signal_suffix_candidates == parser.signal_suffix_candidates
+    assert parser_facts.column_normalization_rule == parser.column_normalization_rule
+    assert parser_facts.roi_name_rule == parser.roi_name_rule
+    assert parser_facts.ambiguity_policy == parser.ambiguity_policy
+
+    dataset = facts.acquisition_dataset
+    assert dataset.available is True
+    assert dataset.acquisition_mode == "intermittent"
+    assert dataset.sessions_per_hour == 6
+    assert dataset.session_duration_sec == pytest.approx(120.0)
+    assert dataset.timeline_anchor_mode == "civil"
+    assert dataset.fixed_daily_anchor_clock is None
+    assert dataset.rwd_time_col == "Time(s)"
+    assert dataset.uv_suffix == "-410"
+    assert dataset.sig_suffix == "-470"
+    assert dataset.dataset_source_setup_signature == facts.diagnostic_cache.source_setup_signature
+    assert dataset.diagnostic_cache_contract_identity == facts.diagnostic_cache.build_request_signature
+
+    roi = facts.roi_scope
+    assert roi.available is True
+    assert roi.discovered_roi_ids == ("CH1",)
+    assert roi.included_roi_ids == ("CH1",)
+    assert roi.excluded_roi_ids == ()
+
+    correction = facts.correction
+    assert correction.available is True
+    assert correction.global_dynamic_fit_mode == "global_linear_regression"
+    assert correction.dynamic_fit_parameter_values
+    assert {mark.roi_id for mark in correction.confirmed_marks} == {"CH1"}
+    assert all(mark.explicit_user_mark and mark.current for mark in correction.confirmed_marks)
+
+    feature = facts.feature_event
+    assert feature.available is True
+    assert feature.profile_id == "feature-profile-001"
+    assert feature.profile_schema_version == "guided_feature_event_profile.v1"
+    assert feature.profile_status == "applied"
+    assert feature.current is True
+    assert feature.active_fields
+    assert feature.inactive_fields
+    assert not hasattr(feature, "feature_event_updated_at_utc")
+    assert not hasattr(feature, "evidence_summary")
+
+    with pytest.raises(FrozenInstanceError):
+        facts.roi_scope.included_roi_ids = ("changed",)  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        facts.correction.global_dynamic_fit_mode = "changed"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "mutation,expected",
+    [
+        ("missing_semantic", "dataset_semantic_value_unresolved"),
+        ("stale", "dataset_facts_stale"),
+        ("source_signature", "dataset_source_signature_mismatch"),
+        ("missing_timing", "dataset_semantic_value_unresolved"),
+    ],
+)
+def test_dataset_fact_enrichment_failures(
+    tmp_path: Path,
+    mutation: str,
+    expected: str,
+):
+    draft = _valid_stage2c_draft(tmp_path)
+    snapshot = draft.dataset_contract_snapshot
+    if mutation == "missing_semantic":
+        values = dict(snapshot.contract_values)
+        values.pop("rwd_time_col")
+        draft.dataset_contract_snapshot = replace(snapshot, contract_values=values)
+    elif mutation == "stale":
+        draft.dataset_contract_snapshot = replace(
+            snapshot, status="stale", stale_reasons=("changed",)
+        )
+    elif mutation == "source_signature":
+        draft.dataset_contract_snapshot = replace(
+            snapshot,
+            source_identity=replace(
+                snapshot.source_identity,
+                source_setup_signature="different",
+            ),
+        )
+    else:
+        draft.dataset_contract_snapshot = replace(
+            snapshot,
+            source_identity=replace(
+                snapshot.source_identity,
+                sessions_per_hour=None,
+            ),
+        )
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == expected
+    assert result.no_usable_facts is True
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["no_discovered", "overlap", "incomplete_partition", "duplicate"],
+)
+def test_roi_scope_fact_enrichment_failures(tmp_path: Path, mutation: str):
+    draft = _valid_stage2c_draft(tmp_path)
+    if mutation == "no_discovered":
+        draft.discovered_roi_ids = []
+    elif mutation == "overlap":
+        draft.excluded_roi_ids = ["CH1"]
+    elif mutation == "incomplete_partition":
+        draft.discovered_roi_ids = ["CH1", "CH2"]
+    else:
+        draft.discovered_roi_ids = ["CH1", "CH1"]
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category in {
+        "roi_scope_missing",
+        "roi_scope_invalid",
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation,expected",
+    [
+        ("unresolved", "dynamic_fit_parameter_unresolved"),
+        ("mode_mismatch", "dynamic_fit_parameter_contract_mismatch"),
+    ],
+)
+def test_dynamic_fit_fact_enrichment_failures(
+    tmp_path: Path,
+    mutation: str,
+    expected: str,
+):
+    draft = _valid_stage2c_draft(tmp_path)
+    if mutation == "unresolved":
+        draft.dynamic_fit_parameter_contract = replace(
+            draft.dynamic_fit_parameter_contract,
+            unresolved_parameters=("min_slope",),
+        )
+    else:
+        draft.dynamic_fit_parameter_contract = replace(
+            draft.dynamic_fit_parameter_contract,
+            dynamic_fit_mode="robust_global_event_reject",
+        )
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == expected
+
+
+def test_feature_event_profile_identity_is_required_for_complete_facts(
+    tmp_path: Path,
+):
+    draft = _valid_stage2c_draft(tmp_path)
+    draft.feature_event_profile_id = None
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert (
+        result.blocking_issues[0].category
+        == "feature_event_profile_identity_unavailable"
+    )
 
 
 @pytest.mark.parametrize("existing", [False, True])
@@ -1129,6 +1365,7 @@ def test_compiler_handoff_refuses_stage_2b(tmp_path: Path):
 
     result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
     assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    assert result.facts.complete_for_compilation is True
 
     validator_contract = GuidedBackendValidatorContract(
         validation_scope="guided_rwd_intermittent_phasic_full_validate",
@@ -1144,7 +1381,9 @@ def test_compiler_handoff_refuses_stage_2b(tmp_path: Path):
     )
     assert isinstance(compile_result, GuidedBackendValidationCompileFailure)
     assert compile_result.status == "refused"
+    assert compile_result.no_partial_request is True
     assert compile_result.no_request_identity is True
+    assert not hasattr(compile_result, "request")
 
 
 # Preservation: Exclusion True Refused

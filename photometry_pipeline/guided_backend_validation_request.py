@@ -34,6 +34,9 @@ GUIDED_BACKEND_VALIDATION_SUBSET_RULE_VERSION = "global_dynamic_fit_only.v1"
 GUIDED_BACKEND_VALIDATION_IDENTITY_DOMAIN = (
     "guided-backend-validation-request:v1"
 )
+GUIDED_BACKEND_FEATURE_EVENT_PROFILE_SCHEMA_VERSION = (
+    "guided_feature_event_profile.v1"
+)
 
 
 SOURCE_DATASET_REFUSAL_CATEGORIES = (
@@ -855,6 +858,7 @@ class GuidedBackendValidationRequest:
 class GuidedBackendSourceSnapshotFacts:
     available: bool = False
     source_root_canonical: str = ""
+    source_root_path_style: str = ""
     source_candidate_set_digest: str = ""
     source_candidate_content_digest: str = ""
     candidate_files: tuple[GuidedBackendSourceCandidateFile, ...] = ()
@@ -876,11 +880,139 @@ class GuidedBackendIncompleteFinalClassificationFacts:
 @dataclass(frozen=True)
 class GuidedBackendParserFacts:
     available: bool = False
+    schema_name: str = ""
+    schema_version: str = ""
+    header_search_line_limit: int | None = None
+    time_column_candidates: tuple[str, ...] = ()
+    uv_suffix_candidates: tuple[str, ...] = ()
+    signal_suffix_candidates: tuple[str, ...] = ()
+    column_normalization_rule: str = ""
+    roi_name_rule: str = ""
+    ambiguity_policy: str = ""
     parser_contract_digest: str = ""
     unresolved_inputs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        for name in (
+            "time_column_candidates",
+            "uv_suffix_candidates",
+            "signal_suffix_candidates",
+        ):
+            _require_tuple(getattr(self, name), name)
         _require_tuple(self.unresolved_inputs, "unresolved_inputs")
+
+
+@dataclass(frozen=True)
+class GuidedBackendAcquisitionDatasetFacts:
+    available: bool = False
+    acquisition_mode: str = ""
+    sessions_per_hour: int | None = None
+    session_duration_sec: float | None = None
+    timeline_anchor_mode: str = ""
+    fixed_daily_anchor_clock: str | None = None
+    allow_partial_final_window: bool = False
+    exclude_incomplete_final_rwd_chunk: bool = False
+    dataset_snapshot_schema_version: str = ""
+    dataset_status: str = ""
+    dataset_current_applied: bool = False
+    rwd_time_col: str = ""
+    uv_suffix: str = ""
+    sig_suffix: str = ""
+    semantic_values: tuple[GuidedBackendTypedFieldValue, ...] = ()
+    dataset_source_setup_signature: str = ""
+    diagnostic_cache_contract_identity: str = ""
+    validation_issue_categories: tuple[str, ...] = ()
+    stale_reason_categories: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in (
+            "semantic_values",
+            "validation_issue_categories",
+            "stale_reason_categories",
+        ):
+            _require_tuple(getattr(self, name), name)
+
+
+@dataclass(frozen=True)
+class GuidedBackendRoiScopeFacts:
+    available: bool = False
+    discovered_roi_ids: tuple[str, ...] = ()
+    included_roi_ids: tuple[str, ...] = ()
+    excluded_roi_ids: tuple[str, ...] = ()
+    selection_mode: str = "include"
+    inventory_status: str = ""
+    inventory_source_content_digest: str = ""
+    roi_inventory_identity_status: str = "deferred_not_authoritative"
+
+    def __post_init__(self) -> None:
+        for name in (
+            "discovered_roi_ids",
+            "included_roi_ids",
+            "excluded_roi_ids",
+        ):
+            _require_tuple(getattr(self, name), name)
+
+
+@dataclass(frozen=True)
+class GuidedBackendConfirmedStrategyMarkFacts:
+    roi_id: str
+    selected_dynamic_fit_mode: str
+    diagnostic_cache_id: str
+    source_setup_signature: str
+    diagnostic_scope_signature: str
+    build_request_signature: str
+    evidence_reference_id: str
+    evidence_chunk: int | None = None
+    explicit_user_mark: bool = True
+    current: bool = True
+
+
+@dataclass(frozen=True)
+class GuidedBackendCorrectionFacts:
+    available: bool = False
+    strategy_scope: str = "global"
+    global_correction_strategy: str = "dynamic_fit"
+    global_dynamic_fit_mode: str = ""
+    dynamic_fit_parameter_values: tuple[GuidedBackendTypedFieldValue, ...] = ()
+    confirmed_marks: tuple[GuidedBackendConfirmedStrategyMarkFacts, ...] = ()
+    mark_rule_version: str = "explicit_confirmed_mark.v1"
+    currentness_rule_version: str = "cache_bound_currentness.v1"
+    unanimity_rule_version: str = "included_roi_unanimous_dynamic_fit.v1"
+    blocked_strategy_states: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in (
+            "dynamic_fit_parameter_values",
+            "confirmed_marks",
+            "blocked_strategy_states",
+        ):
+            _require_tuple(getattr(self, name), name)
+
+
+@dataclass(frozen=True)
+class GuidedBackendFeatureEventFacts:
+    available: bool = False
+    profile_schema_version: str = ""
+    profile_id: str = ""
+    effective_values: tuple[GuidedBackendTypedFieldValue, ...] = ()
+    active_fields: tuple[str, ...] = ()
+    inactive_fields: tuple[str, ...] = ()
+    profile_status: str = ""
+    explicitly_applied: bool = False
+    current: bool = False
+    visible_unapplied_changes: bool = False
+    validation_issue_categories: tuple[str, ...] = ()
+    stale_reason_categories: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in (
+            "effective_values",
+            "active_fields",
+            "inactive_fields",
+            "validation_issue_categories",
+            "stale_reason_categories",
+        ):
+            _require_tuple(getattr(self, name), name)
 
 
 @dataclass(frozen=True)
@@ -943,6 +1075,15 @@ class GuidedBackendValidationMaterializedFacts:
     parser: GuidedBackendParserFacts = field(
         default_factory=GuidedBackendParserFacts
     )
+    acquisition_dataset: GuidedBackendAcquisitionDatasetFacts = field(
+        default_factory=GuidedBackendAcquisitionDatasetFacts
+    )
+    roi_scope: GuidedBackendRoiScopeFacts = field(
+        default_factory=GuidedBackendRoiScopeFacts
+    )
+    correction: GuidedBackendCorrectionFacts = field(
+        default_factory=GuidedBackendCorrectionFacts
+    )
     diagnostic_cache: GuidedBackendDiagnosticCacheFacts = field(
         default_factory=GuidedBackendDiagnosticCacheFacts
     )
@@ -951,6 +1092,9 @@ class GuidedBackendValidationMaterializedFacts:
     )
     evidence_references: GuidedBackendEvidenceReferenceFacts = field(
         default_factory=GuidedBackendEvidenceReferenceFacts
+    )
+    feature_event: GuidedBackendFeatureEventFacts = field(
+        default_factory=GuidedBackendFeatureEventFacts
     )
     effective_feature_event_values: tuple[GuidedBackendTypedFieldValue, ...] = ()
     complete_for_compilation: bool = False

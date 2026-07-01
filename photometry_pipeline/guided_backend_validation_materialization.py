@@ -6,7 +6,7 @@ to gather filesystem facts into immutable dataclasses before pure compilation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields
 import hashlib
 import json
 import os
@@ -20,12 +20,18 @@ from photometry_pipeline.guided_backend_validation_request import (
     GuidedBackendIncompleteFinalClassificationFacts,
     GuidedBackendValidationMaterializedFacts,
     GuidedBackendParserFacts,
+    GuidedBackendAcquisitionDatasetFacts,
+    GuidedBackendRoiScopeFacts,
+    GuidedBackendConfirmedStrategyMarkFacts,
+    GuidedBackendCorrectionFacts,
+    GuidedBackendFeatureEventFacts,
     GuidedBackendEvidenceReferenceFacts,
     GuidedBackendEvidenceReference,
     GuidedBackendDiagnosticCacheFacts,
     GuidedBackendOutputFacts,
     GuidedBackendOutputRelationship,
     GuidedBackendTypedFieldValue,
+    GUIDED_BACKEND_FEATURE_EVENT_PROFILE_SCHEMA_VERSION,
 )
 from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDraftPlan,
@@ -141,6 +147,20 @@ STAGE_2C_VALID_ISSUES = {
     "output_precreate_not_allowed",
     "output_safety_facts_unavailable",
     "output_materialization_requires_write",
+    # Request-ready fact completion categories
+    "dataset_facts_missing",
+    "dataset_facts_stale",
+    "dataset_semantic_value_unresolved",
+    "dataset_source_signature_mismatch",
+    "parser_contract_fields_unavailable",
+    "roi_scope_missing",
+    "roi_scope_invalid",
+    "correction_facts_missing",
+    "dynamic_fit_parameter_unresolved",
+    "dynamic_fit_parameter_contract_mismatch",
+    "feature_event_profile_identity_unavailable",
+    "feature_event_activity_unavailable",
+    "source_path_style_unavailable",
 }
 
 # Backward-compatible name retained for callers/tests from Stage 2b.
@@ -729,6 +749,299 @@ def _materialize_evidence_references(
     ), None
 
 
+def _materialize_dataset_and_roi_facts(
+    draft: GuidedNewAnalysisDraftPlan,
+    source_facts: GuidedBackendSourceSnapshotFacts,
+    cache_facts: GuidedBackendDiagnosticCacheFacts,
+) -> tuple[
+    GuidedBackendAcquisitionDatasetFacts | None,
+    GuidedBackendRoiScopeFacts | None,
+    GuidedBackendValidationMaterializationFailure | None,
+]:
+    snapshot = draft.dataset_contract_snapshot
+    if snapshot.status == "stale" or snapshot.stale_reasons:
+        return None, None, _failure(
+            "dataset_facts_stale",
+            "dataset",
+            "The applied dataset contract snapshot is stale.",
+            detail_code="dataset_snapshot_stale",
+        )
+    if (
+        not snapshot.current_applied
+        or snapshot.input_format != "rwd"
+        or snapshot.resolved_input_format != "rwd"
+        or snapshot.acquisition_mode != "intermittent"
+    ):
+        return None, None, _failure(
+            "dataset_facts_missing",
+            "dataset",
+            "A current applied RWD/intermittent dataset contract is required.",
+            detail_code="dataset_snapshot_missing_or_invalid",
+        )
+    if (
+        draft.execution_intent.timeline_anchor_mode != "civil"
+        or draft.execution_intent.fixed_daily_anchor_clock is not None
+        or draft.execution_intent.execution_mode != "phasic"
+        or draft.execution_intent.run_profile != "full"
+    ):
+        return None, None, _failure(
+            "dataset_facts_missing",
+            "dataset",
+            "The execution intent is outside the first request-ready subset.",
+            detail_code="execution_intent_unsupported",
+        )
+
+    identity = snapshot.source_identity
+    required_semantic_names = ("rwd_time_col", "uv_suffix", "sig_suffix")
+    semantic_values: list[GuidedBackendTypedFieldValue] = []
+    for field_name in sorted(snapshot.contract_values):
+        value = snapshot.contract_values[field_name]
+        if value is not None and not isinstance(value, (str, bool, int, float)):
+            return None, None, _failure(
+                "dataset_semantic_value_unresolved",
+                "dataset",
+                f"Dataset semantic value '{field_name}' is not a canonical scalar.",
+                detail_code="dataset_value_not_scalar",
+            )
+        semantic_values.append(
+            GuidedBackendTypedFieldValue(
+                field_name=field_name,
+                value_type=type(value).__name__,
+                value=value,
+                source_classification="applied_dataset_contract",
+            )
+        )
+    missing_semantics = [
+        name
+        for name in required_semantic_names
+        if not isinstance(snapshot.contract_values.get(name), str)
+        or not str(snapshot.contract_values.get(name) or "").strip()
+    ]
+    if missing_semantics:
+        return None, None, _failure(
+            "dataset_semantic_value_unresolved",
+            "dataset",
+            "Required RWD dataset semantic values are missing.",
+            detail_code="required_rwd_semantics_missing",
+        )
+    if (
+        identity.sessions_per_hour is None
+        or identity.sessions_per_hour <= 0
+        or identity.session_duration_sec is None
+        or identity.session_duration_sec <= 0
+    ):
+        return None, None, _failure(
+            "dataset_semantic_value_unresolved",
+            "dataset",
+            "Session cadence and duration must be resolved.",
+            detail_code="session_timing_missing",
+        )
+    if (
+        identity.sessions_per_hour != draft.sessions_per_hour
+        or identity.session_duration_sec != draft.session_duration_sec
+        or identity.allow_partial_final_window is not False
+        or identity.exclude_incomplete_final_rwd_chunk is not False
+    ):
+        return None, None, _failure(
+            "dataset_facts_stale",
+            "dataset",
+            "Dataset timing or incomplete-final policy is stale.",
+            detail_code="dataset_timing_policy_mismatch",
+        )
+    if (
+        identity.source_setup_signature != cache_facts.source_setup_signature
+        or identity.diagnostic_cache_contract_identity
+        != cache_facts.build_request_signature
+    ):
+        return None, None, _failure(
+            "dataset_source_signature_mismatch",
+            "dataset",
+            "Dataset source identity does not match the diagnostic cache.",
+            detail_code="dataset_cache_identity_mismatch",
+        )
+
+    discovered = tuple(draft.discovered_roi_ids)
+    included = tuple(draft.included_roi_ids)
+    excluded = tuple(draft.excluded_roi_ids)
+    if not discovered or not included:
+        return None, None, _failure(
+            "roi_scope_missing",
+            "roi_scope",
+            "Discovered and included ROI sets are required.",
+            detail_code="roi_inventory_missing",
+        )
+    if (
+        len(discovered) != len(set(discovered))
+        or len(included) != len(set(included))
+        or len(excluded) != len(set(excluded))
+        or set(included) & set(excluded)
+        or set(included) | set(excluded) != set(discovered)
+    ):
+        return None, None, _failure(
+            "roi_scope_invalid",
+            "roi_scope",
+            "Included and excluded ROI sets must uniquely partition discovered ROIs.",
+            detail_code="roi_partition_invalid",
+        )
+    if (
+        tuple(identity.discovered_roi_ids) != discovered
+        or tuple(identity.included_roi_ids) != included
+    ):
+        return None, None, _failure(
+            "dataset_facts_stale",
+            "dataset",
+            "Dataset snapshot ROI identity is stale.",
+            detail_code="dataset_roi_identity_mismatch",
+        )
+
+    dataset_facts = GuidedBackendAcquisitionDatasetFacts(
+        available=True,
+        acquisition_mode="intermittent",
+        sessions_per_hour=identity.sessions_per_hour,
+        session_duration_sec=float(identity.session_duration_sec),
+        timeline_anchor_mode=draft.execution_intent.timeline_anchor_mode,
+        fixed_daily_anchor_clock=draft.execution_intent.fixed_daily_anchor_clock,
+        allow_partial_final_window=bool(identity.allow_partial_final_window),
+        exclude_incomplete_final_rwd_chunk=bool(
+            identity.exclude_incomplete_final_rwd_chunk
+        ),
+        dataset_snapshot_schema_version=snapshot.schema_version,
+        dataset_status=snapshot.status,
+        dataset_current_applied=snapshot.current_applied,
+        rwd_time_col=str(snapshot.contract_values["rwd_time_col"]),
+        uv_suffix=str(snapshot.contract_values["uv_suffix"]),
+        sig_suffix=str(snapshot.contract_values["sig_suffix"]),
+        semantic_values=tuple(semantic_values),
+        dataset_source_setup_signature=str(identity.source_setup_signature),
+        diagnostic_cache_contract_identity=str(
+            identity.diagnostic_cache_contract_identity
+        ),
+        validation_issue_categories=tuple(snapshot.validation_issues),
+        stale_reason_categories=tuple(snapshot.stale_reasons),
+    )
+    roi_facts = GuidedBackendRoiScopeFacts(
+        available=True,
+        discovered_roi_ids=discovered,
+        included_roi_ids=included,
+        excluded_roi_ids=excluded,
+        selection_mode="include",
+        inventory_status="plan_inventory_current_for_snapshot",
+        inventory_source_content_digest=source_facts.source_candidate_content_digest,
+        roi_inventory_identity_status="deferred_not_authoritative",
+    )
+    return dataset_facts, roi_facts, None
+
+
+def _materialize_correction_facts(
+    draft: GuidedNewAnalysisDraftPlan,
+    roi_facts: GuidedBackendRoiScopeFacts,
+    cache_facts: GuidedBackendDiagnosticCacheFacts,
+    evidence_facts: GuidedBackendEvidenceReferenceFacts,
+) -> tuple[
+    GuidedBackendCorrectionFacts | None,
+    GuidedBackendValidationMaterializationFailure | None,
+]:
+    contract = draft.dynamic_fit_parameter_contract
+    if contract.unresolved_parameters:
+        return None, _failure(
+            "dynamic_fit_parameter_unresolved",
+            "correction",
+            "Dynamic-fit parameter contract contains unresolved parameters.",
+            detail_code="dynamic_fit_parameters_unresolved",
+        )
+    evidence_by_roi = {
+        reference.roi_id: reference for reference in evidence_facts.references
+    }
+    modes = {
+        reference.selected_dynamic_fit_mode
+        for reference in evidence_facts.references
+    }
+    if len(modes) != 1:
+        return None, _failure(
+            "correction_facts_missing",
+            "correction",
+            "Correction evidence does not resolve to one global mode.",
+            detail_code="global_mode_unresolved",
+        )
+    global_mode = next(iter(modes))
+    if contract.dynamic_fit_mode != global_mode:
+        return None, _failure(
+            "dynamic_fit_parameter_contract_mismatch",
+            "correction",
+            "Dynamic-fit parameter contract does not match confirmed marks.",
+            detail_code="dynamic_fit_mode_mismatch",
+        )
+
+    parameter_values: list[GuidedBackendTypedFieldValue] = []
+    excluded_parameter_fields = {
+        "schema_version",
+        "unresolved_parameters",
+        "provenance",
+    }
+    for contract_field in dataclass_fields(contract):
+        field_name = contract_field.name
+        if field_name in excluded_parameter_fields:
+            continue
+        value = getattr(contract, field_name)
+        parameter_values.append(
+            GuidedBackendTypedFieldValue(
+                field_name=field_name,
+                value_type=type(value).__name__,
+                value=value,
+                source_classification="applied_dynamic_fit_contract",
+            )
+        )
+
+    choices_by_roi = {
+        choice.roi_id: choice
+        for choice in draft.per_roi_correction_strategy_choices
+        if choice.roi_id in set(roi_facts.included_roi_ids)
+    }
+    marks: list[GuidedBackendConfirmedStrategyMarkFacts] = []
+    for roi_id in roi_facts.included_roi_ids:
+        choice = choices_by_roi.get(roi_id)
+        evidence = evidence_by_roi.get(roi_id)
+        if choice is None or evidence is None:
+            return None, _failure(
+                "correction_facts_missing",
+                "correction",
+                f"Request-ready correction binding is missing for ROI '{roi_id}'.",
+                detail_code="confirmed_binding_missing",
+            )
+        if (
+            not choice.explicit_user_mark
+            or choice.current_or_stale != "current"
+            or evidence.current is not True
+            or evidence.diagnostic_cache_id != cache_facts.cache_id
+        ):
+            return None, _failure(
+                "correction_facts_missing",
+                "correction",
+                f"Confirmed strategy binding is not current for ROI '{roi_id}'.",
+                detail_code="confirmed_binding_not_current",
+            )
+        marks.append(
+            GuidedBackendConfirmedStrategyMarkFacts(
+                roi_id=roi_id,
+                selected_dynamic_fit_mode=global_mode,
+                diagnostic_cache_id=cache_facts.cache_id,
+                source_setup_signature=cache_facts.source_setup_signature,
+                diagnostic_scope_signature=cache_facts.diagnostic_scope_signature,
+                build_request_signature=cache_facts.build_request_signature,
+                evidence_reference_id=evidence.evidence_reference_id,
+                evidence_chunk=evidence.evidence_chunk,
+                explicit_user_mark=True,
+                current=True,
+            )
+        )
+    return GuidedBackendCorrectionFacts(
+        available=True,
+        global_dynamic_fit_mode=global_mode,
+        dynamic_fit_parameter_values=tuple(parameter_values),
+        confirmed_marks=tuple(marks),
+    ), None
+
+
 def _materialize_output_facts(
     draft: GuidedNewAnalysisDraftPlan,
     source_facts: GuidedBackendSourceSnapshotFacts,
@@ -1086,6 +1399,15 @@ def materialize_guided_backend_validation_facts(
 
     parser_facts = GuidedBackendParserFacts(
         available=True,
+        schema_name=parser_contract.schema_name,
+        schema_version=parser_contract.schema_version,
+        header_search_line_limit=parser_contract.header_search_line_limit,
+        time_column_candidates=tuple(parser_contract.time_column_candidates),
+        uv_suffix_candidates=tuple(parser_contract.uv_suffix_candidates),
+        signal_suffix_candidates=tuple(parser_contract.signal_suffix_candidates),
+        column_normalization_rule=parser_contract.column_normalization_rule,
+        roi_name_rule=parser_contract.roi_name_rule,
+        ambiguity_policy=parser_contract.ambiguity_policy,
         parser_contract_digest=parser_contract_digest,
         unresolved_inputs=(),
     )
@@ -1148,9 +1470,28 @@ def materialize_guided_backend_validation_facts(
             )
         )
 
+    source_root_text = snapshot.source_root_canonical
+    normalized_source_root = source_root_text.replace("\\", "/")
+    if (
+        len(normalized_source_root) >= 3
+        and normalized_source_root[1] == ":"
+        and normalized_source_root[2] == "/"
+    ):
+        source_root_path_style = "windows_drive"
+    elif normalized_source_root.startswith("/"):
+        source_root_path_style = "posix"
+    else:
+        return _failure(
+            "source_path_style_unavailable",
+            "source",
+            "The canonical source-root path style is unavailable.",
+            detail_code="source_path_style_unknown",
+        )
+
     source_snapshot_facts = GuidedBackendSourceSnapshotFacts(
         available=True,
         source_root_canonical=snapshot.source_root_canonical,
+        source_root_path_style=source_root_path_style,
         source_candidate_set_digest=snapshot.source_candidate_set_digest,
         source_candidate_content_digest=snapshot.source_candidate_content_digest,
         candidate_files=tuple(backend_candidate_files),
@@ -1263,6 +1604,52 @@ def materialize_guided_backend_validation_facts(
             )
         )
 
+    if not draft.feature_event_profile_id:
+        return _failure(
+            "feature_event_profile_identity_unavailable",
+            "feature_event",
+            "The applied feature/event profile has no semantic profile identity.",
+            detail_code="profile_id_missing",
+        )
+    active_fields = tuple(
+        item["field_name"]
+        for item in effective_values_list
+        if item["active_or_inactive"] == "active"
+    )
+    inactive_fields = tuple(
+        item["field_name"]
+        for item in effective_values_list
+        if item["active_or_inactive"] != "active"
+    )
+    if (
+        len(active_fields) + len(inactive_fields) != len(backend_typed_values)
+        or not active_fields
+    ):
+        return _failure(
+            "feature_event_activity_unavailable",
+            "feature_event",
+            "Feature/event active and inactive field classifications are incomplete.",
+            detail_code="feature_activity_incomplete",
+        )
+    feature_event_facts = GuidedBackendFeatureEventFacts(
+        available=True,
+        profile_schema_version=(
+            GUIDED_BACKEND_FEATURE_EVENT_PROFILE_SCHEMA_VERSION
+        ),
+        profile_id=draft.feature_event_profile_id,
+        effective_values=tuple(backend_typed_values),
+        active_fields=active_fields,
+        inactive_fields=inactive_fields,
+        profile_status=draft.feature_event_profile_status,
+        explicitly_applied=draft.feature_event_explicitly_applied,
+        current=True,
+        visible_unapplied_changes=False,
+        validation_issue_categories=tuple(
+            draft.feature_event_validation_issues
+        ),
+        stale_reason_categories=tuple(draft.feature_event_stale_reasons),
+    )
+
     # 11. Cancellation check after feature/event work
     if cancellation_check and cancellation_check():
         return _failure(
@@ -1287,6 +1674,27 @@ def materialize_guided_backend_validation_facts(
         return evidence_failure
     assert evidence_facts is not None
 
+    dataset_facts, roi_facts, dataset_failure = (
+        _materialize_dataset_and_roi_facts(
+            draft,
+            source_snapshot_facts,
+            cache_facts,
+        )
+    )
+    if dataset_failure is not None:
+        return dataset_failure
+    assert dataset_facts is not None and roi_facts is not None
+
+    correction_facts, correction_failure = _materialize_correction_facts(
+        draft,
+        roi_facts,
+        cache_facts,
+        evidence_facts,
+    )
+    if correction_failure is not None:
+        return correction_failure
+    assert correction_facts is not None
+
     output_facts, output_failure = _materialize_output_facts(
         draft,
         source_snapshot_facts,
@@ -1301,11 +1709,15 @@ def materialize_guided_backend_validation_facts(
         source_snapshot=source_snapshot_facts,
         incomplete_final_classification=classification_facts,
         parser=parser_facts,
+        acquisition_dataset=dataset_facts,
+        roi_scope=roi_facts,
+        correction=correction_facts,
         diagnostic_cache=cache_facts,
         output=output_facts,
         evidence_references=evidence_facts,
+        feature_event=feature_event_facts,
         effective_feature_event_values=tuple(backend_typed_values),
-        complete_for_compilation=False,
+        complete_for_compilation=True,
         unresolved_required_inputs=(),
     )
 
