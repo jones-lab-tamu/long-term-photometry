@@ -41,6 +41,12 @@ from .core.correction_policy_proposal import (
 from .core.reference_candidate_comparison import classify_reference_candidates
 from .core.utils import natural_sort_key
 from .core.reporting import generate_run_report, append_run_report_warnings
+from .guided_manifest_current_facts import build_guided_manifest_current_facts
+from .guided_manifest_verification import (
+    GuidedManifestCliContext,
+    load_guided_candidate_manifest,
+    verify_guided_candidate_manifest_consumption,
+)
 # from .viz import plots # Moved to run() to avoid side effects
 
 TONIC_GLOBAL_FIT_SAMPLE_CAPACITY = 200_000
@@ -1940,25 +1946,99 @@ class Pipeline:
             return p.parent.name
         return p.stem
 
-    def run(self, input_dir: str, output_dir: str, force_format: str = 'auto', recursive: bool = False, glob_pattern: str = "*.csv", include_rois: List[str] = None, exclude_rois: List[str] = None, traces_only: bool = False, emitter=None, sessions_per_hour: int = None):
+    def run(
+        self,
+        input_dir: str,
+        output_dir: str,
+        force_format: str = 'auto',
+        recursive: bool = False,
+        glob_pattern: str = "*.csv",
+        include_rois: List[str] = None,
+        exclude_rois: List[str] = None,
+        traces_only: bool = False,
+        emitter=None,
+        sessions_per_hour: int = None,
+        guided_manifest_path: str | None = None,
+    ):
         # Lazy import to avoid GUI side effects at module level
         from .viz import plots
         run_started = time.perf_counter()
         if self._is_phasic_timing_enabled():
             self._phasic_started_at = run_started
-        
+
+        guided_verification = None
+        guided_facts = None
+        if guided_manifest_path is not None:
+            loaded_manifest = load_guided_candidate_manifest(guided_manifest_path)
+            if not loaded_manifest.accepted or loaded_manifest.manifest is None:
+                detail = (
+                    loaded_manifest.blocking_issues[0].category
+                    if loaded_manifest.blocking_issues
+                    else "guided_manifest_load_failed"
+                )
+                raise RuntimeError(f"Guided manifest verification refused: {detail}")
+            manifest = loaded_manifest.manifest
+            guided_facts = build_guided_manifest_current_facts(
+                source_root=input_dir,
+                config=self.config,
+                manifest_included_roi_ids=manifest.included_roi_ids,
+            )
+            guided_verification = verify_guided_candidate_manifest_consumption(
+                manifest=manifest,
+                source_root=input_dir,
+                current_candidates=guided_facts.current_candidates,
+                current_roi_inventory=guided_facts.current_roi_inventory,
+                cli_context=GuidedManifestCliContext(
+                    input_format=force_format,
+                    mode=self.mode,
+                    run_type="full",
+                    traces_only=bool(traces_only),
+                    discover=False,
+                    validate_only=False,
+                    overwrite=False,
+                    preview_first_n=self.config.preview_first_n,
+                    requested_include_rois=(
+                        tuple(include_rois) if include_rois is not None else None
+                    ),
+                    requested_exclude_rois=(
+                        tuple(exclude_rois) if exclude_rois is not None else ()
+                    ),
+                ),
+            )
+            if not guided_verification.accepted:
+                detail = (
+                    guided_verification.blocking_issues[0].category
+                    if guided_verification.blocking_issues
+                    else "guided_manifest_verification_failed"
+                )
+                raise RuntimeError(f"Guided manifest verification refused: {detail}")
+            self.file_list = [
+                item.absolute_path
+                for item in guided_verification.verified_candidates
+            ]
+            self._selected_rois = list(
+                guided_verification.verified_included_roi_ids
+            )
+            self._guided_manifest_verification = guided_verification
+
         self.output_dir = output_dir
         os.makedirs(os.path.join(output_dir, 'qc'), exist_ok=True)
-        t_discovery = time.perf_counter()
-        self.discover_files(input_dir, recursive, glob_pattern, force_format=force_format)
-        self._add_phasic_phase_bucket("phase.input_discovery", time.perf_counter() - t_discovery)
+        if guided_verification is None:
+            t_discovery = time.perf_counter()
+            self.discover_files(input_dir, recursive, glob_pattern, force_format=force_format)
+            self._add_phasic_phase_bucket("phase.input_discovery", time.perf_counter() - t_discovery)
+        else:
+            self._add_phasic_phase_bucket("phase.input_discovery", 0.0)
         self._set_phasic_metric("files_discovered", len(self.file_list))
         
         # --- Preview Mode: limit to first N sessions ---
         n_total_discovered = len(self.file_list)
         preview_first_n = self.config.preview_first_n
         t_preview = time.perf_counter()
-        if preview_first_n is not None:
+        if guided_verification is not None:
+            self.run_type = "full"
+            self.preview_info = None
+        elif preview_first_n is not None:
             limit_n = min(preview_first_n, n_total_discovered)
             self.file_list = self.file_list[:limit_n]
             self.run_type = "preview"
@@ -1980,52 +2060,69 @@ class Pipeline:
             emitter.emit("inputs", "preview", "Preview selection resolved",
                          payload=self.preview_info)
         
-        # --- ROI Discovery & Resolution ---
-        roi_read_sec = 0.0
-        channels_seen = self._continuous_metadata_channels_seen(self.file_list)
-        if channels_seen is not None:
-            self._record_continuous_csv_reading("roi_discovery", sequential_passes=0, windows_yielded=0)
-            self._set_phasic_metric("roi_discovery_source", "continuous_metadata")
-        else:
-            channels_seen = []
-            for i, fpath in enumerate(self.file_list):
-                try:
-                    t_roi_read = time.perf_counter()
-                    chunk = self._load_entry_chunk(fpath, i, force_format)
-                    roi_read_sec += (time.perf_counter() - t_roi_read)
-                    channels_seen.append(chunk.channel_names)
-                except Exception as e:
-                    logging.warning(f"ROI Discovery: Failed to read {fpath}: {e}")
-            if self._is_continuous_mode_enabled():
-                self._record_continuous_csv_reading(
-                    "roi_discovery",
-                    fallback_windows=len(self.file_list),
-                )
-            self._set_phasic_metric("roi_discovery_source", "chunk_reads")
-        self._add_phasic_phase_bucket("phase.roi_discovery_read_chunks", roi_read_sec)
-        
-        if not channels_seen:
-            raise RuntimeError("No valid data files found for ROI discovery.")
-            
-        # Intersection over all valid chunks, preserving discovered order from first chunk
         t_roi_resolve = time.perf_counter()
-        channel_sets = [set(cx) for cx in channels_seen]
-        discovered_rois = [r for r in channels_seen[0] if all(r in cs for cs in channel_sets)]
-                
-        selected_rois = list(discovered_rois)
-        
-        if include_rois is not None:
-             missing = [r for r in include_rois if r not in discovered_rois]
-             if missing:
-                 raise ValueError(f"Validation Error: Included ROIs not found in discovered ROIs: {missing}")
-             # Preserve discovered order, filter by include_rois
-             selected_rois = [r for r in discovered_rois if r in include_rois]
-             
-        if exclude_rois is not None:
-             missing = [r for r in exclude_rois if r not in discovered_rois]
-             if missing:
-                 logging.warning(f"Excluded ROIs not found in discovered ROIs (ignoring): {missing}")
-             selected_rois = [r for r in selected_rois if r not in exclude_rois]
+        if guided_verification is not None:
+            assert guided_facts is not None
+            discovered_rois = list(
+                guided_facts.current_roi_inventory.discovered_roi_ids
+            )
+            selected_rois = list(guided_verification.verified_included_roi_ids)
+            include_rois = list(guided_verification.verified_included_roi_ids)
+            exclude_rois = list(guided_verification.verified_excluded_roi_ids)
+            self._add_phasic_phase_bucket("phase.roi_discovery_read_chunks", 0.0)
+            self._set_phasic_metric("roi_discovery_source", "guided_manifest")
+        else:
+            # --- ROI Discovery & Resolution ---
+            roi_read_sec = 0.0
+            channels_seen = self._continuous_metadata_channels_seen(self.file_list)
+            if channels_seen is not None:
+                self._record_continuous_csv_reading("roi_discovery", sequential_passes=0, windows_yielded=0)
+                self._set_phasic_metric("roi_discovery_source", "continuous_metadata")
+            else:
+                channels_seen = []
+                for i, fpath in enumerate(self.file_list):
+                    try:
+                        t_roi_read = time.perf_counter()
+                        chunk = self._load_entry_chunk(fpath, i, force_format)
+                        roi_read_sec += (time.perf_counter() - t_roi_read)
+                        channels_seen.append(chunk.channel_names)
+                    except Exception as e:
+                        logging.warning(f"ROI Discovery: Failed to read {fpath}: {e}")
+                if self._is_continuous_mode_enabled():
+                    self._record_continuous_csv_reading(
+                        "roi_discovery",
+                        fallback_windows=len(self.file_list),
+                    )
+                self._set_phasic_metric("roi_discovery_source", "chunk_reads")
+            self._add_phasic_phase_bucket("phase.roi_discovery_read_chunks", roi_read_sec)
+
+            if not channels_seen:
+                raise RuntimeError("No valid data files found for ROI discovery.")
+
+            # Intersection over all valid chunks, preserving first-chunk order.
+            channel_sets = [set(cx) for cx in channels_seen]
+            discovered_rois = [
+                r for r in channels_seen[0] if all(r in cs for cs in channel_sets)
+            ]
+            selected_rois = list(discovered_rois)
+            if include_rois is not None:
+                missing = [r for r in include_rois if r not in discovered_rois]
+                if missing:
+                    raise ValueError(
+                        "Validation Error: Included ROIs not found in "
+                        f"discovered ROIs: {missing}"
+                    )
+                selected_rois = [r for r in discovered_rois if r in include_rois]
+            if exclude_rois is not None:
+                missing = [r for r in exclude_rois if r not in discovered_rois]
+                if missing:
+                    logging.warning(
+                        "Excluded ROIs not found in discovered ROIs "
+                        f"(ignoring): {missing}"
+                    )
+                selected_rois = [
+                    r for r in selected_rois if r not in exclude_rois
+                ]
              
         self.roi_selection = {
             "discovered_rois": discovered_rois,

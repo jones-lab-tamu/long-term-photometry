@@ -30,6 +30,11 @@ def main():
     parser.add_argument('--preview-first-n', type=int, default=None, help="Preview mode: process only the first N discovered sessions (after discovery/sort).")
     parser.add_argument('--sessions-per-hour', type=int, default=None, help="Force sessions per hour for timing inference (overrides inference/defaults)")
     parser.add_argument(
+        '--guided-candidate-manifest',
+        default=None,
+        help="Internal/backend use only: exact Guided candidate manifest.",
+    )
+    parser.add_argument(
         '--acquisition-mode',
         choices=['intermittent', 'continuous'],
         default=None,
@@ -63,6 +68,19 @@ def main():
     parser.set_defaults(allow_partial_final_window=None)
     
     args = parser.parse_args()
+
+    if args.guided_candidate_manifest and (
+        args.mode != "phasic"
+        or args.format != "rwd"
+        or args.overwrite
+        or args.traces_only
+        or args.preview_first_n is not None
+        or args.include_rois is not None
+        or args.exclude_rois is not None
+        or args.acquisition_mode == "continuous"
+    ):
+        print("Error: unsupported internal Guided manifest execution state.")
+        sys.exit(1)
     
     # No active_glob logic needed, argparse handles dest='file_glob'
     
@@ -121,7 +139,8 @@ def main():
             include_rois=inc_rois, exclude_rois=exc_rois,
             traces_only=args.traces_only,
             emitter=emitter,
-            sessions_per_hour=args.sessions_per_hour
+            sessions_per_hour=args.sessions_per_hour,
+            guided_manifest_path=args.guided_candidate_manifest,
         )
         
         # Emit post-run audit events

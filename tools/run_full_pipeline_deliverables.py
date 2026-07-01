@@ -71,6 +71,17 @@ try:
         estimate_continuous_source_duration,
         plan_continuous_windows_for_source,
     )
+    from photometry_pipeline.guided_manifest_current_facts import (
+        build_guided_manifest_current_facts,
+    )
+    from photometry_pipeline.guided_manifest_verification import (
+        GuidedManifestCliContext,
+        load_guided_candidate_manifest,
+        verify_guided_candidate_manifest_consumption,
+    )
+    from photometry_pipeline.guided_new_analysis_plan import (
+        FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
+    )
 except ImportError:
     print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.", flush=True)
     raise SystemExit(1)
@@ -672,6 +683,11 @@ def parse_args():
                         ))
     parser.add_argument('--cancel-flag', default='auto',
                         help="Cancel flag path, or 'auto' for run_dir/CANCEL.REQUESTED")
+    parser.add_argument(
+        '--guided-candidate-manifest',
+        default=None,
+        help="Internal/backend use only: exact Guided candidate manifest.",
+    )
     return parser.parse_args()
 
 # ======================================================================
@@ -768,6 +784,88 @@ def validate_inputs(args):
             input_dir=str(args.input),
             config_path=str(args.config),
         )
+
+
+def verify_guided_manifest_before_output(args):
+    """Verify internal Guided manifest mode before run-dir resolution/allocation."""
+    if not getattr(args, "guided_candidate_manifest", None):
+        return None
+    loaded = load_guided_candidate_manifest(args.guided_candidate_manifest)
+    if not loaded.accepted or loaded.manifest is None:
+        detail = (
+            loaded.blocking_issues[0].category
+            if loaded.blocking_issues
+            else "guided_manifest_load_failed"
+        )
+        raise RuntimeError(f"Guided manifest verification refused: {detail}")
+    manifest = loaded.manifest
+    cfg = Config.from_yaml(args.config)
+    acquisition_mode = (
+        args.acquisition_mode
+        if args.acquisition_mode is not None
+        else getattr(cfg, "acquisition_mode", "intermittent")
+    )
+    if acquisition_mode != "intermittent":
+        raise RuntimeError("Guided manifest execution requires intermittent acquisition.")
+    if bool(getattr(cfg, "exclude_incomplete_final_rwd_chunk", False)):
+        raise RuntimeError(
+            "Guided manifest execution forbids incomplete-final RWD exclusion."
+        )
+    if str(getattr(cfg, "dynamic_fit_mode", "")) not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+        raise RuntimeError("Guided manifest execution has unsupported dynamic-fit mode.")
+    effective_preview_first_n = (
+        args.preview_first_n
+        if args.preview_first_n is not None
+        else getattr(cfg, "preview_first_n", None)
+    )
+    facts = build_guided_manifest_current_facts(
+        source_root=args.input,
+        config=cfg,
+        manifest_included_roi_ids=manifest.included_roi_ids,
+    )
+    include_rois = (
+        tuple(item.strip() for item in args.include_rois.split(",") if item.strip())
+        if args.include_rois
+        else None
+    )
+    exclude_rois = (
+        tuple(item.strip() for item in args.exclude_rois.split(",") if item.strip())
+        if args.exclude_rois
+        else ()
+    )
+    verified = verify_guided_candidate_manifest_consumption(
+        manifest=manifest,
+        source_root=args.input,
+        current_candidates=facts.current_candidates,
+        current_roi_inventory=facts.current_roi_inventory,
+        cli_context=GuidedManifestCliContext(
+            input_format=args.format,
+            mode=args.mode,
+            run_type=args.run_type,
+            traces_only=bool(args.traces_only),
+            discover=bool(args.discover),
+            validate_only=bool(args.validate_only),
+            overwrite=bool(args.overwrite),
+            preview_first_n=effective_preview_first_n,
+            requested_include_rois=include_rois,
+            requested_exclude_rois=exclude_rois,
+        ),
+    )
+    if not verified.accepted:
+        detail = (
+            verified.blocking_issues[0].category
+            if verified.blocking_issues
+            else "guided_manifest_verification_failed"
+        )
+        raise RuntimeError(f"Guided manifest verification refused: {detail}")
+    return verified
+
+
+def _append_guided_manifest_to_analysis_command(cmd, args, *, mode):
+    """Thread the internal manifest only into the phasic analysis subprocess."""
+    manifest_path = getattr(args, "guided_candidate_manifest", None)
+    if manifest_path and mode == "phasic":
+        cmd.extend(["--guided-candidate-manifest", manifest_path])
 
 
 def _discover_custom_tabular_csv_files(input_dir: str) -> list:
@@ -1036,6 +1134,14 @@ def main():
     phasic_out = None
     tonic_out = None
     emitter = None
+
+    # Internal Guided execution must verify live source identity before run-dir
+    # resolution, allocation, status creation, or any subprocess launch.
+    try:
+        verify_guided_manifest_before_output(args)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1)
 
     # ============================================================
     # Discovery Preflight
@@ -1728,9 +1834,12 @@ def main():
             if args.representative_session_index is not None: cmd_tonic.extend(['--representative-session-index', str(args.representative_session_index)])
             if args.preview_first_n is not None:
                 cmd_tonic.extend(['--preview-first-n', str(args.preview_first_n)])
-            if resolved_sessions_per_hour is not None: 
+            if resolved_sessions_per_hour is not None:
                 cmd_tonic.extend(['--sessions-per-hour', str(resolved_sessions_per_hour)])
             _append_continuous_analysis_args(cmd_tonic)
+            _append_guided_manifest_to_analysis_command(
+                cmd_tonic, args, mode="tonic"
+            )
             if events_path: cmd_tonic.extend(['--events-path', events_path])
             try:
                 manifest['commands'].append(run_cmd(cmd_tonic))
@@ -1762,9 +1871,12 @@ def main():
             if args.event_signal: cmd_phasic.extend(['--event-signal', args.event_signal])
             if args.representative_session_index is not None: cmd_phasic.extend(['--representative-session-index', str(args.representative_session_index)])
             if args.preview_first_n is not None: cmd_phasic.extend(['--preview-first-n', str(args.preview_first_n)])
-            if resolved_sessions_per_hour is not None: 
+            if resolved_sessions_per_hour is not None:
                 cmd_phasic.extend(['--sessions-per-hour', str(resolved_sessions_per_hour)])
             _append_continuous_analysis_args(cmd_phasic)
+            _append_guided_manifest_to_analysis_command(
+                cmd_phasic, args, mode="phasic"
+            )
             if events_path: cmd_phasic.extend(['--events-path', events_path])
             try:
                 manifest['commands'].append(run_cmd(cmd_phasic))
