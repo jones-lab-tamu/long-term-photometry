@@ -1386,6 +1386,32 @@ def test_compiler_handoff_succeeds_with_identity_deferred(tmp_path: Path):
     assert compile_result.request_identity_deferred is False
 
 
+def test_backend_validation_workflow_accepts_real_materialized_draft(
+    tmp_path: Path,
+):
+    from photometry_pipeline.guided_backend_validation_workflow import (
+        validate_current_guided_draft_for_backend,
+    )
+
+    draft = _valid_stage2c_draft(tmp_path)
+    validator_contract = GuidedBackendValidatorContract(
+        validation_scope="guided_rwd_intermittent_phasic_full_validate",
+        validation_contract_version="guided_backend_validation_contract.v1",
+        validator_capability_version="test_validator_capability.v1",
+        supported_subset_rule_version="global_dynamic_fit_only.v1",
+    )
+    outcome = validate_current_guided_draft_for_backend(
+        draft,
+        parser_contract=_valid_parser_contract(),
+        validator_contract=validator_contract,
+    )
+
+    assert outcome.status == "validator_accepted"
+    assert outcome.accepted_for_backend_validation is True
+    assert outcome.request_identity
+    assert outcome.run_authorization is False
+
+
 # Preservation: Exclusion True Refused
 def test_exclusion_true_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     source_root = _create_tiny_rwd_fixture(tmp_path)

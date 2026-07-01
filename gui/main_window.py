@@ -1648,6 +1648,20 @@ class MainWindow(QMainWindow):
         self._guided_imported_plan_status = ""
         self._guided_imported_plan_review_run_dir = None
         self._guided_imported_plan_adoption_status = None
+        from photometry_pipeline.guided_backend_validation_workflow import (
+            build_guided_backend_validation_parser_contract,
+            build_guided_backend_validator_contract,
+        )
+        self._guided_backend_validation_parser_contract = (
+            build_guided_backend_validation_parser_contract()
+        )
+        self._guided_backend_validator_contract = (
+            build_guided_backend_validator_contract()
+        )
+        self._guided_backend_validation_revision = 0
+        self._guided_backend_validation_outcome = None
+        self._guided_backend_validation_outcome_revision = None
+        self._guided_backend_validation_stale_reason = ""
         self._guided_raw_setup_controls = {}
         self._guided_open_results_mode_panels = {}
         self._guided_new_analysis_mode_panels = {}
@@ -2093,6 +2107,46 @@ class MainWindow(QMainWindow):
                 self._guided_exclude_incomplete_final_rwd_chunk_cb.isChecked(),
             )
         )
+        self._guided_input_dir_edit.textChanged.connect(
+            lambda _text: self._invalidate_guided_backend_validation(
+                "input source changed"
+            )
+        )
+        self._guided_format_combo.currentIndexChanged.connect(
+            lambda _idx: self._invalidate_guided_backend_validation(
+                "input format changed"
+            )
+        )
+        self._guided_acquisition_mode_combo.currentIndexChanged.connect(
+            lambda _idx: self._invalidate_guided_backend_validation(
+                "acquisition mode changed"
+            )
+        )
+        self._guided_sessions_per_hour_edit.textChanged.connect(
+            lambda _text: self._invalidate_guided_backend_validation(
+                "sessions per hour changed"
+            )
+        )
+        self._guided_session_duration_edit.textChanged.connect(
+            lambda _text: self._invalidate_guided_backend_validation(
+                "session duration changed"
+            )
+        )
+        self._guided_continuous_window_sec_spin.valueChanged.connect(
+            lambda _value: self._invalidate_guided_backend_validation(
+                "acquisition window changed"
+            )
+        )
+        self._guided_allow_partial_final_window_cb.stateChanged.connect(
+            lambda _state: self._invalidate_guided_backend_validation(
+                "partial final window policy changed"
+            )
+        )
+        self._guided_exclude_incomplete_final_rwd_chunk_cb.stateChanged.connect(
+            lambda _state: self._invalidate_guided_backend_validation(
+                "incomplete final RWD policy changed"
+            )
+        )
 
         self._input_dir.textChanged.connect(lambda _text: self._sync_guided_setup_from_full())
         self._output_dir.textChanged.connect(lambda _text: self._sync_guided_setup_from_full())
@@ -2493,6 +2547,7 @@ class MainWindow(QMainWindow):
         full_item = self._roi_list.item(row)
         if full_item.checkState() != item.checkState():
             full_item.setCheckState(item.checkState())
+        self._invalidate_guided_backend_validation("ROI selection changed")
 
     def _on_full_control_roi_item_changed(self, _item: QListWidgetItem) -> None:
         self._on_config_changed()
@@ -4586,6 +4641,9 @@ class MainWindow(QMainWindow):
         runner.start(argv, state=RunnerState.RUNNING)
 
     def _on_guided_diagnostic_cache_error(self, msg: str) -> None:
+        self._invalidate_guided_backend_validation(
+            "diagnostic cache state changed"
+        )
         self._guided_diagnostic_cache_status = DiagnosticCacheStatus(
             False,
             "launch_error",
@@ -4765,6 +4823,9 @@ class MainWindow(QMainWindow):
                 True,
                 "ready",
                 "Diagnostic cache ready.",
+            )
+            self._invalidate_guided_backend_validation(
+                "diagnostic cache identity changed"
             )
             self._guided_diagnostic_cache_status_label.setText(
                 "Diagnostic cache ready (preliminary; not final analysis)."
@@ -5451,6 +5512,10 @@ class MainWindow(QMainWindow):
             stale_reasons=tuple(dict.fromkeys(differences)),
             updated_at_utc=self._guided_dataset_contract_now_utc(),
         )
+        if getattr(snapshot, "status", "") != "stale":
+            self._invalidate_guided_backend_validation(
+                "dataset contract became stale"
+            )
 
     def _guided_dataset_contract_snapshot_text(self, snapshot, *, heading: str) -> str:
         status = getattr(snapshot, "status", "missing")
@@ -5535,6 +5600,7 @@ class MainWindow(QMainWindow):
                 "no_files_written": True,
             },
         )
+        self._invalidate_guided_backend_validation("dataset contract applied")
         self._refresh_guided_dataset_contract_panel()
         self._refresh_guided_draft_run_plan_preview()
 
@@ -5542,8 +5608,63 @@ class MainWindow(QMainWindow):
         self._guided_new_analysis_dataset_contract_snapshot = (
             self._default_guided_new_analysis_dataset_contract_snapshot()
         )
+        self._invalidate_guided_backend_validation("dataset contract cleared")
         self._refresh_guided_dataset_contract_panel()
         self._refresh_guided_draft_run_plan_preview()
+
+    def _invalidate_guided_backend_validation(self, reason: str) -> None:
+        self._guided_backend_validation_revision = int(
+            getattr(self, "_guided_backend_validation_revision", 0)
+        ) + 1
+        self._guided_backend_validation_stale_reason = str(reason or "setup changed")
+        outcome = getattr(self, "_guided_backend_validation_outcome", None)
+        if outcome is not None and hasattr(outcome, "stale"):
+            try:
+                self._guided_backend_validation_outcome = dataclasses.replace(
+                    outcome,
+                    stale=True,
+                )
+            except (TypeError, ValueError):
+                self._guided_backend_validation_outcome = None
+        self._guided_backend_validation_outcome_revision = None
+
+    def _is_guided_backend_validation_outcome_current(self) -> bool:
+        outcome = getattr(self, "_guided_backend_validation_outcome", None)
+        if outcome is None:
+            return False
+        if bool(getattr(outcome, "stale", True)):
+            return False
+        if getattr(outcome, "status", "") not in {
+            "materialization_failed",
+            "compile_failed",
+            "validator_refused",
+            "validator_accepted",
+            "internal_error",
+        }:
+            return False
+        return getattr(
+            self,
+            "_guided_backend_validation_outcome_revision",
+            None,
+        ) == getattr(self, "_guided_backend_validation_revision", 0)
+
+    def _capture_guided_backend_validation_context(self):
+        from photometry_pipeline.guided_backend_validation_workflow import (
+            GuidedBackendValidationGuiContext,
+        )
+
+        draft = self._build_guided_new_analysis_draft_plan()
+        additional_roots: tuple[tuple[str, str], ...] = ()
+        completed_run_root = self._current_guided_completed_run_dir()
+        if completed_run_root:
+            additional_roots = (("completed_run", completed_run_root),)
+        return GuidedBackendValidationGuiContext(
+            draft=draft,
+            parser_contract=self._guided_backend_validation_parser_contract,
+            additional_protected_roots=additional_roots,
+            validator_contract=self._guided_backend_validator_contract,
+            revision=int(self._guided_backend_validation_revision),
+        )
 
     def _build_guided_new_analysis_draft_plan(self):
         from photometry_pipeline.guided_new_analysis_plan import (
@@ -6375,6 +6496,7 @@ class MainWindow(QMainWindow):
             "no_auto_selection": True,
             "marked_at_utc": datetime.now(timezone.utc).isoformat(),
         }
+        self._invalidate_guided_backend_validation("strategy mark changed")
         self._refresh_guided_confirm_strategy_panel()
 
     def _guided_feature_event_profiles_for_current_run(self) -> list[FeatureEventProfile]:
@@ -6717,6 +6839,9 @@ class MainWindow(QMainWindow):
         self._guided_feature_event_status_label.setText(
             "Feature/event profile applied to in-memory draft plan. No outputs were written."
         )
+        self._invalidate_guided_backend_validation(
+            "feature/event profile applied"
+        )
         self._refresh_guided_draft_run_plan_preview()
 
     def _on_guided_clear_feature_event_profile(self) -> None:
@@ -6735,6 +6860,9 @@ class MainWindow(QMainWindow):
         self._refresh_guided_draft_run_plan_preview()
 
     def _on_guided_clear_feature_event_profile_new_analysis(self) -> None:
+        self._invalidate_guided_backend_validation(
+            "feature/event profile cleared"
+        )
         defaults_res = self._active_feature_event_defaults_result()
         baseline_path = defaults_res.baseline_source_path
         baseline_kind = defaults_res.baseline_source_kind
@@ -6972,8 +7100,20 @@ class MainWindow(QMainWindow):
         if not validation.ok:
             stale_reasons.append(validation.message)
         if stale_reasons:
+            became_stale = (
+                getattr(
+                    self,
+                    "_guided_new_analysis_output_policy_status",
+                    "missing",
+                )
+                != "stale"
+            )
             self._guided_new_analysis_output_policy_status = "stale"
             self._guided_new_analysis_output_policy_stale_reasons = list(dict.fromkeys(stale_reasons))
+            if became_stale:
+                self._invalidate_guided_backend_validation(
+                    "output policy became stale"
+                )
 
     def _on_guided_apply_output_policy(self) -> None:
         if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
@@ -7052,6 +7192,7 @@ class MainWindow(QMainWindow):
         self._guided_output_status_label.setText(
             "Output destination applied to new-analysis draft plan. No directories or files were created."
         )
+        self._invalidate_guided_backend_validation("output policy applied")
         self._guided_output_policy_editor_synced_run = "new_analysis"
         self._refresh_guided_draft_run_plan_preview()
 
@@ -7074,6 +7215,7 @@ class MainWindow(QMainWindow):
         self._refresh_guided_draft_run_plan_preview()
 
     def _on_guided_clear_output_policy_new_analysis(self) -> None:
+        self._invalidate_guided_backend_validation("output policy cleared")
         self._guided_new_analysis_output_policy_status = "missing"
         self._guided_new_analysis_output_policy_path = None
         self._guided_new_analysis_output_policy_validation_issues = []
