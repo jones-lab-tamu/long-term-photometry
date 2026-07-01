@@ -400,6 +400,17 @@ def _compiler_draft() -> GuidedNewAnalysisDraftPlan:
     )
 
 
+def _unchecked_replace(instance, **changes):
+    replacement = object.__new__(type(instance))
+    for item in fields(instance):
+        object.__setattr__(
+            replacement,
+            item.name,
+            changes.get(item.name, getattr(instance, item.name)),
+        )
+    return replacement
+
+
 def test_module_has_no_prohibited_imports():
     source = Path(contracts.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -742,7 +753,7 @@ def test_incomplete_fact_groups_refuse_even_when_flag_claims_complete():
     assert result.blocking_issues[0].category == "missing_source_snapshot"
 
 
-def test_complete_facts_compile_populated_request_with_identity_deferred():
+def test_complete_facts_compile_populated_request_with_identity():
     facts = _complete_facts()
 
     result = contracts.compile_guided_backend_validation_request(
@@ -753,8 +764,11 @@ def test_complete_facts_compile_populated_request_with_identity_deferred():
 
     assert isinstance(result, contracts.GuidedBackendValidationCompileSuccess)
     assert result.status == "compiled"
-    assert result.canonical_request_identity is None
-    assert result.request_identity_deferred is True
+    assert len(result.canonical_request_identity) == 64
+    assert result.canonical_request_identity == (
+        contracts.compute_guided_backend_validation_request_identity(result.request)
+    )
+    assert result.request_identity_deferred is False
     request = result.request
     assert isinstance(request, contracts.GuidedBackendValidationRequest)
     assert request.request_schema_name == contracts.GUIDED_BACKEND_VALIDATION_REQUEST_SCHEMA_NAME
@@ -800,19 +814,33 @@ def test_complete_facts_compile_populated_request_with_identity_deferred():
     assert request.output.relationships is facts.output.relationships
     assert request.local_contract.blocking_issue_categories == ()
     assert request.local_contract.unresolved_required_inputs == ()
-    assert "canonical_request_identity" in request.local_contract.deferred_capabilities
-    assert "backend_validation" in request.local_contract.deferred_capabilities
+    assert request.local_contract.deferred_capabilities == (
+        "backend_validation",
+        "run_authorization",
+        "app_build_identity",
+        "full_source_manifest_identity",
+        "strict_roi_inventory_identity",
+    )
 
 
-def test_compile_success_rejects_placeholder_identity():
-    with pytest.raises(
-        contracts.GuidedBackendValidationRequestContractError,
-        match="must be None",
-    ):
+@pytest.mark.parametrize(
+    "identity,deferred",
+    [
+        (None, False),
+        ("bad", False),
+        ("A" * 64, False),
+        (_DIGEST_A, True),
+    ],
+)
+def test_compile_success_rejects_invalid_or_deferred_identity(
+    identity: str | None,
+    deferred: bool,
+):
+    with pytest.raises(contracts.GuidedBackendValidationRequestContractError):
         contracts.GuidedBackendValidationCompileSuccess(
             request=_request(),
-            canonical_request_identity=_DIGEST_A,
-            request_identity_deferred=True,
+            canonical_request_identity=identity,  # type: ignore[arg-type]
+            request_identity_deferred=deferred,
         )
 
 
@@ -984,6 +1012,8 @@ def test_compiler_performs_no_filesystem_io(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(os, "stat", fail)
     monkeypatch.setattr(os, "scandir", fail)
     monkeypatch.setattr(os, "mkdir", fail)
+    monkeypatch.setattr(os.path, "exists", fail)
+    monkeypatch.setattr(os, "access", fail)
     result = contracts.compile_guided_backend_validation_request(
         GuidedNewAnalysisDraftPlan(),
         facts=contracts.GuidedBackendValidationMaterializedFacts(),
@@ -1006,6 +1036,8 @@ def test_compiler_success_performs_no_filesystem_io(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(os, "stat", fail)
     monkeypatch.setattr(os, "scandir", fail)
     monkeypatch.setattr(os, "mkdir", fail)
+    monkeypatch.setattr(os.path, "exists", fail)
+    monkeypatch.setattr(os, "access", fail)
 
     result = contracts.compile_guided_backend_validation_request(
         _compiler_draft(),
@@ -1037,9 +1069,353 @@ def test_refusal_message_does_not_expose_object_repr():
     assert "Traceback" not in message
 
 
-def test_identity_is_explicitly_deferred():
+def test_identity_is_deterministic_digest_with_pinned_vector():
+    request = _request()
+    identical = replace(request)
+
+    first = contracts.compute_guided_backend_validation_request_identity(request)
+
+    assert first == (
+        "953c33bac832171cf16531b97a3558f49929da785ac6662e14481986e9095a88"
+    )
+    assert first == contracts.compute_guided_backend_validation_request_identity(
+        request
+    )
+    assert first == contracts.compute_guided_backend_validation_request_identity(
+        identical
+    )
+    assert len(first) == 64
+    assert set(first) <= set("0123456789abcdef")
+
+
+def test_identity_payload_uses_domain_and_canonical_json_envelope():
+    payload = contracts._guided_backend_validation_request_identity_payload(
+        _request()
+    )
+    encoded = contracts.encode_canonical_value(payload)
+
+    assert tuple(payload) == ("identity_domain", "request")
+    assert (
+        payload["identity_domain"]
+        == contracts.GUIDED_BACKEND_VALIDATION_IDENTITY_DOMAIN
+    )
+    assert encoded.startswith(b'{"identity_domain":')
+    assert b'"request":{' in encoded
+    assert b" " not in encoded
+
+
+def test_identity_mapper_covers_every_request_dataclass_field():
+    expected_types = {
+        contracts.GuidedBackendValidationRequest,
+        contracts.GuidedBackendSourceRequest,
+        contracts.GuidedBackendAcquisitionDatasetRequest,
+        contracts.GuidedBackendRwdParserRequest,
+        contracts.GuidedBackendRoiScopeRequest,
+        contracts.GuidedBackendCorrectionRequest,
+        contracts.GuidedBackendDiagnosticEvidenceRequest,
+        contracts.GuidedBackendFeatureEventRequest,
+        contracts.GuidedBackendOutputRequest,
+        contracts.GuidedBackendLocalContractState,
+        contracts.GuidedBackendTypedFieldValue,
+        contracts.GuidedBackendSourceCandidateFile,
+        contracts.GuidedBackendConfirmedStrategyMark,
+        contracts.GuidedBackendEvidenceReference,
+        contracts.GuidedBackendOutputRelationship,
+    }
+    coverage = contracts._GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS
+
+    assert set(coverage) == expected_types
+    for model_type, mapped_names in coverage.items():
+        assert mapped_names == tuple(item.name for item in fields(model_type))
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "request_schema_name",
+        "request_schema_version",
+        "validation_scope",
+        "validation_contract_version",
+        "validator_capability_version",
+        "compiler_version",
+        "subset_rule_version",
+        "canonicalization_algorithm_version",
+    ],
+)
+def test_identity_changes_for_every_top_level_contract_field(field_name: str):
+    request = _request()
+    changed = _unchecked_replace(
+        request,
+        **{field_name: f"{getattr(request, field_name)}.changed"},
+    )
+    assert contracts.compute_guided_backend_validation_request_identity(
+        changed
+    ) != contracts.compute_guided_backend_validation_request_identity(request)
+
+
+@pytest.mark.parametrize(
+    "section,mutate",
+    [
+        (
+            "top_level",
+            lambda request: _unchecked_replace(
+                request, validator_capability_version="validator.v2"
+            ),
+        ),
+        (
+            "source",
+            lambda request: _unchecked_replace(
+                request,
+                source=_unchecked_replace(
+                    request.source, source_candidate_content_digest="d" * 64
+                ),
+            ),
+        ),
+        (
+            "acquisition",
+            lambda request: _unchecked_replace(
+                request,
+                acquisition_dataset=_unchecked_replace(
+                    request.acquisition_dataset, session_duration_sec=121.0
+                ),
+            ),
+        ),
+        (
+            "parser",
+            lambda request: _unchecked_replace(
+                request,
+                parser=_unchecked_replace(
+                    request.parser, parser_contract_digest="d" * 64
+                ),
+            ),
+        ),
+        (
+            "roi",
+            lambda request: _unchecked_replace(
+                request,
+                roi_scope=_unchecked_replace(
+                    request.roi_scope, included_roi_ids=("ROI1",)
+                ),
+            ),
+        ),
+        (
+            "correction",
+            lambda request: _unchecked_replace(
+                request,
+                correction=_unchecked_replace(
+                    request.correction,
+                    global_dynamic_fit_mode="robust_global_event_reject",
+                ),
+            ),
+        ),
+        (
+            "diagnostic",
+            lambda request: _unchecked_replace(
+                request,
+                diagnostic_evidence=_unchecked_replace(
+                    request.diagnostic_evidence,
+                    artifact_semantic_digest="d" * 64,
+                ),
+            ),
+        ),
+        (
+            "feature",
+            lambda request: _unchecked_replace(
+                request,
+                feature_event=_unchecked_replace(
+                    request.feature_event, profile_id="profile-002"
+                ),
+            ),
+        ),
+        (
+            "output",
+            lambda request: _unchecked_replace(
+                request,
+                output=_unchecked_replace(
+                    request.output, output_base_canonical=r"c:\other"
+                ),
+            ),
+        ),
+        (
+            "local_contract",
+            lambda request: _unchecked_replace(
+                request,
+                local_contract=_unchecked_replace(
+                    request.local_contract,
+                    deferred_capabilities=("different",),
+                ),
+            ),
+        ),
+    ],
+)
+def test_identity_changes_for_every_request_section(section: str, mutate):
+    request = _request()
+    assert contracts.compute_guided_backend_validation_request_identity(
+        mutate(request)
+    ) != contracts.compute_guided_backend_validation_request_identity(request)
+
+
+def test_identity_changes_for_nested_candidate_mark_evidence_and_relationship():
+    request = _request()
+    source = _unchecked_replace(
+        request.source,
+        candidate_files=(
+            _unchecked_replace(
+                request.source.candidate_files[0], size_bytes=999
+            ),
+        ),
+    )
+    mark = _unchecked_replace(
+        request.correction.confirmed_marks[0], evidence_chunk=2
+    )
+    correction = _unchecked_replace(request.correction, confirmed_marks=(mark,))
+    evidence = _unchecked_replace(
+        request.diagnostic_evidence.evidence_references[0], evidence_chunk=2
+    )
+    diagnostic = _unchecked_replace(
+        request.diagnostic_evidence, evidence_references=(evidence,)
+    )
+    relationship = _unchecked_replace(
+        request.output.relationships[0], status="different"
+    )
+    output = _unchecked_replace(request.output, relationships=(relationship,))
+    original = contracts.compute_guided_backend_validation_request_identity(request)
+
+    for changed in (
+        _unchecked_replace(request, source=source),
+        _unchecked_replace(request, correction=correction),
+        _unchecked_replace(request, diagnostic_evidence=diagnostic),
+        _unchecked_replace(request, output=output),
+    ):
+        assert (
+            contracts.compute_guided_backend_validation_request_identity(changed)
+            != original
+        )
+
+
+def test_identity_preserves_tuple_order_and_scalar_types():
+    request = _request()
+    reordered = _unchecked_replace(
+        request.parser,
+        time_column_candidates=("Timestamp",)
+        + request.parser.time_column_candidates,
+    )
+    base_value = request.feature_event.effective_values[0]
+    scalar_values = (
+        _unchecked_replace(base_value, value=None, value_type="NoneType"),
+        _unchecked_replace(base_value, value=True, value_type="bool"),
+        _unchecked_replace(base_value, value=1, value_type="int"),
+        _unchecked_replace(base_value, value=1.0, value_type="float"),
+        _unchecked_replace(base_value, value="1", value_type="str"),
+    )
+
+    identities = [
+        contracts.compute_guided_backend_validation_request_identity(request),
+        contracts.compute_guided_backend_validation_request_identity(
+            _unchecked_replace(request, parser=reordered)
+        ),
+    ]
+    identities.extend(
+        contracts.compute_guided_backend_validation_request_identity(
+            _unchecked_replace(
+                request,
+                feature_event=_unchecked_replace(
+                    request.feature_event, effective_values=(scalar_value,)
+                ),
+            )
+        )
+        for scalar_value in scalar_values
+    )
+    assert len(set(identities)) == len(identities)
+
+
+def test_identity_unicode_encoding_is_deterministic():
+    request = _request()
+    unicode_request = _unchecked_replace(
+        request,
+        validator_capability_version="válidator.Δ.v1",
+    )
+    first = contracts.compute_guided_backend_validation_request_identity(
+        unicode_request
+    )
+    second = contracts.compute_guided_backend_validation_request_identity(
+        _unchecked_replace(
+            request,
+            validator_capability_version="válidator.Δ.v1",
+        )
+    )
+    assert first == second
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), object()])
+def test_identity_rejects_unsupported_or_non_finite_values(bad_value):
+    request = _request()
+    typed = _unchecked_replace(
+        request.feature_event.effective_values[0], value=bad_value
+    )
+    request = _unchecked_replace(
+        request,
+        feature_event=_unchecked_replace(
+            request.feature_event, effective_values=(typed,)
+        ),
+    )
+
+    with pytest.raises(contracts.GuidedBackendValidationRequestContractError):
+        contracts.compute_guided_backend_validation_request_identity(request)
+
+
+def test_identity_rejects_non_request_input():
     with pytest.raises(
         contracts.GuidedBackendValidationRequestContractError,
-        match="deferred",
+        match="GuidedBackendValidationRequest",
     ):
-        contracts.compute_guided_backend_validation_request_identity(_request())
+        contracts.compute_guided_backend_validation_request_identity(object())
+
+
+def test_identity_failure_inside_compiler_returns_no_partial_request(monkeypatch):
+    def fail(_request):
+        raise contracts.GuidedBackendValidationRequestContractError("injected")
+
+    monkeypatch.setattr(
+        contracts,
+        "compute_guided_backend_validation_request_identity",
+        fail,
+    )
+    result = contracts.compile_guided_backend_validation_request(
+        _compiler_draft(),
+        facts=_complete_facts(),
+        validator_contract=_validator_contract(),
+    )
+
+    assert isinstance(result, contracts.GuidedBackendValidationCompileFailure)
+    assert result.blocking_issues[0].category == "compiler_internal_error"
+    assert (
+        result.blocking_issues[0].detail_code
+        == "request_identity_computation_failed"
+    )
+    assert result.no_partial_request is True
+    assert result.no_request_identity is True
+    assert not hasattr(result, "request")
+    assert not hasattr(result, "canonical_request_identity")
+
+
+def test_identity_success_performs_no_filesystem_io(monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise AssertionError("filesystem I/O is prohibited")
+
+    monkeypatch.setattr(builtins, "open", fail)
+    monkeypatch.setattr(Path, "read_text", fail)
+    monkeypatch.setattr(Path, "read_bytes", fail)
+    monkeypatch.setattr(Path, "write_text", fail)
+    monkeypatch.setattr(Path, "write_bytes", fail)
+    monkeypatch.setattr(Path, "mkdir", fail)
+    monkeypatch.setattr(Path, "touch", fail)
+    monkeypatch.setattr(os, "stat", fail)
+    monkeypatch.setattr(os, "scandir", fail)
+    monkeypatch.setattr(os.path, "exists", fail)
+    monkeypatch.setattr(os, "access", fail)
+
+    identity = contracts.compute_guided_backend_validation_request_identity(
+        _request()
+    )
+    assert len(identity) == 64

@@ -10,10 +10,15 @@ facts are not implemented yet.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import math
 from typing import Any
 
-from photometry_pipeline.guided_identity import CANONICALIZATION_ALGORITHM_VERSION
+from photometry_pipeline.guided_identity import (
+    CANONICALIZATION_ALGORITHM_VERSION,
+    GuidedIdentityError,
+    encode_canonical_value,
+)
 from photometry_pipeline.guided_new_analysis_plan import (
     FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
     GuidedNewAnalysisDraftPlan,
@@ -1222,8 +1227,8 @@ class GuidedBackendValidationCompileFailure:
 @dataclass(frozen=True)
 class GuidedBackendValidationCompileSuccess:
     request: GuidedBackendValidationRequest
-    canonical_request_identity: str | None = None
-    request_identity_deferred: bool = True
+    canonical_request_identity: str
+    request_identity_deferred: bool = False
     status: str = field(default="compiled", init=False)
 
     def __post_init__(self) -> None:
@@ -1231,14 +1236,14 @@ class GuidedBackendValidationCompileSuccess:
             raise GuidedBackendValidationRequestContractError(
                 "Compile success requires a GuidedBackendValidationRequest."
             )
-        if self.request_identity_deferred is not True:
+        if self.request_identity_deferred is not False:
             raise GuidedBackendValidationRequestContractError(
-                "Request identity must remain explicitly deferred."
+                "Compile success cannot defer request identity."
             )
-        if self.canonical_request_identity is not None:
-            raise GuidedBackendValidationRequestContractError(
-                "Deferred request identity must be None."
-            )
+        _require_sha256(
+            self.canonical_request_identity,
+            "canonical_request_identity",
+        )
 
 
 GuidedBackendValidationCompileResult = (
@@ -1952,7 +1957,6 @@ def compile_guided_backend_validation_request(
             unsupported_state_flags=(),
             unresolved_required_inputs=(),
             deferred_capabilities=(
-                "canonical_request_identity",
                 "backend_validation",
                 "run_authorization",
                 "app_build_identity",
@@ -1992,22 +1996,269 @@ def compile_guided_backend_validation_request(
             "Request construction failed after completeness gates passed.",
             detail_code="request_contract_construction_failed",
         )
+    try:
+        canonical_request_identity = (
+            compute_guided_backend_validation_request_identity(request)
+        )
+    except Exception:
+        return _failure(
+            "compiler_internal_error",
+            "compiler",
+            "Canonical request identity computation failed.",
+            detail_code="request_identity_computation_failed",
+        )
     return GuidedBackendValidationCompileSuccess(
         request=request,
-        canonical_request_identity=None,
-        request_identity_deferred=True,
+        canonical_request_identity=canonical_request_identity,
+        request_identity_deferred=False,
     )
+
+
+_GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
+    GuidedBackendTypedFieldValue: (
+        "field_name",
+        "value_type",
+        "value",
+        "source_classification",
+    ),
+    GuidedBackendSourceCandidateFile: (
+        "canonical_relative_path",
+        "size_bytes",
+        "sha256_content_digest",
+    ),
+    GuidedBackendSourceRequest: (
+        "source_root_canonical",
+        "source_root_path_style",
+        "source_format",
+        "snapshot_schema_name",
+        "snapshot_schema_version",
+        "discovery_rule_version",
+        "path_canonicalization_version",
+        "relative_path_rule_version",
+        "ignored_files_policy",
+        "build_mode",
+        "source_candidate_set_digest",
+        "source_candidate_content_digest",
+        "candidate_files",
+        "unresolved_source_identity_inputs",
+        "source_identity_level",
+    ),
+    GuidedBackendAcquisitionDatasetRequest: (
+        "acquisition_mode",
+        "sessions_per_hour",
+        "session_duration_sec",
+        "timeline_anchor_mode",
+        "fixed_daily_anchor_clock",
+        "allow_partial_final_window",
+        "exclude_incomplete_final_rwd_chunk",
+        "classification_schema_name",
+        "classification_schema_version",
+        "classifier_version",
+        "classification_status",
+        "not_requested_classification_digest",
+        "dataset_snapshot_schema_version",
+        "dataset_status",
+        "dataset_current_applied",
+        "rwd_time_col",
+        "uv_suffix",
+        "sig_suffix",
+        "semantic_values",
+        "dataset_source_setup_signature",
+        "diagnostic_cache_contract_identity",
+        "validation_issue_categories",
+        "stale_reason_categories",
+    ),
+    GuidedBackendRwdParserRequest: (
+        "schema_name",
+        "schema_version",
+        "header_search_line_limit",
+        "time_column_candidates",
+        "uv_suffix_candidates",
+        "signal_suffix_candidates",
+        "column_normalization_rule",
+        "roi_name_rule",
+        "ambiguity_policy",
+        "parser_contract_digest",
+        "unresolved_inputs",
+    ),
+    GuidedBackendRoiScopeRequest: (
+        "discovered_roi_ids",
+        "included_roi_ids",
+        "excluded_roi_ids",
+        "selection_mode",
+        "inventory_status",
+        "inventory_source_content_digest",
+        "roi_inventory_identity_status",
+    ),
+    GuidedBackendConfirmedStrategyMark: (
+        "roi_id",
+        "selected_dynamic_fit_mode",
+        "diagnostic_cache_id",
+        "source_setup_signature",
+        "diagnostic_scope_signature",
+        "build_request_signature",
+        "evidence_reference_id",
+        "evidence_chunk",
+        "explicit_user_mark",
+        "current",
+    ),
+    GuidedBackendCorrectionRequest: (
+        "strategy_scope",
+        "global_correction_strategy",
+        "global_dynamic_fit_mode",
+        "dynamic_fit_parameter_values",
+        "confirmed_marks",
+        "mark_rule_version",
+        "currentness_rule_version",
+        "unanimity_rule_version",
+        "blocked_strategy_states",
+    ),
+    GuidedBackendEvidenceReference: (
+        "evidence_reference_id",
+        "evidence_kind",
+        "diagnostic_cache_id",
+        "source_setup_signature",
+        "current",
+        "diagnostic_scope_signature",
+        "build_request_signature",
+        "evidence_chunk",
+        "roi_id",
+        "selected_dynamic_fit_mode",
+    ),
+    GuidedBackendDiagnosticEvidenceRequest: (
+        "cache_id",
+        "cache_root_canonical",
+        "source_setup_signature",
+        "diagnostic_scope_signature",
+        "build_request_signature",
+        "artifact_contract_version",
+        "provenance_schema_version",
+        "artifact_semantic_digest",
+        "provenance_semantic_digest",
+        "evidence_references",
+        "completed_run_rejection_category",
+        "resolver_status",
+        "preliminary_cache",
+        "production_analysis",
+        "stale_reasons",
+        "unresolved_inputs",
+    ),
+    GuidedBackendFeatureEventRequest: (
+        "profile_schema_version",
+        "profile_id",
+        "effective_values",
+        "active_fields",
+        "inactive_fields",
+        "profile_status",
+        "explicitly_applied",
+        "current",
+        "visible_unapplied_changes",
+        "validation_issue_categories",
+        "stale_reason_categories",
+    ),
+    GuidedBackendOutputRelationship: (
+        "relationship",
+        "root_kind",
+        "status",
+    ),
+    GuidedBackendOutputRequest: (
+        "output_base_canonical",
+        "output_base_path_style",
+        "path_role",
+        "future_output_owner",
+        "run_directory_strategy",
+        "creation_timing",
+        "overwrite",
+        "precreate",
+        "policy_status",
+        "policy_current",
+        "safety_classifier_version",
+        "relationships",
+        "protected_root_context_complete",
+        "blocker_categories",
+        "filesystem_fact_scope",
+    ),
+    GuidedBackendLocalContractState: (
+        "local_check_contract_version",
+        "blocking_issue_categories",
+        "warning_categories",
+        "unsupported_state_flags",
+        "unresolved_required_inputs",
+        "deferred_capabilities",
+    ),
+    GuidedBackendValidationRequest: (
+        "request_schema_name",
+        "request_schema_version",
+        "validation_scope",
+        "validation_contract_version",
+        "validator_capability_version",
+        "compiler_version",
+        "subset_rule_version",
+        "canonicalization_algorithm_version",
+        "source",
+        "acquisition_dataset",
+        "parser",
+        "roi_scope",
+        "correction",
+        "diagnostic_evidence",
+        "feature_event",
+        "output",
+        "local_contract",
+    ),
+}
+
+
+def _map_guided_backend_validation_identity_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise GuidedBackendValidationRequestContractError(
+                "Canonical request identity does not support non-finite floats."
+            )
+        return value
+    if isinstance(value, tuple):
+        return [
+            _map_guided_backend_validation_identity_value(item)
+            for item in value
+        ]
+    field_names = _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS.get(type(value))
+    if field_names is not None:
+        return {
+            field_name: _map_guided_backend_validation_identity_value(
+                getattr(value, field_name)
+            )
+            for field_name in field_names
+        }
+    raise GuidedBackendValidationRequestContractError(
+        "Canonical request identity encountered an unsupported value type."
+    )
+
+
+def _guided_backend_validation_request_identity_payload(
+    request: GuidedBackendValidationRequest,
+) -> dict[str, Any]:
+    if not isinstance(request, GuidedBackendValidationRequest):
+        raise GuidedBackendValidationRequestContractError(
+            "request must be a GuidedBackendValidationRequest."
+        )
+    return {
+        "identity_domain": GUIDED_BACKEND_VALIDATION_IDENTITY_DOMAIN,
+        "request": _map_guided_backend_validation_identity_value(request),
+    }
 
 
 def compute_guided_backend_validation_request_identity(
     request: GuidedBackendValidationRequest,
 ) -> str:
-    """Identity is deferred until a complete semantic request can be compiled."""
-    if not isinstance(request, GuidedBackendValidationRequest):
+    """Return the deterministic content identity of a frozen request."""
+    payload = _guided_backend_validation_request_identity_payload(request)
+    try:
+        encoded = encode_canonical_value(payload)
+        digest = hashlib.sha256(encoded).hexdigest()
+        _require_sha256(digest, "canonical_request_identity")
+    except (GuidedIdentityError, TypeError, ValueError) as exc:
         raise GuidedBackendValidationRequestContractError(
-            "request must be a GuidedBackendValidationRequest."
-        )
-    raise GuidedBackendValidationRequestContractError(
-        "Canonical backend validation request identity is deferred until "
-        "complete request population is implemented."
-    )
+            "Canonical backend validation request identity could not be computed."
+        ) from exc
+    return digest

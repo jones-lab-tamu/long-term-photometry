@@ -1382,8 +1382,8 @@ def test_compiler_handoff_succeeds_with_identity_deferred(tmp_path: Path):
     assert isinstance(compile_result, GuidedBackendValidationCompileSuccess)
     assert compile_result.status == "compiled"
     assert compile_result.request is not None
-    assert compile_result.canonical_request_identity is None
-    assert compile_result.request_identity_deferred is True
+    assert len(compile_result.canonical_request_identity) == 64
+    assert compile_result.request_identity_deferred is False
 
 
 # Preservation: Exclusion True Refused
