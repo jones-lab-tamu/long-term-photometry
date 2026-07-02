@@ -69,8 +69,8 @@ _SUMMARIES = {
     ),
     "backend_unavailable": "Guided Run is not available in this build.",
     "ready_hidden": (
-        "Guided Run is internally ready, but the Run control is not enabled "
-        "in this build."
+        "Guided Run is internally ready, but running from Guided Mode is not "
+        "enabled in this build."
     ),
 }
 

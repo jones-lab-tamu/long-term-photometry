@@ -1663,6 +1663,9 @@ class MainWindow(QMainWindow):
         self._guided_backend_validation_outcome_revision = None
         self._guided_backend_validation_stale_reason = ""
         self._guided_backend_validation_active = False
+        self._guided_run_authorization_result = None
+        self._guided_execution_payload_result = None
+        self._guided_run_readiness = None
         self._guided_raw_setup_controls = {}
         self._guided_open_results_mode_panels = {}
         self._guided_new_analysis_mode_panels = {}
@@ -5721,6 +5724,7 @@ class MainWindow(QMainWindow):
             self._refresh_guided_backend_validation_display()
 
     def _refresh_guided_backend_validation_display(self) -> None:
+        self._refresh_guided_run_readiness_display()
         status_label = getattr(
             self,
             "_guided_backend_validation_status_label",
@@ -5837,6 +5841,40 @@ class MainWindow(QMainWindow):
             lines.append(f"Detail code: {detail_code}")
         lines.append("Guided Run remains unavailable.")
         details_label.setText("\n".join(lines))
+
+    def _refresh_guided_run_readiness_display(self) -> None:
+        """Update only the disabled Guided Run affordance and its safe text."""
+        from photometry_pipeline.guided_run_readiness import (
+            evaluate_guided_run_readiness,
+        )
+
+        result = evaluate_guided_run_readiness(
+            validation_outcome=getattr(
+                self, "_guided_backend_validation_outcome", None
+            ),
+            validation_revision=getattr(
+                self, "_guided_backend_validation_outcome_revision", None
+            ),
+            current_gui_revision=int(
+                getattr(self, "_guided_backend_validation_revision", 0)
+            ),
+            authorization_result=getattr(
+                self, "_guided_run_authorization_result", None
+            ),
+            payload_result=getattr(
+                self, "_guided_execution_payload_result", None
+            ),
+            backend_execution_available=True,
+            startup_orchestration_available=True,
+        )
+        self._guided_run_readiness = result
+        button = getattr(self, "_guided_run_btn", None)
+        label = getattr(self, "_guided_run_readiness_label", None)
+        if button is not None:
+            button.setEnabled(False)
+            button.setToolTip(result.user_summary)
+        if label is not None:
+            label.setText(result.user_summary)
 
     def _build_guided_new_analysis_draft_plan(self):
         from photometry_pipeline.guided_new_analysis_plan import (
@@ -8016,6 +8054,27 @@ class MainWindow(QMainWindow):
             self._guided_backend_validation_details_label
         )
         new_analysis_layout.addWidget(validation_group)
+
+        run_group = QGroupBox("Guided analysis")
+        run_group.setObjectName("guidedRunAffordancePanel")
+        run_layout = QVBoxLayout(run_group)
+        run_layout.setContentsMargins(10, 8, 10, 8)
+        run_layout.setSpacing(8)
+        self._guided_run_btn = QPushButton("Run Guided Analysis")
+        self._guided_run_btn.setObjectName("guidedRunButton")
+        self._guided_run_btn.setEnabled(False)
+        run_layout.addWidget(self._guided_run_btn, alignment=Qt.AlignLeft)
+        self._guided_run_readiness_label = QLabel("")
+        self._guided_run_readiness_label.setObjectName(
+            "guidedRunReadinessStatus"
+        )
+        self._guided_run_readiness_label.setWordWrap(True)
+        self._guided_run_readiness_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        run_layout.addWidget(self._guided_run_readiness_label)
+        new_analysis_layout.addWidget(run_group)
+
         self._guided_new_analysis_mode_panels["Run"] = new_analysis_panel
         layout.addWidget(new_analysis_panel)
         open_panel = self._build_guided_open_results_unavailable_panel(

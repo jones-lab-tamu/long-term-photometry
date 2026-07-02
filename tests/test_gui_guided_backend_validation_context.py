@@ -218,13 +218,15 @@ def _failure_outcome(status: str):
     )
 
 
-def test_guided_validate_widgets_exist_without_run_or_artifact_controls(window):
+def test_guided_validate_and_disabled_run_widgets_exist(window):
     assert window._guided_backend_validate_btn.text() == (
         "Validate Guided request"
     )
     assert window._guided_backend_validation_status_label is not None
     assert window._guided_backend_validation_details_label is not None
-    assert not hasattr(window, "_guided_run_btn")
+    assert window._guided_run_btn.text() == "Run Guided Analysis"
+    assert window._guided_run_btn.isEnabled() is False
+    assert window._guided_run_readiness_label is not None
     assert not hasattr(window, "_guided_validation_artifact_link")
 
 
