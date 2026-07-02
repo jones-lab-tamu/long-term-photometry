@@ -573,24 +573,134 @@ def _materialize_evidence_references(
             "Current correction-preview evidence is required.",
             detail_code="correction_preview_missing_or_stale",
         )
-    if draft.correction_preview_source_cache_id != cache_facts.cache_id:
-        return None, _failure(
-            "evidence_reference_cache_mismatch",
-            "evidence_references",
-            "Correction-preview evidence does not reference the resolved diagnostic cache.",
-            detail_code="preview_cache_mismatch",
-        )
 
     inventory = artifact.get("session_chunk_inventory_summary", {}).get(
         "evidence_references"
     )
+    use_fallback = False
     if not isinstance(inventory, list) or not inventory:
-        return None, _failure(
-            "evidence_reference_missing_or_stale",
-            "evidence_references",
-            "The diagnostic cache does not contain a usable evidence-reference inventory.",
-            detail_code="cache_evidence_inventory_missing",
-        )
+        use_fallback = True
+
+    if use_fallback:
+        if not draft.correction_preview_source_cache_id:
+            return None, _failure(
+                "evidence_reference_cache_mismatch",
+                "evidence_references",
+                "Correction-preview source cache ID is missing.",
+                detail_code="correction_preview_source_cache_mismatch",
+            )
+        if draft.correction_preview_source_cache_id != cache_facts.cache_id:
+            return None, _failure(
+                "evidence_reference_cache_mismatch",
+                "evidence_references",
+                "Correction-preview source cache ID mismatch.",
+                detail_code="correction_preview_source_cache_mismatch",
+            )
+
+        preview_path = draft.correction_preview_path
+        if not preview_path:
+            return None, _failure(
+                "evidence_reference_missing_or_stale",
+                "evidence_references",
+                "Correction-preview path is missing.",
+                detail_code="correction_preview_path_missing",
+            )
+
+        # Verify correction_preview_path is under resolved diagnostic cache preview/workflow directory
+        preview_path_canon = os.path.realpath(preview_path)
+        cache_root_canon = os.path.realpath(cache_facts.cache_root_canonical)
+        cache_parent = os.path.realpath(os.path.dirname(cache_root_canon))
+        try:
+            common = os.path.commonpath([preview_path_canon, cache_parent])
+        except ValueError:
+            common = ""
+        if not common or common != cache_parent:
+            return None, _failure(
+                "evidence_reference_missing_or_stale",
+                "evidence_references",
+                "Correction-preview path is not associated with the diagnostic cache.",
+                detail_code="preview_path_outside_cache",
+            )
+
+        provenance_file = Path(preview_path_canon) / "preview_provenance.json"
+        if not provenance_file.is_file():
+            return None, _failure(
+                "evidence_reference_missing_or_stale",
+                "evidence_references",
+                "Preview provenance file is missing or unreadable.",
+                detail_code="cache_evidence_inventory_missing",
+            )
+        try:
+            prov_data = json.loads(provenance_file.read_text(encoding="utf-8"))
+        except Exception:
+            return None, _failure(
+                "evidence_reference_missing_or_stale",
+                "evidence_references",
+                "Preview provenance file is malformed.",
+                detail_code="cache_evidence_inventory_missing",
+            )
+        if not isinstance(prov_data, dict):
+            return None, _failure(
+                "evidence_reference_missing_or_stale",
+                "evidence_references",
+                "Preview provenance file is not a JSON object.",
+                detail_code="cache_evidence_inventory_missing",
+            )
+
+        if prov_data.get("preview_id") != evidence_reference_id:
+            return None, _failure(
+                "evidence_reference_missing_or_stale",
+                "evidence_references",
+                "Preview ID in provenance does not match the draft plan.",
+                detail_code="preview_id_mismatch",
+            )
+
+        prov_cache = prov_data.get("diagnostic_cache")
+        if not isinstance(prov_cache, dict):
+            return None, _failure(
+                "evidence_reference_missing_or_stale",
+                "evidence_references",
+                "Preview provenance diagnostic cache metadata is missing.",
+                detail_code="cache_evidence_inventory_missing",
+            )
+
+        if prov_cache.get("cache_id") != cache_facts.cache_id:
+            return None, _failure(
+                "evidence_reference_cache_mismatch",
+                "evidence_references",
+                "Preview provenance cache ID mismatch.",
+                detail_code="preview_provenance_cache_id_mismatch",
+            )
+        if prov_cache.get("build_request_signature") != cache_facts.build_request_signature:
+            return None, _failure(
+                "diagnostic_cache_build_request_mismatch",
+                "evidence_references",
+                "Preview provenance build request signature mismatch.",
+                detail_code="preview_provenance_build_request_mismatch",
+            )
+        if prov_cache.get("source_setup_signature") != cache_facts.source_setup_signature:
+            return None, _failure(
+                "diagnostic_cache_source_setup_mismatch",
+                "evidence_references",
+                "Preview provenance source setup signature mismatch.",
+                detail_code="preview_provenance_source_setup_mismatch",
+            )
+        if prov_cache.get("diagnostic_scope_signature") != cache_facts.diagnostic_scope_signature:
+            return None, _failure(
+                "diagnostic_cache_scope_mismatch",
+                "evidence_references",
+                "Preview provenance diagnostic scope signature mismatch.",
+                detail_code="preview_provenance_scope_mismatch",
+            )
+    else:
+        if draft.correction_preview_source_cache_id != cache_facts.cache_id:
+            return None, _failure(
+                "evidence_reference_cache_mismatch",
+                "evidence_references",
+                "Correction-preview evidence does not reference the resolved diagnostic cache.",
+                detail_code="preview_cache_mismatch",
+            )
+
     inventory_entries = inventory
 
     for roi_id in included:
@@ -671,55 +781,65 @@ def _materialize_evidence_references(
                     detail_code="mark_signature_mismatch",
                 )
 
-        reference_matches = [
-            entry
-            for entry in inventory_entries
-            if isinstance(entry, dict)
-            and entry.get("evidence_reference_id") == evidence_reference_id
-        ]
-        if not reference_matches:
-            return None, _failure(
-                "evidence_reference_missing_or_stale",
-                "evidence_references",
-                f"Cache evidence reference '{evidence_reference_id}' is missing.",
-                detail_code="cache_evidence_reference_missing",
-            )
-        roi_matches = [
-            entry for entry in reference_matches if entry.get("roi_id") == roi_id
-        ]
-        if not roi_matches:
-            return None, _failure(
-                "evidence_reference_roi_mismatch",
-                "evidence_references",
-                f"Cache evidence does not bind reference '{evidence_reference_id}' to ROI '{roi_id}'.",
-                detail_code="cache_evidence_roi_mismatch",
-            )
-        if not any(
-            entry.get("diagnostic_cache_id") == cache_facts.cache_id
-            for entry in roi_matches
-        ):
-            return None, _failure(
-                "evidence_reference_cache_mismatch",
-                "evidence_references",
-                "Cache evidence references a different diagnostic cache.",
-                detail_code="cache_evidence_cache_mismatch",
-            )
-        identity_matches = [
-            entry
-            for entry in roi_matches
-            if entry.get("diagnostic_cache_id") == cache_facts.cache_id
-        ]
-        if not any(
-            entry.get("selected_strategy", entry.get("dynamic_fit_mode"))
-            == choice.selected_strategy
-            for entry in identity_matches
-        ):
-            return None, _failure(
-                "evidence_reference_strategy_mismatch",
-                "evidence_references",
-                f"Cache evidence strategy does not match ROI '{roi_id}'.",
-                detail_code="cache_evidence_strategy_mismatch",
-            )
+        if use_fallback:
+            cache_roi_inventory = artifact.get("roi_inventory", [])
+            if roi_id not in cache_roi_inventory:
+                return None, _failure(
+                    "evidence_reference_roi_mismatch",
+                    "evidence_references",
+                    f"ROI '{roi_id}' is not present in the diagnostic cache ROI inventory.",
+                    detail_code="roi_not_in_cache_inventory",
+                )
+        else:
+            reference_matches = [
+                entry
+                for entry in inventory_entries
+                if isinstance(entry, dict)
+                and entry.get("evidence_reference_id") == evidence_reference_id
+            ]
+            if not reference_matches:
+                return None, _failure(
+                    "evidence_reference_missing_or_stale",
+                    "evidence_references",
+                    f"Cache evidence reference '{evidence_reference_id}' is missing.",
+                    detail_code="cache_evidence_reference_missing",
+                )
+            roi_matches = [
+                entry for entry in reference_matches if entry.get("roi_id") == roi_id
+            ]
+            if not roi_matches:
+                return None, _failure(
+                    "evidence_reference_roi_mismatch",
+                    "evidence_references",
+                    f"Cache evidence does not bind reference '{evidence_reference_id}' to ROI '{roi_id}'.",
+                    detail_code="cache_evidence_roi_mismatch",
+                )
+            if not any(
+                entry.get("diagnostic_cache_id") == cache_facts.cache_id
+                for entry in roi_matches
+            ):
+                return None, _failure(
+                    "evidence_reference_cache_mismatch",
+                    "evidence_references",
+                    "Cache evidence references a different diagnostic cache.",
+                    detail_code="cache_evidence_cache_mismatch",
+                )
+            identity_matches = [
+                entry
+                for entry in roi_matches
+                if entry.get("diagnostic_cache_id") == cache_facts.cache_id
+            ]
+            if not any(
+                entry.get("selected_strategy", entry.get("dynamic_fit_mode"))
+                == choice.selected_strategy
+                for entry in identity_matches
+            ):
+                return None, _failure(
+                    "evidence_reference_strategy_mismatch",
+                    "evidence_references",
+                    f"Cache evidence strategy does not match ROI '{roi_id}'.",
+                    detail_code="cache_evidence_strategy_mismatch",
+                )
 
         references.append(
             GuidedBackendEvidenceReference(

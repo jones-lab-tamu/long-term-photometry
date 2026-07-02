@@ -1507,3 +1507,241 @@ def test_cancellation_preflight(tmp_path: Path):
     result = materialize_guided_backend_validation_facts(draft, parser_contract=parser, cancellation_check=cancel_always)
     assert isinstance(result, GuidedBackendValidationMaterializationFailure)
     assert result.blocking_issues[0].category == "materialization_cancelled"
+
+
+def _setup_fallback_path(draft: GuidedNewAnalysisDraftPlan, tmp_path: Path):
+    artifact, provenance = _cache_payloads(draft)
+
+    if "evidence_references" in artifact["session_chunk_inventory_summary"]:
+        del artifact["session_chunk_inventory_summary"]["evidence_references"]
+
+    _write_cache_payloads(draft, artifact, provenance)
+
+    preview_dir = Path(draft.cache_root_path).parent / "previews" / draft.correction_preview_result_id
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    draft.correction_preview_path = str(preview_dir)
+
+    prov_data = {
+        "preview_id": draft.correction_preview_result_id,
+        "diagnostic_cache": {
+            "cache_id": draft.cache_id,
+            "build_request_signature": draft.build_request_signature,
+            "source_setup_signature": draft.source_setup_signature,
+            "diagnostic_scope_signature": draft.diagnostic_scope_signature,
+        }
+    }
+    prov_file = preview_dir / "preview_provenance.json"
+    prov_file.write_text(json.dumps(prov_data), encoding="utf-8")
+    return preview_dir, prov_file
+
+
+def test_fallback_validation_success(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    _setup_fallback_path(draft, tmp_path)
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+
+
+def test_fallback_missing_provenance(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    preview_dir, prov_file = _setup_fallback_path(draft, tmp_path)
+    prov_file.unlink()
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "cache_evidence_inventory_missing"
+
+
+def test_fallback_malformed_provenance(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    preview_dir, prov_file = _setup_fallback_path(draft, tmp_path)
+    prov_file.write_text("not json", encoding="utf-8")
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "cache_evidence_inventory_missing"
+
+
+def test_fallback_cache_id_mismatch(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    preview_dir, prov_file = _setup_fallback_path(draft, tmp_path)
+    data = json.loads(prov_file.read_text(encoding="utf-8"))
+    data["diagnostic_cache"]["cache_id"] = "different-cache-id"
+    prov_file.write_text(json.dumps(data), encoding="utf-8")
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "preview_provenance_cache_id_mismatch"
+
+
+def test_fallback_build_request_signature_mismatch(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    preview_dir, prov_file = _setup_fallback_path(draft, tmp_path)
+    data = json.loads(prov_file.read_text(encoding="utf-8"))
+    data["diagnostic_cache"]["build_request_signature"] = "different-sig"
+    prov_file.write_text(json.dumps(data), encoding="utf-8")
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "preview_provenance_build_request_mismatch"
+
+
+def test_fallback_source_setup_signature_mismatch(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    preview_dir, prov_file = _setup_fallback_path(draft, tmp_path)
+    data = json.loads(prov_file.read_text(encoding="utf-8"))
+    data["diagnostic_cache"]["source_setup_signature"] = "different-sig"
+    prov_file.write_text(json.dumps(data), encoding="utf-8")
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "preview_provenance_source_setup_mismatch"
+
+
+def test_fallback_diagnostic_scope_signature_mismatch(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    preview_dir, prov_file = _setup_fallback_path(draft, tmp_path)
+    data = json.loads(prov_file.read_text(encoding="utf-8"))
+    data["diagnostic_cache"]["diagnostic_scope_signature"] = "different-sig"
+    prov_file.write_text(json.dumps(data), encoding="utf-8")
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "preview_provenance_scope_mismatch"
+
+
+def test_fallback_preview_id_mismatch(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    preview_dir, prov_file = _setup_fallback_path(draft, tmp_path)
+    data = json.loads(prov_file.read_text(encoding="utf-8"))
+    data["preview_id"] = "different-preview-id"
+    prov_file.write_text(json.dumps(data), encoding="utf-8")
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "preview_id_mismatch"
+
+
+def test_fallback_preview_status_stale(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    _setup_fallback_path(draft, tmp_path)
+    draft.correction_preview_status = "stale"
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "correction_preview_missing_or_stale"
+
+
+def test_fallback_missing_preview_path(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    _setup_fallback_path(draft, tmp_path)
+    draft.correction_preview_path = ""
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "correction_preview_path_missing"
+
+
+def test_fallback_preview_path_outside_cache(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    _setup_fallback_path(draft, tmp_path)
+    outside_dir = tmp_path.parent / "outside_previews"
+    outside_dir.mkdir(exist_ok=True)
+    draft.correction_preview_path = str(outside_dir)
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "preview_path_outside_cache"
+
+
+def test_fallback_roi_missing_confirmed_strategy_choice(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    _setup_fallback_path(draft, tmp_path)
+    draft.per_roi_correction_strategy_choices = []
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "strategy_mark_missing"
+
+
+def test_fallback_unconfirmed_strategy_choice(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    _setup_fallback_path(draft, tmp_path)
+    draft.per_roi_correction_strategy_choices[0] = replace(
+        draft.per_roi_correction_strategy_choices[0],
+        explicit_user_mark=False
+    )
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "strategy_mark_not_explicit"
+
+
+def test_fallback_stale_strategy_choice(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    _setup_fallback_path(draft, tmp_path)
+    draft.per_roi_correction_strategy_choices[0] = replace(
+        draft.per_roi_correction_strategy_choices[0],
+        current_or_stale="stale"
+    )
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "strategy_mark_stale"
+
+
+def test_fallback_wrong_unsupported_strategy(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    _setup_fallback_path(draft, tmp_path)
+    draft.per_roi_correction_strategy_choices[0] = replace(
+        draft.per_roi_correction_strategy_choices[0],
+        selected_strategy="signal_only_f0"
+    )
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "signal_only"
+
+
+def test_fallback_roi_not_in_cache_inventory(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    _setup_fallback_path(draft, tmp_path)
+
+    # Remove ROI from inventory
+    artifact, provenance = _cache_payloads(draft)
+    artifact["roi_inventory"] = []
+    _write_cache_payloads(draft, artifact, provenance)
+
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "roi_not_in_cache_inventory"
+
+
+def test_fallback_existing_artifact_evidence_references_path_passes(tmp_path: Path):
+    # This path has evidence_references present in artifact and it passes as before
+    draft = _valid_stage2c_draft(tmp_path)
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+
+
+def test_fallback_correction_preview_source_cache_id_missing(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    _setup_fallback_path(draft, tmp_path)
+    draft.correction_preview_source_cache_id = ""
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "correction_preview_source_cache_mismatch"
+
+
+def test_fallback_correction_preview_source_cache_id_mismatch(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    _setup_fallback_path(draft, tmp_path)
+    draft.correction_preview_source_cache_id = "completely-different-cache-id"
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "correction_preview_source_cache_mismatch"
