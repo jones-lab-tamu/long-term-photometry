@@ -5843,7 +5843,7 @@ class MainWindow(QMainWindow):
         details_label.setText("\n".join(lines))
 
     def _refresh_guided_run_readiness_display(self) -> None:
-        """Update only the disabled Guided Run affordance and its safe text."""
+        """Update only the guarded Guided Run affordance and its safe text."""
         from photometry_pipeline.guided_run_readiness import (
             evaluate_guided_run_readiness,
         )
@@ -5871,10 +5871,33 @@ class MainWindow(QMainWindow):
         button = getattr(self, "_guided_run_btn", None)
         label = getattr(self, "_guided_run_readiness_label", None)
         if button is not None:
-            button.setEnabled(False)
-            button.setToolTip(result.user_summary)
+            ready = result.status == "ready_hidden" and result.ready is True
+            button.setEnabled(ready)
+            button.setToolTip(
+                (
+                    "Guided Run is internally ready, but execution is not "
+                    "enabled in this build."
+                )
+                if ready
+                else result.user_summary
+            )
         if label is not None:
             label.setText(result.user_summary)
+
+    def _on_guided_run_clicked_disabled_build_guard(self) -> None:
+        """Give an enabled readiness affordance a deliberately inert endpoint."""
+        self._refresh_guided_run_readiness_display()
+        readiness = getattr(self, "_guided_run_readiness", None)
+        if not (
+            getattr(readiness, "status", None) == "ready_hidden"
+            and getattr(readiness, "ready", False) is True
+        ):
+            return
+        label = getattr(self, "_guided_run_readiness_label", None)
+        if label is not None:
+            label.setText(
+                "Guided Run execution is not enabled in this build."
+            )
 
     def _build_guided_new_analysis_draft_plan(self):
         from photometry_pipeline.guided_new_analysis_plan import (
@@ -8063,6 +8086,9 @@ class MainWindow(QMainWindow):
         self._guided_run_btn = QPushButton("Run Guided Analysis")
         self._guided_run_btn.setObjectName("guidedRunButton")
         self._guided_run_btn.setEnabled(False)
+        self._guided_run_btn.clicked.connect(
+            self._on_guided_run_clicked_disabled_build_guard
+        )
         run_layout.addWidget(self._guided_run_btn, alignment=Qt.AlignLeft)
         self._guided_run_readiness_label = QLabel("")
         self._guided_run_readiness_label.setObjectName(
