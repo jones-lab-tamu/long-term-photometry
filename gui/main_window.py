@@ -5760,166 +5760,25 @@ class MainWindow(QMainWindow):
         context,
         outcome,
     ):
-        """Build current authorization, payload, and startup request in memory."""
-        from photometry_pipeline.application_build_identity import (
-            resolve_application_build_identity,
-        )
-        from photometry_pipeline.guided_completed_run_rejection_policy import (
-            detect_guided_diagnostic_cache_candidate,
-        )
-        from photometry_pipeline.guided_execution_payloads import (
-            build_guided_execution_startup_mapping_contract,
-            derive_guided_execution_payloads,
-        )
-        from photometry_pipeline.guided_production_mapping import (
-            build_guided_production_mapping_contract,
-        )
-        from photometry_pipeline.guided_run_authorization import (
-            authorize_guided_run,
-            build_guided_run_authorization_request,
-        )
-        from photometry_pipeline.guided_startup_transaction import (
-            GuidedStartupFilesystemPolicy,
-            GuidedStartupTransactionRequest,
-            GuidedWrapperEntrypointIdentity,
+        """Delegate startup-request construction to the backend builder."""
+        from photometry_pipeline.guided_execution_request_builder import (
+            build_guided_startup_request_from_validation,
         )
 
-        revision = int(
-            getattr(self, "_guided_backend_validation_revision", 0)
-        )
-        if (
-            context is None
-            or context.revision != revision
-            or outcome.status != "validator_accepted"
-            or outcome.accepted_for_backend_validation is not True
-            or outcome.stale is not False
-        ):
-            return None
-        project_root = Path(__file__).resolve().parent.parent
-        build_result = resolve_application_build_identity(
-            project_root=project_root
-        )
-        if build_result.build_identity is None:
-            return None
-        mapping_contract = build_guided_production_mapping_contract()
-        authorization_request = build_guided_run_authorization_request(
-            stored_validation_outcome=outcome,
-            stored_validation_outcome_revision=revision,
-            current_gui_revision=revision,
-            current_validation_context=context,
-            application_build_identity=build_result.build_identity,
-            production_mapping_contract=mapping_contract,
-        )
-        authorization_result = authorize_guided_run(authorization_request)
-        if (
-            authorization_result.status != "authorized"
-            or authorization_result.authorized is not True
-            or authorization_result.production_intent is None
-        ):
-            return None
-        startup_mapping_contract = (
-            build_guided_execution_startup_mapping_contract()
-        )
-        payload_result = derive_guided_execution_payloads(
-            authorization_result,
-            startup_mapping_contract=startup_mapping_contract,
-        )
-        if payload_result.ok is not True:
-            return None
-
-        intent = authorization_result.production_intent
-        source_root_canonical = (
-            intent.input_source.source_root_canonical
-        )
-        output_base_canonical = (
-            intent.output_policy.output_base_canonical
-        )
-        source_root = Path(
-            source_root_canonical
-        ).resolve(strict=False)
-        output_base = Path(
-            output_base_canonical
-        ).resolve(strict=False)
-        now = datetime.now(timezone.utc)
-        run_id = (
-            f"guided_run_{now.strftime('%Y%m%dT%H%M%S%fZ')}_"
-            f"{secrets.token_hex(6)}"
-        )
-        planned_run_dir = os.path.join(output_base_canonical, run_id)
-        run_dir = Path(planned_run_dir).resolve(strict=False)
-        wrapper_path = (
-            project_root / "tools" / "run_full_pipeline_deliverables.py"
-        ).resolve(strict=True)
-        wrapper_digest = hashlib.sha256(wrapper_path.read_bytes()).hexdigest()
-
-        def is_relative_to(path: Path, root: Path) -> bool:
-            try:
-                path.relative_to(root)
-            except ValueError:
-                return False
-            return True
-
-        output_exists = output_base.exists()
-        output_is_dir = output_base.is_dir() if output_exists else False
-        overlap = (
-            output_base == source_root
-            or is_relative_to(output_base, source_root)
-            or is_relative_to(source_root, output_base)
-        )
-        filesystem_policy = GuidedStartupFilesystemPolicy(
-            output_base_exists_or_creatable=output_exists,
-            output_base_is_directory_or_creatable=output_is_dir,
-            output_base_overlaps_source=overlap,
-            output_base_is_completed_run_root=(
-                is_successful_completed_run_dir(os.fspath(output_base))
-                if output_is_dir
-                else False
-            ),
-            output_base_is_guided_diagnostic_cache_root=(
-                detect_guided_diagnostic_cache_candidate(output_base)
-                is not None
-                if output_is_dir
-                else False
-            ),
-            output_base_is_protected_ineligible_root=False,
-            planned_child_directly_under_base=run_dir.parent == output_base,
-            planned_child_already_exists=os.path.lexists(run_dir),
-            overwrite_requested=intent.output_policy.overwrite,
-            protected_root_context_complete=(
-                intent.output_policy.protected_root_context_complete
+        result = build_guided_startup_request_from_validation(
+            validation_context=context,
+            validation_outcome=outcome,
+            current_gui_revision=int(
+                getattr(self, "_guided_backend_validation_revision", 0)
             ),
         )
-        startup_request = GuidedStartupTransactionRequest(
-            authorization_result=authorization_result,
-            payload_result=payload_result,
-            startup_mapping_contract=startup_mapping_contract,
-            application_build_identity=build_result.build_identity,
-            current_guided_revision=revision,
-            explicit_user_run_transition=True,
-            output_base_canonical=output_base_canonical,
-            source_root_canonical=source_root_canonical,
-            planned_run_id=run_id,
-            planned_allocated_run_dir=planned_run_dir,
-            wrapper_entrypoint=GuidedWrapperEntrypointIdentity(
-                entrypoint_kind="script_path",
-                entrypoint_value=os.fspath(wrapper_path),
-                trusted_application_root=os.fspath(project_root),
-                wrapper_identity_digest=wrapper_digest,
-                supported_contract_version=(
-                    "run_full_pipeline_deliverables.v1"
-                ),
-                supports_guided_preallocated_run_dir=True,
-                supports_guided_candidate_manifest=True,
-                trusted_entrypoint=True,
-                python_executable=sys.executable,
-            ),
-            one_shot_consumption_token=secrets.token_urlsafe(32),
-            one_shot_token_current=True,
-            one_shot_token_unused=True,
-            current_time_utc_iso=now.isoformat(),
-            filesystem_policy=filesystem_policy,
+        if not result.ok:
+            return None
+        return (
+            result.authorization_result,
+            result.payload_result,
+            result.startup_transaction_request,
         )
-        return authorization_result, payload_result, startup_request
 
     def _on_guided_backend_validate_clicked(self) -> None:
         if getattr(self, "_guided_backend_validation_active", False):

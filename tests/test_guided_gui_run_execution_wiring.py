@@ -157,40 +157,26 @@ def test_production_validation_update_retains_real_bound_request_and_enables(
 def test_production_derivation_builds_real_exactly_bound_request(
     window, startup_request, monkeypatch
 ):
-    import photometry_pipeline.application_build_identity as build_identity
-    import photometry_pipeline.guided_execution_payloads as payloads
-    import photometry_pipeline.guided_run_authorization as authorization
+    import photometry_pipeline.guided_execution_request_builder as request_builder
 
     revision = startup_request.current_guided_revision
     window._guided_backend_validation_revision = revision
     context = SimpleNamespace(revision=revision)
     outcome = _accepted_outcome()
-    monkeypatch.setattr(
-        build_identity,
-        "resolve_application_build_identity",
-        lambda **_kwargs: SimpleNamespace(
-            build_identity=startup_request.application_build_identity
-        ),
+    built = request_builder.GuidedExecutionRequestBuildResult(
+        status="built",
+        ok=True,
+        authorization_result=startup_request.authorization_result,
+        payload_result=startup_request.payload_result,
+        startup_transaction_request=startup_request,
+        blocking_issues=(),
+        current_gui_revision=revision,
+        request_ready=True,
     )
     monkeypatch.setattr(
-        authorization,
-        "build_guided_run_authorization_request",
-        lambda **_kwargs: object(),
-    )
-    monkeypatch.setattr(
-        authorization,
-        "authorize_guided_run",
-        lambda _request: startup_request.authorization_result,
-    )
-    monkeypatch.setattr(
-        payloads,
-        "build_guided_execution_startup_mapping_contract",
-        lambda: startup_request.startup_mapping_contract,
-    )
-    monkeypatch.setattr(
-        payloads,
-        "derive_guided_execution_payloads",
-        lambda _authorization, **_kwargs: startup_request.payload_result,
+        request_builder,
+        "build_guided_startup_request_from_validation",
+        lambda **_kwargs: built,
     )
     state = window._derive_guided_execution_state_from_validation(
         context, outcome
@@ -498,6 +484,25 @@ def test_gui_execution_methods_use_only_backend_adapter():
         "run_full_pipeline_deliverables",
         "subprocess",
         "Pipeline",
+    )
+    assert not any(name in source for name in prohibited)
+
+
+def test_gui_validation_derivation_uses_only_backend_builder():
+    source = inspect.getsource(
+        MainWindow._derive_guided_execution_state_from_validation
+    )
+    assert "build_guided_startup_request_from_validation" in source
+    prohibited = (
+        "resolve_application_build_identity",
+        "authorize_guided_run",
+        "derive_guided_execution_payloads",
+        "GuidedStartupTransactionRequest",
+        "GuidedStartupFilesystemPolicy",
+        "GuidedWrapperEntrypointIdentity",
+        "detect_guided_diagnostic_cache_candidate",
+        "hashlib",
+        "token_urlsafe",
     )
     assert not any(name in source for name in prohibited)
 

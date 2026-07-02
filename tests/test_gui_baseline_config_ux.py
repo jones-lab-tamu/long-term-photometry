@@ -13,7 +13,11 @@ from PySide6.QtWidgets import QApplication
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from gui.main_window import MainWindow, normalize_dynamic_fit_mode
+from gui.main_window import (
+    MainWindow,
+    _DYNAMIC_FIT_MODE_LABELS,
+    normalize_dynamic_fit_mode,
+)
 from photometry_pipeline.config import Config
 from photometry_pipeline.io.adapters import discover_rwd_chunks
 from photometry_pipeline.pipeline import Pipeline
@@ -30,6 +34,18 @@ def window(qapp):
     yield w
     w.close()
     w.deleteLater()
+
+
+def test_dynamic_fit_labels_preserve_unicode_without_mojibake():
+    assert _DYNAMIC_FIT_MODE_LABELS["rolling_filtered_to_raw"] == (
+        "Rolling regression (filtered→raw)"
+    )
+    assert _DYNAMIC_FIT_MODE_LABELS["rolling_filtered_to_filtered"] == (
+        "Rolling regression (filtered→filtered)"
+    )
+    labels = " ".join(_DYNAMIC_FIT_MODE_LABELS.values())
+    assert "â†’" not in labels
+    assert "â€”" not in labels
 
 
 def _set_valid_dirs(w: MainWindow, tmp_path):
