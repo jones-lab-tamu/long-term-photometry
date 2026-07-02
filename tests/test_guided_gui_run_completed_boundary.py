@@ -178,6 +178,10 @@ def test_gui_click_produces_loader_accepted_completed_candidate(
     assert window._guided_run_readiness_label.text() == (
         "Guided Run finished. Load the completed run for review."
     )
+    assert (
+        window._guided_load_completed_run_for_review_btn.isHidden() is False
+    )
+    assert window._guided_load_completed_run_for_review_btn.isEnabled() is True
     assert calls["prepared_validation"] >= 2
     assert calls["live_verification"] == 1
     assert calls["input_validation"] == 1
@@ -228,4 +232,11 @@ def test_gui_click_produces_loader_accepted_completed_candidate(
     (run_dir / "status.json").unlink()
     (run_dir / "run_report.json").unlink()
     assert classify_completed_run_candidate(str(run_dir))[0] is False
+    review_step_before = window._guided_workflow_stepper.currentRow()
+    window._guided_load_completed_run_for_review_btn.click()
+    assert window._guided_workflow_stepper.currentRow() == review_step_before
+    assert window._guided_run_readiness_label.text() == (
+        "The completed run could not be loaded for review. "
+        "The output folder may be incomplete."
+    )
     assert result.completed_run_claim is False

@@ -5644,6 +5644,7 @@ class MainWindow(QMainWindow):
         self._guided_execution_payload_result = None
         self._guided_startup_transaction_request = None
         self._guided_backend_execution_result = None
+        self._refresh_guided_review_handoff_display()
 
     def _retain_guided_execution_readiness_state(
         self,
@@ -6074,6 +6075,7 @@ class MainWindow(QMainWindow):
             self._guided_backend_execution_active = False
         self._guided_backend_execution_result = result
         self._guided_startup_transaction_request = None
+        self._refresh_guided_review_handoff_display()
         if label is not None:
             label.setText(
                 "Guided Run has started."
@@ -6087,6 +6089,75 @@ class MainWindow(QMainWindow):
                     )
                 )
             )
+
+    def _refresh_guided_review_handoff_display(self) -> None:
+        """Expose Review handoff only for a loader-validation candidate."""
+        button = getattr(
+            self, "_guided_load_completed_run_for_review_btn", None
+        )
+        if button is None:
+            return
+        result = getattr(self, "_guided_backend_execution_result", None)
+        ready = bool(
+            result is not None
+            and getattr(result, "status", "")
+            == "wrapper_completed_needs_review_loading"
+            and getattr(result, "completed_run_candidate_path", None)
+            and getattr(
+                result,
+                "requires_completed_run_loader_validation",
+                False,
+            )
+            is True
+        )
+        button.setVisible(ready)
+        button.setEnabled(ready)
+        button.setToolTip(
+            "Load the completed run into Review."
+            if ready
+            else "No completed Guided Run is ready for review."
+        )
+
+    def _on_guided_load_completed_run_for_review_clicked(self) -> None:
+        """Loader-gate an explicit Guided transition into Review."""
+        result = getattr(self, "_guided_backend_execution_result", None)
+        label = getattr(self, "_guided_run_readiness_label", None)
+        if (
+            result is None
+            or getattr(result, "status", "")
+            != "wrapper_completed_needs_review_loading"
+            or getattr(
+                result,
+                "requires_completed_run_loader_validation",
+                False,
+            )
+            is not True
+        ):
+            if label is not None:
+                label.setText("No completed Guided Run is ready for review.")
+            return
+        candidate = str(
+            getattr(result, "completed_run_candidate_path", "") or ""
+        )
+        if not candidate:
+            if label is not None:
+                label.setText(
+                    "Guided Run did not provide a completed-run candidate."
+                )
+            return
+        accepted, _reason = self._is_openable_completed_results_dir(candidate)
+        if not accepted or not self._open_completed_results_dir(candidate):
+            if label is not None:
+                label.setText(
+                    "The completed run could not be loaded for review. "
+                    "The output folder may be incomplete."
+                )
+            return
+        self._set_guided_workflow_mode("open_results")
+        review_index = list(GUIDED_WORKFLOW_STEPS).index("Review")
+        self._guided_workflow_stepper.setCurrentRow(review_index)
+        if label is not None:
+            label.setText("Completed run loaded for review.")
 
     def _build_guided_new_analysis_draft_plan(self):
         from photometry_pipeline.guided_new_analysis_plan import (
@@ -8288,6 +8359,21 @@ class MainWindow(QMainWindow):
             "guidedSecondaryText", True
         )
         run_layout.addWidget(self._guided_run_readiness_label)
+        self._guided_load_completed_run_for_review_btn = QPushButton(
+            "Load completed run for review"
+        )
+        self._guided_load_completed_run_for_review_btn.setObjectName(
+            "guidedLoadCompletedRunForReviewButton"
+        )
+        self._guided_load_completed_run_for_review_btn.setVisible(False)
+        self._guided_load_completed_run_for_review_btn.setEnabled(False)
+        self._guided_load_completed_run_for_review_btn.clicked.connect(
+            self._on_guided_load_completed_run_for_review_clicked
+        )
+        run_layout.addWidget(
+            self._guided_load_completed_run_for_review_btn,
+            alignment=Qt.AlignLeft,
+        )
         new_analysis_layout.addWidget(run_group)
 
         self._guided_new_analysis_mode_panels["Run"] = new_analysis_panel
