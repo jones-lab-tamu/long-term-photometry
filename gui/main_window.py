@@ -1686,10 +1686,7 @@ class MainWindow(QMainWindow):
         ):
             self._guided_workflow_stack.addWidget(widget)
         self._guided_workflow_stepper.currentRowChanged.connect(
-            self._guided_workflow_stack.setCurrentIndex
-        )
-        self._guided_workflow_stepper.currentRowChanged.connect(
-            lambda _idx: self._refresh_guided_mode_display()
+            self._on_guided_stepper_row_changed
         )
 
         content_wrap = QWidget()
@@ -2368,6 +2365,24 @@ class MainWindow(QMainWindow):
                 f"Completed run: {run_display}"
             )
             self._guided_start_open_status_label.setToolTip(run_dir if has_loaded_results else "")
+
+    def _on_guided_stepper_row_changed(self, idx: int) -> None:
+        if idx < 0 or idx >= len(GUIDED_WORKFLOW_STEPS):
+            return
+        if getattr(self, "_guided_workflow_mode", "start") == "start":
+            step_name = GUIDED_WORKFLOW_STEPS[idx]
+            if step_name in {
+                "Select data",
+                "Recording structure",
+                "Correction approach",
+                "Diagnostics",
+                "Confirm strategy",
+                "Draft plan",
+                "Run",
+            }:
+                self._set_guided_workflow_mode("new_analysis")
+        self._guided_workflow_stack.setCurrentIndex(idx)
+        self._refresh_guided_mode_display()
 
     def _on_guided_start_setup_new_analysis(self) -> None:
         self._set_guided_workflow_mode("new_analysis")

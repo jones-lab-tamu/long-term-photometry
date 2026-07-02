@@ -185,6 +185,7 @@ def _make_preview_completed_run(tmp_path):
 def _load_preview_completed_run(window, run_dir, monkeypatch):
     window._current_run_dir = str(run_dir)
     monkeypatch.setattr(window._report_viewer, "has_loaded_results", lambda: True)
+    window._set_guided_workflow_mode("open_results")
     window._refresh_guided_diagnostics_panel()
 
 
@@ -578,6 +579,7 @@ def test_guided_confirm_strategy_requires_completed_run_and_does_not_generate(wi
     )
 
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._set_guided_workflow_mode("start")
 
     assert window._guided_confirm_roi_combo.isEnabled() is False
     assert window._guided_confirm_chunk_combo.isEnabled() is False
@@ -1887,6 +1889,7 @@ def test_guided_setup_summary_reports_correction_state_without_validation_claim(
 
 def test_guided_diagnostics_step_has_status_context_and_slots(window):
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Diagnostics"))
+    window._set_guided_workflow_mode("start")
 
     assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepDiagnostics"
     assert window._guided_workflow_tab.findChild(QGroupBox, "guidedDiagnosticsCompletedRunSection").title() == "Completed run"
@@ -4818,3 +4821,84 @@ def test_gui_no_draft_plan_tests_use_hidden_confirm_controls():
             self.generic_visit(node)
 
     TestVisitor().visit(tree)
+
+
+def test_stepper_routing_fresh_mainwindow(window):
+    assert window._guided_workflow_mode == "start"
+
+
+def test_stepper_routing_select_data_promotes(window):
+    idx = list(GUIDED_WORKFLOW_STEPS).index("Select data")
+    window._guided_workflow_stepper.setCurrentRow(idx)
+    assert window._guided_workflow_mode == "new_analysis"
+    assert window._guided_workflow_stack.currentIndex() == idx
+
+
+def test_stepper_routing_draft_plan_promotes(window):
+    idx = list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    window._guided_workflow_stepper.setCurrentRow(idx)
+    assert window._guided_workflow_mode == "new_analysis"
+    assert window._guided_workflow_stack.currentIndex() == idx
+
+
+def test_stepper_routing_apply_profile_no_guard_after_promotion(window):
+    # Navigate to Select data first to promote
+    idx = list(GUIDED_WORKFLOW_STEPS).index("Select data")
+    window._guided_workflow_stepper.setCurrentRow(idx)
+    assert window._guided_workflow_mode == "new_analysis"
+
+    # Now navigate to Draft plan and try to apply profile
+    draft_idx = list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    window._guided_workflow_stepper.setCurrentRow(draft_idx)
+
+    # Let's set some dummy inputs in the editor so it doesn't fail on empty validation
+    window._guided_feature_event_peak_k_edit.setText("2.0")
+    window._guided_feature_event_apply_btn.click()
+    # It should not show the Open Results guard message
+    assert "Open Results must be used first" not in window._guided_feature_event_status_label.text()
+
+
+def test_stepper_routing_setup_new_analysis_preserves(window):
+    window._on_guided_start_setup_new_analysis()
+    assert window._guided_workflow_mode == "new_analysis"
+    idx = list(GUIDED_WORKFLOW_STEPS).index("Select data")
+    assert window._guided_workflow_stepper.currentRow() == idx
+
+
+def test_stepper_routing_open_results_retains_mode(window):
+    # Simulates entering open_results mode (e.g. via helper or directly)
+    window._set_guided_workflow_mode("open_results")
+    assert window._guided_workflow_mode == "open_results"
+
+    # Navigate to confirm strategy / draft plan
+    idx = list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    window._guided_workflow_stepper.setCurrentRow(idx)
+    assert window._guided_workflow_mode == "open_results"
+
+    # Navigate to Diagnostics
+    diag_idx = list(GUIDED_WORKFLOW_STEPS).index("Diagnostics")
+    window._guided_workflow_stepper.setCurrentRow(diag_idx)
+    assert window._guided_workflow_mode == "open_results"
+
+
+def test_stepper_routing_diagnostics_promotes(window):
+    idx = list(GUIDED_WORKFLOW_STEPS).index("Diagnostics")
+    window._guided_workflow_stepper.setCurrentRow(idx)
+    assert window._guided_workflow_mode == "new_analysis"
+    assert window._guided_workflow_stack.currentIndex() == idx
+
+
+def test_stepper_routing_confirm_strategy_promotes(window):
+    idx = list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    window._guided_workflow_stepper.setCurrentRow(idx)
+    assert window._guided_workflow_mode == "new_analysis"
+    assert window._guided_workflow_stack.currentIndex() == idx
+
+
+def test_stepper_routing_invalid_indices_no_crash(window):
+    # Test negative index
+    window._on_guided_stepper_row_changed(-1)
+    # Test out of bounds index
+    window._on_guided_stepper_row_changed(100)
+    # Mode should still be start
+    assert window._guided_workflow_mode == "start"
