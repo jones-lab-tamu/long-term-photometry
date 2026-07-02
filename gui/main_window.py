@@ -4220,6 +4220,10 @@ class MainWindow(QMainWindow):
         else:
             result["diagnostic_cache_root"] = os.path.realpath(source_id)
             result["source_type"] = "diagnostic_cache"
+            record = getattr(self, "_guided_diagnostic_cache_record", None)
+            result["source_cache_id"] = str(
+                getattr(record, "cache_id", "") or ""
+            )
         result["roi"] = roi
         result["chunk_index"] = int(chunk)
         self._guided_preview_last_result = result
@@ -5014,10 +5018,75 @@ class MainWindow(QMainWindow):
             "text": "\n".join(lines),
         }
 
+    def _guided_current_correction_preview_evidence_ready(self, source) -> bool:
+        if source is None or not getattr(self, "_guided_preview_has_result", False):
+            return False
+        if getattr(self, "_guided_preview_result_stale", False):
+            return False
+        result = getattr(self, "_guided_preview_last_result", None)
+        if not isinstance(result, dict):
+            return False
+        if str(result.get("status") or "") not in {"success", "partial"}:
+            return False
+        if str(result.get("source_type") or "") != "diagnostic_cache":
+            return False
+        cache_root = os.path.realpath(
+            str(getattr(source, "cache_root_path", "") or "")
+        )
+        if os.path.realpath(
+            str(result.get("diagnostic_cache_root") or "")
+        ) != cache_root:
+            return False
+        preview_id = str(result.get("preview_id") or "")
+        preview_path = str(result.get("preview_output_dir") or "")
+        if not preview_id or not preview_path:
+            return False
+        expected_path = os.path.realpath(
+            os.path.join(
+                cache_root,
+                "_guided_workflow",
+                "previews",
+                preview_id,
+            )
+        )
+        if os.path.realpath(preview_path) != expected_path:
+            return False
+        provenance_path = Path(expected_path) / PREVIEW_PROVENANCE_FILENAME
+        try:
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if (
+            not isinstance(provenance, dict)
+            or provenance.get("preview_id") != preview_id
+        ):
+            return False
+        cache_identity = provenance.get("diagnostic_cache")
+        if not isinstance(cache_identity, dict):
+            return False
+        expected_identity = {
+            "cache_id": getattr(source, "cache_id", None),
+            "source_setup_signature": getattr(
+                source, "source_setup_signature", None
+            ),
+            "diagnostic_scope_signature": getattr(
+                source, "diagnostic_scope_signature", None
+            ),
+            "build_request_signature": getattr(
+                source, "build_request_signature", None
+            ),
+        }
+        return all(
+            cache_identity.get(name) == expected
+            for name, expected in expected_identity.items()
+        )
+
     def _guided_confirm_strategy_progress_text(
         self,
         *,
         source_ok: bool,
+        preview_evidence_ready: bool,
+        preview_evidence_stale: bool,
         included_rois: list[str],
         current_source_key,
     ) -> str:
@@ -5030,6 +5099,20 @@ class MainWindow(QMainWindow):
             )
 
         included = tuple(dict.fromkeys(str(roi) for roi in included_rois if roi))
+        if not preview_evidence_ready:
+            if preview_evidence_stale:
+                return (
+                    "Correction-preview evidence is stale for the current "
+                    "diagnostic cache. Regenerate preview evidence before "
+                    f"confirming strategies. 0/{len(included)} included ROIs "
+                    "confirmed."
+                )
+            return (
+                "Required before Run: generate correction-preview evidence "
+                "from the diagnostic cache before confirming strategies. "
+                f"0/{len(included)} included ROIs confirmed."
+            )
+
         supported = set(GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE.values())
         confirmed: set[str] = set()
         stale: set[str] = set()
@@ -5060,17 +5143,20 @@ class MainWindow(QMainWindow):
         progress = f"{count}/{total} included ROIs confirmed."
         if stale - confirmed:
             return (
-                "Some correction strategy choices are stale. Reconfirm before "
-                f"Run. {progress}"
+                "Correction-preview evidence is ready for the current "
+                "diagnostic cache. Some correction strategy choices are stale. "
+                f"Reconfirm before Run. {progress}"
             )
         if total > 0 and count == total:
             return (
-                "Correction strategies confirmed for all included ROIs. "
-                f"{progress}"
+                "Correction-preview evidence is ready for the current "
+                "diagnostic cache. Correction strategies confirmed for all "
+                f"included ROIs. {progress}"
             )
         return (
-            "Required before Run: confirm a correction strategy for each "
-            f"included ROI. {progress}"
+            "Correction-preview evidence is ready for the current diagnostic "
+            "cache. Required before Run: confirm a correction strategy for "
+            f"each included ROI. {progress}"
         )
 
     def _refresh_guided_confirm_strategy_panel(self, *_args) -> None:
@@ -5088,6 +5174,11 @@ class MainWindow(QMainWindow):
         self._guided_confirm_source_type = ""
         self._guided_confirm_source_key = None
         self._guided_confirm_source = None
+        preview_evidence_ready = False
+        preview_evidence_stale = bool(
+            getattr(self, "_guided_preview_has_result", False)
+            and getattr(self, "_guided_preview_result_stale", False)
+        )
         rois: list[str] = []
         chunk_ids: list[int] = []
         if mode == "new_analysis":
@@ -5128,6 +5219,11 @@ class MainWindow(QMainWindow):
                         self._guided_confirm_source_type = "diagnostic_cache"
                         self._guided_confirm_source_key = self._diagnostic_cache_source_key(source)
                         self._guided_confirm_source = source
+                        preview_evidence_ready = (
+                            self._guided_current_correction_preview_evidence_ready(
+                                source
+                            )
+                        )
                         reason = (
                             "Confirm Strategy will use the preliminary diagnostic cache; "
                             "this is not final production analysis."
@@ -5169,6 +5265,8 @@ class MainWindow(QMainWindow):
         self._guided_confirm_strategy_progress_label.setText(
             self._guided_confirm_strategy_progress_text(
                 source_ok=source_ok,
+                preview_evidence_ready=preview_evidence_ready,
+                preview_evidence_stale=preview_evidence_stale,
                 included_rois=rois,
                 current_source_key=getattr(
                     self, "_guided_confirm_source_key", None
@@ -5241,6 +5339,7 @@ class MainWindow(QMainWindow):
         self._refresh_guided_draft_run_plan_preview()
         can_mark = bool(
             source_ok
+            and (mode != "new_analysis" or preview_evidence_ready)
             and self._selected_guided_confirm_roi()
             and self._selected_guided_confirm_chunk() is not None
             and self._selected_guided_confirm_strategy()

@@ -16,6 +16,7 @@ from photometry_pipeline.guided_new_analysis_plan import (
 )
 from tests.test_gui_guided_workflow import (
     _configure_guided_raw_cache_setup,
+    _generate_ready_guided_correction_preview,
     _write_minimal_guided_cache_outputs,
     _FakeDiagnosticCacheRunner,
 )
@@ -106,6 +107,7 @@ def _configure_complete_guided_new_analysis_draft(
     _write_minimal_guided_cache_outputs(cache_path)
     fake_runner.succeed()
     window._on_guided_diagnostic_cache_finished(0)
+    _generate_ready_guided_correction_preview(window)
 
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
     for index, roi in enumerate(("CH1", "CH2", "CH3")):
@@ -643,6 +645,7 @@ def test_new_analysis_draft_plan_reports_choices_as_current_after_build_and_mark
     _write_minimal_guided_cache_outputs(cache_path)
     fake_runner.succeed()
     window._on_guided_diagnostic_cache_finished(0)
+    _generate_ready_guided_correction_preview(window)
 
     # Confirm strategy step: select ROI and mark
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
@@ -674,6 +677,7 @@ def test_new_analysis_draft_plan_marks_stale_when_roi_selection_changes(window, 
     _write_minimal_guided_cache_outputs(Path(fake_runner.run_dir))
     fake_runner.succeed()
     window._on_guided_diagnostic_cache_finished(0)
+    _generate_ready_guided_correction_preview(window)
 
     # Confirm CH1
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
@@ -1536,5 +1540,4 @@ def test_guided_new_analysis_preview_request_checks_4J11m(window, tmp_path, monk
     # 8. No files or directories are created by preview refresh
     output_dir = tmp_path / "valid_output"
     assert not output_dir.exists()
-
 

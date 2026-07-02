@@ -2407,6 +2407,19 @@ def _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch) -> Path:
     return cache_path
 
 
+def _generate_ready_guided_correction_preview(window) -> Path:
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Diagnostics")
+    )
+    assert window._guided_preview_generate_btn.isEnabled()
+    window._guided_preview_generate_btn.click()
+    result = window._guided_preview_last_result
+    assert result["status"] in {"success", "partial"}
+    preview_dir = Path(result["preview_output_dir"])
+    assert (preview_dir / "preview_provenance.json").is_file()
+    return preview_dir
+
+
 def test_guided_confirm_strategy_new_analysis_blocks_without_diagnostic_cache(window, monkeypatch):
     calls = {"preview": 0, "signal": 0}
     monkeypatch.setattr(
@@ -2447,32 +2460,14 @@ def test_guided_confirm_strategy_progress_none_confirmed(
     )
 
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "Required before Run: confirm a correction strategy for each included "
-        "ROI. 0/3 included ROIs confirmed."
+        "Required before Run: generate correction-preview evidence from the "
+        "diagnostic cache before confirming strategies. "
+        "0/3 included ROIs confirmed."
     )
+    assert window._guided_confirm_mark_btn.isEnabled() is False
 
 
-def test_guided_confirm_strategy_progress_partial_confirmation(
-    window, tmp_path, monkeypatch
-):
-    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
-    window._guided_workflow_stepper.setCurrentRow(
-        list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
-    )
-    strategy_index = window._guided_confirm_strategy_combo.findData(
-        "global_linear_regression"
-    )
-    window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
-    window._guided_confirm_ack_cb.setChecked(True)
-    window._guided_confirm_mark_btn.click()
-
-    assert window._guided_confirm_strategy_progress_label.text() == (
-        "Required before Run: confirm a correction strategy for each included "
-        "ROI. 1/3 included ROIs confirmed."
-    )
-
-
-def test_guided_confirm_strategy_progress_all_confirmed(
+def test_guided_confirm_strategy_cannot_reach_complete_without_preview_evidence(
     window, tmp_path, monkeypatch
 ):
     _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
@@ -2486,10 +2481,106 @@ def test_guided_confirm_strategy_progress_all_confirmed(
         window._guided_confirm_roi_combo.setCurrentIndex(roi_index)
         window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
         window._guided_confirm_ack_cb.setChecked(True)
+        assert window._guided_confirm_mark_btn.isEnabled() is False
+        window._guided_confirm_mark_btn.click()
+
+    assert window._guided_strategy_choices == {}
+    progress = window._guided_confirm_strategy_progress_label.text()
+    assert "0/3 included ROIs confirmed" in progress
+    assert "Correction strategies confirmed for all included ROIs" not in progress
+    assert "Open Results must be used first" not in progress
+
+
+def test_guided_confirm_strategy_stale_preview_evidence_blocks_marks(
+    window, tmp_path, monkeypatch
+):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    _generate_ready_guided_correction_preview(window)
+    window._guided_preview_mark_stale("Preview selection changed.")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    )
+    strategy_index = window._guided_confirm_strategy_combo.findData(
+        "global_linear_regression"
+    )
+    window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
+    window._guided_confirm_ack_cb.setChecked(True)
+
+    assert window._guided_confirm_mark_btn.isEnabled() is False
+    assert window._guided_confirm_strategy_progress_label.text() == (
+        "Correction-preview evidence is stale for the current diagnostic "
+        "cache. Regenerate preview evidence before confirming strategies. "
+        "0/3 included ROIs confirmed."
+    )
+
+
+def test_guided_preview_evidence_populates_new_analysis_draft_fields(
+    window, tmp_path, monkeypatch
+):
+    cache_path = _build_ready_guided_diagnostic_cache(
+        window, tmp_path, monkeypatch
+    )
+    preview_dir = _generate_ready_guided_correction_preview(window)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    )
+    plan = window._build_guided_new_analysis_draft_plan()
+
+    assert plan.correction_preview_result_id
+    assert plan.correction_preview_path == str(preview_dir)
+    assert plan.correction_preview_status == "current"
+    assert plan.correction_preview_source_cache_id == (
+        window._guided_diagnostic_cache_record.cache_id
+    )
+    assert preview_dir.parent == cache_path / "_guided_workflow" / "previews"
+    assert (preview_dir / "preview_provenance.json").is_file()
+    assert "Correction-preview evidence is ready" in (
+        window._guided_confirm_strategy_progress_label.text()
+    )
+
+
+def test_guided_confirm_strategy_progress_partial_confirmation(
+    window, tmp_path, monkeypatch
+):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    _generate_ready_guided_correction_preview(window)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    )
+    strategy_index = window._guided_confirm_strategy_combo.findData(
+        "global_linear_regression"
+    )
+    window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    assert window._guided_confirm_strategy_progress_label.text() == (
+        "Correction-preview evidence is ready for the current diagnostic "
+        "cache. Required before Run: confirm a correction strategy for each "
+        "included ROI. 1/3 included ROIs confirmed."
+    )
+
+
+def test_guided_confirm_strategy_progress_all_confirmed(
+    window, tmp_path, monkeypatch
+):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    _generate_ready_guided_correction_preview(window)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    )
+    strategy_index = window._guided_confirm_strategy_combo.findData(
+        "global_linear_regression"
+    )
+    for roi_index in range(window._guided_confirm_roi_combo.count()):
+        window._guided_confirm_roi_combo.setCurrentIndex(roi_index)
+        window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
+        window._guided_confirm_ack_cb.setChecked(True)
         window._guided_confirm_mark_btn.click()
 
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "Correction strategies confirmed for all included ROIs. "
+        "Correction-preview evidence is ready for the current diagnostic "
+        "cache. Correction strategies confirmed for all included ROIs. "
         "3/3 included ROIs confirmed."
     )
 
@@ -2498,6 +2589,7 @@ def test_guided_confirm_strategy_progress_stale_choice_does_not_count(
     window, tmp_path, monkeypatch
 ):
     _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    _generate_ready_guided_correction_preview(window)
     window._guided_strategy_choices[
         (("diagnostic_cache", "superseded-cache"), "CH1")
     ] = {
@@ -2513,8 +2605,9 @@ def test_guided_confirm_strategy_progress_stale_choice_does_not_count(
     )
 
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "Some correction strategy choices are stale. Reconfirm before Run. "
-        "0/3 included ROIs confirmed."
+        "Correction-preview evidence is ready for the current diagnostic "
+        "cache. Some correction strategy choices are stale. Reconfirm before "
+        "Run. 0/3 included ROIs confirmed."
     )
 
 
@@ -2599,6 +2692,7 @@ def test_guided_confirm_strategy_new_analysis_uses_diagnostic_cache_roi_inventor
 
 def test_guided_confirm_strategy_new_analysis_stale_cache_blocks_and_marks_choices_stale(window, tmp_path, monkeypatch):
     cache_path = _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    _generate_ready_guided_correction_preview(window)
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
     idx = window._guided_confirm_strategy_combo.findData("robust_global_event_reject")
     window._guided_confirm_strategy_combo.setCurrentIndex(idx)
@@ -2670,6 +2764,7 @@ def test_guided_confirm_strategy_new_analysis_marks_source_scoped_choice_without
     window, tmp_path, monkeypatch
 ):
     cache_path = _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    _generate_ready_guided_correction_preview(window)
     calls = {"preview": 0, "signal": 0}
     monkeypatch.setattr(
         main_window_module,
