@@ -114,7 +114,9 @@ def _configure_guided_raw_cache_setup(window: MainWindow, tmp_path, monkeypatch)
     return input_dir, output_dir
 
 
-def _write_minimal_guided_cache_outputs(cache_dir):
+def _write_minimal_guided_cache_outputs(
+    cache_dir, rois=("CH1", "CH2", "CH3")
+):
     phasic = cache_dir / "_analysis" / "phasic_out"
     phasic.mkdir(parents=True)
     (phasic / "config_used.yaml").write_text(
@@ -129,10 +131,12 @@ def _write_minimal_guided_cache_outputs(cache_dir):
         meta = h5.create_group("meta")
         meta.attrs["mode"] = "phasic"
         meta.attrs["schema_version"] = "1.0"
-        meta.create_dataset("rois", data=np.asarray([b"CH1", b"CH2", b"CH3"]))
+        meta.create_dataset(
+            "rois", data=np.asarray([roi.encode("utf-8") for roi in rois])
+        )
         meta.create_dataset("chunk_ids", data=np.asarray([0, 1], dtype=int))
         meta.create_dataset("source_files", data=np.asarray([b"mock0.csv", b"mock1.csv"]))
-        for roi in ("CH1", "CH2", "CH3"):
+        for roi in rois:
             roi_group = h5.create_group(f"roi/{roi}")
             for chunk_id in (0, 1):
                 grp = roi_group.create_group(f"chunk_{chunk_id}")
@@ -2253,8 +2257,147 @@ def test_guided_confirm_strategy_new_analysis_blocks_without_diagnostic_cache(wi
     assert "Build a diagnostic cache before confirming correction strategies" in (
         window._guided_confirm_context_label.text()
     )
+    progress = window._guided_confirm_strategy_progress_label.text()
+    assert progress == (
+        "Required before Run: build the diagnostic cache before confirming "
+        "strategies."
+    )
+    assert "Open Results must be used first" not in progress
     assert window._current_run_dir == ""
     assert calls == {"preview": 0, "signal": 0}
+
+
+def test_guided_confirm_strategy_progress_none_confirmed(
+    window, tmp_path, monkeypatch
+):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    )
+
+    assert window._guided_confirm_strategy_progress_label.text() == (
+        "Required before Run: confirm a correction strategy for each included "
+        "ROI. 0/3 included ROIs confirmed."
+    )
+
+
+def test_guided_confirm_strategy_progress_partial_confirmation(
+    window, tmp_path, monkeypatch
+):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    )
+    strategy_index = window._guided_confirm_strategy_combo.findData(
+        "global_linear_regression"
+    )
+    window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    assert window._guided_confirm_strategy_progress_label.text() == (
+        "Required before Run: confirm a correction strategy for each included "
+        "ROI. 1/3 included ROIs confirmed."
+    )
+
+
+def test_guided_confirm_strategy_progress_all_confirmed(
+    window, tmp_path, monkeypatch
+):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    )
+    strategy_index = window._guided_confirm_strategy_combo.findData(
+        "global_linear_regression"
+    )
+    for roi_index in range(window._guided_confirm_roi_combo.count()):
+        window._guided_confirm_roi_combo.setCurrentIndex(roi_index)
+        window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
+        window._guided_confirm_ack_cb.setChecked(True)
+        window._guided_confirm_mark_btn.click()
+
+    assert window._guided_confirm_strategy_progress_label.text() == (
+        "Correction strategies confirmed for all included ROIs. "
+        "3/3 included ROIs confirmed."
+    )
+
+
+def test_guided_confirm_strategy_progress_stale_choice_does_not_count(
+    window, tmp_path, monkeypatch
+):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    window._guided_strategy_choices[
+        (("diagnostic_cache", "superseded-cache"), "CH1")
+    ] = {
+        "source_type": "diagnostic_cache",
+        "strategy": "global_linear_regression",
+        "confirmed": True,
+        "choice_source": "explicit_user_mark",
+        "current": False,
+        "stale": True,
+    }
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    )
+
+    assert window._guided_confirm_strategy_progress_label.text() == (
+        "Some correction strategy choices are stale. Reconfirm before Run. "
+        "0/3 included ROIs confirmed."
+    )
+
+
+def test_guided_confirm_strategy_progress_uses_included_rois_only(
+    window, tmp_path, monkeypatch
+):
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_roi_list.item(2).setCheckState(Qt.Unchecked)
+    fake_runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = fake_runner
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_diagnostic_cache_build_btn.click()
+    cache_path = Path(fake_runner.run_dir)
+    _write_minimal_guided_cache_outputs(cache_path, rois=("CH1", "CH2"))
+    fake_runner.succeed()
+    window._on_guided_diagnostic_cache_finished(0)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    )
+
+    assert window._guided_confirm_strategy_progress_label.text().endswith(
+        "0/2 included ROIs confirmed."
+    )
+
+
+def test_guided_confirm_strategy_progress_text_excludes_internal_terms(
+    window, tmp_path, monkeypatch
+):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy")
+    )
+    text = window._guided_confirm_strategy_progress_label.text().lower()
+    prohibited = (
+        "open results must be used first",
+        "manifest",
+        "preallocated",
+        "command_invoked",
+        "wrapper claim",
+        "startup transaction",
+        "hash",
+        "--guided",
+        "config_effective.yaml",
+        "runner_request",
+        "startup_transaction_unavailable",
+        "guided_candidate_manifest",
+        "guided_startup",
+        "wrapper_claim",
+        "backend adapter",
+        "orchestration",
+        "subprocess",
+        "raw command",
+    )
+    assert not any(term in text for term in prohibited)
 
 
 def test_guided_confirm_strategy_new_analysis_uses_diagnostic_cache_roi_inventory(window, tmp_path, monkeypatch):

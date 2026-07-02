@@ -5014,6 +5014,65 @@ class MainWindow(QMainWindow):
             "text": "\n".join(lines),
         }
 
+    def _guided_confirm_strategy_progress_text(
+        self,
+        *,
+        source_ok: bool,
+        included_rois: list[str],
+        current_source_key,
+    ) -> str:
+        if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
+            return ""
+        if not source_ok:
+            return (
+                "Required before Run: build the diagnostic cache before "
+                "confirming strategies."
+            )
+
+        included = tuple(dict.fromkeys(str(roi) for roi in included_rois if roi))
+        supported = set(GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE.values())
+        confirmed: set[str] = set()
+        stale: set[str] = set()
+        for key, choice in getattr(self, "_guided_strategy_choices", {}).items():
+            if (
+                not isinstance(key, tuple)
+                or len(key) != 2
+                or not isinstance(choice, dict)
+            ):
+                continue
+            choice_source_key, roi = key
+            roi = str(roi)
+            if roi not in included or choice.get("source_type") != "diagnostic_cache":
+                continue
+            if choice.get("stale") is True or choice.get("current") is not True:
+                stale.add(roi)
+                continue
+            if (
+                choice_source_key == current_source_key
+                and choice.get("confirmed") is True
+                and choice.get("choice_source") == "explicit_user_mark"
+                and choice.get("strategy") in supported
+            ):
+                confirmed.add(roi)
+
+        count = len(confirmed)
+        total = len(included)
+        progress = f"{count}/{total} included ROIs confirmed."
+        if stale - confirmed:
+            return (
+                "Some correction strategy choices are stale. Reconfirm before "
+                f"Run. {progress}"
+            )
+        if total > 0 and count == total:
+            return (
+                "Correction strategies confirmed for all included ROIs. "
+                f"{progress}"
+            )
+        return (
+            "Required before Run: confirm a correction strategy for each "
+            f"included ROI. {progress}"
+        )
+
     def _refresh_guided_confirm_strategy_panel(self, *_args) -> None:
         if not hasattr(self, "_guided_confirm_context_label"):
             return
@@ -5107,6 +5166,15 @@ class MainWindow(QMainWindow):
         )
         self._guided_confirm_context_label.setText(visible_context)
         self._guided_confirm_context_label.setToolTip(full_context)
+        self._guided_confirm_strategy_progress_label.setText(
+            self._guided_confirm_strategy_progress_text(
+                source_ok=source_ok,
+                included_rois=rois,
+                current_source_key=getattr(
+                    self, "_guided_confirm_source_key", None
+                ),
+            )
+        )
 
         previous_roi = self._selected_guided_confirm_roi()
         previous_chunk = self._selected_guided_confirm_chunk()
@@ -8118,6 +8186,19 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_confirm_context_label)
         context_layout.addWidget(self._guided_confirm_context_label)
         layout.addWidget(context_group)
+
+        self._guided_confirm_strategy_progress_label = QLabel("")
+        self._guided_confirm_strategy_progress_label.setObjectName(
+            "guidedConfirmStrategyProgressLabel"
+        )
+        self._guided_confirm_strategy_progress_label.setWordWrap(True)
+        self._guided_confirm_strategy_progress_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        self._make_guided_widget_shrinkable(
+            self._guided_confirm_strategy_progress_label
+        )
+        layout.addWidget(self._guided_confirm_strategy_progress_label)
 
         selection_group = QGroupBox("ROI and evidence chunk")
         selection_group.setObjectName("guidedConfirmStrategySelectionPanel")
