@@ -1517,7 +1517,12 @@ def _setup_fallback_path(draft: GuidedNewAnalysisDraftPlan, tmp_path: Path):
 
     _write_cache_payloads(draft, artifact, provenance)
 
-    preview_dir = Path(draft.cache_root_path).parent / "previews" / draft.correction_preview_result_id
+    preview_dir = (
+        Path(draft.cache_root_path)
+        / "_guided_workflow"
+        / "previews"
+        / draft.correction_preview_result_id
+    )
     preview_dir.mkdir(parents=True, exist_ok=True)
     draft.correction_preview_path = str(preview_dir)
 
@@ -1538,9 +1543,12 @@ def _setup_fallback_path(draft: GuidedNewAnalysisDraftPlan, tmp_path: Path):
 def test_fallback_validation_success(tmp_path: Path):
     draft = _valid_stage2c_draft(tmp_path)
     _setup_fallback_path(draft, tmp_path)
+    artifact_path = Path(draft.artifact_record_path)
+    artifact_bytes_before = artifact_path.read_bytes()
     parser = _valid_parser_contract()
     result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
     assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    assert artifact_path.read_bytes() == artifact_bytes_before
 
 
 def test_fallback_missing_provenance(tmp_path: Path):
@@ -1651,6 +1659,47 @@ def test_fallback_preview_path_outside_cache(tmp_path: Path):
     draft.correction_preview_path = str(outside_dir)
     parser = _valid_parser_contract()
     result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "preview_path_outside_cache"
+
+
+def test_fallback_preview_path_in_cache_parent_sibling_rejected(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    _preview_dir, prov_file = _setup_fallback_path(draft, tmp_path)
+    sibling_dir = (
+        Path(draft.cache_root_path).parent
+        / "previews"
+        / draft.correction_preview_result_id
+    )
+    sibling_dir.mkdir(parents=True)
+    (sibling_dir / "preview_provenance.json").write_bytes(prov_file.read_bytes())
+    draft.correction_preview_path = str(sibling_dir)
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=parser
+    )
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].detail_code == "preview_path_outside_cache"
+
+
+def test_fallback_wrong_preview_id_directory_rejected(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    _preview_dir, prov_file = _setup_fallback_path(draft, tmp_path)
+    wrong_id_dir = (
+        Path(draft.cache_root_path)
+        / "_guided_workflow"
+        / "previews"
+        / "different-preview-id"
+    )
+    wrong_id_dir.mkdir(parents=True)
+    (wrong_id_dir / "preview_provenance.json").write_bytes(
+        prov_file.read_bytes()
+    )
+    draft.correction_preview_path = str(wrong_id_dir)
+    parser = _valid_parser_contract()
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=parser
+    )
     assert isinstance(result, GuidedBackendValidationMaterializationFailure)
     assert result.blocking_issues[0].detail_code == "preview_path_outside_cache"
 

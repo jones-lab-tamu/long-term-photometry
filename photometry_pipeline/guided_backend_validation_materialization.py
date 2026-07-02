@@ -606,15 +606,17 @@ def _materialize_evidence_references(
                 detail_code="correction_preview_path_missing",
             )
 
-        # Verify correction_preview_path is under resolved diagnostic cache preview/workflow directory
         preview_path_canon = os.path.realpath(preview_path)
         cache_root_canon = os.path.realpath(cache_facts.cache_root_canonical)
-        cache_parent = os.path.realpath(os.path.dirname(cache_root_canon))
-        try:
-            common = os.path.commonpath([preview_path_canon, cache_parent])
-        except ValueError:
-            common = ""
-        if not common or common != cache_parent:
+        expected_preview_path_canon = os.path.realpath(
+            os.path.join(
+                cache_root_canon,
+                "_guided_workflow",
+                "previews",
+                evidence_reference_id,
+            )
+        )
+        if preview_path_canon != expected_preview_path_canon:
             return None, _failure(
                 "evidence_reference_missing_or_stale",
                 "evidence_references",
