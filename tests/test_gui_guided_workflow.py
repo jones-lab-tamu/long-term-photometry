@@ -749,6 +749,177 @@ def test_guided_feature_event_profile_editor_creates_no_profile_by_default(windo
     assert window._guided_feature_event_status_label.text() == "No draft feature/event profile applied."
 
 
+def test_guided_new_analysis_feature_event_profile_requires_apply_without_open_results(
+    window,
+):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+
+    assert window._current_run_dir == ""
+    assert window._guided_feature_event_status_label.text() == (
+        "Required before Run: apply or configure the feature/event profile. "
+        "Defaults from the active baseline are shown."
+    )
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.feature_event_profile_status == "default_initialized"
+    assert plan.feature_event_explicitly_applied is False
+
+    window._guided_feature_event_apply_btn.click()
+
+    assert window._guided_feature_event_status_label.text() == (
+        "Feature/event profile is configured."
+    )
+    assert "Open Results must be used first" not in (
+        window._guided_feature_event_status_label.text()
+    )
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.feature_event_profile_status == "applied"
+    assert plan.feature_event_explicitly_applied is True
+    assert plan.feature_event_profile_id
+    assert plan.feature_event_values["event_signal"]
+    visible = window._guided_feature_event_status_label.text().lower()
+    prohibited = (
+        "manifest",
+        "preallocated",
+        "command_invoked",
+        "wrapper claim",
+        "startup transaction",
+        "hash",
+        "--guided",
+        "config_effective.yaml",
+        "runner_request",
+        "startup_transaction_unavailable",
+        "guided_candidate_manifest",
+        "guided_startup",
+        "wrapper_claim",
+        "backend adapter",
+        "orchestration",
+        "subprocess",
+        "raw command",
+    )
+    assert not any(term in visible for term in prohibited)
+
+
+def test_guided_new_analysis_feature_event_profile_invalid_status_is_actionable(
+    window,
+):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    window._guided_feature_event_peak_method_combo.setCurrentText("mean_std")
+    window._guided_feature_event_peak_k_edit.setText("0")
+
+    window._guided_feature_event_apply_btn.click()
+
+    assert window._guided_feature_event_status_label.text().startswith(
+        "Feature/event profile settings need attention before Run:"
+    )
+    assert (
+        window._build_guided_new_analysis_draft_plan().feature_event_profile_status
+        == "invalid"
+    )
+
+
+def test_guided_new_analysis_configured_feature_event_profile_materializes(
+    window, tmp_path
+):
+    from photometry_pipeline.guided_backend_validation_materialization import (
+        GuidedBackendValidationMaterializationSuccess,
+        materialize_guided_backend_validation_facts,
+    )
+    from tests.test_guided_backend_validation_materialization import (
+        _valid_parser_contract,
+        _valid_stage2c_draft,
+    )
+
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    window._guided_feature_event_apply_btn.click()
+    gui_plan = window._build_guided_new_analysis_draft_plan()
+
+    backend_root = tmp_path / "configured_profile_backend"
+    backend_root.mkdir()
+    backend_draft = _valid_stage2c_draft(backend_root)
+    backend_draft.feature_event_profile_status = (
+        gui_plan.feature_event_profile_status
+    )
+    backend_draft.feature_event_profile_id = gui_plan.feature_event_profile_id
+    backend_draft.feature_event_values = dict(gui_plan.feature_event_values)
+    backend_draft.feature_event_validation_issues = list(
+        gui_plan.feature_event_validation_issues
+    )
+    backend_draft.feature_event_stale_reasons = list(
+        gui_plan.feature_event_stale_reasons
+    )
+    backend_draft.feature_event_updated_at_utc = (
+        gui_plan.feature_event_updated_at_utc
+    )
+    backend_draft.feature_event_explicitly_applied = (
+        gui_plan.feature_event_explicitly_applied
+    )
+
+    result = materialize_guided_backend_validation_facts(
+        backend_draft,
+        parser_contract=_valid_parser_contract(),
+    )
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+
+
+def test_guided_new_analysis_cleared_feature_event_profile_still_blocks_validation(
+    window, tmp_path
+):
+    from photometry_pipeline.guided_backend_validation_materialization import (
+        GuidedBackendValidationMaterializationFailure,
+        materialize_guided_backend_validation_facts,
+    )
+    from tests.test_guided_backend_validation_materialization import (
+        _valid_parser_contract,
+        _valid_stage2c_draft,
+    )
+
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    window._guided_feature_event_apply_btn.click()
+    window._guided_feature_event_clear_btn.click()
+    gui_plan = window._build_guided_new_analysis_draft_plan()
+    assert gui_plan.feature_event_profile_status == "default_initialized"
+    assert gui_plan.feature_event_explicitly_applied is False
+
+    backend_root = tmp_path / "cleared_profile_backend"
+    backend_root.mkdir()
+    backend_draft = _valid_stage2c_draft(backend_root)
+    backend_draft.feature_event_profile_status = (
+        gui_plan.feature_event_profile_status
+    )
+    backend_draft.feature_event_profile_id = gui_plan.feature_event_profile_id
+    backend_draft.feature_event_values = dict(gui_plan.feature_event_values)
+    backend_draft.feature_event_validation_issues = list(
+        gui_plan.feature_event_validation_issues
+    )
+    backend_draft.feature_event_stale_reasons = list(
+        gui_plan.feature_event_stale_reasons
+    )
+    backend_draft.feature_event_explicitly_applied = (
+        gui_plan.feature_event_explicitly_applied
+    )
+
+    result = materialize_guided_backend_validation_facts(
+        backend_draft,
+        parser_contract=_valid_parser_contract(),
+    )
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == (
+        "feature_event_unapplied_changes"
+    )
+
+
 def test_guided_feature_event_profile_apply_valid_run_level_profile(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)

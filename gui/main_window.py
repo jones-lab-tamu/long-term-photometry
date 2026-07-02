@@ -7303,7 +7303,10 @@ class MainWindow(QMainWindow):
                 self._guided_new_analysis_feature_event_profile_acq_mode = current_acq_mode
                 self._guided_new_analysis_feature_event_profile_errors = [defaults_res.fallback_reason]
                 self._reset_guided_feature_event_editor_to_defaults(
-                    status_text=f"Active baseline defaults unavailable: {defaults_res.fallback_reason}"
+                    status_text=(
+                        "Feature/event profile settings need attention before "
+                        f"Run: {defaults_res.fallback_reason}"
+                    )
                 )
                 return
             
@@ -7317,31 +7320,41 @@ class MainWindow(QMainWindow):
             
             self._set_guided_feature_event_editor_values(
                 self._guided_new_analysis_feature_event_profile,
-                status_text="Loaded defaults from active baseline. Click Apply to add to draft plan."
+                status_text=(
+                    "Required before Run: apply or configure the feature/event "
+                    "profile. Defaults from the active baseline are shown."
+                ),
             )
             return
 
         if self._guided_new_analysis_feature_event_profile_status == "unavailable":
             self._guided_feature_event_status_label.setText(
-                f"Active baseline defaults unavailable: {'; '.join(self._guided_new_analysis_feature_event_profile_errors or ['unknown reasons'])}"
+                "Feature/event profile settings need attention before Run: "
+                + "; ".join(
+                    self._guided_new_analysis_feature_event_profile_errors
+                    or ["active baseline defaults are unavailable"]
+                )
             )
         elif self._guided_new_analysis_feature_event_profile_status == "default_initialized":
             self._guided_feature_event_status_label.setText(
-                "Loaded defaults from active baseline. Click Apply to add to draft plan."
+                "Required before Run: apply or configure the feature/event "
+                "profile. Defaults from the active baseline are shown."
             )
         elif self._guided_new_analysis_feature_event_profile_status == "applied":
             self._guided_feature_event_status_label.setText(
-                "Feature/event profile applied to in-memory draft plan. No outputs were written."
+                "Feature/event profile is configured."
             )
         elif self._guided_new_analysis_feature_event_profile_status == "stale":
             reasons_str = "; ".join(self._guided_new_analysis_feature_event_profile_stale_reasons)
             self._guided_feature_event_status_label.setText(
-                f"Applied feature/event profile is stale: {reasons_str}. Re-apply or reset to fix."
+                "Feature/event profile settings need attention before Run: "
+                f"{reasons_str}. Re-apply or reset the profile."
             )
         elif self._guided_new_analysis_feature_event_profile_status == "invalid":
             errors_str = "; ".join(self._guided_new_analysis_feature_event_profile_errors)
             self._guided_feature_event_status_label.setText(
-                f"Feature/event profile not applied (invalid): {errors_str}"
+                "Feature/event profile settings need attention before Run: "
+                f"{errors_str}"
             )
 
         if self._guided_new_analysis_feature_event_profile_status in ("applied", "stale", "invalid") and self._guided_new_analysis_feature_event_profile:
@@ -7435,7 +7448,10 @@ class MainWindow(QMainWindow):
         if err:
             self._guided_new_analysis_feature_event_profile_status = "invalid"
             self._guided_new_analysis_feature_event_profile_errors = [err]
-            self._guided_feature_event_status_label.setText(f"Feature/event profile not applied (invalid): {err}")
+            self._guided_feature_event_status_label.setText(
+                "Feature/event profile settings need attention before Run: "
+                f"{err}"
+            )
             self._refresh_guided_draft_run_plan_preview()
             return
 
@@ -7444,7 +7460,8 @@ class MainWindow(QMainWindow):
             self._guided_new_analysis_feature_event_profile_status = "invalid"
             self._guided_new_analysis_feature_event_profile_errors = semantic_errors
             self._guided_feature_event_status_label.setText(
-                f"Feature/event profile not applied (invalid): {'; '.join(semantic_errors)}"
+                "Feature/event profile settings need attention before Run: "
+                + "; ".join(semantic_errors)
             )
             self._refresh_guided_draft_run_plan_preview()
             return
@@ -7466,7 +7483,7 @@ class MainWindow(QMainWindow):
         self._guided_new_analysis_feature_event_profile_updated_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         
         self._guided_feature_event_status_label.setText(
-            "Feature/event profile applied to in-memory draft plan. No outputs were written."
+            "Feature/event profile is configured."
         )
         self._invalidate_guided_backend_validation(
             "feature/event profile applied"
@@ -7515,7 +7532,10 @@ class MainWindow(QMainWindow):
             self._guided_new_analysis_feature_event_profile_acq_mode = current_acq_mode
             self._guided_new_analysis_feature_event_profile_errors = [defaults_res.fallback_reason]
             self._reset_guided_feature_event_editor_to_defaults(
-                status_text=f"Active baseline defaults unavailable: {defaults_res.fallback_reason}"
+                status_text=(
+                    "Feature/event profile settings need attention before Run: "
+                    f"{defaults_res.fallback_reason}"
+                )
             )
             self._refresh_guided_draft_run_plan_preview()
             return
@@ -7531,7 +7551,10 @@ class MainWindow(QMainWindow):
         
         self._set_guided_feature_event_editor_values(
             self._guided_new_analysis_feature_event_profile,
-            status_text="Draft feature/event profile cleared; loaded defaults from active baseline. Click Apply to add to draft plan."
+            status_text=(
+                "Required before Run: apply or configure the feature/event "
+                "profile. Defaults from the active baseline are shown."
+            ),
         )
         self._refresh_guided_draft_run_plan_preview()
 
