@@ -95,6 +95,11 @@ except ImportError:
 # Helpers
 # ======================================================================
 
+# Test-only in-process seam. It is not configurable from CLI and is inactive
+# in production. Tests use it to stop after initial status, before analysis.
+_GUIDED_TEST_STOP_AFTER_INITIAL_STATUS = None
+
+
 def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -1810,6 +1815,11 @@ def main():
     # Initial write (phase="running")
     _write_status_json(status_path, status_data)
     _write_status_update("initializing")
+    if _GUIDED_TEST_STOP_AFTER_INITIAL_STATUS is not None:
+        _GUIDED_TEST_STOP_AFTER_INITIAL_STATUS(
+            run_dir=run_dir,
+            status_path=status_path,
+        )
 
     # -- Open event emitter --
     emitter = EventEmitter(events_path, run_id, run_dir, file_mode="w")
