@@ -7681,6 +7681,57 @@ class MainWindow(QMainWindow):
             return OutputPolicy()
         return getattr(self, "_guided_draft_output_policy_by_run", {}).get(run_dir, OutputPolicy())
 
+    def _guided_new_analysis_output_policy_status_text(self) -> str:
+        status = getattr(
+            self, "_guided_new_analysis_output_policy_status", "missing"
+        )
+        if status == "applied":
+            return (
+                "Output parent folder is configured. Guided Run will create "
+                "a new run folder inside it. No directories or files were "
+                "created during setup."
+            )
+        if status == "stale":
+            reasons = "; ".join(
+                getattr(
+                    self,
+                    "_guided_new_analysis_output_policy_stale_reasons",
+                    [],
+                )
+                or []
+            )
+            return (
+                "Output folder needs attention before Run: "
+                f"{reasons or 'the selected setup changed'}"
+            )
+        if status == "invalid":
+            issues = "; ".join(
+                getattr(
+                    self,
+                    "_guided_new_analysis_output_policy_validation_issues",
+                    [],
+                )
+                or []
+            )
+            return (
+                "Output folder needs attention before Run: "
+                f"{issues or 'the selected folder is invalid'}"
+            )
+        selected_output = (
+            self._guided_output_dir_edit.text().strip()
+            if hasattr(self, "_guided_output_dir_edit")
+            else ""
+        )
+        if selected_output:
+            return (
+                "Select data output folder is configured. Required before Run: "
+                "choose and apply the run output parent folder in Draft Plan."
+            )
+        return (
+            "Required before Run: choose an output folder in Select data, then "
+            "apply the run output parent folder in Draft Plan."
+        )
+
     def _sync_guided_output_policy_editor_to_current_run(self, *, force: bool = False) -> None:
         if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
             self._sync_guided_output_policy_editor_to_new_analysis(force=force)
@@ -7710,28 +7761,13 @@ class MainWindow(QMainWindow):
             return
         self._refresh_guided_new_analysis_output_policy_staleness()
         synced = getattr(self, "_guided_output_policy_editor_synced_run", None)
-        if not force and synced == "new_analysis":
-            return
         path = getattr(self, "_guided_new_analysis_output_policy_path", None)
-        with QSignalBlocker(self._guided_output_path_edit):
-            self._guided_output_path_edit.setText(str(path or ""))
-        status = getattr(self, "_guided_new_analysis_output_policy_status", "missing")
-        if status == "applied":
-            self._guided_output_status_label.setText(
-                "Showing applied new-analysis output policy. No directories or files were created."
-            )
-        elif status == "stale":
-            reasons = "; ".join(getattr(self, "_guided_new_analysis_output_policy_stale_reasons", []) or [])
-            self._guided_output_status_label.setText(
-                f"New-analysis output policy is stale: {reasons or 'source/cache context changed'}"
-            )
-        elif status == "invalid":
-            issues = "; ".join(getattr(self, "_guided_new_analysis_output_policy_validation_issues", []) or [])
-            self._guided_output_status_label.setText(
-                f"Output destination not applied: {issues or 'validation failed'}"
-            )
-        else:
-            self._guided_output_status_label.setText("No new-analysis output destination is applied.")
+        if force or synced != "new_analysis":
+            with QSignalBlocker(self._guided_output_path_edit):
+                self._guided_output_path_edit.setText(str(path or ""))
+        self._guided_output_status_label.setText(
+            self._guided_new_analysis_output_policy_status_text()
+        )
         self._guided_output_policy_editor_synced_run = "new_analysis"
 
     def _refresh_guided_new_analysis_output_policy_staleness(self) -> None:
@@ -7827,7 +7863,9 @@ class MainWindow(QMainWindow):
             self._guided_new_analysis_output_policy_validation_issues = [validation.message]
             self._guided_new_analysis_output_policy_stale_reasons = []
             self._guided_new_analysis_output_policy_explicitly_applied = False
-            self._guided_output_status_label.setText(f"Output destination not applied: {validation.message}")
+            self._guided_output_status_label.setText(
+                self._guided_new_analysis_output_policy_status_text()
+            )
             self._refresh_guided_draft_run_plan_preview()
             return
         resolved_root = str(Path(path.strip()).expanduser().resolve(strict=False))
@@ -7842,7 +7880,7 @@ class MainWindow(QMainWindow):
         self._guided_new_analysis_output_policy_cache_root = ctx.get("cache_root_path", "")
         self._guided_new_analysis_output_policy_build_request_signature = ctx.get("build_request_signature", "")
         self._guided_output_status_label.setText(
-            "Output destination applied to new-analysis draft plan. No directories or files were created."
+            self._guided_new_analysis_output_policy_status_text()
         )
         self._invalidate_guided_backend_validation("output policy applied")
         self._guided_output_policy_editor_synced_run = "new_analysis"
@@ -7880,7 +7918,7 @@ class MainWindow(QMainWindow):
         with QSignalBlocker(self._guided_output_path_edit):
             self._guided_output_path_edit.setText("")
         self._guided_output_status_label.setText(
-            "New-analysis output destination cleared from in-memory draft plan. No files were changed."
+            self._guided_new_analysis_output_policy_status_text()
         )
         self._guided_output_policy_editor_synced_run = "new_analysis"
         self._refresh_guided_draft_run_plan_preview()

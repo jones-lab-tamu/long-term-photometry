@@ -3396,6 +3396,113 @@ def test_guided_output_policy_no_policy_by_default(window, tmp_path, monkeypatch
     assert "Execution ready: false" in checklist
 
 
+def test_guided_new_analysis_draft_plan_distinguishes_select_output_from_run_output(
+    window, tmp_path, monkeypatch
+):
+    _input_dir, output_dir = _configure_guided_raw_cache_setup(
+        window, tmp_path, monkeypatch
+    )
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+
+    status = window._guided_output_status_label.text()
+    assert status == (
+        "Select data output folder is configured. Required before Run: choose "
+        "and apply the run output parent folder in Draft Plan."
+    )
+    assert "No output root is configured" not in status
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.output_base_path == str(output_dir)
+    assert plan.output_policy_status == "missing"
+    assert plan.output_policy_path is None
+
+
+def test_guided_new_analysis_draft_plan_reports_missing_select_output(window):
+    window._guided_output_dir_edit.setText("")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+
+    assert window._guided_workflow_mode == "new_analysis"
+    assert window._guided_output_status_label.text() == (
+        "Required before Run: choose an output folder in Select data, then "
+        "apply the run output parent folder in Draft Plan."
+    )
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.output_base_path is None
+    assert plan.output_policy_status == "missing"
+
+
+def test_guided_new_analysis_output_status_survives_navigation(
+    window, tmp_path, monkeypatch
+):
+    _input_dir, output_dir = _configure_guided_raw_cache_setup(
+        window, tmp_path, monkeypatch
+    )
+    window._set_guided_workflow_mode("new_analysis")
+    draft_index = list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    window._guided_workflow_stepper.setCurrentRow(draft_index)
+    before = window._guided_output_status_label.text()
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Diagnostics")
+    )
+    window._guided_workflow_stepper.setCurrentRow(draft_index)
+
+    assert window._guided_output_dir_edit.text() == str(output_dir)
+    assert window._guided_output_status_label.text() == before
+    assert "No output root is configured" not in before
+
+
+def test_guided_new_analysis_applied_output_parent_is_real_draft_state(
+    window, tmp_path, monkeypatch
+):
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    output_parent = tmp_path / "planned_runs"
+    output_parent.mkdir()
+    run_output_base = output_parent / "future_guided_runs"
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    window._guided_output_path_edit.setText(str(run_output_base))
+
+    window._guided_output_apply_btn.click()
+
+    status = window._guided_output_status_label.text()
+    assert status.startswith(
+        "Output parent folder is configured. Guided Run will create a new run "
+        "folder inside it."
+    )
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.output_policy_status == "applied"
+    assert plan.output_policy_explicitly_applied is True
+    assert plan.output_policy_path == str(run_output_base.resolve())
+    assert not run_output_base.exists()
+    prohibited = (
+        "manifest",
+        "preallocated",
+        "command_invoked",
+        "wrapper claim",
+        "startup transaction",
+        "hash",
+        "--guided",
+        "config_effective.yaml",
+        "runner_request",
+        "startup_transaction_unavailable",
+        "guided_candidate_manifest",
+        "guided_startup",
+        "wrapper_claim",
+        "backend adapter",
+        "orchestration",
+        "subprocess",
+        "raw command",
+    )
+    assert not any(term in status.lower() for term in prohibited)
+
+
 def test_guided_output_policy_apply_valid(window, tmp_path, monkeypatch):
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
