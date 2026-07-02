@@ -82,6 +82,10 @@ try:
     from photometry_pipeline.guided_new_analysis_plan import (
         FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
     )
+    from photometry_pipeline.guided_startup_claim import (
+        claim_guided_preallocated_startup,
+        validate_guided_preallocated_startup,
+    )
 except ImportError:
     print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.", flush=True)
     raise SystemExit(1)
@@ -688,6 +692,14 @@ def parse_args():
         default=None,
         help="Internal/backend use only: exact Guided candidate manifest.",
     )
+    parser.add_argument(
+        '--guided-preallocated-run-dir',
+        action='store_true',
+        help=(
+            "Internal/backend use only: claim a Guided startup-preallocated "
+            "run directory."
+        ),
+    )
     return parser.parse_args()
 
 # ======================================================================
@@ -859,6 +871,46 @@ def verify_guided_manifest_before_output(args):
         )
         raise RuntimeError(f"Guided manifest verification refused: {detail}")
     return verified
+
+
+def validate_guided_preallocated_mode_args(args):
+    """Validate the internal preallocated handoff flags without writing."""
+    if not getattr(args, "guided_preallocated_run_dir", False):
+        return None
+    conflicts = (
+        (not getattr(args, "guided_candidate_manifest", None), "manifest required"),
+        (not getattr(args, "out", None), "--out required"),
+        (bool(getattr(args, "out_base", None)), "--out-base prohibited"),
+        (bool(getattr(args, "overwrite", False)), "overwrite prohibited"),
+        (getattr(args, "format", None) != "rwd", "RWD format required"),
+        (getattr(args, "mode", None) != "phasic", "phasic mode required"),
+        (getattr(args, "run_type", None) != "full", "full run type required"),
+        (
+            getattr(args, "preview_first_n", None) is not None,
+            "preview prohibited",
+        ),
+        (bool(getattr(args, "discover", False)), "discover prohibited"),
+        (bool(getattr(args, "validate_only", False)), "validate-only prohibited"),
+        (bool(getattr(args, "traces_only", False)), "traces-only prohibited"),
+        (
+            getattr(args, "acquisition_mode", None)
+            not in (None, "intermittent"),
+            "continuous acquisition prohibited",
+        ),
+        (getattr(args, "include_rois", None) is not None, "ROI override prohibited"),
+        (getattr(args, "exclude_rois", None) is not None, "ROI override prohibited"),
+    )
+    for failed, detail in conflicts:
+        if failed:
+            raise RuntimeError(
+                f"Guided preallocated startup handoff refused: {detail}."
+            )
+    return validate_guided_preallocated_startup(
+        input_dir=args.input,
+        output_dir=args.out,
+        config_path=args.config,
+        manifest_path=args.guided_candidate_manifest,
+    )
 
 
 def _append_guided_manifest_to_analysis_command(cmd, args, *, mode):
@@ -1134,6 +1186,21 @@ def main():
     phasic_out = None
     tonic_out = None
     emitter = None
+
+    preallocated_validation = None
+    try:
+        preallocated_validation = validate_guided_preallocated_mode_args(args)
+        if (
+            preallocated_validation is not None
+            and not preallocated_validation.accepted
+        ):
+            issue = preallocated_validation.blocking_issues[0]
+            raise RuntimeError(
+                f"Guided preallocated startup handoff refused: {issue.category}"
+            )
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1)
 
     # Internal Guided execution must verify live source identity before run-dir
     # resolution, allocation, status creation, or any subprocess launch.
@@ -1599,7 +1666,11 @@ def main():
     # ============================================================
     # 1. Setup run directory
     # ============================================================
-    if is_gui_mode:
+    if args.guided_preallocated_run_dir:
+        # Startup owns this existing final directory. Never create, clean, or
+        # overwrite its root after the exclusive claim above.
+        pass
+    elif is_gui_mode:
         # GUI mode: --overwrite is meaningless (each run gets a unique run_id)
         if args.overwrite:
             print("WARNING: --overwrite is ignored in --out-base mode")
@@ -1615,7 +1686,8 @@ def main():
             # and open log handles.
             _cleanup_run_outputs_in_place(run_dir, emitter=None)
 
-    os.makedirs(run_dir, exist_ok=True)
+    if not args.guided_preallocated_run_dir:
+        os.makedirs(run_dir, exist_ok=True)
 
     # ============================================================
     # 2. Status & Emitter Setup
@@ -1708,6 +1780,32 @@ def main():
     # Update status_data with resolved preview info before initial write
     status_data["run_type"] = effective_run_type
     status_data["preview"] = {"selector": "first_n", "first_n": effective_preview_first_n} if effective_preview_first_n is not None else None
+
+    if preallocated_validation is not None:
+        # Consume the one-shot startup only after every earlier non-writing
+        # preflight has passed and immediately before production status.
+        preallocated_validation = validate_guided_preallocated_mode_args(args)
+        if not preallocated_validation.accepted:
+            issue = preallocated_validation.blocking_issues[0]
+            print(
+                "Error: Guided preallocated startup handoff refused: "
+                f"{issue.category}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        claim_result = claim_guided_preallocated_startup(
+            preallocated_validation,
+            claimed_utc=_utc_now_iso(),
+            process_id=os.getpid(),
+        )
+        if not claim_result.claimed:
+            issue = claim_result.blocking_issues[0]
+            print(
+                "Error: Guided preallocated startup handoff refused: "
+                f"{issue.category}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
 
     # Initial write (phase="running")
     _write_status_json(status_path, status_data)
