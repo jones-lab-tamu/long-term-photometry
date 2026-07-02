@@ -114,16 +114,13 @@ def test_ready_hidden_enables_guarded_button(window, startup_request):
     assert window._guided_run_readiness.status == "ready_hidden"
     assert window._guided_run_readiness.ready is True
     assert window._guided_run_btn.isEnabled() is True
-    assert window._guided_run_btn.toolTip() == (
-        "Guided Run is internally ready, but execution is not enabled in "
-        "this build."
-    )
-    assert "running from Guided Mode is not enabled" in (
-        window._guided_run_readiness_label.text()
+    assert window._guided_run_btn.toolTip() == "Guided Run is ready to start."
+    assert window._guided_run_readiness_label.text() == (
+        "Guided Run is ready to start."
     )
 
 
-def test_enabled_click_calls_no_execution_path(
+def test_enabled_click_without_retained_request_calls_no_execution_path(
     window, startup_request, monkeypatch
 ):
     def fail(*_args, **_kwargs):
@@ -140,9 +137,10 @@ def test_enabled_click_calls_no_execution_path(
     monkeypatch.setattr(pipeline, "Pipeline", fail)
     _set_ready(window, startup_request)
     window._guided_run_btn.click()
-    assert window._guided_run_btn.isEnabled() is True
+    assert window._guided_run_btn.isEnabled() is False
     assert window._guided_run_readiness_label.text() == (
-        "Guided Run execution is not enabled in this build."
+        "Guided Run could not start because the validated setup is no longer "
+        "current."
     )
 
 

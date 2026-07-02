@@ -68,10 +68,7 @@ _SUMMARIES = {
         "Guided Run could not prepare the validated setup for execution."
     ),
     "backend_unavailable": "Guided Run is not available in this build.",
-    "ready_hidden": (
-        "Guided Run is internally ready, but running from Guided Mode is not "
-        "enabled in this build."
-    ),
+    "ready_hidden": "Guided Run is ready to start.",
 }
 
 
