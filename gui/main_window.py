@@ -4509,6 +4509,59 @@ class MainWindow(QMainWindow):
 
         status, _request, _path = self._guided_diagnostic_cache_readiness()
         record = getattr(self, "_guided_diagnostic_cache_record", None)
+        mode = getattr(self, "_guided_workflow_mode", "start")
+
+        if mode == "new_analysis":
+            if record is None:
+                current_status = getattr(self, "_guided_diagnostic_cache_status", None)
+                if (
+                    isinstance(current_status, DiagnosticCacheStatus)
+                    and current_status.code == "failed"
+                ):
+                    status_text = "Diagnostic cache failed. Fix the issue and rebuild before Run."
+                else:
+                    status_text = "Required before Run: build the diagnostic cache for the selected data."
+                self._guided_diagnostic_cache_status_label.setText(status_text)
+                self._guided_diagnostic_cache_readiness_label.setText(status.message)
+                self._guided_diagnostic_cache_build_btn.setEnabled(status.ok)
+                self._guided_diagnostic_cache_summary_label.setText(
+                    "Diagnostic cache: none ready.\n"
+                    "Build diagnostic cache is required before confirming strategies or running the analysis."
+                )
+                return
+
+            stale_status = None
+            try:
+                current_request = self._build_guided_diagnostic_cache_request(
+                    cache_id=record.cache_id,
+                    cache_root_path=record.cache_root_path,
+                )
+                stale_status = compare_request_to_artifact(current_request, record)
+            except Exception as exc:
+                stale_status = DiagnosticCacheStatus(
+                    False,
+                    "stale_check_failed",
+                    f"Diagnostic cache state could not be compared with the current setup: {exc}",
+                    stale=True,
+                    stale_reasons=("current setup could not be compared",),
+                )
+
+            if stale_status.ok:
+                status_text = "Diagnostic cache is ready."
+            else:
+                if stale_status.code == "stale_check_failed":
+                    status_text = "Diagnostic cache failed. Fix the issue and rebuild before Run."
+                else:
+                    status_text = "Diagnostic cache is missing or stale. Rebuild the diagnostic cache before Run."
+
+            self._guided_diagnostic_cache_status_label.setText(status_text)
+            self._guided_diagnostic_cache_readiness_label.setText(status.message)
+            self._guided_diagnostic_cache_build_btn.setEnabled(status.ok)
+            self._guided_diagnostic_cache_summary_label.setText(
+                self._guided_diagnostic_cache_summary_text(record, stale_status)
+            )
+            return
+
         if record is None:
             current_status = getattr(self, "_guided_diagnostic_cache_status", None)
             if (

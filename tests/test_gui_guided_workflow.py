@@ -4902,3 +4902,84 @@ def test_stepper_routing_invalid_indices_no_crash(window):
     window._on_guided_stepper_row_changed(100)
     # Mode should still be start
     assert window._guided_workflow_mode == "start"
+
+
+def test_guided_diagnostics_guidance_new_analysis_no_cache(window, tmp_path, monkeypatch):
+    # Set to new_analysis mode
+    window._set_guided_workflow_mode("new_analysis")
+    # Refresh panel
+    window._refresh_guided_diagnostics_panel()
+
+    # Diagnostics page must show cache build is required before Run
+    status_text = window._guided_diagnostic_cache_status_label.text()
+    readiness_text = window._guided_diagnostic_cache_readiness_label.text()
+
+    assert "Required before Run: build the diagnostic cache for the selected data." in status_text
+    assert "Select raw input folder." in readiness_text or "Run ROI discovery" in readiness_text or "Input directory is required." in readiness_text
+    # Ensure it doesn't instruct the user to Open Results for new-analysis cache build
+    assert "Open Results" not in status_text
+
+
+def test_guided_diagnostics_guidance_new_analysis_ready_cache(window, tmp_path, monkeypatch):
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._set_guided_workflow_mode("new_analysis")
+
+    # Build/simulate a ready diagnostic cache
+    fake_runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = fake_runner
+    window._guided_diagnostic_cache_build_btn.click()
+    cache_path = Path(fake_runner.run_dir)
+    prelaunch_request = cache_path / "guided_diagnostic_cache_request.json"
+    if prelaunch_request.exists():
+        prelaunch_request.unlink()
+    _write_minimal_guided_cache_outputs(cache_path)
+    fake_runner.succeed()
+    window._on_guided_diagnostic_cache_finished(0)
+
+    # Refresh panel
+    window._refresh_guided_diagnostics_panel()
+
+    # Must say diagnostic cache is ready and not present required message
+    status_text = window._guided_diagnostic_cache_status_label.text()
+    assert "Diagnostic cache is ready." in status_text
+    assert "Required before Run" not in status_text
+
+
+def test_guided_diagnostics_guidance_new_analysis_stale_cache(window, tmp_path, monkeypatch):
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._set_guided_workflow_mode("new_analysis")
+
+    # Build/simulate a ready diagnostic cache
+    fake_runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = fake_runner
+    window._guided_diagnostic_cache_build_btn.click()
+    cache_path = Path(fake_runner.run_dir)
+    prelaunch_request = cache_path / "guided_diagnostic_cache_request.json"
+    if prelaunch_request.exists():
+        prelaunch_request.unlink()
+    _write_minimal_guided_cache_outputs(cache_path)
+    fake_runner.succeed()
+    window._on_guided_diagnostic_cache_finished(0)
+
+    # Now make it stale by changing a setting (e.g. adding an excluded ROI)
+    item = window._roi_list.item(0)
+    item.setCheckState(Qt.Unchecked)  # change roi inclusion to trigger stale status
+
+    window._refresh_guided_diagnostics_panel()
+
+    # Must say diagnostic cache is missing or stale. Rebuild the diagnostic cache before Run.
+    status_text = window._guided_diagnostic_cache_status_label.text()
+    assert "Diagnostic cache is missing or stale. Rebuild the diagnostic cache before Run." in status_text
+
+
+def test_guided_diagnostics_guidance_new_analysis_failed_cache(window):
+    from photometry_pipeline.guided_diagnostic_cache import DiagnosticCacheStatus
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_diagnostic_cache_status = DiagnosticCacheStatus(
+        ok=False,
+        code="failed",
+        message="Failure reason"
+    )
+    window._refresh_guided_diagnostics_panel()
+    status_text = window._guided_diagnostic_cache_status_label.text()
+    assert "Diagnostic cache failed. Fix the issue and rebuild before Run." in status_text
