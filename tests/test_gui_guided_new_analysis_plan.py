@@ -416,6 +416,60 @@ def test_run_page_revalidation_rebuilds_draft_after_dataset_contract_apply(
     )
 
 
+def test_run_page_unanimous_robust_marks_drive_dynamic_fit_contract(
+    window, tmp_path, monkeypatch
+):
+    robust_by_roi = {
+        roi: "Robust Global Event-Reject Fit"
+        for roi in ("CH1", "CH2", "CH3")
+    }
+    _configure_complete_guided_new_analysis_draft(
+        window,
+        tmp_path,
+        monkeypatch,
+        acquisition_mode="intermittent",
+        strategy_by_roi=robust_by_roi,
+        write_rwd_file=True,
+        session_duration=600,
+    )
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        MainWindow._infer_dataset_contract_overrides.__get__(
+            window, MainWindow
+        ),
+    )
+    window._guided_dataset_contract_apply_btn.click()
+    plan = window._build_guided_new_analysis_draft_plan()
+
+    assert {
+        choice.selected_strategy
+        for choice in plan.per_roi_correction_strategy_choices
+        if choice.roi_id in plan.included_roi_ids
+        and choice.current_or_stale == "current"
+    } == {"robust_global_event_reject"}
+    assert plan.dynamic_fit_parameter_contract.dynamic_fit_mode == (
+        "robust_global_event_reject"
+    )
+    assert plan.dynamic_fit_parameter_contract.provenance[
+        "dynamic_fit_mode"
+    ] == "unanimous current explicit included-ROI strategy marks"
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Run")
+    )
+    window._guided_backend_validate_btn.click()
+    issue_codes = {
+        issue.detail_code
+        for issue in window._guided_backend_validation_outcome.blocking_issues
+    }
+    assert "dynamic_fit_mode_mismatch" not in issue_codes
+    assert "dataset_snapshot_missing_or_invalid" not in issue_codes
+    assert "correction_preview_missing_or_stale" not in issue_codes
+    assert "feature_event_profile_missing" not in issue_codes
+    assert "output_policy_missing" not in issue_codes
+
+
 def test_new_analysis_dataset_contract_missing_duration_or_semantics_cannot_apply(
     window, tmp_path, monkeypatch
 ):
@@ -1173,6 +1227,9 @@ def test_new_analysis_run_preview_mixed_per_roi_strategies_subset_blocked_not_pl
     assert "mixed_per_roi_strategies" in preview_text
     assert "status: not executable under global_dynamic_fit_only.v1" in preview_text
     assert "mixed per-ROI strategies remain planning-valid" in preview_text
+    assert "Included ROIs use mixed correction strategies" in (
+        window._guided_confirm_strategy_progress_label.text()
+    )
     assert "Execution unavailable" in preview_text
     assert "ready to run" not in preview_text.lower()
 

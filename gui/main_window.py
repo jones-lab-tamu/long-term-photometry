@@ -5115,6 +5115,7 @@ class MainWindow(QMainWindow):
 
         supported = set(GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE.values())
         confirmed: set[str] = set()
+        confirmed_modes: dict[str, str] = {}
         stale: set[str] = set()
         for key, choice in getattr(self, "_guided_strategy_choices", {}).items():
             if (
@@ -5137,6 +5138,7 @@ class MainWindow(QMainWindow):
                 and choice.get("strategy") in supported
             ):
                 confirmed.add(roi)
+                confirmed_modes[roi] = str(choice["strategy"])
 
         count = len(confirmed)
         total = len(included)
@@ -5148,6 +5150,13 @@ class MainWindow(QMainWindow):
                 f"Reconfirm before Run. {progress}"
             )
         if total > 0 and count == total:
+            if len(set(confirmed_modes.values())) != 1:
+                return (
+                    "Correction-preview evidence is ready for the current "
+                    "diagnostic cache. Included ROIs use mixed correction "
+                    "strategies, but the current Run scope requires one shared "
+                    f"strategy. Reconfirm before Run. {progress}"
+                )
             return (
                 "Correction-preview evidence is ready for the current "
                 "diagnostic cache. Correction strategies confirmed for all "
@@ -6441,6 +6450,7 @@ class MainWindow(QMainWindow):
 
     def _build_guided_new_analysis_draft_plan(self):
         from photometry_pipeline.guided_new_analysis_plan import (
+            GuidedNewAnalysisDynamicFitParameterContract,
             GuidedNewAnalysisDraftPlan,
             GuidedPlanCorrectionChoice
         )
@@ -6585,6 +6595,46 @@ class MainWindow(QMainWindow):
                 )
             )
 
+        current_explicit_modes_by_roi: dict[str, list[str]] = {}
+        supported_dynamic_fit_modes = set(
+            GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE.values()
+        )
+        for choice in per_roi_choices:
+            if (
+                choice.roi_id in included
+                and choice.current_or_stale == "current"
+                and choice.explicit_user_mark
+                and choice.selected_strategy in supported_dynamic_fit_modes
+            ):
+                current_explicit_modes_by_roi.setdefault(
+                    choice.roi_id, []
+                ).append(choice.selected_strategy)
+        unanimous_confirmed_mode = None
+        if included and all(
+            len(current_explicit_modes_by_roi.get(roi, ())) == 1
+            for roi in included
+        ):
+            confirmed_modes = {
+                current_explicit_modes_by_roi[roi][0]
+                for roi in included
+            }
+            if len(confirmed_modes) == 1:
+                unanimous_confirmed_mode = next(iter(confirmed_modes))
+        dynamic_fit_parameter_contract = (
+            GuidedNewAnalysisDynamicFitParameterContract()
+        )
+        if unanimous_confirmed_mode is not None:
+            dynamic_fit_parameter_contract = dataclasses.replace(
+                dynamic_fit_parameter_contract,
+                dynamic_fit_mode=unanimous_confirmed_mode,
+                provenance={
+                    **dict(dynamic_fit_parameter_contract.provenance),
+                    "dynamic_fit_mode": (
+                        "unanimous current explicit included-ROI strategy marks"
+                    ),
+                },
+            )
+
         preview_id = None
         preview_path = None
         preview_status = None
@@ -6648,6 +6698,7 @@ class MainWindow(QMainWindow):
             output_overwrite=False,
             global_correction_strategy=global_corr_strategy,
             dynamic_fit_mode=df_mode,
+            dynamic_fit_parameter_contract=dynamic_fit_parameter_contract,
             discovered_roi_ids=discovered,
             included_roi_ids=included,
             excluded_roi_ids=excluded,
