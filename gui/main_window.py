@@ -2727,8 +2727,10 @@ class MainWindow(QMainWindow):
         wrapper_layout.addWidget(self._guided_correction_next_action_label)
 
         candidate_group = QGroupBox(
-            "Method configuration - not evidence selection"
+            "Method configuration - not evidence selection",
+            wrapper,
         )
+        candidate_group.setObjectName("guidedHiddenMethodConfiguration")
         candidate_layout = QVBoxLayout(candidate_group)
         candidate_layout.setContentsMargins(10, 8, 10, 8)
         cards = QWidget()
@@ -2788,9 +2790,6 @@ class MainWindow(QMainWindow):
             self._guided_correction_sync_connected = True
         self._sync_guided_correction_from_full()
         candidate_layout.addWidget(cards)
-        self._guided_raw_setup_controls["Correction approach"] = (
-            candidate_group
-        )
         self._guided_method_configuration_group = candidate_group
         candidate_group.setVisible(False)
 

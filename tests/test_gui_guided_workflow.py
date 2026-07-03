@@ -504,11 +504,13 @@ def test_guided_open_results_mode_marks_setup_steps_skipped_and_can_switch_back(
         assert window._guided_workflow_stack.currentWidget().objectName() == object_name
         banner = window._guided_skipped_setup_banners[step_name]
         assert banner.isHidden() is False
-        assert window._guided_raw_setup_controls[step_name].isHidden() is True
+        if step_name in window._guided_raw_setup_controls:
+            assert window._guided_raw_setup_controls[step_name].isHidden() is True
         text = " ".join(label.text() for label in banner.findChildren(QLabel))
         assert "reviewing a completed run" in text
         assert "raw/input data" in text
         assert "do not configure the loaded completed run" in text
+    assert window._guided_method_configuration_group.isHidden() is True
 
     switch_btn = window._guided_skipped_setup_banners["Select data"].findChild(
         QPushButton,
@@ -4659,6 +4661,27 @@ def test_signal_only_f0_is_one_preview_subsection_with_plain_limit(window):
     )
     assert "Guided Run cannot execute it yet" in (
         window._guided_preview_locked_label.text()
+    )
+
+
+def test_hidden_method_configuration_never_becomes_top_level(window, qapp):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    window._refresh_guided_mode_display()
+    qapp.processEvents()
+
+    group = window._guided_method_configuration_group
+    assert group.parentWidget() is not None
+    assert group.isWindow() is False
+    assert group.isHidden() is True
+    assert group not in QApplication.topLevelWidgets()
+    assert "Correction approach" not in window._guided_raw_setup_controls
+    assert not any(
+        isinstance(widget, QGroupBox)
+        and widget.title() == "Method configuration - not evidence selection"
+        for widget in QApplication.topLevelWidgets()
     )
 
 
