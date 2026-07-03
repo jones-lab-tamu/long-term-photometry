@@ -2003,7 +2003,13 @@ class MainWindow(QMainWindow):
         self._guided_session_duration_edit.setPlaceholderText(self._duration_edit.placeholderText())
         self._guided_session_duration_edit.setToolTip(self._duration_edit.toolTip())
         self._make_guided_widget_shrinkable(self._guided_session_duration_edit)
-        form.addRow("Session duration (s):", self._guided_session_duration_edit)
+        self._guided_session_duration_label = QLabel(
+            "Session duration (s):"
+        )
+        form.addRow(
+            self._guided_session_duration_label,
+            self._guided_session_duration_edit,
+        )
 
         self._guided_continuous_window_sec_spin = QDoubleSpinBox()
         self._guided_continuous_window_sec_spin.setObjectName("guidedContinuousWindowSec")
@@ -2460,6 +2466,7 @@ class MainWindow(QMainWindow):
             self._guided_diagnostics_status = "not_generated"
         if hasattr(self, "_run_btn"):
             self._run_btn.setEnabled(False)
+        self._sync_guided_recording_visibility()
         self._refresh_guided_setup_summary(lightweight=True)
         self._invalidate_guided_backend_validation("input format changed")
 
@@ -2567,12 +2574,82 @@ class MainWindow(QMainWindow):
             if widget is not None:
                 widget.setEnabled(continuous)
         if continuous:
+            self._guided_session_duration_label.setText(
+                "Session duration (s):"
+            )
+            self._guided_session_duration_edit.setPlaceholderText(
+                "(not used in continuous mode)"
+            )
+            self._guided_session_duration_edit.setToolTip(
+                self._duration_edit.toolTip()
+            )
             self._guided_recording_structure_help_label.setText(
-                "Continuous mode uses one uninterrupted recording split into non-overlapping analysis windows."
+                "Continuous mode uses one uninterrupted recording split into "
+                "non-overlapping analysis windows. Continuous acquisition is "
+                "outside the current Guided Run scope."
+            )
+            return
+
+        input_format = (
+            self._guided_format_combo.currentText().strip().lower()
+            if hasattr(self, "_guided_format_combo")
+            else ""
+        )
+        if input_format != "rwd":
+            self._guided_session_duration_label.setText(
+                "Session duration (s):"
+            )
+            self._guided_session_duration_edit.setPlaceholderText(
+                "(optional, seconds > 0)"
+            )
+            self._guided_session_duration_edit.setToolTip(
+                self._duration_edit.toolTip()
+            )
+            self._guided_recording_structure_help_label.setText(
+                "Intermittent timing is available for planning, but this input "
+                "format is outside the current Guided Run scope."
+            )
+            return
+
+        self._guided_session_duration_label.setText(
+            "Session duration (s) — required:"
+        )
+        self._guided_session_duration_edit.setPlaceholderText(
+            "(required, seconds > 0)"
+        )
+        self._guided_session_duration_edit.setToolTip(
+            "Required for RWD intermittent recordings. Enter the positive "
+            "recording duration for each session, in seconds."
+        )
+        sessions_per_hour = None
+        try:
+            sessions_per_hour = int(
+                self._guided_sessions_per_hour_edit.text().strip()
+            )
+        except (AttributeError, ValueError):
+            pass
+        session_duration = None
+        try:
+            session_duration = float(
+                self._guided_session_duration_edit.text().strip()
+            )
+        except (AttributeError, ValueError):
+            pass
+        if (
+            sessions_per_hour is not None
+            and sessions_per_hour > 0
+            and session_duration is not None
+            and session_duration > 0
+        ):
+            self._guided_recording_structure_help_label.setText(
+                "Recording structure complete: intermittent sessions, "
+                f"{sessions_per_hour} sessions/hour, "
+                f"{session_duration:g} s/session."
             )
         else:
             self._guided_recording_structure_help_label.setText(
-                "Intermittent mode uses session/chunk timing. Sessions/hour and session duration are optional unless required by the input format."
+                "Recording structure needs attention: positive sessions/hour "
+                "and session duration are required for RWD intermittent input."
             )
 
     def _on_guided_discover_rois(self) -> None:

@@ -1755,6 +1755,110 @@ def test_guided_recording_structure_syncs_to_full_control_state(window):
     assert window._duration_edit.text() == "300"
 
 
+def _set_guided_rwd_intermittent(window):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText("rwd")
+    index = window._guided_acquisition_mode_combo.findData("intermittent")
+    assert index >= 0
+    window._guided_acquisition_mode_combo.setCurrentIndex(index)
+
+
+def test_guided_rwd_intermittent_duration_is_visibly_required(window):
+    _set_guided_rwd_intermittent(window)
+    window._guided_sessions_per_hour_edit.setText("2")
+    window._guided_session_duration_edit.clear()
+
+    assert window._guided_session_duration_label.text() == (
+        "Session duration (s) — required:"
+    )
+    assert "required, seconds > 0" in (
+        window._guided_session_duration_edit.placeholderText()
+    )
+    status = window._guided_recording_structure_help_label.text()
+    assert "needs attention" in status
+    assert "session duration are required" in status
+    assert "optional" not in status.lower()
+
+
+@pytest.mark.parametrize("duration", ("", "0", "-1", "not-a-number"))
+def test_guided_rwd_intermittent_invalid_duration_remains_incomplete(
+    window,
+    duration,
+):
+    _set_guided_rwd_intermittent(window)
+    window._guided_sessions_per_hour_edit.setText("2")
+    window._guided_session_duration_edit.setText(duration)
+
+    assert "needs attention" in (
+        window._guided_recording_structure_help_label.text()
+    )
+    assert "positive sessions/hour and session duration are required" in (
+        window._guided_recording_structure_help_label.text()
+    )
+
+
+def test_guided_rwd_intermittent_valid_duration_completes_step(window):
+    _set_guided_rwd_intermittent(window)
+    window._guided_sessions_per_hour_edit.setText("2")
+    window._guided_session_duration_edit.setText("600")
+
+    status = window._guided_recording_structure_help_label.text()
+    assert status == (
+        "Recording structure complete: intermittent sessions, "
+        "2 sessions/hour, 600 s/session."
+    )
+    assert "needs attention" not in status
+
+
+def test_guided_recording_requiredness_updates_with_format_and_mode(window):
+    _set_guided_rwd_intermittent(window)
+    assert "required for RWD intermittent input" in (
+        window._guided_recording_structure_help_label.text()
+    )
+
+    window._guided_format_combo.setCurrentText("custom_tabular")
+    assert "outside the current Guided Run scope" in (
+        window._guided_recording_structure_help_label.text()
+    )
+    assert "required for RWD intermittent input" not in (
+        window._guided_recording_structure_help_label.text()
+    )
+
+    window._guided_format_combo.setCurrentText("rwd")
+    continuous = window._guided_acquisition_mode_combo.findData("continuous")
+    window._guided_acquisition_mode_combo.setCurrentIndex(continuous)
+    assert "Continuous acquisition is outside the current Guided Run scope" in (
+        window._guided_recording_structure_help_label.text()
+    )
+    assert "required for RWD intermittent input" not in (
+        window._guided_recording_structure_help_label.text()
+    )
+
+
+def test_guided_recording_structure_text_is_user_safe(window):
+    _set_guided_rwd_intermittent(window)
+    text = " ".join(
+        (
+            window._guided_session_duration_label.text(),
+            window._guided_session_duration_edit.placeholderText(),
+            window._guided_session_duration_edit.toolTip(),
+            window._guided_recording_structure_help_label.text(),
+        )
+    ).lower()
+    prohibited = (
+        "backend validator",
+        "manifest",
+        "run spec",
+        "startup",
+        "materialization",
+        "contract snapshot",
+        "diagnostic cache",
+        "completed run",
+        "open results",
+    )
+    assert not any(term in text for term in prohibited)
+
+
 def test_full_control_recording_structure_syncs_to_guided_display(window):
     idx = window._acquisition_mode_combo.findData("continuous")
     assert idx >= 0
