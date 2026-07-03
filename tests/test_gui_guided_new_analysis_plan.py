@@ -301,6 +301,7 @@ def test_new_analysis_applied_rwd_dataset_contract_reaches_backend_materializati
             window, MainWindow
         ),
     )
+    window._discovery_cache["resolved_format"] = " RWD "
     window._guided_dataset_contract_apply_btn.click()
     plan = window._build_guided_new_analysis_draft_plan()
 
@@ -319,6 +320,100 @@ def test_new_analysis_applied_rwd_dataset_contract_reaches_backend_materializati
         parser_contract=_valid_parser_contract(),
     )
     assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+
+
+def test_run_page_validation_uses_current_applied_dataset_contract(
+    window, tmp_path, monkeypatch
+):
+    _configure_complete_guided_new_analysis_draft(
+        window,
+        tmp_path,
+        monkeypatch,
+        acquisition_mode="intermittent",
+        write_rwd_file=True,
+        session_duration=600,
+    )
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        MainWindow._infer_dataset_contract_overrides.__get__(
+            window, MainWindow
+        ),
+    )
+    window._discovery_cache["resolved_format"] = " RWD "
+    window._guided_dataset_contract_apply_btn.click()
+    preview_plan = window._build_guided_new_analysis_draft_plan()
+    preview_snapshot = preview_plan.dataset_contract_snapshot
+    assert preview_snapshot.current_applied is True
+    assert preview_snapshot.input_format == "rwd"
+    assert preview_snapshot.resolved_input_format == "rwd"
+    assert preview_snapshot.acquisition_mode == "intermittent"
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Run")
+    )
+    context = window._capture_guided_backend_validation_context()
+    validation_snapshot = context.draft.dataset_contract_snapshot
+    assert validation_snapshot is preview_snapshot
+    assert validation_snapshot.contract_values["session_duration_sec"] == 600.0
+    assert validation_snapshot.contract_values["rwd_time_col"] == "Time(s)"
+    assert validation_snapshot.contract_values["uv_suffix"] == "-410"
+    assert validation_snapshot.contract_values["sig_suffix"] == "-470"
+
+    window._guided_backend_validate_btn.click()
+
+    issue_codes = {
+        issue.detail_code
+        for issue in window._guided_backend_validation_outcome.blocking_issues
+    }
+    assert "dataset_snapshot_missing_or_invalid" not in issue_codes
+    assert "contract_snapshot_missing_or_invalid" not in issue_codes
+
+
+def test_run_page_revalidation_rebuilds_draft_after_dataset_contract_apply(
+    window, tmp_path, monkeypatch
+):
+    _configure_complete_guided_new_analysis_draft(
+        window,
+        tmp_path,
+        monkeypatch,
+        acquisition_mode="intermittent",
+        write_rwd_file=True,
+        session_duration=600,
+    )
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        MainWindow._infer_dataset_contract_overrides.__get__(
+            window, MainWindow
+        ),
+    )
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Run")
+    )
+
+    window._guided_backend_validate_btn.click()
+    first_codes = {
+        issue.detail_code
+        for issue in window._guided_backend_validation_outcome.blocking_issues
+    }
+    assert "dataset_snapshot_missing_or_invalid" in first_codes
+    first_revision = window._guided_backend_validation_outcome_revision
+
+    window._guided_dataset_contract_apply_btn.click()
+    assert window._guided_backend_validation_outcome_revision is None
+    assert window._guided_backend_validation_revision > first_revision
+    window._guided_backend_validate_btn.click()
+
+    second_codes = {
+        issue.detail_code
+        for issue in window._guided_backend_validation_outcome.blocking_issues
+    }
+    assert "dataset_snapshot_missing_or_invalid" not in second_codes
+    assert "contract_snapshot_missing_or_invalid" not in second_codes
+    assert window._guided_backend_validation_outcome_revision == (
+        window._guided_backend_validation_revision
+    )
 
 
 def test_new_analysis_dataset_contract_missing_duration_or_semantics_cannot_apply(
@@ -348,6 +443,25 @@ def test_new_analysis_dataset_contract_missing_duration_or_semantics_cannot_appl
     snapshot = window._build_guided_new_analysis_draft_plan().dataset_contract_snapshot
     assert snapshot.current_applied is False
     assert "required RWD dataset semantics are unresolved" in (
+        window._guided_dataset_contract_status_label.text()
+    )
+
+
+def test_dataset_contract_resolved_format_mismatch_cannot_reach_run_validation(
+    window, tmp_path, monkeypatch
+):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.setText("600")
+    window._discovery_cache["resolved_format"] = "npm"
+
+    window._guided_dataset_contract_apply_btn.click()
+
+    snapshot = window._build_guided_new_analysis_draft_plan().dataset_contract_snapshot
+    assert snapshot.current_applied is False
+    assert "resolved input format does not match the selected format" in (
         window._guided_dataset_contract_status_label.text()
     )
 

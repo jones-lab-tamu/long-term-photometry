@@ -5538,10 +5538,16 @@ class MainWindow(QMainWindow):
         )
 
         input_path = self._guided_input_dir_edit.text().strip() if hasattr(self, "_guided_input_dir_edit") else ""
-        input_format = self._guided_format_combo.currentText() if hasattr(self, "_guided_format_combo") else "auto"
+        input_format = (
+            self._guided_format_combo.currentText()
+            if hasattr(self, "_guided_format_combo")
+            else "auto"
+        )
+        input_format = str(input_format or "").strip().lower()
         resolved_format = ""
         if getattr(self, "_discovery_cache", None) is not None:
             resolved_format = str(self._discovery_cache.get("resolved_format", "") or "")
+        resolved_format = resolved_format.strip().lower()
         acq_mode = "continuous"
         if hasattr(self, "_guided_acquisition_mode_combo"):
             acq_mode = (
@@ -5549,6 +5555,7 @@ class MainWindow(QMainWindow):
                 or self._guided_acquisition_mode_combo.currentText().lower()
                 or "continuous"
             )
+        acq_mode = str(acq_mode or "").strip().lower()
         sph_val = None
         if hasattr(self, "_guided_sessions_per_hour_edit"):
             text = self._guided_sessions_per_hour_edit.text().strip()
@@ -5643,6 +5650,9 @@ class MainWindow(QMainWindow):
             diagnostic_cache_contract_identity=signatures["build_request_signature"],
         )
         fmt = str(identity.input_format or "").strip().lower()
+        resolved_fmt = str(
+            identity.resolved_input_format or ""
+        ).strip().lower()
         acq = str(identity.acquisition_mode or "").strip().lower()
         validation_issues: list[str] = []
         status = "inferred"
@@ -5652,6 +5662,10 @@ class MainWindow(QMainWindow):
             validation_issues.append("input source path is missing")
         if fmt not in {"rwd", "npm", "custom_tabular", "auto"}:
             validation_issues.append(f"input format is unsupported: {fmt or 'missing'}")
+        if resolved_fmt != fmt:
+            validation_issues.append(
+                "resolved input format does not match the selected format"
+            )
         if acq not in {"intermittent", "continuous"}:
             validation_issues.append(f"acquisition mode is unsupported: {acq or 'missing'}")
         if acq == "intermittent":
@@ -6432,12 +6446,18 @@ class MainWindow(QMainWindow):
         )
         
         input_path = self._guided_input_dir_edit.text().strip() if hasattr(self, "_guided_input_dir_edit") else ""
-        input_format = self._guided_format_combo.currentText() if hasattr(self, "_guided_format_combo") else "auto"
+        input_format = (
+            self._guided_format_combo.currentText()
+            if hasattr(self, "_guided_format_combo")
+            else "auto"
+        )
+        input_format = str(input_format or "").strip().lower()
         acq_mode = "continuous"
         if hasattr(self, "_guided_acquisition_mode_combo"):
             acq_mode = self._guided_acquisition_mode_combo.currentData() or self._guided_acquisition_mode_combo.currentText().lower()
             if not acq_mode:
                 acq_mode = "continuous"
+        acq_mode = str(acq_mode or "").strip().lower()
         
         sph_val = None
         if hasattr(self, "_guided_sessions_per_hour_edit"):
