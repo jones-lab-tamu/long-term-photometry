@@ -110,7 +110,15 @@ def _configure_guided_raw_cache_setup(window: MainWindow, tmp_path, monkeypatch)
     idx = window._format_combo.findText("rwd")
     window._format_combo.setCurrentIndex(idx)
     _populate_fake_discovery(window)
-    monkeypatch.setattr(window, "_infer_dataset_contract_overrides", lambda _fmt: {})
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        lambda _fmt: {
+            "rwd_time_col": "Time(s)",
+            "uv_suffix": "-410",
+            "sig_suffix": "-470",
+        },
+    )
     return input_dir, output_dir
 
 

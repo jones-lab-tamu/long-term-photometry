@@ -89,16 +89,34 @@ def _configure_complete_guided_new_analysis_draft(
     acquisition_mode="continuous",
     signal_only_f0=False,
     strategy_by_roi=None,
+    write_rwd_file=False,
+    session_duration=None,
 ):
     window._guided_workflow_stepper.setCurrentRow(0)
     window._guided_start_setup_btn.click()
-    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    input_dir, _output_dir = _configure_guided_raw_cache_setup(
+        window, tmp_path, monkeypatch
+    )
+    if write_rwd_file:
+        session = input_dir / "2026_07_02-12_00_00"
+        session.mkdir()
+        rows = ["Time(s),CH1-410,CH1-470"]
+        rows.extend(
+            f"{index / 20.0:.2f},1.0,2.0"
+            for index in range(12_000)
+        )
+        (session / "fluorescence.csv").write_text(
+            "\n".join(rows) + "\n",
+            encoding="utf-8",
+        )
     acquisition_idx = window._guided_acquisition_mode_combo.findData(acquisition_mode)
     if acquisition_idx >= 0:
         window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_idx)
     if acquisition_mode == "intermittent":
         window._guided_sessions_per_hour_edit.setText("6")
-        window._guided_session_duration_edit.setText("120")
+        window._guided_session_duration_edit.setText(
+            str(session_duration if session_duration is not None else 120)
+        )
 
     fake_runner = _FakeDiagnosticCacheRunner()
     window._guided_diagnostic_cache_runner = fake_runner
@@ -218,7 +236,7 @@ def test_new_analysis_dataset_contract_default_state_is_missing(window, tmp_path
     assert "Dataset contract snapshot status: missing" in window._guided_draft_run_plan_preview_label.text()
 
 
-def test_new_analysis_dataset_contract_apply_valid_rwd_structural_snapshot_without_writes(
+def test_new_analysis_dataset_contract_apply_valid_rwd_snapshot_without_writes(
     window,
     tmp_path,
     monkeypatch,
@@ -230,6 +248,7 @@ def test_new_analysis_dataset_contract_apply_valid_rwd_structural_snapshot_witho
     window._guided_session_duration_edit.setText("120")
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     before = _snapshot_files(tmp_path)
+    validation_revision_before = window._guided_backend_validation_revision
 
     window._guided_dataset_contract_apply_btn.click()
     plan = window._build_guided_new_analysis_draft_plan()
@@ -244,9 +263,93 @@ def test_new_analysis_dataset_contract_apply_valid_rwd_structural_snapshot_witho
     assert snapshot.source_identity.sessions_per_hour == 6
     assert snapshot.source_identity.session_duration_sec == 120.0
     assert snapshot.source_identity.exclude_incomplete_final_rwd_chunk is False
+    assert snapshot.contract_values["rwd_time_col"] == "Time(s)"
+    assert snapshot.contract_values["uv_suffix"] == "-410"
+    assert snapshot.contract_values["sig_suffix"] == "-470"
     assert "explicit_guided_apply" in snapshot.provenance
+    assert window._guided_backend_validation_revision == (
+        validation_revision_before + 1
+    )
+    assert window._guided_backend_validation_outcome_revision is None
     assert "Dataset contract current_applied: true" in window._guided_draft_run_plan_preview_label.text()
     assert _snapshot_files(tmp_path) == before
+
+
+def test_new_analysis_applied_rwd_dataset_contract_reaches_backend_materialization(
+    window, tmp_path, monkeypatch
+):
+    from photometry_pipeline.guided_backend_validation_materialization import (
+        GuidedBackendValidationMaterializationSuccess,
+        materialize_guided_backend_validation_facts,
+    )
+    from tests.test_guided_backend_validation_materialization import (
+        _valid_parser_contract,
+    )
+
+    _configure_complete_guided_new_analysis_draft(
+        window,
+        tmp_path,
+        monkeypatch,
+        acquisition_mode="intermittent",
+        write_rwd_file=True,
+        session_duration=600,
+    )
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        MainWindow._infer_dataset_contract_overrides.__get__(
+            window, MainWindow
+        ),
+    )
+    window._guided_dataset_contract_apply_btn.click()
+    plan = window._build_guided_new_analysis_draft_plan()
+
+    assert plan.dataset_contract_snapshot.current_applied is True
+    assert plan.dataset_contract_snapshot.explicitly_applied is True
+    assert plan.dataset_contract_snapshot.contract_values[
+        "session_duration_sec"
+    ] == 600.0
+    assert plan.dataset_contract_snapshot.contract_values[
+        "rwd_time_col"
+    ] == "Time(s)"
+    assert plan.dataset_contract_snapshot.contract_values["uv_suffix"] == "-410"
+    assert plan.dataset_contract_snapshot.contract_values["sig_suffix"] == "-470"
+    result = materialize_guided_backend_validation_facts(
+        plan,
+        parser_contract=_valid_parser_contract(),
+    )
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+
+
+def test_new_analysis_dataset_contract_missing_duration_or_semantics_cannot_apply(
+    window, tmp_path, monkeypatch
+):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.clear()
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+
+    window._guided_dataset_contract_apply_btn.click()
+
+    snapshot = window._build_guided_new_analysis_draft_plan().dataset_contract_snapshot
+    assert snapshot.current_applied is False
+    assert "intermittent session duration is missing or invalid" in (
+        window._guided_dataset_contract_status_label.text()
+    )
+
+    window._guided_session_duration_edit.setText("600")
+    monkeypatch.setattr(window, "_infer_dataset_contract_overrides", lambda _fmt: {})
+    window._guided_dataset_contract_apply_btn.click()
+
+    snapshot = window._build_guided_new_analysis_draft_plan().dataset_contract_snapshot
+    assert snapshot.current_applied is False
+    assert "required RWD dataset semantics are unresolved" in (
+        window._guided_dataset_contract_status_label.text()
+    )
 
 
 def test_new_analysis_dataset_contract_invalid_candidate_cannot_apply(window, tmp_path, monkeypatch):
@@ -314,16 +417,17 @@ def test_new_analysis_dataset_contract_marks_stale_on_setup_change(window, tmp_p
     window._guided_dataset_contract_apply_btn.click()
     assert window._build_guided_new_analysis_draft_plan().dataset_contract_snapshot.current_applied is True
 
-    changed_input = tmp_path / "changed_raw_input"
-    changed_input.mkdir()
-    window._guided_input_dir_edit.setText(str(changed_input))
+    window._guided_session_duration_edit.setText("180")
     window._refresh_guided_draft_run_plan_preview()
     snapshot = window._build_guided_new_analysis_draft_plan().dataset_contract_snapshot
 
     assert snapshot.status == "stale"
     assert snapshot.explicitly_applied is True
     assert snapshot.current_applied is False
-    assert any("input_source_path changed" in reason for reason in snapshot.stale_reasons)
+    assert any(
+        "session_duration_sec changed" in reason
+        for reason in snapshot.stale_reasons
+    )
     assert "Dataset contract stale reasons:" in window._guided_draft_run_plan_preview_label.text()
 
 
@@ -805,7 +909,7 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "  feature_dependent_phasic_summaries_in_scope: true" in preview_text
     assert "status: complete for future execution-spec preview; actual execution remains unavailable" in preview_text
     assert "Guided execution-spec preview:" in preview_text
-    assert "spec_preview_available: false" in preview_text
+    assert "spec_preview_available: true" in preview_text
     assert "first_subset_executable: true" in preview_text
     assert "backend_mapping_status: preview_only_not_mapped_to_RunSpec" in preview_text
     assert "dynamic_fit_parameter_contract:" in preview_text
@@ -817,8 +921,8 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "backend_config_mapping_status: effective_values_ready_for_future_mapping" in preview_text
     assert "unresolved_fields: none" in preview_text
     assert "rwd_dataset_normalization:" in preview_text
-    assert "backend_config_mapping_status: rwd_dataset_contract_unresolved" in preview_text
-    assert "missing_required_fields: rwd_time_col; sig_suffix; uv_suffix" in preview_text
+    assert "backend_config_mapping_status: rwd_dataset_contract_ready_for_future_mapping" in preview_text
+    assert "missing_required_fields: none" in preview_text
     assert "inconsistent_fields: none" in preview_text
     assert "output_safety_ownership:" in preview_text
     assert "backend_config_mapping_status: output_base_ready_for_runner_owned_future_mapping" in preview_text
@@ -826,20 +930,20 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "future_run_dir: unresolved_until_execution_start" in preview_text
     assert "blockers: none" in preview_text
     assert "first_subset_mapping_preview:" in preview_text
-    assert "mapping_preview_available: false" in preview_text
+    assert "mapping_preview_available: true" in preview_text
     assert "scope: rwd_intermittent_phasic_full_dynamic_fit" in preview_text
     assert "future_cli_target: out_base_concept_only" in preview_text
     assert "config_generated: false" in preview_text
     assert "argv_generated: false" in preview_text
     assert "guided_runner_request_preview:" in preview_text
-    assert "runner_request_preview_available: false" in preview_text
+    assert "runner_request_preview_available: true" in preview_text
     assert "future_runner_owner: runner" in preview_text
     assert "config_payload_generated: false" in preview_text
     assert "validation_run: false" in preview_text
     assert "execution_run: false" in preview_text
     assert "output: no directories or files created" in preview_text
-    assert "missing_required_rwd_contract_field" in preview_text
-    assert "unresolved_rwd_dataset_contract_normalization" in preview_text
+    assert "missing_required_rwd_contract_field" not in preview_text
+    assert "unresolved_rwd_dataset_contract_normalization" not in preview_text
     assert "execution_available: false" in preview_text
     assert "ready to run" not in preview_text.lower()
     assert "ready for execution" not in preview_text.lower()
@@ -1540,4 +1644,3 @@ def test_guided_new_analysis_preview_request_checks_4J11m(window, tmp_path, monk
     # 8. No files or directories are created by preview refresh
     output_dir = tmp_path / "valid_output"
     assert not output_dir.exists()
-

@@ -5646,6 +5646,7 @@ class MainWindow(QMainWindow):
         acq = str(identity.acquisition_mode or "").strip().lower()
         validation_issues: list[str] = []
         status = "inferred"
+        dataset_semantics: dict[str, object] = {}
 
         if not identity.input_source_path:
             validation_issues.append("input source path is missing")
@@ -5661,6 +5662,36 @@ class MainWindow(QMainWindow):
         if acq == "continuous":
             if identity.continuous_window_sec is None or identity.continuous_window_sec <= 0:
                 validation_issues.append("continuous window duration is missing or invalid")
+        if fmt == "rwd":
+            semantic_names = ("rwd_time_col", "uv_suffix", "sig_suffix")
+            try:
+                inferred = self._infer_dataset_contract_overrides(fmt)
+            except Exception as exc:
+                validation_issues.append(
+                    f"RWD dataset semantics could not be resolved: {exc}"
+                )
+            else:
+                if isinstance(inferred, dict):
+                    dataset_semantics = {
+                        name: str(inferred[name]).strip()
+                        for name in semantic_names
+                        if isinstance(inferred.get(name), str)
+                        and str(inferred[name]).strip()
+                    }
+                missing_semantics = [
+                    name
+                    for name in semantic_names
+                    if name not in dataset_semantics
+                ]
+                if missing_semantics:
+                    validation_issues.append(
+                        "required RWD dataset semantics are unresolved: "
+                        + ", ".join(missing_semantics)
+                    )
+                elif dataset_semantics["uv_suffix"] == dataset_semantics["sig_suffix"]:
+                    validation_issues.append(
+                        "RWD UV and signal suffixes must be different"
+                    )
 
         if fmt == "npm" and acq == "continuous":
             status = "unsupported"
@@ -5692,11 +5723,11 @@ class MainWindow(QMainWindow):
                 "continuous_step_sec": identity.continuous_step_sec,
                 "allow_partial_final_window": identity.allow_partial_final_window,
                 "exclude_incomplete_final_rwd_chunk": identity.exclude_incomplete_final_rwd_chunk,
+                **dataset_semantics,
             },
             format_specific={
-                "structural_only": True,
-                "no_file_inspection": True,
-                "real_backend_contract_values_not_inferred": True,
+                "structural_only": False,
+                "dataset_semantics_inferred_from_selected_input": fmt == "rwd",
                 "diagnostic_scope_signature": signatures["diagnostic_scope_signature"],
             },
             source_identity=identity,
