@@ -128,7 +128,7 @@ def _configure_complete_guided_new_analysis_draft(
     window._on_guided_diagnostic_cache_finished(0)
     _generate_ready_guided_correction_preview(window)
 
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
     for index, roi in enumerate(("CH1", "CH2", "CH3")):
         window._guided_confirm_roi_combo.setCurrentIndex(window._guided_confirm_roi_combo.findData(roi))
         window._guided_confirm_chunk_combo.setCurrentIndex(0)
@@ -940,7 +940,7 @@ def test_new_analysis_draft_plan_reports_choices_as_current_after_build_and_mark
     _generate_ready_guided_correction_preview(window)
 
     # Confirm strategy step: select ROI and mark
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
     
     # Check that we can select and mark CH1
     window._guided_confirm_roi_combo.setCurrentIndex(window._guided_confirm_roi_combo.findData("CH1"))
@@ -972,7 +972,7 @@ def test_new_analysis_draft_plan_marks_stale_when_roi_selection_changes(window, 
     _generate_ready_guided_correction_preview(window)
 
     # Confirm CH1
-    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Confirm strategy"))
+    window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
     window._guided_confirm_roi_combo.setCurrentIndex(window._guided_confirm_roi_combo.findData("CH1"))
     window._guided_confirm_chunk_combo.setCurrentIndex(0)
     window._guided_confirm_strategy_combo.setCurrentIndex(window._guided_confirm_strategy_combo.findText("Global Linear Regression"))

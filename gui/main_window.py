@@ -153,8 +153,6 @@ GUIDED_WORKFLOW_STEPS = (
     "Select data",
     "Recording structure",
     "Correction approach",
-    "Diagnostics",
-    "Confirm strategy",
     "Draft plan",
     "Run",
     "Review",
@@ -1678,8 +1676,6 @@ class MainWindow(QMainWindow):
             self._build_guided_select_data_step(),
             self._build_guided_recording_structure_step(),
             self._build_guided_correction_approach_step(),
-            self._build_guided_diagnostics_step(),
-            self._build_guided_confirm_strategy_step(),
             self._build_guided_draft_plan_step(),
             self._build_guided_run_step(),
             self._build_guided_review_step(),
@@ -2378,8 +2374,6 @@ class MainWindow(QMainWindow):
                 "Select data",
                 "Recording structure",
                 "Correction approach",
-                "Diagnostics",
-                "Confirm strategy",
                 "Draft plan",
                 "Run",
             }:
@@ -2389,7 +2383,7 @@ class MainWindow(QMainWindow):
 
     def _on_guided_start_setup_new_analysis(self) -> None:
         self._set_guided_workflow_mode("new_analysis")
-        idx = list(GUIDED_WORKFLOW_STEPS).index("Select data")
+        idx = self._guided_step_index("Select data")
         self._guided_workflow_stepper.setCurrentRow(idx)
 
     def _on_guided_start_open_results(self) -> None:
@@ -2398,17 +2392,21 @@ class MainWindow(QMainWindow):
             self._set_guided_workflow_mode("open_results")
             self._refresh_guided_start_panel()
             self._refresh_guided_diagnostics_panel()
-            idx = list(GUIDED_WORKFLOW_STEPS).index("Diagnostics")
+            idx = self._guided_step_index("Correction approach")
             self._guided_workflow_stepper.setCurrentRow(idx)
 
     def _on_guided_switch_to_new_analysis_setup(self) -> None:
         self._set_guided_workflow_mode("new_analysis")
-        idx = list(GUIDED_WORKFLOW_STEPS).index("Select data")
+        idx = self._guided_step_index("Select data")
         self._guided_workflow_stepper.setCurrentRow(idx)
 
     def _on_guided_go_to_diagnostics(self) -> None:
-        idx = list(GUIDED_WORKFLOW_STEPS).index("Diagnostics")
+        idx = self._guided_step_index("Correction approach")
         self._guided_workflow_stepper.setCurrentRow(idx)
+
+    def _guided_step_index(self, step_name: str) -> int:
+        """Return one semantic Guided step index."""
+        return GUIDED_WORKFLOW_STEPS.index(step_name)
 
     def _sync_line_edit_value(self, target: QLineEdit, text: str) -> None:
         if getattr(self, "_guided_setup_syncing", False):
@@ -2709,6 +2707,9 @@ class MainWindow(QMainWindow):
         wrapper_layout.setContentsMargins(0, 0, 0, 0)
         wrapper_layout.setSpacing(10)
         wrapper_layout.addWidget(self._build_guided_skipped_setup_banner("Correction approach"))
+        candidate_group = QGroupBox("Choose a correction candidate")
+        candidate_layout = QVBoxLayout(candidate_group)
+        candidate_layout.setContentsMargins(10, 8, 10, 8)
         cards = QWidget()
         cards.setObjectName("guidedCorrectionCards")
         grid = QGridLayout(cards)
@@ -2761,14 +2762,34 @@ class MainWindow(QMainWindow):
             )
             self._guided_correction_sync_connected = True
         self._sync_guided_correction_from_full()
-        self._guided_raw_setup_controls["Correction approach"] = cards
-        wrapper_layout.addWidget(cards)
+        candidate_layout.addWidget(cards)
+        self._guided_raw_setup_controls["Correction approach"] = (
+            candidate_group
+        )
+        wrapper_layout.addWidget(candidate_group)
+
+        evidence_group = QGroupBox("Prepare and review correction evidence")
+        evidence_layout = QVBoxLayout(evidence_group)
+        evidence_layout.setContentsMargins(10, 8, 10, 8)
+        evidence_layout.addWidget(self._build_guided_diagnostics_step())
+        wrapper_layout.addWidget(evidence_group)
+
+        confirmation_group = QGroupBox(
+            "Review evidence and confirm strategy"
+        )
+        confirmation_layout = QVBoxLayout(confirmation_group)
+        confirmation_layout.setContentsMargins(10, 8, 10, 8)
+        confirmation_layout.addWidget(
+            self._build_guided_confirm_strategy_step()
+        )
+        wrapper_layout.addWidget(confirmation_group)
         return self._build_guided_step_scroll(
             "guidedStepCorrectionApproach",
             "Correction approach",
             [
                 "Correction cards are static and non-executing. They do not change config, run diagnostics, write manifests, or route analysis.",
-                "Use Diagnostics after opening completed results to generate explicit preview-only evidence.",
+                "Prepare correction evidence, review the current preview, and "
+                "explicitly confirm a strategy for each included ROI.",
             ],
             wrapper,
         )
@@ -6569,7 +6590,7 @@ class MainWindow(QMainWindow):
                 )
             return
         self._set_guided_workflow_mode("open_results")
-        review_index = list(GUIDED_WORKFLOW_STEPS).index("Review")
+        review_index = self._guided_step_index("Review")
         self._guided_workflow_stepper.setCurrentRow(review_index)
         if label is not None:
             label.setText("Completed run loaded for review.")
@@ -8957,7 +8978,7 @@ class MainWindow(QMainWindow):
         label.setWordWrap(True)
         layout.addWidget(label)
         row = QHBoxLayout()
-        diagnostics_btn = QPushButton("Go to Diagnostics")
+        diagnostics_btn = QPushButton("Go to correction approach")
         diagnostics_btn.setObjectName(f"{object_name}GoToDiagnostics")
         diagnostics_btn.clicked.connect(self._on_guided_go_to_diagnostics)
         row.addWidget(diagnostics_btn)
