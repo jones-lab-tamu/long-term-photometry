@@ -2308,7 +2308,9 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
     assert "Load a completed run to generate Signal-Only F0 diagnostic review artifacts" in (
         window._guided_signal_f0_source_status_label.text()
     )
-    assert window._guided_signal_f0_generate_btn.text() == "Generate Signal-Only F0 diagnostic review"
+    assert window._guided_signal_f0_generate_btn.text() == (
+        "Generate Signal-Only F0 preview"
+    )
     assert window._guided_signal_f0_generate_btn.isEnabled() is False
     output_summary = window._guided_generated_outputs_summary_label.text()
     assert "Correction preview: not generated." in output_summary
@@ -2717,6 +2719,10 @@ def test_guided_confirm_strategy_stale_preview_evidence_blocks_marks(
         "Correction preview is stale. Generate a new preview before confirming "
         "strategies. 0/3 included ROIs confirmed."
     )
+    assert window._guided_correction_next_action_label.text() == (
+        "Correction preview is stale. Generate a new preview before confirming "
+        "strategies."
+    )
 
 
 def test_guided_preview_evidence_populates_new_analysis_draft_fields(
@@ -2765,6 +2771,10 @@ def test_guided_confirm_strategy_progress_partial_confirmation(
     assert window._guided_confirm_strategy_progress_label.text() == (
         "1/3 included ROIs confirmed."
     )
+    assert window._guided_correction_next_action_label.text() == (
+        "Correction preview is ready. Continue confirming strategies. "
+        "1/3 included ROIs confirmed."
+    )
 
 
 def test_guided_confirm_strategy_progress_all_confirmed(
@@ -2786,6 +2796,10 @@ def test_guided_confirm_strategy_progress_all_confirmed(
 
     assert window._guided_confirm_strategy_progress_label.text() == (
         "3/3 included ROIs confirmed."
+    )
+    assert window._guided_correction_next_action_label.text() == (
+        "Correction strategy complete for 3/3 included ROIs. Next step: "
+        "Draft plan."
     )
 
 
@@ -3301,7 +3315,9 @@ def test_guided_correction_preview_button_generates_backend_preview_read_only(wi
 
     window._guided_preview_generate_btn.click()
 
-    assert "Preview comparison generated: success." in window._guided_preview_status_label.text()
+    assert window._guided_preview_status_label.text() == (
+        "Correction preview: ready."
+    )
     artifacts_text = window._guided_preview_artifacts_label.text()
     assert "Preview directory:" in artifacts_text
     assert "Summary:" in artifacts_text
@@ -3356,7 +3372,9 @@ def test_guided_signal_only_f0_button_generates_backend_diagnostic_read_only(win
 
     window._guided_signal_f0_generate_btn.click()
 
-    assert "Signal-Only F0 diagnostic review generated: success." in window._guided_signal_f0_status_label.text()
+    assert window._guided_signal_f0_status_label.text() == (
+        "Signal-Only F0 preview: ready."
+    )
     artifacts_text = window._guided_signal_f0_artifacts_label.text()
     assert "Diagnostic directory:" in artifacts_text
     assert "Provenance JSON:" in artifacts_text
@@ -3479,7 +3497,9 @@ def test_guided_correction_preview_result_marks_stale_on_selection_change(window
     _load_preview_completed_run(window, run_dir, monkeypatch)
 
     window._guided_preview_generate_btn.click()
-    assert "Preview comparison generated: success." in window._guided_preview_status_label.text()
+    assert window._guided_preview_status_label.text() == (
+        "Correction preview: ready."
+    )
 
     window._guided_preview_chunk_combo.setCurrentIndex(1)
 
@@ -3516,7 +3536,9 @@ def test_guided_signal_only_f0_result_displays_partial_failed_and_does_not_selec
 
     window._guided_signal_f0_generate_btn.click()
 
-    assert "partial" in window._guided_signal_f0_status_label.text()
+    assert window._guided_signal_f0_status_label.text() == (
+        "Signal-Only F0 preview: ready."
+    )
     assert "chunk 1: failed" in window._guided_signal_f0_messages_label.text()
     table_text = " ".join(
         window._guided_signal_f0_chunk_table.item(row, col).text()
@@ -3559,7 +3581,9 @@ def test_guided_signal_only_f0_result_marks_stale_on_selection_change(window, tm
     run_dir = _make_preview_completed_run(tmp_path)
     _load_preview_completed_run(window, run_dir, monkeypatch)
     window._guided_signal_f0_generate_btn.click()
-    assert "Signal-Only F0 diagnostic review generated: success." in window._guided_signal_f0_status_label.text()
+    assert window._guided_signal_f0_status_label.text() == (
+        "Signal-Only F0 preview: ready."
+    )
 
     window._guided_signal_f0_chunk_combo.setCurrentIndex(1)
 
@@ -4622,6 +4646,10 @@ def test_compact_correction_sections_unlock_in_order(
     assert window._guided_preview_roi_combo.isHidden() is True
     assert window._guided_confirm_locked_label.isHidden() is False
     assert window._guided_confirm_strategy_combo.parentWidget().isHidden()
+    assert window._guided_diagnostic_cache_build_btn.isEnabled() is False
+    assert window._guided_correction_next_action_label.text() != (
+        "Next step: build correction evidence."
+    )
 
     _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
 
@@ -4631,6 +4659,9 @@ def test_compact_correction_sections_unlock_in_order(
     assert window._guided_preview_generate_btn.isHidden() is False
     assert window._guided_confirm_locked_label.isHidden() is False
     assert window._guided_confirm_strategy_combo.parentWidget().isHidden()
+    assert window._guided_diagnostic_cache_build_btn.text() == (
+        "Rebuild correction evidence"
+    )
     assert "Next step: generate a correction preview" in (
         window._guided_correction_next_action_label.text()
     )
@@ -4683,6 +4714,191 @@ def test_hidden_method_configuration_never_becomes_top_level(window, qapp):
         and widget.title() == "Method configuration - not evidence selection"
         for widget in QApplication.topLevelWidgets()
     )
+
+
+def test_correction_preview_ready_has_openable_review_summary(
+    window, tmp_path, monkeypatch
+):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    opened = []
+    monkeypatch.setattr(
+        window,
+        "_open_guided_preview_output",
+        lambda path: opened.append(path),
+    )
+    _generate_ready_guided_correction_preview(window)
+    result = window._guided_preview_last_result
+    assert opened == []
+
+    text = window._guided_preview_review_label.text()
+    assert "Correction preview: ready." in text
+    assert "ROI: CH1" in text
+    assert "Preview segment: 0" in text
+    assert "Methods compared:" in text
+    assert window._guided_preview_open_btn.text() == "Open correction preview"
+    assert window._guided_preview_open_btn.isHidden() is False
+    report_path = Path(result["user_report_path"])
+    assert report_path.name == "correction_preview_report.html"
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "Correction preview" in report_text
+    assert "ROI:</strong> CH1" in report_text
+    assert "Preview segment:</strong> 0" in report_text
+    assert "Methods compared:" in report_text
+    assert "First 12 trace samples" in report_text
+    assert '"comparison_plot"' not in report_text
+    visual_path = Path(result["visual_preview_path"])
+    assert visual_path.name == "correction_preview_visual.png"
+    assert visual_path.is_file()
+    assert set(result["visual_trace_sources"]) == {
+        "robust_global_event_reject",
+        "adaptive_event_gated_regression",
+        "global_linear_regression",
+    }
+    assert all(
+        count > 0
+        for count in result["visual_trace_sample_counts"].values()
+    )
+    assert window._guided_preview_visual_label.pixmap().isNull() is False
+    visual_text = window._guided_preview_visual_status_label.text()
+    assert "Reference/control signal" in visual_text
+    assert "Corrected signal" in visual_text
+    assert "Fitted reference" in visual_text
+
+    window._guided_preview_open_btn.click()
+
+    assert opened == [str(report_path)]
+
+
+def test_signal_only_f0_preview_has_plain_review_affordance(
+    window, tmp_path, monkeypatch
+):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    expected_summary = str(tmp_path / "signal-summary.json")
+
+    def fake_signal_preview(*_args, **kwargs):
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        chunk_csv = output_dir / "signal_only_f0_diagnostic_chunks.csv"
+        chunk_csv.write_text(
+            "roi,chunk_id,status,n_samples,signal_finite_fraction,"
+            "f0_median,dff_median,signal_only_f0_candidate_viability,"
+            "signal_only_f0_candidate_confidence,warning_flags,error\n"
+            "CH1,0,success,100,1.0,2.0,0.1,viable,high,,\n",
+            encoding="utf-8",
+        )
+        return {
+            "ok": True,
+            "status": "success",
+            "diagnostic_id": "signal-preview",
+            "output_dir": str(output_dir),
+            "provenance_path": str(tmp_path / "provenance.json"),
+            "summary_path": expected_summary,
+            "chunk_csv_path": str(chunk_csv),
+            "trace_csv_paths": [],
+            "warnings": [],
+            "errors": [],
+            "chunk_statuses": {"0": {"status": "success", "error": ""}},
+        }
+
+    monkeypatch.setattr(
+        main_window_module,
+        "run_signal_only_f0_diagnostic_review",
+        fake_signal_preview,
+    )
+    opened = []
+    monkeypatch.setattr(
+        window,
+        "_open_guided_preview_output",
+        lambda path: opened.append(path),
+    )
+    assert window._guided_signal_f0_generate_btn.text() == (
+        "Generate Signal-Only F0 preview"
+    )
+
+    window._guided_signal_f0_generate_btn.click()
+
+    text = window._guided_signal_f0_review_label.text()
+    assert "Signal-Only F0 preview: ready." in text
+    assert "ROI: CH1" in text
+    assert "Preview segment: 0" in text
+    assert "no trace preview is available yet" in text
+    assert "Guided Run cannot execute it yet" in (
+        window._guided_signal_f0_status_label.parentWidget().findChild(
+            QLabel, "guidedSignalOnlyF0DiagnosticIntro"
+        ).text()
+    )
+    assert window._guided_signal_f0_open_btn.isHidden() is False
+    report_path = Path(
+        window._guided_signal_f0_last_result["user_report_path"]
+    )
+    assert report_path.name == "signal_only_f0_preview_report.html"
+    assert "Signal-Only F0 preview" in report_path.read_text(
+        encoding="utf-8"
+    )
+    window._guided_signal_f0_open_btn.click()
+    assert opened == [str(report_path)]
+
+
+def test_visual_preview_failure_is_plain_and_keeps_strategy_locked(
+    window, tmp_path, monkeypatch
+):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        window,
+        "_render_guided_correction_preview_visual",
+        lambda _result: "",
+    )
+
+    window._guided_preview_generate_btn.click()
+
+    assert window._guided_preview_status_label.text() == (
+        "Correction preview generated, but visual preview unavailable."
+    )
+    assert "visual preview could not be displayed" in (
+        window._guided_preview_visual_status_label.text()
+    )
+    assert window._guided_preview_visual_label.isHidden() is True
+    assert window._guided_confirm_locked_label.isHidden() is False
+    assert window._guided_confirm_strategy_combo.parentWidget().isHidden()
+    assert "visual preview unavailable" in (
+        window._guided_correction_next_action_label.text()
+    )
+
+
+def test_correction_preview_report_failure_falls_back_to_folder(
+    window, tmp_path, monkeypatch
+):
+    preview_dir = tmp_path / "preview"
+    preview_dir.mkdir()
+    window._guided_preview_has_result = True
+    window._guided_preview_result_stale = False
+    window._guided_preview_last_result = {
+        "status": "success",
+        "preview_output_dir": str(preview_dir),
+        "preview_summary_path": str(preview_dir / "preview_summary.json"),
+        "user_report_path": "",
+        "roi": "CH1",
+        "chunk_index": 0,
+        "method_statuses": {},
+    }
+    opened = []
+    monkeypatch.setattr(
+        window,
+        "_open_guided_preview_output",
+        lambda path: opened.append(path),
+    )
+
+    window._refresh_guided_preview_review_affordances()
+    window._guided_preview_open_btn.click()
+
+    assert window._guided_preview_open_btn.text() == "Open preview folder"
+    assert "report could not be generated" in (
+        window._guided_preview_review_label.text()
+    )
+    assert opened == [str(preview_dir)]
+    assert opened != [
+        window._guided_preview_last_result["preview_summary_path"]
+    ]
 
 
 def test_gui_draft_plan_contains_moved_plan_panels(window):
@@ -5865,6 +6081,9 @@ def test_guided_diagnostics_guidance_new_analysis_stale_cache(window, tmp_path, 
     assert status_text == (
         "Correction evidence: stale after setup changes. Rebuild before "
         "continuing."
+    )
+    assert window._guided_diagnostic_cache_build_btn.text() == (
+        "Rebuild correction evidence"
     )
 
 

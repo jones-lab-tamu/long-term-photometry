@@ -14,9 +14,11 @@ State model:
 
 import json
 import hashlib
+import html
 import sys
 import os
 import csv
+import itertools
 import re
 import math
 import secrets
@@ -3170,8 +3172,44 @@ class MainWindow(QMainWindow):
         self._guided_preview_gated_widgets.append(
             self._guided_preview_status_label
         )
+        self._guided_preview_review_label = QLabel("")
+        self._guided_preview_review_label.setObjectName(
+            "guidedCorrectionPreviewReviewSummary"
+        )
+        self._guided_preview_review_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_preview_review_label.setWordWrap(True)
+        preview_layout.addWidget(self._guided_preview_review_label)
+        self._guided_preview_visual_status_label = QLabel("")
+        self._guided_preview_visual_status_label.setObjectName(
+            "guidedCorrectionPreviewVisualStatus"
+        )
+        self._guided_preview_visual_status_label.setWordWrap(True)
+        preview_layout.addWidget(self._guided_preview_visual_status_label)
+        self._guided_preview_visual_label = QLabel()
+        self._guided_preview_visual_label.setObjectName(
+            "guidedCorrectionPreviewVisual"
+        )
+        self._guided_preview_visual_label.setAlignment(Qt.AlignCenter)
+        self._guided_preview_visual_label.setMinimumHeight(300)
+        self._guided_preview_visual_label.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred
+        )
+        preview_layout.addWidget(self._guided_preview_visual_label)
+        self._guided_preview_open_btn = QPushButton("Open correction preview")
+        self._guided_preview_open_btn.setObjectName(
+            "guidedCorrectionPreviewOpenButton"
+        )
+        self._guided_preview_open_btn.clicked.connect(
+            self._on_open_guided_correction_preview
+        )
+        self._guided_preview_review_label.setVisible(False)
+        self._guided_preview_visual_status_label.setVisible(False)
+        self._guided_preview_visual_label.setVisible(False)
+        self._guided_preview_open_btn.setVisible(False)
 
-        artifacts_group = QGroupBox("Technical preview details")
+        artifacts_group = QGroupBox("Technical details")
         artifacts_group.setObjectName("guidedCorrectionPreviewArtifactsPanel")
         self._guided_preview_technical_details_group = artifacts_group
         artifacts_group.setCheckable(True)
@@ -3179,6 +3217,9 @@ class MainWindow(QMainWindow):
         artifacts_layout = QVBoxLayout(artifacts_group)
         artifacts_layout.setContentsMargins(8, 8, 8, 8)
         artifacts_layout.setSpacing(4)
+        artifacts_layout.addWidget(
+            self._guided_preview_open_btn, alignment=Qt.AlignLeft
+        )
         self._guided_preview_artifacts_label = QLabel("No preview artifacts generated.")
         self._guided_preview_artifacts_label.setObjectName("guidedCorrectionPreviewArtifacts")
         self._guided_preview_artifacts_label.setProperty("guidedSecondaryText", True)
@@ -3285,7 +3326,7 @@ class MainWindow(QMainWindow):
         signal_layout.addLayout(signal_form)
 
         self._guided_signal_f0_generate_btn = QPushButton(
-            "Generate Signal-Only F0 diagnostic review"
+            "Generate Signal-Only F0 preview"
         )
         self._guided_signal_f0_generate_btn.setObjectName("guidedSignalOnlyF0GenerateButton")
         self._guided_signal_f0_generate_btn.clicked.connect(
@@ -3300,8 +3341,28 @@ class MainWindow(QMainWindow):
         self._guided_signal_f0_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._make_guided_widget_shrinkable(self._guided_signal_f0_status_label)
         signal_layout.addWidget(self._guided_signal_f0_status_label)
+        self._guided_signal_f0_review_label = QLabel("")
+        self._guided_signal_f0_review_label.setObjectName(
+            "guidedSignalOnlyF0ReviewSummary"
+        )
+        self._guided_signal_f0_review_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_signal_f0_review_label.setWordWrap(True)
+        signal_layout.addWidget(self._guided_signal_f0_review_label)
+        self._guided_signal_f0_open_btn = QPushButton(
+            "Open Signal-Only F0 preview"
+        )
+        self._guided_signal_f0_open_btn.setObjectName(
+            "guidedSignalOnlyF0OpenButton"
+        )
+        self._guided_signal_f0_open_btn.clicked.connect(
+            self._on_open_guided_signal_only_f0_preview
+        )
+        self._guided_signal_f0_review_label.setVisible(False)
+        self._guided_signal_f0_open_btn.setVisible(False)
 
-        signal_artifacts_group = QGroupBox("Signal-Only F0 result details")
+        signal_artifacts_group = QGroupBox("Technical details")
         signal_artifacts_group.setObjectName("guidedSignalOnlyF0ArtifactsPanel")
         self._guided_signal_f0_technical_details_group = (
             signal_artifacts_group
@@ -3311,6 +3372,9 @@ class MainWindow(QMainWindow):
         signal_artifacts_layout = QVBoxLayout(signal_artifacts_group)
         signal_artifacts_layout.setContentsMargins(8, 8, 8, 8)
         signal_artifacts_layout.setSpacing(4)
+        signal_artifacts_layout.addWidget(
+            self._guided_signal_f0_open_btn, alignment=Qt.AlignLeft
+        )
         self._guided_signal_f0_artifacts_label = QLabel("No Signal-Only F0 diagnostic artifacts generated.")
         self._guided_signal_f0_artifacts_label.setObjectName("guidedSignalOnlyF0Artifacts")
         self._guided_signal_f0_artifacts_label.setProperty("guidedSecondaryText", True)
@@ -3671,6 +3735,7 @@ class MainWindow(QMainWindow):
         self._guided_preview_result_stale = True
         if hasattr(self, "_guided_preview_status_label"):
             self._guided_preview_status_label.setText(reason)
+        self._refresh_guided_preview_review_affordances()
         self._refresh_guided_generated_outputs_summary()
         self._refresh_guided_confirm_strategy_panel()
 
@@ -3683,6 +3748,7 @@ class MainWindow(QMainWindow):
         self._guided_signal_f0_result_stale = True
         if hasattr(self, "_guided_signal_f0_status_label"):
             self._guided_signal_f0_status_label.setText(reason)
+        self._refresh_guided_preview_review_affordances()
         self._refresh_guided_generated_outputs_summary()
         self._refresh_guided_confirm_strategy_panel()
 
@@ -3998,6 +4064,490 @@ class MainWindow(QMainWindow):
     def _guided_preview_method_label(self, method: str) -> str:
         return GUIDED_CORRECTION_PREVIEW_METHOD_LABELS.get(str(method), str(method))
 
+    def _render_guided_correction_preview_visual(
+        self, result: dict[str, object]
+    ) -> str:
+        output_text = str(result.get("preview_output_dir") or "").strip()
+        method_statuses = result.get("method_statuses", {})
+        if not output_text or not isinstance(method_statuses, dict):
+            return ""
+        traces: dict[str, dict[str, list[float]]] = {}
+        trace_sources: dict[str, str] = {}
+        columns = ("time_sec", "sig_raw", "uv_raw", "fit_ref", "delta_f")
+        for method, raw_status in method_statuses.items():
+            status = raw_status if isinstance(raw_status, dict) else {}
+            trace_path = Path(str(status.get("trace_csv") or ""))
+            if not trace_path.is_file():
+                continue
+            series = {column: [] for column in columns}
+            try:
+                with trace_path.open(
+                    "r", encoding="utf-8", newline=""
+                ) as handle:
+                    for row in csv.DictReader(handle):
+                        for column in columns:
+                            try:
+                                series[column].append(float(row[column]))
+                            except (KeyError, TypeError, ValueError):
+                                series[column].append(float("nan"))
+            except Exception:
+                continue
+            if series["time_sec"]:
+                traces[str(method)] = series
+                trace_sources[str(method)] = str(trace_path)
+        result["visual_trace_sources"] = trace_sources
+        result["visual_trace_sample_counts"] = {
+            method: len(series["time_sec"])
+            for method, series in traces.items()
+        }
+        if not traces:
+            return ""
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            from matplotlib import pyplot as plt
+
+            with matplotlib.rc_context({"figure.dpi": 120}):
+                figure, axes = plt.subplots(
+                    3, 1, figsize=(9.5, 8), sharex=True
+                )
+                first = next(iter(traces.values()))
+                axes[0].plot(
+                    first["time_sec"],
+                    first["sig_raw"],
+                    label="Raw signal",
+                    linewidth=1.2,
+                )
+                axes[0].plot(
+                    first["time_sec"],
+                    first["uv_raw"],
+                    label="Reference/control signal",
+                    linewidth=1.0,
+                    alpha=0.8,
+                )
+                axes[0].set_title("Source segment")
+                axes[0].set_ylabel("Signal")
+                axes[0].legend(loc="best")
+                for method, series in traces.items():
+                    label = self._guided_preview_method_label(method)
+                    axes[1].plot(
+                        series["time_sec"],
+                        series["delta_f"],
+                        label=label,
+                        linewidth=1.1,
+                    )
+                    axes[2].plot(
+                        series["time_sec"],
+                        series["fit_ref"],
+                        label=label,
+                        linewidth=1.1,
+                    )
+                axes[1].set_title("Corrected signal comparison")
+                axes[1].set_ylabel("Corrected signal")
+                axes[1].legend(loc="best", fontsize="small")
+                axes[2].set_title("Fitted reference comparison")
+                axes[2].set_ylabel("Fitted reference")
+                axes[2].set_xlabel("Time (seconds)")
+                axes[2].legend(loc="best", fontsize="small")
+                figure.suptitle(
+                    "Correction preview — "
+                    f"ROI {result.get('roi', '')}, "
+                    f"segment {result.get('chunk_index', '')}"
+                )
+                figure.tight_layout()
+                visual_path = (
+                    Path(output_text) / "correction_preview_visual.png"
+                )
+                figure.savefig(visual_path, bbox_inches="tight")
+                plt.close(figure)
+        except Exception:
+            return ""
+        return str(visual_path)
+
+    def _write_guided_correction_preview_report(
+        self, result: dict[str, object]
+    ) -> str:
+        output_text = str(result.get("preview_output_dir") or "").strip()
+        if not output_text:
+            return ""
+        output_dir = Path(output_text)
+        if not output_dir.is_dir():
+            return ""
+        method_statuses = result.get("method_statuses", {})
+        if not isinstance(method_statuses, dict):
+            method_statuses = {}
+        sections: list[str] = []
+        for method, raw_status in method_statuses.items():
+            status = raw_status if isinstance(raw_status, dict) else {}
+            label = self._guided_preview_method_label(str(method))
+            warnings = "; ".join(str(x) for x in status.get("warnings", []))
+            errors = "; ".join(str(x) for x in status.get("errors", []))
+            diagnostics_path = Path(
+                str(status.get("diagnostics_json") or "")
+            )
+            trace_path = Path(str(status.get("trace_csv") or ""))
+            diagnostic_lines: list[str] = []
+            if diagnostics_path.is_file():
+                try:
+                    payload = json.loads(
+                        diagnostics_path.read_text(encoding="utf-8")
+                    )
+                except Exception:
+                    payload = {}
+                if isinstance(payload, dict):
+                    if payload.get("n_samples") is not None:
+                        diagnostic_lines.append(
+                            f"Samples: {html.escape(str(payload['n_samples']))}"
+                        )
+                    for key, title in (
+                        ("fit_ref_summary", "Fitted reference"),
+                        ("delta_f_summary", "Corrected signal"),
+                    ):
+                        summary = payload.get(key)
+                        if isinstance(summary, dict):
+                            values = ", ".join(
+                                f"{html.escape(str(name))}: "
+                                f"{html.escape(str(value))}"
+                                for name, value in summary.items()
+                            )
+                            diagnostic_lines.append(
+                                f"{title}: {values}"
+                            )
+            trace_rows: list[dict[str, str]] = []
+            if trace_path.is_file():
+                try:
+                    with trace_path.open(
+                        "r", encoding="utf-8", newline=""
+                    ) as handle:
+                        trace_rows = list(
+                            itertools.islice(csv.DictReader(handle), 12)
+                        )
+                except Exception:
+                    trace_rows = []
+            table = ""
+            if trace_rows:
+                columns = (
+                    "time_sec",
+                    "sig_raw",
+                    "uv_raw",
+                    "fit_ref",
+                    "delta_f",
+                )
+                header = "".join(
+                    f"<th>{html.escape(column)}</th>"
+                    for column in columns
+                )
+                body = "".join(
+                    "<tr>"
+                    + "".join(
+                        f"<td>{html.escape(str(row.get(column, '')))}</td>"
+                        for column in columns
+                    )
+                    + "</tr>"
+                    for row in trace_rows
+                )
+                table = (
+                    "<p>First 12 trace samples:</p>"
+                    f"<table><thead><tr>{header}</tr></thead>"
+                    f"<tbody>{body}</tbody></table>"
+                )
+            links = []
+            for path, text in (
+                (trace_path, "Trace CSV"),
+                (diagnostics_path, "Diagnostics JSON"),
+            ):
+                if path.is_file():
+                    links.append(
+                        f'<a href="{html.escape(path.name)}">'
+                        f"{html.escape(text)}</a>"
+                    )
+            sections.append(
+                f"<section><h2>{html.escape(label)}</h2>"
+                f"<p>Status: {html.escape(str(status.get('status', '')))}</p>"
+                f"<p>Warnings: {html.escape(warnings or 'none')}</p>"
+                f"<p>Errors: {html.escape(errors or 'none')}</p>"
+                + "".join(f"<p>{line}</p>" for line in diagnostic_lines)
+                + table
+                + (
+                    "<p>Technical files: " + " | ".join(links) + "</p>"
+                    if links
+                    else ""
+                )
+                + "</section>"
+            )
+        method_names = ", ".join(
+            self._guided_preview_method_label(str(method))
+            for method in method_statuses
+        )
+        report = (
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            "<title>Correction preview</title><style>"
+            "body{font-family:system-ui,sans-serif;max-width:1100px;"
+            "margin:2rem auto;padding:0 1rem;color:#202124}"
+            "table{border-collapse:collapse;width:100%;font-size:.9rem}"
+            "th,td{border:1px solid #ccc;padding:.35rem;text-align:right}"
+            "th{background:#f3f4f6}section{margin:2rem 0}</style></head>"
+            "<body><h1>Correction preview</h1>"
+            f"<p><strong>ROI:</strong> {html.escape(str(result.get('roi', '')))}</p>"
+            f"<p><strong>Preview segment:</strong> "
+            f"{html.escape(str(result.get('chunk_index', '')))}</p>"
+            f"<p><strong>Methods compared:</strong> "
+            f"{html.escape(method_names)}</p>"
+            "<p>This report is for correction-method review only. Opening it "
+            "does not confirm a strategy or start the final analysis.</p>"
+            + "".join(sections)
+            + "</body></html>"
+        )
+        report_path = output_dir / "correction_preview_report.html"
+        report_path.write_text(report, encoding="utf-8")
+        return str(report_path)
+
+    def _write_guided_signal_f0_preview_report(
+        self, result: dict[str, object]
+    ) -> str:
+        output_text = str(result.get("output_dir") or "").strip()
+        if not output_text:
+            return ""
+        output_dir = Path(output_text)
+        if not output_dir.is_dir():
+            return ""
+        rows = self._load_signal_f0_chunk_rows(
+            str(result.get("chunk_csv_path") or "")
+        )
+        columns = (
+            "chunk_id",
+            "status",
+            "n_samples",
+            "signal_finite_fraction",
+            "f0_median",
+            "dff_median",
+            "signal_only_f0_candidate_viability",
+            "signal_only_f0_candidate_confidence",
+            "warning_flags",
+            "error",
+        )
+        header = "".join(
+            f"<th>{html.escape(column)}</th>" for column in columns
+        )
+        body = "".join(
+            "<tr>"
+            + "".join(
+                f"<td>{html.escape(str(row.get(column, '')))}</td>"
+                for column in columns
+            )
+            + "</tr>"
+            for row in rows
+        )
+        report = (
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            "<title>Signal-Only F0 preview</title><style>"
+            "body{font-family:system-ui,sans-serif;max-width:1100px;"
+            "margin:2rem auto;padding:0 1rem;color:#202124}"
+            "table{border-collapse:collapse;width:100%;font-size:.9rem}"
+            "th,td{border:1px solid #ccc;padding:.35rem}"
+            "th{background:#f3f4f6}</style></head><body>"
+            "<h1>Signal-Only F0 preview</h1>"
+            f"<p><strong>ROI:</strong> {html.escape(str(result.get('roi', '')))}</p>"
+            f"<p><strong>Preview segment:</strong> "
+            f"{html.escape(str(result.get('chunk_index', '')))}</p>"
+            "<p>You can review Signal-Only F0 here, but Guided Run cannot "
+            "execute it yet.</p>"
+            f"<p>Status: {html.escape(str(result.get('status', '')))}</p>"
+            f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
+            "</body></html>"
+        )
+        report_path = output_dir / "signal_only_f0_preview_report.html"
+        report_path.write_text(report, encoding="utf-8")
+        return str(report_path)
+
+    def _generate_guided_preview_reports(
+        self, result: dict[str, object], *, signal_only_f0: bool
+    ) -> None:
+        if not signal_only_f0:
+            try:
+                result["visual_preview_path"] = (
+                    self._render_guided_correction_preview_visual(result)
+                )
+            except Exception:
+                result["visual_preview_path"] = ""
+        try:
+            report_path = (
+                self._write_guided_signal_f0_preview_report(result)
+                if signal_only_f0
+                else self._write_guided_correction_preview_report(result)
+            )
+        except Exception:
+            report_path = ""
+        result["user_report_path"] = report_path
+
+    def _open_guided_preview_output(self, path: str) -> None:
+        if os.path.isdir(path):
+            _open_folder(path)
+        else:
+            _open_file(path)
+
+    def _on_open_guided_correction_preview(self) -> None:
+        result = getattr(self, "_guided_preview_last_result", {}) or {}
+        path = str(
+            result.get("user_report_path")
+            or result.get("preview_output_dir")
+            or ""
+        )
+        if path:
+            self._open_guided_preview_output(path)
+
+    def _on_open_guided_signal_only_f0_preview(self) -> None:
+        result = getattr(self, "_guided_signal_f0_last_result", {}) or {}
+        path = str(
+            result.get("user_report_path") or result.get("output_dir") or ""
+        )
+        if path:
+            self._open_guided_preview_output(path)
+
+    def _refresh_guided_preview_review_affordances(self) -> None:
+        preview = getattr(self, "_guided_preview_last_result", {}) or {}
+        preview_ready = bool(
+            getattr(self, "_guided_preview_has_result", False)
+            and str(preview.get("status", "")) in {"success", "partial"}
+        )
+        preview_stale = bool(
+            getattr(self, "_guided_preview_result_stale", False)
+        )
+        if hasattr(self, "_guided_preview_review_label"):
+            if preview_ready:
+                methods = preview.get("method_statuses", {})
+                method_ids = (
+                    list(methods)
+                    if isinstance(methods, dict) and methods
+                    else self._selected_guided_preview_methods()
+                )
+                method_text = ", ".join(
+                    self._guided_preview_method_label(str(method))
+                    for method in method_ids
+                )
+                state = "stale" if preview_stale else "ready"
+                self._guided_preview_review_label.setText(
+                    f"Correction preview: {state}.\n"
+                    f"ROI: {preview.get('roi', '')}\n"
+                    f"Preview segment: {preview.get('chunk_index', '')}\n"
+                    f"Methods compared: {method_text}"
+                    + (
+                        ""
+                        if preview.get("user_report_path")
+                        else "\nCorrection preview report could not be "
+                        "generated. Open preview folder."
+                    )
+                )
+            self._guided_preview_review_label.setVisible(preview_ready)
+            self._guided_preview_open_btn.setVisible(preview_ready)
+            self._guided_preview_open_btn.setText(
+                "Open correction preview"
+                if preview.get("user_report_path")
+                else "Open preview folder"
+            )
+            self._guided_preview_open_btn.setEnabled(
+                preview_ready and not preview_stale
+            )
+            visual_path = str(
+                preview.get("visual_preview_path") or ""
+            )
+            visual_ready = bool(
+                preview_ready
+                and not preview_stale
+                and visual_path
+                and os.path.isfile(visual_path)
+            )
+            if visual_ready:
+                pixmap = QPixmap(visual_path)
+                if not pixmap.isNull():
+                    self._guided_preview_visual_label.setPixmap(
+                        pixmap.scaled(
+                            950,
+                            800,
+                            Qt.KeepAspectRatio,
+                            Qt.SmoothTransformation,
+                        )
+                    )
+                    self._guided_preview_visual_status_label.setText(
+                        "Preview for ROI "
+                        f"{preview.get('roi', '')}, segment "
+                        f"{preview.get('chunk_index', '')}. Review the Raw "
+                        "signal, Reference/control signal, Corrected signal, "
+                        "and Fitted reference before confirming a strategy."
+                    )
+                else:
+                    visual_ready = False
+            if preview_ready and not visual_ready:
+                self._guided_preview_visual_label.setPixmap(QPixmap())
+                self._guided_preview_visual_status_label.setText(
+                    "Correction preview was generated, but the visual preview "
+                    "could not be displayed. You can open the preview folder "
+                    "from Technical details."
+                )
+            self._guided_preview_visual_status_label.setVisible(preview_ready)
+            self._guided_preview_visual_label.setVisible(visual_ready)
+
+        signal = getattr(self, "_guided_signal_f0_last_result", {}) or {}
+        signal_ready = bool(
+            getattr(self, "_guided_signal_f0_has_result", False)
+            and str(signal.get("status", "")) in {"success", "partial"}
+        )
+        signal_stale = bool(
+            getattr(self, "_guided_signal_f0_result_stale", False)
+        )
+        if hasattr(self, "_guided_signal_f0_review_label"):
+            if signal_ready:
+                state = "stale" if signal_stale else "ready"
+                rows = self._load_signal_f0_chunk_rows(
+                    str(signal.get("chunk_csv_path") or "")
+                )
+                row = rows[0] if rows else {}
+                metrics = ""
+                if row:
+                    metrics = (
+                        "\nCandidate viability: "
+                        + str(
+                            row.get(
+                                "signal_only_f0_candidate_viability", ""
+                            )
+                        )
+                        + "\nCandidate confidence: "
+                        + str(
+                            row.get(
+                                "signal_only_f0_candidate_confidence", ""
+                            )
+                        )
+                        + "\nSignal finite fraction: "
+                        + str(row.get("signal_finite_fraction", ""))
+                        + "\nMedian dF/F: "
+                        + str(row.get("dff_median", ""))
+                    )
+                self._guided_signal_f0_review_label.setText(
+                    f"Signal-Only F0 preview: {state}.\n"
+                    f"ROI: {signal.get('roi', '')}\n"
+                    f"Preview segment: {signal.get('chunk_index', '')}"
+                    + metrics
+                    + "\nSignal-Only F0 generated a summary for this preview "
+                    "segment, but no trace preview is available yet."
+                    + (
+                        ""
+                        if signal.get("user_report_path")
+                        else "\nSignal-Only F0 preview report could not be "
+                        "generated. Open preview folder."
+                    )
+                )
+            self._guided_signal_f0_review_label.setVisible(signal_ready)
+            self._guided_signal_f0_open_btn.setVisible(signal_ready)
+            self._guided_signal_f0_open_btn.setText(
+                "Open Signal-Only F0 preview"
+                if signal.get("user_report_path")
+                else "Open Signal-Only F0 preview folder"
+            )
+            self._guided_signal_f0_open_btn.setEnabled(
+                signal_ready and not signal_stale
+            )
+
     def _set_table_item(self, row: int, column: int, text: str, tooltip: str = "") -> None:
         item = QTableWidgetItem(str(text or ""))
         item.setToolTip(str(tooltip or text or ""))
@@ -4043,6 +4593,7 @@ class MainWindow(QMainWindow):
             self._guided_preview_messages_label.setText("\n".join(lines))
         if hasattr(self, "_guided_preview_result_label"):
             self._guided_preview_result_label.setText(self._format_guided_preview_result(result))
+        self._refresh_guided_preview_review_affordances()
         self._refresh_guided_generated_outputs_summary()
 
     def _clear_guided_preview_result_widgets(self) -> None:
@@ -4310,6 +4861,7 @@ class MainWindow(QMainWindow):
             if not lines:
                 lines.append("Errors/warnings: none reported by Signal-Only F0 diagnostic backend.")
             self._guided_signal_f0_messages_label.setText("\n".join(lines))
+        self._refresh_guided_preview_review_affordances()
         self._refresh_guided_generated_outputs_summary()
 
     def _on_generate_guided_signal_only_f0_diagnostic(self) -> None:
@@ -4362,15 +4914,20 @@ class MainWindow(QMainWindow):
             result["source_type"] = "diagnostic_cache"
         result["roi"] = roi
         result["chunk_index"] = int(chunk)
+        self._generate_guided_preview_reports(
+            result, signal_only_f0=True
+        )
         self._guided_signal_f0_last_result = result
         if hasattr(self, "_guided_signal_f0_status_label"):
             status = str(result.get("status", "failed"))
             if status in {"success", "partial"}:
                 self._guided_signal_f0_status_label.setText(
-                    f"Signal-Only F0 diagnostic review generated: {status}."
+                    "Signal-Only F0 preview: ready."
                 )
             else:
-                self._guided_signal_f0_status_label.setText("Signal-Only F0 diagnostic review failed.")
+                self._guided_signal_f0_status_label.setText(
+                    "Signal-Only F0 preview: failed."
+                )
         self._populate_guided_signal_f0_result_widgets(result)
         self._refresh_guided_signal_f0_enablement()
         self._refresh_guided_confirm_strategy_panel()
@@ -4470,13 +5027,23 @@ class MainWindow(QMainWindow):
             )
         result["roi"] = roi
         result["chunk_index"] = int(chunk)
+        self._generate_guided_preview_reports(
+            result, signal_only_f0=False
+        )
         self._guided_preview_last_result = result
         if hasattr(self, "_guided_preview_status_label"):
             status = str(result.get("status", "failed"))
             if status in {"success", "partial"}:
-                self._guided_preview_status_label.setText(f"Preview comparison generated: {status}.")
+                self._guided_preview_status_label.setText(
+                    "Correction preview: ready."
+                    if result.get("visual_preview_path")
+                    else "Correction preview generated, but visual preview "
+                    "unavailable."
+                )
             else:
-                self._guided_preview_status_label.setText("Preview comparison failed.")
+                self._guided_preview_status_label.setText(
+                    "Correction preview: failed."
+                )
         self._populate_guided_preview_result_widgets(result)
         self._refresh_guided_preview_enablement()
         self._refresh_guided_confirm_strategy_panel()
@@ -4493,8 +5060,6 @@ class MainWindow(QMainWindow):
             "_guided_completed_run_diagnostics_details_group",
             "_guided_generated_outputs_group",
             "_guided_diagnostics_slots_group",
-            "_guided_preview_technical_details_group",
-            "_guided_signal_f0_technical_details_group",
         ):
             widget = getattr(self, widget_name, None)
             if widget is not None:
@@ -4791,6 +5356,13 @@ class MainWindow(QMainWindow):
         )
         runner = getattr(self, "_guided_diagnostic_cache_runner", None)
         if runner is not None and runner.is_running():
+            if new_analysis:
+                self._guided_diagnostic_cache_build_btn.setText(
+                    "Rebuild correction evidence"
+                    if getattr(self, "_guided_diagnostic_cache_record", None)
+                    is not None
+                    else "Build correction evidence"
+                )
             self._guided_diagnostic_cache_status_label.setText(
                 "Correction evidence: building."
                 if new_analysis
@@ -4809,6 +5381,9 @@ class MainWindow(QMainWindow):
         record = getattr(self, "_guided_diagnostic_cache_record", None)
         if mode == "new_analysis":
             if record is None:
+                self._guided_diagnostic_cache_build_btn.setText(
+                    "Build correction evidence"
+                )
                 current_status = getattr(self, "_guided_diagnostic_cache_status", None)
                 if (
                     isinstance(current_status, DiagnosticCacheStatus)
@@ -4826,6 +5401,9 @@ class MainWindow(QMainWindow):
                 self._guided_diagnostic_cache_summary_label.setText("")
                 return
 
+            self._guided_diagnostic_cache_build_btn.setText(
+                "Rebuild correction evidence"
+            )
             stale_status = None
             try:
                 current_request = self._build_guided_diagnostic_cache_request(
@@ -5474,6 +6052,17 @@ class MainWindow(QMainWindow):
             and getattr(self, "_guided_preview_has_result", False)
             and not getattr(self, "_guided_preview_result_stale", False)
         )
+        preview_result = getattr(
+            self, "_guided_preview_last_result", {}
+        ) or {}
+        if "visual_preview_path" in preview_result:
+            preview_ready = bool(
+                preview_ready
+                and preview_result.get("visual_preview_path")
+                and os.path.isfile(
+                    str(preview_result.get("visual_preview_path"))
+                )
+            )
         preview_unlocked = evidence_ready or not new_analysis
         strategy_unlocked = preview_ready or not new_analysis
         self._guided_preview_locked_label.setVisible(not preview_unlocked)
@@ -5488,8 +6077,6 @@ class MainWindow(QMainWindow):
                 "_guided_confirm_evidence_group",
                 "_guided_preview_source_status_label",
                 "_guided_signal_f0_source_status_label",
-                "_guided_preview_technical_details_group",
-                "_guided_signal_f0_technical_details_group",
             ):
                 widget = getattr(self, widget_name, None)
                 if widget is not None:
@@ -5507,7 +6094,30 @@ class MainWindow(QMainWindow):
             return
         record = getattr(self, "_guided_diagnostic_cache_record", None)
         if record is None:
-            label.setText("Next step: build correction evidence.")
+            button = getattr(
+                self, "_guided_diagnostic_cache_build_btn", None
+            )
+            if button is not None and not button.isEnabled():
+                status, _request, _path = (
+                    self._guided_diagnostic_cache_readiness()
+                )
+                reason = str(status.message or "").strip()
+                reason = (
+                    reason.replace("diagnostic cache", "correction evidence")
+                    .replace("Diagnostic cache", "Correction evidence")
+                    .replace("ROI discovery", "ROI selection")
+                )
+                label.setText(
+                    "Next step: "
+                    + (
+                        reason[0].lower() + reason[1:]
+                        if reason
+                        else "complete Select data and Recording structure "
+                        "before building correction evidence."
+                    )
+                )
+            else:
+                label.setText("Next step: build correction evidence.")
             return
         try:
             request = self._build_guided_diagnostic_cache_request(
@@ -5532,6 +6142,24 @@ class MainWindow(QMainWindow):
             label.setText(
                 "Correction preview is stale. Generate a new preview before "
                 "confirming strategies."
+            )
+            return
+        preview_result = getattr(
+            self, "_guided_preview_last_result", {}
+        ) or {}
+        if (
+            preview_exists
+            and "visual_preview_path" in preview_result
+            and not (
+                preview_result.get("visual_preview_path")
+                and os.path.isfile(
+                    str(preview_result.get("visual_preview_path"))
+                )
+            )
+        ):
+            label.setText(
+                "Correction preview generated, but visual preview unavailable. "
+                "Generate a new preview before confirming strategies."
             )
             return
         preview_ready = preview_exists and not preview_stale
@@ -5559,11 +6187,16 @@ class MainWindow(QMainWindow):
                 "ROIs. Next step: Draft plan."
             )
         else:
-            label.setText(
-                "Correction preview is ready. Next step: confirm a strategy "
-                f"for each included ROI. {count}/{total} included ROIs "
-                "confirmed."
-            )
+            if count:
+                label.setText(
+                    "Correction preview is ready. Continue confirming "
+                    f"strategies. {count}/{total} included ROIs confirmed."
+                )
+            else:
+                label.setText(
+                    "Correction preview is ready. Next step: confirm a "
+                    "strategy for each included ROI."
+                )
 
     def _refresh_guided_confirm_strategy_panel(self, *_args) -> None:
         if not hasattr(self, "_guided_confirm_context_label"):
