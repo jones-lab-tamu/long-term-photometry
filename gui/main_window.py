@@ -2708,9 +2708,8 @@ class MainWindow(QMainWindow):
         wrapper_layout.setSpacing(10)
         wrapper_layout.addWidget(self._build_guided_skipped_setup_banner("Correction approach"))
         guidance = QLabel(
-            "Build correction evidence, preview correction behavior, then "
-            "confirm a strategy for each included ROI. Nothing here starts "
-            "the final analysis."
+            "Compare correction methods and choose one strategy for each "
+            "included ROI. Nothing here starts the final analysis."
         )
         guidance.setObjectName("guidedCorrectionWorkflowGuidance")
         guidance.setWordWrap(True)
@@ -2795,29 +2794,12 @@ class MainWindow(QMainWindow):
         self._guided_method_configuration_group = candidate_group
         candidate_group.setVisible(False)
 
-        evidence_group = QGroupBox("Correction evidence workflow")
-        evidence_layout = QVBoxLayout(evidence_group)
-        evidence_layout.setContentsMargins(10, 8, 10, 8)
-        evidence_layout.addWidget(self._build_guided_diagnostics_step())
-        wrapper_layout.addWidget(evidence_group)
-
-        confirmation_group = QGroupBox(
-            "3. Confirm correction strategy"
-        )
-        confirmation_layout = QVBoxLayout(confirmation_group)
-        confirmation_layout.setContentsMargins(10, 8, 10, 8)
-        confirmation_layout.addWidget(
-            self._build_guided_confirm_strategy_step()
-        )
-        wrapper_layout.addWidget(confirmation_group)
+        wrapper_layout.addWidget(self._build_guided_diagnostics_step())
+        wrapper_layout.addWidget(self._build_guided_confirm_strategy_step())
         return self._build_guided_step_scroll(
             "guidedStepCorrectionApproach",
             "Correction approach",
-            [
-                "Prepare correction evidence, preview correction methods, and "
-                "explicitly confirm one strategy for each included ROI.",
-                "Method configuration is not final strategy confirmation.",
-            ],
+            [],
             wrapper,
         )
 
@@ -3071,6 +3053,7 @@ class MainWindow(QMainWindow):
 
         preview_group = QGroupBox("2. Preview correction methods")
         preview_group.setObjectName("guidedCorrectionPreviewPanel")
+        self._guided_preview_gated_widgets = []
         preview_layout = QVBoxLayout(preview_group)
         preview_layout.setContentsMargins(10, 10, 10, 10)
         preview_layout.setSpacing(8)
@@ -3082,6 +3065,7 @@ class MainWindow(QMainWindow):
         preview_intro.setProperty("guidedSecondaryText", True)
         preview_intro.setWordWrap(True)
         preview_layout.addWidget(preview_intro)
+        self._guided_preview_gated_widgets.append(preview_intro)
 
         self._guided_preview_source_status_label = QLabel(
             "Load a completed run to generate preview-only correction comparisons."
@@ -3092,6 +3076,9 @@ class MainWindow(QMainWindow):
         self._guided_preview_source_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._make_guided_widget_shrinkable(self._guided_preview_source_status_label)
         preview_layout.addWidget(self._guided_preview_source_status_label)
+        self._guided_preview_gated_widgets.append(
+            self._guided_preview_source_status_label
+        )
 
         form = QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
@@ -3101,15 +3088,27 @@ class MainWindow(QMainWindow):
         self._guided_preview_roi_combo.setMinimumContentsLength(6)
         self._make_guided_widget_shrinkable(self._guided_preview_roi_combo)
         self._guided_preview_roi_combo.currentIndexChanged.connect(self._on_guided_preview_selection_changed)
-        form.addRow("ROI", self._guided_preview_roi_combo)
+        preview_roi_label = QLabel("ROI")
+        form.addRow(preview_roi_label, self._guided_preview_roi_combo)
         self._guided_preview_chunk_combo = QComboBox()
         self._guided_preview_chunk_combo.setObjectName("guidedCorrectionPreviewChunkCombo")
         self._guided_preview_chunk_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self._guided_preview_chunk_combo.setMinimumContentsLength(6)
         self._make_guided_widget_shrinkable(self._guided_preview_chunk_combo)
         self._guided_preview_chunk_combo.currentIndexChanged.connect(self._on_guided_preview_selection_changed)
-        form.addRow("Preview segment", self._guided_preview_chunk_combo)
+        preview_segment_label = QLabel("Preview segment")
+        form.addRow(
+            preview_segment_label, self._guided_preview_chunk_combo
+        )
         preview_layout.addLayout(form)
+        self._guided_preview_gated_widgets.extend(
+            (
+                preview_roi_label,
+                self._guided_preview_roi_combo,
+                preview_segment_label,
+                self._guided_preview_chunk_combo,
+            )
+        )
 
         self._guided_preview_method_checkboxes: dict[str, QCheckBox] = {}
         method_row = QVBoxLayout()
@@ -3120,6 +3119,7 @@ class MainWindow(QMainWindow):
             cb.stateChanged.connect(self._on_guided_preview_selection_changed)
             self._guided_preview_method_checkboxes[method] = cb
             method_row.addWidget(cb)
+            self._guided_preview_gated_widgets.append(cb)
             descriptions = {
                 "robust_global_event_reject": (
                     "Recommended starting point when the reference/control "
@@ -3137,16 +3137,7 @@ class MainWindow(QMainWindow):
             description.setProperty("guidedSecondaryText", True)
             description.setWordWrap(True)
             method_row.addWidget(description)
-        signal_candidate = QLabel(
-            "Signal-Only F0: use when the reference/control channel is not "
-            "appropriate for correction. Available for preview and strategy "
-            "review. Current Guided Run execution supports dynamic-fit "
-            "production routing only."
-        )
-        signal_candidate.setObjectName("guidedSignalOnlyF0CandidateText")
-        signal_candidate.setProperty("guidedSecondaryText", True)
-        signal_candidate.setWordWrap(True)
-        method_row.addWidget(signal_candidate)
+            self._guided_preview_gated_widgets.append(description)
         preview_layout.addLayout(method_row)
 
         preview_note = QLabel(
@@ -3158,6 +3149,7 @@ class MainWindow(QMainWindow):
         preview_note.setProperty("guidedSecondaryText", True)
         preview_note.setWordWrap(True)
         preview_layout.addWidget(preview_note)
+        self._guided_preview_gated_widgets.append(preview_note)
 
         self._guided_preview_generate_btn = QPushButton(
             "Generate correction preview"
@@ -3165,6 +3157,9 @@ class MainWindow(QMainWindow):
         self._guided_preview_generate_btn.setObjectName("guidedCorrectionPreviewGenerateButton")
         self._guided_preview_generate_btn.clicked.connect(self._on_generate_guided_correction_preview)
         preview_layout.addWidget(self._guided_preview_generate_btn, alignment=Qt.AlignLeft)
+        self._guided_preview_gated_widgets.append(
+            self._guided_preview_generate_btn
+        )
 
         self._guided_preview_status_label = QLabel("")
         self._guided_preview_status_label.setObjectName("guidedCorrectionPreviewStatus")
@@ -3173,6 +3168,9 @@ class MainWindow(QMainWindow):
         self._guided_preview_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._make_guided_widget_shrinkable(self._guided_preview_status_label)
         preview_layout.addWidget(self._guided_preview_status_label)
+        self._guided_preview_gated_widgets.append(
+            self._guided_preview_status_label
+        )
 
         artifacts_group = QGroupBox("Technical preview details")
         artifacts_group.setObjectName("guidedCorrectionPreviewArtifactsPanel")
@@ -3237,7 +3235,7 @@ class MainWindow(QMainWindow):
             ]
         )
         preview_layout.addWidget(artifacts_group)
-        actions_layout.addWidget(preview_group)
+        self._guided_preview_gated_widgets.append(artifacts_group)
 
         signal_group = QGroupBox("Signal-Only F0 preview")
         signal_group.setObjectName("guidedSignalOnlyF0DiagnosticPanel")
@@ -3247,8 +3245,8 @@ class MainWindow(QMainWindow):
 
         signal_intro = QLabel(
             "Use when the reference/control channel is not appropriate for "
-            "correction. Available for preview and strategy review. Current "
-            "Guided Run execution supports dynamic-fit production routing only."
+            "correction. You can review Signal-Only F0 here, but Guided Run "
+            "cannot execute it yet."
         )
         signal_intro.setObjectName("guidedSignalOnlyF0DiagnosticIntro")
         signal_intro.setProperty("guidedSecondaryText", True)
@@ -3371,7 +3369,22 @@ class MainWindow(QMainWindow):
             ]
         )
         signal_layout.addWidget(signal_artifacts_group)
-        actions_layout.addWidget(signal_group)
+        preview_layout.addWidget(signal_group)
+        self._guided_preview_gated_widgets.append(signal_group)
+        self._guided_preview_locked_label = QLabel(
+            "Locked until correction evidence is built. Signal-Only F0 is a "
+            "correction-method candidate you can review after evidence is "
+            "ready, but Guided Run cannot execute it yet."
+        )
+        self._guided_preview_locked_label.setObjectName(
+            "guidedCorrectionPreviewLocked"
+        )
+        self._guided_preview_locked_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_preview_locked_label.setWordWrap(True)
+        preview_layout.addWidget(self._guided_preview_locked_label)
+        actions_layout.addWidget(preview_group)
         layout.addWidget(actions_group)
 
         outputs_group = QGroupBox("Technical generated-output details")
@@ -3424,15 +3437,7 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(slots_group)
         self._refresh_guided_diagnostics_panel()
-        return self._build_guided_step_scroll(
-            "guidedStepDiagnostics",
-            "Diagnostics",
-            [
-                "Build and review correction evidence before confirming a "
-                "strategy.",
-            ],
-            diagnostics,
-        )
+        return diagnostics
 
     def _guided_completed_run_diagnostic_artifacts(self) -> dict[str, object]:
         run_dir = os.path.realpath((self._current_run_dir or "").strip())
@@ -5446,7 +5451,53 @@ class MainWindow(QMainWindow):
             return progress
         return progress
 
+    def _refresh_guided_correction_section_gating(self) -> None:
+        if not hasattr(self, "_guided_preview_locked_label"):
+            return
+        new_analysis = (
+            getattr(self, "_guided_workflow_mode", "start") == "new_analysis"
+        )
+        evidence_ready = False
+        record = getattr(self, "_guided_diagnostic_cache_record", None)
+        if record is not None:
+            try:
+                request = self._build_guided_diagnostic_cache_request(
+                    cache_id=record.cache_id,
+                    cache_root_path=record.cache_root_path,
+                )
+                evidence_ready = compare_request_to_artifact(
+                    request, record
+                ).ok
+            except Exception:
+                evidence_ready = False
+        preview_ready = bool(
+            evidence_ready
+            and getattr(self, "_guided_preview_has_result", False)
+            and not getattr(self, "_guided_preview_result_stale", False)
+        )
+        preview_unlocked = evidence_ready or not new_analysis
+        strategy_unlocked = preview_ready or not new_analysis
+        self._guided_preview_locked_label.setVisible(not preview_unlocked)
+        for widget in getattr(self, "_guided_preview_gated_widgets", ()):
+            widget.setVisible(preview_unlocked)
+        self._guided_confirm_locked_label.setVisible(not strategy_unlocked)
+        for widget in getattr(self, "_guided_confirm_gated_widgets", ()):
+            widget.setVisible(strategy_unlocked)
+        if new_analysis:
+            for widget_name in (
+                "_guided_confirm_context_group",
+                "_guided_confirm_evidence_group",
+                "_guided_preview_source_status_label",
+                "_guided_signal_f0_source_status_label",
+                "_guided_preview_technical_details_group",
+                "_guided_signal_f0_technical_details_group",
+            ):
+                widget = getattr(self, widget_name, None)
+                if widget is not None:
+                    widget.setVisible(False)
+
     def _refresh_guided_correction_next_action(self) -> None:
+        self._refresh_guided_correction_section_gating()
         label = getattr(self, "_guided_correction_next_action_label", None)
         if label is None:
             return
@@ -8797,7 +8848,7 @@ class MainWindow(QMainWindow):
         self._guided_export_editor_synced_run = run_dir
 
     def _build_guided_confirm_strategy_step(self) -> QWidget:
-        wrapper = QWidget()
+        wrapper = QGroupBox("3. Choose correction strategy")
         wrapper.setObjectName("guidedConfirmStrategyContent")
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -8830,7 +8881,7 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self._guided_confirm_strategy_progress_label)
 
-        selection_group = QGroupBox("Choose correction strategy")
+        selection_group = QWidget()
         selection_group.setObjectName("guidedConfirmStrategySelectionPanel")
         selection_layout = QFormLayout(selection_group)
         selection_layout.setContentsMargins(10, 8, 10, 8)
@@ -8866,7 +8917,7 @@ class MainWindow(QMainWindow):
         evidence_layout.addWidget(self._guided_confirm_evidence_label)
         layout.addWidget(evidence_group)
 
-        choice_group = QGroupBox("Confirm correction strategy")
+        choice_group = QWidget()
         choice_group.setObjectName("guidedConfirmStrategyChoicePanel")
         choice_layout = QFormLayout(choice_group)
         choice_layout.setContentsMargins(10, 8, 10, 8)
@@ -8904,17 +8955,26 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_confirm_marked_choice_label)
         layout.addWidget(self._guided_confirm_marked_choice_label)
 
-        self._refresh_guided_confirm_strategy_panel()
-        return self._build_guided_step_scroll(
-            "guidedStepConfirmStrategy",
-            "Confirm strategy",
-            [
-                "Explicitly mark a candidate strategy after reviewing current "
-                "correction evidence. Selecting a strategy alone does not "
-                "confirm it or choose automatically.",
-            ],
-            wrapper,
+        self._guided_confirm_locked_label = QLabel(
+            "Locked until a correction preview is generated."
         )
+        self._guided_confirm_locked_label.setObjectName(
+            "guidedConfirmStrategyLocked"
+        )
+        self._guided_confirm_locked_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_confirm_locked_label.setWordWrap(True)
+        layout.addWidget(self._guided_confirm_locked_label)
+        self._guided_confirm_gated_widgets = (
+            self._guided_confirm_strategy_progress_label,
+            selection_group,
+            evidence_group,
+            choice_group,
+            self._guided_confirm_marked_choice_label,
+        )
+        self._refresh_guided_confirm_strategy_panel()
+        return wrapper
 
     def _build_guided_draft_plan_step(self) -> QWidget:
         wrapper = QWidget()

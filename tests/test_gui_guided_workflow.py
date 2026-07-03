@@ -4565,7 +4565,7 @@ def test_gui_merged_correction_page_is_evidence_first_and_user_safe(window):
     ]
     prepare_index = group_titles.index("1. Prepare correction evidence")
     preview_index = group_titles.index("2. Preview correction methods")
-    confirm_index = group_titles.index("Confirm correction strategy")
+    confirm_index = group_titles.index("3. Choose correction strategy")
     assert prepare_index < preview_index < confirm_index
     assert "Choose a correction candidate" not in group_titles
 
@@ -4581,12 +4581,13 @@ def test_gui_merged_correction_page_is_evidence_first_and_user_safe(window):
     ]
     visible_text = " ".join(group_titles + labels + buttons)
     assert "Setup intent only; not wired to execution." not in visible_text
-    assert "Build correction evidence, preview correction behavior" in (
+    assert "Compare correction methods and choose one strategy" in (
         visible_text
     )
-    assert "Preview segment" in visible_text
     assert "Signal-Only F0" in visible_text
-    assert "dynamic-fit production routing only" in visible_text
+    assert "Guided Run cannot execute it yet" in visible_text
+    assert "Locked until correction evidence is built" in visible_text
+    assert "Locked until a correction preview is generated" in visible_text
     assert "I reviewed" not in visible_text
     assert "Mark strategy choice" not in visible_text
     prohibited = (
@@ -4606,6 +4607,59 @@ def test_gui_merged_correction_page_is_evidence_first_and_user_safe(window):
     lowered = visible_text.lower()
     found = [term for term in prohibited if term in lowered]
     assert found == []
+
+
+def test_compact_correction_sections_unlock_in_order(
+    window, tmp_path, monkeypatch
+):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    assert window._guided_preview_locked_label.isHidden() is False
+    assert window._guided_preview_roi_combo.isHidden() is True
+    assert window._guided_confirm_locked_label.isHidden() is False
+    assert window._guided_confirm_strategy_combo.parentWidget().isHidden()
+
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+
+    assert window._guided_preview_locked_label.isHidden() is True
+    assert window._guided_preview_roi_combo.isHidden() is False
+    assert window._guided_preview_chunk_combo.isHidden() is False
+    assert window._guided_preview_generate_btn.isHidden() is False
+    assert window._guided_confirm_locked_label.isHidden() is False
+    assert window._guided_confirm_strategy_combo.parentWidget().isHidden()
+    assert "Next step: generate a correction preview" in (
+        window._guided_correction_next_action_label.text()
+    )
+
+    _generate_ready_guided_correction_preview(window)
+
+    assert window._guided_confirm_locked_label.isHidden() is True
+    assert window._guided_confirm_roi_combo.parentWidget().isHidden() is False
+    assert window._guided_confirm_strategy_combo.parentWidget().isHidden() is False
+    assert "Next step: confirm a strategy" in (
+        window._guided_correction_next_action_label.text()
+    )
+
+
+def test_signal_only_f0_is_one_preview_subsection_with_plain_limit(window):
+    window._set_guided_workflow_mode("new_analysis")
+    correction_widget = window._guided_workflow_stack.widget(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    signal_groups = [
+        group
+        for group in correction_widget.findChildren(QGroupBox)
+        if group.title() == "Signal-Only F0 preview"
+    ]
+    assert len(signal_groups) == 1
+    assert signal_groups[0].isAncestorOf(
+        window._guided_signal_f0_generate_btn
+    )
+    assert "Guided Run cannot execute it yet" in (
+        window._guided_preview_locked_label.text()
+    )
 
 
 def test_gui_draft_plan_contains_moved_plan_panels(window):
