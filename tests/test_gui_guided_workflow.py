@@ -1797,26 +1797,86 @@ def test_guided_roi_discovery_mirrors_existing_discovery_state(window):
     assert window._guided_roi_list.item(0).checkState() == Qt.Unchecked
 
 
+def test_guided_format_change_is_lightweight_and_clears_stale_discovery(
+    window, monkeypatch
+):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText("custom_tabular")
+    discovery = {
+        "resolved_format": "custom_tabular",
+        "n_total_discovered": 1,
+        "n_preview": 1,
+        "sessions": [{"session_id": "s1"}],
+        "rois": [{"roi_id": "ROI_A"}],
+    }
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+    assert window._guided_roi_list.count() == 1
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("format change must not inspect data or discover ROIs")
+
+    window._validation_passed = True
+    monkeypatch.setattr(window, "_on_discover", fail)
+    monkeypatch.setattr(window, "_infer_dataset_contract_overrides", fail)
+    monkeypatch.setattr(window, "_refresh_guided_mode_display", fail)
+    window._guided_format_combo.setCurrentText("rwd")
+
+    assert window._format_combo.currentText() == "rwd"
+    # The shared Full Control signal still runs its lightweight invalidation,
+    # while the suppression guard prevents its Guided refresh from entering
+    # mode-display / Draft Plan / dataset-inspection work.
+    assert window._validation_passed is False
+    assert window._discovery_cache is None
+    assert window._roi_list.count() == 0
+    assert window._guided_roi_list.count() == 0
+    assert window._guided_resolved_format_label.text() == (
+        "Resolved format will appear after discovery/validation."
+    )
+    assert window._guided_discovery_summary_label.text() == (
+        "Format changed. Select ROIs to run discovery for the selected input."
+    )
+
+
 def test_guided_roi_discovery_button_reuses_existing_discovery_handler(window, monkeypatch):
     called = {"discover": False}
 
     def _fake_discover():
         called["discover"] = True
-        window._populate_discovery_ui(
-            {
-                "resolved_format": "custom_tabular",
-                "n_total_discovered": 1,
-                "n_preview": 1,
-                "sessions": [{"session_id": "s1"}],
-                "rois": [{"roi_id": "ROI_A"}],
-            }
-        )
+        discovery = {
+            "resolved_format": "rwd",
+            "n_total_discovered": 1,
+            "n_preview": 1,
+            "sessions": [{"session_id": "s1"}],
+            "rois": [{"roi_id": "ROI_A"}],
+        }
+        window._discovery_cache = discovery
+        window._populate_discovery_ui(discovery)
 
     monkeypatch.setattr(window, "_on_discover", _fake_discover)
     window._on_guided_discover_rois()
 
     assert called["discover"] is True
     assert window._guided_roi_list.item(0).text() == "ROI_A"
+    assert window._guided_resolved_format_label.text() == "rwd"
+    assert "Format: rwd" in window._guided_discovery_summary_label.text()
+
+
+def test_guided_format_change_status_uses_only_select_data_language(
+    window,
+):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_format_combo.setCurrentText("custom_tabular")
+    text = window._guided_discovery_summary_label.text().lower()
+    assert "select rois" in text
+    prohibited = (
+        "open results",
+        "completed run",
+        "manifest",
+        "backend startup",
+        "diagnostic cache",
+    )
+    assert not any(term in text for term in prohibited)
 
 
 def test_guided_setup_values_are_run_spec_relevant_state_equivalent(window, tmp_path):

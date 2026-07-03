@@ -2080,10 +2080,7 @@ class MainWindow(QMainWindow):
             lambda text: self._sync_line_edit_value(self._output_dir, text)
         )
         self._guided_format_combo.currentIndexChanged.connect(
-            lambda _idx: self._sync_combo_text_value(
-                self._format_combo,
-                self._guided_format_combo.currentText(),
-            )
+            self._on_guided_format_changed
         )
         self._guided_acquisition_mode_combo.currentIndexChanged.connect(
             lambda _idx: self._sync_combo_data_value(
@@ -2115,11 +2112,6 @@ class MainWindow(QMainWindow):
         self._guided_input_dir_edit.textChanged.connect(
             lambda _text: self._invalidate_guided_backend_validation(
                 "input source changed"
-            )
-        )
-        self._guided_format_combo.currentIndexChanged.connect(
-            lambda _idx: self._invalidate_guided_backend_validation(
-                "input format changed"
             )
         )
         self._guided_acquisition_mode_combo.currentIndexChanged.connect(
@@ -2216,7 +2208,14 @@ class MainWindow(QMainWindow):
             self._refresh_guided_diagnostics_panel()
         if hasattr(self, "_guided_start_status_label"):
             self._refresh_guided_start_panel()
-        if hasattr(self, "_guided_mode_banner_label"):
+        if (
+            hasattr(self, "_guided_mode_banner_label")
+            and not getattr(
+                self,
+                "_guided_suppress_expensive_setup_refresh",
+                False,
+            )
+        ):
             self._refresh_guided_mode_display()
         state = self._guided_setup_summary_state()
         resolved = state["resolved_format"] or "not discovered"
@@ -2413,6 +2412,50 @@ class MainWindow(QMainWindow):
         if target.text() == text:
             return
         target.setText(text)
+
+    def _on_guided_format_changed(self, _idx: int) -> None:
+        """Change format without hidden file inspection or ROI discovery."""
+        if getattr(self, "_guided_setup_syncing", False):
+            return
+        self._discovery_cache = None
+        self._rwd_contract_cache = None
+        if hasattr(self, "_roi_list"):
+            blocker = QSignalBlocker(self._roi_list)
+            self._roi_list.clear()
+            del blocker
+        if hasattr(self, "_guided_roi_list"):
+            blocker = QSignalBlocker(self._guided_roi_list)
+            self._guided_roi_list.clear()
+            del blocker
+        if hasattr(self, "_sessions_list"):
+            self._sessions_list.clear()
+        if hasattr(self, "_rep_session_combo"):
+            self._rep_session_combo.clear()
+            self._rep_session_combo.addItem("(auto)")
+        if hasattr(self, "_roi_selection_container"):
+            self._roi_selection_container.setVisible(False)
+        if hasattr(self, "_discovery_summary"):
+            self._discovery_summary.setText(
+                "ROI discovery is required after changing format."
+            )
+        if hasattr(self, "_guided_discovery_summary_label"):
+            self._guided_discovery_summary_label.setText(
+                "Format changed. Select ROIs to run discovery for the "
+                "selected input."
+            )
+        if hasattr(self, "_guided_resolved_format_label"):
+            self._guided_resolved_format_label.setText(
+                "Resolved format will appear after discovery/validation."
+            )
+        self._guided_suppress_expensive_setup_refresh = True
+        try:
+            self._sync_combo_text_value(
+                self._format_combo,
+                self._guided_format_combo.currentText(),
+            )
+        finally:
+            self._guided_suppress_expensive_setup_refresh = False
+        self._invalidate_guided_backend_validation("input format changed")
 
     def _sync_combo_text_value(self, target: QComboBox, text: str) -> None:
         if getattr(self, "_guided_setup_syncing", False):
