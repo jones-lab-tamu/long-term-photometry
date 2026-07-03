@@ -2707,7 +2707,17 @@ class MainWindow(QMainWindow):
         wrapper_layout.setContentsMargins(0, 0, 0, 0)
         wrapper_layout.setSpacing(10)
         wrapper_layout.addWidget(self._build_guided_skipped_setup_banner("Correction approach"))
-        candidate_group = QGroupBox("Choose a correction candidate")
+        guidance = QLabel(
+            "Build correction evidence, preview correction behavior, then "
+            "explicitly confirm a strategy for each included ROI."
+        )
+        guidance.setObjectName("guidedCorrectionWorkflowGuidance")
+        guidance.setWordWrap(True)
+        wrapper_layout.addWidget(guidance)
+
+        candidate_group = QGroupBox(
+            "Method configuration - not evidence selection"
+        )
         candidate_layout = QVBoxLayout(candidate_group)
         candidate_layout.setContentsMargins(10, 8, 10, 8)
         cards = QWidget()
@@ -2736,14 +2746,18 @@ class MainWindow(QMainWindow):
             ),
             (
                 "Signal-Only F0",
-                "Explicit strategy",
-                "Use when reference-based correction is unavailable, inappropriate, failed diagnostic checks, or intentionally not used. This is an explicit user-selected strategy, not an automatic fallback.",
+                "Diagnostic only",
+                "Additional evidence for cases where reference-based correction "
+                "may be inappropriate. It is not a current Guided Run "
+                "production route.",
                 "standard",
             ),
             (
                 "Decision-Support Audit",
                 "Coming later / read-only evidence.",
-                "Future advisory report that may summarize evidence for candidate strategies. It will not run analysis, silently choose a strategy, or write manifests automatically.",
+                "Future advisory report that may summarize evidence for "
+                "candidate strategies. It will not run analysis or silently "
+                "choose a strategy.",
                 "future",
             ),
         ]
@@ -2768,14 +2782,14 @@ class MainWindow(QMainWindow):
         )
         wrapper_layout.addWidget(candidate_group)
 
-        evidence_group = QGroupBox("Prepare and review correction evidence")
+        evidence_group = QGroupBox("Correction evidence workflow")
         evidence_layout = QVBoxLayout(evidence_group)
         evidence_layout.setContentsMargins(10, 8, 10, 8)
         evidence_layout.addWidget(self._build_guided_diagnostics_step())
         wrapper_layout.addWidget(evidence_group)
 
         confirmation_group = QGroupBox(
-            "Review evidence and confirm strategy"
+            "3. Confirm correction strategy"
         )
         confirmation_layout = QVBoxLayout(confirmation_group)
         confirmation_layout.setContentsMargins(10, 8, 10, 8)
@@ -2787,9 +2801,9 @@ class MainWindow(QMainWindow):
             "guidedStepCorrectionApproach",
             "Correction approach",
             [
-                "Correction cards are static and non-executing. They do not change config, run diagnostics, write manifests, or route analysis.",
-                "Prepare correction evidence, review the current preview, and "
-                "explicitly confirm a strategy for each included ROI.",
+                "Prepare correction evidence, preview correction methods, and "
+                "explicitly confirm one strategy for each included ROI.",
+                "Method configuration is not final strategy confirmation.",
             ],
             wrapper,
         )
@@ -2816,17 +2830,35 @@ class MainWindow(QMainWindow):
         helper_label.setProperty("guidedSecondaryText", True)
         helper_label.setWordWrap(True)
         layout.addWidget(helper_label)
-        stage_label = QLabel("Setup intent only; not wired to execution.")
+        if title == GUIDED_SIGNAL_ONLY_F0_CARD:
+            stage_text = (
+                "Diagnostic only in the current Guided Run scope. It is not a "
+                "current production route."
+            )
+        elif title in GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE:
+            stage_text = (
+                "Sets the active dynamic-fit method in the editable run "
+                "configuration. Diagnostic-cache identity and preview method "
+                "inclusion are controlled separately; final strategy "
+                "confirmation happens below."
+            )
+        else:
+            stage_text = (
+                "Read-only method information. Final strategy confirmation "
+                "happens after preview evidence is reviewed."
+            )
+        stage_label = QLabel(stage_text)
         stage_label.setObjectName(f"guidedCorrectionCard{safe_name}Stage")
         stage_label.setProperty("guidedMutedText", True)
         stage_label.setWordWrap(True)
         layout.addWidget(stage_label)
         if title in GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE:
-            select_btn = QPushButton("Select")
+            select_btn = QPushButton("Set run method configuration")
             select_btn.setObjectName(f"guidedCorrectionSelect{safe_name}")
             select_btn.setToolTip(
-                "Updates the existing Full Control Dynamic Fit Mode setup state. "
-                "Does not validate, run diagnostics, or execute analysis."
+                "Updates the active dynamic-fit method in the editable run "
+                "configuration. It does not select preview methods or confirm "
+                "a strategy."
             )
             select_btn.clicked.connect(
                 lambda _checked=False, card_title=title: self._select_guided_reference_correction_card(card_title)
@@ -2834,11 +2866,11 @@ class MainWindow(QMainWindow):
             self._guided_correction_select_buttons[title] = select_btn
             layout.addWidget(select_btn)
         elif title == GUIDED_SIGNAL_ONLY_F0_CARD:
-            select_btn = QPushButton("Mark for later confirmation")
+            select_btn = QPushButton("Set diagnostic intent")
             select_btn.setObjectName(f"guidedCorrectionSelect{safe_name}")
             select_btn.setToolTip(
-                "Records Guided intent only. It does not change Dynamic Fit Mode, "
-                "write manifests, route applied-dF/F, or run analysis."
+                "Records diagnostic-only intent. Signal-Only F0 is not a "
+                "current Guided Run production route."
             )
             select_btn.clicked.connect(self._select_guided_signal_only_f0_intent)
             self._guided_correction_select_buttons[title] = select_btn
@@ -2885,11 +2917,15 @@ class MainWindow(QMainWindow):
             btn = getattr(self, "_guided_correction_select_buttons", {}).get(title)
             if btn is not None:
                 if is_selected:
-                    btn.setText("Selected")
+                    btn.setText(
+                        "Diagnostic intent active"
+                        if title == GUIDED_SIGNAL_ONLY_F0_CARD
+                        else "Active run method configuration"
+                    )
                 elif title == GUIDED_SIGNAL_ONLY_F0_CARD:
-                    btn.setText("Mark for later confirmation")
+                    btn.setText("Set diagnostic intent")
                 else:
-                    btn.setText("Select")
+                    btn.setText("Set run method configuration")
         self._refresh_guided_setup_summary()
 
     def _build_guided_diagnostics_step(self) -> QWidget:
@@ -2966,7 +3002,7 @@ class MainWindow(QMainWindow):
         actions_layout.setContentsMargins(10, 10, 10, 10)
         actions_layout.setSpacing(10)
 
-        cache_group = QGroupBox("Preliminary diagnostic cache")
+        cache_group = QGroupBox("1. Prepare correction evidence")
         cache_group.setObjectName("guidedDiagnosticCachePanel")
         cache_layout = QVBoxLayout(cache_group)
         cache_layout.setContentsMargins(10, 10, 10, 10)
@@ -3015,13 +3051,14 @@ class MainWindow(QMainWindow):
         cache_layout.addWidget(self._guided_diagnostic_cache_summary_label)
         actions_layout.addWidget(cache_group)
 
-        preview_group = QGroupBox("Correction preview comparison")
+        preview_group = QGroupBox("2. Preview correction methods")
         preview_group.setObjectName("guidedCorrectionPreviewPanel")
         preview_layout = QVBoxLayout(preview_group)
         preview_layout.setContentsMargins(10, 10, 10, 10)
         preview_layout.setSpacing(8)
         preview_intro = QLabel(
-            "Compare reference-based correction methods from the loaded completed-run cache."
+            "Select one or more methods to compare for the current ROI and "
+            "evidence chunk. Preview inclusion does not confirm a strategy."
         )
         preview_intro.setObjectName("guidedCorrectionPreviewIntro")
         preview_intro.setProperty("guidedSecondaryText", True)
@@ -3068,9 +3105,9 @@ class MainWindow(QMainWindow):
         preview_layout.addLayout(method_row)
 
         preview_note = QLabel(
-            "This creates preview-only correction comparison artifacts from the loaded completed run. "
-            "It does not validate the dataset, run the analysis pipeline, choose a strategy, write a "
-            "manifest, route applied-dF/F, or modify source/completed-run outputs."
+            "This generates correction evidence for review. It does not select "
+            "or confirm a final strategy and does not modify source data or "
+            "completed results."
         )
         preview_note.setObjectName("guidedCorrectionPreviewSafetyNote")
         preview_note.setProperty("guidedSecondaryText", True)
@@ -3154,14 +3191,18 @@ class MainWindow(QMainWindow):
         preview_layout.addWidget(artifacts_group)
         actions_layout.addWidget(preview_group)
 
-        signal_group = QGroupBox("Signal-Only F0 diagnostic review")
+        signal_group = QGroupBox(
+            "Additional diagnostic review - Signal-Only F0"
+        )
         signal_group.setObjectName("guidedSignalOnlyF0DiagnosticPanel")
         signal_layout = QVBoxLayout(signal_group)
         signal_layout.setContentsMargins(10, 10, 10, 10)
         signal_layout.setSpacing(8)
 
         signal_intro = QLabel(
-            "Review a Signal-Only F0 diagnostic for one ROI/chunk without choosing or routing a strategy."
+            "Diagnostic only in the current Guided Run scope. Review one "
+            "ROI/chunk as additional evidence; Signal-Only F0 is not a current "
+            "Guided Run production route."
         )
         signal_intro.setObjectName("guidedSignalOnlyF0DiagnosticIntro")
         signal_intro.setProperty("guidedSecondaryText", True)
@@ -8642,7 +8683,7 @@ class MainWindow(QMainWindow):
         evidence_layout.addWidget(self._guided_confirm_evidence_label)
         layout.addWidget(evidence_group)
 
-        choice_group = QGroupBox("Candidate strategy")
+        choice_group = QGroupBox("Strategy to confirm")
         choice_group.setObjectName("guidedConfirmStrategyChoicePanel")
         choice_layout = QFormLayout(choice_group)
         choice_layout.setContentsMargins(10, 8, 10, 8)
@@ -8681,8 +8722,9 @@ class MainWindow(QMainWindow):
             "guidedStepConfirmStrategy",
             "Confirm strategy",
             [
-                "Explicitly mark a candidate strategy for later planning after reviewing diagnostics. "
-                "This does not write manifests, create applied-dF/F outputs, route analysis, or choose automatically.",
+                "Explicitly mark a candidate strategy after reviewing current "
+                "correction evidence. Selecting a strategy alone does not "
+                "confirm it or choose automatically.",
             ],
             wrapper,
         )

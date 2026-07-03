@@ -3011,6 +3011,38 @@ def test_guided_confirm_strategy_new_analysis_marks_source_scoped_choice_without
     assert not (cache_path / "_analysis" / "phasic_out" / "applied_dff").exists()
 
 
+def test_guided_run_method_configuration_is_separate_from_evidence_state(
+    window, tmp_path, monkeypatch
+):
+    _build_ready_guided_diagnostic_cache(window, tmp_path, monkeypatch)
+    _generate_ready_guided_correction_preview(window)
+    idx = window._guided_confirm_strategy_combo.findData(
+        "robust_global_event_reject"
+    )
+    assert idx >= 0
+    window._guided_confirm_strategy_combo.setCurrentIndex(idx)
+    window._guided_confirm_ack_cb.setChecked(True)
+    window._guided_confirm_mark_btn.click()
+
+    record = window._guided_diagnostic_cache_record
+    preview_result = window._guided_preview_last_result
+    choice_key, choice_before = next(
+        iter(window._guided_strategy_choices.items())
+    )
+
+    window._guided_correction_select_buttons[
+        "Adaptive Event-Gated Fit"
+    ].click()
+
+    assert window._guided_diagnostic_cache_record is record
+    assert window._guided_preview_last_result is preview_result
+    assert window._guided_preview_result_stale is False
+    assert window._guided_strategy_choices[choice_key] == choice_before
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.global_correction_strategy == "dynamic_fit"
+    assert plan.dynamic_fit_mode == "adaptive_event_gated_regression"
+
+
 def test_guided_signal_only_f0_new_analysis_blocks_without_diagnostic_cache(window):
     window._set_guided_workflow_mode("new_analysis")
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
@@ -4518,6 +4550,60 @@ def test_gui_merged_correction_page_contains_existing_workflow_controls(window):
     assert correction_widget.findChild(QWidget, "guidedPlanReadinessSummaryPanel") is None
     assert correction_widget.findChild(QWidget, "guidedDraftRunPlanPreviewPanel") is None
     assert correction_widget.findChild(QWidget, "guidedDraftRunPlanChecklistPanel") is None
+
+
+def test_gui_merged_correction_page_is_evidence_first_and_user_safe(window):
+    correction_widget = window._guided_workflow_stack.widget(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    group_titles = [
+        group.title()
+        for group in correction_widget.findChildren(QGroupBox)
+    ]
+    configuration_index = group_titles.index(
+        "Method configuration - not evidence selection"
+    )
+    prepare_index = group_titles.index("1. Prepare correction evidence")
+    preview_index = group_titles.index("2. Preview correction methods")
+    confirm_index = group_titles.index("3. Confirm correction strategy")
+    assert configuration_index < prepare_index < preview_index < confirm_index
+    assert "Choose a correction candidate" not in group_titles
+
+    labels = [
+        label.text()
+        for label in correction_widget.findChildren(QLabel)
+    ]
+    buttons = [
+        button.text()
+        for button in correction_widget.findChildren(QPushButton)
+    ]
+    visible_text = " ".join(group_titles + labels + buttons)
+    assert "Setup intent only; not wired to execution." not in visible_text
+    assert "Selected" not in buttons
+    assert "evidence configuration" not in visible_text.lower()
+    assert "Build correction evidence, preview correction behavior" in (
+        visible_text
+    )
+    assert "Preview inclusion does not confirm a strategy." in visible_text
+    assert (
+        "Diagnostic-cache identity and preview method inclusion are controlled "
+        "separately"
+    ) in visible_text
+    assert "Signal-Only F0 is not a current Guided Run production route." in (
+        visible_text
+    )
+    prohibited = (
+        "backend validator",
+        "manifest",
+        "materialization",
+        "contract snapshot",
+        "run spec",
+        "wrapper",
+        "orchestration",
+    )
+    lowered = visible_text.lower()
+    found = [term for term in prohibited if term in lowered]
+    assert found == []
 
 
 def test_gui_draft_plan_contains_moved_plan_panels(window):
