@@ -2201,22 +2201,20 @@ class MainWindow(QMainWindow):
             "guided_correction_intent": getattr(self, "_guided_correction_intent", "") or "not selected",
         }
 
-    def _refresh_guided_setup_summary(self) -> None:
+    def _refresh_guided_setup_summary(
+        self,
+        *,
+        lightweight: bool = False,
+    ) -> None:
         if not hasattr(self, "_guided_setup_summary_label"):
             return
-        if hasattr(self, "_guided_diagnostics_status_label"):
-            self._refresh_guided_diagnostics_panel()
-        if hasattr(self, "_guided_start_status_label"):
-            self._refresh_guided_start_panel()
-        if (
-            hasattr(self, "_guided_mode_banner_label")
-            and not getattr(
-                self,
-                "_guided_suppress_expensive_setup_refresh",
-                False,
-            )
-        ):
-            self._refresh_guided_mode_display()
+        if not lightweight:
+            if hasattr(self, "_guided_diagnostics_status_label"):
+                self._refresh_guided_diagnostics_panel()
+            if hasattr(self, "_guided_start_status_label"):
+                self._refresh_guided_start_panel()
+            if hasattr(self, "_guided_mode_banner_label"):
+                self._refresh_guided_mode_display()
         state = self._guided_setup_summary_state()
         resolved = state["resolved_format"] or "not discovered"
         roi_text = (
@@ -2430,8 +2428,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_sessions_list"):
             self._sessions_list.clear()
         if hasattr(self, "_rep_session_combo"):
+            blocker = QSignalBlocker(self._rep_session_combo)
             self._rep_session_combo.clear()
             self._rep_session_combo.addItem("(auto)")
+            del blocker
         if hasattr(self, "_roi_selection_container"):
             self._roi_selection_container.setVisible(False)
         if hasattr(self, "_discovery_summary"):
@@ -2447,14 +2447,20 @@ class MainWindow(QMainWindow):
             self._guided_resolved_format_label.setText(
                 "Resolved format will appear after discovery/validation."
             )
-        self._guided_suppress_expensive_setup_refresh = True
-        try:
+        if hasattr(self, "_format_combo"):
+            blocker = QSignalBlocker(self._format_combo)
             self._sync_combo_text_value(
                 self._format_combo,
                 self._guided_format_combo.currentText(),
             )
-        finally:
-            self._guided_suppress_expensive_setup_refresh = False
+            del blocker
+        self._validation_passed = False
+        self._validated_run_signature = None
+        if hasattr(self, "_guided_diagnostics_status"):
+            self._guided_diagnostics_status = "not_generated"
+        if hasattr(self, "_run_btn"):
+            self._run_btn.setEnabled(False)
+        self._refresh_guided_setup_summary(lightweight=True)
         self._invalidate_guided_backend_validation("input format changed")
 
     def _sync_combo_text_value(self, target: QComboBox, text: str) -> None:

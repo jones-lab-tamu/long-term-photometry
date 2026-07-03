@@ -1817,16 +1817,44 @@ def test_guided_format_change_is_lightweight_and_clears_stale_discovery(
         raise AssertionError("format change must not inspect data or discover ROIs")
 
     window._validation_passed = True
+    validation_revision = window._guided_backend_validation_revision
+    full_format_signals = []
+    representative_signals = []
+    window._format_combo.currentIndexChanged.connect(
+        lambda index: full_format_signals.append(index)
+    )
+    window._rep_session_combo.currentIndexChanged.connect(
+        lambda index: representative_signals.append(index)
+    )
     monkeypatch.setattr(window, "_on_discover", fail)
     monkeypatch.setattr(window, "_infer_dataset_contract_overrides", fail)
     monkeypatch.setattr(window, "_refresh_guided_mode_display", fail)
+    monkeypatch.setattr(window, "_refresh_splitter_workspace_policy", fail)
+    monkeypatch.setattr(window, "_update_button_states", fail)
+    original_summary_refresh = window._refresh_guided_setup_summary
+    summary_refresh_modes = []
+
+    def record_summary_refresh(*, lightweight=False):
+        summary_refresh_modes.append(lightweight)
+        return original_summary_refresh(lightweight=lightweight)
+
+    monkeypatch.setattr(
+        window,
+        "_refresh_guided_setup_summary",
+        record_summary_refresh,
+    )
     window._guided_format_combo.setCurrentText("rwd")
 
     assert window._format_combo.currentText() == "rwd"
-    # The shared Full Control signal still runs its lightweight invalidation,
-    # while the suppression guard prevents its Guided refresh from entering
-    # mode-display / Draft Plan / dataset-inspection work.
+    # Guided synchronization blocks the mirrored Full Control combo signals,
+    # then invalidates shared validation state directly. Full Control's broad
+    # synchronous _on_config_changed refresh cascade is not entered.
     assert window._validation_passed is False
+    assert window._guided_backend_validation_revision == validation_revision + 1
+    assert window._run_btn.isEnabled() is False
+    assert full_format_signals == []
+    assert representative_signals == []
+    assert summary_refresh_modes == [True]
     assert window._discovery_cache is None
     assert window._roi_list.count() == 0
     assert window._guided_roi_list.count() == 0
