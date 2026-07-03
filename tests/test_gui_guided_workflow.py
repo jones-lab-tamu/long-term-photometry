@@ -647,9 +647,8 @@ def test_guided_confirm_strategy_explicit_mark_is_ui_state_only(window, tmp_path
     idx = window._guided_confirm_strategy_combo.findData("signal_only_f0")
     assert idx >= 0
     window._guided_confirm_strategy_combo.setCurrentIndex(idx)
-    assert window._guided_confirm_mark_btn.isEnabled() is False
-    window._guided_confirm_ack_cb.setChecked(True)
     assert window._guided_confirm_mark_btn.isEnabled() is True
+    assert window._guided_strategy_choices == {}
 
     window._guided_confirm_mark_btn.click()
 
@@ -1350,7 +1349,7 @@ def test_guided_confirm_acknowledgment_resets_when_chunk_changes(window, tmp_pat
 
     assert window._guided_confirm_ack_cb.isChecked() is False
     assert window._guided_confirm_strategy_combo.currentData() == "signal_only_f0"
-    assert window._guided_confirm_mark_btn.isEnabled() is False
+    assert window._guided_confirm_mark_btn.isEnabled() is True
 
 
 def test_guided_confirm_choice_is_roi_level_and_evidence_chunk_can_update(window, tmp_path, monkeypatch):
@@ -1379,7 +1378,7 @@ def test_guided_confirm_choice_is_roi_level_and_evidence_chunk_can_update(window
     )
     assert "chunk 1" not in window._guided_draft_run_plan_preview_label.text()
     assert window._guided_confirm_ack_cb.isChecked() is False
-    assert window._guided_confirm_mark_btn.isEnabled() is False
+    assert window._guided_confirm_mark_btn.isEnabled() is True
 
     window._guided_confirm_ack_cb.setChecked(True)
     assert window._guided_confirm_mark_btn.isEnabled() is True
@@ -1407,7 +1406,7 @@ def test_guided_confirm_choices_are_independent_by_roi(window, tmp_path, monkeyp
 
     assert "Current marked choice: none." in window._guided_confirm_marked_choice_label.text()
     assert window._guided_confirm_ack_cb.isChecked() is False
-    assert window._guided_confirm_mark_btn.isEnabled() is False
+    assert window._guided_confirm_mark_btn.isEnabled() is True
 
     window._guided_confirm_ack_cb.setChecked(True)
     window._guided_confirm_mark_btn.click()
@@ -2269,12 +2268,16 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
 
     assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepCorrectionApproach"
     assert window._guided_workflow_tab.findChild(QGroupBox, "guidedDiagnosticsCompletedRunSection").title() == "Completed run"
-    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedDiagnosticsActionsSection").title() == "Diagnostic actions"
+    assert window._guided_workflow_tab.findChild(
+        QWidget, "guidedDiagnosticsActionsSection"
+    ) is not None
     assert (
         window._guided_workflow_tab.findChild(QGroupBox, "guidedDiagnosticsGeneratedOutputsSection").title()
-        == "Generated diagnostic outputs"
+        == "Technical generated-output details"
     )
-    actions_section = window._guided_workflow_tab.findChild(QGroupBox, "guidedDiagnosticsActionsSection")
+    actions_section = window._guided_workflow_tab.findChild(
+        QWidget, "guidedDiagnosticsActionsSection"
+    )
     assert isinstance(actions_section.layout(), QVBoxLayout)
     assert window._guided_diagnostics_status_label.text() == "Diagnostics: not generated; no completed run loaded"
     assert "Reference correction method:" in window._guided_diagnostics_context_label.text()
@@ -2288,7 +2291,9 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
     assert window._guided_diagnostics_slot_labels["Fit stability"].isHidden() is True
     assert "No completed run is loaded" in window._guided_diagnostics_completed_run_label.text()
     assert "Load a completed run to generate preview-only correction comparisons" in window._guided_preview_source_status_label.text()
-    assert window._guided_preview_generate_btn.text() == "Generate preview comparison"
+    assert window._guided_preview_generate_btn.text() == (
+        "Generate correction preview"
+    )
     assert window._guided_preview_generate_btn.isEnabled() is False
     assert window._guided_preview_result_label.text() == ""
     signal_panel = window._guided_workflow_tab.findChild(QGroupBox, "guidedSignalOnlyF0DiagnosticPanel")
@@ -2319,7 +2324,9 @@ def test_guided_diagnostic_cache_action_blocks_without_roi_discovery(window, tmp
     window._guided_output_dir_edit.setText(str(output_dir))
     window._refresh_guided_diagnostic_cache_panel()
 
-    assert window._guided_diagnostic_cache_build_btn.text() == "Build diagnostic cache"
+    assert window._guided_diagnostic_cache_build_btn.text() == (
+        "Build correction evidence"
+    )
     assert window._guided_diagnostic_cache_build_btn.isEnabled() is False
     assert "Run ROI discovery" in window._guided_diagnostic_cache_readiness_label.text()
     assert window._guided_diagnostic_cache_record is None
@@ -2643,10 +2650,7 @@ def test_guided_confirm_strategy_new_analysis_blocks_without_diagnostic_cache(wi
         window._guided_confirm_context_label.text()
     )
     progress = window._guided_confirm_strategy_progress_label.text()
-    assert progress == (
-        "Required before Run: build the diagnostic cache before confirming "
-        "strategies."
-    )
+    assert progress == "0/0 included ROIs confirmed."
     assert "Open Results must be used first" not in progress
     assert window._current_run_dir == ""
     assert calls == {"preview": 0, "signal": 0}
@@ -2662,8 +2666,6 @@ def test_guided_confirm_strategy_progress_none_confirmed(
     window._refresh_guided_confirm_strategy_panel()
 
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "Required before Run: generate correction-preview evidence from the "
-        "diagnostic cache before confirming strategies. "
         "0/3 included ROIs confirmed."
     )
     assert window._guided_confirm_mark_btn.isEnabled() is False
@@ -2710,9 +2712,8 @@ def test_guided_confirm_strategy_stale_preview_evidence_blocks_marks(
 
     assert window._guided_confirm_mark_btn.isEnabled() is False
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "Correction-preview evidence is stale for the current diagnostic "
-        "cache. Regenerate preview evidence before confirming strategies. "
-        "0/3 included ROIs confirmed."
+        "Correction preview is stale. Generate a new preview before confirming "
+        "strategies. 0/3 included ROIs confirmed."
     )
 
 
@@ -2736,8 +2737,11 @@ def test_guided_preview_evidence_populates_new_analysis_draft_fields(
     )
     assert preview_dir.parent == cache_path / "_guided_workflow" / "previews"
     assert (preview_dir / "preview_provenance.json").is_file()
-    assert "Correction-preview evidence is ready" in (
-        window._guided_confirm_strategy_progress_label.text()
+    assert window._guided_confirm_strategy_progress_label.text() == (
+        "0/3 included ROIs confirmed."
+    )
+    assert "Correction preview is ready" in (
+        window._guided_correction_next_action_label.text()
     )
 
 
@@ -2757,9 +2761,7 @@ def test_guided_confirm_strategy_progress_partial_confirmation(
     window._guided_confirm_mark_btn.click()
 
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "Correction-preview evidence is ready for the current diagnostic "
-        "cache. Required before Run: confirm a correction strategy for each "
-        "included ROI. 1/3 included ROIs confirmed."
+        "1/3 included ROIs confirmed."
     )
 
 
@@ -2781,8 +2783,6 @@ def test_guided_confirm_strategy_progress_all_confirmed(
         window._guided_confirm_mark_btn.click()
 
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "Correction-preview evidence is ready for the current diagnostic "
-        "cache. Correction strategies confirmed for all included ROIs. "
         "3/3 included ROIs confirmed."
     )
 
@@ -2808,9 +2808,8 @@ def test_guided_confirm_strategy_progress_stale_choice_does_not_count(
     window._refresh_guided_confirm_strategy_panel()
 
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "Correction-preview evidence is ready for the current diagnostic "
-        "cache. Some correction strategy choices are stale. Reconfirm before "
-        "Run. 0/3 included ROIs confirmed."
+        "Some correction strategy choices are stale. Reconfirm before Run. "
+        "0/3 included ROIs confirmed."
     )
 
 
@@ -3005,8 +3004,9 @@ def test_guided_confirm_strategy_new_analysis_marks_source_scoped_choice_without
     assert entry["production_analysis"] is False
     assert entry["preliminary_cache"] is True
     assert "not generated for current diagnostic cache" in entry["evidence_summary"]["signal_only_f0"]
-    assert "Current marked choice" in window._guided_confirm_marked_choice_label.text()
-    assert "Source: diagnostic_cache" in window._guided_confirm_marked_choice_label.text()
+    assert "Confirmed strategy for CH1" in (
+        window._guided_confirm_marked_choice_label.text()
+    )
     assert not (cache_path / "MANIFEST.csv").exists()
     assert not (cache_path / "_analysis" / "phasic_out" / "applied_dff").exists()
 
@@ -3695,7 +3695,7 @@ def test_guided_diagnostics_step_has_no_generation_or_execution_buttons(window):
         if button.text()
     }
     assert button_texts.isdisjoint(forbidden)
-    assert "Generate preview comparison" in button_texts
+    assert "Generate correction preview" in button_texts
 
 
 def test_guided_visible_text_does_not_use_stale_shell_or_completed_loader_wording(window):
@@ -4523,15 +4523,13 @@ def test_gui_stepper_order_has_draft_plan_after_confirm_strategy():
 
 
 def test_gui_merged_correction_page_contains_existing_workflow_controls(window):
+    window._set_guided_workflow_mode("new_analysis")
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
 
     correction_widget = window._guided_workflow_stack.widget(
         list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
     )
 
-    assert correction_widget.findChild(
-        QWidget, "guidedCorrectionCards"
-    ) is not None
     assert correction_widget.findChild(
         QWidget, "guidedDiagnosticCacheBuildButton"
     ) is not None
@@ -4541,7 +4539,7 @@ def test_gui_merged_correction_page_contains_existing_workflow_controls(window):
     assert correction_widget.findChild(QWidget, "guidedConfirmStrategyRoiCombo") is not None
     assert correction_widget.findChild(QWidget, "guidedConfirmStrategyChunkCombo") is not None
     assert correction_widget.findChild(QWidget, "guidedConfirmStrategyChoiceCombo") is not None
-    assert correction_widget.findChild(QWidget, "guidedConfirmStrategyAcknowledge") is not None
+    assert window._guided_confirm_ack_cb.isVisible() is False
     assert correction_widget.findChild(QWidget, "guidedConfirmStrategyMarkButton") is not None
 
     assert correction_widget.findChild(QWidget, "guidedFeatureEventProfileEditorPanel") is None
@@ -4553,53 +4551,57 @@ def test_gui_merged_correction_page_contains_existing_workflow_controls(window):
 
 
 def test_gui_merged_correction_page_is_evidence_first_and_user_safe(window):
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
     correction_widget = window._guided_workflow_stack.widget(
         list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
     )
     group_titles = [
         group.title()
         for group in correction_widget.findChildren(QGroupBox)
+        if group.isVisibleTo(correction_widget)
     ]
-    configuration_index = group_titles.index(
-        "Method configuration - not evidence selection"
-    )
     prepare_index = group_titles.index("1. Prepare correction evidence")
     preview_index = group_titles.index("2. Preview correction methods")
-    confirm_index = group_titles.index("3. Confirm correction strategy")
-    assert configuration_index < prepare_index < preview_index < confirm_index
+    confirm_index = group_titles.index("Confirm correction strategy")
+    assert prepare_index < preview_index < confirm_index
     assert "Choose a correction candidate" not in group_titles
 
     labels = [
         label.text()
         for label in correction_widget.findChildren(QLabel)
+        if label.isVisibleTo(correction_widget)
     ]
     buttons = [
         button.text()
         for button in correction_widget.findChildren(QPushButton)
+        if button.isVisibleTo(correction_widget)
     ]
     visible_text = " ".join(group_titles + labels + buttons)
     assert "Setup intent only; not wired to execution." not in visible_text
-    assert "Selected" not in buttons
-    assert "evidence configuration" not in visible_text.lower()
     assert "Build correction evidence, preview correction behavior" in (
         visible_text
     )
-    assert "Preview inclusion does not confirm a strategy." in visible_text
-    assert (
-        "Diagnostic-cache identity and preview method inclusion are controlled "
-        "separately"
-    ) in visible_text
-    assert "Signal-Only F0 is not a current Guided Run production route." in (
-        visible_text
-    )
+    assert "Preview segment" in visible_text
+    assert "Signal-Only F0" in visible_text
+    assert "dynamic-fit production routing only" in visible_text
+    assert "I reviewed" not in visible_text
+    assert "Mark strategy choice" not in visible_text
     prohibited = (
+        "diagnostic cache",
+        "evidence chunk",
+        "artifact",
         "backend validator",
         "manifest",
         "materialization",
         "contract snapshot",
         "run spec",
+        "startup",
         "wrapper",
-        "orchestration",
+        "completed-run cache",
+        "open results",
     )
     lowered = visible_text.lower()
     found = [term for term in prohibited if term in lowered]
@@ -5728,7 +5730,7 @@ def test_guided_diagnostics_guidance_new_analysis_no_cache(window, tmp_path, mon
     status_text = window._guided_diagnostic_cache_status_label.text()
     readiness_text = window._guided_diagnostic_cache_readiness_label.text()
 
-    assert "Required before Run: build the diagnostic cache for the selected data." in status_text
+    assert status_text == "Correction evidence: not built."
     assert "Select raw input folder." in readiness_text or "Run ROI discovery" in readiness_text or "Input directory is required." in readiness_text
     # Ensure it doesn't instruct the user to Open Results for new-analysis cache build
     assert "Open Results" not in status_text
@@ -5755,7 +5757,7 @@ def test_guided_diagnostics_guidance_new_analysis_ready_cache(window, tmp_path, 
 
     # Must say diagnostic cache is ready and not present required message
     status_text = window._guided_diagnostic_cache_status_label.text()
-    assert "Diagnostic cache is ready." in status_text
+    assert status_text == "Correction evidence: ready."
     assert "Required before Run" not in status_text
 
 
@@ -5783,7 +5785,10 @@ def test_guided_diagnostics_guidance_new_analysis_stale_cache(window, tmp_path, 
 
     # Must say diagnostic cache is missing or stale. Rebuild the diagnostic cache before Run.
     status_text = window._guided_diagnostic_cache_status_label.text()
-    assert "Diagnostic cache is missing or stale. Rebuild the diagnostic cache before Run." in status_text
+    assert status_text == (
+        "Correction evidence: stale after setup changes. Rebuild before "
+        "continuing."
+    )
 
 
 def test_guided_diagnostics_guidance_new_analysis_failed_cache(window):
@@ -5796,4 +5801,6 @@ def test_guided_diagnostics_guidance_new_analysis_failed_cache(window):
     )
     window._refresh_guided_diagnostics_panel()
     status_text = window._guided_diagnostic_cache_status_label.text()
-    assert "Diagnostic cache failed. Fix the issue and rebuild before Run." in status_text
+    assert status_text == (
+        "Correction evidence: build failed. Fix the issue and try again."
+    )

@@ -2709,11 +2709,23 @@ class MainWindow(QMainWindow):
         wrapper_layout.addWidget(self._build_guided_skipped_setup_banner("Correction approach"))
         guidance = QLabel(
             "Build correction evidence, preview correction behavior, then "
-            "explicitly confirm a strategy for each included ROI."
+            "confirm a strategy for each included ROI. Nothing here starts "
+            "the final analysis."
         )
         guidance.setObjectName("guidedCorrectionWorkflowGuidance")
         guidance.setWordWrap(True)
         wrapper_layout.addWidget(guidance)
+        self._guided_correction_next_action_label = QLabel(
+            "Next step: build correction evidence."
+        )
+        self._guided_correction_next_action_label.setObjectName(
+            "guidedCorrectionNextAction"
+        )
+        self._guided_correction_next_action_label.setProperty(
+            "guidedStatusPill", True
+        )
+        self._guided_correction_next_action_label.setWordWrap(True)
+        wrapper_layout.addWidget(self._guided_correction_next_action_label)
 
         candidate_group = QGroupBox(
             "Method configuration - not evidence selection"
@@ -2780,7 +2792,8 @@ class MainWindow(QMainWindow):
         self._guided_raw_setup_controls["Correction approach"] = (
             candidate_group
         )
-        wrapper_layout.addWidget(candidate_group)
+        self._guided_method_configuration_group = candidate_group
+        candidate_group.setVisible(False)
 
         evidence_group = QGroupBox("Correction evidence workflow")
         evidence_layout = QVBoxLayout(evidence_group)
@@ -2937,6 +2950,7 @@ class MainWindow(QMainWindow):
 
         status_group = QGroupBox("Completed run")
         status_group.setObjectName("guidedDiagnosticsCompletedRunSection")
+        self._guided_completed_run_diagnostics_status_group = status_group
         status_layout = QVBoxLayout(status_group)
         status_layout.setContentsMargins(10, 10, 10, 10)
         status_layout.setSpacing(6)
@@ -2954,6 +2968,7 @@ class MainWindow(QMainWindow):
 
         context_group = QGroupBox("Completed-run details")
         context_group.setObjectName("guidedDiagnosticsCorrectionContextPanel")
+        self._guided_completed_run_diagnostics_context_group = context_group
         context_group.setCheckable(True)
         context_group.setChecked(False)
         context_layout = QVBoxLayout(context_group)
@@ -2976,6 +2991,7 @@ class MainWindow(QMainWindow):
 
         completed_group = QGroupBox("Loaded artifact details")
         completed_group.setObjectName("guidedDiagnosticsCompletedRunPanel")
+        self._guided_completed_run_diagnostics_details_group = completed_group
         completed_group.setCheckable(True)
         completed_group.setChecked(False)
         completed_layout = QVBoxLayout(completed_group)
@@ -2996,7 +3012,7 @@ class MainWindow(QMainWindow):
         completed_group.toggled.connect(self._guided_diagnostics_completed_run_content.setVisible)
         layout.addWidget(completed_group)
 
-        actions_group = QGroupBox("Diagnostic actions")
+        actions_group = QWidget()
         actions_group.setObjectName("guidedDiagnosticsActionsSection")
         actions_layout = QVBoxLayout(actions_group)
         actions_layout.setContentsMargins(10, 10, 10, 10)
@@ -3009,8 +3025,8 @@ class MainWindow(QMainWindow):
         cache_layout.setSpacing(8)
 
         cache_intro = QLabel(
-            "Build preliminary diagnostic artifacts from the selected raw input for correction review "
-            "and strategy decisions. This is not the final production analysis."
+            "Prepares the data needed to preview correction methods for the "
+            "selected input. This does not run the final analysis."
         )
         cache_intro.setObjectName("guidedDiagnosticCacheIntro")
         cache_intro.setProperty("guidedSecondaryText", True)
@@ -3018,7 +3034,7 @@ class MainWindow(QMainWindow):
         cache_layout.addWidget(cache_intro)
 
         self._guided_diagnostic_cache_status_label = QLabel(
-            "Diagnostic cache: not built."
+            "Correction evidence: not built."
         )
         self._guided_diagnostic_cache_status_label.setObjectName("guidedDiagnosticCacheStatus")
         self._guided_diagnostic_cache_status_label.setProperty("guidedStatusPill", True)
@@ -3035,13 +3051,15 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_diagnostic_cache_readiness_label)
         cache_layout.addWidget(self._guided_diagnostic_cache_readiness_label)
 
-        self._guided_diagnostic_cache_build_btn = QPushButton("Build diagnostic cache")
+        self._guided_diagnostic_cache_build_btn = QPushButton(
+            "Build correction evidence"
+        )
         self._guided_diagnostic_cache_build_btn.setObjectName("guidedDiagnosticCacheBuildButton")
         self._guided_diagnostic_cache_build_btn.clicked.connect(self._on_build_guided_diagnostic_cache)
         cache_layout.addWidget(self._guided_diagnostic_cache_build_btn, alignment=Qt.AlignLeft)
 
         self._guided_diagnostic_cache_summary_label = QLabel(
-            "Diagnostic cache: none.\nPreliminary cache only; not final analysis."
+            "Correction evidence: not built."
         )
         self._guided_diagnostic_cache_summary_label.setObjectName("guidedDiagnosticCacheSummary")
         self._guided_diagnostic_cache_summary_label.setProperty("guidedSecondaryText", True)
@@ -3058,7 +3076,7 @@ class MainWindow(QMainWindow):
         preview_layout.setSpacing(8)
         preview_intro = QLabel(
             "Select one or more methods to compare for the current ROI and "
-            "evidence chunk. Preview inclusion does not confirm a strategy."
+            "preview segment. Previewing does not confirm a strategy."
         )
         preview_intro.setObjectName("guidedCorrectionPreviewIntro")
         preview_intro.setProperty("guidedSecondaryText", True)
@@ -3090,7 +3108,7 @@ class MainWindow(QMainWindow):
         self._guided_preview_chunk_combo.setMinimumContentsLength(6)
         self._make_guided_widget_shrinkable(self._guided_preview_chunk_combo)
         self._guided_preview_chunk_combo.currentIndexChanged.connect(self._on_guided_preview_selection_changed)
-        form.addRow("Chunk", self._guided_preview_chunk_combo)
+        form.addRow("Preview segment", self._guided_preview_chunk_combo)
         preview_layout.addLayout(form)
 
         self._guided_preview_method_checkboxes: dict[str, QCheckBox] = {}
@@ -3102,6 +3120,33 @@ class MainWindow(QMainWindow):
             cb.stateChanged.connect(self._on_guided_preview_selection_changed)
             self._guided_preview_method_checkboxes[method] = cb
             method_row.addWidget(cb)
+            descriptions = {
+                "robust_global_event_reject": (
+                    "Recommended starting point when the reference/control "
+                    "channel tracks shared noise or motion."
+                ),
+                "adaptive_event_gated_regression": (
+                    "Useful when the reference relationship changes over time "
+                    "or events distort fitting."
+                ),
+                "global_linear_regression": (
+                    "Baseline reference-fit comparison."
+                ),
+            }
+            description = QLabel(descriptions[method])
+            description.setProperty("guidedSecondaryText", True)
+            description.setWordWrap(True)
+            method_row.addWidget(description)
+        signal_candidate = QLabel(
+            "Signal-Only F0: use when the reference/control channel is not "
+            "appropriate for correction. Available for preview and strategy "
+            "review. Current Guided Run execution supports dynamic-fit "
+            "production routing only."
+        )
+        signal_candidate.setObjectName("guidedSignalOnlyF0CandidateText")
+        signal_candidate.setProperty("guidedSecondaryText", True)
+        signal_candidate.setWordWrap(True)
+        method_row.addWidget(signal_candidate)
         preview_layout.addLayout(method_row)
 
         preview_note = QLabel(
@@ -3114,7 +3159,9 @@ class MainWindow(QMainWindow):
         preview_note.setWordWrap(True)
         preview_layout.addWidget(preview_note)
 
-        self._guided_preview_generate_btn = QPushButton("Generate preview comparison")
+        self._guided_preview_generate_btn = QPushButton(
+            "Generate correction preview"
+        )
         self._guided_preview_generate_btn.setObjectName("guidedCorrectionPreviewGenerateButton")
         self._guided_preview_generate_btn.clicked.connect(self._on_generate_guided_correction_preview)
         preview_layout.addWidget(self._guided_preview_generate_btn, alignment=Qt.AlignLeft)
@@ -3127,8 +3174,9 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_preview_status_label)
         preview_layout.addWidget(self._guided_preview_status_label)
 
-        artifacts_group = QGroupBox("Preview result details")
+        artifacts_group = QGroupBox("Technical preview details")
         artifacts_group.setObjectName("guidedCorrectionPreviewArtifactsPanel")
+        self._guided_preview_technical_details_group = artifacts_group
         artifacts_group.setCheckable(True)
         artifacts_group.setChecked(False)
         artifacts_layout = QVBoxLayout(artifacts_group)
@@ -3191,18 +3239,16 @@ class MainWindow(QMainWindow):
         preview_layout.addWidget(artifacts_group)
         actions_layout.addWidget(preview_group)
 
-        signal_group = QGroupBox(
-            "Additional diagnostic review - Signal-Only F0"
-        )
+        signal_group = QGroupBox("Signal-Only F0 preview")
         signal_group.setObjectName("guidedSignalOnlyF0DiagnosticPanel")
         signal_layout = QVBoxLayout(signal_group)
         signal_layout.setContentsMargins(10, 10, 10, 10)
         signal_layout.setSpacing(8)
 
         signal_intro = QLabel(
-            "Diagnostic only in the current Guided Run scope. Review one "
-            "ROI/chunk as additional evidence; Signal-Only F0 is not a current "
-            "Guided Run production route."
+            "Use when the reference/control channel is not appropriate for "
+            "correction. Available for preview and strategy review. Current "
+            "Guided Run execution supports dynamic-fit production routing only."
         )
         signal_intro.setObjectName("guidedSignalOnlyF0DiagnosticIntro")
         signal_intro.setProperty("guidedSecondaryText", True)
@@ -3238,7 +3284,7 @@ class MainWindow(QMainWindow):
         self._guided_signal_f0_chunk_combo.currentIndexChanged.connect(
             self._on_guided_signal_f0_selection_changed
         )
-        signal_form.addRow("Chunk", self._guided_signal_f0_chunk_combo)
+        signal_form.addRow("Preview segment", self._guided_signal_f0_chunk_combo)
         signal_layout.addLayout(signal_form)
 
         self._guided_signal_f0_generate_btn = QPushButton(
@@ -3260,6 +3306,9 @@ class MainWindow(QMainWindow):
 
         signal_artifacts_group = QGroupBox("Signal-Only F0 result details")
         signal_artifacts_group.setObjectName("guidedSignalOnlyF0ArtifactsPanel")
+        self._guided_signal_f0_technical_details_group = (
+            signal_artifacts_group
+        )
         signal_artifacts_group.setCheckable(True)
         signal_artifacts_group.setChecked(False)
         signal_artifacts_layout = QVBoxLayout(signal_artifacts_group)
@@ -3325,8 +3374,9 @@ class MainWindow(QMainWindow):
         actions_layout.addWidget(signal_group)
         layout.addWidget(actions_group)
 
-        outputs_group = QGroupBox("Generated diagnostic outputs")
+        outputs_group = QGroupBox("Technical generated-output details")
         outputs_group.setObjectName("guidedDiagnosticsGeneratedOutputsSection")
+        self._guided_generated_outputs_group = outputs_group
         outputs_layout = QVBoxLayout(outputs_group)
         outputs_layout.setContentsMargins(10, 10, 10, 10)
         self._guided_generated_outputs_summary_label = QLabel(
@@ -3341,6 +3391,7 @@ class MainWindow(QMainWindow):
 
         slots_group = QGroupBox("Planned diagnostic evidence slots")
         slots_group.setObjectName("guidedDiagnosticsSlotsPanel")
+        self._guided_diagnostics_slots_group = slots_group
         slots_group.setCheckable(True)
         slots_group.setChecked(False)
         slots_layout = QGridLayout(slots_group)
@@ -3377,7 +3428,8 @@ class MainWindow(QMainWindow):
             "guidedStepDiagnostics",
             "Diagnostics",
             [
-                "Review completed-run status and explicitly generate diagnostic-only artifacts.",
+                "Build and review correction evidence before confirming a "
+                "strategy.",
             ],
             diagnostics,
         )
@@ -4428,6 +4480,30 @@ class MainWindow(QMainWindow):
     def _refresh_guided_diagnostics_panel(self) -> None:
         if not hasattr(self, "_guided_diagnostics_status_label"):
             return
+        new_analysis = (
+            getattr(self, "_guided_workflow_mode", "start") == "new_analysis"
+        )
+        for widget_name in (
+            "_guided_completed_run_diagnostics_status_group",
+            "_guided_completed_run_diagnostics_context_group",
+            "_guided_completed_run_diagnostics_details_group",
+            "_guided_generated_outputs_group",
+            "_guided_diagnostics_slots_group",
+            "_guided_preview_technical_details_group",
+            "_guided_signal_f0_technical_details_group",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setVisible(not new_analysis)
+        for widget_name in (
+            "_guided_confirm_context_group",
+            "_guided_confirm_evidence_group",
+            "_guided_preview_source_status_label",
+            "_guided_signal_f0_source_status_label",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setVisible(not new_analysis)
         self._clear_guided_imported_plan_candidate_if_run_changed()
         artifact_state = self._guided_completed_run_diagnostic_artifacts()
         self._guided_diagnostics_status = str(artifact_state["status"])
@@ -4472,6 +4548,22 @@ class MainWindow(QMainWindow):
                 self._guided_diagnostics_completed_run_label.setText("\n".join(lines))
         self._refresh_guided_correction_preview_panel(artifact_state)
         self._refresh_guided_signal_f0_panel(artifact_state)
+        if new_analysis:
+            for label_name in (
+                "_guided_preview_status_label",
+                "_guided_signal_f0_status_label",
+            ):
+                label = getattr(self, label_name, None)
+                if label is not None:
+                    label.setText(
+                        label.text()
+                        .replace("diagnostic cache", "correction evidence")
+                        .replace("Diagnostic cache", "Correction evidence")
+                        .replace(
+                            "Signal-Only F0 diagnostic review",
+                            "Signal-Only F0 preview",
+                        )
+                    )
         if hasattr(self, "_guided_diagnostics_slot_labels"):
             for slot, label in self._guided_diagnostics_slot_labels.items():
                 suffix = "coming later / read-only evidence" if "Decision-Support Audit" in slot else "not generated"
@@ -4685,10 +4777,20 @@ class MainWindow(QMainWindow):
     def _refresh_guided_diagnostic_cache_panel(self) -> None:
         if not hasattr(self, "_guided_diagnostic_cache_status_label"):
             return
+        mode = getattr(self, "_guided_workflow_mode", "start")
+        new_analysis = mode == "new_analysis"
+        self._guided_diagnostic_cache_readiness_label.setVisible(
+            not new_analysis
+        )
+        self._guided_diagnostic_cache_summary_label.setVisible(
+            not new_analysis
+        )
         runner = getattr(self, "_guided_diagnostic_cache_runner", None)
         if runner is not None and runner.is_running():
             self._guided_diagnostic_cache_status_label.setText(
-                "Diagnostic cache building (preliminary; not final analysis)."
+                "Correction evidence: building."
+                if new_analysis
+                else "Diagnostic cache building (preliminary; not final analysis)."
             )
             self._guided_diagnostic_cache_readiness_label.setText("Build in progress.")
             self._guided_diagnostic_cache_build_btn.setEnabled(False)
@@ -4701,8 +4803,6 @@ class MainWindow(QMainWindow):
 
         status, _request, _path = self._guided_diagnostic_cache_readiness()
         record = getattr(self, "_guided_diagnostic_cache_record", None)
-        mode = getattr(self, "_guided_workflow_mode", "start")
-
         if mode == "new_analysis":
             if record is None:
                 current_status = getattr(self, "_guided_diagnostic_cache_status", None)
@@ -4710,16 +4810,16 @@ class MainWindow(QMainWindow):
                     isinstance(current_status, DiagnosticCacheStatus)
                     and current_status.code == "failed"
                 ):
-                    status_text = "Diagnostic cache failed. Fix the issue and rebuild before Run."
+                    status_text = (
+                        "Correction evidence: build failed. Fix the issue and "
+                        "try again."
+                    )
                 else:
-                    status_text = "Required before Run: build the diagnostic cache for the selected data."
+                    status_text = "Correction evidence: not built."
                 self._guided_diagnostic_cache_status_label.setText(status_text)
                 self._guided_diagnostic_cache_readiness_label.setText(status.message)
                 self._guided_diagnostic_cache_build_btn.setEnabled(status.ok)
-                self._guided_diagnostic_cache_summary_label.setText(
-                    "Diagnostic cache: none ready.\n"
-                    "Build diagnostic cache is required before confirming strategies or running the analysis."
-                )
+                self._guided_diagnostic_cache_summary_label.setText("")
                 return
 
             stale_status = None
@@ -4739,12 +4839,18 @@ class MainWindow(QMainWindow):
                 )
 
             if stale_status.ok:
-                status_text = "Diagnostic cache is ready."
+                status_text = "Correction evidence: ready."
             else:
                 if stale_status.code == "stale_check_failed":
-                    status_text = "Diagnostic cache failed. Fix the issue and rebuild before Run."
+                    status_text = (
+                        "Correction evidence: could not be checked. Rebuild "
+                        "before continuing."
+                    )
                 else:
-                    status_text = "Diagnostic cache is missing or stale. Rebuild the diagnostic cache before Run."
+                    status_text = (
+                        "Correction evidence: stale after setup changes. "
+                        "Rebuild before continuing."
+                    )
 
             self._guided_diagnostic_cache_status_label.setText(status_text)
             self._guided_diagnostic_cache_readiness_label.setText(status.message)
@@ -5281,23 +5387,17 @@ class MainWindow(QMainWindow):
         if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
             return ""
         if not source_ok:
-            return (
-                "Required before Run: build the diagnostic cache before "
-                "confirming strategies."
-            )
+            return "0/0 included ROIs confirmed."
 
         included = tuple(dict.fromkeys(str(roi) for roi in included_rois if roi))
         if not preview_evidence_ready:
             if preview_evidence_stale:
                 return (
-                    "Correction-preview evidence is stale for the current "
-                    "diagnostic cache. Regenerate preview evidence before "
+                    "Correction preview is stale. Generate a new preview before "
                     f"confirming strategies. 0/{len(included)} included ROIs "
                     "confirmed."
                 )
             return (
-                "Required before Run: generate correction-preview evidence "
-                "from the diagnostic cache before confirming strategies. "
                 f"0/{len(included)} included ROIs confirmed."
             )
 
@@ -5333,28 +5433,87 @@ class MainWindow(QMainWindow):
         progress = f"{count}/{total} included ROIs confirmed."
         if stale - confirmed:
             return (
-                "Correction-preview evidence is ready for the current "
-                "diagnostic cache. Some correction strategy choices are stale. "
+                "Some correction strategy choices are stale. "
                 f"Reconfirm before Run. {progress}"
             )
         if total > 0 and count == total:
             if len(set(confirmed_modes.values())) != 1:
                 return (
-                    "Correction-preview evidence is ready for the current "
-                    "diagnostic cache. Included ROIs use mixed correction "
+                    "Included ROIs use mixed correction "
                     "strategies, but the current Run scope requires one shared "
                     f"strategy. Reconfirm before Run. {progress}"
                 )
-            return (
-                "Correction-preview evidence is ready for the current "
-                "diagnostic cache. Correction strategies confirmed for all "
-                f"included ROIs. {progress}"
+            return progress
+        return progress
+
+    def _refresh_guided_correction_next_action(self) -> None:
+        label = getattr(self, "_guided_correction_next_action_label", None)
+        if label is None:
+            return
+        if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
+            label.setText(
+                "Review correction evidence and confirm a strategy explicitly."
             )
-        return (
-            "Correction-preview evidence is ready for the current diagnostic "
-            "cache. Required before Run: confirm a correction strategy for "
-            f"each included ROI. {progress}"
+            return
+        record = getattr(self, "_guided_diagnostic_cache_record", None)
+        if record is None:
+            label.setText("Next step: build correction evidence.")
+            return
+        try:
+            request = self._build_guided_diagnostic_cache_request(
+                cache_id=record.cache_id,
+                cache_root_path=record.cache_root_path,
+            )
+            cache_current = compare_request_to_artifact(request, record).ok
+        except Exception:
+            cache_current = False
+        if not cache_current:
+            label.setText(
+                "Correction evidence is stale. Rebuild it before continuing."
+            )
+            return
+        preview_exists = bool(
+            getattr(self, "_guided_preview_has_result", False)
         )
+        preview_stale = bool(
+            getattr(self, "_guided_preview_result_stale", False)
+        )
+        if preview_exists and preview_stale:
+            label.setText(
+                "Correction preview is stale. Generate a new preview before "
+                "confirming strategies."
+            )
+            return
+        preview_ready = preview_exists and not preview_stale
+        if not preview_ready:
+            label.setText(
+                "Correction evidence is ready. Next step: generate a "
+                "correction preview."
+            )
+            return
+        included = set(self._guided_selected_roi_ids()[1])
+        confirmed = {
+            str(choice.get("roi", ""))
+            for choice in getattr(self, "_guided_strategy_choices", {}).values()
+            if isinstance(choice, dict)
+            and choice.get("source_type") == "diagnostic_cache"
+            and choice.get("current") is True
+            and choice.get("confirmed") is True
+            and str(choice.get("roi", "")) in included
+        }
+        count = len(confirmed)
+        total = len(included)
+        if total and count == total:
+            label.setText(
+                f"Correction strategy complete for {count}/{total} included "
+                "ROIs. Next step: Draft plan."
+            )
+        else:
+            label.setText(
+                "Correction preview is ready. Next step: confirm a strategy "
+                f"for each included ROI. {count}/{total} included ROIs "
+                "confirmed."
+            )
 
     def _refresh_guided_confirm_strategy_panel(self, *_args) -> None:
         if not hasattr(self, "_guided_confirm_context_label"):
@@ -5515,7 +5674,6 @@ class MainWindow(QMainWindow):
             self._guided_confirm_roi_combo,
             self._guided_confirm_chunk_combo,
             self._guided_confirm_strategy_combo,
-            self._guided_confirm_ack_cb,
         ):
             widget.setEnabled(source_ok)
 
@@ -5540,9 +5698,9 @@ class MainWindow(QMainWindow):
             and self._selected_guided_confirm_roi()
             and self._selected_guided_confirm_chunk() is not None
             and self._selected_guided_confirm_strategy()
-            and self._guided_confirm_ack_cb.isChecked()
         )
         self._guided_confirm_mark_btn.setEnabled(can_mark)
+        self._refresh_guided_correction_next_action()
 
     def _build_guided_draft_run_plan(self) -> tuple[GuidedRunPlan | None, list[str]]:
         run_dir = self._current_guided_completed_run_dir()
@@ -7448,7 +7606,12 @@ class MainWindow(QMainWindow):
         roi = self._selected_guided_confirm_roi()
         chunk = self._selected_guided_confirm_chunk()
         if not source_type or not roi:
-            return "Current marked choice: none."
+            return (
+                "Confirmed strategy for this ROI: none."
+                if getattr(self, "_guided_workflow_mode", "start")
+                == "new_analysis"
+                else "Current marked choice: none."
+            )
         source_id = (
             getattr(self, "_guided_confirm_source", None)
             if source_type == "diagnostic_cache"
@@ -7458,7 +7621,23 @@ class MainWindow(QMainWindow):
             self._guided_confirm_choice_key(source_type, source_id, roi)
         )
         if not entry:
-            return "Current marked choice: none."
+            return (
+                "Confirmed strategy for this ROI: none."
+                if getattr(self, "_guided_workflow_mode", "start")
+                == "new_analysis"
+                else "Current marked choice: none."
+            )
+        if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
+            state = (
+                "stale; confirm again"
+                if entry.get("stale") is True
+                or entry.get("current") is not True
+                else "current"
+            )
+            return (
+                f"Confirmed strategy for {roi}: "
+                f"{entry.get('strategy_label', '')}. Status: {state}."
+            )
         source_line = (
             f"Source: diagnostic_cache {entry.get('cache_id', '')}"
             if entry.get("source_type") == "diagnostic_cache"
@@ -7477,7 +7656,7 @@ class MainWindow(QMainWindow):
         roi = self._selected_guided_confirm_roi()
         chunk = self._selected_guided_confirm_chunk()
         strategy = self._selected_guided_confirm_strategy()
-        if not roi or chunk is None or not strategy or not self._guided_confirm_ack_cb.isChecked():
+        if not roi or chunk is None or not strategy:
             self._refresh_guided_confirm_strategy_panel()
             return
         evidence = self._guided_confirm_evidence_summary()
@@ -8626,6 +8805,7 @@ class MainWindow(QMainWindow):
 
         context_group = QGroupBox("Loaded context")
         context_group.setObjectName("guidedConfirmStrategyContextPanel")
+        self._guided_confirm_context_group = context_group
         context_layout = QVBoxLayout(context_group)
         context_layout.setContentsMargins(10, 8, 10, 8)
         self._guided_confirm_context_label = QLabel("")
@@ -8650,7 +8830,7 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self._guided_confirm_strategy_progress_label)
 
-        selection_group = QGroupBox("ROI and evidence chunk")
+        selection_group = QGroupBox("Choose correction strategy")
         selection_group.setObjectName("guidedConfirmStrategySelectionPanel")
         selection_layout = QFormLayout(selection_group)
         selection_layout.setContentsMargins(10, 8, 10, 8)
@@ -8667,11 +8847,14 @@ class MainWindow(QMainWindow):
         self._guided_confirm_chunk_combo.setMinimumContentsLength(6)
         self._make_guided_widget_shrinkable(self._guided_confirm_chunk_combo)
         self._guided_confirm_chunk_combo.currentIndexChanged.connect(self._on_guided_confirm_selection_changed)
-        selection_layout.addRow("Evidence chunk:", self._guided_confirm_chunk_combo)
+        selection_layout.addRow(
+            "Preview segment:", self._guided_confirm_chunk_combo
+        )
         layout.addWidget(selection_group)
 
-        evidence_group = QGroupBox("Evidence summary")
+        evidence_group = QGroupBox("Technical evidence summary")
         evidence_group.setObjectName("guidedConfirmStrategyEvidencePanel")
+        self._guided_confirm_evidence_group = evidence_group
         evidence_layout = QVBoxLayout(evidence_group)
         evidence_layout.setContentsMargins(10, 8, 10, 8)
         self._guided_confirm_evidence_label = QLabel("")
@@ -8683,7 +8866,7 @@ class MainWindow(QMainWindow):
         evidence_layout.addWidget(self._guided_confirm_evidence_label)
         layout.addWidget(evidence_group)
 
-        choice_group = QGroupBox("Strategy to confirm")
+        choice_group = QGroupBox("Confirm correction strategy")
         choice_group.setObjectName("guidedConfirmStrategyChoicePanel")
         choice_layout = QFormLayout(choice_group)
         choice_layout.setContentsMargins(10, 8, 10, 8)
@@ -8696,14 +8879,18 @@ class MainWindow(QMainWindow):
         self._guided_confirm_strategy_combo.setMinimumContentsLength(12)
         self._make_guided_widget_shrinkable(self._guided_confirm_strategy_combo)
         self._guided_confirm_strategy_combo.currentIndexChanged.connect(self._refresh_guided_confirm_strategy_panel)
-        choice_layout.addRow("Strategy:", self._guided_confirm_strategy_combo)
+        choice_layout.addRow(
+            "Strategy for this ROI:", self._guided_confirm_strategy_combo
+        )
         self._guided_confirm_ack_cb = QCheckBox(
             "I reviewed the diagnostic evidence and am explicitly marking this strategy for later planning."
         )
         self._guided_confirm_ack_cb.setObjectName("guidedConfirmStrategyAcknowledge")
         self._guided_confirm_ack_cb.stateChanged.connect(self._refresh_guided_confirm_strategy_panel)
-        choice_layout.addRow("", self._guided_confirm_ack_cb)
-        self._guided_confirm_mark_btn = QPushButton("Mark strategy choice")
+        self._guided_confirm_ack_cb.setVisible(False)
+        self._guided_confirm_mark_btn = QPushButton(
+            "Confirm selected strategy for this ROI"
+        )
         self._guided_confirm_mark_btn.setObjectName("guidedConfirmStrategyMarkButton")
         self._guided_confirm_mark_btn.clicked.connect(self._on_guided_mark_strategy_choice)
         choice_layout.addRow("", self._guided_confirm_mark_btn)
