@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
@@ -419,6 +420,8 @@ def test_run_page_revalidation_rebuilds_draft_after_dataset_contract_apply(
 def test_run_page_unanimous_robust_marks_drive_dynamic_fit_contract(
     window, tmp_path, monkeypatch
 ):
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+
     robust_by_roi = {
         roi: "Robust Global Event-Reject Fit"
         for roi in ("CH1", "CH2", "CH3")
@@ -458,6 +461,11 @@ def test_run_page_unanimous_robust_marks_drive_dynamic_fit_contract(
     window._guided_workflow_stepper.setCurrentRow(
         list(GUIDED_WORKFLOW_STEPS).index("Run")
     )
+    monkeypatch.setattr(
+        request_builder,
+        "resolve_application_build_identity",
+        lambda **_kwargs: SimpleNamespace(build_identity=None),
+    )
     window._guided_backend_validate_btn.click()
     issue_codes = {
         issue.detail_code
@@ -468,6 +476,18 @@ def test_run_page_unanimous_robust_marks_drive_dynamic_fit_contract(
     assert "correction_preview_missing_or_stale" not in issue_codes
     assert "feature_event_profile_missing" not in issue_codes
     assert "output_policy_missing" not in issue_codes
+    assert window._guided_backend_validation_outcome.status == (
+        "validator_accepted"
+    )
+    assert window._guided_run_authorization_result is None
+    assert window._guided_run_btn.isEnabled() is False
+    assert window._guided_run_readiness_label.text() == (
+        "Guided validation succeeded, but Guided Run execution is unavailable "
+        "in this build."
+    )
+    assert "Validate the setup first" not in (
+        window._guided_run_readiness_label.text()
+    )
 
 
 def test_new_analysis_dataset_contract_missing_duration_or_semantics_cannot_apply(

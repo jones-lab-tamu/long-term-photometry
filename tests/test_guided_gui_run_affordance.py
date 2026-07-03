@@ -89,6 +89,13 @@ def test_missing_authorization_keeps_button_disabled(window, startup_request):
     window._refresh_guided_run_readiness_display()
     assert window._guided_run_readiness.status == "authorization_missing"
     assert window._guided_run_btn.isEnabled() is False
+    assert window._guided_run_readiness_label.text() == (
+        "Guided validation succeeded, but Guided Run execution is unavailable "
+        "in this build."
+    )
+    assert "Validate the setup first" not in (
+        window._guided_run_readiness_label.text()
+    )
 
 
 def test_missing_payload_keeps_button_disabled(window, startup_request):

@@ -80,6 +80,12 @@ def test_missing_authorization_refuses(ready_state):
     result = _evaluate(ready_state, authorization_result=None)
     assert result.status == "authorization_missing"
     assert not result.ready
+    assert result.user_visible_state == "cannot_run"
+    assert result.user_summary == (
+        "Guided validation succeeded, but Guided Run execution is unavailable "
+        "in this build."
+    )
+    assert "Validate the setup first" not in result.user_summary
 
 
 def test_unauthorized_authorization_refuses(ready_state):

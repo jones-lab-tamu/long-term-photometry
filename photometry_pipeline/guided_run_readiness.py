@@ -55,7 +55,8 @@ _SUMMARIES = {
         "The Guided setup changed after validation. Validate again before running."
     ),
     "authorization_missing": (
-        "Guided Run is not ready yet. Validate the setup first."
+        "Guided validation succeeded, but Guided Run execution is unavailable "
+        "in this build."
     ),
     "authorization_not_accepted": (
         "Guided Run could not authorize the validated setup."
@@ -105,7 +106,6 @@ def _result(
             in {
                 "no_validation",
                 "validation_not_accepted",
-                "authorization_missing",
             }
             else (
                 "needs_revalidation"
