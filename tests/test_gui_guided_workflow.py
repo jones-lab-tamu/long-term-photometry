@@ -2339,7 +2339,7 @@ def test_guided_diagnostic_cache_action_blocks_without_roi_discovery(window, tmp
     assert window._current_run_dir == ""
 
 
-def test_guided_diagnostic_cache_panel_text_uses_preliminary_not_final_language(window):
+def test_guided_full_evidence_panel_is_optional_and_scientist_facing(window):
     panel = window._guided_workflow_tab.findChild(QGroupBox, "guidedDiagnosticCachePanel")
     assert panel is not None
     visible_text = "\n".join(
@@ -2349,10 +2349,11 @@ def test_guided_diagnostic_cache_panel_text_uses_preliminary_not_final_language(
     )
     visible_text += "\n" + window._guided_diagnostic_cache_build_btn.text()
 
-    assert "Tuning Prep" not in visible_text
-    assert "preliminary" in visible_text.lower()
-    assert "not final" in visible_text.lower() or "not the final production analysis" in visible_text.lower()
-    assert "diagnostic" in visible_text.lower()
+    assert panel.title() == "Optional: prepare reusable full correction evidence"
+    assert panel.isChecked() is False
+    assert "may take several minutes" in visible_text
+    assert "Local preview does not require this step" in visible_text
+    assert "Final analysis will still recompute correction" in visible_text
 
 
 def test_guided_diagnostic_cache_build_launches_tuning_prep_without_completed_run(window, tmp_path, monkeypatch):
@@ -4578,7 +4579,7 @@ def test_gui_merged_correction_page_contains_existing_workflow_controls(window):
     assert correction_widget.findChild(QWidget, "guidedDraftRunPlanChecklistPanel") is None
 
 
-def test_gui_merged_correction_page_is_evidence_first_and_user_safe(window):
+def test_gui_merged_correction_page_makes_local_preview_primary_and_user_safe(window):
     window._set_guided_workflow_mode("new_analysis")
     window._guided_workflow_stepper.setCurrentRow(
         list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
@@ -4591,10 +4592,11 @@ def test_gui_merged_correction_page_is_evidence_first_and_user_safe(window):
         for group in correction_widget.findChildren(QGroupBox)
         if group.isVisibleTo(correction_widget)
     ]
-    prepare_index = group_titles.index("1. Prepare correction evidence")
-    preview_index = group_titles.index("2. Preview correction methods")
-    confirm_index = group_titles.index("3. Choose correction strategy")
-    assert prepare_index < preview_index < confirm_index
+    assert "Optional: prepare reusable full correction evidence" in group_titles
+    assert "1. Preview correction methods" in group_titles
+    assert "2. Choose correction strategy" in group_titles
+    assert window._guided_full_evidence_group.isChecked() is False
+    assert window._guided_diagnostic_cache_build_btn.isHidden() is True
     assert "Choose a correction candidate" not in group_titles
 
     labels = [
@@ -4612,9 +4614,9 @@ def test_gui_merged_correction_page_is_evidence_first_and_user_safe(window):
     assert "Compare correction methods and choose one strategy" in (
         visible_text
     )
-    assert "Signal-Only F0" in visible_text
-    assert "Guided Run cannot execute it yet" in visible_text
-    assert "Locked until correction evidence is built" in visible_text
+    assert "Build correction evidence" not in visible_text
+    assert "Generate local correction preview" not in visible_text
+    assert "Complete Select data, Recording structure" in visible_text
     assert "Locked until a correction preview is generated" in visible_text
     assert "I reviewed" not in visible_text
     assert "Mark strategy choice" not in visible_text
@@ -4693,7 +4695,9 @@ def test_signal_only_f0_is_one_preview_subsection_with_plain_limit(window):
         window._guided_signal_f0_generate_btn
     )
     assert "Guided Run cannot execute it yet" in (
-        window._guided_preview_locked_label.text()
+        window._guided_signal_f0_status_label.parentWidget().findChild(
+            QLabel, "guidedSignalOnlyF0DiagnosticIntro"
+        ).text()
     )
 
 
@@ -4725,22 +4729,30 @@ def test_local_preview_bypasses_full_evidence_and_keeps_confirmation_locked(
     output_dir = tmp_path / "output"
     input_dir.mkdir()
     output_dir.mkdir()
-    source_file = input_dir / "fluorescence.csv"
-    source_file.write_text("local preview source", encoding="utf-8")
+    source_files = []
+    for index in range(3):
+        session_dir = input_dir / f"session-{index}"
+        session_dir.mkdir()
+        source_file = session_dir / "fluorescence.csv"
+        source_file.write_text(
+            f"local preview source {index}", encoding="utf-8"
+        )
+        source_files.append(source_file)
     window._guided_input_dir_edit.setText(str(input_dir))
     window._guided_output_dir_edit.setText(str(output_dir))
     window._format_combo.setCurrentText("rwd")
     discovery = {
         "resolved_format": "rwd",
-        "n_total_discovered": 1,
-        "n_preview": 1,
+        "n_total_discovered": 3,
+        "n_preview": 3,
         "sessions": [
             {
-                "index": 0,
-                "session_id": "session-0",
+                "index": index,
+                "session_id": f"session-{index}",
                 "path": str(source_file),
                 "included_in_preview": True,
             }
+            for index, source_file in enumerate(source_files)
         ],
         "rois": [{"roi_id": "CH1"}],
     }
@@ -4770,11 +4782,12 @@ def test_local_preview_bypasses_full_evidence_and_keeps_confirmation_locked(
     )
     monkeypatch.setattr(
         window,
-        "_infer_dataset_contract_overrides",
-        lambda _format: {
-            "target_fs_hz": 20.0,
+        "_infer_rwd_chunk_contract",
+        lambda path: {
+            "csv_path": path,
+            "fs_hz": 20.0,
             "chunk_duration_sec": 600.0,
-            "rwd_time_col": "Time(s)",
+            "time_col": "Time(s)",
             "uv_suffix": "-410",
             "sig_suffix": "-470",
         },
@@ -4789,13 +4802,23 @@ def test_local_preview_bypasses_full_evidence_and_keeps_confirmation_locked(
 
     assert window._guided_preview_source_type == "local_raw_segment"
     assert window._guided_preview_generate_btn.isEnabled() is True
+    assert window._guided_preview_generate_btn.isHidden() is False
+    assert window._guided_full_evidence_group.isChecked() is False
+    assert window._guided_diagnostic_cache_build_btn.isHidden() is True
+    window._guided_full_evidence_group.setChecked(True)
+    assert window._guided_diagnostic_cache_build_btn.isHidden() is False
+    assert "Local preview does not require this step" in " ".join(
+        _label_texts(window._guided_full_evidence_group)
+    )
+    window._guided_full_evidence_group.setChecked(False)
+    window._guided_preview_chunk_combo.setCurrentIndex(2)
     window._guided_preview_generate_btn.click()
 
     result = window._guided_preview_last_result
     assert result["source_type"] == "local_raw_segment"
     assert result["preview_only"] is True
     assert result["production_analysis"] is False
-    assert loads == [(str(source_file.resolve()), "rwd", 0)]
+    assert loads == [(str(source_files[2].resolve()), "rwd", 0)]
     assert runner.argv is None
     assert window._guided_diagnostic_cache_record is None
     assert Path(result["visual_preview_path"]).is_file()
@@ -4807,10 +4830,17 @@ def test_local_preview_bypasses_full_evidence_and_keeps_confirmation_locked(
         "single_discovered_session_single_roi"
     )
     assert provenance["selected_roi"] == "CH1"
-    assert provenance["selected_chunk"] == 0
+    assert provenance["selected_chunk"] == 2
+    assert provenance["selected_segment_index"] == 2
+    assert provenance["selected_segment_label"] == "session-2"
+    assert provenance["adapter_local_chunk_id"] == 0
+    assert provenance["source_file"] == str(source_files[2].resolve())
     assert provenance["production_analysis"] is False
     assert provenance["reference_fit_scope"] == "selected_session"
     assert provenance["effective_config_values"]["target_fs_hz"] == 20.0
+    assert "Preview segment: session-2" in (
+        window._guided_preview_review_label.text()
+    )
     preview_dir = Path(result["preview_output_dir"])
     assert not (preview_dir / "status.json").exists()
     assert not (preview_dir / "run_report.json").exists()
@@ -4819,6 +4849,11 @@ def test_local_preview_bypasses_full_evidence_and_keeps_confirmation_locked(
     assert window._guided_confirm_locked_label.isHidden() is False
     assert window._guided_confirm_strategy_combo.parentWidget().isHidden()
     assert window._guided_strategy_choices == {}
+    assert (
+        window._guided_confirm_locked_label.text()
+        == "Review the local preview above. Strategy confirmation from local "
+        "preview will be enabled in a later step."
+    )
     assert "Final analysis recomputes correction" in " ".join(
         _label_texts(
             window._guided_workflow_stack.widget(
@@ -4826,6 +4861,86 @@ def test_local_preview_bypasses_full_evidence_and_keeps_confirmation_locked(
             )
         )
     )
+
+
+def test_local_preview_failure_reports_selected_segment_without_fallback(
+    window, tmp_path, monkeypatch
+):
+    input_dir = tmp_path / "raw"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    files = []
+    for index in range(2):
+        path = input_dir / f"session-{index}" / "fluorescence.csv"
+        path.parent.mkdir()
+        path.write_text(f"source {index}", encoding="utf-8")
+        files.append(path)
+    window._guided_input_dir_edit.setText(str(input_dir))
+    window._guided_output_dir_edit.setText(str(output_dir))
+    window._discovery_cache = {
+        "resolved_format": "RWD",
+        "n_total_discovered": 2,
+        "n_preview": 2,
+        "sessions": [
+            {
+                "index": index,
+                "session_id": f"session-{index}",
+                "path": str(path),
+                "included_in_preview": True,
+            }
+            for index, path in enumerate(files)
+        ],
+        "rois": [{"roi_id": "CH1"}],
+    }
+    window._populate_discovery_ui(window._discovery_cache)
+    monkeypatch.setattr(
+        window,
+        "_infer_rwd_chunk_contract",
+        lambda path: {
+            "csv_path": path,
+            "fs_hz": 20.0,
+            "chunk_duration_sec": 600.0,
+            "time_col": "TimeStamp",
+            "uv_suffix": "-410",
+            "sig_suffix": "-470",
+        },
+    )
+    loaded = []
+
+    def fail_load(path, _format, _config, chunk_id):
+        loaded.append((path, chunk_id))
+        raise ValueError("selected session has invalid timestamps")
+
+    monkeypatch.setattr(
+        correction_preview_module, "load_chunk", fail_load
+    )
+    runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = runner
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    window._refresh_guided_diagnostics_panel()
+    window._guided_preview_chunk_combo.setCurrentIndex(1)
+
+    window._guided_preview_generate_btn.click()
+
+    assert loaded == [(str(files[1].resolve()), 0)]
+    assert all(path != str(files[0].resolve()) for path, _ in loaded)
+    assert runner.argv is None
+    assert window._guided_preview_status_label.text() == (
+        "Could not load the selected preview segment. Try another segment or "
+        "check that the source file is still available."
+    )
+    details = window._guided_preview_messages_label.text()
+    assert "Selected segment: session-1" in details
+    assert "Discovered session index: 1" in details
+    assert f"Source path: {files[1].resolve()}" in details
+    assert "Adapter-local chunk ID: 0" in details
+    assert "Input format: rwd" in details
+    assert "selected session has invalid timestamps" in details
+    assert window._guided_strategy_choices == {}
 
 
 def test_correction_preview_ready_has_openable_review_summary(

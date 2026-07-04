@@ -1288,6 +1288,8 @@ def run_guided_local_correction_preview(
     *,
     roi: str,
     chunk_index: int,
+    adapter_chunk_index: int = 0,
+    segment_label: str = "",
     input_format: str,
     config_path: str | os.PathLike[str],
     methods: Iterable[str] | None = None,
@@ -1304,21 +1306,51 @@ def run_guided_local_correction_preview(
     source_path = _resolve_path(source_file)
     output_dir = _resolve_path(preview_output_dir)
     config_source = _resolve_path(config_path)
-    if not _safe_preview_id_component(pid):
-        return _result_failed(preview_id=str(pid), errors=[f"Unsafe preview_id: {pid!r}"])
-    method_result = validate_preview_methods(methods or GUIDED_REFERENCE_PREVIEW_METHODS)
-    if not method_result.ok:
-        return _result_failed(preview_id=pid, errors=[method_result.reason])
-    if not os.path.isfile(source_path):
-        return _result_failed(preview_id=pid, errors=["Selected preview segment is unavailable."])
-    if not os.path.isfile(config_source):
-        return _result_failed(preview_id=pid, errors=["Correction configuration is unavailable."])
-    if os.path.exists(output_dir):
-        return _result_failed(
+    local_context = {
+        "selected_segment_label": str(segment_label or chunk_index),
+        "selected_segment_index": int(chunk_index),
+        "source_path": source_path,
+        "adapter_local_chunk_id": int(adapter_chunk_index),
+        "input_format": str(input_format).strip().lower(),
+    }
+
+    def failed(message: str) -> dict[str, Any]:
+        result = _result_failed(
             preview_id=pid,
             preview_output_dir=output_dir,
-            errors=["Local preview output directory already exists."],
+            errors=[str(message)],
         )
+        result.update(
+            {
+                "source_type": "local_raw_segment",
+                "preview_only": True,
+                "production_analysis": False,
+                "roi": str(roi),
+                "chunk_index": int(chunk_index),
+                "preview_segment_label": str(
+                    segment_label or chunk_index
+                ),
+                "adapter_local_chunk_id": int(adapter_chunk_index),
+                "source_file": source_path,
+                "local_preview_diagnostics": {
+                    **local_context,
+                    "adapter_error": str(message),
+                },
+            }
+        )
+        return result
+
+    if not _safe_preview_id_component(pid):
+        return failed(f"Unsafe preview_id: {pid!r}")
+    method_result = validate_preview_methods(methods or GUIDED_REFERENCE_PREVIEW_METHODS)
+    if not method_result.ok:
+        return failed(method_result.reason)
+    if not os.path.isfile(source_path):
+        return failed("Selected preview segment is unavailable.")
+    if not os.path.isfile(config_source):
+        return failed("Correction configuration is unavailable.")
+    if os.path.exists(output_dir):
+        return failed("Local preview output directory already exists.")
 
     try:
         base_cfg = Config.from_yaml(config_source)
@@ -1335,7 +1367,7 @@ def run_guided_local_correction_preview(
             source_path,
             str(input_format).strip().lower(),
             base_cfg,
-            int(chunk_index),
+            int(adapter_chunk_index),
         )
         if roi not in raw_chunk.channel_names:
             raise GuidedCorrectionPreviewError(
@@ -1353,7 +1385,7 @@ def run_guided_local_correction_preview(
         time_sec = time_sec[segment_mask] - segment_start
         record = {
             "roi": str(roi),
-            "chunk_id": int(chunk_index),
+            "chunk_id": int(adapter_chunk_index),
             "source_file": source_path,
             "time_sec": time_sec,
             "sig_raw": np.asarray(
@@ -1367,7 +1399,7 @@ def run_guided_local_correction_preview(
             "metadata": dict(raw_chunk.metadata or {}),
         }
     except Exception as exc:
-        return _result_failed(preview_id=pid, preview_output_dir=output_dir, errors=[str(exc)])
+        return failed(f"{type(exc).__name__}: {exc}")
 
     os.makedirs(output_dir, exist_ok=False)
     generated_artifacts: dict[str, str] = {}
@@ -1416,6 +1448,9 @@ def run_guided_local_correction_preview(
         "local_preview_scope": "single_discovered_session_single_roi",
         "selected_roi": str(roi),
         "selected_chunk": int(chunk_index),
+        "selected_segment_index": int(chunk_index),
+        "selected_segment_label": str(segment_label or chunk_index),
+        "adapter_local_chunk_id": int(adapter_chunk_index),
         "source_file": source_path,
         "source_file_sha256": _file_sha256(source_path),
         "input_format": str(input_format).strip().lower(),
@@ -1482,5 +1517,11 @@ def run_guided_local_correction_preview(
         "errors": errors,
         "roi": str(roi),
         "chunk_index": int(chunk_index),
+        "preview_segment_label": str(segment_label or chunk_index),
+        "adapter_local_chunk_id": int(adapter_chunk_index),
+        "local_preview_diagnostics": {
+            **local_context,
+            "adapter_error": "",
+        },
         "source_file": source_path,
     }

@@ -11,6 +11,7 @@ from photometry_pipeline.preview.correction_preview import (
     PREVIEW_PROVENANCE_FILENAME,
     PREVIEW_SUMMARY_FILENAME,
     run_guided_correction_preview_comparison,
+    run_guided_local_correction_preview,
 )
 from photometry_pipeline.guided_diagnostic_cache import (
     DiagnosticCacheBuildRequest,
@@ -30,6 +31,26 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _write_realistic_rwd_session(path: Path, *, offset: float) -> None:
+    path.parent.mkdir(parents=True)
+    rows = [
+        '{"Light":{"Led410Enable":true;"Led470Enable":true};'
+        '"Excitation":{"continuous_time":600};"Fps":40.0}',
+        "TimeStamp,Events,CH1-410,CH1-470,CH2-410,CH2-470,",
+    ]
+    for index in range(12000):
+        timestamp_ms = index * 50.0
+        uv1 = offset + 100.0 + 0.01 * np.sin(index / 50.0)
+        sig1 = offset + 125.0 + 0.012 * np.sin(index / 50.0)
+        uv2 = offset + 90.0 + 0.008 * np.cos(index / 60.0)
+        sig2 = offset + 112.0 + 0.01 * np.cos(index / 60.0)
+        rows.append(
+            f"{timestamp_ms:.3f},,{uv1:.6f},{sig1:.6f},"
+            f"{uv2:.6f},{sig2:.6f},"
+        )
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
 def _make_completed_run(tmp_path: Path, *, missing_field: str | None = None) -> Path:
@@ -449,3 +470,86 @@ def test_preview_backend_provenance_summary_and_diagnostics_have_no_recommendati
     assert summary["strategy_recommendation"] is None
     assert diagnostics["preview_only"] is True
     assert diagnostics["strategy_recommendation"] is None
+
+
+def test_local_preview_real_rwd_nonfirst_session_uses_selected_file_and_local_chunk_zero(
+    tmp_path,
+):
+    first = tmp_path / "session-0" / "fluorescence.csv"
+    third = tmp_path / "session-2" / "fluorescence.csv"
+    _write_realistic_rwd_session(first, offset=0.0)
+    _write_realistic_rwd_session(third, offset=20.0)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 20.0\n"
+        "chunk_duration_sec: 600.0\n"
+        "rwd_time_col: TimeStamp\n"
+        "uv_suffix: '-410'\n"
+        "sig_suffix: '-470'\n"
+        "lowpass_hz: 1.0\n"
+        "filter_order: 3\n",
+        encoding="utf-8",
+    )
+
+    result = run_guided_local_correction_preview(
+        third,
+        tmp_path / "local-preview",
+        roi="CH2",
+        chunk_index=2,
+        adapter_chunk_index=0,
+        segment_label="session-2",
+        input_format="rwd",
+        config_path=config,
+        methods=["global_linear_regression"],
+        preview_id="local_rwd_segment_2",
+    )
+
+    assert result["status"] == "success"
+    assert result["source_file"] == str(third.resolve())
+    assert result["source_file"] != str(first.resolve())
+    assert result["adapter_local_chunk_id"] == 0
+    provenance = _load_json(Path(result["preview_provenance_path"]))
+    assert provenance["selected_segment_index"] == 2
+    assert provenance["selected_segment_label"] == "session-2"
+    assert provenance["adapter_local_chunk_id"] == 0
+    assert provenance["source_file"] == str(third.resolve())
+    assert provenance["selected_roi"] == "CH2"
+    assert provenance["source_type"] == "local_raw_segment"
+    assert provenance["preview_only"] is True
+    assert provenance["production_analysis"] is False
+
+
+def test_local_preview_adapter_failure_returns_full_load_context(tmp_path):
+    source = tmp_path / "session-2" / "fluorescence.csv"
+    _write_realistic_rwd_session(source, offset=20.0)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 50.0\n"
+        "chunk_duration_sec: 600.0\n"
+        "rwd_time_col: TimeStamp\n"
+        "uv_suffix: '-410'\n"
+        "sig_suffix: '-470'\n",
+        encoding="utf-8",
+    )
+
+    result = run_guided_local_correction_preview(
+        source,
+        tmp_path / "failed-preview",
+        roi="CH1",
+        chunk_index=2,
+        adapter_chunk_index=0,
+        segment_label="session-2",
+        input_format="rwd",
+        config_path=config,
+        methods=["global_linear_regression"],
+        preview_id="failed_local_rwd_segment_2",
+    )
+
+    assert result["status"] == "failed"
+    details = result["local_preview_diagnostics"]
+    assert details["selected_segment_label"] == "session-2"
+    assert details["selected_segment_index"] == 2
+    assert details["source_path"] == str(source.resolve())
+    assert details["adapter_local_chunk_id"] == 0
+    assert details["input_format"] == "rwd"
+    assert "End Coverage Failure" in details["adapter_error"]

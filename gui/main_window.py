@@ -3002,15 +3002,22 @@ class MainWindow(QMainWindow):
         actions_layout.setContentsMargins(10, 10, 10, 10)
         actions_layout.setSpacing(10)
 
-        cache_group = QGroupBox("1. Prepare correction evidence")
+        cache_group = QGroupBox(
+            "Optional: prepare reusable full correction evidence"
+        )
         cache_group.setObjectName("guidedDiagnosticCachePanel")
+        cache_group.setCheckable(True)
+        cache_group.setChecked(False)
+        self._guided_full_evidence_group = cache_group
         cache_layout = QVBoxLayout(cache_group)
         cache_layout.setContentsMargins(10, 10, 10, 10)
         cache_layout.setSpacing(8)
 
         cache_intro = QLabel(
-            "Prepares the data needed to preview correction methods for the "
-            "selected input. This does not run the final analysis."
+            "This processes the full selected recordings and may take several "
+            "minutes. Local preview does not require this step. Final analysis "
+            "will still recompute correction using the full selected "
+            "recordings."
         )
         cache_intro.setObjectName("guidedDiagnosticCacheIntro")
         cache_intro.setProperty("guidedSecondaryText", True)
@@ -3051,9 +3058,23 @@ class MainWindow(QMainWindow):
         self._guided_diagnostic_cache_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._make_guided_widget_shrinkable(self._guided_diagnostic_cache_summary_label)
         cache_layout.addWidget(self._guided_diagnostic_cache_summary_label)
-        actions_layout.addWidget(cache_group)
+        self._guided_full_evidence_detail_widgets = [
+            cache_intro,
+            self._guided_diagnostic_cache_status_label,
+            self._guided_diagnostic_cache_readiness_label,
+            self._guided_diagnostic_cache_build_btn,
+            self._guided_diagnostic_cache_summary_label,
+        ]
+        for widget in self._guided_full_evidence_detail_widgets:
+            widget.setVisible(False)
+        cache_group.toggled.connect(
+            lambda checked: [
+                widget.setVisible(bool(checked))
+                for widget in self._guided_full_evidence_detail_widgets
+            ]
+        )
 
-        preview_group = QGroupBox("2. Preview correction methods")
+        preview_group = QGroupBox("1. Preview correction methods")
         preview_group.setObjectName("guidedCorrectionPreviewPanel")
         self._guided_preview_gated_widgets = []
         preview_layout = QVBoxLayout(preview_group)
@@ -3434,9 +3455,8 @@ class MainWindow(QMainWindow):
         self._guided_signal_f0_group = signal_group
         self._guided_preview_gated_widgets.append(signal_group)
         self._guided_preview_locked_label = QLabel(
-            "Locked until correction evidence is built. Signal-Only F0 is a "
-            "correction-method candidate you can review after evidence is "
-            "ready, but Guided Run cannot execute it yet."
+            "Complete Select data, Recording structure, and ROI selection to "
+            "generate a local correction preview."
         )
         self._guided_preview_locked_label.setObjectName(
             "guidedCorrectionPreviewLocked"
@@ -3447,6 +3467,7 @@ class MainWindow(QMainWindow):
         self._guided_preview_locked_label.setWordWrap(True)
         preview_layout.addWidget(self._guided_preview_locked_label)
         actions_layout.addWidget(preview_group)
+        actions_layout.addWidget(cache_group)
         layout.addWidget(actions_group)
 
         outputs_group = QGroupBox("Technical generated-output details")
@@ -3560,10 +3581,73 @@ class MainWindow(QMainWindow):
         if combo is None:
             return None
         value = combo.currentData()
+        if isinstance(value, dict):
+            value = value.get("discovered_session_index")
         try:
             return int(value)
         except Exception:
             return None
+
+    def _selected_guided_preview_segment(self) -> dict[str, object] | None:
+        combo = getattr(self, "_guided_preview_chunk_combo", None)
+        if combo is None:
+            return None
+        value = combo.currentData()
+        if isinstance(value, dict):
+            return dict(value)
+        try:
+            chunk_index = int(value)
+        except Exception:
+            return None
+        return {
+            "discovered_session_index": chunk_index,
+            "segment_label": combo.currentText() or str(chunk_index),
+            "adapter_chunk_index": chunk_index,
+            "source_path": "",
+        }
+
+    def _resolve_guided_local_preview_segment(self) -> dict[str, object]:
+        segment = self._selected_guided_preview_segment()
+        if not segment:
+            raise RuntimeError("No preview segment is selected.")
+        try:
+            discovered_index = int(
+                segment["discovered_session_index"]
+            )
+            adapter_chunk_index = int(
+                segment.get("adapter_chunk_index", 0)
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "The selected preview segment identity is invalid."
+            ) from exc
+        label = str(
+            segment.get("segment_label") or discovered_index
+        ).strip()
+        source_path = os.path.realpath(
+            str(segment.get("source_path") or "")
+        )
+        if not source_path or not os.path.isfile(source_path):
+            raise RuntimeError(
+                "Could not load the selected preview segment. The source "
+                f"file is unavailable: {source_path or '(missing path)'}"
+            )
+        resolved_format = str(
+            (getattr(self, "_discovery_cache", None) or {}).get(
+                "resolved_format",
+                self._format_combo.currentText(),
+            )
+        ).strip().lower()
+        return {
+            "source_type": "local_raw_segment",
+            "discovered_session_index": discovered_index,
+            "segment_label": label,
+            "source_path": source_path,
+            "adapter_chunk_index": adapter_chunk_index,
+            "input_format": resolved_format,
+            "path_exists": True,
+            "path_kind": "file",
+        }
 
     def _resolve_current_guided_preview_diagnostic_cache_source(self):
         record = getattr(self, "_guided_diagnostic_cache_record", None)
@@ -3930,7 +4014,15 @@ class MainWindow(QMainWindow):
                                 entry.get("session_id") or index
                             )
                             self._guided_preview_chunk_combo.addItem(
-                                label, index
+                                label,
+                                {
+                                    "discovered_session_index": index,
+                                    "segment_label": label,
+                                    "source_path": os.path.realpath(
+                                        str(entry["path"])
+                                    ),
+                                    "adapter_chunk_index": 0,
+                                },
                             )
                         if previous_roi:
                             index = self._guided_preview_roi_combo.findData(
@@ -3941,13 +4033,27 @@ class MainWindow(QMainWindow):
                                     index
                                 )
                         if previous_chunk is not None:
-                            index = self._guided_preview_chunk_combo.findData(
-                                int(previous_chunk)
-                            )
-                            if index >= 0:
-                                self._guided_preview_chunk_combo.setCurrentIndex(
-                                    index
+                            for combo_index in range(
+                                self._guided_preview_chunk_combo.count()
+                            ):
+                                data = (
+                                    self._guided_preview_chunk_combo.itemData(
+                                        combo_index
+                                    )
                                 )
+                                if (
+                                    isinstance(data, dict)
+                                    and int(
+                                        data.get(
+                                            "discovered_session_index", -1
+                                        )
+                                    )
+                                    == int(previous_chunk)
+                                ):
+                                    self._guided_preview_chunk_combo.setCurrentIndex(
+                                        combo_index
+                                    )
+                                    break
                     self._guided_preview_source_ok = True
                     self._guided_preview_source_type = "local_raw_segment"
                     self._guided_preview_source_path = source_id
@@ -4360,7 +4466,7 @@ class MainWindow(QMainWindow):
             "<body><h1>Correction preview</h1>"
             f"<p><strong>ROI:</strong> {html.escape(str(result.get('roi', '')))}</p>"
             f"<p><strong>Preview segment:</strong> "
-            f"{html.escape(str(result.get('chunk_index', '')))}</p>"
+            f"{html.escape(str(result.get('preview_segment_label') or result.get('chunk_index', '')))}</p>"
             f"<p><strong>Methods compared:</strong> "
             f"{html.escape(method_names)}</p>"
             "<p>This report is for correction-method review only. Opening it "
@@ -4552,6 +4658,14 @@ class MainWindow(QMainWindow):
                         "generated. Open preview folder."
                     )
                 )
+                if preview.get("preview_segment_label"):
+                    self._guided_preview_review_label.setText(
+                        self._guided_preview_review_label.text().replace(
+                            f"Preview segment: {preview.get('chunk_index', '')}",
+                            "Preview segment: "
+                            f"{preview.get('preview_segment_label', '')}",
+                        )
+                    )
             self._guided_preview_review_label.setVisible(preview_ready)
             self._guided_preview_open_btn.setVisible(preview_ready)
             self._guided_preview_open_btn.setText(
@@ -4579,7 +4693,8 @@ class MainWindow(QMainWindow):
                     self._guided_preview_visual_status_label.setText(
                         "Preview for ROI "
                         f"{preview.get('roi', '')}, segment "
-                        f"{preview.get('chunk_index', '')}. Review the preview "
+                        f"{preview.get('preview_segment_label') or preview.get('chunk_index', '')}. "
+                        "Review the preview "
                         "below, then choose a strategy for this ROI. The plot "
                         "shows the Raw "
                         "signal, Reference/control signal, Corrected signal, "
@@ -4698,6 +4813,22 @@ class MainWindow(QMainWindow):
                 lines.append(f"Warnings: {'; '.join(str(x) for x in warnings)}")
             if errors:
                 lines.append(f"Errors: {'; '.join(str(x) for x in errors)}")
+            diagnostics = result.get("local_preview_diagnostics")
+            if isinstance(diagnostics, dict):
+                lines.extend(
+                    [
+                        "Local preview load details:",
+                        "Selected segment: "
+                        f"{diagnostics.get('selected_segment_label', '')}",
+                        "Discovered session index: "
+                        f"{diagnostics.get('selected_segment_index', '')}",
+                        f"Source path: {diagnostics.get('source_path', '')}",
+                        "Adapter-local chunk ID: "
+                        f"{diagnostics.get('adapter_local_chunk_id', '')}",
+                        f"Input format: {diagnostics.get('input_format', '')}",
+                        f"Load error: {diagnostics.get('adapter_error', '') or 'none'}",
+                    ]
+                )
             if not lines:
                 lines.append("Errors/warnings: none reported by preview backend.")
             self._guided_preview_messages_label.setText("\n".join(lines))
@@ -5088,6 +5219,7 @@ class MainWindow(QMainWindow):
         source_id = str(getattr(self, "_guided_preview_loaded_run_dir", "") or "")
         roi = self._selected_guided_preview_roi()
         chunk = self._selected_guided_preview_chunk()
+        segment = self._selected_guided_preview_segment()
         methods = self._selected_guided_preview_methods()
         if (
             not source_path
@@ -5105,20 +5237,7 @@ class MainWindow(QMainWindow):
             return
         try:
             if source_type == "local_raw_segment":
-                sessions = {
-                    int(entry.get("index", -1)): entry
-                    for entry in (
-                        (getattr(self, "_discovery_cache", None) or {}).get(
-                            "sessions", []
-                        )
-                    )
-                    if isinstance(entry, dict)
-                }
-                entry = sessions.get(int(chunk))
-                if not entry or not entry.get("path"):
-                    raise RuntimeError(
-                        "The selected preview segment is no longer available."
-                    )
+                segment = self._resolve_guided_local_preview_segment()
                 preview_id = (
                     "local_correction_preview_"
                     f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_"
@@ -5129,32 +5248,46 @@ class MainWindow(QMainWindow):
                     "_guided_workflow",
                     "local_previews",
                 )
-                config_overrides = self._infer_dataset_contract_overrides(
-                    str(
-                        (getattr(self, "_discovery_cache", None) or {}).get(
-                            "resolved_format",
-                            self._format_combo.currentText(),
+                if segment["input_format"] == "rwd":
+                    local_contract = self._infer_rwd_chunk_contract(
+                        str(segment["source_path"])
+                    )
+                    config_overrides = {
+                        "target_fs_hz": float(local_contract["fs_hz"]),
+                        "chunk_duration_sec": float(
+                            local_contract["chunk_duration_sec"]
+                        ),
+                        "rwd_time_col": str(
+                            local_contract["time_col"]
+                        ),
+                        "uv_suffix": str(local_contract["uv_suffix"]),
+                        "sig_suffix": str(local_contract["sig_suffix"]),
+                    }
+                else:
+                    config_overrides = (
+                        self._infer_dataset_contract_overrides(
+                            str(segment["input_format"])
                         )
                     )
-                )
                 if not isinstance(config_overrides, dict):
                     config_overrides = {}
                 duration_text = self._duration_edit.text().strip()
-                if duration_text:
+                if duration_text and segment["input_format"] != "rwd":
                     config_overrides["chunk_duration_sec"] = float(
                         duration_text
                     )
                 result = run_guided_local_correction_preview(
-                    str(entry["path"]),
+                    str(segment["source_path"]),
                     os.path.join(preview_root, preview_id),
                     roi=roi,
                     chunk_index=int(chunk),
-                    input_format=str(
-                        (getattr(self, "_discovery_cache", None) or {}).get(
-                            "resolved_format",
-                            self._format_combo.currentText(),
-                        )
+                    adapter_chunk_index=int(
+                        segment.get("adapter_chunk_index", 0)
                     ),
+                    segment_label=str(
+                        segment.get("segment_label") or chunk
+                    ),
+                    input_format=str(segment["input_format"]),
                     config_path=self._active_config_source_path(),
                     methods=methods,
                     preview_id=preview_id,
@@ -5182,6 +5315,28 @@ class MainWindow(QMainWindow):
                     **kwargs,
                 )
         except Exception as exc:
+            local_diagnostics = {}
+            if source_type == "local_raw_segment":
+                raw_segment = segment or {}
+                local_diagnostics = {
+                    "selected_segment_label": str(
+                        raw_segment.get("segment_label") or chunk or ""
+                    ),
+                    "selected_segment_index": chunk,
+                    "source_path": str(
+                        raw_segment.get("source_path") or ""
+                    ),
+                    "adapter_local_chunk_id": raw_segment.get(
+                        "adapter_chunk_index", 0
+                    ),
+                    "input_format": str(
+                        (getattr(self, "_discovery_cache", None) or {}).get(
+                            "resolved_format",
+                            self._format_combo.currentText(),
+                        )
+                    ).lower(),
+                    "adapter_error": f"{type(exc).__name__}: {exc}",
+                }
             result = {
                 "ok": False,
                 "status": "failed",
@@ -5191,6 +5346,11 @@ class MainWindow(QMainWindow):
                 "method_statuses": {},
                 "warnings": [],
                 "errors": [str(exc)],
+                "source_type": source_type,
+                "preview_segment_label": str(
+                    local_diagnostics.get("selected_segment_label", "")
+                ),
+                "local_preview_diagnostics": local_diagnostics,
             }
         self._guided_preview_has_result = True
         self._guided_preview_result_stale = False
@@ -5222,7 +5382,10 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self._guided_preview_status_label.setText(
-                    "Correction preview: failed."
+                    "Could not load the selected preview segment. Try another "
+                    "segment or check that the source file is still available."
+                    if source_type == "local_raw_segment"
+                    else "Correction preview: failed."
                 )
         self._populate_guided_preview_result_widgets(result)
         self._refresh_guided_preview_enablement()
@@ -6262,9 +6425,8 @@ class MainWindow(QMainWindow):
             signal_group.setVisible(preview_unlocked and evidence_ready)
         if new_analysis and local_preview_ready and not strategy_unlocked:
             self._guided_confirm_locked_label.setText(
-                "Local preview is available for method review. Strategy "
-                "confirmation remains locked in this prototype until reusable "
-                "correction evidence is prepared."
+                "Review the local preview above. Strategy confirmation from "
+                "local preview will be enabled in a later step."
             )
         if new_analysis:
             for widget_name in (
@@ -9698,7 +9860,7 @@ class MainWindow(QMainWindow):
         self._guided_export_editor_synced_run = run_dir
 
     def _build_guided_confirm_strategy_step(self) -> QWidget:
-        wrapper = QGroupBox("3. Choose correction strategy")
+        wrapper = QGroupBox("2. Choose correction strategy")
         wrapper.setObjectName("guidedConfirmStrategyContent")
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
