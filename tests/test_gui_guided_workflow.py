@@ -2303,8 +2303,8 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
     assert signal_panel is not None
     assert preview_panel is not None
     assert signal_panel is not preview_panel
-    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedCorrectionPreviewArtifactsPanel").isChecked() is False
-    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedSignalOnlyF0ArtifactsPanel").isChecked() is False
+    assert window._guided_preview_technical_details_group.isHidden() is True
+    assert window._guided_signal_f0_technical_details_group.isHidden() is True
     assert "Load a completed run to generate Signal-Only F0 diagnostic review artifacts" in (
         window._guided_signal_f0_source_status_label.text()
     )
@@ -3253,7 +3253,7 @@ def test_guided_correction_preview_panel_populates_from_loaded_completed_run(win
     assert "Signal-Only F0" not in method_text
     assert "Decision-Support Audit" not in method_text
     assert "No Correction" not in method_text
-    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedCorrectionPreviewArtifactsPanel").isChecked() is False
+    assert window._guided_preview_technical_details_group.isHidden() is True
 
 
 def test_guided_signal_only_f0_panel_populates_from_loaded_completed_run(window, tmp_path, monkeypatch):
@@ -3280,7 +3280,7 @@ def test_guided_signal_only_f0_panel_populates_from_loaded_completed_run(window,
     assert window._guided_signal_f0_generate_btn.isEnabled() is True
     method_text = " ".join(cb.text() for cb in window._guided_preview_method_checkboxes.values())
     assert "Signal-Only F0" not in method_text
-    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedSignalOnlyF0ArtifactsPanel").isChecked() is False
+    assert window._guided_signal_f0_technical_details_group.isHidden() is True
 
 
 def test_guided_diagnostics_long_completed_run_paths_are_compact_in_visible_labels(window, tmp_path, monkeypatch):
@@ -4735,8 +4735,11 @@ def test_correction_preview_ready_has_openable_review_summary(
     assert "ROI: CH1" in text
     assert "Preview segment: 0" in text
     assert "Methods compared:" in text
-    assert window._guided_preview_open_btn.text() == "Open correction preview"
-    assert window._guided_preview_open_btn.isHidden() is False
+    assert window._guided_preview_open_btn.text() == "Open exported report"
+    assert window._guided_preview_technical_details_group.isHidden() is True
+    assert window._guided_preview_technical_toggle_btn.text() == (
+        "Show technical details"
+    )
     report_path = Path(result["user_report_path"])
     assert report_path.name == "correction_preview_report.html"
     report_text = report_path.read_text(encoding="utf-8")
@@ -4759,14 +4762,26 @@ def test_correction_preview_ready_has_openable_review_summary(
         for count in result["visual_trace_sample_counts"].values()
     )
     assert window._guided_preview_visual_label.pixmap().isNull() is False
+    assert window._guided_preview_visual_display_width <= 820
+    assert window._guided_preview_visual_display_width <= max(
+        320, window._guided_preview_visual_viewport_width - 72
+    )
     visual_text = window._guided_preview_visual_status_label.text()
     assert "Reference/control signal" in visual_text
     assert "Corrected signal" in visual_text
     assert "Fitted reference" in visual_text
 
+    assert opened == []
+    window._guided_preview_technical_toggle_btn.click()
+    assert window._guided_preview_technical_details_group.isHidden() is False
+    assert window._guided_preview_technical_toggle_btn.text() == (
+        "Hide technical details"
+    )
     window._guided_preview_open_btn.click()
 
     assert opened == [str(report_path)]
+    window._guided_preview_technical_toggle_btn.click()
+    assert window._guided_preview_technical_details_group.isHidden() is True
 
 
 def test_signal_only_f0_preview_has_plain_review_affordance(
@@ -4827,7 +4842,10 @@ def test_signal_only_f0_preview_has_plain_review_affordance(
             QLabel, "guidedSignalOnlyF0DiagnosticIntro"
         ).text()
     )
-    assert window._guided_signal_f0_open_btn.isHidden() is False
+    assert window._guided_signal_f0_technical_details_group.isHidden() is True
+    assert window._guided_signal_f0_technical_toggle_btn.text() == (
+        "Show technical details"
+    )
     report_path = Path(
         window._guided_signal_f0_last_result["user_report_path"]
     )
@@ -4835,6 +4853,10 @@ def test_signal_only_f0_preview_has_plain_review_affordance(
     assert "Signal-Only F0 preview" in report_path.read_text(
         encoding="utf-8"
     )
+    assert opened == []
+    window._guided_signal_f0_technical_toggle_btn.click()
+    assert window._guided_signal_f0_technical_details_group.isHidden() is False
+    assert window._guided_signal_f0_open_btn.text() == "Open exported report"
     window._guided_signal_f0_open_btn.click()
     assert opened == [str(report_path)]
 

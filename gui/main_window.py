@@ -3192,12 +3192,12 @@ class MainWindow(QMainWindow):
             "guidedCorrectionPreviewVisual"
         )
         self._guided_preview_visual_label.setAlignment(Qt.AlignCenter)
-        self._guided_preview_visual_label.setMinimumHeight(300)
+        self._guided_preview_visual_label.setMinimumSize(0, 0)
         self._guided_preview_visual_label.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Preferred
         )
         preview_layout.addWidget(self._guided_preview_visual_label)
-        self._guided_preview_open_btn = QPushButton("Open correction preview")
+        self._guided_preview_open_btn = QPushButton("Open exported report")
         self._guided_preview_open_btn.setObjectName(
             "guidedCorrectionPreviewOpenButton"
         )
@@ -3209,11 +3209,25 @@ class MainWindow(QMainWindow):
         self._guided_preview_visual_label.setVisible(False)
         self._guided_preview_open_btn.setVisible(False)
 
-        artifacts_group = QGroupBox("Technical details")
+        self._guided_preview_technical_toggle_btn = QPushButton(
+            "Show technical details"
+        )
+        self._guided_preview_technical_toggle_btn.setObjectName(
+            "guidedCorrectionPreviewTechnicalToggle"
+        )
+        self._guided_preview_technical_toggle_btn.clicked.connect(
+            self._toggle_guided_preview_technical_details
+        )
+        preview_layout.addWidget(
+            self._guided_preview_technical_toggle_btn,
+            alignment=Qt.AlignLeft,
+        )
+        self._guided_preview_gated_widgets.append(
+            self._guided_preview_technical_toggle_btn
+        )
+        artifacts_group = QWidget()
         artifacts_group.setObjectName("guidedCorrectionPreviewArtifactsPanel")
         self._guided_preview_technical_details_group = artifacts_group
-        artifacts_group.setCheckable(True)
-        artifacts_group.setChecked(False)
         artifacts_layout = QVBoxLayout(artifacts_group)
         artifacts_layout.setContentsMargins(8, 8, 8, 8)
         artifacts_layout.setSpacing(4)
@@ -3260,22 +3274,8 @@ class MainWindow(QMainWindow):
         self._guided_preview_result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._make_guided_widget_shrinkable(self._guided_preview_result_label)
         artifacts_layout.addWidget(self._guided_preview_result_label)
-        self._guided_preview_artifacts_detail_widgets = [
-            self._guided_preview_artifacts_label,
-            self._guided_preview_method_table,
-            self._guided_preview_messages_label,
-            self._guided_preview_result_label,
-        ]
-        for widget in self._guided_preview_artifacts_detail_widgets:
-            widget.setVisible(False)
-        artifacts_group.toggled.connect(
-            lambda checked: [
-                widget.setVisible(bool(checked))
-                for widget in getattr(self, "_guided_preview_artifacts_detail_widgets", [])
-            ]
-        )
+        artifacts_group.setVisible(False)
         preview_layout.addWidget(artifacts_group)
-        self._guided_preview_gated_widgets.append(artifacts_group)
 
         signal_group = QGroupBox("Signal-Only F0 preview")
         signal_group.setObjectName("guidedSignalOnlyF0DiagnosticPanel")
@@ -3350,9 +3350,7 @@ class MainWindow(QMainWindow):
         )
         self._guided_signal_f0_review_label.setWordWrap(True)
         signal_layout.addWidget(self._guided_signal_f0_review_label)
-        self._guided_signal_f0_open_btn = QPushButton(
-            "Open Signal-Only F0 preview"
-        )
+        self._guided_signal_f0_open_btn = QPushButton("Open exported report")
         self._guided_signal_f0_open_btn.setObjectName(
             "guidedSignalOnlyF0OpenButton"
         )
@@ -3362,13 +3360,24 @@ class MainWindow(QMainWindow):
         self._guided_signal_f0_review_label.setVisible(False)
         self._guided_signal_f0_open_btn.setVisible(False)
 
-        signal_artifacts_group = QGroupBox("Technical details")
+        self._guided_signal_f0_technical_toggle_btn = QPushButton(
+            "Show technical details"
+        )
+        self._guided_signal_f0_technical_toggle_btn.setObjectName(
+            "guidedSignalOnlyF0TechnicalToggle"
+        )
+        self._guided_signal_f0_technical_toggle_btn.clicked.connect(
+            self._toggle_guided_signal_f0_technical_details
+        )
+        signal_layout.addWidget(
+            self._guided_signal_f0_technical_toggle_btn,
+            alignment=Qt.AlignLeft,
+        )
+        signal_artifacts_group = QWidget()
         signal_artifacts_group.setObjectName("guidedSignalOnlyF0ArtifactsPanel")
         self._guided_signal_f0_technical_details_group = (
             signal_artifacts_group
         )
-        signal_artifacts_group.setCheckable(True)
-        signal_artifacts_group.setChecked(False)
         signal_artifacts_layout = QVBoxLayout(signal_artifacts_group)
         signal_artifacts_layout.setContentsMargins(8, 8, 8, 8)
         signal_artifacts_layout.setSpacing(4)
@@ -3418,19 +3427,7 @@ class MainWindow(QMainWindow):
         self._guided_signal_f0_messages_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._make_guided_widget_shrinkable(self._guided_signal_f0_messages_label)
         signal_artifacts_layout.addWidget(self._guided_signal_f0_messages_label)
-        self._guided_signal_f0_detail_widgets = [
-            self._guided_signal_f0_artifacts_label,
-            self._guided_signal_f0_chunk_table,
-            self._guided_signal_f0_messages_label,
-        ]
-        for widget in self._guided_signal_f0_detail_widgets:
-            widget.setVisible(False)
-        signal_artifacts_group.toggled.connect(
-            lambda checked: [
-                widget.setVisible(bool(checked))
-                for widget in getattr(self, "_guided_signal_f0_detail_widgets", [])
-            ]
-        )
+        signal_artifacts_group.setVisible(False)
         signal_layout.addWidget(signal_artifacts_group)
         preview_layout.addWidget(signal_group)
         self._guided_preview_gated_widgets.append(signal_group)
@@ -4108,9 +4105,9 @@ class MainWindow(QMainWindow):
             matplotlib.use("Agg")
             from matplotlib import pyplot as plt
 
-            with matplotlib.rc_context({"figure.dpi": 120}):
+            with matplotlib.rc_context({"figure.dpi": 100}):
                 figure, axes = plt.subplots(
-                    3, 1, figsize=(9.5, 8), sharex=True
+                    3, 1, figsize=(7.5, 6.5), sharex=True
                 )
                 first = next(iter(traces.values()))
                 axes[0].plot(
@@ -4387,6 +4384,50 @@ class MainWindow(QMainWindow):
         else:
             _open_file(path)
 
+    def _toggle_guided_preview_technical_details(self) -> None:
+        content = self._guided_preview_technical_details_group
+        visible = content.isHidden()
+        content.setVisible(visible)
+        self._guided_preview_technical_toggle_btn.setText(
+            "Hide technical details" if visible else "Show technical details"
+        )
+
+    def _toggle_guided_signal_f0_technical_details(self) -> None:
+        content = self._guided_signal_f0_technical_details_group
+        visible = content.isHidden()
+        content.setVisible(visible)
+        self._guided_signal_f0_technical_toggle_btn.setText(
+            "Hide technical details" if visible else "Show technical details"
+        )
+
+    def _fit_guided_preview_visual_to_page(self) -> None:
+        source = getattr(
+            self, "_guided_preview_visual_source_pixmap", QPixmap()
+        )
+        label = getattr(self, "_guided_preview_visual_label", None)
+        if (
+            label is None
+            or source.isNull()
+            or not hasattr(self, "_guided_workflow_stack")
+        ):
+            return
+        scroll = self._guided_workflow_stack.widget(
+            list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+        )
+        viewport_width = (
+            scroll.viewport().width()
+            if isinstance(scroll, QScrollArea)
+            else self._guided_workflow_stack.width()
+        )
+        target_width = max(320, min(820, int(viewport_width) - 72))
+        scaled = source.scaledToWidth(
+            target_width, Qt.SmoothTransformation
+        )
+        label.setMaximumWidth(target_width)
+        label.setPixmap(scaled)
+        self._guided_preview_visual_display_width = scaled.width()
+        self._guided_preview_visual_viewport_width = viewport_width
+
     def _on_open_guided_correction_preview(self) -> None:
         result = getattr(self, "_guided_preview_last_result", {}) or {}
         path = str(
@@ -4442,7 +4483,7 @@ class MainWindow(QMainWindow):
             self._guided_preview_review_label.setVisible(preview_ready)
             self._guided_preview_open_btn.setVisible(preview_ready)
             self._guided_preview_open_btn.setText(
-                "Open correction preview"
+                "Open exported report"
                 if preview.get("user_report_path")
                 else "Open preview folder"
             )
@@ -4461,24 +4502,21 @@ class MainWindow(QMainWindow):
             if visual_ready:
                 pixmap = QPixmap(visual_path)
                 if not pixmap.isNull():
-                    self._guided_preview_visual_label.setPixmap(
-                        pixmap.scaled(
-                            950,
-                            800,
-                            Qt.KeepAspectRatio,
-                            Qt.SmoothTransformation,
-                        )
-                    )
+                    self._guided_preview_visual_source_pixmap = pixmap
+                    self._fit_guided_preview_visual_to_page()
                     self._guided_preview_visual_status_label.setText(
                         "Preview for ROI "
                         f"{preview.get('roi', '')}, segment "
-                        f"{preview.get('chunk_index', '')}. Review the Raw "
+                        f"{preview.get('chunk_index', '')}. Review the preview "
+                        "below, then choose a strategy for this ROI. The plot "
+                        "shows the Raw "
                         "signal, Reference/control signal, Corrected signal, "
                         "and Fitted reference before confirming a strategy."
                     )
                 else:
                     visual_ready = False
             if preview_ready and not visual_ready:
+                self._guided_preview_visual_source_pixmap = QPixmap()
                 self._guided_preview_visual_label.setPixmap(QPixmap())
                 self._guided_preview_visual_status_label.setText(
                     "Correction preview was generated, but the visual preview "
@@ -4540,7 +4578,7 @@ class MainWindow(QMainWindow):
             self._guided_signal_f0_review_label.setVisible(signal_ready)
             self._guided_signal_f0_open_btn.setVisible(signal_ready)
             self._guided_signal_f0_open_btn.setText(
-                "Open Signal-Only F0 preview"
+                "Open exported report"
                 if signal.get("user_report_path")
                 else "Open Signal-Only F0 preview folder"
             )
@@ -14704,6 +14742,7 @@ class MainWindow(QMainWindow):
         self._apply_splitter_workspace_policy()
         self._render_tuning_overlay()
         self._render_correction_tuning_overlay()
+        QTimer.singleShot(0, self._fit_guided_preview_visual_to_page)
 
     def _update_adv_group_visibility(self):
         # In our GUI contract, "both" maps to mode_val=None (which implies phasic runs)
