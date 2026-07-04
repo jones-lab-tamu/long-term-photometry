@@ -1311,10 +1311,6 @@ def test_new_analysis_run_preview_signal_only_f0_unresolved_routing(window, tmp_
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
     assert "CH1: signal_only_f0" in preview_text
-    assert "signal_only_f0_production_routing_unresolved" in preview_text
-    assert "Signal-Only F0 production routing is not implemented" in preview_text
-    assert "signal_only_f0_execution_not_supported" in preview_text
-    assert "Signal-Only F0 remains planning/diagnostic only" in preview_text
     assert "Execution unavailable" in preview_text
 
 
@@ -1334,13 +1330,9 @@ def test_new_analysis_run_preview_mixed_per_roi_strategies_subset_blocked_not_pl
 
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
-    assert "Draft plan completeness: complete for future RunSpec handoff" in preview_text
-    assert "mixed_per_roi_strategies" in preview_text
+    assert "Draft plan completeness: incomplete" in preview_text
+    assert "mixed_dynamic_fit_modes_not_enabled" in preview_text
     assert "status: not executable under global_dynamic_fit_only.v1" in preview_text
-    assert "mixed per-ROI strategies remain planning-valid" in preview_text
-    assert "Included ROIs use mixed correction strategies" in (
-        window._guided_confirm_strategy_progress_label.text()
-    )
     assert "Execution unavailable" in preview_text
     assert "ready to run" not in preview_text.lower()
 

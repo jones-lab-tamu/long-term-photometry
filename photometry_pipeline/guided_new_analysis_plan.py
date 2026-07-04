@@ -669,7 +669,10 @@ def build_guided_per_roi_production_strategy_map(
         elif selected == "signal_only_f0":
             family = "signal_only_f0"
             dynamic_mode = None
-            blockers.append("signal_only_f0_production_routing_not_enabled")
+            if not plan.applied_dff_orchestration_enabled:
+                blockers.append(
+                    "signal_only_f0_production_routing_not_enabled"
+                )
         else:
             family = "unsupported"
             dynamic_mode = None
@@ -678,6 +681,11 @@ def build_guided_per_roi_production_strategy_map(
             blockers.append("non_explicit_strategy_for_included_roi")
         if choice.current_or_stale != "current":
             blockers.append("stale_strategy_for_included_roi")
+        evidence_reference = (
+            choice.evidence_reference
+            if isinstance(choice.evidence_reference, dict)
+            else {}
+        )
         entries.append(
             GuidedPerRoiProductionStrategy(
                 roi_id=roi,
@@ -685,11 +693,11 @@ def build_guided_per_roi_production_strategy_map(
                 dynamic_fit_mode=dynamic_mode,
                 selected_strategy=selected,
                 evidence_source_type=str(
-                    choice.evidence_reference.get("evidence_source_type")
+                    evidence_reference.get("evidence_source_type")
                     or choice.source_type
                     or ""
                 ),
-                evidence_reference=dict(choice.evidence_reference),
+                evidence_reference=dict(evidence_reference),
                 explicit_user_mark=bool(choice.explicit_user_mark),
                 current_or_stale=str(choice.current_or_stale or "stale"),
             )
@@ -702,15 +710,16 @@ def build_guided_per_roi_production_strategy_map(
     }
     families = {entry.strategy_family for entry in entries}
     legacy_mode = None
-    if (
-        len(entries) == len(included)
-        and families == {"dynamic_fit"}
-        and len(dynamic_modes) == 1
-    ):
+    if len(entries) == len(included) and len(dynamic_modes) == 1:
         legacy_mode = next(iter(dynamic_modes))
-    elif len(dynamic_modes) > 1:
+    if len(dynamic_modes) > 1:
         blockers.append("mixed_dynamic_fit_modes_not_enabled")
-    elif len(families) > 1:
+    if "signal_only_f0" in families and not dynamic_modes:
+        blockers.append("all_signal_only_f0_not_supported")
+    if (
+        len(families) > 1
+        and not plan.applied_dff_orchestration_enabled
+    ):
         blockers.append("mixed_strategy_families_not_enabled")
 
     unique_blockers = tuple(dict.fromkeys(blockers))
@@ -938,6 +947,9 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
             == "local_correction_preview"
             and choices_by_roi[roi].current_or_stale == "current"
             and choices_by_roi[roi].explicit_user_mark
+            and isinstance(
+                choices_by_roi[roi].evidence_reference, dict
+            )
             and choices_by_roi[roi].evidence_reference.get("preview_only")
             is True
             and choices_by_roi[roi].evidence_reference.get(
@@ -1017,6 +1029,56 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
                 if choice.diagnostic_scope_signature != plan.diagnostic_scope_signature:
                     is_choice_stale = True
                     choice_stale_reasons.append("diagnostic scope signature mismatch")
+            elif choice.selected_strategy == "signal_only_f0":
+                reference = (
+                    choice.evidence_reference
+                    if isinstance(choice.evidence_reference, dict)
+                    else None
+                )
+                if (
+                    not reference
+                    or reference.get("evidence_source_type")
+                    != "local_preview"
+                ):
+                    issues.append(GuidedPlanIssue(
+                        category="signal_only_f0_preview_evidence_missing",
+                        message=(
+                            f"ROI '{roi}' has no local Signal-Only F0 "
+                            "preview evidence."
+                        ),
+                        severity="blocking",
+                    ))
+                else:
+                    if (
+                        reference.get("preview_only") is not True
+                        or reference.get("production_analysis") is not False
+                        or reference.get("strategy_family")
+                        != "signal_only_f0"
+                        or reference.get("selected_strategy")
+                        != "signal_only_f0"
+                        or reference.get("dynamic_fit_mode") is not None
+                        or reference.get("valid") is not True
+                    ):
+                        issues.append(GuidedPlanIssue(
+                            category="signal_only_f0_preview_evidence_invalid",
+                            message=(
+                                f"ROI '{roi}' Signal-Only F0 preview "
+                                "evidence is invalid."
+                            ),
+                            severity="blocking",
+                        ))
+                    if (
+                        reference.get("current_or_stale") != "current"
+                        or choice.current_or_stale != "current"
+                    ):
+                        issues.append(GuidedPlanIssue(
+                            category="signal_only_f0_preview_evidence_stale",
+                            message=(
+                                f"ROI '{roi}' Signal-Only F0 preview "
+                                "evidence is stale."
+                            ),
+                            severity="blocking",
+                        ))
             elif (
                 choice.evidence_reference.get("preview_only") is not True
                 or choice.evidence_reference.get("production_analysis")
@@ -1062,6 +1124,37 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
                     message=f"Strategy '{choice.selected_strategy}' for ROI '{roi}' is unknown/invalid.",
                     severity="blocking"
                 ))
+
+    strategy_map = build_guided_per_roi_production_strategy_map(plan)
+    for category in strategy_map.blocking_categories:
+        if category not in {
+            "all_signal_only_f0_not_supported",
+            "mixed_dynamic_fit_modes_not_enabled",
+            "mixed_strategy_families_not_enabled",
+            "signal_only_f0_production_routing_not_enabled",
+        }:
+            continue
+        messages = {
+            "all_signal_only_f0_not_supported": (
+                "At least one included ROI must use a dynamic-fit strategy; "
+                "all-Signal-Only F0 runs are not supported."
+            ),
+            "mixed_dynamic_fit_modes_not_enabled": (
+                "All dynamic-fit ROIs must use one shared dynamic-fit mode."
+            ),
+            "mixed_strategy_families_not_enabled": (
+                "Mixed dynamic-fit and Signal-Only F0 strategies require "
+                "applied-dF/F orchestration."
+            ),
+            "signal_only_f0_production_routing_not_enabled": (
+                "Signal-Only F0 requires applied-dF/F orchestration."
+            ),
+        }
+        issues.append(GuidedPlanIssue(
+            category=category,
+            message=messages[category],
+            severity="blocking",
+        ))
 
     # Evidence result missing checks
     if plan.correction_preview_result_id:
@@ -1896,10 +1989,13 @@ def evaluate_guided_new_analysis_execution_subset_readiness(
                 "forbidden_strategy_state",
                 f"Strategy '{choice.selected_strategy}' for ROI '{choice.roi_id}' is forbidden for execution.",
             ))
-        elif choice.selected_strategy == "signal_only_f0":
+        elif (
+            choice.selected_strategy == "signal_only_f0"
+            and not plan.applied_dff_orchestration_enabled
+        ):
             issues.append(_execution_subset_issue(
                 "signal_only_f0_execution_not_supported",
-                "Signal-Only F0 remains planning/diagnostic only until applied-dF/F routing is designed.",
+                "Signal-Only F0 requires applied-dF/F orchestration.",
             ))
         elif choice.selected_strategy not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
             issues.append(_execution_subset_issue(
@@ -1907,13 +2003,33 @@ def evaluate_guided_new_analysis_execution_subset_readiness(
                 f"Strategy '{choice.selected_strategy}' is not supported by the first execution subset.",
             ))
 
-    if len(unique_strategies) > 1:
+    dynamic_strategies = {
+        strategy
+        for strategy in unique_strategies
+        if strategy in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+    }
+    has_signal_only_f0 = "signal_only_f0" in unique_strategies
+    if has_signal_only_f0 and not dynamic_strategies:
+        issues.append(_execution_subset_issue(
+            "all_signal_only_f0_not_supported",
+            "At least one included ROI must use dynamic fit.",
+        ))
+    if len(dynamic_strategies) > 1:
+        issues.append(_execution_subset_issue(
+            "mixed_dynamic_fit_modes_not_enabled",
+            "All dynamic-fit ROIs must use one shared dynamic-fit strategy.",
+        ))
+    elif len(dynamic_strategies) == 1:
+        allowed_dynamic_fit_strategy = next(iter(dynamic_strategies))
+    if (
+        has_signal_only_f0
+        and dynamic_strategies
+        and not plan.applied_dff_orchestration_enabled
+    ):
         issues.append(_execution_subset_issue(
             "mixed_per_roi_strategies",
-            "Included ROIs use mixed correction strategies; first subset requires one shared dynamic-fit strategy.",
+            "Mixed strategies require applied-dF/F orchestration.",
         ))
-    elif len(unique_strategies) == 1 and unique_strategies[0] in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
-        allowed_dynamic_fit_strategy = unique_strategies[0]
 
     if (
         allowed_dynamic_fit_strategy
@@ -2560,10 +2676,32 @@ def _correction_strategy_run_preview_unresolved_items(
 
     selected = [choice.selected_strategy for choice in included_choices]
     unique_strategies = tuple(dict.fromkeys(selected))
-    if len(unique_strategies) > 1:
+    dynamic_strategies = {
+        strategy
+        for strategy in unique_strategies
+        if strategy in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+    }
+    has_signal_only_f0 = "signal_only_f0" in unique_strategies
+    if len(dynamic_strategies) > 1:
+        unresolved.append(GuidedNewAnalysisRunPreviewIssue(
+            category="mixed_dynamic_fit_modes_not_enabled",
+            message="All dynamic-fit ROIs must use one shared dynamic-fit strategy.",
+            severity="blocking",
+        ))
+    if has_signal_only_f0 and not dynamic_strategies:
+        unresolved.append(GuidedNewAnalysisRunPreviewIssue(
+            category="all_signal_only_f0_not_supported",
+            message="At least one included ROI must use dynamic fit.",
+            severity="blocking",
+        ))
+    if (
+        has_signal_only_f0
+        and dynamic_strategies
+        and not plan.applied_dff_orchestration_enabled
+    ):
         unresolved.append(GuidedNewAnalysisRunPreviewIssue(
             category="mixed_per_roi_strategies",
-            message="Included ROIs use mixed correction strategies; first subset requires one shared dynamic-fit strategy.",
+            message="Mixed strategies require applied-dF/F orchestration.",
             severity="blocking",
         ))
 
@@ -2586,10 +2724,13 @@ def _correction_strategy_run_preview_unresolved_items(
                 message=f"Strategy '{choice.selected_strategy}' for ROI '{choice.roi_id}' is forbidden for execution.",
                 severity="blocking",
             ))
-        elif choice.selected_strategy == "signal_only_f0":
+        elif (
+            choice.selected_strategy == "signal_only_f0"
+            and not plan.applied_dff_orchestration_enabled
+        ):
             unresolved.append(GuidedNewAnalysisRunPreviewIssue(
                 category="signal_only_f0_production_routing_unresolved",
-                message="Signal-Only F0 production routing is not implemented for Guided new_analysis.",
+                message="Signal-Only F0 requires applied-dF/F orchestration.",
                 severity="blocking",
             ))
         elif choice.selected_strategy not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
@@ -3933,7 +4074,11 @@ def build_guided_first_subset_executable_mapping_preview(
         unsupported_categories.append("unsupported_acquisition_mode_for_first_subset_mapping")
     if "signal_only_f0_execution_not_supported" in spec_preview.blocking_issue_categories:
         unsupported_categories.append("signal_only_f0_production_routing_not_supported")
-    if "mixed_per_roi_strategies" in spec_preview.blocking_issue_categories:
+    if (
+        "mixed_per_roi_strategies" in spec_preview.blocking_issue_categories
+        or "mixed_dynamic_fit_modes_not_enabled"
+        in spec_preview.blocking_issue_categories
+    ):
         unsupported_categories.append("mixed_per_roi_strategy_execution_not_supported")
 
     section_blockers = []

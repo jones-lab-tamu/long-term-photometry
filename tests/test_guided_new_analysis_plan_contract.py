@@ -209,6 +209,167 @@ def test_per_roi_strategy_map_represents_mixed_dynamic_modes_without_collapse():
     )
 
 
+def test_per_roi_strategy_map_allows_enabled_uniform_mixed_families():
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        excluded_roi_ids=[],
+        applied_dff_orchestration_enabled=True,
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="CH1",
+                selected_strategy="robust_global_event_reject",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+            GuidedPlanCorrectionChoice(
+                roi_id="CH2",
+                selected_strategy="signal_only_f0",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+        ],
+    )
+
+    strategy_map = build_guided_per_roi_production_strategy_map(plan)
+
+    assert [entry.strategy_family for entry in strategy_map.entries] == [
+        "dynamic_fit", "signal_only_f0"
+    ]
+    assert strategy_map.entries[1].dynamic_fit_mode is None
+    assert strategy_map.legacy_global_dynamic_fit_mode == (
+        "robust_global_event_reject"
+    )
+    assert strategy_map.execution_routing_supported is True
+    assert strategy_map.blocking_categories == ()
+
+
+def test_per_roi_strategy_map_enabled_all_signal_only_still_blocks():
+    plan = _complete_new_analysis_plan(
+        applied_dff_orchestration_enabled=True,
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="signal_only_f0",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            )
+        ],
+    )
+
+    strategy_map = build_guided_per_roi_production_strategy_map(plan)
+
+    assert strategy_map.execution_routing_supported is False
+    assert "all_signal_only_f0_not_supported" in (
+        strategy_map.blocking_categories
+    )
+
+
+def test_signal_only_f0_missing_preview_evidence_blocks_without_crash():
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        excluded_roi_ids=[],
+        applied_dff_orchestration_enabled=True,
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="CH1",
+                selected_strategy="robust_global_event_reject",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+                evidence_reference={
+                    "evidence_source_type": "local_correction_preview",
+                    "preview_only": True,
+                    "production_analysis": False,
+                },
+            ),
+            GuidedPlanCorrectionChoice(
+                roi_id="CH2",
+                selected_strategy="signal_only_f0",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+                evidence_reference=None,
+            ),
+        ],
+    )
+
+    issues = evaluate_new_analysis_plan_issues(plan)
+
+    assert "signal_only_f0_preview_evidence_missing" in {
+        issue.category for issue in issues
+    }
+    assert evaluate_new_analysis_plan_readiness(
+        plan
+    ).plan_complete_for_handoff is False
+
+
+def test_signal_only_f0_invalid_preview_evidence_blocks_without_crash():
+    plan = _complete_new_analysis_plan(
+        applied_dff_orchestration_enabled=True,
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="signal_only_f0",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+                evidence_reference={
+                    "evidence_source_type": "local_preview",
+                    "preview_only": False,
+                    "production_analysis": False,
+                    "strategy_family": "signal_only_f0",
+                    "selected_strategy": "signal_only_f0",
+                    "dynamic_fit_mode": None,
+                    "valid": False,
+                    "current_or_stale": "current",
+                },
+            )
+        ],
+    )
+
+    categories = {
+        issue.category for issue in evaluate_new_analysis_plan_issues(plan)
+    }
+
+    assert "signal_only_f0_preview_evidence_invalid" in categories
+
+
+def test_signal_only_f0_stale_preview_evidence_blocks_without_crash():
+    plan = _complete_new_analysis_plan(
+        applied_dff_orchestration_enabled=True,
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="signal_only_f0",
+                source_type="local_correction_preview",
+                current_or_stale="stale",
+                explicit_user_mark=True,
+                evidence_reference={
+                    "evidence_source_type": "local_preview",
+                    "preview_only": True,
+                    "production_analysis": False,
+                    "strategy_family": "signal_only_f0",
+                    "selected_strategy": "signal_only_f0",
+                    "dynamic_fit_mode": None,
+                    "valid": True,
+                    "current_or_stale": "stale",
+                },
+            )
+        ],
+    )
+
+    categories = {
+        issue.category for issue in evaluate_new_analysis_plan_issues(plan)
+    }
+
+    assert "signal_only_f0_preview_evidence_stale" in categories
+
+
 def _current_applied_snapshot_for_plan(plan, **overrides):
     source_identity = GuidedNewAnalysisDatasetContractSourceIdentity(
         input_source_path=plan.input_source_path,
@@ -669,8 +830,9 @@ def test_run_preview_marks_signal_only_f0_production_routing_unresolved():
 
     preview = build_guided_new_analysis_run_preview(plan)
 
-    assert preview.readiness_snapshot["plan_complete_for_handoff"] is True
+    assert preview.readiness_snapshot["plan_complete_for_handoff"] is False
     categories = {item.category for item in preview.unresolved_items}
+    assert "all_signal_only_f0_not_supported" in categories
     assert "signal_only_f0_production_routing_unresolved" in categories
     assert preview.correction_strategy["per_roi_choices"][0]["selected_strategy"] == "signal_only_f0"
 
@@ -710,7 +872,7 @@ def test_run_preview_marks_mixed_dynamic_strategies_unresolved_without_generic_m
     preview = build_guided_new_analysis_run_preview(plan)
     categories = {item.category for item in preview.unresolved_items}
 
-    assert "mixed_per_roi_strategies" in categories
+    assert "mixed_dynamic_fit_modes_not_enabled" in categories
     assert "per_roi_correction_execution_contract_unresolved" not in categories
 
 
@@ -1303,11 +1465,18 @@ def test_execution_subset_mixed_dynamic_strategies_block_subset_not_planning_rea
     planning = evaluate_new_analysis_plan_readiness(plan)
     subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
 
-    assert planning.plan_complete_for_handoff is True
-    assert subset.planning_complete_for_handoff is True
+    assert planning.plan_complete_for_handoff is False
+    assert any(
+        issue.category == "mixed_dynamic_fit_modes_not_enabled"
+        for issue in planning.blocking_issues
+    )
+    assert subset.planning_complete_for_handoff is False
     assert subset.first_subset_executable is False
     assert subset.allowed_dynamic_fit_strategy is None
-    assert any(issue.category == "mixed_per_roi_strategies" for issue in subset.blocking_issues)
+    assert any(
+        issue.category == "mixed_dynamic_fit_modes_not_enabled"
+        for issue in subset.blocking_issues
+    )
 
 
 def test_execution_subset_signal_only_blocks_subset_not_planning_readiness():
@@ -1331,11 +1500,18 @@ def test_execution_subset_signal_only_blocks_subset_not_planning_readiness():
     planning = evaluate_new_analysis_plan_readiness(plan)
     subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
 
-    assert planning.plan_complete_for_handoff is True
-    assert subset.planning_complete_for_handoff is True
+    assert planning.plan_complete_for_handoff is False
+    assert any(
+        issue.category == "all_signal_only_f0_not_supported"
+        for issue in planning.blocking_issues
+    )
+    assert subset.planning_complete_for_handoff is False
     assert subset.first_subset_executable is False
     assert subset.allowed_dynamic_fit_strategy is None
-    assert any(issue.category == "signal_only_f0_execution_not_supported" for issue in subset.blocking_issues)
+    assert any(
+        issue.category == "all_signal_only_f0_not_supported"
+        for issue in subset.blocking_issues
+    )
 
 
 def test_execution_subset_duplicate_strategy_choice_for_included_roi_blocks_subset():
@@ -2949,7 +3125,10 @@ def test_execution_spec_preview_mixed_per_roi_strategies_block_without_collapse(
     preview = build_guided_new_analysis_execution_spec_preview(plan)
 
     assert preview.spec_preview_available is False
-    assert "mixed_per_roi_strategies" in preview.blocking_issue_categories
+    assert (
+        "mixed_dynamic_fit_modes_not_enabled"
+        in preview.blocking_issue_categories
+    )
     assert preview.correction["selected_global_dynamic_fit_strategy"] is None
     assert preview.correction["global_strategy_collapsed"] is False
     assert preview.correction["mixed_strategy_supported"] is False

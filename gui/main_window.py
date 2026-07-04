@@ -3230,7 +3230,8 @@ class MainWindow(QMainWindow):
         preview_layout.addWidget(self._guided_preview_visual_label)
         self._guided_local_signal_f0_preview_label = QLabel(
             "Signal-Only F0 preview\n"
-            "Preview evidence only. Production selection is not enabled yet. "
+            "Preview evidence only. Generate a valid local preview to enable "
+            "selection for this ROI. "
             "This preview does not write production outputs."
         )
         self._guided_local_signal_f0_preview_label.setObjectName(
@@ -3844,6 +3845,22 @@ class MainWindow(QMainWindow):
                 and str(entry.get("roi") or "")
                 in set(self._guided_selected_roi_ids()[1])
             )
+            if current and entry.get("strategy") == "signal_only_f0":
+                candidate = (
+                    self._guided_local_preview_locked_evidence_for_roi(
+                        str(entry.get("roi") or ""),
+                        "signal_only_f0",
+                    )
+                )
+                reference = entry.get("local_preview_evidence")
+                current = bool(
+                    self._guided_signal_only_f0_preview_is_eligible(
+                        candidate
+                    )
+                    and isinstance(reference, dict)
+                    and reference.get("preview_id")
+                    == candidate.get("preview_id")
+                )
             if not current:
                 updated["current"] = False
                 updated["stale"] = True
@@ -3905,7 +3922,7 @@ class MainWindow(QMainWindow):
             self._guided_local_signal_f0_preview_label.setText(
                 "Signal-Only F0 preview\n"
                 "Preview evidence is stale; generate the local preview again. "
-                "Production selection is not enabled yet."
+                "Signal-Only F0 cannot be selected from stale evidence."
             )
         self._refresh_guided_preview_review_affordances()
         self._refresh_guided_generated_outputs_summary()
@@ -4941,7 +4958,10 @@ class MainWindow(QMainWindow):
                         f"samples {metrics.get('sample_count', '')}; "
                         f"minimum dF/F {metrics.get('dff_min', '')}; "
                         "negative dF/F samples "
-                        f"{metrics.get('negative_dff_count', '')}."
+                        f"{metrics.get('negative_dff_count', '')}. Current "
+                        "preview evidence is available. Signal-Only F0 can "
+                        "now be selected for this ROI. Final production "
+                        "recomputes applied dF/F during Run."
                     )
                 else:
                     details = (
@@ -4950,15 +4970,15 @@ class MainWindow(QMainWindow):
                     )
                 self._guided_local_signal_f0_preview_label.setText(
                     "Signal-Only F0 preview\n"
-                    "Preview evidence only. Production selection is not "
-                    "enabled yet. This preview does not write production "
+                    "Preview evidence only. Selection requires current valid "
+                    "evidence. This preview does not write production "
                     f"outputs.\n{details}"
                 )
             else:
                 self._guided_local_signal_f0_preview_label.setText(
                     "Signal-Only F0 preview\n"
-                    "Local preview evidence is available only for a selected "
-                    "raw segment. Production selection is not enabled yet."
+                    "Generate a valid local preview to enable selection for "
+                    "this ROI."
                 )
         self._refresh_guided_preview_review_affordances()
         self._refresh_guided_generated_outputs_summary()
@@ -4975,8 +4995,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_guided_local_signal_f0_preview_label"):
             self._guided_local_signal_f0_preview_label.setText(
                 "Signal-Only F0 preview\n"
-                "Preview evidence only. Production selection is not enabled "
-                "yet. This preview does not write production outputs."
+                "Preview evidence only. Generate a valid local preview to "
+                "enable selection. This preview does not write production "
+                "outputs."
             )
         self._refresh_guided_generated_outputs_summary()
 
@@ -6555,6 +6576,10 @@ class MainWindow(QMainWindow):
         locked_candidates: dict[str, dict[str, object]] = {}
         signal_f0 = result.get("signal_only_f0_preview_evidence")
         if isinstance(signal_f0, dict):
+            signal_f0_selectable = bool(
+                signal_f0.get("valid") is True
+                and signal_f0.get("current_or_stale") == "current"
+            )
             locked_candidates["signal_only_f0"] = {
                 **dict(signal_f0),
                 "preview_id": str(result.get("preview_id") or ""),
@@ -6569,10 +6594,12 @@ class MainWindow(QMainWindow):
                 "source_file_hash": str(
                     provenance.get("source_file_sha256") or ""
                 ),
-                "selectable": False,
-                "locked": True,
+                "selectable": signal_f0_selectable,
+                "locked": not signal_f0_selectable,
                 "lock_reason": (
-                    "Production selection is not enabled yet."
+                    ""
+                    if signal_f0_selectable
+                    else "Current valid preview evidence is required."
                 ),
             }
         self._guided_local_preview_evidence_by_roi[roi] = {
@@ -6634,9 +6661,68 @@ class MainWindow(QMainWindow):
             return None
         return candidate
 
+    @staticmethod
+    def _guided_signal_only_f0_preview_is_eligible(
+        candidate: object,
+    ) -> bool:
+        return bool(
+            isinstance(candidate, dict)
+            and candidate.get("valid") is True
+            and candidate.get("current_or_stale") == "current"
+            and candidate.get("preview_only") is True
+            and candidate.get("production_analysis") is False
+            and candidate.get("strategy_family") == "signal_only_f0"
+            and candidate.get("selected_strategy") == "signal_only_f0"
+            and candidate.get("dynamic_fit_mode") is None
+            and candidate.get("selectable") is True
+            and candidate.get("locked") is False
+        )
+
     def _guided_local_preview_evidence_reference(
         self, strategy: str, *, roi: str | None = None
     ) -> dict[str, object] | None:
+        if strategy == "signal_only_f0" and roi:
+            candidate = self._guided_local_preview_locked_evidence_for_roi(
+                roi, strategy
+            )
+            if not self._guided_signal_only_f0_preview_is_eligible(
+                candidate
+            ):
+                return None
+            return {
+                "evidence_source_type": "local_preview",
+                "strategy_family": "signal_only_f0",
+                "selected_strategy": "signal_only_f0",
+                "dynamic_fit_mode": None,
+                "preview_only": True,
+                "production_analysis": False,
+                "explicit_user_mark": False,
+                "current_or_stale": "current",
+                "valid": True,
+                "roi": str(roi),
+                "roi_id": str(roi),
+                "preview_id": str(candidate.get("preview_id") or ""),
+                "setup_signature": str(
+                    candidate.get("setup_signature") or ""
+                ),
+                "selected_segment_label": str(
+                    candidate.get("selected_segment_label") or ""
+                ),
+                "selected_segment_index": candidate.get(
+                    "selected_segment_index"
+                ),
+                "source_file": str(candidate.get("source_file") or ""),
+                "source_file_hash": str(
+                    candidate.get("source_file_hash") or ""
+                ),
+                "metrics": dict(candidate.get("metrics") or {}),
+                "issues": list(candidate.get("issues") or []),
+                "warnings": list(candidate.get("warnings") or []),
+                "message": (
+                    "Confirmed from local Signal-Only F0 preview evidence. "
+                    "Final analysis recomputes applied dF/F during Run."
+                ),
+            }
         current = (
             self._guided_local_preview_evidence_for_roi(roi)
             if roi
@@ -6730,6 +6816,14 @@ class MainWindow(QMainWindow):
         self._guided_strategy_choices[source_key] = {
             "strategy": strategy,
             "strategy_label": self._guided_confirm_strategy_label(strategy),
+            "strategy_family": (
+                "signal_only_f0"
+                if strategy == "signal_only_f0"
+                else "dynamic_fit"
+            ),
+            "dynamic_fit_mode": (
+                None if strategy == "signal_only_f0" else strategy
+            ),
             "confirmed": True,
             "source_type": LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
             "evidence_source_type": LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
@@ -6801,6 +6895,15 @@ class MainWindow(QMainWindow):
                         self._guided_confirm_strategy_label(strategy),
                         strategy,
                     )
+            signal_f0_candidate = (
+                self._guided_local_preview_locked_evidence_for_roi(
+                    roi, "signal_only_f0"
+                )
+            )
+            if self._guided_signal_only_f0_preview_is_eligible(
+                signal_f0_candidate
+            ):
+                combo.addItem("Signal-Only F0", "signal_only_f0")
             saved_strategy = str(
                 self._guided_local_preview_row_strategy_by_roi.get(roi) or ""
             )
@@ -8800,7 +8903,7 @@ class MainWindow(QMainWindow):
                 )
             )
 
-        current_explicit_modes_by_roi: dict[str, list[str]] = {}
+        current_explicit_choices_by_roi: dict[str, list[str]] = {}
         supported_dynamic_fit_modes = set(
             GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE.values()
         )
@@ -8809,22 +8912,32 @@ class MainWindow(QMainWindow):
                 choice.roi_id in included
                 and choice.current_or_stale == "current"
                 and choice.explicit_user_mark
-                and choice.selected_strategy in supported_dynamic_fit_modes
+                and (
+                    choice.selected_strategy in supported_dynamic_fit_modes
+                    or choice.selected_strategy == "signal_only_f0"
+                )
             ):
-                current_explicit_modes_by_roi.setdefault(
+                current_explicit_choices_by_roi.setdefault(
                     choice.roi_id, []
                 ).append(choice.selected_strategy)
         unanimous_confirmed_mode = None
         if included and all(
-            len(current_explicit_modes_by_roi.get(roi, ())) == 1
+            len(current_explicit_choices_by_roi.get(roi, ())) == 1
             for roi in included
         ):
             confirmed_modes = {
-                current_explicit_modes_by_roi[roi][0]
+                current_explicit_choices_by_roi[roi][0]
                 for roi in included
+                if current_explicit_choices_by_roi[roi][0]
+                in supported_dynamic_fit_modes
             }
             if len(confirmed_modes) == 1:
                 unanimous_confirmed_mode = next(iter(confirmed_modes))
+        has_confirmed_signal_only_f0 = any(
+            values == ["signal_only_f0"]
+            for roi, values in current_explicit_choices_by_roi.items()
+            if roi in included
+        )
         dynamic_fit_parameter_contract = (
             GuidedNewAnalysisDynamicFitParameterContract()
         )
@@ -8885,6 +8998,9 @@ class MainWindow(QMainWindow):
             elif intent in GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE:
                 global_corr_strategy = "dynamic_fit"
                 df_mode = GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE[intent]
+        if unanimous_confirmed_mode is not None:
+            global_corr_strategy = "dynamic_fit"
+            df_mode = unanimous_confirmed_mode
 
         return GuidedNewAnalysisDraftPlan(
             input_source_path=input_path,
@@ -8928,6 +9044,9 @@ class MainWindow(QMainWindow):
             signal_only_f0_path=sig_path,
             signal_only_f0_status=sig_status,
             signal_only_f0_source_cache_id=sig_source_cache_id,
+            applied_dff_orchestration_enabled=(
+                has_confirmed_signal_only_f0
+            ),
             feature_event_profile_status=getattr(self, "_guided_new_analysis_feature_event_profile_status", "missing"),
             feature_event_profile_id=self._guided_new_analysis_feature_event_profile.get("profile_id") if self._guided_new_analysis_feature_event_profile else None,
             feature_event_baseline_config_source=self._guided_new_analysis_feature_event_profile_baseline_source,

@@ -4855,7 +4855,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert "Preview evidence only" in (
         window._guided_local_signal_f0_preview_label.text()
     )
-    assert "Production selection is not enabled yet" in (
+    assert "Signal-Only F0 can now be selected for this ROI" in (
         window._guided_local_signal_f0_preview_label.text()
     )
     assert "Preview segment: session-2" in (
@@ -4883,6 +4883,10 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert rows["CH1"]["strategy_combo"].isEnabled() is True
     assert rows["CH2"]["evidence_label"].text() == "Preview first"
     assert rows["CH2"]["strategy_combo"].isEnabled() is False
+    assert (
+        rows["CH2"]["strategy_combo"].findData("signal_only_f0")
+        == -1
+    )
     assert rows["CH2"]["action_button"].isEnabled() is False
     assert rows["CH3"]["evidence_label"].text() == "Preview first"
     assert rows["CH3"]["action_button"].isEnabled() is False
@@ -4900,10 +4904,26 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert locked_signal_f0["production_analysis"] is False
     assert locked_signal_f0["explicit_user_mark"] is False
     assert locked_signal_f0["current_or_stale"] == "current"
-    assert locked_signal_f0["locked"] is True
-    assert locked_signal_f0["selectable"] is False
+    assert locked_signal_f0["locked"] is False
+    assert locked_signal_f0["selectable"] is True
     assert locked_signal_f0["metrics"]["sample_count"] == len(time_sec)
     ch1_signal_f0_preview_id = locked_signal_f0["preview_id"]
+    locked_signal_f0.update(
+        valid=False,
+        selectable=False,
+        locked=True,
+        issues=["invalid denominator"],
+    )
+    window._rebuild_guided_local_preview_confirmation_rows()
+    assert window._guided_local_preview_confirmation_rows["CH1"][
+        "strategy_combo"
+    ].findData("signal_only_f0") == -1
+    locked_signal_f0.update(
+        valid=True,
+        selectable=True,
+        locked=False,
+        issues=[],
+    )
     registered_ch1["result"]["method_statuses"][
         "adaptive_event_gated_regression"
     ]["status"] = "failed"
@@ -4912,7 +4932,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         "strategy_combo"
     ]
     assert ch1_methods.findData("adaptive_event_gated_regression") == -1
-    assert ch1_methods.findData("signal_only_f0") == -1
+    assert ch1_methods.findData("signal_only_f0") >= 0
     assert window._guided_strategy_choices == {}
 
     window._guided_preview_roi_combo.setCurrentIndex(
@@ -4933,6 +4953,9 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         "Local preview, segment session-2"
     )
     assert rows["CH3"]["evidence_label"].text() == "Preview first"
+    assert rows["CH2"]["strategy_combo"].findData(
+        "signal_only_f0"
+    ) >= 0
     persisted_signal_f0 = (
         window._guided_local_preview_locked_evidence_for_roi(
             "CH1", "signal_only_f0"
@@ -4968,7 +4991,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     rows = window._guided_local_preview_confirmation_rows
     ch2_combo = rows["CH2"]["strategy_combo"]
     ch2_combo.setCurrentIndex(
-        ch2_combo.findData("global_linear_regression")
+        ch2_combo.findData("signal_only_f0")
     )
     assert len(window._guided_strategy_choices) == 1
     rows["CH2"]["action_button"].click()
@@ -4980,6 +5003,16 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         ch2_result["preview_id"]
     )
     assert ch2_choice["local_preview_evidence"]["roi"] == "CH2"
+    assert ch2_choice["strategy_family"] == "signal_only_f0"
+    assert ch2_choice["strategy"] == "signal_only_f0"
+    assert ch2_choice["dynamic_fit_mode"] is None
+    assert ch2_choice["confirmed"] is True
+    assert ch2_choice["local_preview_evidence"][
+        "evidence_source_type"
+    ] == "local_preview"
+    assert ch2_choice["local_preview_evidence"][
+        "current_or_stale"
+    ] == "current"
 
     window._guided_preview_roi_combo.setCurrentIndex(
         window._guided_preview_roi_combo.findData("CH3")
@@ -4988,7 +5021,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     rows = window._guided_local_preview_confirmation_rows
     ch3_combo = rows["CH3"]["strategy_combo"]
     ch3_combo.setCurrentIndex(
-        ch3_combo.findData("global_linear_regression")
+        ch3_combo.findData("robust_global_event_reject")
     )
     rows["CH3"]["action_button"].click()
 
@@ -4999,6 +5032,17 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         choice.roi_id: choice.current_or_stale
         for choice in plan.per_roi_correction_strategy_choices
     } == {"CH1": "current", "CH2": "current", "CH3": "current"}
+    assert plan.applied_dff_orchestration_enabled is True
+    assert plan.global_correction_strategy == "dynamic_fit"
+    assert plan.dynamic_fit_mode == "robust_global_event_reject"
+    plan_choices = {
+        choice.roi_id: choice
+        for choice in plan.per_roi_correction_strategy_choices
+    }
+    assert plan_choices["CH2"].selected_strategy == "signal_only_f0"
+    assert plan_choices["CH2"].evidence_reference[
+        "evidence_source_type"
+    ] == "local_preview"
     from photometry_pipeline.guided_new_analysis_plan import (
         evaluate_new_analysis_plan_readiness,
     )
@@ -5037,8 +5081,8 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert replacement_signal_f0 is not None
     assert replacement_signal_f0["preview_id"] != ch1_signal_f0_preview_id
     assert replacement_signal_f0["current_or_stale"] == "current"
-    assert replacement_signal_f0["locked"] is True
-    assert replacement_signal_f0["selectable"] is False
+    assert replacement_signal_f0["locked"] is False
+    assert replacement_signal_f0["selectable"] is True
     ch1_combo = rows["CH1"]["strategy_combo"]
     ch1_combo.setCurrentIndex(
         ch1_combo.findData("robust_global_event_reject")
@@ -5076,8 +5120,8 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         choice["stale"] is True
         for choice in window._guided_strategy_choices.values()
     )
-    assert all(
-        choice.selected_strategy != "signal_only_f0"
+    assert any(
+        choice.selected_strategy == "signal_only_f0"
         for choice in changed_plan.per_roi_correction_strategy_choices
     )
     assert "Final analysis recomputes correction" in " ".join(

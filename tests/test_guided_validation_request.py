@@ -141,6 +141,58 @@ def test_validation_request_preserves_authoritative_per_roi_strategy_map(
     }
 
 
+def test_validation_allows_enabled_uniform_mixed_strategy_map(
+    tmp_path: Path,
+):
+    plan = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(tmp_path / "raw_input"),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+        included_roi_ids=["CH1", "CH2"],
+        global_correction_strategy="dynamic_fit",
+        dynamic_fit_mode="robust_global_event_reject",
+        applied_dff_orchestration_enabled=True,
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="CH1",
+                selected_strategy="robust_global_event_reject",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+            GuidedPlanCorrectionChoice(
+                roi_id="CH2",
+                selected_strategy="signal_only_f0",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+        ],
+        output_base_path=str(tmp_path / "output"),
+    )
+
+    request = build_guided_validation_request_from_plan(plan)
+    issues = {
+        issue.category
+        for issue in validate_guided_validation_request(request)
+    }
+
+    assert request.applied_dff_orchestration_enabled is True
+    assert request.legacy_global_dynamic_fit_mode == (
+        "robust_global_event_reject"
+    )
+    assert [
+        entry["strategy_family"]
+        for entry in request.per_roi_production_strategy_map
+    ] == ["dynamic_fit", "signal_only_f0"]
+    assert not issues & {
+        "signal_only_f0_production_routing_not_enabled",
+        "missing_dynamic_fit_strategy",
+        "mixed_dynamic_fit_modes_not_enabled",
+        "mixed_strategy_families_not_enabled",
+    }
+
+
 def test_new_strategy_map_signal_only_is_truthful_and_fail_closed(tmp_path: Path):
     plan = GuidedNewAnalysisDraftPlan(
         input_source_path=str(tmp_path / "raw_input"),
