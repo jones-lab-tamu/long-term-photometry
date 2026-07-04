@@ -42,6 +42,7 @@ class GuidedValidationRequest:
     production_strategy_map_version: str = ""
     per_roi_production_strategy_map: tuple[dict[str, Any], ...] = ()
     legacy_global_dynamic_fit_mode: str | None = None
+    applied_dff_orchestration_enabled: bool = False
 
     # Output Destination
     output_base_path: str | None = None
@@ -107,6 +108,8 @@ def build_guided_validation_request_from_plan(plan: GuidedNewAnalysisDraftPlan) 
         else None
     )
 
+    applied_dff_orchestration_enabled = getattr(plan, "applied_dff_orchestration_enabled", False)
+
     return GuidedValidationRequest(
         source_path=source_path,
         source_format=source_format,
@@ -145,6 +148,7 @@ def build_guided_validation_request_from_plan(plan: GuidedNewAnalysisDraftPlan) 
         output_path_role=output_path_role,
         output_creation_timing=output_creation_timing,
         run_directory_strategy=run_directory_strategy,
+        applied_dff_orchestration_enabled=applied_dff_orchestration_enabled,
     )
 
 
@@ -178,6 +182,7 @@ def compute_request_identity(request: GuidedValidationRequest) -> str:
         str(request.legacy_global_dynamic_fit_mode),
         str(request.output_base_path),
         str(request.output_overwrite),
+        str(request.applied_dff_orchestration_enabled),
     ]
     raw_str = "|".join(elements)
     return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
@@ -344,41 +349,64 @@ def validate_guided_validation_request(request: GuidedValidationRequest) -> list
                         ),
                         severity="blocking",
                     ))
-                issues.append(GuidedPlanIssue(
-                    category="signal_only_f0_production_routing_not_enabled",
-                    message=(
-                        "Signal-Only F0 production routing is not enabled in "
-                        "Guided yet."
-                    ),
-                    severity="blocking",
-                ))
+                if not request.applied_dff_orchestration_enabled:
+                    issues.append(GuidedPlanIssue(
+                        category="signal_only_f0_production_routing_not_enabled",
+                        message=(
+                            "Signal-Only F0 production routing is not enabled in "
+                            "Guided yet."
+                        ),
+                        severity="blocking",
+                    ))
         dynamic_modes = {
             entry.get("dynamic_fit_mode")
             for entry in included_entries
             if entry.get("strategy_family") == "dynamic_fit"
+            and entry.get("dynamic_fit_mode") is not None
         }
         families = {
             entry.get("strategy_family") for entry in included_entries
         }
-        if len(dynamic_modes) > 1:
-            issues.append(GuidedPlanIssue(
-                category="mixed_dynamic_fit_modes_not_enabled",
-                message=(
-                    "Mixed per-ROI dynamic-fit modes are represented in the "
-                    "plan but are not executable by the current Guided "
-                    "production path."
-                ),
-                severity="blocking",
-            ))
-        if len(families) > 1:
-            issues.append(GuidedPlanIssue(
-                category="mixed_strategy_families_not_enabled",
-                message=(
-                    "Mixed per-ROI correction strategy families are represented "
-                    "but production routing is not enabled."
-                ),
-                severity="blocking",
-            ))
+        if request.applied_dff_orchestration_enabled:
+            if len(dynamic_modes) == 0 and len(families) > 0:
+                issues.append(GuidedPlanIssue(
+                    category="missing_dynamic_fit_strategy",
+                    message=(
+                        "At least one dynamic_fit strategy is required to "
+                        "provide a dynamic_fit_mode for the phasic pipeline."
+                    ),
+                    severity="blocking",
+                ))
+            if len(dynamic_modes) > 1:
+                issues.append(GuidedPlanIssue(
+                    category="mixed_dynamic_fit_modes_not_enabled",
+                    message=(
+                        "Mixed per-ROI dynamic-fit modes are represented in the "
+                        "plan but are not executable by the current Guided "
+                        "production path."
+                    ),
+                    severity="blocking",
+                ))
+        else:
+            if len(dynamic_modes) > 1:
+                issues.append(GuidedPlanIssue(
+                    category="mixed_dynamic_fit_modes_not_enabled",
+                    message=(
+                        "Mixed per-ROI dynamic-fit modes are represented in the "
+                        "plan but are not executable by the current Guided "
+                        "production path."
+                    ),
+                    severity="blocking",
+                ))
+            if len(families) > 1:
+                issues.append(GuidedPlanIssue(
+                    category="mixed_strategy_families_not_enabled",
+                    message=(
+                        "Mixed per-ROI correction strategy families are represented "
+                        "but production routing is not enabled."
+                    ),
+                    severity="blocking",
+                ))
         if (
             request.legacy_global_dynamic_fit_mode
             and request.dynamic_fit_mode

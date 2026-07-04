@@ -295,3 +295,56 @@ def test_materialization_module_import_boundary():
         for name in imported
         for marker in prohibited
     )
+
+
+def test_materialize_writes_strategy_map_when_orchestration_enabled(allocated_case, monkeypatch):
+    request, plan, allocated = allocated_case
+
+    object.__setattr__(
+        request.authorization_result.production_intent.correction,
+        "applied_dff_orchestration_enabled",
+        True
+    )
+    monkeypatch.setattr(
+        materialization,
+        "_validate_preconditions",
+        lambda r, p, a: (Path(a.allocated_run_dir), None)
+    )
+
+    result = materialization.materialize_guided_startup_artifacts(
+        request=request,
+        pure_plan=plan,
+        allocation_result=allocated,
+    )
+    assert result.ok, result.blocking_issues
+    strategy_map_path = Path(result.allocated_run_dir) / "guided_correction_strategy_map.json"
+    assert strategy_map_path.exists()
+    payload = json.loads(strategy_map_path.read_text(encoding="utf-8"))
+    assert payload["applied_dff_orchestration_enabled"] is True
+    assert "production_strategy_map_version" in payload
+    assert "included_roi_ids" in payload
+    assert "per_roi_production_strategy_map" in payload
+
+
+def test_materialize_skips_strategy_map_when_orchestration_disabled(allocated_case, monkeypatch):
+    request, plan, allocated = allocated_case
+
+    object.__setattr__(
+        request.authorization_result.production_intent.correction,
+        "applied_dff_orchestration_enabled",
+        False
+    )
+    monkeypatch.setattr(
+        materialization,
+        "_validate_preconditions",
+        lambda r, p, a: (Path(a.allocated_run_dir), None)
+    )
+
+    result = materialization.materialize_guided_startup_artifacts(
+        request=request,
+        pure_plan=plan,
+        allocation_result=allocated,
+    )
+    assert result.ok
+    strategy_map_path = Path(result.allocated_run_dir) / "guided_correction_strategy_map.json"
+    assert not strategy_map_path.exists()

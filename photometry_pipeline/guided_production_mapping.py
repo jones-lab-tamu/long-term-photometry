@@ -424,6 +424,7 @@ class GuidedProductionCorrection:
     per_roi_production_strategy_map: tuple[
         GuidedProductionPerRoiStrategy, ...
     ] = ()
+    applied_dff_orchestration_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -940,6 +941,7 @@ def map_guided_validation_request_to_execution_intent(
                     )
                     for entry in correction.per_roi_production_strategy_map
                 ),
+                correction.applied_dff_orchestration_enabled,
             ),
             diagnostic_evidence=GuidedProductionDiagnosticEvidence(
                 request.diagnostic_evidence.cache_id, request.diagnostic_evidence.cache_root_canonical,

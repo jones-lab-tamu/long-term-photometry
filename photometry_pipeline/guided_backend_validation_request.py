@@ -584,6 +584,7 @@ class GuidedBackendCorrectionRequest:
     per_roi_production_strategy_map: tuple[
         GuidedBackendPerRoiProductionStrategy, ...
     ] = ()
+    applied_dff_orchestration_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.strategy_scope != "global":
@@ -1921,6 +1922,7 @@ def compile_guided_backend_validation_request(
             per_roi_production_strategy_map=(
                 correction_facts.per_roi_production_strategy_map
             ),
+            applied_dff_orchestration_enabled=draft.applied_dff_orchestration_enabled,
         )
         diagnostic_request = GuidedBackendDiagnosticEvidenceRequest(
             cache_id=cache_facts.cache_id,
@@ -2152,6 +2154,7 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "blocked_strategy_states",
         "production_strategy_map_version",
         "per_roi_production_strategy_map",
+        "applied_dff_orchestration_enabled",
     ),
     GuidedBackendEvidenceReference: (
         "evidence_reference_id",

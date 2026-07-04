@@ -62,7 +62,8 @@ def test_build_guided_validation_request_from_plan(tmp_path: Path):
             path_role="output_base",
             creation_timing="future_execution_start_only",
             run_directory_strategy="derive_unique_run_id_under_output_base"
-        )
+        ),
+        applied_dff_orchestration_enabled=True
     )
 
     request = build_guided_validation_request_from_plan(plan)
@@ -85,6 +86,7 @@ def test_build_guided_validation_request_from_plan(tmp_path: Path):
     assert request.output_path_role == "output_base"
     assert request.output_creation_timing == "future_execution_start_only"
     assert request.run_directory_strategy == "derive_unique_run_id_under_output_base"
+    assert request.applied_dff_orchestration_enabled is True
 
 
 def test_validation_request_preserves_authoritative_per_roi_strategy_map(
@@ -674,3 +676,19 @@ def test_unsupported_selected_strategy_blocks_even_when_legacy_valid(tmp_path: P
     issues = validate_guided_validation_request(request)
     cats = {i.category for i in issues}
     assert "invalid_dynamic_fit_strategy_entry" in cats
+
+
+def test_compute_request_identity_includes_applied_dff_orchestration_enabled():
+    import dataclasses
+    req1 = GuidedValidationRequest(
+        source_path="/path/to/source",
+        source_format="rwd",
+        acquisition_mode="intermittent",
+        sessions_per_hour=6,
+        session_duration_sec=120.0,
+        exclude_incomplete_final_rwd_chunk=True,
+        timeline_anchor_mode="civil",
+        applied_dff_orchestration_enabled=False
+    )
+    req2 = dataclasses.replace(req1, applied_dff_orchestration_enabled=True)
+    assert compute_request_identity(req1) != compute_request_identity(req2)

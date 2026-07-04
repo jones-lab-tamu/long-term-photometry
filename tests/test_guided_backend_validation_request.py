@@ -1057,17 +1057,18 @@ def test_compiler_success_performs_no_filesystem_io(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(Path, "write_bytes", fail)
     monkeypatch.setattr(Path, "mkdir", fail)
     monkeypatch.setattr(Path, "touch", fail)
-    monkeypatch.setattr(os, "stat", fail)
     monkeypatch.setattr(os, "scandir", fail)
     monkeypatch.setattr(os, "mkdir", fail)
     monkeypatch.setattr(os.path, "exists", fail)
-    monkeypatch.setattr(os, "access", fail)
 
-    result = contracts.compile_guided_backend_validation_request(
-        _compiler_draft(),
-        facts=_complete_facts(),
-        validator_contract=_validator_contract(),
-    )
+    with monkeypatch.context() as m:
+        m.setattr(os, "stat", fail)
+        m.setattr(os, "access", fail)
+        result = contracts.compile_guided_backend_validation_request(
+            _compiler_draft(),
+            facts=_complete_facts(),
+            validator_contract=_validator_contract(),
+        )
 
     assert isinstance(result, contracts.GuidedBackendValidationCompileSuccess)
 
@@ -1100,7 +1101,7 @@ def test_identity_is_deterministic_digest_with_pinned_vector():
     first = contracts.compute_guided_backend_validation_request_identity(request)
 
     assert first == (
-        "d085e16a2bf7617757e1b9b656a0665d7075ac1188715f82e01e7b6d1e1ca762"
+        "f87b48ff4ce15ac5ddb2ffed5d51e07aa816c832a9d5ac35597f354709c2f2e3"
     )
     assert first == contracts.compute_guided_backend_validation_request_identity(
         request
@@ -1443,4 +1444,15 @@ def test_identity_success_performs_no_filesystem_io(monkeypatch):
     identity = contracts.compute_guided_backend_validation_request_identity(
         _request()
     )
+    assert identity
     assert len(identity) == 64
+
+
+def test_backend_validation_identity_includes_applied_dff_orchestration_enabled():
+    import dataclasses
+    req1 = _request()
+    new_correction = dataclasses.replace(req1.correction, applied_dff_orchestration_enabled=not req1.correction.applied_dff_orchestration_enabled)
+    req2 = dataclasses.replace(req1, correction=new_correction)
+    id1 = contracts.compute_guided_backend_validation_request_identity(req1)
+    id2 = contracts.compute_guided_backend_validation_request_identity(req2)
+    assert id1 != id2

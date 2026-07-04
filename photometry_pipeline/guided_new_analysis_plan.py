@@ -838,6 +838,7 @@ class GuidedNewAnalysisDraftPlan:
     execution_ready: bool = False
     executable: bool = False
     production_run_enabled: bool = False
+    applied_dff_orchestration_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.mode != "new_analysis":

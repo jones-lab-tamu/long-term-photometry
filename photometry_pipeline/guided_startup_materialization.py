@@ -438,6 +438,48 @@ def materialize_guided_startup_artifacts(
                 ),
             )
 
+    correction = request.authorization_result.production_intent.correction
+    if correction.applied_dff_orchestration_enabled:
+        strategy_map_payload = {
+            "applied_dff_orchestration_enabled": True,
+            "production_strategy_map_version": correction.production_strategy_map_version,
+            "included_roi_ids": list(request.authorization_result.production_intent.roi_scope.included_roi_ids),
+            "per_roi_production_strategy_map": [
+                {
+                    "roi_id": entry.roi_id,
+                    "strategy_family": entry.strategy_family,
+                    "dynamic_fit_mode": entry.dynamic_fit_mode,
+                    "selected_strategy": entry.selected_strategy,
+                    "evidence_source_type": entry.evidence_source_type,
+                    "evidence_reference_json": entry.evidence_reference_json,
+                    "explicit_user_mark": entry.explicit_user_mark,
+                    "current_or_stale": entry.current_or_stale,
+                }
+                for entry in correction.per_roi_production_strategy_map
+            ]
+        }
+        strategy_map_bytes = json.dumps(strategy_map_payload, indent=2).encode("utf-8")
+        try:
+            _write_exclusive(run_dir / "guided_correction_strategy_map.json", strategy_map_bytes)
+            written.append("guided_correction_strategy_map.json")
+        except Exception as exc:
+            return _result(
+                status="materialization_failed_partial",
+                ok=False,
+                materialized=False,
+                run_dir=os.fspath(run_dir),
+                files_written=tuple(written),
+                issue=GuidedStartupMaterializationIssue(
+                    "startup_artifact_materialization_failed",
+                    "guided_correction_strategy_map.json",
+                    f"Startup artifact materialization failed: {exc}",
+                ),
+                artifact_hashes=tuple(hashes),
+                startup_transaction_identity=(
+                    pure_plan.identities.startup_transaction_identity
+                ),
+            )
+
     return _result(
         status="startup_artifacts_materialized",
         ok=True,

@@ -2829,9 +2829,48 @@ def main():
 
         emitter.emit("plots", "done", "All ROI deliverables complete")
         _phase_done(status_data, manifest, "plots_total", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
-
         check_cancel(cancel_flag_path, emitter, "package", manifest_path, manifest)
         
+        # ============================================================
+        # 7.5. Guided Post-Phasic Applied-dF/F Orchestration
+        # ============================================================
+        from photometry_pipeline.guided_applied_dff_orchestration import (
+            run_guided_applied_dff_orchestration_if_enabled,
+            GuidedAppliedDffOrchestrationError,
+        )
+
+        t_phase = None
+        started_utc_phase = None
+
+        def _start_applied_dff_phase():
+            nonlocal t_phase, started_utc_phase
+            t_phase, started_utc_phase = _phase_start(status_data, "applied_dff_orchestration", emitter=emitter)
+            emitter.emit("applied_dff_orchestration", "start", "Running Guided applied-dF/F orchestration")
+
+        def _run_cmd_wrapper(cmd):
+            result = run_cmd(cmd, env=os.environ.copy())
+            return 0 if result is None else int(result)
+        try:
+            ran = run_guided_applied_dff_orchestration_if_enabled(
+                run_dir,
+                phasic_out,
+                run_cmd_callable=_run_cmd_wrapper,
+                on_enabled=_start_applied_dff_phase,
+            )
+            if ran:
+                _phase_done(status_data, manifest, "applied_dff_orchestration", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
+                check_cancel(cancel_flag_path, emitter, "applied_dff_orchestration", manifest_path, manifest)
+        except GuidedAppliedDffOrchestrationError as e:
+            emitter.emit("applied_dff_orchestration", "error", f"Applied-dF/F orchestration failed: {e}", error_code="APPLIED_DFF_ORCHESTRATION_ERROR")
+            _finalize_status("error", error_msg=f"Applied-dF/F orchestration failed: {e}")
+            print(f"ERROR: Applied-dF/F orchestration failed: {e}", file=sys.stderr)
+            raise SystemExit(1)
+        except Exception as e:
+            emitter.emit("applied_dff_orchestration", "error", f"Applied-dF/F orchestration failed: {e}", error_code="APPLIED_DFF_ORCHESTRATION_ERROR")
+            _finalize_status("error", error_msg=f"Applied-dF/F orchestration failed: {e}")
+            print(f"ERROR: Applied-dF/F orchestration failed: {e}", file=sys.stderr)
+            raise SystemExit(1)
+
         # ============================================================
         # 8. Write Manifest (LAST, atomic)
         # ============================================================
