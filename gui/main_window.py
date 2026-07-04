@@ -119,6 +119,7 @@ from photometry_pipeline.preview.correction_preview import (
     PREVIEW_SUMMARY_FILENAME,
     resolve_completed_run_preview_source,
     run_guided_correction_preview_comparison,
+    run_guided_local_correction_preview,
 )
 from photometry_pipeline.signal_only_f0_diagnostics import (
     build_default_signal_only_f0_diagnostic_cache_output_dir,
@@ -3059,8 +3060,9 @@ class MainWindow(QMainWindow):
         preview_layout.setContentsMargins(10, 10, 10, 10)
         preview_layout.setSpacing(8)
         preview_intro = QLabel(
-            "Select one or more methods to compare for the current ROI and "
-            "preview segment. Previewing does not confirm a strategy."
+            "This local preview helps compare correction strategies for the "
+            "selected ROI and segment. Final analysis recomputes correction "
+            "using the full selected recordings."
         )
         preview_intro.setObjectName("guidedCorrectionPreviewIntro")
         preview_intro.setProperty("guidedSecondaryText", True)
@@ -3142,9 +3144,8 @@ class MainWindow(QMainWindow):
         preview_layout.addLayout(method_row)
 
         preview_note = QLabel(
-            "This generates correction evidence for review. It does not select "
-            "or confirm a final strategy and does not modify source data or "
-            "completed results."
+            "This preview does not start the final analysis or modify source "
+            "data. It uses only the selected preview segment."
         )
         preview_note.setObjectName("guidedCorrectionPreviewSafetyNote")
         preview_note.setProperty("guidedSecondaryText", True)
@@ -3153,7 +3154,7 @@ class MainWindow(QMainWindow):
         self._guided_preview_gated_widgets.append(preview_note)
 
         self._guided_preview_generate_btn = QPushButton(
-            "Generate correction preview"
+            "Generate local correction preview"
         )
         self._guided_preview_generate_btn.setObjectName("guidedCorrectionPreviewGenerateButton")
         self._guided_preview_generate_btn.clicked.connect(self._on_generate_guided_correction_preview)
@@ -3430,6 +3431,7 @@ class MainWindow(QMainWindow):
         signal_artifacts_group.setVisible(False)
         signal_layout.addWidget(signal_artifacts_group)
         preview_layout.addWidget(signal_group)
+        self._guided_signal_f0_group = signal_group
         self._guided_preview_gated_widgets.append(signal_group)
         self._guided_preview_locked_label = QLabel(
             "Locked until correction evidence is built. Signal-Only F0 is a "
@@ -3900,9 +3902,79 @@ class MainWindow(QMainWindow):
         if mode == "new_analysis":
             source, status = self._resolve_current_guided_preview_diagnostic_cache_source()
             if source is None:
+                discovery = getattr(self, "_discovery_cache", None) or {}
+                sessions = [
+                    entry
+                    for entry in discovery.get("sessions", [])
+                    if isinstance(entry, dict)
+                    and entry.get("included_in_preview", True)
+                    and entry.get("path")
+                ]
+                included_rois = list(self._guided_selected_roi_ids()[1])
+                if sessions and included_rois:
+                    source_id = os.path.realpath(
+                        str(self._input_dir.text().strip())
+                    )
+                    self._guided_preview_loaded_run_dir = source_id
+                    with (
+                        QSignalBlocker(self._guided_preview_roi_combo),
+                        QSignalBlocker(self._guided_preview_chunk_combo),
+                    ):
+                        for roi in included_rois:
+                            self._guided_preview_roi_combo.addItem(
+                                str(roi), str(roi)
+                            )
+                        for entry in sessions:
+                            index = int(entry.get("index", 0))
+                            label = str(
+                                entry.get("session_id") or index
+                            )
+                            self._guided_preview_chunk_combo.addItem(
+                                label, index
+                            )
+                        if previous_roi:
+                            index = self._guided_preview_roi_combo.findData(
+                                previous_roi
+                            )
+                            if index >= 0:
+                                self._guided_preview_roi_combo.setCurrentIndex(
+                                    index
+                                )
+                        if previous_chunk is not None:
+                            index = self._guided_preview_chunk_combo.findData(
+                                int(previous_chunk)
+                            )
+                            if index >= 0:
+                                self._guided_preview_chunk_combo.setCurrentIndex(
+                                    index
+                                )
+                    self._guided_preview_source_ok = True
+                    self._guided_preview_source_type = "local_raw_segment"
+                    self._guided_preview_source_path = source_id
+                    self._guided_preview_source_reason = (
+                        "Local correction preview is ready."
+                    )
+                    self._guided_preview_source_status_label.setText(
+                        "Local preview uses only the selected ROI and preview "
+                        "segment. Final analysis recomputes correction using "
+                        "the full selected recordings."
+                    )
+                    self._guided_preview_source_status_label.setToolTip("")
+                    self._refresh_guided_preview_enablement()
+                    return
                 self._guided_preview_loaded_run_dir = ""
-                self._guided_preview_source_reason = status.message
-                self._guided_preview_source_status_label.setText(status.message)
+                self._guided_preview_source_reason = (
+                    status.message
+                    if getattr(
+                        self, "_guided_diagnostic_cache_record", None
+                    )
+                    is not None
+                    else "Complete ROI selection before generating a local "
+                    "correction preview."
+                )
+                self._guided_preview_source_status_label.setText(
+                    self._guided_preview_source_reason
+                )
                 self._guided_preview_source_status_label.setToolTip("")
                 if not getattr(self, "_guided_preview_has_result", False):
                     self._clear_guided_preview_result_widgets()
@@ -5017,30 +5089,98 @@ class MainWindow(QMainWindow):
         roi = self._selected_guided_preview_roi()
         chunk = self._selected_guided_preview_chunk()
         methods = self._selected_guided_preview_methods()
-        if not source_path or source_type not in {"completed_run", "diagnostic_cache"} or not roi or chunk is None or not methods:
+        if (
+            not source_path
+            or source_type
+            not in {
+                "completed_run",
+                "diagnostic_cache",
+                "local_raw_segment",
+            }
+            or not roi
+            or chunk is None
+            or not methods
+        ):
             self._refresh_guided_preview_enablement()
             return
         try:
-            kwargs = {
-                "roi": roi,
-                "chunk_index": chunk,
-                "methods": methods,
-                "source_type": source_type,
-                "overwrite": False,
-            }
-            if source_type == "diagnostic_cache":
-                preview_id = f"diagnostic_cache_preview_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{secrets.token_hex(4)}"
-                kwargs["preview_id"] = preview_id
-                kwargs["preview_output_dir"] = os.path.join(
-                    source_id,
-                    "_guided_workflow",
-                    "previews",
-                    preview_id,
+            if source_type == "local_raw_segment":
+                sessions = {
+                    int(entry.get("index", -1)): entry
+                    for entry in (
+                        (getattr(self, "_discovery_cache", None) or {}).get(
+                            "sessions", []
+                        )
+                    )
+                    if isinstance(entry, dict)
+                }
+                entry = sessions.get(int(chunk))
+                if not entry or not entry.get("path"):
+                    raise RuntimeError(
+                        "The selected preview segment is no longer available."
+                    )
+                preview_id = (
+                    "local_correction_preview_"
+                    f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_"
+                    f"{secrets.token_hex(4)}"
                 )
-            result = run_guided_correction_preview_comparison(
-                source_path,
-                **kwargs,
-            )
+                preview_root = os.path.join(
+                    self._output_dir.text().strip(),
+                    "_guided_workflow",
+                    "local_previews",
+                )
+                config_overrides = self._infer_dataset_contract_overrides(
+                    str(
+                        (getattr(self, "_discovery_cache", None) or {}).get(
+                            "resolved_format",
+                            self._format_combo.currentText(),
+                        )
+                    )
+                )
+                if not isinstance(config_overrides, dict):
+                    config_overrides = {}
+                duration_text = self._duration_edit.text().strip()
+                if duration_text:
+                    config_overrides["chunk_duration_sec"] = float(
+                        duration_text
+                    )
+                result = run_guided_local_correction_preview(
+                    str(entry["path"]),
+                    os.path.join(preview_root, preview_id),
+                    roi=roi,
+                    chunk_index=int(chunk),
+                    input_format=str(
+                        (getattr(self, "_discovery_cache", None) or {}).get(
+                            "resolved_format",
+                            self._format_combo.currentText(),
+                        )
+                    ),
+                    config_path=self._active_config_source_path(),
+                    methods=methods,
+                    preview_id=preview_id,
+                    config_overrides=config_overrides,
+                )
+            else:
+                kwargs = {
+                    "roi": roi,
+                    "chunk_index": chunk,
+                    "methods": methods,
+                    "source_type": source_type,
+                    "overwrite": False,
+                }
+                if source_type == "diagnostic_cache":
+                    preview_id = f"diagnostic_cache_preview_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{secrets.token_hex(4)}"
+                    kwargs["preview_id"] = preview_id
+                    kwargs["preview_output_dir"] = os.path.join(
+                        source_id,
+                        "_guided_workflow",
+                        "previews",
+                        preview_id,
+                    )
+                result = run_guided_correction_preview_comparison(
+                    source_path,
+                    **kwargs,
+                )
         except Exception as exc:
             result = {
                 "ok": False,
@@ -5056,13 +5196,15 @@ class MainWindow(QMainWindow):
         self._guided_preview_result_stale = False
         if source_type == "completed_run":
             result["completed_run_dir"] = os.path.realpath(source_id)
-        else:
+        elif source_type == "diagnostic_cache":
             result["diagnostic_cache_root"] = os.path.realpath(source_id)
             result["source_type"] = "diagnostic_cache"
             record = getattr(self, "_guided_diagnostic_cache_record", None)
             result["source_cache_id"] = str(
                 getattr(record, "cache_id", "") or ""
             )
+        else:
+            result["source_type"] = "local_raw_segment"
         result["roi"] = roi
         result["chunk_index"] = int(chunk)
         self._generate_guided_preview_reports(
@@ -6101,7 +6243,13 @@ class MainWindow(QMainWindow):
                     str(preview_result.get("visual_preview_path"))
                 )
             )
-        preview_unlocked = evidence_ready or not new_analysis
+        local_preview_ready = bool(
+            new_analysis
+            and getattr(self, "_guided_preview_source_type", "")
+            == "local_raw_segment"
+            and getattr(self, "_guided_preview_source_ok", False)
+        )
+        preview_unlocked = evidence_ready or local_preview_ready or not new_analysis
         strategy_unlocked = preview_ready or not new_analysis
         self._guided_preview_locked_label.setVisible(not preview_unlocked)
         for widget in getattr(self, "_guided_preview_gated_widgets", ()):
@@ -6109,6 +6257,15 @@ class MainWindow(QMainWindow):
         self._guided_confirm_locked_label.setVisible(not strategy_unlocked)
         for widget in getattr(self, "_guided_confirm_gated_widgets", ()):
             widget.setVisible(strategy_unlocked)
+        signal_group = getattr(self, "_guided_signal_f0_group", None)
+        if signal_group is not None and new_analysis:
+            signal_group.setVisible(preview_unlocked and evidence_ready)
+        if new_analysis and local_preview_ready and not strategy_unlocked:
+            self._guided_confirm_locked_label.setText(
+                "Local preview is available for method review. Strategy "
+                "confirmation remains locked in this prototype until reusable "
+                "correction evidence is prepared."
+            )
         if new_analysis:
             for widget_name in (
                 "_guided_confirm_context_group",
@@ -6132,6 +6289,29 @@ class MainWindow(QMainWindow):
             return
         record = getattr(self, "_guided_diagnostic_cache_record", None)
         if record is None:
+            local_result = getattr(
+                self, "_guided_preview_last_result", {}
+            ) or {}
+            if (
+                getattr(self, "_guided_preview_has_result", False)
+                and not getattr(self, "_guided_preview_result_stale", False)
+                and local_result.get("source_type") == "local_raw_segment"
+            ):
+                label.setText(
+                    "Local correction preview is ready for review. Final "
+                    "analysis will recompute correction using the full "
+                    "selected recordings."
+                )
+                return
+            if (
+                getattr(self, "_guided_preview_source_type", "")
+                == "local_raw_segment"
+                and getattr(self, "_guided_preview_source_ok", False)
+            ):
+                label.setText(
+                    "Next step: generate a local correction preview."
+                )
+                return
             button = getattr(
                 self, "_guided_diagnostic_cache_build_btn", None
             )

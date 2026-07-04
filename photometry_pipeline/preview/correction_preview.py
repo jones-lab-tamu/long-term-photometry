@@ -38,6 +38,7 @@ from photometry_pipeline.io.hdf5_cache_reader import (
     load_cache_chunk_attrs,
     open_phasic_cache,
 )
+from photometry_pipeline.io.adapters import load_chunk
 from photometry_pipeline.guided_diagnostic_cache import resolve_diagnostic_cache_source
 
 
@@ -1278,4 +1279,208 @@ def run_guided_correction_preview_comparison(
         "method_statuses": method_statuses,
         "warnings": warnings,
         "errors": errors,
+    }
+
+
+def run_guided_local_correction_preview(
+    source_file: str | os.PathLike[str],
+    preview_output_dir: str | os.PathLike[str],
+    *,
+    roi: str,
+    chunk_index: int,
+    input_format: str,
+    config_path: str | os.PathLike[str],
+    methods: Iterable[str] | None = None,
+    preview_id: str | None = None,
+    config_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run preview-only correction methods on one raw source segment.
+
+    This pathway intentionally does not accept or produce a phasic cache. It
+    loads one discovered source session, extracts one ROI, and writes only
+    preview-scoped traces and provenance.
+    """
+    pid = preview_id or make_guided_preview_id("local_correction_preview")
+    source_path = _resolve_path(source_file)
+    output_dir = _resolve_path(preview_output_dir)
+    config_source = _resolve_path(config_path)
+    if not _safe_preview_id_component(pid):
+        return _result_failed(preview_id=str(pid), errors=[f"Unsafe preview_id: {pid!r}"])
+    method_result = validate_preview_methods(methods or GUIDED_REFERENCE_PREVIEW_METHODS)
+    if not method_result.ok:
+        return _result_failed(preview_id=pid, errors=[method_result.reason])
+    if not os.path.isfile(source_path):
+        return _result_failed(preview_id=pid, errors=["Selected preview segment is unavailable."])
+    if not os.path.isfile(config_source):
+        return _result_failed(preview_id=pid, errors=["Correction configuration is unavailable."])
+    if os.path.exists(output_dir):
+        return _result_failed(
+            preview_id=pid,
+            preview_output_dir=output_dir,
+            errors=["Local preview output directory already exists."],
+        )
+
+    try:
+        base_cfg = Config.from_yaml(config_source)
+        applied_config_overrides = {
+            str(key): value
+            for key, value in (config_overrides or {}).items()
+            if str(key) in Config.__dataclass_fields__
+        }
+        if applied_config_overrides:
+            config_values = dataclasses.asdict(base_cfg)
+            config_values.update(applied_config_overrides)
+            base_cfg = Config(**config_values)
+        raw_chunk = load_chunk(
+            source_path,
+            str(input_format).strip().lower(),
+            base_cfg,
+            int(chunk_index),
+        )
+        if roi not in raw_chunk.channel_names:
+            raise GuidedCorrectionPreviewError(
+                f"Requested ROI '{roi}' is not present in the selected preview segment."
+            )
+        roi_index = raw_chunk.channel_names.index(roi)
+        time_sec = np.asarray(raw_chunk.time_sec, dtype=float).reshape(-1)
+        segment_start = float(time_sec[0])
+        segment_end = segment_start + float(base_cfg.chunk_duration_sec)
+        segment_mask = (time_sec >= segment_start) & (time_sec < segment_end)
+        if int(np.count_nonzero(segment_mask)) < 3:
+            raise GuidedCorrectionPreviewError(
+                "Selected preview segment contains too few samples."
+            )
+        time_sec = time_sec[segment_mask] - segment_start
+        record = {
+            "roi": str(roi),
+            "chunk_id": int(chunk_index),
+            "source_file": source_path,
+            "time_sec": time_sec,
+            "sig_raw": np.asarray(
+                raw_chunk.sig_raw[:, roi_index], dtype=float
+            ).reshape(-1)[segment_mask],
+            "uv_raw": np.asarray(
+                raw_chunk.uv_raw[:, roi_index], dtype=float
+            ).reshape(-1)[segment_mask],
+            "fs_hz": float(raw_chunk.fs_hz),
+            "window": None,
+            "metadata": dict(raw_chunk.metadata or {}),
+        }
+    except Exception as exc:
+        return _result_failed(preview_id=pid, preview_output_dir=output_dir, errors=[str(exc)])
+
+    os.makedirs(output_dir, exist_ok=False)
+    generated_artifacts: dict[str, str] = {}
+    method_statuses: dict[str, Any] = {}
+    errors: list[str] = []
+    for method in method_result.methods:
+        diagnostics, artifacts = _run_preview_method(
+            method=method,
+            base_cfg=base_cfg,
+            record=record,
+            roi=str(roi),
+            preview_dir=output_dir,
+        )
+        method_statuses[method] = {
+            "status": diagnostics.get("status", "failed"),
+            "errors": diagnostics.get("errors", []),
+            "warnings": diagnostics.get("warnings", []),
+            "diagnostics_json": artifacts.get("diagnostics_json", ""),
+            "trace_csv": artifacts.get("trace_csv", ""),
+            "strategy_recommendation": None,
+        }
+        generated_artifacts[f"{method}_diagnostics_json"] = artifacts.get(
+            "diagnostics_json", ""
+        )
+        if artifacts.get("trace_csv"):
+            generated_artifacts[f"{method}_trace_csv"] = artifacts["trace_csv"]
+        if diagnostics.get("status") != "success":
+            errors.extend(str(value) for value in diagnostics.get("errors", []))
+
+    success_count = sum(
+        status.get("status") == "success" for status in method_statuses.values()
+    )
+    status = (
+        "success"
+        if success_count == len(method_statuses) and method_statuses
+        else "partial"
+        if success_count
+        else "failed"
+    )
+    provenance = {
+        "preview_only": True,
+        "production_analysis": False,
+        "source_type": "local_raw_segment",
+        "preview_id": pid,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "local_preview_scope": "single_discovered_session_single_roi",
+        "selected_roi": str(roi),
+        "selected_chunk": int(chunk_index),
+        "source_file": source_path,
+        "source_file_sha256": _file_sha256(source_path),
+        "input_format": str(input_format).strip().lower(),
+        "sample_count": int(time_sec.size),
+        "time_bounds_sec": [
+            float(time_sec[0]) if time_sec.size else None,
+            float(time_sec[-1]) if time_sec.size else None,
+        ],
+        "padding_sec": 0.0,
+        "correction_methods_compared": list(method_result.methods),
+        "config_source_path": config_source,
+        "config_sha256": _file_sha256(config_source),
+        "config_overrides": _json_safe(applied_config_overrides),
+        "effective_config_values": {
+            "target_fs_hz": float(base_cfg.target_fs_hz),
+            "chunk_duration_sec": float(base_cfg.chunk_duration_sec),
+            "lowpass_hz": float(base_cfg.lowpass_hz),
+            "filter_order": int(base_cfg.filter_order),
+        },
+        "baseline_scope": "not_computed_delta_f_preview",
+        "reference_fit_scope": "selected_session",
+        "pipeline_run_executed": False,
+        "feature_extraction_run": False,
+        "strategy_recommendation": None,
+        "warning": (
+            "Local correction preview for decision support only. Final analysis "
+            "recomputes correction using the full selected recordings."
+        ),
+    }
+    provenance_path = os.path.join(output_dir, PREVIEW_PROVENANCE_FILENAME)
+    _write_json(provenance_path, provenance)
+    generated_artifacts["preview_provenance_json"] = provenance_path
+    summary = build_preview_summary(
+        preview_id=pid,
+        status=status,
+        method_statuses=method_statuses,
+        errors=errors,
+        generated_artifact_paths=generated_artifacts,
+    )
+    summary.update(
+        {
+            "preview_only": True,
+            "production_analysis": False,
+            "source_type": "local_raw_segment",
+            "strategy_recommendation": None,
+        }
+    )
+    summary_path = os.path.join(output_dir, PREVIEW_SUMMARY_FILENAME)
+    _write_json(summary_path, summary)
+    generated_artifacts["preview_summary_json"] = summary_path
+    return {
+        "ok": status == "success",
+        "preview_id": pid,
+        "status": status,
+        "source_type": "local_raw_segment",
+        "preview_only": True,
+        "production_analysis": False,
+        "preview_output_dir": output_dir,
+        "preview_provenance_path": provenance_path,
+        "preview_summary_path": summary_path,
+        "generated_artifacts": generated_artifacts,
+        "method_statuses": method_statuses,
+        "warnings": [],
+        "errors": errors,
+        "roi": str(roi),
+        "chunk_index": int(chunk_index),
+        "source_file": source_path,
     }

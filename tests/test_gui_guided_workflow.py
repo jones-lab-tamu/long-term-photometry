@@ -9,8 +9,10 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 import gui.main_window as main_window_module
+import photometry_pipeline.preview.correction_preview as correction_preview_module
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
 from photometry_pipeline.config import Config
+from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.guided_run_plan import (
     CorrectionStrategyChoice,
     EvidenceChunkReview,
@@ -2294,7 +2296,7 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
     assert "No completed run is loaded" in window._guided_diagnostics_completed_run_label.text()
     assert "Load a completed run to generate preview-only correction comparisons" in window._guided_preview_source_status_label.text()
     assert window._guided_preview_generate_btn.text() == (
-        "Generate correction preview"
+        "Generate local correction preview"
     )
     assert window._guided_preview_generate_btn.isEnabled() is False
     assert window._guided_preview_result_label.text() == ""
@@ -2489,12 +2491,12 @@ def test_guided_diagnostic_cache_success_then_setup_change_marks_stale(window, t
     assert window._guided_diagnostic_cache_record is not None
 
 
-def test_guided_correction_preview_new_analysis_blocks_without_diagnostic_cache(window):
+def test_guided_correction_preview_new_analysis_blocks_without_roi_selection(window):
     window._set_guided_workflow_mode("new_analysis")
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
 
     assert window._guided_preview_generate_btn.isEnabled() is False
-    assert "Build a diagnostic cache before generating correction previews" in (
+    assert "Complete ROI selection before generating a local correction preview" in (
         window._guided_preview_source_status_label.text()
     )
 
@@ -3721,7 +3723,7 @@ def test_guided_diagnostics_step_has_no_generation_or_execution_buttons(window):
         if button.text()
     }
     assert button_texts.isdisjoint(forbidden)
-    assert "Generate correction preview" in button_texts
+    assert "Generate local correction preview" in button_texts
 
 
 def test_guided_visible_text_does_not_use_stale_shell_or_completed_loader_wording(window):
@@ -4713,6 +4715,116 @@ def test_hidden_method_configuration_never_becomes_top_level(window, qapp):
         isinstance(widget, QGroupBox)
         and widget.title() == "Method configuration - not evidence selection"
         for widget in QApplication.topLevelWidgets()
+    )
+
+
+def test_local_preview_bypasses_full_evidence_and_keeps_confirmation_locked(
+    window, tmp_path, monkeypatch
+):
+    input_dir = tmp_path / "raw"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    source_file = input_dir / "fluorescence.csv"
+    source_file.write_text("local preview source", encoding="utf-8")
+    window._guided_input_dir_edit.setText(str(input_dir))
+    window._guided_output_dir_edit.setText(str(output_dir))
+    window._format_combo.setCurrentText("rwd")
+    discovery = {
+        "resolved_format": "rwd",
+        "n_total_discovered": 1,
+        "n_preview": 1,
+        "sessions": [
+            {
+                "index": 0,
+                "session_id": "session-0",
+                "path": str(source_file),
+                "included_in_preview": True,
+            }
+        ],
+        "rois": [{"roi_id": "CH1"}],
+    }
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+    time_sec = np.arange(2400, dtype=float) / 20.0
+    uv = 1.0 + 0.03 * np.sin(time_sec * 0.15)
+    sig = 1.25 * uv + 0.04 * np.sin(time_sec * 0.7)
+    loads = []
+
+    def fake_load_chunk(path, input_format, _config, chunk_id):
+        loads.append((path, input_format, chunk_id))
+        return Chunk(
+            chunk_id=chunk_id,
+            source_file=path,
+            format=input_format,
+            time_sec=time_sec,
+            uv_raw=uv.reshape(-1, 1),
+            sig_raw=sig.reshape(-1, 1),
+            fs_hz=20.0,
+            channel_names=["CH1"],
+            metadata={},
+        )
+
+    monkeypatch.setattr(
+        correction_preview_module, "load_chunk", fake_load_chunk
+    )
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        lambda _format: {
+            "target_fs_hz": 20.0,
+            "chunk_duration_sec": 600.0,
+            "rwd_time_col": "Time(s)",
+            "uv_suffix": "-410",
+            "sig_suffix": "-470",
+        },
+    )
+    runner = _FakeDiagnosticCacheRunner()
+    window._guided_diagnostic_cache_runner = runner
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    window._refresh_guided_diagnostics_panel()
+
+    assert window._guided_preview_source_type == "local_raw_segment"
+    assert window._guided_preview_generate_btn.isEnabled() is True
+    window._guided_preview_generate_btn.click()
+
+    result = window._guided_preview_last_result
+    assert result["source_type"] == "local_raw_segment"
+    assert result["preview_only"] is True
+    assert result["production_analysis"] is False
+    assert loads == [(str(source_file.resolve()), "rwd", 0)]
+    assert runner.argv is None
+    assert window._guided_diagnostic_cache_record is None
+    assert Path(result["visual_preview_path"]).is_file()
+    assert window._guided_preview_visual_label.pixmap().isNull() is False
+    provenance = json.loads(
+        Path(result["preview_provenance_path"]).read_text(encoding="utf-8")
+    )
+    assert provenance["local_preview_scope"] == (
+        "single_discovered_session_single_roi"
+    )
+    assert provenance["selected_roi"] == "CH1"
+    assert provenance["selected_chunk"] == 0
+    assert provenance["production_analysis"] is False
+    assert provenance["reference_fit_scope"] == "selected_session"
+    assert provenance["effective_config_values"]["target_fs_hz"] == 20.0
+    preview_dir = Path(result["preview_output_dir"])
+    assert not (preview_dir / "status.json").exists()
+    assert not (preview_dir / "run_report.json").exists()
+    assert not (preview_dir / "MANIFEST.json").exists()
+    assert not (preview_dir / "_analysis").exists()
+    assert window._guided_confirm_locked_label.isHidden() is False
+    assert window._guided_confirm_strategy_combo.parentWidget().isHidden()
+    assert window._guided_strategy_choices == {}
+    assert "Final analysis recomputes correction" in " ".join(
+        _label_texts(
+            window._guided_workflow_stack.widget(
+                list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+            )
+        )
     )
 
 
