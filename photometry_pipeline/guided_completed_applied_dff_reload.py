@@ -85,6 +85,83 @@ class GuidedCompletedAppliedDffState:
         return [issue for issue in self.issues if issue.severity == "blocking"]
 
 
+def format_guided_completed_applied_dff_summary(
+    state: GuidedCompletedAppliedDffState,
+) -> str:
+    """Format completed-run applied-dF/F state for read-only review."""
+    if not state.present:
+        return (
+            "Applied dF/F: not present\n"
+            "Guided applied-dF/F provenance was not found."
+        )
+
+    blocking_count = sum(
+        issue.severity == "blocking" for issue in state.issues
+    )
+    warning_count = sum(
+        issue.severity == "warning" for issue in state.issues
+    )
+    if blocking_count:
+        display_status = "invalid provenance"
+    elif state.overall_status in {"succeeded", "failed", "running"}:
+        display_status = state.overall_status
+    else:
+        display_status = "unknown"
+
+    def yes_no(value: bool | None) -> str:
+        if value is True:
+            return "yes"
+        if value is False:
+            return "no"
+        return "unknown"
+
+    lines = [
+        f"Applied dF/F: {display_status}",
+        f"Overall status: {state.overall_status or 'unknown'}",
+        f"Production analysis: {yes_no(state.production_analysis)}",
+        f"Preview only: {yes_no(state.preview_only)}",
+        "Orchestration capability enabled: "
+        f"{yes_no(state.orchestration_capability_enabled)}",
+        f"Issues: {blocking_count} blocking, {warning_count} warning",
+    ]
+
+    if state.rows:
+        lines.append("ROI strategies:")
+        for row in state.rows:
+            strategy = (
+                f"{row.strategy_family}; selected {row.selected_strategy}"
+            )
+            if row.dynamic_fit_mode:
+                strategy += f"; dynamic-fit mode {row.dynamic_fit_mode}"
+            output_state = (
+                "output present" if row.output_dir_exists else "output missing"
+            )
+            summary_state = (
+                "summary present"
+                if row.pipeline_summary_exists
+                else "summary missing"
+                if row.pipeline_summary_path
+                else "summary not recorded"
+            )
+            lines.append(
+                f"- {row.roi_id}: {strategy}; batch {row.batch_strategy}; "
+                f"status {row.status}; {output_state}; {summary_state}"
+            )
+
+    visible_issues = [
+        issue
+        for issue in state.issues
+        if issue.severity in {"blocking", "warning"}
+    ]
+    if visible_issues:
+        lines.append("Issues:")
+        lines.extend(
+            f"- {issue.severity}: {issue.category} — {issue.message}"
+            for issue in visible_issues
+        )
+    return "\n".join(lines)
+
+
 def _is_subpath(child: Path, parent: Path) -> bool:
     """Check if child path is under parent path."""
     try:

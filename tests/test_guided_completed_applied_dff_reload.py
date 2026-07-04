@@ -8,6 +8,9 @@ import pytest
 
 from photometry_pipeline.guided_completed_applied_dff_reload import (
     load_guided_completed_applied_dff_state,
+    format_guided_completed_applied_dff_summary,
+    GuidedCompletedAppliedDffIssue,
+    GuidedCompletedAppliedDffRow,
     GuidedCompletedAppliedDffState,
 )
 from gui.run_report_viewer import RunReportViewer
@@ -126,6 +129,89 @@ def test_no_provenance_file(tmp_path):
     assert state.present is False
     assert len(state.blocking_issues()) == 0
     assert not (run_dir / "applied_dff").exists()
+
+
+def test_format_summary_absent_state():
+    text = format_guided_completed_applied_dff_summary(
+        GuidedCompletedAppliedDffState.absent()
+    )
+
+    assert "Applied dF/F" in text
+    assert "not present" in text
+    assert "blocking" not in text
+
+
+def test_format_summary_valid_succeeded_state():
+    state = GuidedCompletedAppliedDffState(
+        present=True,
+        overall_status="succeeded",
+        production_analysis=True,
+        preview_only=False,
+        orchestration_capability_enabled=True,
+        rows=(
+            GuidedCompletedAppliedDffRow(
+                roi_id="CH1",
+                batch_roi="CH1",
+                strategy_family="dynamic_fit",
+                selected_strategy="robust_global_event_reject",
+                dynamic_fit_mode="robust_global_event_reject",
+                batch_strategy="dynamic_fit",
+                output_name="CH1_dynamic_fit",
+                output_dir="applied_dff/CH1_dynamic_fit",
+                status="succeeded",
+                pipeline_summary_path=None,
+                output_dir_exists=True,
+                pipeline_summary_exists=False,
+            ),
+        ),
+    )
+
+    text = format_guided_completed_applied_dff_summary(state)
+
+    assert "Applied dF/F: succeeded" in text
+    assert "Production analysis: yes" in text
+    assert "CH1" in text
+    assert "dynamic_fit" in text
+    assert "output present" in text
+
+
+def test_format_summary_invalid_provenance():
+    state = GuidedCompletedAppliedDffState(
+        present=True,
+        overall_status="succeeded",
+        issues=(
+            GuidedCompletedAppliedDffIssue(
+                category="test_blocker",
+                severity="blocking",
+                message="Contract mismatch.",
+            ),
+        ),
+    )
+
+    text = format_guided_completed_applied_dff_summary(state)
+
+    assert "invalid provenance" in text
+    assert "test_blocker" in text
+    assert "Contract mismatch." in text
+
+
+def test_format_summary_failed_orchestration_warning():
+    state = GuidedCompletedAppliedDffState(
+        present=True,
+        overall_status="failed",
+        issues=(
+            GuidedCompletedAppliedDffIssue(
+                category="applied_dff_orchestration_failed",
+                severity="warning",
+                message="Subprocess returned 1.",
+            ),
+        ),
+    )
+
+    text = format_guided_completed_applied_dff_summary(state)
+
+    assert "Applied dF/F: failed" in text
+    assert "applied_dff_orchestration_failed" in text
 
 
 def test_malformed_provenance_json(tmp_path):
@@ -588,6 +674,7 @@ def test_integration_valid_completed_run_no_provenance(qapp, tmp_path):
         assert viewer.load_report(str(run_dir)) is True
         assert viewer.applied_dff_state.present is False
         assert len(viewer.applied_dff_state.blocking_issues()) == 0
+        assert "not present" in viewer.applied_dff_summary_text
     finally:
         viewer.close()
 
@@ -605,6 +692,7 @@ def test_failed_viewer_load_does_not_expose_applied_dff_state(qapp, tmp_path):
     try:
         assert viewer.load_report(str(run_dir)) is False
         assert viewer.applied_dff_state.present is False
+        assert "succeeded" not in viewer.applied_dff_summary_text
     finally:
         viewer.close()
 
@@ -626,6 +714,9 @@ def test_integration_valid_completed_run_valid_provenance(qapp, tmp_path):
         assert len(viewer.applied_dff_state.rows) == 1
         assert viewer.applied_dff_state.rows[0].roi_id == "CH1"
         assert viewer.applied_dff_state.has_blocking_issues is False
+        assert "succeeded" in viewer.applied_dff_summary_text
+        assert "CH1" in viewer.applied_dff_summary_text
+        assert "dynamic_fit" in viewer.applied_dff_summary_text
     finally:
         viewer.close()
 
@@ -640,6 +731,11 @@ def test_integration_valid_completed_run_malformed_provenance(qapp, tmp_path):
         assert viewer.load_report(str(run_dir)) is True
         assert viewer.applied_dff_state.present is True
         assert viewer.applied_dff_state.has_blocking_issues is True
+        assert "invalid provenance" in viewer.applied_dff_summary_text
+        assert (
+            "applied_dff_provenance_malformed"
+            in viewer.applied_dff_summary_text
+        )
     finally:
         viewer.close()
 

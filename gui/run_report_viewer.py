@@ -33,6 +33,7 @@ from gui.interactive_image import InteractiveImageLabel, InteractiveImageControl
 from photometry_pipeline.guided_completed_applied_dff_reload import (
     load_guided_completed_applied_dff_state,
     GuidedCompletedAppliedDffState,
+    format_guided_completed_applied_dff_summary,
 )
 
 
@@ -93,6 +94,22 @@ class RunReportViewer(QWidget):
         ws = QVBoxLayout(self._workspace)
         ws.setContentsMargins(0, 0, 0, 0)
         ws.setSpacing(6)
+
+        self._applied_dff_summary_label = QLabel(
+            format_guided_completed_applied_dff_summary(
+                self._applied_dff_state
+            )
+        )
+        self._applied_dff_summary_label.setObjectName(
+            "completedRunAppliedDffSummary"
+        )
+        self._applied_dff_summary_label.setWordWrap(True)
+        self._applied_dff_summary_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        self._applied_dff_summary_label.setFrameShape(QFrame.StyledPanel)
+        self._applied_dff_summary_label.setContentsMargins(8, 6, 8, 6)
+        ws.addWidget(self._applied_dff_summary_label)
 
         selector_row = QHBoxLayout()
         selector_row.addWidget(QLabel("Region:"))
@@ -190,7 +207,7 @@ class RunReportViewer(QWidget):
         nav_row.addWidget(self._next_btn)
         viewer_col.addLayout(nav_row)
         ws.addLayout(viewer_col, 1)
-        ws.setStretch(2, 1)
+        ws.setStretch(3, 1)
         root.addWidget(self._workspace, 1)
 
         self.clear()
@@ -200,6 +217,11 @@ class RunReportViewer(QWidget):
         self._current_run_dir = ""
         self._run_summary_path = ""
         self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
+        self._applied_dff_summary_label.setText(
+            format_guided_completed_applied_dff_summary(
+                self._applied_dff_state
+            )
+        )
         self._region_paths = {}
         self._region_tab_images = {}
         self._tab_indices = {}
@@ -273,6 +295,11 @@ class RunReportViewer(QWidget):
             return False
 
         self._applied_dff_state = load_guided_completed_applied_dff_state(out_dir)
+        self._applied_dff_summary_label.setText(
+            format_guided_completed_applied_dff_summary(
+                self._applied_dff_state
+            )
+        )
 
         title = "Results workspace"
         if is_preview:
@@ -301,6 +328,11 @@ class RunReportViewer(QWidget):
     def applied_dff_state(self) -> GuidedCompletedAppliedDffState:
         """Return the loaded completed run applied dF/F state."""
         return self._applied_dff_state
+
+    @property
+    def applied_dff_summary_text(self) -> str:
+        """Return the read-only completed-run applied dF/F summary text."""
+        return self._applied_dff_summary_label.text()
 
     def _discover_region_tab_images(self, region_path: str) -> Dict[str, List[str]]:
         """Discover per-tab image lists for one region directory."""
