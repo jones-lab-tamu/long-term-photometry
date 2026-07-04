@@ -171,6 +171,11 @@ GUIDED_CORRECTION_PREVIEW_METHOD_LABELS = {
     "global_linear_regression": "Global Linear Regression",
 }
 GUIDED_SIGNAL_ONLY_F0_CARD = "Signal-Only F0"
+LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE = "local_correction_preview"
+LOCAL_CORRECTION_PREVIEW_RECOMPUTE_MESSAGE = (
+    "Confirmed from local correction preview. Final analysis will recompute "
+    "correction using the full selected recordings."
+)
 GUIDED_CONFIRM_STRATEGIES = (
     ("Robust Global Event-Reject Fit", "robust_global_event_reject"),
     ("Adaptive Event-Gated Fit", "adaptive_event_gated_regression"),
@@ -3003,7 +3008,8 @@ class MainWindow(QMainWindow):
         actions_layout.setSpacing(10)
 
         cache_group = QGroupBox(
-            "Optional: prepare reusable full correction evidence"
+            "Optional: prepare reusable full correction evidence",
+            actions_group,
         )
         cache_group.setObjectName("guidedDiagnosticCachePanel")
         cache_group.setCheckable(True)
@@ -3073,6 +3079,7 @@ class MainWindow(QMainWindow):
                 for widget in self._guided_full_evidence_detail_widgets
             ]
         )
+        cache_group.setVisible(False)
 
         preview_group = QGroupBox("1. Preview correction methods")
         preview_group.setObjectName("guidedCorrectionPreviewPanel")
@@ -3467,7 +3474,6 @@ class MainWindow(QMainWindow):
         self._guided_preview_locked_label.setWordWrap(True)
         preview_layout.addWidget(self._guided_preview_locked_label)
         actions_layout.addWidget(preview_group)
-        actions_layout.addWidget(cache_group)
         layout.addWidget(actions_group)
 
         outputs_group = QGroupBox("Technical generated-output details")
@@ -3771,7 +3777,61 @@ class MainWindow(QMainWindow):
     def _guided_confirm_choice_key(self, source_type: str, source_id: object, roi: str):
         if source_type == "diagnostic_cache":
             return (self._diagnostic_cache_source_key(source_id), roi)
+        if source_type == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE:
+            return (LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, roi)
         return (str(source_id or ""), roi)
+
+    def _guided_local_preview_setup_signature(self) -> str:
+        payload = self._guided_diagnostic_cache_request_payload()
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+
+    def _mark_guided_local_preview_choices_stale(
+        self, reason: str, *, roi: str | None = None
+    ) -> None:
+        choices = getattr(self, "_guided_strategy_choices", {})
+        for key, entry in list(choices.items()):
+            if (
+                not isinstance(entry, dict)
+                or entry.get("source_type")
+                != LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+                or (roi is not None and str(entry.get("roi")) != str(roi))
+            ):
+                continue
+            updated = dict(entry)
+            updated["current"] = False
+            updated["stale"] = True
+            updated["stale_reason"] = reason
+            choices[key] = updated
+
+    def _refresh_guided_local_preview_choice_currency(self) -> None:
+        signature = self._guided_local_preview_setup_signature()
+        choices = getattr(self, "_guided_strategy_choices", {})
+        for key, entry in list(choices.items()):
+            if (
+                not isinstance(entry, dict)
+                or entry.get("source_type")
+                != LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+            ):
+                continue
+            updated = dict(entry)
+            current = (
+                str(entry.get("setup_signature") or "") == signature
+                and str(entry.get("roi") or "")
+                in set(self._guided_selected_roi_ids()[1])
+            )
+            if not current:
+                updated["current"] = False
+                updated["stale"] = True
+                updated["stale_reason"] = (
+                    "Correction-relevant setup changed; confirm again from a "
+                    "current local preview."
+                )
+            elif entry.get("stale") is not True:
+                updated["current"] = True
+                updated["stale"] = False
+            choices[key] = updated
 
     def _mark_guided_diagnostic_cache_choices_stale(self, reason: str) -> None:
         choices = getattr(self, "_guided_strategy_choices", {})
@@ -5365,6 +5425,12 @@ class MainWindow(QMainWindow):
             )
         else:
             result["source_type"] = "local_raw_segment"
+            if str(result.get("status") or "") in {"success", "partial"}:
+                self._mark_guided_local_preview_choices_stale(
+                    "A newer local preview was generated for this ROI; "
+                    "confirm again to use the new preview.",
+                    roi=roi,
+                )
         result["roi"] = roi
         result["chunk_index"] = int(chunk)
         self._generate_guided_preview_reports(
@@ -6166,6 +6232,26 @@ class MainWindow(QMainWindow):
         return str(strategy or "")
 
     def _on_guided_confirm_selection_changed(self, *_args) -> None:
+        if (
+            getattr(self, "_guided_confirm_source_type", "")
+            == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+        ):
+            roi = self._selected_guided_confirm_roi()
+            strategy = self._selected_guided_confirm_strategy()
+            entry = getattr(self, "_guided_strategy_choices", {}).get(
+                self._guided_confirm_choice_key(
+                    LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, roi
+                )
+            )
+            if (
+                isinstance(entry, dict)
+                and strategy
+                and strategy != entry.get("strategy")
+            ):
+                self._mark_guided_local_preview_choices_stale(
+                    "Selected strategy changed; confirm the new strategy.",
+                    roi=roi,
+                )
         self._refresh_guided_confirm_strategy_panel()
 
     def _current_guided_completed_run_dir(self) -> str:
@@ -6215,11 +6301,21 @@ class MainWindow(QMainWindow):
         return f"{prefix}: {status}{suffix}"
 
     def _guided_confirm_evidence_summary(self) -> dict[str, object]:
-        preview = self._confirm_evidence_status(
-            "Correction preview",
-            "_guided_preview_last_result",
-            "_guided_preview_result_stale",
-        )
+        local = self._guided_current_local_preview_evidence()
+        if local is not None:
+            result = local["result"]
+            preview = (
+                "Local correction preview: "
+                f"{result.get('status', '')}; ROI {result.get('roi', '')}; "
+                "preview segment "
+                f"{result.get('preview_segment_label') or result.get('chunk_index', '')}"
+            )
+        else:
+            preview = self._confirm_evidence_status(
+                "Correction preview",
+                "_guided_preview_last_result",
+                "_guided_preview_result_stale",
+            )
         signal = self._confirm_evidence_status(
             "Signal-Only F0 diagnostic",
             "_guided_signal_f0_last_result",
@@ -6229,7 +6325,10 @@ class MainWindow(QMainWindow):
         lines = [preview, signal]
         if stale:
             lines.append("Displayed evidence is stale for the current selection.")
-        lines.append("Evidence is descriptive only. It does not select a strategy.")
+        lines.append(
+            "Generating or selecting a strategy does not confirm it. Use the "
+            "explicit confirmation button."
+        )
         return {
             "preview": preview,
             "signal_only_f0": signal,
@@ -6300,6 +6399,104 @@ class MainWindow(QMainWindow):
             for name, expected in expected_identity.items()
         )
 
+    def _guided_current_local_preview_evidence(self) -> dict[str, object] | None:
+        if (
+            not getattr(self, "_guided_preview_has_result", False)
+            or getattr(self, "_guided_preview_result_stale", False)
+        ):
+            return None
+        result = getattr(self, "_guided_preview_last_result", None)
+        if (
+            not isinstance(result, dict)
+            or result.get("source_type") != "local_raw_segment"
+            or result.get("preview_only") is not True
+            or result.get("production_analysis") is not False
+            or str(result.get("status") or "") not in {"success", "partial"}
+        ):
+            return None
+        provenance_path = Path(
+            str(result.get("preview_provenance_path") or "")
+        )
+        try:
+            provenance = json.loads(
+                provenance_path.read_text(encoding="utf-8")
+            )
+        except Exception:
+            return None
+        if (
+            not isinstance(provenance, dict)
+            or provenance.get("preview_only") is not True
+            or provenance.get("production_analysis") is not False
+            or provenance.get("source_type") != "local_raw_segment"
+            or str(provenance.get("preview_id") or "")
+            != str(result.get("preview_id") or "")
+            or str(provenance.get("selected_roi") or "")
+            != str(result.get("roi") or "")
+        ):
+            return None
+        return {"result": result, "provenance": provenance}
+
+    def _guided_local_preview_evidence_reference(
+        self, strategy: str
+    ) -> dict[str, object] | None:
+        current = self._guided_current_local_preview_evidence()
+        if current is None:
+            return None
+        result = current["result"]
+        provenance = current["provenance"]
+        statuses = result.get("method_statuses", {})
+        method_status = (
+            statuses.get(strategy, {}) if isinstance(statuses, dict) else {}
+        )
+        if (
+            strategy
+            not in set(GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE.values())
+            or not isinstance(method_status, dict)
+            or method_status.get("status") != "success"
+        ):
+            return None
+        return {
+            "evidence_source_type": LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
+            "preview_only": True,
+            "production_analysis": False,
+            "roi": str(result.get("roi") or ""),
+            "selected_strategy": strategy,
+            "compared_methods": list(
+                provenance.get("correction_methods_compared") or []
+            ),
+            "preview_id": str(result.get("preview_id") or ""),
+            "preview_output_dir": str(
+                result.get("preview_output_dir") or ""
+            ),
+            "preview_visual_path": str(
+                result.get("visual_preview_path") or ""
+            ),
+            "preview_summary_path": str(
+                result.get("preview_summary_path") or ""
+            ),
+            "preview_provenance_path": str(
+                result.get("preview_provenance_path") or ""
+            ),
+            "selected_segment_label": str(
+                provenance.get("selected_segment_label") or ""
+            ),
+            "selected_segment_index": provenance.get(
+                "selected_segment_index"
+            ),
+            "source_file": str(provenance.get("source_file") or ""),
+            "source_file_hash": str(
+                provenance.get("source_file_sha256") or ""
+            ),
+            "adapter_local_chunk_id": provenance.get(
+                "adapter_local_chunk_id"
+            ),
+            "input_format": str(provenance.get("input_format") or ""),
+            "created_at_utc": str(
+                provenance.get("created_at_utc") or ""
+            ),
+            "message": LOCAL_CORRECTION_PREVIEW_RECOMPUTE_MESSAGE,
+        }
+
     def _guided_confirm_strategy_progress_text(
         self,
         *,
@@ -6309,6 +6506,7 @@ class MainWindow(QMainWindow):
         included_rois: list[str],
         current_source_key,
     ) -> str:
+        self._refresh_guided_local_preview_choice_currency()
         if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
             return ""
         if not source_ok:
@@ -6339,7 +6537,14 @@ class MainWindow(QMainWindow):
                 continue
             choice_source_key, roi = key
             roi = str(roi)
-            if roi not in included or choice.get("source_type") != "diagnostic_cache":
+            if (
+                roi not in included
+                or choice.get("source_type")
+                not in {
+                    "diagnostic_cache",
+                    LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
+                }
+            ):
                 continue
             if choice.get("stale") is True or choice.get("current") is not True:
                 stale.add(roi)
@@ -6412,8 +6617,18 @@ class MainWindow(QMainWindow):
             == "local_raw_segment"
             and getattr(self, "_guided_preview_source_ok", False)
         )
+        local_confirmation_ready = bool(
+            new_analysis
+            and self._guided_current_local_preview_evidence() is not None
+            and preview_result.get("visual_preview_path")
+            and os.path.isfile(
+                str(preview_result.get("visual_preview_path"))
+            )
+        )
         preview_unlocked = evidence_ready or local_preview_ready or not new_analysis
-        strategy_unlocked = preview_ready or not new_analysis
+        strategy_unlocked = (
+            preview_ready or local_confirmation_ready or not new_analysis
+        )
         self._guided_preview_locked_label.setVisible(not preview_unlocked)
         for widget in getattr(self, "_guided_preview_gated_widgets", ()):
             widget.setVisible(preview_unlocked)
@@ -6425,8 +6640,8 @@ class MainWindow(QMainWindow):
             signal_group.setVisible(preview_unlocked and evidence_ready)
         if new_analysis and local_preview_ready and not strategy_unlocked:
             self._guided_confirm_locked_label.setText(
-                "Review the local preview above. Strategy confirmation from "
-                "local preview will be enabled in a later step."
+                "Generate and review a successful local correction preview "
+                "before choosing a strategy."
             )
         if new_analysis:
             for widget_name in (
@@ -6441,6 +6656,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_guided_correction_next_action(self) -> None:
         self._refresh_guided_correction_section_gating()
+        self._refresh_guided_local_preview_choice_currency()
         label = getattr(self, "_guided_correction_next_action_label", None)
         if label is None:
             return
@@ -6459,11 +6675,30 @@ class MainWindow(QMainWindow):
                 and not getattr(self, "_guided_preview_result_stale", False)
                 and local_result.get("source_type") == "local_raw_segment"
             ):
-                label.setText(
-                    "Local correction preview is ready for review. Final "
-                    "analysis will recompute correction using the full "
-                    "selected recordings."
-                )
+                included = set(self._guided_selected_roi_ids()[1])
+                confirmed = {
+                    str(choice.get("roi") or "")
+                    for choice in getattr(
+                        self, "_guided_strategy_choices", {}
+                    ).values()
+                    if isinstance(choice, dict)
+                    and choice.get("source_type")
+                    == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+                    and choice.get("current") is True
+                    and choice.get("confirmed") is True
+                    and str(choice.get("roi") or "") in included
+                }
+                if included and confirmed == included:
+                    label.setText(
+                        "Correction strategies are confirmed from local "
+                        "preview for all included ROIs. Next step: Draft plan."
+                    )
+                else:
+                    label.setText(
+                        "Local correction preview is ready. Confirm a strategy "
+                        f"for this ROI. {len(confirmed)}/{len(included)} "
+                        "included ROIs confirmed."
+                    )
                 return
             if (
                 getattr(self, "_guided_preview_source_type", "")
@@ -6601,52 +6836,80 @@ class MainWindow(QMainWindow):
         rois: list[str] = []
         chunk_ids: list[int] = []
         if mode == "new_analysis":
-            source_type = "diagnostic_cache"
-            source_label = "Diagnostic cache"
-            source, status = self._resolve_current_guided_confirm_diagnostic_cache_source()
-            if source is None:
-                reason = status.message
-                source_identity = ""
-                source_display = "none"
-                if status.stale or status.code == "stale":
-                    self._mark_guided_diagnostic_cache_choices_stale(reason)
+            self._refresh_guided_local_preview_choice_currency()
+            local = self._guided_current_local_preview_evidence()
+            if local is not None:
+                result = local["result"]
+                source_type = LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+                source_label = "Local correction preview"
+                source_identity = str(result.get("preview_id") or "")
+                source_display = str(
+                    result.get("preview_segment_label")
+                    or result.get("chunk_index")
+                    or ""
+                )
+                rois = [str(result.get("roi") or "")]
+                chunk_ids = [int(result.get("chunk_index"))]
+                source_ok = bool(rois[0])
+                preview_evidence_ready = source_ok
+                self._guided_confirm_source_type = source_type
+                self._guided_confirm_source_key = (
+                    LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+                )
+                self._guided_confirm_source = local
+                reason = (
+                    "Review the local preview above, then choose the correction "
+                    "strategy for this ROI. The final analysis will recompute "
+                    "correction using the full selected recordings."
+                )
             else:
-                source_identity = source.cache_root_path
-                source_display = self._display_path(source.cache_root_path)
-                self._mark_current_guided_diagnostic_cache_choices_current(source)
-                try:
-                    with open_phasic_cache(source.phasic_trace_cache_path) as cache:
-                        phasic_rois = [str(x) for x in list_cache_rois(cache)]
-                        chunk_ids = [int(x) for x in list_cache_chunk_ids(cache)]
-                except Exception as exc:
-                    phasic_rois = []
-                    reason = f"Unable to read diagnostic-cache phasic cache for strategy confirmation: {exc}"
+                source_type = "diagnostic_cache"
+                source_label = "Diagnostic cache"
+                source, status = self._resolve_current_guided_confirm_diagnostic_cache_source()
+                if source is None:
+                    reason = status.message
+                    source_identity = ""
+                    source_display = "none"
+                    if status.stale or status.code == "stale":
+                        self._mark_guided_diagnostic_cache_choices_stale(reason)
                 else:
-                    included_rois = [str(x) for x in source.included_roi_ids]
-                    if not included_rois:
-                        reason = "Diagnostic cache does not contain included ROI IDs for strategy confirmation."
-                    elif set(included_rois) != set(phasic_rois):
-                        reason = (
-                            "Diagnostic cache ROI mismatch; included ROI IDs do not match phasic-cache ROI inventory. "
-                            "Rebuild the diagnostic cache before confirming strategies."
-                        )
-                    elif not chunk_ids:
-                        reason = "Diagnostic cache has no evidence chunk entries for strategy confirmation."
+                    source_identity = source.cache_root_path
+                    source_display = self._display_path(source.cache_root_path)
+                    self._mark_current_guided_diagnostic_cache_choices_current(source)
+                    try:
+                        with open_phasic_cache(source.phasic_trace_cache_path) as cache:
+                            phasic_rois = [str(x) for x in list_cache_rois(cache)]
+                            chunk_ids = [int(x) for x in list_cache_chunk_ids(cache)]
+                    except Exception as exc:
+                        phasic_rois = []
+                        reason = f"Unable to read diagnostic-cache phasic cache for strategy confirmation: {exc}"
                     else:
-                        rois = included_rois
-                        source_ok = True
-                        self._guided_confirm_source_type = "diagnostic_cache"
-                        self._guided_confirm_source_key = self._diagnostic_cache_source_key(source)
-                        self._guided_confirm_source = source
-                        preview_evidence_ready = (
-                            self._guided_current_correction_preview_evidence_ready(
-                                source
+                        included_rois = [str(x) for x in source.included_roi_ids]
+                        if not included_rois:
+                            reason = "Diagnostic cache does not contain included ROI IDs for strategy confirmation."
+                        elif set(included_rois) != set(phasic_rois):
+                            reason = (
+                                "Diagnostic cache ROI mismatch; included ROI IDs do not match phasic-cache ROI inventory. "
+                                "Rebuild the diagnostic cache before confirming strategies."
                             )
-                        )
-                        reason = (
-                            "Confirm Strategy will use the preliminary diagnostic cache; "
-                            "this is not final production analysis."
-                        )
+                        elif not chunk_ids:
+                            reason = "Diagnostic cache has no evidence chunk entries for strategy confirmation."
+                        else:
+                            rois = included_rois
+                            source_ok = True
+                            self._guided_confirm_source_type = "diagnostic_cache"
+                            self._guided_confirm_source_key = self._diagnostic_cache_source_key(source)
+                            self._guided_confirm_source = source
+                            preview_evidence_ready = (
+                                self._guided_current_correction_preview_evidence_ready(
+                                    source
+                                )
+                            )
+                            reason = (
+                                "Confirm Strategy will use the preliminary "
+                                "diagnostic cache; this is not final production "
+                                "analysis."
+                            )
         elif run_dir:
             source = resolve_completed_run_preview_source(run_dir)
             if source.ok:
@@ -6686,7 +6949,11 @@ class MainWindow(QMainWindow):
                 source_ok=source_ok,
                 preview_evidence_ready=preview_evidence_ready,
                 preview_evidence_stale=preview_evidence_stale,
-                included_rois=rois,
+                included_rois=(
+                    list(self._guided_selected_roi_ids()[1])
+                    if mode == "new_analysis"
+                    else rois
+                ),
                 current_source_key=getattr(
                     self, "_guided_confirm_source_key", None
                 ),
@@ -6713,6 +6980,32 @@ class MainWindow(QMainWindow):
 
         current_roi = self._selected_guided_confirm_roi()
         current_chunk = self._selected_guided_confirm_chunk()
+        local_preview_confirmation = (
+            source_type == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+        )
+        self._guided_confirm_chunk_combo.setVisible(
+            not local_preview_confirmation
+        )
+        self._guided_confirm_chunk_label.setVisible(
+            not local_preview_confirmation
+        )
+        if local_preview_confirmation:
+            local_result = local["result"]
+            segment_label = str(
+                local_result.get("preview_segment_label")
+                or local_result.get("chunk_index")
+                or ""
+            )
+            self._guided_confirm_local_preview_evidence_label.setText(
+                "Local correction preview for "
+                f"{current_roi}, preview segment {segment_label}."
+            )
+        self._guided_confirm_local_preview_evidence_label.setVisible(
+            local_preview_confirmation
+        )
+        self._guided_confirm_local_preview_explanation_label.setVisible(
+            local_preview_confirmation
+        )
         current_source_key = getattr(self, "_guided_confirm_source_key", None) or (
             run_dir if mode != "new_analysis" else ""
         )
@@ -6755,12 +7048,29 @@ class MainWindow(QMainWindow):
         self._guided_confirm_evidence_label.setText(str(evidence["text"]))
         self._guided_confirm_marked_choice_label.setText(self._guided_marked_choice_text())
         self._refresh_guided_draft_run_plan_preview()
+        selected_strategy = self._selected_guided_confirm_strategy()
+        local_reference = (
+            self._guided_local_preview_evidence_reference(
+                selected_strategy
+            )
+            if source_type == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+            else None
+        )
         can_mark = bool(
             source_ok
             and (mode != "new_analysis" or preview_evidence_ready)
             and self._selected_guided_confirm_roi()
             and self._selected_guided_confirm_chunk() is not None
-            and self._selected_guided_confirm_strategy()
+            and selected_strategy
+            and (
+                source_type != LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+                or local_reference is not None
+            )
+        )
+        self._guided_confirm_mark_btn.setText(
+            "Confirm strategy for this ROI"
+            if source_type == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+            else "Confirm selected strategy for this ROI"
         )
         self._guided_confirm_mark_btn.setEnabled(can_mark)
         self._refresh_guided_correction_next_action()
@@ -7863,6 +8173,12 @@ class MainWindow(QMainWindow):
             GuidedNewAnalysisDraftPlan,
             GuidedPlanCorrectionChoice
         )
+
+        # Draft construction is the shared consumption boundary for Draft Plan,
+        # backend validation/materialization, and the revision-bound Run request.
+        # Enforce local-preview currency here so correctness never depends on
+        # revisiting the Confirm Strategy UI.
+        self._refresh_guided_local_preview_choice_currency()
         
         input_path = self._guided_input_dir_edit.text().strip() if hasattr(self, "_guided_input_dir_edit") else ""
         input_format = (
@@ -7979,17 +8295,38 @@ class MainWindow(QMainWindow):
             if not isinstance(key, tuple) or len(key) != 2:
                 continue
             choice_source_key, roi_id = key
-            if choice.get("source_type") != "diagnostic_cache":
+            choice_source_type = choice.get("source_type")
+            if choice_source_type not in {
+                "diagnostic_cache",
+                LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
+            }:
                 continue
 
-            is_active = (record is not None and choice_source_key == active_cache_source_key)
-            choice_stale = "current" if (is_active and stale_or_current == "current" and not choice.get("stale", False)) else "stale"
+            if choice_source_type == "diagnostic_cache":
+                is_active = (
+                    record is not None
+                    and choice_source_key == active_cache_source_key
+                )
+                is_current = (
+                    is_active and stale_or_current == "current"
+                )
+            else:
+                is_current = (
+                    choice_source_key
+                    == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+                    and choice.get("current") is True
+                )
+            choice_stale = (
+                "current"
+                if is_current and not choice.get("stale", False)
+                else "stale"
+            )
 
             per_roi_choices.append(
                 GuidedPlanCorrectionChoice(
                     roi_id=roi_id,
                     selected_strategy=choice.get("strategy", ""),
-                    source_type="diagnostic_cache",
+                    source_type=choice_source_type,
                     diagnostic_cache_id=choice.get("cache_id"),
                     diagnostic_cache_root=choice.get("cache_root_path"),
                     diagnostic_cache_signature=choice.get("build_request_signature"),
@@ -8001,6 +8338,9 @@ class MainWindow(QMainWindow):
                     current_or_stale=choice_stale,
                     explicit_user_mark=choice.get("confirmed", False) or choice.get("choice_source") == "explicit_user_mark",
                     selected_at_utc=choice.get("marked_at_utc"),
+                    evidence_reference=dict(
+                        choice.get("local_preview_evidence") or {}
+                    ),
                 )
             )
 
@@ -8163,8 +8503,17 @@ class MainWindow(QMainWindow):
         else:
             timing_summary = f"{acq_mode}"
             
+        has_local_preview_choices = any(
+            choice.source_type == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+            for choice in plan.per_roi_correction_strategy_choices
+        )
         if plan.cache_id:
             cache_status = f"{plan.stale_or_current or 'current'} ({plan.cache_id} at {self._display_path(plan.cache_root_path or '')})"
+        elif has_local_preview_choices:
+            cache_status = (
+                "not prepared; not required for strategies confirmed from "
+                "local preview"
+            )
         else:
             cache_status = "missing"
             
@@ -8212,9 +8561,30 @@ class MainWindow(QMainWindow):
             f"Acquisition mode: {acq_mode}",
             f"Acquisition structure summary: {timing_summary}",
             f"ROI counts: {len(plan.discovered_roi_ids)} discovered, {len(plan.included_roi_ids)} included, {len(plan.excluded_roi_ids)} excluded",
-            f"Diagnostic cache: {cache_status}",
+            (
+                f"Reusable full correction evidence: {cache_status}"
+                if has_local_preview_choices
+                else f"Diagnostic cache: {cache_status}"
+            ),
             f"Correction strategy coverage: {coverage_summary}",
         ]
+        for choice in plan.per_roi_correction_strategy_choices:
+            if (
+                choice.source_type
+                == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+            ):
+                segment = choice.evidence_reference.get(
+                    "selected_segment_label", ""
+                )
+                lines.extend(
+                    [
+                        f"Correction strategy: {choice.selected_strategy}",
+                        "Evidence: local correction preview, ROI "
+                        f"{choice.roi_id}, preview segment {segment}",
+                        "Final analysis will recompute correction using the "
+                        "full selected recordings.",
+                    ]
+                )
         lines.extend(fe_lines)
         snapshot = plan.dataset_contract_snapshot
         lines.extend([
@@ -8665,6 +9035,7 @@ class MainWindow(QMainWindow):
             label.setToolTip("")
 
     def _guided_marked_choice_text(self) -> str:
+        self._refresh_guided_local_preview_choice_currency()
         source_type = str(getattr(self, "_guided_confirm_source_type", "") or "")
         roi = self._selected_guided_confirm_roi()
         chunk = self._selected_guided_confirm_chunk()
@@ -8697,6 +9068,23 @@ class MainWindow(QMainWindow):
                 or entry.get("current") is not True
                 else "current"
             )
+            if (
+                entry.get("source_type")
+                == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+            ):
+                reference = entry.get("local_preview_evidence", {})
+                segment_label = (
+                    reference.get("selected_segment_label", "")
+                    if isinstance(reference, dict)
+                    else ""
+                )
+                return (
+                    f"Confirmed from local preview for {roi} using "
+                    f"{entry.get('strategy_label', '')}.\nEvidence reviewed: "
+                    f"preview segment {segment_label}.\nStatus: {state}. "
+                    "Final analysis will "
+                    "recompute correction using the full selected recordings."
+                )
             return (
                 f"Confirmed strategy for {roi}: "
                 f"{entry.get('strategy_label', '')}. Status: {state}."
@@ -8736,6 +9124,29 @@ class MainWindow(QMainWindow):
                 "source_type": "completed_run",
                 "completed_run_dir": run_dir,
                 "current": True,
+            }
+        elif source_type == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE:
+            reference = self._guided_local_preview_evidence_reference(
+                strategy
+            )
+            if reference is None or reference.get("roi") != roi:
+                self._refresh_guided_confirm_strategy_panel()
+                return
+            source_key = self._guided_confirm_choice_key(
+                source_type, None, roi
+            )
+            source_fields = {
+                "source_type": LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
+                "evidence_source_type": LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
+                "preview_only": True,
+                "production_analysis": False,
+                "local_preview_evidence": reference,
+                "setup_signature": (
+                    self._guided_local_preview_setup_signature()
+                ),
+                "current": True,
+                "stale": False,
+                "completed_run_dir": "",
             }
         else:
             self._refresh_guided_confirm_strategy_panel()
@@ -9913,6 +10324,9 @@ class MainWindow(QMainWindow):
         selection_layout.addRow(
             "Preview segment:", self._guided_confirm_chunk_combo
         )
+        self._guided_confirm_chunk_label = selection_layout.labelForField(
+            self._guided_confirm_chunk_combo
+        )
         layout.addWidget(selection_group)
 
         evidence_group = QGroupBox("Technical evidence summary")
@@ -9941,9 +10355,40 @@ class MainWindow(QMainWindow):
         self._guided_confirm_strategy_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self._guided_confirm_strategy_combo.setMinimumContentsLength(12)
         self._make_guided_widget_shrinkable(self._guided_confirm_strategy_combo)
-        self._guided_confirm_strategy_combo.currentIndexChanged.connect(self._refresh_guided_confirm_strategy_panel)
+        self._guided_confirm_strategy_combo.currentIndexChanged.connect(
+            self._on_guided_confirm_selection_changed
+        )
         choice_layout.addRow(
             "Strategy for this ROI:", self._guided_confirm_strategy_combo
+        )
+        self._guided_confirm_local_preview_evidence_label = QLabel("")
+        self._guided_confirm_local_preview_evidence_label.setObjectName(
+            "guidedConfirmLocalPreviewEvidence"
+        )
+        self._guided_confirm_local_preview_evidence_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_confirm_local_preview_evidence_label.setWordWrap(True)
+        self._guided_confirm_local_preview_evidence_label.setVisible(False)
+        choice_layout.addRow(
+            "Evidence reviewed:",
+            self._guided_confirm_local_preview_evidence_label,
+        )
+        self._guided_confirm_local_preview_explanation_label = QLabel(
+            "This choice will be recorded as confirmed from the local preview "
+            "above. Final analysis will recompute correction using the full "
+            "selected recordings."
+        )
+        self._guided_confirm_local_preview_explanation_label.setObjectName(
+            "guidedConfirmLocalPreviewExplanation"
+        )
+        self._guided_confirm_local_preview_explanation_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_confirm_local_preview_explanation_label.setWordWrap(True)
+        self._guided_confirm_local_preview_explanation_label.setVisible(False)
+        choice_layout.addRow(
+            "", self._guided_confirm_local_preview_explanation_label
         )
         self._guided_confirm_ack_cb = QCheckBox(
             "I reviewed the diagnostic evidence and am explicitly marking this strategy for later planning."

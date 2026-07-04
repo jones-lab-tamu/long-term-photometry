@@ -612,6 +612,7 @@ class GuidedPlanCorrectionChoice:
     current_or_stale: str | None = "stale"  # "current" or "stale"
     explicit_user_mark: bool = False
     selected_at_utc: str | None = None
+    evidence_reference: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -811,8 +812,30 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
             severity="blocking"
         ))
 
+    choices_by_roi = {
+        choice.roi_id: choice
+        for choice in plan.per_roi_correction_strategy_choices
+    }
+    all_included_use_current_local_preview = bool(
+        plan.included_roi_ids
+        and all(
+            roi in choices_by_roi
+            and choices_by_roi[roi].source_type
+            == "local_correction_preview"
+            and choices_by_roi[roi].current_or_stale == "current"
+            and choices_by_roi[roi].explicit_user_mark
+            and choices_by_roi[roi].evidence_reference.get("preview_only")
+            is True
+            and choices_by_roi[roi].evidence_reference.get(
+                "production_analysis"
+            )
+            is False
+            for roi in plan.included_roi_ids
+        )
+    )
+
     # 6. missing_diagnostic_cache
-    if not plan.cache_id:
+    if not plan.cache_id and not all_included_use_current_local_preview:
         issues.append(GuidedPlanIssue(
             category="missing_diagnostic_cache",
             message="Diagnostic cache has not been generated for the current setup.",
@@ -843,7 +866,6 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
         ))
 
     # ROI strategies checks
-    choices_by_roi = {choice.roi_id: choice for choice in plan.per_roi_correction_strategy_choices}
     for roi in plan.included_roi_ids:
         # 8. missing_strategy_choice_for_included_roi
         if roi not in choices_by_roi:
@@ -858,41 +880,50 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
             choice_stale_reasons = []
 
             # source_type check
-            if choice.source_type != "diagnostic_cache":
+            if choice.source_type not in {
+                "diagnostic_cache",
+                "local_correction_preview",
+            }:
                 is_choice_stale = True
                 choice_stale_reasons.append("invalid_choice_source_type")
 
-            # cache_id check
-            if not plan.cache_id or choice.diagnostic_cache_id != plan.cache_id:
+            if choice.source_type == "diagnostic_cache":
+                if not plan.cache_id or choice.diagnostic_cache_id != plan.cache_id:
+                    is_choice_stale = True
+                    choice_stale_reasons.append("source cache id mismatch")
+                if not _paths_match(choice.diagnostic_cache_root, plan.cache_root_path):
+                    is_choice_stale = True
+                    choice_stale_reasons.append("source cache root mismatch")
+                if choice.build_request_signature != plan.build_request_signature:
+                    is_choice_stale = True
+                    choice_stale_reasons.append("build request signature mismatch")
+                if choice.source_setup_signature != plan.source_setup_signature:
+                    is_choice_stale = True
+                    choice_stale_reasons.append("source setup signature mismatch")
+                if choice.diagnostic_scope_signature != plan.diagnostic_scope_signature:
+                    is_choice_stale = True
+                    choice_stale_reasons.append("diagnostic scope signature mismatch")
+            elif (
+                choice.evidence_reference.get("preview_only") is not True
+                or choice.evidence_reference.get("production_analysis")
+                is not False
+                or choice.evidence_reference.get("evidence_source_type")
+                != "local_correction_preview"
+            ):
                 is_choice_stale = True
-                choice_stale_reasons.append("source cache id mismatch")
-
-            # cache_root check
-            if not _paths_match(choice.diagnostic_cache_root, plan.cache_root_path):
-                is_choice_stale = True
-                choice_stale_reasons.append("source cache root mismatch")
-
-            # build_request_signature check
-            if choice.build_request_signature != plan.build_request_signature:
-                is_choice_stale = True
-                choice_stale_reasons.append("build request signature mismatch")
-
-            # source_setup_signature check
-            if choice.source_setup_signature != plan.source_setup_signature:
-                is_choice_stale = True
-                choice_stale_reasons.append("source setup signature mismatch")
-
-            # diagnostic_scope_signature check
-            if choice.diagnostic_scope_signature != plan.diagnostic_scope_signature:
-                is_choice_stale = True
-                choice_stale_reasons.append("diagnostic scope signature mismatch")
+                choice_stale_reasons.append(
+                    "invalid local preview evidence reference"
+                )
 
             # stale check
             if choice.current_or_stale == "stale":
                 is_choice_stale = True
                 choice_stale_reasons.append("choice explicitly marked stale")
 
-            if plan.stale_or_current == "stale":
+            if (
+                choice.source_type == "diagnostic_cache"
+                and plan.stale_or_current == "stale"
+            ):
                 is_choice_stale = True
                 choice_stale_reasons.append("active cache is stale")
 
@@ -2575,6 +2606,7 @@ def build_guided_new_analysis_run_preview(plan: GuidedNewAnalysisDraftPlan) -> G
                     "current_or_stale": choice.current_or_stale,
                     "explicit_user_mark": choice.explicit_user_mark,
                     "selected_at_utc": choice.selected_at_utc,
+                    "evidence_reference": dict(choice.evidence_reference),
                 }
                 for choice in choices
             ],
@@ -2693,6 +2725,7 @@ def _per_roi_choice_preview_dict(choice: GuidedPlanCorrectionChoice) -> dict[str
         "current_or_stale": choice.current_or_stale,
         "explicit_user_mark": choice.explicit_user_mark,
         "selected_at_utc": choice.selected_at_utc,
+        "evidence_reference": dict(choice.evidence_reference),
     }
 
 

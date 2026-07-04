@@ -82,6 +82,97 @@ def _complete_new_analysis_plan_for_gui(**overrides):
     return plan
 
 
+def test_local_preview_choices_satisfy_strategy_readiness_without_full_evidence():
+    evidence = {
+        "evidence_source_type": "local_correction_preview",
+        "preview_only": True,
+        "production_analysis": False,
+        "preview_id": "local-preview-1",
+        "roi": "CH1",
+        "selected_segment_label": "session-2",
+        "message": (
+            "Confirmed from local correction preview. Final analysis will "
+            "recompute correction using the full selected recordings."
+        ),
+    }
+    plan = _complete_new_analysis_plan_for_gui(
+        cache_id=None,
+        cache_root_path=None,
+        artifact_record_path=None,
+        provenance_path=None,
+        source_setup_signature=None,
+        diagnostic_scope_signature=None,
+        build_request_signature=None,
+        stale_or_current="missing",
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="CH1",
+                selected_strategy="global_linear_regression",
+                source_type="local_correction_preview",
+                evidence_chunk=2,
+                evidence_summary=evidence["message"],
+                current_or_stale="current",
+                explicit_user_mark=True,
+                evidence_reference=evidence,
+            )
+        ],
+    )
+
+    readiness = evaluate_new_analysis_plan_readiness(plan)
+    blocking = {
+        issue.category
+        for issue in readiness.blocking_issues
+    }
+    assert "missing_diagnostic_cache" not in blocking
+    assert "stale_strategy_choice" not in blocking
+    assert "missing_strategy_choice_for_included_roi" not in blocking
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    subset_blocking = {
+        issue.category for issue in subset.blocking_issues
+    }
+    assert "missing_strategy_choice_for_execution_subset" not in subset_blocking
+    assert "non_explicit_strategy_choice" not in subset_blocking
+
+
+def test_stale_local_preview_choice_cannot_replace_full_evidence_readiness():
+    evidence = {
+        "evidence_source_type": "local_correction_preview",
+        "preview_only": True,
+        "production_analysis": False,
+        "preview_id": "local-preview-stale",
+        "roi": "CH1",
+    }
+    plan = _complete_new_analysis_plan_for_gui(
+        cache_id=None,
+        cache_root_path=None,
+        artifact_record_path=None,
+        provenance_path=None,
+        source_setup_signature=None,
+        diagnostic_scope_signature=None,
+        build_request_signature=None,
+        stale_or_current="missing",
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="CH1",
+                selected_strategy="global_linear_regression",
+                source_type="local_correction_preview",
+                current_or_stale="stale",
+                explicit_user_mark=True,
+                evidence_reference=evidence,
+            )
+        ],
+    )
+
+    blocking = {
+        issue.category
+        for issue in evaluate_new_analysis_plan_readiness(
+            plan
+        ).blocking_issues
+    }
+    assert "missing_diagnostic_cache" in blocking
+    assert "stale_strategy_choice" in blocking
+
+
 def _configure_complete_guided_new_analysis_draft(
     window,
     tmp_path,

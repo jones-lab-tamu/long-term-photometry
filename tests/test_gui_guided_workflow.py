@@ -544,6 +544,8 @@ def test_guided_confirm_strategy_is_real_planning_ui_and_run_stays_skipped_in_op
         0,
         1,
     ]
+    assert window._guided_confirm_chunk_combo.isHidden() is False
+    assert window._guided_confirm_chunk_label.isHidden() is False
     strategy_values = {
         window._guided_confirm_strategy_combo.itemData(i)
         for i in range(window._guided_confirm_strategy_combo.count())
@@ -2339,21 +2341,14 @@ def test_guided_diagnostic_cache_action_blocks_without_roi_discovery(window, tmp
     assert window._current_run_dir == ""
 
 
-def test_guided_full_evidence_panel_is_optional_and_scientist_facing(window):
+def test_guided_full_evidence_controls_remain_internal_and_hidden(window):
     panel = window._guided_workflow_tab.findChild(QGroupBox, "guidedDiagnosticCachePanel")
     assert panel is not None
-    visible_text = "\n".join(
-        label.text()
-        for label in panel.findChildren(QLabel)
-        if label.text()
-    )
-    visible_text += "\n" + window._guided_diagnostic_cache_build_btn.text()
-
-    assert panel.title() == "Optional: prepare reusable full correction evidence"
+    assert panel.parentWidget() is not None
+    assert panel.isWindow() is False
+    assert panel.isHidden() is True
     assert panel.isChecked() is False
-    assert "may take several minutes" in visible_text
-    assert "Local preview does not require this step" in visible_text
-    assert "Final analysis will still recompute correction" in visible_text
+    assert window._guided_diagnostic_cache_build_btn.isVisible() is False
 
 
 def test_guided_diagnostic_cache_build_launches_tuning_prep_without_completed_run(window, tmp_path, monkeypatch):
@@ -2905,6 +2900,8 @@ def test_guided_confirm_strategy_new_analysis_uses_diagnostic_cache_roi_inventor
         0,
         1,
     ]
+    assert window._guided_confirm_chunk_combo.isHidden() is False
+    assert window._guided_confirm_chunk_label.isHidden() is False
     assert "preliminary diagnostic cache" in window._guided_confirm_context_label.text()
     assert "not final production analysis" in window._guided_confirm_context_label.text()
     assert window._current_run_dir == before_run_dir
@@ -4592,11 +4589,11 @@ def test_gui_merged_correction_page_makes_local_preview_primary_and_user_safe(wi
         for group in correction_widget.findChildren(QGroupBox)
         if group.isVisibleTo(correction_widget)
     ]
-    assert "Optional: prepare reusable full correction evidence" in group_titles
+    assert "Optional: prepare reusable full correction evidence" not in group_titles
     assert "1. Preview correction methods" in group_titles
     assert "2. Choose correction strategy" in group_titles
-    assert window._guided_full_evidence_group.isChecked() is False
-    assert window._guided_diagnostic_cache_build_btn.isHidden() is True
+    assert window._guided_full_evidence_group.isVisible() is False
+    assert window._guided_diagnostic_cache_build_btn.isVisible() is False
     assert "Choose a correction candidate" not in group_titles
 
     labels = [
@@ -4614,6 +4611,9 @@ def test_gui_merged_correction_page_makes_local_preview_primary_and_user_safe(wi
     assert "Compare correction methods and choose one strategy" in (
         visible_text
     )
+    assert "Optional: prepare reusable full correction evidence" not in visible_text
+    assert "Correction evidence: not built" not in visible_text
+    assert "reusable full correction evidence" not in visible_text
     assert "Build correction evidence" not in visible_text
     assert "Generate local correction preview" not in visible_text
     assert "Complete Select data, Recording structure" in visible_text
@@ -4722,7 +4722,7 @@ def test_hidden_method_configuration_never_becomes_top_level(window, qapp):
     )
 
 
-def test_local_preview_bypasses_full_evidence_and_keeps_confirmation_locked(
+def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     window, tmp_path, monkeypatch
 ):
     input_dir = tmp_path / "raw"
@@ -4804,13 +4804,8 @@ def test_local_preview_bypasses_full_evidence_and_keeps_confirmation_locked(
     assert window._guided_preview_generate_btn.isEnabled() is True
     assert window._guided_preview_generate_btn.isHidden() is False
     assert window._guided_full_evidence_group.isChecked() is False
-    assert window._guided_diagnostic_cache_build_btn.isHidden() is True
-    window._guided_full_evidence_group.setChecked(True)
-    assert window._guided_diagnostic_cache_build_btn.isHidden() is False
-    assert "Local preview does not require this step" in " ".join(
-        _label_texts(window._guided_full_evidence_group)
-    )
-    window._guided_full_evidence_group.setChecked(False)
+    assert window._guided_full_evidence_group.isVisible() is False
+    assert window._guided_diagnostic_cache_build_btn.isVisible() is False
     window._guided_preview_chunk_combo.setCurrentIndex(2)
     window._guided_preview_generate_btn.click()
 
@@ -4846,20 +4841,165 @@ def test_local_preview_bypasses_full_evidence_and_keeps_confirmation_locked(
     assert not (preview_dir / "run_report.json").exists()
     assert not (preview_dir / "MANIFEST.json").exists()
     assert not (preview_dir / "_analysis").exists()
-    assert window._guided_confirm_locked_label.isHidden() is False
-    assert window._guided_confirm_strategy_combo.parentWidget().isHidden()
-    assert window._guided_strategy_choices == {}
+    assert window._guided_confirm_locked_label.isHidden() is True
+    assert window._guided_confirm_strategy_combo.parentWidget().isHidden() is False
+    assert window._guided_confirm_roi_combo.isHidden() is False
+    assert window._guided_confirm_chunk_combo.isHidden() is True
+    assert window._guided_confirm_chunk_label.isHidden() is True
     assert (
-        window._guided_confirm_locked_label.text()
-        == "Review the local preview above. Strategy confirmation from local "
-        "preview will be enabled in a later step."
+        window._guided_confirm_local_preview_evidence_label.text()
+        == "Local correction preview for CH1, preview segment session-2."
     )
+    assert (
+        window._guided_confirm_local_preview_explanation_label.text()
+        == "This choice will be recorded as confirmed from the local preview "
+        "above. Final analysis will recompute correction using the full "
+        "selected recordings."
+    )
+    assert window._guided_strategy_choices == {}
+    assert window._guided_confirm_mark_btn.isEnabled() is False
+    result["method_statuses"]["adaptive_event_gated_regression"][
+        "status"
+    ] = "failed"
+    failed_index = window._guided_confirm_strategy_combo.findData(
+        "adaptive_event_gated_regression"
+    )
+    window._guided_confirm_strategy_combo.setCurrentIndex(failed_index)
+    assert window._guided_confirm_mark_btn.isEnabled() is False
+    strategy_index = window._guided_confirm_strategy_combo.findData(
+        "robust_global_event_reject"
+    )
+    window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
+    assert window._guided_strategy_choices == {}
+    assert window._guided_confirm_mark_btn.isEnabled() is True
+    assert window._guided_confirm_mark_btn.text() == (
+        "Confirm strategy for this ROI"
+    )
+    window._guided_confirm_mark_btn.click()
+    assert len(window._guided_strategy_choices) == 1
+    choice = next(iter(window._guided_strategy_choices.values()))
+    assert choice["source_type"] == "local_correction_preview"
+    assert choice["evidence_source_type"] == "local_correction_preview"
+    assert choice["preview_only"] is True
+    assert choice["production_analysis"] is False
+    assert choice["roi"] == "CH1"
+    assert choice["strategy"] == "robust_global_event_reject"
+    reference = choice["local_preview_evidence"]
+    assert reference["preview_id"] == result["preview_id"]
+    assert reference["selected_segment_label"] == "session-2"
+    assert reference["selected_segment_index"] == 2
+    assert reference["adapter_local_chunk_id"] == 0
+    assert reference["source_file"] == str(source_files[2].resolve())
+    assert reference["preview_only"] is True
+    assert reference["production_analysis"] is False
+    assert "Final analysis will recompute correction" in reference["message"]
+    assert "Confirmed from local preview for CH1" in (
+        window._guided_confirm_marked_choice_label.text()
+    )
+    assert "Evidence reviewed: preview segment session-2." in (
+        window._guided_confirm_marked_choice_label.text()
+    )
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.cache_id is None
+    assert len(plan.per_roi_correction_strategy_choices) == 1
+    plan_choice = plan.per_roi_correction_strategy_choices[0]
+    assert plan_choice.source_type == "local_correction_preview"
+    assert plan_choice.current_or_stale == "current"
+    assert plan_choice.evidence_reference["preview_id"] == result["preview_id"]
+    assert plan.dynamic_fit_parameter_contract.dynamic_fit_mode == (
+        "robust_global_event_reject"
+    )
+    window._guided_preview_generate_btn.click()
+    stale_plan = window._build_guided_new_analysis_draft_plan()
+    stale_plan_choice = stale_plan.per_roi_correction_strategy_choices[0]
+    assert stale_plan_choice.current_or_stale == "stale"
+    stale_choice = next(iter(window._guided_strategy_choices.values()))
+    assert "newer local preview" in stale_choice["stale_reason"]
+    window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
+    window._guided_confirm_mark_btn.click()
+    refreshed_choice = next(iter(window._guided_strategy_choices.values()))
+    assert refreshed_choice["stale"] is False
+    assert refreshed_choice["local_preview_evidence"]["preview_id"] == (
+        window._guided_preview_last_result["preview_id"]
+    )
+    window._duration_edit.setText("601")
+    changed_plan = window._build_guided_new_analysis_draft_plan()
+    changed_plan_choice = changed_plan.per_roi_correction_strategy_choices[0]
+    assert changed_plan_choice.current_or_stale == "stale"
+    from photometry_pipeline.guided_new_analysis_plan import (
+        evaluate_new_analysis_plan_readiness,
+    )
+
+    blocking = {
+        issue.category
+        for issue in evaluate_new_analysis_plan_readiness(
+            changed_plan
+        ).blocking_issues
+    }
+    assert "stale_strategy_choice" in blocking
+    assert "missing_diagnostic_cache" in blocking
+    validation_context = window._capture_guided_backend_validation_context()
+    validation_choice = (
+        validation_context.draft.per_roi_correction_strategy_choices[0]
+    )
+    assert validation_choice.current_or_stale == "stale"
+    assert runner.argv is None
+    setup_stale_choice = next(
+        iter(window._guided_strategy_choices.values())
+    )
+    assert setup_stale_choice["stale"] is True
+    assert "setup changed" in setup_stale_choice["stale_reason"]
+    signal_index = window._guided_confirm_strategy_combo.findData(
+        "signal_only_f0"
+    )
+    window._guided_confirm_strategy_combo.setCurrentIndex(signal_index)
+    assert window._guided_confirm_mark_btn.isEnabled() is False
+    assert next(iter(window._guided_strategy_choices.values()))["stale"] is True
     assert "Final analysis recomputes correction" in " ".join(
         _label_texts(
             window._guided_workflow_stack.widget(
                 list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
             )
         )
+    )
+
+
+def test_new_local_preview_only_stales_confirmation_for_its_roi(
+    window, monkeypatch
+):
+    window._set_guided_workflow_mode("new_analysis")
+    monkeypatch.setattr(
+        window, "_guided_local_preview_setup_signature", lambda: "setup-1"
+    )
+    monkeypatch.setattr(
+        window, "_guided_selected_roi_ids", lambda: (["CH1", "CH2"], ["CH1", "CH2"])
+    )
+    window._guided_strategy_choices = {
+        ("local_correction_preview", "CH1"): {
+            "source_type": "local_correction_preview",
+            "roi": "CH1",
+            "strategy": "robust_global_event_reject",
+            "setup_signature": "setup-1",
+            "current": True,
+            "stale": False,
+            "confirmed": True,
+        }
+    }
+
+    window._mark_guided_local_preview_choices_stale(
+        "A newer local preview was generated for this ROI.",
+        roi="CH2",
+    )
+    window._build_guided_new_analysis_draft_plan()
+
+    ch1 = window._guided_strategy_choices[
+        ("local_correction_preview", "CH1")
+    ]
+    assert ch1["current"] is True
+    assert ch1["stale"] is False
+    assert not any(
+        isinstance(choice, dict) and choice.get("roi") == "CH2"
+        for choice in window._guided_strategy_choices.values()
     )
 
 
