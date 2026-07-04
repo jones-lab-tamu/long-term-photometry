@@ -3006,7 +3006,7 @@ class MainWindow(QMainWindow):
         actions_group = QWidget()
         actions_group.setObjectName("guidedDiagnosticsActionsSection")
         actions_layout = QVBoxLayout(actions_group)
-        actions_layout.setContentsMargins(10, 10, 10, 10)
+        actions_layout.setContentsMargins(0, 10, 0, 10)
         actions_layout.setSpacing(10)
 
         cache_group = QGroupBox(

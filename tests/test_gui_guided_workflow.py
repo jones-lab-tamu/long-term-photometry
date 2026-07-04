@@ -4584,6 +4584,13 @@ def test_gui_merged_correction_page_makes_local_preview_primary_and_user_safe(wi
     correction_widget = window._guided_workflow_stack.widget(
         list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
     )
+    actions = correction_widget.findChild(
+        QWidget, "guidedDiagnosticsActionsSection"
+    )
+    assert actions is not None
+    actions_margins = actions.layout().contentsMargins()
+    assert actions_margins.left() == 0
+    assert actions_margins.right() == 0
     group_titles = [
         group.title()
         for group in correction_widget.findChildren(QGroupBox)
