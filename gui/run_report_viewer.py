@@ -30,6 +30,10 @@ from gui.run_report_parser import (
     resolve_region_deliverables,
 )
 from gui.interactive_image import InteractiveImageLabel, InteractiveImageController
+from photometry_pipeline.guided_completed_applied_dff_reload import (
+    load_guided_completed_applied_dff_state,
+    GuidedCompletedAppliedDffState,
+)
 
 
 TAB_VERIFICATION = "Verification"
@@ -62,6 +66,7 @@ class RunReportViewer(QWidget):
 
         self._current_run_dir = ""
         self._run_summary_path = ""
+        self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
         self._region_paths: Dict[str, str] = {}
         self._region_tab_images: Dict[str, Dict[str, List[str]]] = {}
         self._tab_indices: Dict[Tuple[str, str], int] = {}
@@ -194,6 +199,7 @@ class RunReportViewer(QWidget):
         """Reset to idle/placeholder state."""
         self._current_run_dir = ""
         self._run_summary_path = ""
+        self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
         self._region_paths = {}
         self._region_tab_images = {}
         self._tab_indices = {}
@@ -266,6 +272,8 @@ class RunReportViewer(QWidget):
             self._workspace.hide()
             return False
 
+        self._applied_dff_state = load_guided_completed_applied_dff_state(out_dir)
+
         title = "Results workspace"
         if is_preview:
             title += " [PREVIEW]"
@@ -288,6 +296,11 @@ class RunReportViewer(QWidget):
             self._refresh_inline_actions()
 
         return True
+
+    @property
+    def applied_dff_state(self) -> GuidedCompletedAppliedDffState:
+        """Return the loaded completed run applied dF/F state."""
+        return self._applied_dff_state
 
     def _discover_region_tab_images(self, region_path: str) -> Dict[str, List[str]]:
         """Discover per-tab image lists for one region directory."""
