@@ -3228,6 +3228,27 @@ class MainWindow(QMainWindow):
             QSizePolicy.Expanding, QSizePolicy.Preferred
         )
         preview_layout.addWidget(self._guided_preview_visual_label)
+        self._guided_local_signal_f0_preview_label = QLabel(
+            "Signal-Only F0 preview\n"
+            "Preview evidence only. Production selection is not enabled yet. "
+            "This preview does not write production outputs."
+        )
+        self._guided_local_signal_f0_preview_label.setObjectName(
+            "guidedLocalSignalOnlyF0PreviewEvidence"
+        )
+        self._guided_local_signal_f0_preview_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_local_signal_f0_preview_label.setWordWrap(True)
+        self._guided_local_signal_f0_preview_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        preview_layout.addWidget(
+            self._guided_local_signal_f0_preview_label
+        )
+        self._guided_preview_gated_widgets.append(
+            self._guided_local_signal_f0_preview_label
+        )
         self._guided_preview_open_btn = QPushButton("Open exported report")
         self._guided_preview_open_btn.setObjectName(
             "guidedCorrectionPreviewOpenButton"
@@ -3880,6 +3901,12 @@ class MainWindow(QMainWindow):
         self._guided_preview_result_stale = True
         if hasattr(self, "_guided_preview_status_label"):
             self._guided_preview_status_label.setText(reason)
+        if hasattr(self, "_guided_local_signal_f0_preview_label"):
+            self._guided_local_signal_f0_preview_label.setText(
+                "Signal-Only F0 preview\n"
+                "Preview evidence is stale; generate the local preview again. "
+                "Production selection is not enabled yet."
+            )
         self._refresh_guided_preview_review_affordances()
         self._refresh_guided_generated_outputs_summary()
         self._refresh_guided_confirm_strategy_panel()
@@ -4896,6 +4923,43 @@ class MainWindow(QMainWindow):
             self._guided_preview_messages_label.setText("\n".join(lines))
         if hasattr(self, "_guided_preview_result_label"):
             self._guided_preview_result_label.setText(self._format_guided_preview_result(result))
+        if hasattr(self, "_guided_local_signal_f0_preview_label"):
+            evidence = result.get("signal_only_f0_preview_evidence")
+            if (
+                result.get("source_type") == "local_raw_segment"
+                and isinstance(evidence, dict)
+            ):
+                metrics = evidence.get("metrics", {})
+                if not isinstance(metrics, dict):
+                    metrics = {}
+                issues = "; ".join(
+                    str(value) for value in evidence.get("issues", [])
+                )
+                if evidence.get("valid") is True:
+                    details = (
+                        f"Status: ready; ROI {evidence.get('roi_id', '')}; "
+                        f"samples {metrics.get('sample_count', '')}; "
+                        f"minimum dF/F {metrics.get('dff_min', '')}; "
+                        "negative dF/F samples "
+                        f"{metrics.get('negative_dff_count', '')}."
+                    )
+                else:
+                    details = (
+                        "Status: unavailable for this segment"
+                        + (f"; {issues}" if issues else ".")
+                    )
+                self._guided_local_signal_f0_preview_label.setText(
+                    "Signal-Only F0 preview\n"
+                    "Preview evidence only. Production selection is not "
+                    "enabled yet. This preview does not write production "
+                    f"outputs.\n{details}"
+                )
+            else:
+                self._guided_local_signal_f0_preview_label.setText(
+                    "Signal-Only F0 preview\n"
+                    "Local preview evidence is available only for a selected "
+                    "raw segment. Production selection is not enabled yet."
+                )
         self._refresh_guided_preview_review_affordances()
         self._refresh_guided_generated_outputs_summary()
 
@@ -4908,6 +4972,12 @@ class MainWindow(QMainWindow):
             self._guided_preview_messages_label.setText("")
         if hasattr(self, "_guided_preview_result_label"):
             self._guided_preview_result_label.setText("")
+        if hasattr(self, "_guided_local_signal_f0_preview_label"):
+            self._guided_local_signal_f0_preview_label.setText(
+                "Signal-Only F0 preview\n"
+                "Preview evidence only. Production selection is not enabled "
+                "yet. This preview does not write production outputs."
+            )
         self._refresh_guided_generated_outputs_summary()
 
     def _refresh_guided_signal_f0_panel(self, artifact_state: dict[str, object]) -> None:
@@ -6481,10 +6551,35 @@ class MainWindow(QMainWindow):
             != str(result.get("preview_id") or "")
         ):
             return
+        setup_signature = self._guided_local_preview_setup_signature()
+        locked_candidates: dict[str, dict[str, object]] = {}
+        signal_f0 = result.get("signal_only_f0_preview_evidence")
+        if isinstance(signal_f0, dict):
+            locked_candidates["signal_only_f0"] = {
+                **dict(signal_f0),
+                "preview_id": str(result.get("preview_id") or ""),
+                "setup_signature": setup_signature,
+                "selected_segment_label": str(
+                    provenance.get("selected_segment_label") or ""
+                ),
+                "selected_segment_index": provenance.get(
+                    "selected_segment_index"
+                ),
+                "source_file": str(provenance.get("source_file") or ""),
+                "source_file_hash": str(
+                    provenance.get("source_file_sha256") or ""
+                ),
+                "selectable": False,
+                "locked": True,
+                "lock_reason": (
+                    "Production selection is not enabled yet."
+                ),
+            }
         self._guided_local_preview_evidence_by_roi[roi] = {
             "result": dict(result),
             "provenance": dict(provenance),
-            "setup_signature": self._guided_local_preview_setup_signature(),
+            "setup_signature": setup_signature,
+            "locked_evidence_candidates": locked_candidates,
         }
 
     def _guided_local_preview_evidence_for_roi(
@@ -6512,6 +6607,32 @@ class MainWindow(QMainWindow):
         ):
             return None
         return entry
+
+    def _guided_local_preview_locked_evidence_for_roi(
+        self,
+        roi: str,
+        strategy: str,
+        *,
+        require_current: bool = True,
+    ) -> dict[str, object] | None:
+        entry = self._guided_local_preview_evidence_for_roi(
+            roi, require_current=require_current
+        )
+        if entry is None:
+            return None
+        candidates = entry.get("locked_evidence_candidates")
+        if not isinstance(candidates, dict):
+            return None
+        candidate = candidates.get(str(strategy))
+        if not isinstance(candidate, dict):
+            return None
+        if require_current and (
+            candidate.get("current_or_stale") != "current"
+            or str(candidate.get("setup_signature") or "")
+            != str(entry.get("setup_signature") or "")
+        ):
+            return None
+        return candidate
 
     def _guided_local_preview_evidence_reference(
         self, strategy: str, *, roi: str | None = None

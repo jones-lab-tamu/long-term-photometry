@@ -4,12 +4,14 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import photometry_pipeline.preview.correction_preview as correction_preview_module
 
 from photometry_pipeline.preview.correction_preview import (
     GUIDED_REFERENCE_PREVIEW_METHODS,
     METHOD_DIAGNOSTICS_FILENAME_TEMPLATE,
     PREVIEW_PROVENANCE_FILENAME,
     PREVIEW_SUMMARY_FILENAME,
+    compute_guided_local_signal_only_f0_preview,
     run_guided_correction_preview_comparison,
     run_guided_local_correction_preview,
 )
@@ -23,6 +25,70 @@ from photometry_pipeline.guided_diagnostic_cache import (
 
 
 PREVIEW_ID = "preview_20260617T010203Z_abcd1234"
+
+
+def test_local_signal_only_f0_preview_computes_in_memory_and_preserves_negative():
+    time_sec = np.arange(2400, dtype=float) / 20.0
+    signal = (
+        1.0
+        + 0.08 * np.sin(time_sec * 0.2)
+        + 0.03 * np.sin(time_sec * 1.3)
+    )
+
+    evidence = compute_guided_local_signal_only_f0_preview(
+        signal, time_sec, roi_id="CH1"
+    )
+
+    assert evidence["status"] == "success"
+    assert evidence["valid"] is True
+    assert evidence["preview_only"] is True
+    assert evidence["production_analysis"] is False
+    assert evidence["strategy_family"] == "signal_only_f0"
+    assert evidence["selected_strategy"] == "signal_only_f0"
+    assert evidence["dynamic_fit_mode"] is None
+    assert evidence["explicit_user_mark"] is False
+    assert evidence["current_or_stale"] == "current"
+    assert len(evidence["time_sec"]) == len(signal)
+    assert len(evidence["preview_dff"]) == len(signal)
+    assert evidence["metrics"]["negative_dff_count"] > 0
+    assert np.min(evidence["preview_dff"]) < 0
+
+
+def test_local_signal_only_f0_preview_flags_invalid_denominator():
+    evidence = compute_guided_local_signal_only_f0_preview(
+        np.zeros(100, dtype=float),
+        np.arange(100, dtype=float) / 10.0,
+        roi_id="CH1",
+    )
+
+    assert evidence["status"] == "invalid"
+    assert evidence["valid"] is False
+    assert evidence["preview_only"] is True
+    assert evidence["preview_dff"].size == 0
+    assert evidence["issues"]
+
+
+def test_local_signal_only_f0_preview_exception_path_is_defensive(monkeypatch):
+    class BadArray:
+        def __array__(self, *_args, **_kwargs):
+            raise RuntimeError("cannot coerce")
+
+    monkeypatch.setattr(
+        correction_preview_module,
+        "compute_signal_only_f0_dff",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("candidate failed")
+        ),
+    )
+
+    evidence = compute_guided_local_signal_only_f0_preview(
+        BadArray(), BadArray(), roi_id="CH1"
+    )
+
+    assert evidence["status"] == "invalid"
+    assert evidence["signal_raw"].size == 0
+    assert evidence["time_sec"].size == 0
+    assert evidence["issues"] == ["candidate failed"]
 
 
 def _sha256(path: Path) -> str:
@@ -517,6 +583,18 @@ def test_local_preview_real_rwd_nonfirst_session_uses_selected_file_and_local_ch
     assert provenance["source_type"] == "local_raw_segment"
     assert provenance["preview_only"] is True
     assert provenance["production_analysis"] is False
+    evidence = result["signal_only_f0_preview_evidence"]
+    assert evidence["evidence_source_type"] == "local_preview"
+    assert evidence["strategy_family"] == "signal_only_f0"
+    assert evidence["preview_only"] is True
+    assert evidence["production_analysis"] is False
+    assert evidence["explicit_user_mark"] is False
+    assert evidence["current_or_stale"] == "current"
+    assert len(evidence["time_sec"]) == len(evidence["preview_dff"])
+    assert provenance["signal_only_f0_preview_evidence"][
+        "strategy_family"
+    ] == "signal_only_f0"
+    assert not (tmp_path / "applied_dff").exists()
 
 
 def test_local_preview_adapter_failure_returns_full_load_context(tmp_path):

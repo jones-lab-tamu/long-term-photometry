@@ -40,6 +40,7 @@ from photometry_pipeline.io.hdf5_cache_reader import (
 )
 from photometry_pipeline.io.adapters import load_chunk
 from photometry_pipeline.guided_diagnostic_cache import resolve_diagnostic_cache_source
+from photometry_pipeline.signal_only_f0 import compute_signal_only_f0_dff
 
 
 PREVIEW_PROVENANCE_FILENAME = "preview_provenance.json"
@@ -107,6 +108,91 @@ class PreviewSourceValidationResult:
 
 class GuidedCorrectionPreviewError(RuntimeError):
     """Raised for explicit backend preview failures."""
+
+
+def compute_guided_local_signal_only_f0_preview(
+    signal: Any,
+    time_sec: Any,
+    *,
+    roi_id: str,
+) -> dict[str, Any]:
+    """Compute in-memory Signal-Only F0 evidence for one local segment."""
+    base = {
+        "evidence_source_type": "local_preview",
+        "strategy_family": "signal_only_f0",
+        "selected_strategy": "signal_only_f0",
+        "dynamic_fit_mode": None,
+        "preview_only": True,
+        "production_analysis": False,
+        "explicit_user_mark": False,
+        "current_or_stale": "current",
+        "roi_id": str(roi_id),
+    }
+
+    def safe_array(values: Any) -> np.ndarray:
+        try:
+            return np.asarray(values, dtype=float).reshape(-1).copy()
+        except Exception:
+            return np.asarray([], dtype=float)
+
+    try:
+        result = compute_signal_only_f0_dff(
+            signal,
+            time=time_sec,
+            preserve_negative=True,
+        )
+    except Exception as exc:
+        return {
+            **base,
+            "status": "invalid",
+            "valid": False,
+            "time_sec": safe_array(time_sec),
+            "signal_raw": safe_array(signal),
+            "signal_only_f0_uncapped": np.asarray([], dtype=float),
+            "preview_dff": np.asarray([], dtype=float),
+            "issues": [str(exc)],
+            "warnings": [],
+            "metrics": {},
+        }
+
+    dff = np.asarray(result.dff, dtype=float).reshape(-1)
+    return {
+        **base,
+        "status": "success",
+        "valid": True,
+        "time_sec": np.asarray(time_sec, dtype=float).reshape(-1).copy(),
+        "signal_raw": np.asarray(result.signal, dtype=float).reshape(-1).copy(),
+        "signal_only_f0_uncapped": np.asarray(
+            result.signal_only_f0, dtype=float
+        ).reshape(-1).copy(),
+        "preview_dff": dff.copy(),
+        "issues": [],
+        "warnings": list(result.warnings),
+        "parameters": dict(result.parameters),
+        "metrics": {
+            "sample_count": int(dff.size),
+            "dff_min": float(np.min(dff)),
+            "dff_median": float(np.median(dff)),
+            "negative_dff_count": int(np.count_nonzero(dff < 0)),
+        },
+    }
+
+
+def _signal_only_f0_preview_metadata(
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Return JSON-safe Signal-Only F0 evidence metadata without trace arrays."""
+    return {
+        key: _json_safe(value)
+        for key, value in evidence.items()
+        if key
+        not in {
+            "time_sec",
+            "signal_raw",
+            "signal_only_f0_uncapped",
+            "preview_dff",
+        }
+    }
 
 
 def _resolve_path(path: str | os.PathLike[str] | None) -> str:
@@ -1401,6 +1487,12 @@ def run_guided_local_correction_preview(
     except Exception as exc:
         return failed(f"{type(exc).__name__}: {exc}")
 
+    signal_only_f0_preview = compute_guided_local_signal_only_f0_preview(
+        record["sig_raw"],
+        record["time_sec"],
+        roi_id=str(roi),
+    )
+
     os.makedirs(output_dir, exist_ok=False)
     generated_artifacts: dict[str, str] = {}
     method_statuses: dict[str, Any] = {}
@@ -1475,6 +1567,9 @@ def run_guided_local_correction_preview(
         "pipeline_run_executed": False,
         "feature_extraction_run": False,
         "strategy_recommendation": None,
+        "signal_only_f0_preview_evidence": (
+            _signal_only_f0_preview_metadata(signal_only_f0_preview)
+        ),
         "warning": (
             "Local correction preview for decision support only. Final analysis "
             "recomputes correction using the full selected recordings."
@@ -1496,6 +1591,9 @@ def run_guided_local_correction_preview(
             "production_analysis": False,
             "source_type": "local_raw_segment",
             "strategy_recommendation": None,
+            "signal_only_f0_preview_evidence": (
+                _signal_only_f0_preview_metadata(signal_only_f0_preview)
+            ),
         }
     )
     summary_path = os.path.join(output_dir, PREVIEW_SUMMARY_FILENAME)
@@ -1513,6 +1611,7 @@ def run_guided_local_correction_preview(
         "preview_summary_path": summary_path,
         "generated_artifacts": generated_artifacts,
         "method_statuses": method_statuses,
+        "signal_only_f0_preview_evidence": signal_only_f0_preview,
         "warnings": [],
         "errors": errors,
         "roi": str(roi),

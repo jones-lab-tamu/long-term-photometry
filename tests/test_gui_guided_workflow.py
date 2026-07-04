@@ -4844,6 +4844,20 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert provenance["production_analysis"] is False
     assert provenance["reference_fit_scope"] == "selected_session"
     assert provenance["effective_config_values"]["target_fs_hz"] == 20.0
+    signal_f0_evidence = result["signal_only_f0_preview_evidence"]
+    assert signal_f0_evidence["strategy_family"] == "signal_only_f0"
+    assert signal_f0_evidence["preview_only"] is True
+    assert signal_f0_evidence["production_analysis"] is False
+    assert signal_f0_evidence["explicit_user_mark"] is False
+    assert "Signal-Only F0 preview" in (
+        window._guided_local_signal_f0_preview_label.text()
+    )
+    assert "Preview evidence only" in (
+        window._guided_local_signal_f0_preview_label.text()
+    )
+    assert "Production selection is not enabled yet" in (
+        window._guided_local_signal_f0_preview_label.text()
+    )
     assert "Preview segment: session-2" in (
         window._guided_preview_review_label.text()
     )
@@ -4852,6 +4866,11 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert not (preview_dir / "run_report.json").exists()
     assert not (preview_dir / "MANIFEST.json").exists()
     assert not (preview_dir / "_analysis").exists()
+    assert not (output_dir / "applied_dff").exists()
+    assert not list(output_dir.rglob("batch_manifest.csv"))
+    assert not list(
+        output_dir.rglob("guided_applied_dff_provenance.json")
+    )
     assert window._guided_confirm_locked_label.isHidden() is True
     assert window._guided_confirm_selection_group.isHidden() is True
     assert window._guided_confirm_choice_group.isHidden() is True
@@ -4868,6 +4887,23 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert rows["CH3"]["evidence_label"].text() == "Preview first"
     assert rows["CH3"]["action_button"].isEnabled() is False
     registered_ch1 = window._guided_local_preview_evidence_by_roi["CH1"]
+    locked_signal_f0 = window._guided_local_preview_locked_evidence_for_roi(
+        "CH1", "signal_only_f0"
+    )
+    assert locked_signal_f0 is not None
+    assert locked_signal_f0["roi_id"] == "CH1"
+    assert locked_signal_f0["strategy_family"] == "signal_only_f0"
+    assert locked_signal_f0["selected_strategy"] == "signal_only_f0"
+    assert locked_signal_f0["dynamic_fit_mode"] is None
+    assert locked_signal_f0["evidence_source_type"] == "local_preview"
+    assert locked_signal_f0["preview_only"] is True
+    assert locked_signal_f0["production_analysis"] is False
+    assert locked_signal_f0["explicit_user_mark"] is False
+    assert locked_signal_f0["current_or_stale"] == "current"
+    assert locked_signal_f0["locked"] is True
+    assert locked_signal_f0["selectable"] is False
+    assert locked_signal_f0["metrics"]["sample_count"] == len(time_sec)
+    ch1_signal_f0_preview_id = locked_signal_f0["preview_id"]
     registered_ch1["result"]["method_statuses"][
         "adaptive_event_gated_regression"
     ]["status"] = "failed"
@@ -4882,6 +4918,10 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     window._guided_preview_roi_combo.setCurrentIndex(
         window._guided_preview_roi_combo.findData("CH2")
     )
+    assert window._guided_preview_result_stale is True
+    assert "Preview evidence is stale" in (
+        window._guided_local_signal_f0_preview_label.text()
+    )
     window._guided_preview_generate_btn.click()
     ch2_result = window._guided_preview_last_result
     assert ch2_result["roi"] == "CH2"
@@ -4893,6 +4933,13 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         "Local preview, segment session-2"
     )
     assert rows["CH3"]["evidence_label"].text() == "Preview first"
+    persisted_signal_f0 = (
+        window._guided_local_preview_locked_evidence_for_roi(
+            "CH1", "signal_only_f0"
+        )
+    )
+    assert persisted_signal_f0 is not None
+    assert persisted_signal_f0["preview_id"] == ch1_signal_f0_preview_id
 
     ch1_combo = rows["CH1"]["strategy_combo"]
     ch1_strategy_index = ch1_combo.findData(
@@ -4982,6 +5029,16 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     rows = window._guided_local_preview_confirmation_rows
     assert rows["CH1"]["status_label"].text() == "Stale, confirm again"
     assert rows["CH2"]["status_label"].text() == "Confirmed"
+    replacement_signal_f0 = (
+        window._guided_local_preview_locked_evidence_for_roi(
+            "CH1", "signal_only_f0"
+        )
+    )
+    assert replacement_signal_f0 is not None
+    assert replacement_signal_f0["preview_id"] != ch1_signal_f0_preview_id
+    assert replacement_signal_f0["current_or_stale"] == "current"
+    assert replacement_signal_f0["locked"] is True
+    assert replacement_signal_f0["selectable"] is False
     ch1_combo = rows["CH1"]["strategy_combo"]
     ch1_combo.setCurrentIndex(
         ch1_combo.findData("robust_global_event_reject")
@@ -5018,6 +5075,10 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert all(
         choice["stale"] is True
         for choice in window._guided_strategy_choices.values()
+    )
+    assert all(
+        choice.selected_strategy != "signal_only_f0"
+        for choice in changed_plan.per_roi_correction_strategy_choices
     )
     assert "Final analysis recomputes correction" in " ".join(
         _label_texts(
