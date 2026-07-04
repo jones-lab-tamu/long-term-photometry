@@ -558,6 +558,18 @@ class GuidedBackendConfirmedStrategyMark:
 
 
 @dataclass(frozen=True)
+class GuidedBackendPerRoiProductionStrategy:
+    roi_id: str
+    strategy_family: str
+    dynamic_fit_mode: str | None
+    selected_strategy: str
+    evidence_source_type: str
+    evidence_reference_json: str
+    explicit_user_mark: bool
+    current_or_stale: str
+
+
+@dataclass(frozen=True)
 class GuidedBackendCorrectionRequest:
     strategy_scope: str
     global_correction_strategy: str
@@ -568,6 +580,10 @@ class GuidedBackendCorrectionRequest:
     currentness_rule_version: str
     unanimity_rule_version: str
     blocked_strategy_states: tuple[str, ...] = ()
+    production_strategy_map_version: str = ""
+    per_roi_production_strategy_map: tuple[
+        GuidedBackendPerRoiProductionStrategy, ...
+    ] = ()
 
     def __post_init__(self) -> None:
         if self.strategy_scope != "global":
@@ -586,6 +602,7 @@ class GuidedBackendCorrectionRequest:
             "dynamic_fit_parameter_values",
             "confirmed_marks",
             "blocked_strategy_states",
+            "per_roi_production_strategy_map",
         ):
             _require_tuple(getattr(self, name), name)
         if not self.dynamic_fit_parameter_values or not self.confirmed_marks:
@@ -1017,12 +1034,17 @@ class GuidedBackendCorrectionFacts:
     currentness_rule_version: str = "cache_bound_currentness.v1"
     unanimity_rule_version: str = "included_roi_unanimous_dynamic_fit.v1"
     blocked_strategy_states: tuple[str, ...] = ()
+    production_strategy_map_version: str = ""
+    per_roi_production_strategy_map: tuple[
+        GuidedBackendPerRoiProductionStrategy, ...
+    ] = ()
 
     def __post_init__(self) -> None:
         for name in (
             "dynamic_fit_parameter_values",
             "confirmed_marks",
             "blocked_strategy_states",
+            "per_roi_production_strategy_map",
         ):
             _require_tuple(getattr(self, name), name)
 
@@ -1893,6 +1915,12 @@ def compile_guided_backend_validation_request(
             currentness_rule_version=correction_facts.currentness_rule_version,
             unanimity_rule_version=correction_facts.unanimity_rule_version,
             blocked_strategy_states=correction_facts.blocked_strategy_states,
+            production_strategy_map_version=(
+                correction_facts.production_strategy_map_version
+            ),
+            per_roi_production_strategy_map=(
+                correction_facts.per_roi_production_strategy_map
+            ),
         )
         diagnostic_request = GuidedBackendDiagnosticEvidenceRequest(
             cache_id=cache_facts.cache_id,
@@ -2102,6 +2130,16 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "explicit_user_mark",
         "current",
     ),
+    GuidedBackendPerRoiProductionStrategy: (
+        "roi_id",
+        "strategy_family",
+        "dynamic_fit_mode",
+        "selected_strategy",
+        "evidence_source_type",
+        "evidence_reference_json",
+        "explicit_user_mark",
+        "current_or_stale",
+    ),
     GuidedBackendCorrectionRequest: (
         "strategy_scope",
         "global_correction_strategy",
@@ -2112,6 +2150,8 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "currentness_rule_version",
         "unanimity_rule_version",
         "blocked_strategy_states",
+        "production_strategy_map_version",
+        "per_roi_production_strategy_map",
     ),
     GuidedBackendEvidenceReference: (
         "evidence_reference_id",

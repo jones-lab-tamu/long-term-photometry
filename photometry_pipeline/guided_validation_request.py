@@ -1,11 +1,14 @@
 from __future__ import annotations
 import os
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
 from typing import Any
 from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDraftPlan,
     GuidedPlanIssue,
     FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
+    PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION,
+    build_guided_per_roi_production_strategy_map,
 )
 
 @dataclass(frozen=True)
@@ -36,6 +39,9 @@ class GuidedValidationRequest:
     global_correction_strategy: str | None = None
     dynamic_fit_mode: str | None = None
     dynamic_fit_parameter_contract: dict[str, Any] = field(default_factory=dict)
+    production_strategy_map_version: str = ""
+    per_roi_production_strategy_map: tuple[dict[str, Any], ...] = ()
+    legacy_global_dynamic_fit_mode: str | None = None
 
     # Output Destination
     output_base_path: str | None = None
@@ -95,6 +101,11 @@ def build_guided_validation_request_from_plan(plan: GuidedNewAnalysisDraftPlan) 
     if df_contract:
         from dataclasses import asdict
         dynamic_fit_parameter_contract = asdict(df_contract)
+    strategy_map = (
+        build_guided_per_roi_production_strategy_map(plan)
+        if plan.per_roi_correction_strategy_choices
+        else None
+    )
 
     return GuidedValidationRequest(
         source_path=source_path,
@@ -115,6 +126,20 @@ def build_guided_validation_request_from_plan(plan: GuidedNewAnalysisDraftPlan) 
         global_correction_strategy=global_correction_strategy,
         dynamic_fit_mode=dynamic_fit_mode,
         dynamic_fit_parameter_contract=dynamic_fit_parameter_contract,
+        production_strategy_map_version=(
+            strategy_map.version if strategy_map is not None else ""
+        ),
+        per_roi_production_strategy_map=tuple(
+            asdict(entry)
+            for entry in (
+                strategy_map.entries if strategy_map is not None else ()
+            )
+        ),
+        legacy_global_dynamic_fit_mode=(
+            strategy_map.legacy_global_dynamic_fit_mode
+            if strategy_map is not None
+            else None
+        ),
         output_base_path=output_base_path,
         output_overwrite=output_overwrite,
         output_path_role=output_path_role,
@@ -144,6 +169,13 @@ def compute_request_identity(request: GuidedValidationRequest) -> str:
         ",".join(sorted(request.included_roi_ids)),
         str(request.global_correction_strategy),
         str(request.dynamic_fit_mode),
+        str(request.production_strategy_map_version),
+        json.dumps(
+            request.per_roi_production_strategy_map,
+            sort_keys=True,
+            default=str,
+        ),
+        str(request.legacy_global_dynamic_fit_mode),
         str(request.output_base_path),
         str(request.output_overwrite),
     ]
@@ -215,6 +247,152 @@ def validate_guided_validation_request(request: GuidedValidationRequest) -> list
         # Re-incorporate completed-run detection helper check here once relocated to a non-GUI module.
 
     # 6. Correction strategy checks
+    if request.production_strategy_map_version:
+        if (
+            request.production_strategy_map_version
+            != PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION
+        ):
+            issues.append(GuidedPlanIssue(
+                category="unsupported_production_strategy_map_version",
+                message="Per-ROI production strategy-map version is unsupported.",
+                severity="blocking",
+            ))
+        entries = list(request.per_roi_production_strategy_map)
+        entry_rois = [str(entry.get("roi_id") or "") for entry in entries]
+        for roi in request.included_roi_ids:
+            count = entry_rois.count(str(roi))
+            if count == 0:
+                issues.append(GuidedPlanIssue(
+                    category="missing_strategy_for_included_roi",
+                    message=f"Included ROI '{roi}' has no production strategy.",
+                    severity="blocking",
+                ))
+            elif count > 1:
+                issues.append(GuidedPlanIssue(
+                    category="duplicate_strategy_for_included_roi",
+                    message=f"Included ROI '{roi}' has duplicate production strategies.",
+                    severity="blocking",
+                ))
+        included_entries = [
+            entry
+            for entry in entries
+            if str(entry.get("roi_id") or "") in set(request.included_roi_ids)
+        ]
+        for entry in included_entries:
+            roi = str(entry.get("roi_id") or "")
+            if entry.get("explicit_user_mark") is not True:
+                issues.append(GuidedPlanIssue(
+                    category="non_explicit_strategy_for_included_roi",
+                    message=f"ROI '{roi}' strategy is not explicitly confirmed.",
+                    severity="blocking",
+                ))
+            if entry.get("current_or_stale") != "current":
+                issues.append(GuidedPlanIssue(
+                    category="stale_strategy_for_included_roi",
+                    message=f"ROI '{roi}' strategy is stale.",
+                    severity="blocking",
+                ))
+            family = entry.get("strategy_family")
+            selected = entry.get("selected_strategy")
+            dynamic_mode = entry.get("dynamic_fit_mode")
+
+            if family not in {"dynamic_fit", "signal_only_f0"}:
+                issues.append(GuidedPlanIssue(
+                    category="unsupported_production_strategy_family",
+                    message=f"ROI '{roi}' has unsupported production strategy family.",
+                    severity="blocking",
+                ))
+                continue
+
+            if family == "dynamic_fit":
+                if selected not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+                    issues.append(GuidedPlanIssue(
+                        category="invalid_dynamic_fit_strategy_entry",
+                        message=f"ROI '{roi}' dynamic-fit strategy entry has an unsupported selected_strategy.",
+                        severity="blocking",
+                    ))
+                if dynamic_mode not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+                    issues.append(GuidedPlanIssue(
+                        category="missing_or_invalid_dynamic_fit_mode",
+                        message=f"ROI '{roi}' dynamic-fit strategy entry has a missing or unsupported dynamic_fit_mode.",
+                        severity="blocking",
+                    ))
+                if (
+                    selected in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+                    and dynamic_mode in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+                    and selected != dynamic_mode
+                ):
+                    issues.append(GuidedPlanIssue(
+                        category="dynamic_fit_strategy_mode_mismatch",
+                        message=f"ROI '{roi}' dynamic-fit selected_strategy does not match dynamic_fit_mode.",
+                        severity="blocking",
+                    ))
+
+            elif family == "signal_only_f0":
+                if selected != "signal_only_f0":
+                    issues.append(GuidedPlanIssue(
+                        category="invalid_signal_only_f0_strategy_entry",
+                        message=f"ROI '{roi}' Signal-Only F0 strategy entry must use selected_strategy='signal_only_f0'.",
+                        severity="blocking",
+                    ))
+                if dynamic_mode is not None:
+                    issues.append(GuidedPlanIssue(
+                        category="signal_only_f0_dynamic_fit_mode_invalid",
+                        message=(
+                            f"ROI '{roi}' Signal-Only F0 strategy must not "
+                            "populate dynamic_fit_mode."
+                        ),
+                        severity="blocking",
+                    ))
+                issues.append(GuidedPlanIssue(
+                    category="signal_only_f0_production_routing_not_enabled",
+                    message=(
+                        "Signal-Only F0 production routing is not enabled in "
+                        "Guided yet."
+                    ),
+                    severity="blocking",
+                ))
+        dynamic_modes = {
+            entry.get("dynamic_fit_mode")
+            for entry in included_entries
+            if entry.get("strategy_family") == "dynamic_fit"
+        }
+        families = {
+            entry.get("strategy_family") for entry in included_entries
+        }
+        if len(dynamic_modes) > 1:
+            issues.append(GuidedPlanIssue(
+                category="mixed_dynamic_fit_modes_not_enabled",
+                message=(
+                    "Mixed per-ROI dynamic-fit modes are represented in the "
+                    "plan but are not executable by the current Guided "
+                    "production path."
+                ),
+                severity="blocking",
+            ))
+        if len(families) > 1:
+            issues.append(GuidedPlanIssue(
+                category="mixed_strategy_families_not_enabled",
+                message=(
+                    "Mixed per-ROI correction strategy families are represented "
+                    "but production routing is not enabled."
+                ),
+                severity="blocking",
+            ))
+        if (
+            request.legacy_global_dynamic_fit_mode
+            and request.dynamic_fit_mode
+            != request.legacy_global_dynamic_fit_mode
+        ):
+            issues.append(GuidedPlanIssue(
+                category="legacy_dynamic_fit_projection_mismatch",
+                message=(
+                    "Legacy global dynamic-fit compatibility projection does "
+                    "not match the current dynamic-fit mode."
+                ),
+                severity="blocking",
+            ))
+
     if request.strategy_scope != "global":
         issues.append(GuidedPlanIssue(category="unsupported_strategy_scope", message="Only global strategy scope is supported.", severity="blocking"))
 
@@ -353,4 +531,3 @@ def can_guided_run_unlock(
         if getattr(iss, "severity", None) == "blocking":
             return False
     return True
-

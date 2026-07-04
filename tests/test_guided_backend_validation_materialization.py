@@ -910,6 +910,14 @@ def test_request_ready_enriched_facts_are_complete_and_immutable(tmp_path: Path)
     assert correction.dynamic_fit_parameter_values
     assert {mark.roi_id for mark in correction.confirmed_marks} == {"CH1"}
     assert all(mark.explicit_user_mark and mark.current for mark in correction.confirmed_marks)
+    assert correction.production_strategy_map_version == (
+        "per_roi_correction_strategy_map.v1"
+    )
+    assert len(correction.per_roi_production_strategy_map) == 1
+    strategy_entry = correction.per_roi_production_strategy_map[0]
+    assert strategy_entry.roi_id == "CH1"
+    assert strategy_entry.strategy_family == "dynamic_fit"
+    assert strategy_entry.dynamic_fit_mode == "global_linear_regression"
 
     feature = facts.feature_event
     assert feature.available is True

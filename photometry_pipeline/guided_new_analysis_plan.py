@@ -7,7 +7,7 @@ validation helpers for the new_analysis Guided draft plan state.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -30,6 +30,9 @@ EXECUTION_INTENT_SCHEMA_VERSION = "guided_new_analysis_execution_intent.v1"
 OUTPUT_CREATION_POLICY_SCHEMA_VERSION = "guided_new_analysis_output_creation_policy.v1"
 DYNAMIC_FIT_PARAMETER_CONTRACT_SCHEMA_VERSION = "guided_new_analysis_dynamic_fit_parameter_contract.v1"
 FIRST_EXECUTION_SUBSET_NAME = "global_dynamic_fit_only.v1"
+PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION = (
+    "per_roi_correction_strategy_map.v1"
+)
 SUPPORTED_INPUT_FORMATS = {"auto", "rwd", "npm", "custom_tabular"}
 SUPPORTED_ACQUISITION_MODES = {"intermittent", "continuous"}
 DATASET_CONTRACT_SNAPSHOT_STATUSES = {
@@ -613,6 +616,116 @@ class GuidedPlanCorrectionChoice:
     explicit_user_mark: bool = False
     selected_at_utc: str | None = None
     evidence_reference: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class GuidedPerRoiProductionStrategy:
+    roi_id: str
+    strategy_family: str
+    dynamic_fit_mode: str | None
+    selected_strategy: str
+    evidence_source_type: str
+    evidence_reference: dict[str, Any]
+    explicit_user_mark: bool
+    current_or_stale: str
+
+
+@dataclass(frozen=True)
+class GuidedPerRoiProductionStrategyMap:
+    version: str
+    entries: tuple[GuidedPerRoiProductionStrategy, ...]
+    legacy_global_dynamic_fit_mode: str | None
+    execution_routing_supported: bool
+    blocking_categories: tuple[str, ...]
+
+
+def build_guided_per_roi_production_strategy_map(
+    plan: "GuidedNewAnalysisDraftPlan",
+) -> GuidedPerRoiProductionStrategyMap:
+    """Build the authoritative per-ROI strategy contract without executing."""
+    included = tuple(dict.fromkeys(str(roi) for roi in plan.included_roi_ids))
+    choices_by_roi: dict[str, list[GuidedPlanCorrectionChoice]] = {
+        roi: [] for roi in included
+    }
+    for choice in plan.per_roi_correction_strategy_choices:
+        if choice.roi_id in choices_by_roi:
+            choices_by_roi[choice.roi_id].append(choice)
+
+    entries: list[GuidedPerRoiProductionStrategy] = []
+    blockers: list[str] = []
+    for roi in included:
+        choices = choices_by_roi[roi]
+        if not choices:
+            blockers.append("missing_strategy_for_included_roi")
+            continue
+        if len(choices) != 1:
+            blockers.append("duplicate_strategy_for_included_roi")
+            continue
+        choice = choices[0]
+        selected = str(choice.selected_strategy or "")
+        if selected in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+            family = "dynamic_fit"
+            dynamic_mode: str | None = selected
+        elif selected == "signal_only_f0":
+            family = "signal_only_f0"
+            dynamic_mode = None
+            blockers.append("signal_only_f0_production_routing_not_enabled")
+        else:
+            family = "unsupported"
+            dynamic_mode = None
+            blockers.append("unsupported_production_strategy")
+        if not choice.explicit_user_mark:
+            blockers.append("non_explicit_strategy_for_included_roi")
+        if choice.current_or_stale != "current":
+            blockers.append("stale_strategy_for_included_roi")
+        entries.append(
+            GuidedPerRoiProductionStrategy(
+                roi_id=roi,
+                strategy_family=family,
+                dynamic_fit_mode=dynamic_mode,
+                selected_strategy=selected,
+                evidence_source_type=str(
+                    choice.evidence_reference.get("evidence_source_type")
+                    or choice.source_type
+                    or ""
+                ),
+                evidence_reference=dict(choice.evidence_reference),
+                explicit_user_mark=bool(choice.explicit_user_mark),
+                current_or_stale=str(choice.current_or_stale or "stale"),
+            )
+        )
+
+    dynamic_modes = {
+        entry.dynamic_fit_mode
+        for entry in entries
+        if entry.strategy_family == "dynamic_fit"
+    }
+    families = {entry.strategy_family for entry in entries}
+    legacy_mode = None
+    if (
+        len(entries) == len(included)
+        and families == {"dynamic_fit"}
+        and len(dynamic_modes) == 1
+    ):
+        legacy_mode = next(iter(dynamic_modes))
+    elif len(dynamic_modes) > 1:
+        blockers.append("mixed_dynamic_fit_modes_not_enabled")
+    elif len(families) > 1:
+        blockers.append("mixed_strategy_families_not_enabled")
+
+    unique_blockers = tuple(dict.fromkeys(blockers))
+    return GuidedPerRoiProductionStrategyMap(
+        version=PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION,
+        entries=tuple(entries),
+        legacy_global_dynamic_fit_mode=legacy_mode,
+        execution_routing_supported=bool(
+            included
+            and len(entries) == len(included)
+            and legacy_mode
+            and not unique_blockers
+        ),
+        blocking_categories=unique_blockers,
+    )
 
 
 @dataclass
@@ -2733,6 +2846,9 @@ def _execution_spec_correction_preview_dict(
     plan: GuidedNewAnalysisDraftPlan,
     subset_readiness: GuidedNewAnalysisExecutionSubsetReadiness,
 ) -> dict[str, Any]:
+    production_strategy_map = (
+        build_guided_per_roi_production_strategy_map(plan)
+    )
     issue_categories = tuple(issue.category for issue in subset_readiness.blocking_issues)
     correction_blockers = tuple(
         category for category in issue_categories
@@ -2762,6 +2878,14 @@ def _execution_spec_correction_preview_dict(
             for choice in plan.per_roi_correction_strategy_choices
         ],
         "per_roi_choice_provenance_preserved": True,
+        "production_strategy_map_version": production_strategy_map.version,
+        "per_roi_production_strategy_map": [
+            asdict(entry) for entry in production_strategy_map.entries
+        ],
+        "legacy_global_dynamic_fit_mode": (
+            production_strategy_map.legacy_global_dynamic_fit_mode
+        ),
+        "production_strategy_map_is_authoritative": True,
         "signal_only_f0_production_routing_supported": False,
         "mixed_strategy_supported": False,
         "blocker_categories": list(correction_blockers),

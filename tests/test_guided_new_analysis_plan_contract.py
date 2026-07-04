@@ -32,9 +32,11 @@ from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisOutputCreationPolicy,
     GuidedPlanCorrectionChoice,
     GuidedPlanIssue,
+    PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION,
     NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION,
     RUN_PREVIEW_SCHEMA_VERSION,
     build_guided_new_analysis_execution_spec_preview,
+    build_guided_per_roi_production_strategy_map,
     build_guided_feature_event_effective_values_preview,
     build_guided_first_subset_executable_mapping_preview,
     build_guided_runner_request_preview,
@@ -99,6 +101,112 @@ def _complete_new_analysis_plan(**overrides):
     for key, value in overrides.items():
         setattr(plan, key, value)
     return plan
+
+
+def test_per_roi_production_strategy_map_unanimous_dynamic_fit_projection():
+    choices = [
+        GuidedPlanCorrectionChoice(
+            roi_id=roi,
+            selected_strategy="robust_global_event_reject",
+            source_type="local_correction_preview",
+            current_or_stale="current",
+            explicit_user_mark=True,
+            evidence_reference={
+                "evidence_source_type": "local_correction_preview",
+                "preview_id": f"preview-{roi}",
+            },
+        )
+        for roi in ("CH1", "CH2", "CH3")
+    ]
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2", "CH3"],
+        included_roi_ids=["CH1", "CH2", "CH3"],
+        excluded_roi_ids=[],
+        per_roi_correction_strategy_choices=choices,
+    )
+
+    strategy_map = build_guided_per_roi_production_strategy_map(plan)
+
+    assert strategy_map.version == PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION
+    assert [entry.roi_id for entry in strategy_map.entries] == [
+        "CH1", "CH2", "CH3"
+    ]
+    assert {entry.strategy_family for entry in strategy_map.entries} == {
+        "dynamic_fit"
+    }
+    assert {entry.dynamic_fit_mode for entry in strategy_map.entries} == {
+        "robust_global_event_reject"
+    }
+    assert strategy_map.legacy_global_dynamic_fit_mode == (
+        "robust_global_event_reject"
+    )
+    assert strategy_map.execution_routing_supported is True
+    assert strategy_map.blocking_categories == ()
+
+
+def test_per_roi_strategy_map_represents_signal_only_but_blocks_routing():
+    plan = _complete_new_analysis_plan(
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="ROI1",
+                selected_strategy="signal_only_f0",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+                evidence_reference={
+                    "evidence_source_type": "local_correction_preview",
+                },
+            )
+        ],
+    )
+
+    strategy_map = build_guided_per_roi_production_strategy_map(plan)
+
+    assert len(strategy_map.entries) == 1
+    entry = strategy_map.entries[0]
+    assert entry.strategy_family == "signal_only_f0"
+    assert entry.dynamic_fit_mode is None
+    assert strategy_map.legacy_global_dynamic_fit_mode is None
+    assert strategy_map.execution_routing_supported is False
+    assert "signal_only_f0_production_routing_not_enabled" in (
+        strategy_map.blocking_categories
+    )
+
+
+def test_per_roi_strategy_map_represents_mixed_dynamic_modes_without_collapse():
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        excluded_roi_ids=[],
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="CH1",
+                selected_strategy="robust_global_event_reject",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+            GuidedPlanCorrectionChoice(
+                roi_id="CH2",
+                selected_strategy="adaptive_event_gated_regression",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+        ],
+    )
+
+    strategy_map = build_guided_per_roi_production_strategy_map(plan)
+
+    assert [entry.dynamic_fit_mode for entry in strategy_map.entries] == [
+        "robust_global_event_reject",
+        "adaptive_event_gated_regression",
+    ]
+    assert strategy_map.legacy_global_dynamic_fit_mode is None
+    assert strategy_map.execution_routing_supported is False
+    assert "mixed_dynamic_fit_modes_not_enabled" in (
+        strategy_map.blocking_categories
+    )
 
 
 def _current_applied_snapshot_for_plan(plan, **overrides):
@@ -3285,4 +3393,3 @@ def test_guided_new_analysis_durable_fields_4J11i():
     assert restored.output_overwrite is False
     assert restored.global_correction_strategy is None
     assert restored.dynamic_fit_mode is None
-

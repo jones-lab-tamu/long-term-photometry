@@ -399,6 +399,18 @@ class GuidedProductionConfirmedMark:
 
 
 @dataclass(frozen=True)
+class GuidedProductionPerRoiStrategy:
+    roi_id: str
+    strategy_family: str
+    dynamic_fit_mode: str | None
+    selected_strategy: str
+    evidence_source_type: str
+    evidence_reference_json: str
+    explicit_user_mark: bool
+    current_or_stale: str
+
+
+@dataclass(frozen=True)
 class GuidedProductionCorrection:
     strategy_scope: str
     global_correction_strategy: str
@@ -408,6 +420,10 @@ class GuidedProductionCorrection:
     mark_rule_version: str
     currentness_rule_version: str
     unanimity_rule_version: str
+    production_strategy_map_version: str = ""
+    per_roi_production_strategy_map: tuple[
+        GuidedProductionPerRoiStrategy, ...
+    ] = ()
 
 
 @dataclass(frozen=True)
@@ -910,6 +926,20 @@ def map_guided_validation_request_to_execution_intent(
                 tuple(GuidedProductionConfirmedMark(**{item.name: getattr(mark, item.name) for item in fields(GuidedBackendConfirmedStrategyMark)}) for mark in correction.confirmed_marks),
                 correction.mark_rule_version, correction.currentness_rule_version,
                 correction.unanimity_rule_version,
+                correction.production_strategy_map_version,
+                tuple(
+                    GuidedProductionPerRoiStrategy(
+                        roi_id=entry.roi_id,
+                        strategy_family=entry.strategy_family,
+                        dynamic_fit_mode=entry.dynamic_fit_mode,
+                        selected_strategy=entry.selected_strategy,
+                        evidence_source_type=entry.evidence_source_type,
+                        evidence_reference_json=entry.evidence_reference_json,
+                        explicit_user_mark=entry.explicit_user_mark,
+                        current_or_stale=entry.current_or_stale,
+                    )
+                    for entry in correction.per_roi_production_strategy_map
+                ),
             ),
             diagnostic_evidence=GuidedProductionDiagnosticEvidence(
                 request.diagnostic_evidence.cache_id, request.diagnostic_evidence.cache_root_canonical,

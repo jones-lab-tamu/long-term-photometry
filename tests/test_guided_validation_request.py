@@ -6,6 +6,8 @@ from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDraftPlan,
     GuidedNewAnalysisExecutionIntent,
     GuidedNewAnalysisOutputCreationPolicy,
+    GuidedPlanCorrectionChoice,
+    PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION,
 )
 from photometry_pipeline.guided_validation_request import (
     GuidedValidationRequest,
@@ -83,6 +85,96 @@ def test_build_guided_validation_request_from_plan(tmp_path: Path):
     assert request.output_path_role == "output_base"
     assert request.output_creation_timing == "future_execution_start_only"
     assert request.run_directory_strategy == "derive_unique_run_id_under_output_base"
+
+
+def test_validation_request_preserves_authoritative_per_roi_strategy_map(
+    tmp_path: Path,
+):
+    plan = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(tmp_path / "raw_input"),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+        included_roi_ids=["CH1", "CH2"],
+        global_correction_strategy="dynamic_fit",
+        dynamic_fit_mode="robust_global_event_reject",
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id=roi,
+                selected_strategy="robust_global_event_reject",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+                evidence_reference={
+                    "evidence_source_type": "local_correction_preview",
+                    "preview_id": f"preview-{roi}",
+                },
+            )
+            for roi in ("CH1", "CH2")
+        ],
+        output_base_path=str(tmp_path / "output"),
+    )
+
+    request = build_guided_validation_request_from_plan(plan)
+
+    assert request.production_strategy_map_version == (
+        PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION
+    )
+    assert [entry["roi_id"] for entry in request.per_roi_production_strategy_map] == [
+        "CH1", "CH2"
+    ]
+    assert {
+        entry["strategy_family"]
+        for entry in request.per_roi_production_strategy_map
+    } == {"dynamic_fit"}
+    assert request.legacy_global_dynamic_fit_mode == (
+        "robust_global_event_reject"
+    )
+    assert not {
+        issue.category
+        for issue in validate_guided_validation_request(request)
+    } & {
+        "missing_strategy_for_included_roi",
+        "mixed_dynamic_fit_modes_not_enabled",
+        "signal_only_f0_production_routing_not_enabled",
+    }
+
+
+def test_new_strategy_map_signal_only_is_truthful_and_fail_closed(tmp_path: Path):
+    plan = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(tmp_path / "raw_input"),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+        included_roi_ids=["CH1"],
+        global_correction_strategy="signal_only_f0",
+        dynamic_fit_mode=None,
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="CH1",
+                selected_strategy="signal_only_f0",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+                evidence_reference={
+                    "evidence_source_type": "local_correction_preview",
+                },
+            )
+        ],
+        output_base_path=str(tmp_path / "output"),
+    )
+
+    request = build_guided_validation_request_from_plan(plan)
+    entry = request.per_roi_production_strategy_map[0]
+    issues = validate_guided_validation_request(request)
+
+    assert entry["strategy_family"] == "signal_only_f0"
+    assert entry["dynamic_fit_mode"] is None
+    assert request.legacy_global_dynamic_fit_mode is None
+    assert "signal_only_f0_production_routing_not_enabled" in {
+        issue.category for issue in issues
+    }
+    assert "unsupported_correction_strategy" in {
+        issue.category for issue in issues
+    }
 
 def test_validation_missing_output_base(tmp_path: Path):
     request = GuidedValidationRequest(
@@ -403,3 +495,182 @@ def test_guided_validation_result_state_4J11q():
     # production run allocated -> False
     assert not can_guided_run_unlock(passed, "hash123", [], production_run_allocated=True)
 
+
+def _base_request_with_strategy_map(tmp_path, entries, *, dynamic_fit_mode="robust_global_event_reject"):
+    return GuidedValidationRequest(
+        source_path=str(tmp_path / "raw_input"),
+        source_format="rwd",
+        acquisition_mode="intermittent",
+        sessions_per_hour=6,
+        session_duration_sec=120.0,
+        exclude_incomplete_final_rwd_chunk=True,
+        timeline_anchor_mode="civil",
+        included_roi_ids=["CH1"],
+        strategy_scope="global",
+        global_correction_strategy="dynamic_fit",
+        dynamic_fit_mode=dynamic_fit_mode,
+        production_strategy_map_version=PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION,
+        per_roi_production_strategy_map=tuple(entries),
+        legacy_global_dynamic_fit_mode=dynamic_fit_mode,
+        output_base_path=str(tmp_path / "output"),
+        execution_mode="phasic",
+        run_profile="full",
+        traces_only=False,
+        output_overwrite=False,
+        output_path_role="output_base",
+        output_creation_timing="future_execution_start_only",
+        run_directory_strategy="derive_unique_run_id_under_output_base"
+    )
+
+def test_valid_dynamic_fit_entry_passes(tmp_path: Path):
+    entry = {
+        "roi_id": "CH1",
+        "strategy_family": "dynamic_fit",
+        "dynamic_fit_mode": "robust_global_event_reject",
+        "selected_strategy": "robust_global_event_reject",
+        "evidence_source_type": "local_correction_preview",
+        "evidence_reference": {},
+        "explicit_user_mark": True,
+        "current_or_stale": "current",
+    }
+    request = _base_request_with_strategy_map(tmp_path, [entry])
+    issues = validate_guided_validation_request(request)
+    cats = {i.category for i in issues}
+
+    assert "unsupported_production_strategy_family" not in cats
+    assert "invalid_dynamic_fit_strategy_entry" not in cats
+    assert "missing_or_invalid_dynamic_fit_mode" not in cats
+    assert "dynamic_fit_strategy_mode_mismatch" not in cats
+    assert "invalid_signal_only_f0_strategy_entry" not in cats
+    assert "signal_only_f0_dynamic_fit_mode_invalid" not in cats
+    assert "signal_only_f0_production_routing_not_enabled" not in cats
+    assert "mixed_dynamic_fit_modes_not_enabled" not in cats
+    assert "mixed_strategy_families_not_enabled" not in cats
+
+def test_dynamic_fit_row_missing_dynamic_fit_mode_blocks(tmp_path: Path):
+    entry = {
+        "roi_id": "CH1",
+        "strategy_family": "dynamic_fit",
+        "selected_strategy": "robust_global_event_reject",
+        "dynamic_fit_mode": None,
+        "explicit_user_mark": True,
+        "current_or_stale": "current",
+    }
+    request = _base_request_with_strategy_map(tmp_path, [entry])
+    issues = validate_guided_validation_request(request)
+    cats = {i.category for i in issues}
+    assert "missing_or_invalid_dynamic_fit_mode" in cats
+
+def test_dynamic_fit_row_unsupported_dynamic_fit_mode_blocks(tmp_path: Path):
+    entry = {
+        "roi_id": "CH1",
+        "strategy_family": "dynamic_fit",
+        "selected_strategy": "robust_global_event_reject",
+        "dynamic_fit_mode": "bad_mode",
+        "explicit_user_mark": True,
+        "current_or_stale": "current",
+    }
+    request = _base_request_with_strategy_map(tmp_path, [entry])
+    issues = validate_guided_validation_request(request)
+    cats = {i.category for i in issues}
+    assert "missing_or_invalid_dynamic_fit_mode" in cats
+
+def test_dynamic_fit_row_unsupported_selected_strategy_blocks(tmp_path: Path):
+    entry = {
+        "roi_id": "CH1",
+        "strategy_family": "dynamic_fit",
+        "selected_strategy": "bad_strategy",
+        "dynamic_fit_mode": "robust_global_event_reject",
+        "explicit_user_mark": True,
+        "current_or_stale": "current",
+    }
+    request = _base_request_with_strategy_map(tmp_path, [entry])
+    issues = validate_guided_validation_request(request)
+    cats = {i.category for i in issues}
+    assert "invalid_dynamic_fit_strategy_entry" in cats
+
+def test_dynamic_fit_row_mismatch_blocks(tmp_path: Path):
+    entry = {
+        "roi_id": "CH1",
+        "strategy_family": "dynamic_fit",
+        "selected_strategy": "robust_global_event_reject",
+        "dynamic_fit_mode": "adaptive_event_gated_regression",
+        "explicit_user_mark": True,
+        "current_or_stale": "current",
+    }
+    request = _base_request_with_strategy_map(tmp_path, [entry])
+    issues = validate_guided_validation_request(request)
+    cats = {i.category for i in issues}
+    assert "dynamic_fit_strategy_mode_mismatch" in cats
+    assert "mixed_dynamic_fit_modes_not_enabled" not in cats
+
+def test_unsupported_strategy_family_blocks(tmp_path: Path):
+    entry = {
+        "roi_id": "CH1",
+        "strategy_family": "unsupported",
+        "selected_strategy": "robust_global_event_reject",
+        "dynamic_fit_mode": "robust_global_event_reject",
+        "explicit_user_mark": True,
+        "current_or_stale": "current",
+    }
+    request = _base_request_with_strategy_map(tmp_path, [entry])
+    issues = validate_guided_validation_request(request)
+    cats = {i.category for i in issues}
+    assert "unsupported_production_strategy_family" in cats
+
+def test_missing_strategy_family_blocks(tmp_path: Path):
+    entry = {
+        "roi_id": "CH1",
+        "selected_strategy": "robust_global_event_reject",
+        "dynamic_fit_mode": "robust_global_event_reject",
+        "explicit_user_mark": True,
+        "current_or_stale": "current",
+    }
+    request = _base_request_with_strategy_map(tmp_path, [entry])
+    issues = validate_guided_validation_request(request)
+    cats = {i.category for i in issues}
+    assert "unsupported_production_strategy_family" in cats
+
+def test_signal_only_f0_dynamic_fit_mode_populated_blocks(tmp_path: Path):
+    entry = {
+        "roi_id": "CH1",
+        "strategy_family": "signal_only_f0",
+        "selected_strategy": "signal_only_f0",
+        "dynamic_fit_mode": "robust_global_event_reject",
+        "explicit_user_mark": True,
+        "current_or_stale": "current",
+    }
+    request = _base_request_with_strategy_map(tmp_path, [entry])
+    issues = validate_guided_validation_request(request)
+    cats = {i.category for i in issues}
+    assert "signal_only_f0_dynamic_fit_mode_invalid" in cats
+    assert "signal_only_f0_production_routing_not_enabled" in cats
+
+def test_signal_only_f0_wrong_selected_strategy_blocks(tmp_path: Path):
+    entry = {
+        "roi_id": "CH1",
+        "strategy_family": "signal_only_f0",
+        "selected_strategy": "robust_global_event_reject",
+        "dynamic_fit_mode": None,
+        "explicit_user_mark": True,
+        "current_or_stale": "current",
+    }
+    request = _base_request_with_strategy_map(tmp_path, [entry])
+    issues = validate_guided_validation_request(request)
+    cats = {i.category for i in issues}
+    assert "invalid_signal_only_f0_strategy_entry" in cats
+    assert "signal_only_f0_production_routing_not_enabled" in cats
+
+def test_unsupported_selected_strategy_blocks_even_when_legacy_valid(tmp_path: Path):
+    entry = {
+        "roi_id": "CH1",
+        "strategy_family": "dynamic_fit",
+        "selected_strategy": "bad_strategy",
+        "dynamic_fit_mode": "robust_global_event_reject",
+        "explicit_user_mark": True,
+        "current_or_stale": "current",
+    }
+    request = _base_request_with_strategy_map(tmp_path, [entry], dynamic_fit_mode="robust_global_event_reject")
+    issues = validate_guided_validation_request(request)
+    cats = {i.category for i in issues}
+    assert "invalid_dynamic_fit_strategy_entry" in cats

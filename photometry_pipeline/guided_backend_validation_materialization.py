@@ -23,6 +23,7 @@ from photometry_pipeline.guided_backend_validation_request import (
     GuidedBackendAcquisitionDatasetFacts,
     GuidedBackendRoiScopeFacts,
     GuidedBackendConfirmedStrategyMarkFacts,
+    GuidedBackendPerRoiProductionStrategy,
     GuidedBackendCorrectionFacts,
     GuidedBackendFeatureEventFacts,
     GuidedBackendEvidenceReferenceFacts,
@@ -38,6 +39,7 @@ from photometry_pipeline.guided_new_analysis_plan import (
     FEATURE_EVENT_CONFIG_FIELDS,
     FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
     FORBIDDEN_CORRECTION_STRATEGIES,
+    build_guided_per_roi_production_strategy_map,
     build_guided_feature_event_effective_values_preview,
     classify_output_base_safety_ownership,
 )
@@ -1156,11 +1158,30 @@ def _materialize_correction_facts(
                 current=True,
             )
         )
+    strategy_map = build_guided_per_roi_production_strategy_map(draft)
     return GuidedBackendCorrectionFacts(
         available=True,
         global_dynamic_fit_mode=global_mode,
         dynamic_fit_parameter_values=tuple(parameter_values),
         confirmed_marks=tuple(marks),
+        production_strategy_map_version=strategy_map.version,
+        per_roi_production_strategy_map=tuple(
+            GuidedBackendPerRoiProductionStrategy(
+                roi_id=entry.roi_id,
+                strategy_family=entry.strategy_family,
+                dynamic_fit_mode=entry.dynamic_fit_mode,
+                selected_strategy=entry.selected_strategy,
+                evidence_source_type=entry.evidence_source_type,
+                evidence_reference_json=json.dumps(
+                    entry.evidence_reference,
+                    sort_keys=True,
+                    default=str,
+                ),
+                explicit_user_mark=entry.explicit_user_mark,
+                current_or_stale=entry.current_or_stale,
+            )
+            for entry in strategy_map.entries
+        ),
     ), None
 
 
