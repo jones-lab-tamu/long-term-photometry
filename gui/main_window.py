@@ -1621,6 +1621,8 @@ class MainWindow(QMainWindow):
         self._guided_workflow_mode = "start"
         self._guided_diagnostics_status = "not_generated"
         self._guided_strategy_choices = {}
+        self._guided_local_preview_evidence_by_roi = {}
+        self._guided_local_preview_row_strategy_by_roi = {}
         # Temporary in-memory Guided draft plan state until durable plan
         # persistence/export exists. Values are scoped to completed-run source
         # and populated only by explicit Apply.
@@ -5436,6 +5438,8 @@ class MainWindow(QMainWindow):
         self._generate_guided_preview_reports(
             result, signal_only_f0=False
         )
+        if result.get("source_type") == "local_raw_segment":
+            self._register_guided_local_preview_evidence(result)
         self._guided_preview_last_result = result
         if hasattr(self, "_guided_preview_status_label"):
             status = str(result.get("status", "failed"))
@@ -6434,12 +6438,89 @@ class MainWindow(QMainWindow):
             != str(result.get("roi") or "")
         ):
             return None
+        registered = getattr(
+            self, "_guided_local_preview_evidence_by_roi", {}
+        ).get(str(result.get("roi") or ""))
+        if (
+            isinstance(registered, dict)
+            and str(
+                registered.get("result", {}).get("preview_id") or ""
+            )
+            == str(result.get("preview_id") or "")
+        ):
+            return registered
         return {"result": result, "provenance": provenance}
 
-    def _guided_local_preview_evidence_reference(
-        self, strategy: str
+    def _register_guided_local_preview_evidence(
+        self, result: dict[str, object]
+    ) -> None:
+        if (
+            result.get("source_type") != "local_raw_segment"
+            or str(result.get("status") or "") not in {"success", "partial"}
+            or result.get("preview_only") is not True
+            or result.get("production_analysis") is not False
+        ):
+            return
+        roi = str(result.get("roi") or "")
+        provenance_path = Path(
+            str(result.get("preview_provenance_path") or "")
+        )
+        try:
+            provenance = json.loads(
+                provenance_path.read_text(encoding="utf-8")
+            )
+        except Exception:
+            return
+        if (
+            not roi
+            or not isinstance(provenance, dict)
+            or provenance.get("preview_only") is not True
+            or provenance.get("production_analysis") is not False
+            or str(provenance.get("selected_roi") or "") != roi
+            or str(provenance.get("preview_id") or "")
+            != str(result.get("preview_id") or "")
+        ):
+            return
+        self._guided_local_preview_evidence_by_roi[roi] = {
+            "result": dict(result),
+            "provenance": dict(provenance),
+            "setup_signature": self._guided_local_preview_setup_signature(),
+        }
+
+    def _guided_local_preview_evidence_for_roi(
+        self, roi: str, *, require_current: bool = True
     ) -> dict[str, object] | None:
-        current = self._guided_current_local_preview_evidence()
+        entry = getattr(
+            self, "_guided_local_preview_evidence_by_roi", {}
+        ).get(str(roi))
+        if not isinstance(entry, dict):
+            return None
+        result = entry.get("result")
+        provenance = entry.get("provenance")
+        if (
+            not isinstance(result, dict)
+            or not isinstance(provenance, dict)
+            or str(result.get("roi") or "") != str(roi)
+            or result.get("preview_only") is not True
+            or result.get("production_analysis") is not False
+        ):
+            return None
+        if require_current and (
+            str(entry.get("setup_signature") or "")
+            != self._guided_local_preview_setup_signature()
+            or str(roi) not in set(self._guided_selected_roi_ids()[1])
+        ):
+            return None
+        return entry
+
+    def _guided_local_preview_evidence_reference(
+        self, strategy: str, *, roi: str | None = None
+    ) -> dict[str, object] | None:
+        current = (
+            self._guided_local_preview_evidence_for_roi(roi)
+            if roi
+            else self._guided_current_local_preview_evidence()
+        )
         if current is None:
             return None
         result = current["result"]
@@ -6496,6 +6577,195 @@ class MainWindow(QMainWindow):
             ),
             "message": LOCAL_CORRECTION_PREVIEW_RECOMPUTE_MESSAGE,
         }
+
+    def _on_guided_local_preview_row_strategy_changed(
+        self, roi: str, combo: QComboBox, button: QPushButton
+    ) -> None:
+        strategy = str(combo.currentData() or "")
+        self._guided_local_preview_row_strategy_by_roi[str(roi)] = strategy
+        button.setEnabled(
+            bool(
+                strategy
+                and self._guided_local_preview_evidence_reference(
+                    strategy, roi=str(roi)
+                )
+            )
+        )
+
+    def _confirm_guided_local_preview_row(
+        self, roi: str, combo: QComboBox
+    ) -> None:
+        roi = str(roi)
+        strategy = str(combo.currentData() or "")
+        reference = self._guided_local_preview_evidence_reference(
+            strategy, roi=roi
+        )
+        if reference is None:
+            self._refresh_guided_confirm_strategy_panel()
+            return
+        source_key = self._guided_confirm_choice_key(
+            LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, roi
+        )
+        self._guided_strategy_choices[source_key] = {
+            "strategy": strategy,
+            "strategy_label": self._guided_confirm_strategy_label(strategy),
+            "confirmed": True,
+            "source_type": LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
+            "evidence_source_type": LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
+            "preview_only": True,
+            "production_analysis": False,
+            "local_preview_evidence": reference,
+            "setup_signature": self._guided_local_preview_setup_signature(),
+            "current": True,
+            "stale": False,
+            "completed_run_dir": "",
+            "roi": roi,
+            "evidence_chunk": reference.get("selected_segment_index"),
+            "evidence_summary": {
+                "preview": (
+                    f"Local correction preview: ROI {roi}; preview segment "
+                    f"{reference.get('selected_segment_label', '')}"
+                ),
+                "signal_only_f0": "",
+                "stale": False,
+            },
+            "choice_source": "explicit_user_mark",
+            "no_auto_selection": True,
+            "marked_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        self._invalidate_guided_backend_validation("strategy mark changed")
+        self._refresh_guided_confirm_strategy_panel()
+
+    def _rebuild_guided_local_preview_confirmation_rows(self) -> None:
+        layout = self._guided_local_preview_confirmation_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._guided_local_preview_confirmation_rows = {}
+        for column, heading in enumerate(
+            ("ROI", "Evidence reviewed", "Strategy", "Status", "Action")
+        ):
+            label = QLabel(heading)
+            label.setProperty("guidedTableHeader", True)
+            layout.addWidget(label, 0, column)
+
+        included = list(self._guided_selected_roi_ids()[1])
+        supported = set(GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE.values())
+        for row_index, roi in enumerate(included, start=1):
+            roi = str(roi)
+            any_evidence = self._guided_local_preview_evidence_for_roi(
+                roi, require_current=False
+            )
+            evidence = self._guided_local_preview_evidence_for_roi(roi)
+            evidence_label = QLabel()
+            evidence_label.setWordWrap(True)
+            combo = QComboBox()
+            combo.addItem("Select a strategy...", "")
+            statuses = (
+                evidence.get("result", {}).get("method_statuses", {})
+                if evidence
+                else {}
+            )
+            if not isinstance(statuses, dict):
+                statuses = {}
+            for strategy, method_status in statuses.items():
+                if (
+                    strategy in supported
+                    and isinstance(method_status, dict)
+                    and method_status.get("status") == "success"
+                ):
+                    combo.addItem(
+                        self._guided_confirm_strategy_label(strategy),
+                        strategy,
+                    )
+            saved_strategy = str(
+                self._guided_local_preview_row_strategy_by_roi.get(roi) or ""
+            )
+            saved_index = combo.findData(saved_strategy)
+            if saved_index >= 0:
+                combo.setCurrentIndex(saved_index)
+            combo.setEnabled(evidence is not None)
+
+            choice = self._guided_strategy_choices.get(
+                self._guided_confirm_choice_key(
+                    LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, roi
+                )
+            )
+            confirmed = bool(
+                isinstance(choice, dict)
+                and choice.get("confirmed") is True
+                and choice.get("current") is True
+                and choice.get("stale") is not True
+            )
+            stale = bool(
+                isinstance(choice, dict)
+                and (
+                    choice.get("stale") is True
+                    or choice.get("current") is not True
+                )
+            )
+            if evidence is not None:
+                segment = evidence["provenance"].get(
+                    "selected_segment_label", ""
+                )
+                evidence_label.setText(
+                    f"Local preview, segment {segment}"
+                )
+            elif any_evidence is not None:
+                evidence_label.setText("Evidence stale; preview again")
+            else:
+                evidence_label.setText("Preview first")
+            status_label = QLabel(
+                "Confirmed"
+                if confirmed
+                else "Stale, confirm again"
+                if stale
+                else "Needs confirmation"
+                if evidence is not None
+                else "Preview first"
+            )
+            action = QPushButton(
+                "Reconfirm strategy for this ROI"
+                if stale or confirmed
+                else "Confirm strategy for this ROI"
+            )
+            action.setEnabled(
+                bool(
+                    evidence is not None
+                    and combo.currentData()
+                    and self._guided_local_preview_evidence_reference(
+                        str(combo.currentData()), roi=roi
+                    )
+                )
+            )
+            combo.currentIndexChanged.connect(
+                lambda _index, r=roi, c=combo, b=action:
+                self._on_guided_local_preview_row_strategy_changed(r, c, b)
+            )
+            action.clicked.connect(
+                lambda _checked=False, r=roi, c=combo:
+                self._confirm_guided_local_preview_row(r, c)
+            )
+            layout.addWidget(QLabel(roi), row_index, 0)
+            layout.addWidget(evidence_label, row_index, 1)
+            layout.addWidget(combo, row_index, 2)
+            layout.addWidget(status_label, row_index, 3)
+            layout.addWidget(action, row_index, 4)
+            self._guided_local_preview_confirmation_rows[roi] = {
+                "evidence_label": evidence_label,
+                "strategy_combo": combo,
+                "status_label": status_label,
+                "action_button": action,
+            }
+
+        note = QLabel(
+            "Final analysis recomputes correction using the full selected "
+            "recordings."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note, len(included) + 1, 0, 1, 5)
 
     def _guided_confirm_strategy_progress_text(
         self,
@@ -6617,12 +6887,25 @@ class MainWindow(QMainWindow):
             == "local_raw_segment"
             and getattr(self, "_guided_preview_source_ok", False)
         )
+        included_rois = list(self._guided_selected_roi_ids()[1])
         local_confirmation_ready = bool(
             new_analysis
-            and self._guided_current_local_preview_evidence() is not None
-            and preview_result.get("visual_preview_path")
-            and os.path.isfile(
-                str(preview_result.get("visual_preview_path"))
+            and any(
+                (
+                    evidence := self._guided_local_preview_evidence_for_roi(
+                        roi
+                    )
+                )
+                is not None
+                and evidence.get("result", {}).get("visual_preview_path")
+                and os.path.isfile(
+                    str(
+                        evidence.get("result", {}).get(
+                            "visual_preview_path"
+                        )
+                    )
+                )
+                for roi in included_rois
             )
         )
         preview_unlocked = evidence_ready or local_preview_ready or not new_analysis
@@ -6635,6 +6918,27 @@ class MainWindow(QMainWindow):
         self._guided_confirm_locked_label.setVisible(not strategy_unlocked)
         for widget in getattr(self, "_guided_confirm_gated_widgets", ()):
             widget.setVisible(strategy_unlocked)
+        local_table_active = bool(
+            new_analysis
+            and getattr(
+                self, "_guided_local_preview_evidence_by_roi", {}
+            )
+        )
+        if local_table_active:
+            for widget_name in (
+                "_guided_confirm_selection_group",
+                "_guided_confirm_evidence_group",
+                "_guided_confirm_choice_group",
+                "_guided_confirm_marked_choice_label",
+            ):
+                widget = getattr(self, widget_name, None)
+                if widget is not None:
+                    widget.setVisible(False)
+            self._guided_local_preview_confirmation_group.setVisible(
+                strategy_unlocked
+            )
+        else:
+            self._guided_local_preview_confirmation_group.setVisible(False)
         signal_group = getattr(self, "_guided_signal_f0_group", None)
         if signal_group is not None and new_analysis:
             signal_group.setVisible(preview_unlocked and evidence_ready)
@@ -6837,7 +7141,21 @@ class MainWindow(QMainWindow):
         chunk_ids: list[int] = []
         if mode == "new_analysis":
             self._refresh_guided_local_preview_choice_currency()
-            local = self._guided_current_local_preview_evidence()
+            included_local_rois = list(self._guided_selected_roi_ids()[1])
+            registered_local_rois = [
+                roi
+                for roi in included_local_rois
+                if self._guided_local_preview_evidence_for_roi(
+                    roi, require_current=False
+                )
+                is not None
+            ]
+            current_local = self._guided_current_local_preview_evidence()
+            local = current_local
+            if local is None and registered_local_rois:
+                local = self._guided_local_preview_evidence_for_roi(
+                    registered_local_rois[0], require_current=False
+                )
             if local is not None:
                 result = local["result"]
                 source_type = LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
@@ -6848,9 +7166,9 @@ class MainWindow(QMainWindow):
                     or result.get("chunk_index")
                     or ""
                 )
-                rois = [str(result.get("roi") or "")]
+                rois = [str(roi) for roi in included_local_rois]
                 chunk_ids = [int(result.get("chunk_index"))]
-                source_ok = bool(rois[0])
+                source_ok = bool(rois)
                 preview_evidence_ready = source_ok
                 self._guided_confirm_source_type = source_type
                 self._guided_confirm_source_key = (
@@ -6983,6 +7301,23 @@ class MainWindow(QMainWindow):
         local_preview_confirmation = (
             source_type == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
         )
+        self._guided_confirm_selection_group.setVisible(
+            not local_preview_confirmation
+        )
+        self._guided_confirm_evidence_group.setVisible(
+            not local_preview_confirmation
+        )
+        self._guided_confirm_choice_group.setVisible(
+            not local_preview_confirmation
+        )
+        self._guided_confirm_marked_choice_label.setVisible(
+            not local_preview_confirmation
+        )
+        self._guided_local_preview_confirmation_group.setVisible(
+            local_preview_confirmation
+        )
+        if local_preview_confirmation:
+            self._rebuild_guided_local_preview_confirmation_rows()
         self._guided_confirm_chunk_combo.setVisible(
             not local_preview_confirmation
         )
@@ -10306,6 +10641,7 @@ class MainWindow(QMainWindow):
 
         selection_group = QWidget()
         selection_group.setObjectName("guidedConfirmStrategySelectionPanel")
+        self._guided_confirm_selection_group = selection_group
         selection_layout = QFormLayout(selection_group)
         selection_layout.setContentsMargins(10, 8, 10, 8)
         self._guided_confirm_roi_combo = QComboBox()
@@ -10345,6 +10681,7 @@ class MainWindow(QMainWindow):
 
         choice_group = QWidget()
         choice_group.setObjectName("guidedConfirmStrategyChoicePanel")
+        self._guided_confirm_choice_group = choice_group
         choice_layout = QFormLayout(choice_group)
         choice_layout.setContentsMargins(10, 8, 10, 8)
         self._guided_confirm_strategy_combo = QComboBox()
@@ -10403,6 +10740,22 @@ class MainWindow(QMainWindow):
         self._guided_confirm_mark_btn.clicked.connect(self._on_guided_mark_strategy_choice)
         choice_layout.addRow("", self._guided_confirm_mark_btn)
         layout.addWidget(choice_group)
+
+        self._guided_local_preview_confirmation_group = QGroupBox(
+            "Strategies by included ROI"
+        )
+        self._guided_local_preview_confirmation_group.setObjectName(
+            "guidedLocalPreviewConfirmationTable"
+        )
+        self._guided_local_preview_confirmation_layout = QGridLayout(
+            self._guided_local_preview_confirmation_group
+        )
+        self._guided_local_preview_confirmation_layout.setContentsMargins(
+            10, 8, 10, 8
+        )
+        self._guided_local_preview_confirmation_rows = {}
+        self._guided_local_preview_confirmation_group.setVisible(False)
+        layout.addWidget(self._guided_local_preview_confirmation_group)
 
         self._guided_confirm_marked_choice_label = QLabel("Current marked choice: none.")
         self._guided_confirm_marked_choice_label.setObjectName("guidedConfirmStrategyMarkedChoice")
