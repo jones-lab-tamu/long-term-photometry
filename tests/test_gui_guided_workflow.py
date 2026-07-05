@@ -5,7 +5,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
@@ -1876,6 +1876,106 @@ def test_guided_rwd_intermittent_valid_duration_completes_step(window):
         "2 sessions/hour, 600 s/session."
     )
     assert "needs attention" not in status
+
+
+def test_guided_recording_continue_reports_missing_and_invalid_intermittent_fields(
+    window,
+):
+    _set_guided_rwd_intermittent(window)
+    window._guided_sessions_per_hour_edit.clear()
+    window._guided_session_duration_edit.clear()
+
+    assert window._guided_recording_continue_btn.isEnabled() is False
+    assert window._guided_recording_continue_status.text() == (
+        "Enter sessions per hour and session duration to continue."
+    )
+
+    window._guided_sessions_per_hour_edit.setText("1.5")
+    window._guided_session_duration_edit.setText("600")
+    assert window._guided_recording_continue_btn.isEnabled() is False
+    assert window._guided_recording_continue_status.text() == (
+        "Sessions per hour must be a positive whole number."
+    )
+
+    window._guided_sessions_per_hour_edit.setText("2")
+    window._guided_session_duration_edit.setText("0")
+    assert window._guided_recording_continue_btn.isEnabled() is False
+    assert window._guided_recording_continue_status.text() == (
+        "Session duration must be greater than 0 seconds."
+    )
+
+
+@pytest.mark.parametrize(
+    ("sessions_per_hour", "duration", "ready"),
+    [
+        ("2", "600", True),
+        ("6", "600", True),
+        ("600", "1000", False),
+    ],
+)
+def test_guided_recording_continue_enforces_intermittent_timing_plausibility(
+    window, sessions_per_hour, duration, ready
+):
+    _set_guided_rwd_intermittent(window)
+    window._guided_sessions_per_hour_edit.setText(sessions_per_hour)
+    window._guided_session_duration_edit.setText(duration)
+
+    assert window._guided_recording_continue_btn.isEnabled() is ready
+    if ready:
+        assert window._guided_recording_continue_status.text() == (
+            "Recording structure is ready."
+        )
+    else:
+        assert window._guided_recording_continue_status.text() == (
+            "Session timing is impossible: sessions per hour × session "
+            "duration cannot exceed 3600 seconds."
+        )
+
+
+def test_guided_recording_continuous_readiness_and_mode_visibility(window):
+    _set_guided_rwd_intermittent(window)
+    assert window._guided_sessions_per_hour_edit.isHidden() is False
+    assert window._guided_continuous_window_sec_spin.isHidden() is True
+    assert window._guided_incomplete_final_rwd_group.isHidden() is False
+    assert window._guided_exclude_incomplete_final_rwd_chunk_cb.text() == (
+        "Allow one incomplete final RWD recording chunk"
+    )
+    assert "Earlier incomplete chunks still stop validation" in (
+        window._guided_incomplete_final_rwd_help_label.text()
+    )
+    assert "Raw files are not modified" in (
+        window._guided_incomplete_final_rwd_help_label.text()
+    )
+
+    continuous = window._guided_acquisition_mode_combo.findData(
+        "continuous"
+    )
+    window._guided_acquisition_mode_combo.setCurrentIndex(continuous)
+    assert window._guided_sessions_per_hour_edit.isHidden() is True
+    assert window._guided_session_duration_edit.isHidden() is True
+    assert window._guided_continuous_window_sec_spin.isHidden() is False
+    assert window._guided_incomplete_final_rwd_group.isHidden() is True
+    assert window._guided_recording_continue_btn.isEnabled() is True
+    assert window._guided_recording_continue_status.text() == (
+        "Recording structure is ready."
+    )
+
+    blocker = QSignalBlocker(window._guided_continuous_window_sec_spin)
+    window._guided_continuous_window_sec_spin.setMinimum(0)
+    window._guided_continuous_window_sec_spin.setValue(0)
+    del blocker
+    window._refresh_guided_navigation_state()
+    assert window._guided_recording_continue_btn.isEnabled() is False
+    assert window._guided_recording_continue_status.text() == (
+        "Continuous analysis window must be greater than 0 seconds."
+    )
+
+
+def test_guided_incomplete_final_rwd_option_hidden_for_non_rwd(window):
+    _set_guided_rwd_intermittent(window)
+    window._guided_format_combo.setCurrentText("custom_tabular")
+
+    assert window._guided_incomplete_final_rwd_group.isHidden() is True
 
 
 def test_guided_recording_requiredness_updates_with_format_and_mode(window):

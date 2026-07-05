@@ -2022,12 +2022,29 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_acquisition_mode_combo)
         form.addRow("Acquisition mode:", self._guided_acquisition_mode_combo)
 
+        self._guided_intermittent_explanation_label = QLabel(
+            "Use intermittent mode when recording occurs in repeated "
+            "acquisition chunks, such as RWD sessions. Enter how many chunks "
+            "occur per hour and the expected duration of each chunk."
+        )
+        self._guided_intermittent_explanation_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_intermittent_explanation_label.setWordWrap(True)
+        form.addRow("", self._guided_intermittent_explanation_label)
+
         self._guided_sessions_per_hour_edit = QLineEdit()
         self._guided_sessions_per_hour_edit.setObjectName("guidedSessionsPerHour")
         self._guided_sessions_per_hour_edit.setPlaceholderText(self._sph_edit.placeholderText())
         self._guided_sessions_per_hour_edit.setToolTip(self._sph_edit.toolTip())
         self._make_guided_widget_shrinkable(self._guided_sessions_per_hour_edit)
-        form.addRow("Sessions/hour:", self._guided_sessions_per_hour_edit)
+        self._guided_sessions_per_hour_label = QLabel(
+            "Sessions per hour (required):"
+        )
+        form.addRow(
+            self._guided_sessions_per_hour_label,
+            self._guided_sessions_per_hour_edit,
+        )
 
         self._guided_session_duration_edit = QLineEdit()
         self._guided_session_duration_edit.setObjectName("guidedSessionDuration")
@@ -2051,24 +2068,58 @@ class MainWindow(QMainWindow):
         self._guided_continuous_window_sec_spin.setDecimals(self._continuous_window_sec_spin.decimals())
         self._guided_continuous_window_sec_spin.setSingleStep(self._continuous_window_sec_spin.singleStep())
         self._guided_continuous_window_sec_spin.setToolTip(self._continuous_window_sec_spin.toolTip())
-        form.addRow("Continuous window (s):", self._guided_continuous_window_sec_spin)
+        self._guided_continuous_window_label = QLabel(
+            "Continuous analysis window (s):"
+        )
+        form.addRow(
+            self._guided_continuous_window_label,
+            self._guided_continuous_window_sec_spin,
+        )
 
         self._guided_allow_partial_final_window_cb = QCheckBox("")
         self._guided_allow_partial_final_window_cb.setObjectName("guidedAllowPartialFinalWindow")
         self._guided_allow_partial_final_window_cb.setToolTip(self._allow_partial_final_window_cb.toolTip())
-        form.addRow("Allow partial final window:", self._guided_allow_partial_final_window_cb)
+        self._guided_allow_partial_final_window_label = QLabel(
+            "Allow partial final analysis window:"
+        )
+        form.addRow(
+            self._guided_allow_partial_final_window_label,
+            self._guided_allow_partial_final_window_cb,
+        )
 
-        self._guided_exclude_incomplete_final_rwd_chunk_cb = QCheckBox("")
+        self._guided_incomplete_final_rwd_group = QGroupBox(
+            "Final RWD recording"
+        )
+        incomplete_layout = QVBoxLayout(
+            self._guided_incomplete_final_rwd_group
+        )
+        incomplete_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_exclude_incomplete_final_rwd_chunk_cb = QCheckBox(
+            "Allow one incomplete final RWD recording chunk"
+        )
         self._guided_exclude_incomplete_final_rwd_chunk_cb.setObjectName(
             "guidedExcludeIncompleteFinalRwdChunk"
         )
         self._guided_exclude_incomplete_final_rwd_chunk_cb.setToolTip(
             self._exclude_incomplete_final_rwd_chunk_cb.toolTip()
         )
-        form.addRow(
-            "Exclude incomplete final RWD chunk:",
+        incomplete_layout.addWidget(
             self._guided_exclude_incomplete_final_rwd_chunk_cb,
         )
+        self._guided_incomplete_final_rwd_help_label = QLabel(
+            "If the last RWD file is shorter than expected, Guided Mode can "
+            "exclude that final incomplete chunk and continue. Earlier "
+            "incomplete chunks still stop validation. Raw files are not "
+            "modified."
+        )
+        self._guided_incomplete_final_rwd_help_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_incomplete_final_rwd_help_label.setWordWrap(True)
+        incomplete_layout.addWidget(
+            self._guided_incomplete_final_rwd_help_label
+        )
+        form.addRow("", self._guided_incomplete_final_rwd_group)
 
         self._guided_recording_structure_help_label = QLabel("")
         self._guided_recording_structure_help_label.setObjectName("guidedRecordingStructureHelp")
@@ -2345,15 +2396,32 @@ class MainWindow(QMainWindow):
         return bool(self._guided_selected_roi_ids()[1])
 
     def _guided_recording_structure_ready_to_continue(self) -> bool:
+        ready, _reason = self._guided_recording_structure_readiness()
+        return ready
+
+    def _guided_recording_structure_readiness(
+        self,
+    ) -> tuple[bool, str]:
         if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
-            return False
+            return (
+                False,
+                "Complete required recording structure fields to continue.",
+            )
         mode = str(
             self._guided_acquisition_mode_combo.currentData() or ""
         ).strip()
         if mode == "continuous":
-            return self._guided_continuous_window_sec_spin.value() > 0
+            if self._guided_continuous_window_sec_spin.value() <= 0:
+                return (
+                    False,
+                    "Continuous analysis window must be greater than 0 seconds.",
+                )
+            return True, "Recording structure is ready."
         if mode != "intermittent":
-            return False
+            return (
+                False,
+                "Select an acquisition mode to continue.",
+            )
         resolved_format = str(
             (getattr(self, "_discovery_cache", None) or {}).get(
                 "resolved_format",
@@ -2361,17 +2429,45 @@ class MainWindow(QMainWindow):
             )
         ).strip().lower()
         if resolved_format != "rwd":
-            return True
+            return True, "Recording structure is ready."
+        sessions_text = self._guided_sessions_per_hour_edit.text().strip()
+        duration_text = self._guided_session_duration_edit.text().strip()
+        if not sessions_text or not duration_text:
+            return (
+                False,
+                "Enter sessions per hour and session duration to continue.",
+            )
         try:
-            sessions_per_hour = int(
-                self._guided_sessions_per_hour_edit.text().strip()
-            )
-            session_duration = float(
-                self._guided_session_duration_edit.text().strip()
-            )
+            sessions_per_hour = int(sessions_text)
         except ValueError:
-            return False
-        return sessions_per_hour > 0 and session_duration > 0
+            return (
+                False,
+                "Sessions per hour must be a positive whole number.",
+            )
+        if sessions_per_hour <= 0:
+            return (
+                False,
+                "Sessions per hour must be a positive whole number.",
+            )
+        try:
+            session_duration = float(duration_text)
+        except ValueError:
+            return (
+                False,
+                "Session duration must be greater than 0 seconds.",
+            )
+        if session_duration <= 0:
+            return (
+                False,
+                "Session duration must be greater than 0 seconds.",
+            )
+        if sessions_per_hour * session_duration > 3600:
+            return (
+                False,
+                "Session timing is impossible: sessions per hour × session "
+                "duration cannot exceed 3600 seconds.",
+            )
+        return True, "Recording structure is ready."
 
     def _reach_guided_step(self, step_name: str) -> None:
         index = self._guided_step_index(step_name)
@@ -2402,16 +2498,18 @@ class MainWindow(QMainWindow):
                 if select_ready
                 else "Select data and include at least one ROI to continue."
             )
-        recording_ready = bool(
-            hasattr(self, "_guided_recording_continue_btn")
-            and self._guided_recording_structure_ready_to_continue()
+        recording_ready = False
+        recording_reason = (
+            "Complete required recording structure fields to continue."
         )
+        if hasattr(self, "_guided_recording_continue_btn"):
+            recording_ready, recording_reason = (
+                self._guided_recording_structure_readiness()
+            )
         if hasattr(self, "_guided_recording_continue_btn"):
             self._guided_recording_continue_btn.setEnabled(recording_ready)
             self._guided_recording_continue_status.setText(
-                "Recording structure is ready."
-                if recording_ready
-                else "Complete required recording structure fields to continue."
+                recording_reason
             )
 
     def _on_guided_continue_to_recording_structure(self) -> None:
@@ -2740,17 +2838,34 @@ class MainWindow(QMainWindow):
             return
         continuous = self._selected_acquisition_mode() == "continuous"
         for widget in (
+            getattr(self, "_guided_intermittent_explanation_label", None),
+            getattr(self, "_guided_sessions_per_hour_label", None),
             getattr(self, "_guided_sessions_per_hour_edit", None),
+            getattr(self, "_guided_session_duration_label", None),
             getattr(self, "_guided_session_duration_edit", None),
         ):
             if widget is not None:
-                widget.setEnabled(not continuous)
+                widget.setVisible(not continuous)
         for widget in (
+            getattr(self, "_guided_continuous_window_label", None),
             getattr(self, "_guided_continuous_window_sec_spin", None),
+            getattr(
+                self, "_guided_allow_partial_final_window_label", None
+            ),
             getattr(self, "_guided_allow_partial_final_window_cb", None),
         ):
             if widget is not None:
-                widget.setEnabled(continuous)
+                widget.setVisible(continuous)
+        resolved_format = str(
+            (getattr(self, "_discovery_cache", None) or {}).get(
+                "resolved_format",
+                self._guided_format_combo.currentText(),
+            )
+        ).strip().lower()
+        if hasattr(self, "_guided_incomplete_final_rwd_group"):
+            self._guided_incomplete_final_rwd_group.setVisible(
+                not continuous and resolved_format == "rwd"
+            )
         if continuous:
             self._guided_session_duration_label.setText(
                 "Session duration (s):"
@@ -2766,12 +2881,11 @@ class MainWindow(QMainWindow):
                 "non-overlapping analysis windows. Continuous acquisition is "
                 "outside the current Guided Run scope."
             )
+            self._refresh_guided_navigation_state()
             return
 
         input_format = (
-            self._guided_format_combo.currentText().strip().lower()
-            if hasattr(self, "_guided_format_combo")
-            else ""
+            resolved_format
         )
         if input_format != "rwd":
             self._guided_session_duration_label.setText(
@@ -2787,6 +2901,7 @@ class MainWindow(QMainWindow):
                 "Intermittent timing is available for planning, but this input "
                 "format is outside the current Guided Run scope."
             )
+            self._refresh_guided_navigation_state()
             return
 
         self._guided_session_duration_label.setText(
@@ -2818,6 +2933,7 @@ class MainWindow(QMainWindow):
             and sessions_per_hour > 0
             and session_duration is not None
             and session_duration > 0
+            and sessions_per_hour * session_duration <= 3600
         ):
             self._guided_recording_structure_help_label.setText(
                 "Recording structure complete: intermittent sessions, "
@@ -2825,10 +2941,25 @@ class MainWindow(QMainWindow):
                 f"{session_duration:g} s/session."
             )
         else:
-            self._guided_recording_structure_help_label.setText(
-                "Recording structure needs attention: positive sessions/hour "
-                "and session duration are required for RWD intermittent input."
-            )
+            if (
+                sessions_per_hour is not None
+                and sessions_per_hour > 0
+                and session_duration is not None
+                and session_duration > 0
+                and sessions_per_hour * session_duration > 3600
+            ):
+                self._guided_recording_structure_help_label.setText(
+                    "Recording structure needs attention: session timing is "
+                    "impossible because sessions per hour × session duration "
+                    "cannot exceed 3600 seconds."
+                )
+            else:
+                self._guided_recording_structure_help_label.setText(
+                    "Recording structure needs attention: positive "
+                    "sessions/hour and session duration are required for RWD "
+                    "intermittent input."
+                )
+        self._refresh_guided_navigation_state()
 
     def _on_guided_discover_rois(self) -> None:
         """Run the existing ROI discovery path and mirror its shared ROI state."""
@@ -2864,6 +2995,7 @@ class MainWindow(QMainWindow):
                     str(self._discovery_cache.get("resolved_format", "?"))
                 )
         self._refresh_guided_setup_summary()
+        self._sync_guided_recording_visibility()
         self._refresh_guided_navigation_state()
 
     def _on_guided_roi_item_changed(self, item: QListWidgetItem) -> None:
