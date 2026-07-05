@@ -1619,6 +1619,7 @@ class MainWindow(QMainWindow):
         self._guided_workflow_stack = QStackedWidget()
         self._guided_workflow_stack.setObjectName("guidedWorkflowStepStack")
         self._guided_workflow_mode = "start"
+        self._guided_reached_step_indices = {0}
         self._guided_diagnostics_status = "not_generated"
         self._guided_strategy_choices = {}
         self._guided_local_preview_evidence_by_roi = {}
@@ -1694,6 +1695,7 @@ class MainWindow(QMainWindow):
         self._guided_workflow_stepper.currentRowChanged.connect(
             self._on_guided_stepper_row_changed
         )
+        self._refresh_guided_navigation_state()
 
         content_wrap = QWidget()
         content_layout = QVBoxLayout(content_wrap)
@@ -1959,6 +1961,29 @@ class MainWindow(QMainWindow):
         self._sync_guided_setup_from_full()
         self._guided_raw_setup_controls["Select data"] = controls
         wrapper_layout.addWidget(controls)
+        self._guided_select_data_continue_status = QLabel(
+            "Select data and include at least one ROI to continue."
+        )
+        self._guided_select_data_continue_status.setObjectName(
+            "guidedSelectDataContinueStatus"
+        )
+        self._guided_select_data_continue_status.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_select_data_continue_status.setWordWrap(True)
+        wrapper_layout.addWidget(self._guided_select_data_continue_status)
+        self._guided_select_data_continue_btn = QPushButton(
+            "Continue to Recording Structure"
+        )
+        self._guided_select_data_continue_btn.setObjectName(
+            "guidedSelectDataContinueButton"
+        )
+        self._guided_select_data_continue_btn.clicked.connect(
+            self._on_guided_continue_to_recording_structure
+        )
+        wrapper_layout.addWidget(
+            self._guided_select_data_continue_btn, alignment=Qt.AlignLeft
+        )
         return self._build_guided_step_scroll(
             "guidedStepSelectData",
             "Select data",
@@ -2055,6 +2080,29 @@ class MainWindow(QMainWindow):
         self._sync_guided_setup_from_full()
         self._guided_raw_setup_controls["Recording structure"] = controls
         wrapper_layout.addWidget(controls)
+        self._guided_recording_continue_status = QLabel(
+            "Complete required recording structure fields to continue."
+        )
+        self._guided_recording_continue_status.setObjectName(
+            "guidedRecordingStructureContinueStatus"
+        )
+        self._guided_recording_continue_status.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_recording_continue_status.setWordWrap(True)
+        wrapper_layout.addWidget(self._guided_recording_continue_status)
+        self._guided_recording_continue_btn = QPushButton(
+            "Continue to Correction Approach"
+        )
+        self._guided_recording_continue_btn.setObjectName(
+            "guidedRecordingStructureContinueButton"
+        )
+        self._guided_recording_continue_btn.clicked.connect(
+            self._on_guided_continue_to_correction_approach
+        )
+        wrapper_layout.addWidget(
+            self._guided_recording_continue_btn, alignment=Qt.AlignLeft
+        )
         return self._build_guided_step_scroll(
             "guidedStepRecordingStructure",
             "Recording structure",
@@ -2088,8 +2136,14 @@ class MainWindow(QMainWindow):
         self._guided_input_dir_edit.textChanged.connect(
             lambda text: self._sync_line_edit_value(self._input_dir, text)
         )
+        self._guided_input_dir_edit.textChanged.connect(
+            lambda _text: self._refresh_guided_navigation_state()
+        )
         self._guided_output_dir_edit.textChanged.connect(
             lambda text: self._sync_line_edit_value(self._output_dir, text)
+        )
+        self._guided_output_dir_edit.textChanged.connect(
+            lambda _text: self._refresh_guided_navigation_state()
         )
         self._guided_format_combo.currentIndexChanged.connect(
             self._on_guided_format_changed
@@ -2100,14 +2154,26 @@ class MainWindow(QMainWindow):
                 self._guided_acquisition_mode_combo.currentData(),
             )
         )
+        self._guided_acquisition_mode_combo.currentIndexChanged.connect(
+            lambda _idx: self._refresh_guided_navigation_state()
+        )
         self._guided_sessions_per_hour_edit.textChanged.connect(
             lambda text: self._sync_line_edit_value(self._sph_edit, text)
+        )
+        self._guided_sessions_per_hour_edit.textChanged.connect(
+            lambda _text: self._refresh_guided_navigation_state()
         )
         self._guided_session_duration_edit.textChanged.connect(
             lambda text: self._sync_line_edit_value(self._duration_edit, text)
         )
+        self._guided_session_duration_edit.textChanged.connect(
+            lambda _text: self._refresh_guided_navigation_state()
+        )
         self._guided_continuous_window_sec_spin.valueChanged.connect(
             lambda value: self._sync_spin_value(self._continuous_window_sec_spin, value)
+        )
+        self._guided_continuous_window_sec_spin.valueChanged.connect(
+            lambda _value: self._refresh_guided_navigation_state()
         )
         self._guided_allow_partial_final_window_cb.stateChanged.connect(
             lambda _state: self._sync_checkbox_value(
@@ -2265,6 +2331,106 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_guided_diagnostics_status_label"):
             self._refresh_guided_diagnostics_panel()
         self._refresh_guided_confirm_strategy_panel()
+        self._refresh_guided_navigation_state()
+
+    def _guided_select_data_ready_to_continue(self) -> bool:
+        if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
+            return False
+        if not self._guided_input_dir_edit.text().strip():
+            return False
+        if not self._guided_output_dir_edit.text().strip():
+            return False
+        if getattr(self, "_discovery_cache", None) is None:
+            return False
+        return bool(self._guided_selected_roi_ids()[1])
+
+    def _guided_recording_structure_ready_to_continue(self) -> bool:
+        if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
+            return False
+        mode = str(
+            self._guided_acquisition_mode_combo.currentData() or ""
+        ).strip()
+        if mode == "continuous":
+            return self._guided_continuous_window_sec_spin.value() > 0
+        if mode != "intermittent":
+            return False
+        resolved_format = str(
+            (getattr(self, "_discovery_cache", None) or {}).get(
+                "resolved_format",
+                self._guided_format_combo.currentText(),
+            )
+        ).strip().lower()
+        if resolved_format != "rwd":
+            return True
+        try:
+            sessions_per_hour = int(
+                self._guided_sessions_per_hour_edit.text().strip()
+            )
+            session_duration = float(
+                self._guided_session_duration_edit.text().strip()
+            )
+        except ValueError:
+            return False
+        return sessions_per_hour > 0 and session_duration > 0
+
+    def _reach_guided_step(self, step_name: str) -> None:
+        index = self._guided_step_index(step_name)
+        self._guided_reached_step_indices.add(index)
+        self._refresh_guided_navigation_state()
+
+    def _refresh_guided_navigation_state(self) -> None:
+        if not hasattr(self, "_guided_workflow_stepper"):
+            return
+        reached = getattr(self, "_guided_reached_step_indices", {0})
+        for index in range(self._guided_workflow_stepper.count()):
+            item = self._guided_workflow_stepper.item(index)
+            flags = item.flags()
+            if index in reached:
+                flags |= Qt.ItemIsEnabled | Qt.ItemIsSelectable
+            else:
+                flags &= ~Qt.ItemIsEnabled
+                flags &= ~Qt.ItemIsSelectable
+            item.setFlags(flags)
+        select_ready = bool(
+            hasattr(self, "_guided_select_data_continue_btn")
+            and self._guided_select_data_ready_to_continue()
+        )
+        if hasattr(self, "_guided_select_data_continue_btn"):
+            self._guided_select_data_continue_btn.setEnabled(select_ready)
+            self._guided_select_data_continue_status.setText(
+                "Data selection is ready."
+                if select_ready
+                else "Select data and include at least one ROI to continue."
+            )
+        recording_ready = bool(
+            hasattr(self, "_guided_recording_continue_btn")
+            and self._guided_recording_structure_ready_to_continue()
+        )
+        if hasattr(self, "_guided_recording_continue_btn"):
+            self._guided_recording_continue_btn.setEnabled(recording_ready)
+            self._guided_recording_continue_status.setText(
+                "Recording structure is ready."
+                if recording_ready
+                else "Complete required recording structure fields to continue."
+            )
+
+    def _on_guided_continue_to_recording_structure(self) -> None:
+        if not self._guided_select_data_ready_to_continue():
+            self._refresh_guided_navigation_state()
+            return
+        self._reach_guided_step("Recording structure")
+        self._guided_workflow_stepper.setCurrentRow(
+            self._guided_step_index("Recording structure")
+        )
+
+    def _on_guided_continue_to_correction_approach(self) -> None:
+        if not self._guided_recording_structure_ready_to_continue():
+            self._refresh_guided_navigation_state()
+            return
+        self._reach_guided_step("Correction approach")
+        self._guided_workflow_stepper.setCurrentRow(
+            self._guided_step_index("Correction approach")
+        )
 
     def _display_path(self, path: str, *, max_chars: int = 60) -> str:
         text = str(path or "").strip()
@@ -2393,6 +2559,7 @@ class MainWindow(QMainWindow):
 
     def _on_guided_start_setup_new_analysis(self) -> None:
         self._set_guided_workflow_mode("new_analysis")
+        self._reach_guided_step("Select data")
         idx = self._guided_step_index("Select data")
         self._guided_workflow_stepper.setCurrentRow(idx)
 
@@ -2400,6 +2567,7 @@ class MainWindow(QMainWindow):
         loaded = self._prompt_open_completed_results()
         if loaded:
             self._set_guided_workflow_mode("open_results")
+            self._reach_guided_step("Correction approach")
             self._refresh_guided_start_panel()
             self._refresh_guided_diagnostics_panel()
             idx = self._guided_step_index("Correction approach")
@@ -2407,6 +2575,7 @@ class MainWindow(QMainWindow):
 
     def _on_guided_switch_to_new_analysis_setup(self) -> None:
         self._set_guided_workflow_mode("new_analysis")
+        self._reach_guided_step("Select data")
         idx = self._guided_step_index("Select data")
         self._guided_workflow_stepper.setCurrentRow(idx)
 
@@ -2564,6 +2733,7 @@ class MainWindow(QMainWindow):
             self._guided_setup_syncing = False
         self._sync_guided_recording_visibility()
         self._refresh_guided_setup_summary()
+        self._refresh_guided_navigation_state()
 
     def _sync_guided_recording_visibility(self) -> None:
         if not hasattr(self, "_guided_recording_structure_help_label"):
@@ -2694,6 +2864,7 @@ class MainWindow(QMainWindow):
                     str(self._discovery_cache.get("resolved_format", "?"))
                 )
         self._refresh_guided_setup_summary()
+        self._refresh_guided_navigation_state()
 
     def _on_guided_roi_item_changed(self, item: QListWidgetItem) -> None:
         if getattr(self, "_guided_setup_syncing", False):
@@ -2705,6 +2876,7 @@ class MainWindow(QMainWindow):
         if full_item.checkState() != item.checkState():
             full_item.setCheckState(item.checkState())
         self._invalidate_guided_backend_validation("ROI selection changed")
+        self._refresh_guided_navigation_state()
 
     def _on_full_control_roi_item_changed(self, _item: QListWidgetItem) -> None:
         self._on_config_changed()

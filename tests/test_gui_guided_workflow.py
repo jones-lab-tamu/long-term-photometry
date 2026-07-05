@@ -6,6 +6,7 @@ import h5py
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 import gui.main_window as main_window_module
@@ -412,6 +413,67 @@ def test_guided_start_setup_new_analysis_navigates_without_loading_or_generating
     assert all(banner.isHidden() for banner in window._guided_skipped_setup_banners.values())
     assert all(not controls.isHidden() for controls in window._guided_raw_setup_controls.values())
     assert calls == {"open": 0, "preview": 0, "signal": 0}
+
+
+def test_guided_steps_one_through_four_use_reached_navigation_contract(
+    window, tmp_path
+):
+    stepper = window._guided_workflow_stepper
+    enabled = Qt.ItemIsEnabled
+    selectable = Qt.ItemIsSelectable
+
+    assert stepper.currentRow() == 0
+    assert stepper.item(0).flags() & enabled
+    assert stepper.item(0).flags() & selectable
+    assert all(
+        not stepper.item(index).flags() & enabled
+        for index in range(1, stepper.count())
+    )
+    step_two_rect = stepper.visualItemRect(stepper.item(1))
+    QTest.mouseClick(
+        stepper.viewport(), Qt.LeftButton, pos=step_two_rect.center()
+    )
+    assert stepper.currentRow() == 0
+
+    window._guided_start_setup_btn.click()
+    assert stepper.currentRow() == 1
+    assert stepper.item(1).flags() & enabled
+    assert not stepper.item(2).flags() & enabled
+    assert window._guided_select_data_continue_btn.isEnabled() is False
+
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    window._guided_input_dir_edit.setText(str(input_dir))
+    window._guided_output_dir_edit.setText(str(output_dir))
+    window._guided_sessions_per_hour_edit.setText("")
+    window._guided_session_duration_edit.setText("")
+    _populate_fake_discovery(window)
+
+    assert window._guided_select_data_continue_btn.isEnabled() is True
+    window._guided_select_data_continue_btn.click()
+    assert stepper.currentRow() == 2
+    assert stepper.item(2).flags() & enabled
+    assert window._guided_recording_continue_btn.isEnabled() is False
+    assert not stepper.item(3).flags() & enabled
+
+    window._guided_sessions_per_hour_edit.setText("12")
+    window._guided_session_duration_edit.setText("60")
+    assert window._guided_recording_continue_btn.isEnabled() is True
+    window._guided_recording_continue_btn.click()
+
+    assert stepper.currentRow() == 3
+    assert stepper.item(3).flags() & enabled
+    assert not stepper.item(4).flags() & enabled
+    stepper.setCurrentRow(1)
+    assert window._guided_workflow_stack.currentWidget().objectName() == (
+        "guidedStepSelectData"
+    )
+    stepper.setCurrentRow(2)
+    assert window._guided_workflow_stack.currentWidget().objectName() == (
+        "guidedStepRecordingStructure"
+    )
 
 
 def test_guided_start_open_results_uses_shared_loader_and_navigates_to_diagnostics(
