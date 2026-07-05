@@ -4830,6 +4830,22 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert runner.argv is None
     assert window._guided_diagnostic_cache_record is None
     assert Path(result["visual_preview_path"]).is_file()
+    assert result["visual_panel_titles"] == [
+        "Source segment",
+        "Dynamic-fit corrected signal comparison",
+        "Dynamic-fit fitted reference comparison",
+        "Signal-Only F0 baseline",
+        "Signal-Only F0-corrected dF/F preview",
+    ]
+    assert result["visual_trace_labels"] == [
+        "Raw signal",
+        "Reference/control signal",
+        "Robust Global Event-Reject Fit",
+        "Adaptive Event-Gated Fit",
+        "Global Linear Regression",
+        "Signal-only F0 baseline",
+        "Signal-only dF/F",
+    ]
     assert window._guided_preview_visual_label.pixmap().isNull() is False
     provenance = json.loads(
         Path(result["preview_provenance_path"]).read_text(encoding="utf-8")
@@ -4982,6 +4998,8 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     rows["CH1"]["action_button"].click()
     rows = window._guided_local_preview_confirmation_rows
     assert rows["CH1"]["status_label"].text() == "Confirmed"
+    assert rows["CH1"]["action_button"].text() == "Confirmed"
+    assert rows["CH1"]["action_button"].isEnabled() is False
     assert rows["CH1"]["strategy_combo"].currentData() == (
         "robust_global_event_reject"
     )
@@ -5007,6 +5025,10 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert rows["CH1"]["status_label"].text() == (
         "Selection changed, confirm again"
     )
+    assert rows["CH1"]["action_button"].text() == (
+        "Confirm changed strategy for this ROI"
+    )
+    assert rows["CH1"]["action_button"].isEnabled() is True
     assert rows["CH1"]["strategy_combo"].currentData() == "signal_only_f0"
     assert "0/3 included ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
@@ -5014,6 +5036,8 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     rows["CH1"]["action_button"].click()
     rows = window._guided_local_preview_confirmation_rows
     assert rows["CH1"]["status_label"].text() == "Confirmed"
+    assert rows["CH1"]["action_button"].text() == "Confirmed"
+    assert rows["CH1"]["action_button"].isEnabled() is False
     assert "1/3 included ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
@@ -5026,12 +5050,18 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert rows["CH1"]["status_label"].text() == (
         "Selection changed, confirm again"
     )
+    assert rows["CH1"]["action_button"].text() == (
+        "Confirm changed strategy for this ROI"
+    )
+    assert rows["CH1"]["action_button"].isEnabled() is True
     assert "0/3 included ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
     rows["CH1"]["action_button"].click()
     rows = window._guided_local_preview_confirmation_rows
     assert rows["CH1"]["status_label"].text() == "Confirmed"
+    assert rows["CH1"]["action_button"].text() == "Confirmed"
+    assert rows["CH1"]["action_button"].isEnabled() is False
     assert "1/3 included ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
@@ -5044,12 +5074,18 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert rows["CH1"]["status_label"].text() == (
         "Selection changed, confirm again"
     )
+    assert rows["CH1"]["action_button"].text() == (
+        "Confirm changed strategy for this ROI"
+    )
+    assert rows["CH1"]["action_button"].isEnabled() is True
     assert "0/3 included ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
     rows["CH1"]["action_button"].click()
     rows = window._guided_local_preview_confirmation_rows
     assert rows["CH1"]["status_label"].text() == "Confirmed"
+    assert rows["CH1"]["action_button"].text() == "Confirmed"
+    assert rows["CH1"]["action_button"].isEnabled() is False
     assert "1/3 included ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
@@ -5063,6 +5099,8 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     rows["CH2"]["action_button"].click()
     rows = window._guided_local_preview_confirmation_rows
     assert rows["CH2"]["status_label"].text() == "Confirmed"
+    assert rows["CH2"]["action_button"].text() == "Confirmed"
+    assert rows["CH2"]["action_button"].isEnabled() is False
     assert rows["CH2"]["strategy_combo"].currentData() == "signal_only_f0"
     assert "2/3 included ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
@@ -5201,7 +5239,43 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     window._guided_preview_roi_combo.setCurrentIndex(
         window._guided_preview_roi_combo.findData("CH2")
     )
+    for checkbox in window._guided_preview_method_checkboxes.values():
+        checkbox.setChecked(False)
+    assert window._guided_preview_signal_f0_cb.isChecked() is True
+    assert window._guided_preview_generate_btn.isEnabled() is True
+    window._guided_preview_generate_btn.click()
+    signal_only_result = window._guided_preview_last_result
+    assert signal_only_result["status"] == "success"
+    assert signal_only_result["method_statuses"] == {}
+    assert signal_only_result["signal_only_f0_preview_requested"] is True
+    assert signal_only_result["signal_only_f0_preview_evidence"][
+        "valid"
+    ] is True
+    assert Path(signal_only_result["visual_preview_path"]).is_file()
+    assert signal_only_result["visual_panel_titles"] == [
+        "Signal-Only F0 baseline",
+        "Signal-Only F0-corrected dF/F preview",
+    ]
+    assert signal_only_result["visual_trace_labels"] == [
+        "Raw signal",
+        "Signal-only F0 baseline",
+        "Signal-only dF/F",
+    ]
+    rows = window._guided_local_preview_confirmation_rows
+    ch2_combo = rows["CH2"]["strategy_combo"]
+    assert ch2_combo.findData("signal_only_f0") >= 0
+    ch2_combo.setCurrentIndex(ch2_combo.findData("signal_only_f0"))
+    rows["CH2"]["action_button"].click()
+    rows = window._guided_local_preview_confirmation_rows
+    assert rows["CH2"]["status_label"].text() == "Confirmed"
+    assert rows["CH2"]["action_button"].text() == "Confirmed"
+    assert rows["CH2"]["action_button"].isEnabled() is False
+
+    window._guided_preview_method_checkboxes[
+        "robust_global_event_reject"
+    ].setChecked(True)
     window._guided_preview_signal_f0_cb.setChecked(False)
+    assert window._guided_preview_generate_btn.isEnabled() is True
     window._guided_preview_generate_btn.click()
     without_signal_f0 = window._guided_preview_last_result
     assert without_signal_f0["signal_only_f0_preview_requested"] is False
@@ -5400,6 +5474,18 @@ def test_correction_preview_ready_has_openable_review_summary(
         "adaptive_event_gated_regression",
         "global_linear_regression",
     }
+    assert result["visual_panel_titles"] == [
+        "Source segment",
+        "Dynamic-fit corrected signal comparison",
+        "Dynamic-fit fitted reference comparison",
+    ]
+    assert result["visual_trace_labels"] == [
+        "Raw signal",
+        "Reference/control signal",
+        "Robust Global Event-Reject Fit",
+        "Adaptive Event-Gated Fit",
+        "Global Linear Regression",
+    ]
     assert all(
         count > 0
         for count in result["visual_trace_sample_counts"].values()

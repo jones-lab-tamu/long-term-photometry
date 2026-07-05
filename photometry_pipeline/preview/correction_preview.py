@@ -1429,9 +1429,24 @@ def run_guided_local_correction_preview(
 
     if not _safe_preview_id_component(pid):
         return failed(f"Unsafe preview_id: {pid!r}")
-    method_result = validate_preview_methods(methods or GUIDED_REFERENCE_PREVIEW_METHODS)
-    if not method_result.ok:
-        return failed(method_result.reason)
+    requested_methods = (
+        list(GUIDED_REFERENCE_PREVIEW_METHODS)
+        if methods is None
+        else list(methods)
+    )
+    if requested_methods:
+        method_result = validate_preview_methods(requested_methods)
+        if not method_result.ok:
+            return failed(method_result.reason)
+    elif include_signal_only_f0_preview:
+        method_result = PreviewMethodValidationResult(
+            ok=True,
+            methods=(),
+            code="ok",
+            reason="Signal-Only F0 preview requested without reference methods.",
+        )
+    else:
+        return failed("No supported preview methods were provided.")
     if not os.path.isfile(source_path):
         return failed("Selected preview segment is unavailable.")
     if not os.path.isfile(config_source):
@@ -1529,13 +1544,20 @@ def run_guided_local_correction_preview(
     success_count = sum(
         status.get("status") == "success" for status in method_statuses.values()
     )
-    status = (
-        "success"
-        if success_count == len(method_statuses) and method_statuses
-        else "partial"
-        if success_count
-        else "failed"
+    signal_f0_success = bool(
+        isinstance(signal_only_f0_preview, dict)
+        and signal_only_f0_preview.get("valid") is True
     )
+    if method_statuses:
+        status = (
+            "success"
+            if success_count == len(method_statuses)
+            else "partial"
+            if success_count or signal_f0_success
+            else "failed"
+        )
+    else:
+        status = "success" if signal_f0_success else "failed"
     provenance = {
         "preview_only": True,
         "production_analysis": False,

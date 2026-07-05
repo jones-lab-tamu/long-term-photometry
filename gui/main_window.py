@@ -3978,7 +3978,19 @@ class MainWindow(QMainWindow):
         roi = self._selected_guided_preview_roi()
         chunk = self._selected_guided_preview_chunk()
         methods = self._selected_guided_preview_methods()
-        enabled = bool(source_ok and roi and chunk is not None and methods)
+        signal_f0_selected = bool(
+            getattr(self, "_guided_preview_source_type", "")
+            == "local_raw_segment"
+            and getattr(self, "_guided_preview_signal_f0_cb", None)
+            is not None
+            and self._guided_preview_signal_f0_cb.isChecked()
+        )
+        enabled = bool(
+            source_ok
+            and roi
+            and chunk is not None
+            and (methods or signal_f0_selected)
+        )
         self._guided_preview_generate_btn.setEnabled(enabled)
         if hasattr(self, "_guided_preview_status_label") and not getattr(self, "_guided_preview_has_result", False):
             if not source_ok:
@@ -3991,8 +4003,8 @@ class MainWindow(QMainWindow):
                 message = "Select an ROI for preview comparison."
             elif chunk is None:
                 message = "Select a chunk for preview comparison."
-            elif not methods:
-                message = "Select at least one reference preview method."
+            elif not methods and not signal_f0_selected:
+                message = "Select at least one preview method."
             else:
                 message = "Preview comparison ready."
             self._guided_preview_status_label.setText(message)
@@ -4403,7 +4415,50 @@ class MainWindow(QMainWindow):
             method: len(series["time_sec"])
             for method, series in traces.items()
         }
-        if not traces:
+        signal_f0 = result.get("signal_only_f0_preview_evidence")
+        signal_f0_valid = bool(
+            isinstance(signal_f0, dict)
+            and signal_f0.get("valid") is True
+            and len(signal_f0.get("time_sec", ()))
+            == len(signal_f0.get("preview_dff", ()))
+            and len(signal_f0.get("time_sec", ())) > 0
+        )
+        if signal_f0_valid:
+            result["visual_trace_sample_counts"]["signal_only_f0"] = len(
+                signal_f0["time_sec"]
+            )
+        dynamic_labels = [
+            self._guided_preview_method_label(method) for method in traces
+        ]
+        if traces:
+            panel_titles = [
+                "Source segment",
+                "Dynamic-fit corrected signal comparison",
+                "Dynamic-fit fitted reference comparison",
+            ]
+            trace_labels = [
+                "Raw signal",
+                "Reference/control signal",
+                *dynamic_labels,
+            ]
+        else:
+            panel_titles = []
+            trace_labels = []
+        if signal_f0_valid:
+            panel_titles.extend(
+                [
+                    "Signal-Only F0 baseline",
+                    "Signal-Only F0-corrected dF/F preview",
+                ]
+            )
+            trace_labels.extend(
+                ["Signal-only F0 baseline", "Signal-only dF/F"]
+            )
+            if not traces:
+                trace_labels.insert(0, "Raw signal")
+        result["visual_panel_titles"] = panel_titles
+        result["visual_trace_labels"] = trace_labels
+        if not traces and not signal_f0_valid:
             return ""
         try:
             import matplotlib
@@ -4412,47 +4467,114 @@ class MainWindow(QMainWindow):
             from matplotlib import pyplot as plt
 
             with matplotlib.rc_context({"figure.dpi": 100}):
-                figure, axes = plt.subplots(
-                    3, 1, figsize=(7.5, 6.5), sharex=True
-                )
-                first = next(iter(traces.values()))
-                axes[0].plot(
-                    first["time_sec"],
-                    first["sig_raw"],
-                    label="Raw signal",
-                    linewidth=1.2,
-                )
-                axes[0].plot(
-                    first["time_sec"],
-                    first["uv_raw"],
-                    label="Reference/control signal",
-                    linewidth=1.0,
-                    alpha=0.8,
-                )
-                axes[0].set_title("Source segment")
-                axes[0].set_ylabel("Signal")
-                axes[0].legend(loc="best")
-                for method, series in traces.items():
-                    label = self._guided_preview_method_label(method)
+                if not traces:
+                    figure, axes = plt.subplots(
+                        2, 1, figsize=(7.5, 5.5), sharex=True
+                    )
+                    axes[0].plot(
+                        signal_f0["time_sec"],
+                        signal_f0["signal_raw"],
+                        label="Raw signal",
+                        linewidth=1.2,
+                    )
+                    axes[0].plot(
+                        signal_f0["time_sec"],
+                        signal_f0["signal_only_f0_uncapped"],
+                        label="Signal-only F0 baseline",
+                        linewidth=1.1,
+                    )
+                    axes[0].set_title("Signal-Only F0 baseline")
+                    axes[0].set_ylabel("Signal")
+                    axes[0].legend(loc="best", fontsize="small")
                     axes[1].plot(
-                        series["time_sec"],
-                        series["delta_f"],
-                        label=label,
+                        signal_f0["time_sec"],
+                        signal_f0["preview_dff"],
+                        label="Signal-only dF/F",
                         linewidth=1.1,
                     )
-                    axes[2].plot(
-                        series["time_sec"],
-                        series["fit_ref"],
-                        label=label,
-                        linewidth=1.1,
+                    axes[1].set_title(
+                        "Signal-Only F0-corrected dF/F preview"
                     )
-                axes[1].set_title("Corrected signal comparison")
-                axes[1].set_ylabel("Corrected signal")
-                axes[1].legend(loc="best", fontsize="small")
-                axes[2].set_title("Fitted reference comparison")
-                axes[2].set_ylabel("Fitted reference")
-                axes[2].set_xlabel("Time (seconds)")
-                axes[2].legend(loc="best", fontsize="small")
+                    axes[1].set_ylabel("dF/F")
+                    axes[1].set_xlabel("Time (seconds)")
+                    axes[1].legend(loc="best", fontsize="small")
+                else:
+                    panel_count = 5 if signal_f0_valid else 3
+                    figure, axes = plt.subplots(
+                        panel_count,
+                        1,
+                        figsize=(7.5, 10.0 if signal_f0_valid else 6.5),
+                        sharex=True,
+                    )
+                    first = next(iter(traces.values()))
+                    axes[0].plot(
+                        first["time_sec"],
+                        first["sig_raw"],
+                        label="Raw signal",
+                        linewidth=1.2,
+                    )
+                    axes[0].plot(
+                        first["time_sec"],
+                        first["uv_raw"],
+                        label="Reference/control signal",
+                        linewidth=1.0,
+                        alpha=0.8,
+                    )
+                    axes[0].set_title("Source segment")
+                    axes[0].set_ylabel("Signal")
+                    axes[0].legend(loc="best")
+                    for method, series in traces.items():
+                        label = self._guided_preview_method_label(method)
+                        axes[1].plot(
+                            series["time_sec"],
+                            series["delta_f"],
+                            label=label,
+                            linewidth=1.1,
+                        )
+                        axes[2].plot(
+                            series["time_sec"],
+                            series["fit_ref"],
+                            label=label,
+                            linewidth=1.1,
+                        )
+                    axes[1].set_title(
+                        "Dynamic-fit corrected signal comparison"
+                    )
+                    axes[1].set_ylabel("Corrected signal")
+                    axes[1].legend(loc="best", fontsize="small")
+                    axes[2].set_title(
+                        "Dynamic-fit fitted reference comparison"
+                    )
+                    axes[2].set_ylabel("Fitted reference")
+                    axes[2].legend(loc="best", fontsize="small")
+                    if signal_f0_valid:
+                        axes[3].plot(
+                            signal_f0["time_sec"],
+                            signal_f0["signal_raw"],
+                            label="Raw signal",
+                            linewidth=1.2,
+                        )
+                        axes[3].plot(
+                            signal_f0["time_sec"],
+                            signal_f0["signal_only_f0_uncapped"],
+                            label="Signal-only F0 baseline",
+                            linewidth=1.1,
+                        )
+                        axes[3].set_title("Signal-Only F0 baseline")
+                        axes[3].set_ylabel("Signal")
+                        axes[3].legend(loc="best", fontsize="small")
+                        axes[4].plot(
+                            signal_f0["time_sec"],
+                            signal_f0["preview_dff"],
+                            label="Signal-only dF/F",
+                            linewidth=1.1,
+                        )
+                        axes[4].set_title(
+                            "Signal-Only F0-corrected dF/F preview"
+                        )
+                        axes[4].set_ylabel("dF/F")
+                        axes[4].legend(loc="best", fontsize="small")
+                    axes[-1].set_xlabel("Time (seconds)")
                 figure.suptitle(
                     "Correction preview — "
                     f"ROI {result.get('roi', '')}, "
@@ -5408,6 +5530,10 @@ class MainWindow(QMainWindow):
         chunk = self._selected_guided_preview_chunk()
         segment = self._selected_guided_preview_segment()
         methods = self._selected_guided_preview_methods()
+        signal_f0_selected = bool(
+            source_type == "local_raw_segment"
+            and self._guided_preview_signal_f0_cb.isChecked()
+        )
         if (
             not source_path
             or source_type
@@ -5418,7 +5544,7 @@ class MainWindow(QMainWindow):
             }
             or not roi
             or chunk is None
-            or not methods
+            or not (methods or signal_f0_selected)
         ):
             self._refresh_guided_preview_enablement()
             return
@@ -7070,12 +7196,16 @@ class MainWindow(QMainWindow):
             action = QPushButton(
                 "Confirm changed strategy for this ROI"
                 if selection_changed
+                else "Confirmed"
+                if confirmed
                 else "Reconfirm strategy for this ROI"
-                if stale or confirmed
+                if stale
                 else "Confirm strategy for this ROI"
             )
             action.setEnabled(
                 bool(
+                    not confirmed
+                    and
                     evidence is not None
                     and combo.currentData()
                     and self._guided_local_preview_evidence_reference(
