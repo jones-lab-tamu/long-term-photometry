@@ -4918,6 +4918,9 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert window._guided_local_preview_confirmation_rows["CH1"][
         "strategy_combo"
     ].findData("signal_only_f0") == -1
+    assert "0/3 included ROIs confirmed" in (
+        window._guided_confirm_strategy_progress_label.text()
+    )
     locked_signal_f0.update(
         valid=True,
         selectable=True,
@@ -4975,6 +4978,14 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         "Confirm strategy for this ROI"
     )
     rows["CH1"]["action_button"].click()
+    rows = window._guided_local_preview_confirmation_rows
+    assert rows["CH1"]["status_label"].text() == "Confirmed"
+    assert rows["CH1"]["strategy_combo"].currentData() == (
+        "robust_global_event_reject"
+    )
+    assert "1/3 included ROIs confirmed" in (
+        window._guided_confirm_strategy_progress_label.text()
+    )
     ch1_choice = window._guided_strategy_choices[
         ("local_correction_preview", "CH1")
     ]
@@ -4995,6 +5006,19 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     )
     assert len(window._guided_strategy_choices) == 1
     rows["CH2"]["action_button"].click()
+    rows = window._guided_local_preview_confirmation_rows
+    assert rows["CH2"]["status_label"].text() == "Confirmed"
+    assert rows["CH2"]["strategy_combo"].currentData() == "signal_only_f0"
+    assert "2/3 included ROIs confirmed" in (
+        window._guided_confirm_strategy_progress_label.text()
+    )
+    window._rebuild_guided_local_preview_confirmation_rows()
+    rows = window._guided_local_preview_confirmation_rows
+    assert rows["CH2"]["status_label"].text() == "Confirmed"
+    assert rows["CH2"]["strategy_combo"].currentData() == "signal_only_f0"
+    assert "2/3 included ROIs confirmed" in (
+        window._guided_confirm_strategy_progress_label.text()
+    )
     assert len(window._guided_strategy_choices) == 2
     ch2_choice = window._guided_strategy_choices[
         ("local_correction_preview", "CH2")
@@ -5024,6 +5048,9 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         ch3_combo.findData("robust_global_event_reject")
     )
     rows["CH3"]["action_button"].click()
+    assert "3/3 included ROIs confirmed" in (
+        window._guided_confirm_strategy_progress_label.text()
+    )
 
     plan = window._build_guided_new_analysis_draft_plan()
     assert plan.cache_id is None
@@ -5119,6 +5146,10 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert all(
         choice["stale"] is True
         for choice in window._guided_strategy_choices.values()
+    )
+    window._refresh_guided_confirm_strategy_panel()
+    assert "0/3 included ROIs confirmed" in (
+        window._guided_confirm_strategy_progress_label.text()
     )
     assert any(
         choice.selected_strategy == "signal_only_f0"

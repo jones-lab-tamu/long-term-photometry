@@ -6851,6 +6851,55 @@ class MainWindow(QMainWindow):
         self._invalidate_guided_backend_validation("strategy mark changed")
         self._refresh_guided_confirm_strategy_panel()
 
+    def _guided_local_choice_is_current_confirmed(
+        self, roi: str, choice: object
+    ) -> bool:
+        if not (
+            isinstance(choice, dict)
+            and choice.get("source_type")
+            == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+            and choice.get("confirmed") is True
+            and choice.get("choice_source") == "explicit_user_mark"
+            and choice.get("current") is True
+            and choice.get("stale") is not True
+        ):
+            return False
+        strategy = str(choice.get("strategy") or "")
+        reference = choice.get("local_preview_evidence")
+        current_reference = self._guided_local_preview_evidence_reference(
+            strategy, roi=str(roi)
+        )
+        if not (
+            isinstance(reference, dict)
+            and isinstance(current_reference, dict)
+            and reference.get("preview_id")
+            == current_reference.get("preview_id")
+        ):
+            return False
+        if strategy == "signal_only_f0":
+            return bool(
+                choice.get("strategy_family") == "signal_only_f0"
+                and choice.get("dynamic_fit_mode") is None
+                and reference.get("evidence_source_type")
+                == "local_preview"
+                and reference.get("current_or_stale") == "current"
+                and reference.get("valid") is True
+                and reference.get("preview_only") is True
+                and reference.get("production_analysis") is False
+                and reference.get("strategy_family")
+                == "signal_only_f0"
+                and reference.get("selected_strategy")
+                == "signal_only_f0"
+                and reference.get("dynamic_fit_mode") is None
+            )
+        return bool(
+            strategy
+            in set(GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE.values())
+            and choice.get("strategy_family", "dynamic_fit")
+            == "dynamic_fit"
+            and choice.get("dynamic_fit_mode", strategy) == strategy
+        )
+
     def _rebuild_guided_local_preview_confirmation_rows(self) -> None:
         layout = self._guided_local_preview_confirmation_layout
         while layout.count():
@@ -6904,31 +6953,32 @@ class MainWindow(QMainWindow):
                 signal_f0_candidate
             ):
                 combo.addItem("Signal-Only F0", "signal_only_f0")
+            choice = self._guided_strategy_choices.get(
+                self._guided_confirm_choice_key(
+                    LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, roi
+                )
+            )
+            confirmed = self._guided_local_choice_is_current_confirmed(
+                roi, choice
+            )
             saved_strategy = str(
-                self._guided_local_preview_row_strategy_by_roi.get(roi) or ""
+                (
+                    choice.get("strategy")
+                    if confirmed and isinstance(choice, dict)
+                    else self._guided_local_preview_row_strategy_by_roi.get(
+                        roi
+                    )
+                )
+                or ""
             )
             saved_index = combo.findData(saved_strategy)
             if saved_index >= 0:
                 combo.setCurrentIndex(saved_index)
             combo.setEnabled(evidence is not None)
 
-            choice = self._guided_strategy_choices.get(
-                self._guided_confirm_choice_key(
-                    LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, roi
-                )
-            )
-            confirmed = bool(
-                isinstance(choice, dict)
-                and choice.get("confirmed") is True
-                and choice.get("current") is True
-                and choice.get("stale") is not True
-            )
             stale = bool(
                 isinstance(choice, dict)
-                and (
-                    choice.get("stale") is True
-                    or choice.get("current") is not True
-                )
+                and not confirmed
             )
             if evidence is not None:
                 segment = evidence["provenance"].get(
@@ -7018,9 +7068,8 @@ class MainWindow(QMainWindow):
                 f"0/{len(included)} included ROIs confirmed."
             )
 
-        supported = set(GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE.values())
         confirmed: set[str] = set()
-        confirmed_modes: dict[str, str] = {}
+        confirmed_dynamic_modes: set[str] = set()
         stale: set[str] = set()
         for key, choice in getattr(self, "_guided_strategy_choices", {}).items():
             if (
@@ -7043,14 +7092,35 @@ class MainWindow(QMainWindow):
             if choice.get("stale") is True or choice.get("current") is not True:
                 stale.add(roi)
                 continue
+            if choice_source_key != current_source_key:
+                continue
             if (
-                choice_source_key == current_source_key
-                and choice.get("confirmed") is True
-                and choice.get("choice_source") == "explicit_user_mark"
-                and choice.get("strategy") in supported
+                choice.get("source_type")
+                == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
             ):
+                is_confirmed = (
+                    self._guided_local_choice_is_current_confirmed(
+                        roi, choice
+                    )
+                )
+            else:
+                strategy = str(choice.get("strategy") or "")
+                is_confirmed = bool(
+                    choice.get("confirmed") is True
+                    and choice.get("choice_source")
+                    == "explicit_user_mark"
+                    and strategy
+                    in set(
+                        GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE.values()
+                    )
+                )
+            if is_confirmed:
                 confirmed.add(roi)
-                confirmed_modes[roi] = str(choice["strategy"])
+                strategy = str(choice.get("strategy") or "")
+                if strategy != "signal_only_f0":
+                    confirmed_dynamic_modes.add(strategy)
+            elif choice.get("confirmed") is True:
+                stale.add(roi)
 
         count = len(confirmed)
         total = len(included)
@@ -7061,11 +7131,10 @@ class MainWindow(QMainWindow):
                 f"Reconfirm before Run. {progress}"
             )
         if total > 0 and count == total:
-            if len(set(confirmed_modes.values())) != 1:
+            if len(confirmed_dynamic_modes) > 1:
                 return (
-                    "Included ROIs use mixed correction "
-                    "strategies, but the current Run scope requires one shared "
-                    f"strategy. Reconfirm before Run. {progress}"
+                    "Included dynamic-fit ROIs use mixed correction modes. "
+                    f"Reconfirm before Run. {progress}"
                 )
             return progress
         return progress
@@ -7210,11 +7279,10 @@ class MainWindow(QMainWindow):
                         self, "_guided_strategy_choices", {}
                     ).values()
                     if isinstance(choice, dict)
-                    and choice.get("source_type")
-                    == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
-                    and choice.get("current") is True
-                    and choice.get("confirmed") is True
                     and str(choice.get("roi") or "") in included
+                    and self._guided_local_choice_is_current_confirmed(
+                        str(choice.get("roi") or ""), choice
+                    )
                 }
                 if included and confirmed == included:
                     label.setText(
