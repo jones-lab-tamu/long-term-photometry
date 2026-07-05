@@ -121,6 +121,10 @@ from photometry_pipeline.preview.correction_preview import (
     run_guided_correction_preview_comparison,
     run_guided_local_correction_preview,
 )
+from photometry_pipeline.guided_recording_structure_inference import (
+    GuidedRecordingStructureInference,
+    infer_guided_recording_structure,
+)
 from photometry_pipeline.signal_only_f0_diagnostics import (
     build_default_signal_only_f0_diagnostic_cache_output_dir,
     make_signal_only_f0_diagnostic_id,
@@ -1620,6 +1624,10 @@ class MainWindow(QMainWindow):
         self._guided_workflow_stack.setObjectName("guidedWorkflowStepStack")
         self._guided_workflow_mode = "start"
         self._guided_reached_step_indices = {0}
+        self._guided_recording_timing_source_key = None
+        self._guided_recording_timing_user_edited = False
+        self._guided_recording_timing_applying = False
+        self._guided_recording_timing_inference = None
         self._guided_diagnostics_status = "not_generated"
         self._guided_strategy_choices = {}
         self._guided_local_preview_evidence_by_roi = {}
@@ -2032,6 +2040,28 @@ class MainWindow(QMainWindow):
         )
         self._guided_intermittent_explanation_label.setWordWrap(True)
         form.addRow("", self._guided_intermittent_explanation_label)
+        self._guided_recording_timing_inference_label = QLabel(
+            "Session timing has not been detected yet."
+        )
+        self._guided_recording_timing_inference_label.setObjectName(
+            "guidedRecordingTimingInferenceStatus"
+        )
+        self._guided_recording_timing_inference_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_recording_timing_inference_label.setWordWrap(True)
+        form.addRow("", self._guided_recording_timing_inference_label)
+        self._guided_use_detected_timing_btn = QPushButton(
+            "Use detected timing"
+        )
+        self._guided_use_detected_timing_btn.setObjectName(
+            "guidedUseDetectedRecordingTimingButton"
+        )
+        self._guided_use_detected_timing_btn.clicked.connect(
+            self._on_guided_use_detected_timing
+        )
+        self._guided_use_detected_timing_btn.setVisible(False)
+        form.addRow("", self._guided_use_detected_timing_btn)
 
         self._guided_sessions_per_hour_edit = QLineEdit()
         self._guided_sessions_per_hour_edit.setObjectName("guidedSessionsPerHour")
@@ -2211,11 +2241,17 @@ class MainWindow(QMainWindow):
         self._guided_sessions_per_hour_edit.textChanged.connect(
             lambda text: self._sync_line_edit_value(self._sph_edit, text)
         )
+        self._guided_sessions_per_hour_edit.textEdited.connect(
+            self._on_guided_recording_timing_user_edit
+        )
         self._guided_sessions_per_hour_edit.textChanged.connect(
             lambda _text: self._refresh_guided_navigation_state()
         )
         self._guided_session_duration_edit.textChanged.connect(
             lambda text: self._sync_line_edit_value(self._duration_edit, text)
+        )
+        self._guided_session_duration_edit.textEdited.connect(
+            self._on_guided_recording_timing_user_edit
         )
         self._guided_session_duration_edit.textChanged.connect(
             lambda _text: self._refresh_guided_navigation_state()
@@ -2839,6 +2875,9 @@ class MainWindow(QMainWindow):
         continuous = self._selected_acquisition_mode() == "continuous"
         for widget in (
             getattr(self, "_guided_intermittent_explanation_label", None),
+            getattr(
+                self, "_guided_recording_timing_inference_label", None
+            ),
             getattr(self, "_guided_sessions_per_hour_label", None),
             getattr(self, "_guided_sessions_per_hour_edit", None),
             getattr(self, "_guided_session_duration_label", None),
@@ -2866,6 +2905,7 @@ class MainWindow(QMainWindow):
             self._guided_incomplete_final_rwd_group.setVisible(
                 not continuous and resolved_format == "rwd"
             )
+        self._refresh_guided_use_detected_timing_action()
         if continuous:
             self._guided_session_duration_label.setText(
                 "Session duration (s):"
@@ -2966,6 +3006,159 @@ class MainWindow(QMainWindow):
         self._on_discover()
         self._sync_guided_discovery_from_full()
 
+    def _on_guided_recording_timing_user_edit(self, _text: str) -> None:
+        if self._guided_recording_timing_applying:
+            return
+        self._guided_recording_timing_user_edited = True
+        self._guided_recording_timing_inference_label.setText(
+            "Using manually entered session timing."
+        )
+        self._refresh_guided_use_detected_timing_action()
+
+    def _guided_detected_timing_available(self) -> bool:
+        inference = self._guided_recording_timing_inference
+        return bool(
+            isinstance(inference, GuidedRecordingStructureInference)
+            and inference.status == "inferred"
+            and inference.sessions_per_hour is not None
+            and inference.session_duration_sec is not None
+        )
+
+    def _refresh_guided_use_detected_timing_action(self) -> None:
+        if not hasattr(self, "_guided_use_detected_timing_btn"):
+            return
+        intermittent = (
+            self._selected_acquisition_mode() == "intermittent"
+        )
+        available = self._guided_detected_timing_available()
+        differs = False
+        if available:
+            inference = self._guided_recording_timing_inference
+            differs = (
+                self._guided_sessions_per_hour_edit.text().strip()
+                != str(inference.sessions_per_hour)
+                or self._guided_session_duration_edit.text().strip()
+                != f"{inference.session_duration_sec:g}"
+            )
+        show = bool(
+            intermittent
+            and available
+            and (self._guided_recording_timing_user_edited or differs)
+        )
+        self._guided_use_detected_timing_btn.setVisible(show)
+        self._guided_use_detected_timing_btn.setEnabled(show)
+
+    def _apply_guided_detected_timing(self) -> None:
+        if not self._guided_detected_timing_available():
+            return
+        inference = self._guided_recording_timing_inference
+        self._guided_recording_timing_applying = True
+        try:
+            self._guided_sessions_per_hour_edit.setText(
+                str(inference.sessions_per_hour)
+            )
+            self._guided_session_duration_edit.setText(
+                f"{inference.session_duration_sec:g}"
+            )
+        finally:
+            self._guided_recording_timing_applying = False
+        self._guided_recording_timing_user_edited = False
+        self._guided_recording_timing_inference_label.setText(
+            inference.message
+        )
+        self._refresh_guided_navigation_state()
+        self._refresh_guided_use_detected_timing_action()
+
+    def _on_guided_use_detected_timing(self) -> None:
+        self._apply_guided_detected_timing()
+
+    @staticmethod
+    def _guided_recording_timing_discovery_key(
+        discovery: dict[str, object],
+    ) -> tuple[str, tuple[str, ...]]:
+        return (
+            os.path.realpath(str(discovery.get("input_dir") or "")),
+            tuple(
+                os.path.realpath(str(session.get("path") or ""))
+                for session in discovery.get("sessions", [])
+                if isinstance(session, dict)
+            ),
+        )
+
+    def _infer_guided_recording_timing_from_discovery(
+        self,
+    ) -> GuidedRecordingStructureInference:
+        discovery = getattr(self, "_discovery_cache", None) or {}
+        resolved_format = str(
+            discovery.get("resolved_format")
+            or self._guided_format_combo.currentText()
+        ).strip().lower()
+        source_path = str(
+            discovery.get("input_dir")
+            or self._guided_input_dir_edit.text()
+        )
+        contracts: list[dict[str, object]] = []
+        if resolved_format == "rwd":
+            try:
+                contracts = [
+                    self._infer_rwd_chunk_contract(str(session["path"]))
+                    for session in discovery.get("sessions", [])
+                    if isinstance(session, dict) and session.get("path")
+                ]
+            except Exception as exc:
+                return GuidedRecordingStructureInference(
+                    supported=True,
+                    status="failed",
+                    evidence={
+                        "resolved_format": resolved_format,
+                        "source_path": source_path,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                    message=(
+                        "Could not confidently detect session timing. Enter "
+                        "sessions per hour and session duration manually."
+                    ),
+                )
+        return infer_guided_recording_structure(
+            discovery,
+            source_path,
+            resolved_format,
+            rwd_chunk_contracts=contracts,
+        )
+
+    def _refresh_guided_recording_timing_inference(self) -> None:
+        if (
+            not hasattr(self, "_guided_recording_timing_inference_label")
+            or getattr(self, "_discovery_cache", None) is None
+        ):
+            return
+        discovery = self._discovery_cache
+        source_key = self._guided_recording_timing_discovery_key(discovery)
+        new_source = source_key != self._guided_recording_timing_source_key
+        if new_source:
+            self._guided_recording_timing_source_key = source_key
+            self._guided_recording_timing_user_edited = False
+        if self._guided_recording_timing_user_edited and not new_source:
+            self._guided_recording_timing_inference_label.setText(
+                "Using manually entered session timing."
+            )
+            self._refresh_guided_use_detected_timing_action()
+            return
+
+        inference = self._infer_guided_recording_timing_from_discovery()
+        self._guided_recording_timing_inference = inference
+        self._guided_recording_timing_inference_label.setText(
+            inference.message
+        )
+        if (
+            inference.status != "inferred"
+            or inference.sessions_per_hour is None
+            or inference.session_duration_sec is None
+        ):
+            self._refresh_guided_use_detected_timing_action()
+            return
+        self._apply_guided_detected_timing()
+
     def _sync_guided_discovery_from_full(self) -> None:
         if not hasattr(self, "_guided_roi_list"):
             return
@@ -2996,6 +3189,7 @@ class MainWindow(QMainWindow):
                 )
         self._refresh_guided_setup_summary()
         self._sync_guided_recording_visibility()
+        self._refresh_guided_recording_timing_inference()
         self._refresh_guided_navigation_state()
 
     def _on_guided_roi_item_changed(self, item: QListWidgetItem) -> None:

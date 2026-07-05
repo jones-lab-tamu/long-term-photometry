@@ -1934,6 +1934,9 @@ def test_guided_recording_continue_enforces_intermittent_timing_plausibility(
 
 def test_guided_recording_continuous_readiness_and_mode_visibility(window):
     _set_guided_rwd_intermittent(window)
+    assert (
+        window._guided_recording_timing_inference_label.isHidden() is False
+    )
     assert window._guided_sessions_per_hour_edit.isHidden() is False
     assert window._guided_continuous_window_sec_spin.isHidden() is True
     assert window._guided_incomplete_final_rwd_group.isHidden() is False
@@ -1953,6 +1956,10 @@ def test_guided_recording_continuous_readiness_and_mode_visibility(window):
     window._guided_acquisition_mode_combo.setCurrentIndex(continuous)
     assert window._guided_sessions_per_hour_edit.isHidden() is True
     assert window._guided_session_duration_edit.isHidden() is True
+    assert (
+        window._guided_recording_timing_inference_label.isHidden() is True
+    )
+    assert window._guided_use_detected_timing_btn.isHidden() is True
     assert window._guided_continuous_window_sec_spin.isHidden() is False
     assert window._guided_incomplete_final_rwd_group.isHidden() is True
     assert window._guided_recording_continue_btn.isEnabled() is True
@@ -1976,6 +1983,176 @@ def test_guided_incomplete_final_rwd_option_hidden_for_non_rwd(window):
     window._guided_format_combo.setCurrentText("custom_tabular")
 
     assert window._guided_incomplete_final_rwd_group.isHidden() is True
+
+
+def _timed_discovery(input_dir, session_ids, resolved_format="RWD"):
+    return {
+        "schema_version": 1,
+        "input_dir": str(input_dir),
+        "resolved_format": resolved_format,
+        "sessions": [
+            {
+                "index": index,
+                "session_id": session_id,
+                "path": str(
+                    input_dir / session_id / "fluorescence.csv"
+                ),
+                "included_in_preview": True,
+            }
+            for index, session_id in enumerate(session_ids)
+        ],
+        "n_total_discovered": len(session_ids),
+        "n_preview": len(session_ids),
+        "rois": [{"roi_id": "CH1"}],
+    }
+
+
+def test_guided_rwd_discovery_autofills_recording_timing(
+    window, tmp_path, monkeypatch
+):
+    _set_guided_rwd_intermittent(window)
+    window._guided_sessions_per_hour_edit.clear()
+    window._guided_session_duration_edit.clear()
+    monkeypatch.setattr(
+        window,
+        "_infer_rwd_chunk_contract",
+        lambda path: {
+            "csv_path": path,
+            "chunk_duration_sec": 599.988,
+        },
+    )
+    discovery = _timed_discovery(
+        tmp_path / "first",
+        [
+            "2025_01_01-00_00_00",
+            "2025_01_01-00_30_00",
+            "2025_01_01-01_00_00",
+        ],
+    )
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+
+    assert window._guided_sessions_per_hour_edit.text() == "2"
+    assert window._guided_session_duration_edit.text() == "600"
+    assert window._guided_recording_timing_inference.evidence[
+        "raw_session_duration_sec"
+    ] == 599.988
+    assert window._guided_recording_timing_inference.evidence[
+        "display_session_duration_sec"
+    ] == 600.0
+    assert window._sph_edit.text() == "2"
+    assert window._duration_edit.text() == "600"
+    assert window._guided_recording_continue_btn.isEnabled() is True
+    assert window._guided_recording_timing_inference_label.text() == (
+        "Detected 2 sessions/hour and ~600 s/session from RWD files. "
+        "Please confirm."
+    )
+
+
+def test_guided_recording_timing_preserves_manual_edit_until_new_source(
+    window, tmp_path, monkeypatch
+):
+    _set_guided_rwd_intermittent(window)
+    duration = {"value": 600.0}
+    monkeypatch.setattr(
+        window,
+        "_infer_rwd_chunk_contract",
+        lambda path: {
+            "csv_path": path,
+            "chunk_duration_sec": duration["value"],
+        },
+    )
+    first = _timed_discovery(
+        tmp_path / "first",
+        ["2025_01_01-00_00_00", "2025_01_01-00_30_00"],
+    )
+    window._discovery_cache = first
+    window._populate_discovery_ui(first)
+
+    window._guided_session_duration_edit.setFocus()
+    window._guided_session_duration_edit.selectAll()
+    QTest.keyClicks(window._guided_session_duration_edit, "700")
+    assert window._guided_recording_timing_inference_label.text() == (
+        "Using manually entered session timing."
+    )
+    window._sync_guided_discovery_from_full()
+    assert window._guided_session_duration_edit.text() == "700"
+    assert window._guided_use_detected_timing_btn.isHidden() is False
+    assert window._guided_use_detected_timing_btn.isEnabled() is True
+
+    window._guided_session_duration_edit.setFocus()
+    window._guided_session_duration_edit.selectAll()
+    QTest.keyClick(
+        window._guided_session_duration_edit, Qt.Key_Backspace
+    )
+    window._sync_guided_discovery_from_full()
+    assert window._guided_session_duration_edit.text() == ""
+    assert window._guided_recording_continue_btn.isEnabled() is False
+    assert window._guided_use_detected_timing_btn.isHidden() is False
+
+    window._guided_use_detected_timing_btn.click()
+    assert window._guided_sessions_per_hour_edit.text() == "2"
+    assert window._guided_session_duration_edit.text() == "600"
+    assert window._sph_edit.text() == "2"
+    assert window._duration_edit.text() == "600"
+    assert window._guided_recording_continue_btn.isEnabled() is True
+    assert window._guided_use_detected_timing_btn.isHidden() is True
+    assert window._guided_recording_timing_inference_label.text() == (
+        "Detected 2 sessions/hour and ~600 s/session from RWD files. "
+        "Please confirm."
+    )
+
+    duration["value"] = 300.0
+    second = _timed_discovery(
+        tmp_path / "second",
+        ["2025_01_02-00_00_00", "2025_01_02-00_15_00"],
+    )
+    window._discovery_cache = second
+    window._populate_discovery_ui(second)
+    assert window._guided_sessions_per_hour_edit.text() == "4"
+    assert window._guided_session_duration_edit.text() == "300"
+
+
+def test_guided_ambiguous_or_unsupported_timing_does_not_overwrite_values(
+    window, tmp_path, monkeypatch
+):
+    _set_guided_rwd_intermittent(window)
+    window._guided_sessions_per_hour_edit.setText("3")
+    window._guided_session_duration_edit.setText("500")
+    monkeypatch.setattr(
+        window,
+        "_infer_rwd_chunk_contract",
+        lambda path: {"csv_path": path, "chunk_duration_sec": 600.0},
+    )
+    ambiguous = _timed_discovery(
+        tmp_path / "ambiguous",
+        ["2025_01_01-00_00_00"],
+    )
+    window._discovery_cache = ambiguous
+    window._populate_discovery_ui(ambiguous)
+
+    assert window._guided_sessions_per_hour_edit.text() == "3"
+    assert window._guided_session_duration_edit.text() == "500"
+    assert "Could not confidently detect session timing" in (
+        window._guided_recording_timing_inference_label.text()
+    )
+    assert window._guided_use_detected_timing_btn.isHidden() is True
+
+    window._guided_sessions_per_hour_edit.clear()
+    window._guided_session_duration_edit.clear()
+    unsupported = _timed_discovery(
+        tmp_path / "custom",
+        [],
+        resolved_format="custom_tabular",
+    )
+    window._discovery_cache = unsupported
+    window._populate_discovery_ui(unsupported)
+    assert window._guided_sessions_per_hour_edit.text() == ""
+    assert window._guided_session_duration_edit.text() == ""
+    assert window._guided_recording_timing_inference_label.text() == (
+        "Automatic timing detection is not available for this format yet."
+    )
+    assert window._guided_use_detected_timing_btn.isHidden() is True
 
 
 def test_guided_recording_requiredness_updates_with_format_and_mode(window):
