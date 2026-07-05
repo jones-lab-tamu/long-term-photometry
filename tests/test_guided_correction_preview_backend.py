@@ -597,6 +597,44 @@ def test_local_preview_real_rwd_nonfirst_session_uses_selected_file_and_local_ch
     assert not (tmp_path / "applied_dff").exists()
 
 
+def test_local_preview_can_omit_signal_only_f0_evidence(tmp_path):
+    source = tmp_path / "session-0" / "fluorescence.csv"
+    _write_realistic_rwd_session(source, offset=0.0)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 20.0\n"
+        "chunk_duration_sec: 600.0\n"
+        "rwd_time_col: TimeStamp\n"
+        "uv_suffix: '-410'\n"
+        "sig_suffix: '-470'\n"
+        "lowpass_hz: 1.0\n"
+        "filter_order: 3\n",
+        encoding="utf-8",
+    )
+
+    result = run_guided_local_correction_preview(
+        source,
+        tmp_path / "local-preview",
+        roi="CH1",
+        chunk_index=0,
+        adapter_chunk_index=0,
+        segment_label="session-0",
+        input_format="rwd",
+        config_path=config,
+        methods=["global_linear_regression"],
+        include_signal_only_f0_preview=False,
+        preview_id="local_rwd_without_signal_f0",
+    )
+
+    assert result["status"] == "success"
+    assert result["signal_only_f0_preview_requested"] is False
+    assert "signal_only_f0_preview_evidence" not in result
+    provenance = _load_json(Path(result["preview_provenance_path"]))
+    assert provenance["signal_only_f0_preview_requested"] is False
+    assert "signal_only_f0_preview_evidence" not in provenance
+    assert not (tmp_path / "applied_dff").exists()
+
+
 def test_local_preview_adapter_failure_returns_full_load_context(tmp_path):
     source = tmp_path / "session-2" / "fluorescence.csv"
     _write_realistic_rwd_session(source, offset=20.0)

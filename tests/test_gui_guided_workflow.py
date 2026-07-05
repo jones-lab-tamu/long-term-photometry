@@ -4817,6 +4817,8 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert window._guided_full_evidence_group.isChecked() is False
     assert window._guided_full_evidence_group.isVisible() is False
     assert window._guided_diagnostic_cache_build_btn.isVisible() is False
+    assert window._guided_preview_signal_f0_cb.text() == "Signal-Only F0"
+    assert window._guided_preview_signal_f0_cb.isChecked() is True
     window._guided_preview_chunk_combo.setCurrentIndex(2)
     window._guided_preview_generate_btn.click()
 
@@ -4999,6 +5001,59 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert ch1_reference["preview_only"] is True
     assert ch1_reference["production_analysis"] is False
 
+    ch1_combo = rows["CH1"]["strategy_combo"]
+    ch1_combo.setCurrentIndex(ch1_combo.findData("signal_only_f0"))
+    rows = window._guided_local_preview_confirmation_rows
+    assert rows["CH1"]["status_label"].text() == (
+        "Selection changed, confirm again"
+    )
+    assert rows["CH1"]["strategy_combo"].currentData() == "signal_only_f0"
+    assert "0/3 included ROIs confirmed" in (
+        window._guided_confirm_strategy_progress_label.text()
+    )
+    rows["CH1"]["action_button"].click()
+    rows = window._guided_local_preview_confirmation_rows
+    assert rows["CH1"]["status_label"].text() == "Confirmed"
+    assert "1/3 included ROIs confirmed" in (
+        window._guided_confirm_strategy_progress_label.text()
+    )
+
+    ch1_combo = rows["CH1"]["strategy_combo"]
+    ch1_combo.setCurrentIndex(
+        ch1_combo.findData("global_linear_regression")
+    )
+    rows = window._guided_local_preview_confirmation_rows
+    assert rows["CH1"]["status_label"].text() == (
+        "Selection changed, confirm again"
+    )
+    assert "0/3 included ROIs confirmed" in (
+        window._guided_confirm_strategy_progress_label.text()
+    )
+    rows["CH1"]["action_button"].click()
+    rows = window._guided_local_preview_confirmation_rows
+    assert rows["CH1"]["status_label"].text() == "Confirmed"
+    assert "1/3 included ROIs confirmed" in (
+        window._guided_confirm_strategy_progress_label.text()
+    )
+
+    ch1_combo = rows["CH1"]["strategy_combo"]
+    ch1_combo.setCurrentIndex(
+        ch1_combo.findData("robust_global_event_reject")
+    )
+    rows = window._guided_local_preview_confirmation_rows
+    assert rows["CH1"]["status_label"].text() == (
+        "Selection changed, confirm again"
+    )
+    assert "0/3 included ROIs confirmed" in (
+        window._guided_confirm_strategy_progress_label.text()
+    )
+    rows["CH1"]["action_button"].click()
+    rows = window._guided_local_preview_confirmation_rows
+    assert rows["CH1"]["status_label"].text() == "Confirmed"
+    assert "1/3 included ROIs confirmed" in (
+        window._guided_confirm_strategy_progress_label.text()
+    )
+
     rows = window._guided_local_preview_confirmation_rows
     ch2_combo = rows["CH2"]["strategy_combo"]
     ch2_combo.setCurrentIndex(
@@ -5141,6 +5196,27 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         choice.current_or_stale == "stale"
         for choice in
         validation_context.draft.per_roi_correction_strategy_choices
+    )
+
+    window._guided_preview_roi_combo.setCurrentIndex(
+        window._guided_preview_roi_combo.findData("CH2")
+    )
+    window._guided_preview_signal_f0_cb.setChecked(False)
+    window._guided_preview_generate_btn.click()
+    without_signal_f0 = window._guided_preview_last_result
+    assert without_signal_f0["signal_only_f0_preview_requested"] is False
+    assert "signal_only_f0_preview_evidence" not in without_signal_f0
+    assert (
+        window._guided_local_preview_locked_evidence_for_roi(
+            "CH2", "signal_only_f0"
+        )
+        is None
+    )
+    rows = window._guided_local_preview_confirmation_rows
+    assert rows["CH2"]["strategy_combo"].findData("signal_only_f0") == -1
+    assert rows["CH2"]["status_label"].text() != "Confirmed"
+    assert "not included in the latest preview" in (
+        window._guided_local_signal_f0_preview_label.text()
     )
     assert runner.argv is None
     assert all(

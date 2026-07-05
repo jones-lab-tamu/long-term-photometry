@@ -1379,6 +1379,7 @@ def run_guided_local_correction_preview(
     input_format: str,
     config_path: str | os.PathLike[str],
     methods: Iterable[str] | None = None,
+    include_signal_only_f0_preview: bool = True,
     preview_id: str | None = None,
     config_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1487,11 +1488,15 @@ def run_guided_local_correction_preview(
     except Exception as exc:
         return failed(f"{type(exc).__name__}: {exc}")
 
-    signal_only_f0_preview = compute_guided_local_signal_only_f0_preview(
-        record["sig_raw"],
-        record["time_sec"],
-        roi_id=str(roi),
-    )
+    signal_only_f0_preview = None
+    if include_signal_only_f0_preview:
+        signal_only_f0_preview = (
+            compute_guided_local_signal_only_f0_preview(
+                record["sig_raw"],
+                record["time_sec"],
+                roi_id=str(roi),
+            )
+        )
 
     os.makedirs(output_dir, exist_ok=False)
     generated_artifacts: dict[str, str] = {}
@@ -1567,14 +1572,18 @@ def run_guided_local_correction_preview(
         "pipeline_run_executed": False,
         "feature_extraction_run": False,
         "strategy_recommendation": None,
-        "signal_only_f0_preview_evidence": (
-            _signal_only_f0_preview_metadata(signal_only_f0_preview)
+        "signal_only_f0_preview_requested": bool(
+            include_signal_only_f0_preview
         ),
         "warning": (
             "Local correction preview for decision support only. Final analysis "
             "recomputes correction using the full selected recordings."
         ),
     }
+    if signal_only_f0_preview is not None:
+        provenance["signal_only_f0_preview_evidence"] = (
+            _signal_only_f0_preview_metadata(signal_only_f0_preview)
+        )
     provenance_path = os.path.join(output_dir, PREVIEW_PROVENANCE_FILENAME)
     _write_json(provenance_path, provenance)
     generated_artifacts["preview_provenance_json"] = provenance_path
@@ -1591,15 +1600,19 @@ def run_guided_local_correction_preview(
             "production_analysis": False,
             "source_type": "local_raw_segment",
             "strategy_recommendation": None,
-            "signal_only_f0_preview_evidence": (
-                _signal_only_f0_preview_metadata(signal_only_f0_preview)
+            "signal_only_f0_preview_requested": bool(
+                include_signal_only_f0_preview
             ),
         }
     )
+    if signal_only_f0_preview is not None:
+        summary["signal_only_f0_preview_evidence"] = (
+            _signal_only_f0_preview_metadata(signal_only_f0_preview)
+        )
     summary_path = os.path.join(output_dir, PREVIEW_SUMMARY_FILENAME)
     _write_json(summary_path, summary)
     generated_artifacts["preview_summary_json"] = summary_path
-    return {
+    result = {
         "ok": status == "success",
         "preview_id": pid,
         "status": status,
@@ -1611,7 +1624,9 @@ def run_guided_local_correction_preview(
         "preview_summary_path": summary_path,
         "generated_artifacts": generated_artifacts,
         "method_statuses": method_statuses,
-        "signal_only_f0_preview_evidence": signal_only_f0_preview,
+        "signal_only_f0_preview_requested": bool(
+            include_signal_only_f0_preview
+        ),
         "warnings": [],
         "errors": errors,
         "roi": str(roi),
@@ -1624,3 +1639,8 @@ def run_guided_local_correction_preview(
         },
         "source_file": source_path,
     }
+    if signal_only_f0_preview is not None:
+        result["signal_only_f0_preview_evidence"] = (
+            signal_only_f0_preview
+        )
+    return result

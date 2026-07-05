@@ -3090,8 +3090,8 @@ class MainWindow(QMainWindow):
         preview_layout.setContentsMargins(10, 10, 10, 10)
         preview_layout.setSpacing(8)
         preview_intro = QLabel(
-            "This local preview helps compare correction strategies for the "
-            "selected ROI and segment. Final analysis recomputes correction "
+            "This local preview compares the selected correction methods for "
+            "the chosen ROI and segment. Final analysis recomputes correction "
             "using the full selected recordings."
         )
         preview_intro.setObjectName("guidedCorrectionPreviewIntro")
@@ -3171,6 +3171,28 @@ class MainWindow(QMainWindow):
             description.setWordWrap(True)
             method_row.addWidget(description)
             self._guided_preview_gated_widgets.append(description)
+        self._guided_preview_signal_f0_cb = QCheckBox("Signal-Only F0")
+        self._guided_preview_signal_f0_cb.setObjectName(
+            "guidedCorrectionPreviewMethodSignalOnlyF0"
+        )
+        self._guided_preview_signal_f0_cb.setChecked(True)
+        self._guided_preview_signal_f0_cb.stateChanged.connect(
+            self._on_guided_preview_selection_changed
+        )
+        method_row.addWidget(self._guided_preview_signal_f0_cb)
+        self._guided_preview_gated_widgets.append(
+            self._guided_preview_signal_f0_cb
+        )
+        signal_f0_description = QLabel(
+            "Use the signal channel alone to estimate baseline when the "
+            "reference/control channel is not trustworthy."
+        )
+        signal_f0_description.setProperty("guidedSecondaryText", True)
+        signal_f0_description.setWordWrap(True)
+        method_row.addWidget(signal_f0_description)
+        self._guided_preview_gated_widgets.append(
+            signal_f0_description
+        )
         preview_layout.addLayout(method_row)
 
         preview_note = QLabel(
@@ -3230,8 +3252,8 @@ class MainWindow(QMainWindow):
         preview_layout.addWidget(self._guided_preview_visual_label)
         self._guided_local_signal_f0_preview_label = QLabel(
             "Signal-Only F0 preview\n"
-            "Preview evidence only. Generate a valid local preview to enable "
-            "selection for this ROI. "
+            "Preview evidence only. Select Signal-Only F0 above and generate "
+            "a local preview to evaluate this strategy for the ROI. "
             "This preview does not write production outputs."
         )
         self._guided_local_signal_f0_preview_label.setObjectName(
@@ -4977,8 +4999,20 @@ class MainWindow(QMainWindow):
             else:
                 self._guided_local_signal_f0_preview_label.setText(
                     "Signal-Only F0 preview\n"
-                    "Generate a valid local preview to enable selection for "
-                    "this ROI."
+                    + (
+                        "Signal-Only F0 was not included in the latest "
+                        "preview for this ROI."
+                        if (
+                            result.get("source_type")
+                            == "local_raw_segment"
+                            and result.get(
+                                "signal_only_f0_preview_requested"
+                            )
+                            is False
+                        )
+                        else "Select Signal-Only F0 above and generate a "
+                        "local preview to evaluate this strategy for the ROI."
+                    )
                 )
         self._refresh_guided_preview_review_affordances()
         self._refresh_guided_generated_outputs_summary()
@@ -4995,9 +5029,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_guided_local_signal_f0_preview_label"):
             self._guided_local_signal_f0_preview_label.setText(
                 "Signal-Only F0 preview\n"
-                "Preview evidence only. Generate a valid local preview to "
-                "enable selection. This preview does not write production "
-                "outputs."
+                "Preview evidence only. Select Signal-Only F0 above and "
+                "generate a local preview to evaluate this strategy for the "
+                "ROI. This preview does not write production outputs."
             )
         self._refresh_guided_generated_outputs_summary()
 
@@ -5443,6 +5477,9 @@ class MainWindow(QMainWindow):
                     input_format=str(segment["input_format"]),
                     config_path=self._active_config_source_path(),
                     methods=methods,
+                    include_signal_only_f0_preview=bool(
+                        self._guided_preview_signal_f0_cb.isChecked()
+                    ),
                     preview_id=preview_id,
                     config_overrides=config_overrides,
                 )
@@ -6790,6 +6827,27 @@ class MainWindow(QMainWindow):
     ) -> None:
         strategy = str(combo.currentData() or "")
         self._guided_local_preview_row_strategy_by_roi[str(roi)] = strategy
+        choice_key = self._guided_confirm_choice_key(
+            LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, str(roi)
+        )
+        choice = self._guided_strategy_choices.get(choice_key)
+        if (
+            isinstance(choice, dict)
+            and choice.get("confirmed") is True
+            and strategy != str(choice.get("strategy") or "")
+        ):
+            updated = dict(choice)
+            updated["current"] = False
+            updated["stale"] = True
+            updated["stale_reason"] = (
+                "Selection changed; confirm the new strategy."
+            )
+            self._guided_strategy_choices[choice_key] = updated
+            self._invalidate_guided_backend_validation(
+                "strategy selection changed"
+            )
+            self._refresh_guided_confirm_strategy_panel()
+            return
         button.setEnabled(
             bool(
                 strategy
@@ -6980,6 +7038,13 @@ class MainWindow(QMainWindow):
                 isinstance(choice, dict)
                 and not confirmed
             )
+            selection_changed = bool(
+                stale
+                and isinstance(choice, dict)
+                and str(choice.get("stale_reason") or "").startswith(
+                    "Selection changed"
+                )
+            )
             if evidence is not None:
                 segment = evidence["provenance"].get(
                     "selected_segment_label", ""
@@ -6994,6 +7059,8 @@ class MainWindow(QMainWindow):
             status_label = QLabel(
                 "Confirmed"
                 if confirmed
+                else "Selection changed, confirm again"
+                if selection_changed
                 else "Stale, confirm again"
                 if stale
                 else "Needs confirmation"
@@ -7001,7 +7068,9 @@ class MainWindow(QMainWindow):
                 else "Preview first"
             )
             action = QPushButton(
-                "Reconfirm strategy for this ROI"
+                "Confirm changed strategy for this ROI"
+                if selection_changed
+                else "Reconfirm strategy for this ROI"
                 if stale or confirmed
                 else "Confirm strategy for this ROI"
             )
