@@ -283,14 +283,22 @@ def test_build_guided_applied_dff_manifest_rows_unsupported_version(tmp_path):
         build_guided_applied_dff_manifest_rows(strategy_map_payload, tmp_path)
 
 
-def test_build_guided_applied_dff_manifest_rows_all_signal_only_f0_rejected(tmp_path):
+def test_build_guided_applied_dff_manifest_rows_all_signal_only_f0_accepted(tmp_path):
     strategy_map_payload = {
         "production_strategy_map_version": "per_roi_correction_strategy_map.v1",
         "included_roi_ids": ["CH1"],
         "per_roi_production_strategy_map": [_valid_signal_only_f0_entry("CH1")]
     }
-    with pytest.raises(GuidedAppliedDffOrchestrationError, match="At least one dynamic_fit row is required"):
-        build_guided_applied_dff_manifest_rows(strategy_map_payload, tmp_path)
+    rows = build_guided_applied_dff_manifest_rows(
+        strategy_map_payload, tmp_path
+    )
+    assert rows == [
+        {
+            "roi": "CH1",
+            "strategy": "signal_only_f0",
+            "output_name": "CH1_signal_only_f0",
+        }
+    ]
 
 
 def test_build_guided_applied_dff_manifest_rows_mixed_dynamic_fit_rejected(tmp_path):
@@ -304,7 +312,10 @@ def test_build_guided_applied_dff_manifest_rows_mixed_dynamic_fit_rejected(tmp_p
         "included_roi_ids": ["CH1", "CH2"],
         "per_roi_production_strategy_map": [entry1, entry2]
     }
-    with pytest.raises(GuidedAppliedDffOrchestrationError, match="Mixed dynamic_fit modes are not allowed"):
+    with pytest.raises(
+        GuidedAppliedDffOrchestrationError,
+        match="Mixed dynamic_fit modes cannot be executed",
+    ):
         build_guided_applied_dff_manifest_rows(strategy_map_payload, tmp_path)
 
 

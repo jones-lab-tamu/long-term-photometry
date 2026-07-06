@@ -226,8 +226,53 @@ def test_new_strategy_map_signal_only_is_truthful_and_fail_closed(tmp_path: Path
     assert "signal_only_f0_production_routing_not_enabled" in {
         issue.category for issue in issues
     }
-    assert "unsupported_correction_strategy" in {
+    assert "unsupported_correction_strategy" not in {
         issue.category for issue in issues
+    }
+
+
+def test_validation_allows_enabled_all_signal_only_strategy_map(
+    tmp_path: Path,
+):
+    plan = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(tmp_path / "raw_input"),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+        included_roi_ids=["CH1", "CH2"],
+        global_correction_strategy="signal_only_f0",
+        dynamic_fit_mode=None,
+        applied_dff_orchestration_enabled=True,
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id=roi,
+                selected_strategy="signal_only_f0",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+                evidence_reference={
+                    "evidence_source_type": "local_preview",
+                },
+            )
+            for roi in ("CH1", "CH2")
+        ],
+        output_base_path=str(tmp_path / "output"),
+    )
+
+    request = build_guided_validation_request_from_plan(plan)
+    categories = {
+        issue.category
+        for issue in validate_guided_validation_request(request)
+    }
+
+    assert request.legacy_global_dynamic_fit_mode is None
+    assert {
+        entry["strategy_family"]
+        for entry in request.per_roi_production_strategy_map
+    } == {"signal_only_f0"}
+    assert not categories & {
+        "missing_dynamic_fit_strategy",
+        "unsupported_correction_strategy",
+        "signal_only_f0_production_routing_not_enabled",
     }
 
 def test_validation_missing_output_base(tmp_path: Path):
@@ -264,7 +309,9 @@ def test_validation_missing_strategy(tmp_path: Path):
     issues = validate_guided_validation_request(request)
     assert any(iss.category == "unsupported_correction_strategy" for iss in issues)
 
-def test_validation_signal_only_f0_blocks(tmp_path: Path):
+def test_validation_signal_only_f0_does_not_require_dynamic_fit_mode(
+    tmp_path: Path,
+):
     request = GuidedValidationRequest(
         source_path=str(tmp_path / "raw_input"),
         source_format="rwd",
@@ -279,7 +326,11 @@ def test_validation_signal_only_f0_blocks(tmp_path: Path):
         output_base_path=str(tmp_path / "output")
     )
     issues = validate_guided_validation_request(request)
-    assert any(iss.category == "unsupported_correction_strategy" for iss in issues)
+    assert not any(
+        iss.category
+        in {"unsupported_correction_strategy", "missing_dynamic_fit_mode"}
+        for iss in issues
+    )
 
 def test_validation_unsupported_dynamic_fit_mode(tmp_path: Path):
     request = GuidedValidationRequest(

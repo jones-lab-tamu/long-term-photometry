@@ -57,7 +57,6 @@ def build_guided_applied_dff_manifest_rows(
     from photometry_pipeline.guided_new_analysis_plan import FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
     SUPPORTED_DYNAMIC_FIT_MODES = FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
 
-    has_dynamic_fit = False
     used_dynamic_fit_modes = set()
 
     for entry in entries:
@@ -90,7 +89,6 @@ def build_guided_applied_dff_manifest_rows(
                 raise GuidedAppliedDffOrchestrationError(f"Unsupported dynamic_fit_mode: {dynamic_fit_mode}")
             if selected_strategy != dynamic_fit_mode:
                 raise GuidedAppliedDffOrchestrationError(f"Mismatch between selected_strategy ({selected_strategy}) and dynamic_fit_mode ({dynamic_fit_mode}) for ROI {roi_id}")
-            has_dynamic_fit = True
             used_dynamic_fit_modes.add(dynamic_fit_mode)
             batch_strategy = "dynamic_fit"
 
@@ -129,11 +127,12 @@ def build_guided_applied_dff_manifest_rows(
         }
         rows.append(row)
 
-    if not has_dynamic_fit:
-        raise GuidedAppliedDffOrchestrationError("At least one dynamic_fit row is required. All-signal_only_f0 maps are currently unsupported.")
-
     if len(used_dynamic_fit_modes) > 1:
-        raise GuidedAppliedDffOrchestrationError(f"Mixed dynamic_fit modes are not allowed. Found: {used_dynamic_fit_modes}")
+        raise GuidedAppliedDffOrchestrationError(
+            "Mixed dynamic_fit modes cannot be executed by the current "
+            "applied-dF/F batch manifest because manifest rows do not carry "
+            f"a per-ROI dynamic-fit mode. Found: {used_dynamic_fit_modes}"
+        )
 
     return rows
 

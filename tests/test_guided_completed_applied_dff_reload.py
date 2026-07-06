@@ -394,7 +394,7 @@ def test_row_output_dir_escapes_applied_output_root(tmp_path):
 
 
 def test_requested_strategy_map_all_signal_only_f0(tmp_path):
-    """12. all-signal_only_f0 -> blocking issue (unsupported)."""
+    """12. all-signal_only_f0 is valid when its evidence is current."""
     run_dir = _create_completed_run(tmp_path, prov_payload=None)
     payload = _valid_provenance_payload(run_dir)
     payload["requested_strategy_map"]["per_roi_production_strategy_map"] = [
@@ -414,8 +414,7 @@ def test_requested_strategy_map_all_signal_only_f0(tmp_path):
 
     state = load_guided_completed_applied_dff_state(run_dir)
     assert state.present is True
-    assert state.has_blocking_issues is True
-    assert any(issue.category == "applied_dff_provenance_no_dynamic_fit" for issue in state.blocking_issues())
+    assert state.has_blocking_issues is False
 
 
 def test_requested_strategy_map_mixed_dynamic_fit_modes(tmp_path):

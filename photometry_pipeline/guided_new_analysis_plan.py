@@ -712,10 +712,6 @@ def build_guided_per_roi_production_strategy_map(
     legacy_mode = None
     if len(entries) == len(included) and len(dynamic_modes) == 1:
         legacy_mode = next(iter(dynamic_modes))
-    if len(dynamic_modes) > 1:
-        blockers.append("mixed_dynamic_fit_modes_not_enabled")
-    if "signal_only_f0" in families and not dynamic_modes:
-        blockers.append("all_signal_only_f0_not_supported")
     if (
         len(families) > 1
         and not plan.applied_dff_orchestration_enabled
@@ -730,7 +726,7 @@ def build_guided_per_roi_production_strategy_map(
         execution_routing_supported=bool(
             included
             and len(entries) == len(included)
-            and legacy_mode
+            and (legacy_mode or families == {"signal_only_f0"})
             and not unique_blockers
         ),
         blocking_categories=unique_blockers,
@@ -1128,20 +1124,11 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
     strategy_map = build_guided_per_roi_production_strategy_map(plan)
     for category in strategy_map.blocking_categories:
         if category not in {
-            "all_signal_only_f0_not_supported",
-            "mixed_dynamic_fit_modes_not_enabled",
             "mixed_strategy_families_not_enabled",
             "signal_only_f0_production_routing_not_enabled",
         }:
             continue
         messages = {
-            "all_signal_only_f0_not_supported": (
-                "At least one included ROI must use a dynamic-fit strategy; "
-                "all-Signal-Only F0 runs are not supported."
-            ),
-            "mixed_dynamic_fit_modes_not_enabled": (
-                "All dynamic-fit ROIs must use one shared dynamic-fit mode."
-            ),
             "mixed_strategy_families_not_enabled": (
                 "Mixed dynamic-fit and Signal-Only F0 strategies require "
                 "applied-dF/F orchestration."
@@ -1997,7 +1984,11 @@ def evaluate_guided_new_analysis_execution_subset_readiness(
                 "signal_only_f0_execution_not_supported",
                 "Signal-Only F0 requires applied-dF/F orchestration.",
             ))
-        elif choice.selected_strategy not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+        elif (
+            choice.selected_strategy != "signal_only_f0"
+            and choice.selected_strategy
+            not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+        ):
             issues.append(_execution_subset_issue(
                 "unsupported_dynamic_fit_strategy_for_first_subset",
                 f"Strategy '{choice.selected_strategy}' is not supported by the first execution subset.",
@@ -2011,13 +2002,20 @@ def evaluate_guided_new_analysis_execution_subset_readiness(
     has_signal_only_f0 = "signal_only_f0" in unique_strategies
     if has_signal_only_f0 and not dynamic_strategies:
         issues.append(_execution_subset_issue(
-            "all_signal_only_f0_not_supported",
-            "At least one included ROI must use dynamic fit.",
+            "all_signal_only_f0_backend_validation_not_enabled",
+            (
+                "All-Signal-Only F0 planning is supported, but the current "
+                "backend validation request subset still requires dynamic fit."
+            ),
         ))
     if len(dynamic_strategies) > 1:
         issues.append(_execution_subset_issue(
-            "mixed_dynamic_fit_modes_not_enabled",
-            "All dynamic-fit ROIs must use one shared dynamic-fit strategy.",
+            "mixed_dynamic_fit_modes_execution_not_enabled",
+            (
+                "Mixed dynamic-fit correction choices are valid for planning, "
+                "but the current backend validation/run route does not yet "
+                "support executing multiple dynamic-fit modes in one run."
+            ),
         ))
     elif len(dynamic_strategies) == 1:
         allowed_dynamic_fit_strategy = next(iter(dynamic_strategies))
@@ -2682,16 +2680,25 @@ def _correction_strategy_run_preview_unresolved_items(
         if strategy in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
     }
     has_signal_only_f0 = "signal_only_f0" in unique_strategies
-    if len(dynamic_strategies) > 1:
-        unresolved.append(GuidedNewAnalysisRunPreviewIssue(
-            category="mixed_dynamic_fit_modes_not_enabled",
-            message="All dynamic-fit ROIs must use one shared dynamic-fit strategy.",
-            severity="blocking",
-        ))
     if has_signal_only_f0 and not dynamic_strategies:
         unresolved.append(GuidedNewAnalysisRunPreviewIssue(
-            category="all_signal_only_f0_not_supported",
-            message="At least one included ROI must use dynamic fit.",
+            category=(
+                "all_signal_only_f0_backend_validation_not_enabled"
+            ),
+            message=(
+                "All-Signal-Only F0 planning is supported, but backend "
+                "validation for that execution route is not enabled yet."
+            ),
+            severity="blocking",
+        ))
+    if len(dynamic_strategies) > 1:
+        unresolved.append(GuidedNewAnalysisRunPreviewIssue(
+            category="mixed_dynamic_fit_modes_execution_not_enabled",
+            message=(
+                "Mixed dynamic-fit correction choices are valid for planning, "
+                "but the current backend validation/run route does not yet "
+                "support executing multiple dynamic-fit modes in one run."
+            ),
             severity="blocking",
         ))
     if (
@@ -2733,7 +2740,11 @@ def _correction_strategy_run_preview_unresolved_items(
                 message="Signal-Only F0 requires applied-dF/F orchestration.",
                 severity="blocking",
             ))
-        elif choice.selected_strategy not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+        elif (
+            choice.selected_strategy != "signal_only_f0"
+            and choice.selected_strategy
+            not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+        ):
             unresolved.append(GuidedNewAnalysisRunPreviewIssue(
                 category="unsupported_dynamic_fit_strategy_for_first_subset",
                 message=f"Strategy '{choice.selected_strategy}' is not supported by the first execution subset.",
@@ -4076,7 +4087,7 @@ def build_guided_first_subset_executable_mapping_preview(
         unsupported_categories.append("signal_only_f0_production_routing_not_supported")
     if (
         "mixed_per_roi_strategies" in spec_preview.blocking_issue_categories
-        or "mixed_dynamic_fit_modes_not_enabled"
+        or "mixed_dynamic_fit_modes_execution_not_enabled"
         in spec_preview.blocking_issue_categories
     ):
         unsupported_categories.append("mixed_per_roi_strategy_execution_not_supported")

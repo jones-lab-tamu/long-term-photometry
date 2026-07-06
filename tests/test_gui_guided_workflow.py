@@ -5136,6 +5136,236 @@ def test_gui_stepper_order_has_draft_plan_after_confirm_strategy():
     assert draft_idx == confirm_idx + 1
 
 
+def _configure_correction_to_draft_gate(
+    window, monkeypatch, strategies, *, invalid_signal_evidence=False
+):
+    included = list(strategies)
+    window._set_guided_workflow_mode("new_analysis")
+    window._discovery_cache = {"rois": [{"roi_id": roi} for roi in included]}
+    for roi_list in (window._roi_list, window._guided_roi_list):
+        roi_list.clear()
+        for roi in included:
+            roi_list.addItem(roi)
+            roi_list.item(roi_list.count() - 1).setCheckState(Qt.Checked)
+    monkeypatch.setattr(
+        window,
+        "_refresh_guided_local_preview_choice_currency",
+        lambda: None,
+    )
+    references = {}
+    choices = {}
+    for roi, strategy in strategies.items():
+        reference = {
+            "evidence_source_type": (
+                "local_preview"
+                if strategy == "signal_only_f0"
+                else "local_correction_preview"
+            ),
+            "preview_only": True,
+            "production_analysis": False,
+            "roi": roi,
+            "roi_id": roi,
+            "preview_id": f"preview-{roi}",
+            "selected_strategy": strategy,
+        }
+        if strategy == "signal_only_f0":
+            reference.update(
+                strategy_family="signal_only_f0",
+                dynamic_fit_mode=None,
+                valid=not invalid_signal_evidence,
+                current_or_stale="current",
+            )
+        references[(roi, strategy)] = reference
+        choices[("local_correction_preview", roi)] = {
+            "strategy": strategy,
+            "strategy_family": (
+                "signal_only_f0"
+                if strategy == "signal_only_f0"
+                else "dynamic_fit"
+            ),
+            "dynamic_fit_mode": (
+                None if strategy == "signal_only_f0" else strategy
+            ),
+            "confirmed": True,
+            "choice_source": "explicit_user_mark",
+            "source_type": "local_correction_preview",
+            "current": True,
+            "stale": False,
+            "roi": roi,
+            "local_preview_evidence": reference,
+        }
+    window._guided_strategy_choices = choices
+    monkeypatch.setattr(
+        window,
+        "_guided_local_preview_evidence_reference",
+        lambda strategy, *, roi=None: references.get((roi, strategy)),
+    )
+    window._refresh_guided_correction_continue_state()
+    return choices
+
+
+def test_guided_correction_to_draft_plan_starts_locked(window):
+    window._set_guided_workflow_mode("new_analysis")
+    correction_index = list(GUIDED_WORKFLOW_STEPS).index(
+        "Correction approach"
+    )
+    draft_index = list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    window._reach_guided_step("Correction approach")
+    window._guided_workflow_stepper.setCurrentRow(correction_index)
+
+    assert not (
+        window._guided_workflow_stepper.item(draft_index).flags()
+        & Qt.ItemIsEnabled
+    )
+    draft_item = window._guided_workflow_stepper.item(draft_index)
+    item_rect = window._guided_workflow_stepper.visualItemRect(draft_item)
+    QTest.mouseClick(
+        window._guided_workflow_stepper.viewport(),
+        Qt.LeftButton,
+        pos=item_rect.center(),
+    )
+    assert window._guided_workflow_stepper.currentRow() == correction_index
+    assert window._guided_correction_continue_btn.isEnabled() is False
+    assert window._guided_correction_continue_status.text() == (
+        "Confirm correction strategies for all included ROIs to continue."
+    )
+
+
+def test_guided_correction_gate_ready_unlocks_only_draft_plan(
+    window, monkeypatch
+):
+    _configure_correction_to_draft_gate(
+        window,
+        monkeypatch,
+        {
+            "CH1": "robust_global_event_reject",
+            "CH2": "robust_global_event_reject",
+        },
+    )
+
+    assert window._guided_correction_continue_btn.isEnabled() is True
+    assert window._guided_correction_continue_status.text() == (
+        "Correction strategies are ready for a draft plan."
+    )
+    window._guided_correction_continue_btn.click()
+
+    draft_index = list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    run_index = list(GUIDED_WORKFLOW_STEPS).index("Run")
+    review_index = list(GUIDED_WORKFLOW_STEPS).index("Review")
+    assert window._guided_workflow_stepper.currentRow() == draft_index
+    assert (
+        window._guided_workflow_stepper.item(draft_index).flags()
+        & Qt.ItemIsEnabled
+    )
+    assert not (
+        window._guided_workflow_stepper.item(run_index).flags()
+        & Qt.ItemIsEnabled
+    )
+    assert not (
+        window._guided_workflow_stepper.item(review_index).flags()
+        & Qt.ItemIsEnabled
+    )
+
+
+def test_guided_correction_gate_requires_reconfirmation_after_change_or_stale(
+    window, monkeypatch
+):
+    choices = _configure_correction_to_draft_gate(
+        window,
+        monkeypatch,
+        {"CH1": "robust_global_event_reject"},
+    )
+    choice = choices[("local_correction_preview", "CH1")]
+    choice.update(
+        current=False,
+        stale=True,
+        stale_reason="Selection changed; confirm the new strategy.",
+    )
+    window._refresh_guided_correction_continue_state()
+    assert window._guided_correction_continue_btn.isEnabled() is False
+    assert window._guided_correction_continue_status.text() == (
+        "Review and confirm changed correction strategies before continuing."
+    )
+
+    choice["stale_reason"] = "Correction-relevant setup changed."
+    window._refresh_guided_correction_continue_state()
+    assert window._guided_correction_continue_status.text() == (
+        "Regenerate the correction preview and reconfirm stale strategies "
+        "before continuing."
+    )
+
+    choice.update(current=True, stale=False, stale_reason="")
+    window._refresh_guided_correction_continue_state()
+    assert window._guided_correction_continue_btn.isEnabled() is True
+
+
+@pytest.mark.parametrize(
+    ("strategies", "invalid_signal", "ready", "status"),
+    [
+        (
+            {
+                "CH1": "robust_global_event_reject",
+                "CH2": "signal_only_f0",
+            },
+            False,
+            True,
+            "Correction strategies are ready for a draft plan.",
+        ),
+        (
+            {"CH1": "signal_only_f0", "CH2": "signal_only_f0"},
+            False,
+            True,
+            "Correction strategies are ready for a draft plan.",
+        ),
+        (
+            {
+                "CH1": "robust_global_event_reject",
+                "CH2": "global_linear_regression",
+            },
+            False,
+            True,
+            "Correction strategies are ready for a draft plan.",
+        ),
+        (
+            {
+                "CH1": "adaptive_event_gated_regression",
+                "CH2": "global_linear_regression",
+                "CH3": "signal_only_f0",
+            },
+            False,
+            True,
+            "Correction strategies are ready for a draft plan.",
+        ),
+        (
+            {
+                "CH1": "robust_global_event_reject",
+                "CH2": "signal_only_f0",
+            },
+            True,
+            False,
+            "Signal-Only F0 choices require current local preview evidence.",
+        ),
+    ],
+)
+def test_guided_correction_gate_strategy_contracts(
+    window,
+    monkeypatch,
+    strategies,
+    invalid_signal,
+    ready,
+    status,
+):
+    _configure_correction_to_draft_gate(
+        window,
+        monkeypatch,
+        strategies,
+        invalid_signal_evidence=invalid_signal,
+    )
+
+    assert window._guided_correction_continue_btn.isEnabled() is ready
+    assert window._guided_correction_continue_status.text() == status
+
+
 def test_gui_merged_correction_page_contains_existing_workflow_controls(window):
     window._set_guided_workflow_mode("new_analysis")
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
@@ -5731,6 +5961,41 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     rows["CH3"]["action_button"].click()
     assert "3/3 included ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
+    )
+    assert window._guided_correction_continue_btn.isEnabled() is True
+    assert window._guided_correction_continue_status.text() == (
+        "Correction strategies are ready for a draft plan."
+    )
+
+    rows = window._guided_local_preview_confirmation_rows
+    ch3_combo = rows["CH3"]["strategy_combo"]
+    ch3_combo.setCurrentIndex(
+        ch3_combo.findData("global_linear_regression")
+    )
+    assert window._guided_correction_continue_btn.isEnabled() is False
+    assert window._guided_correction_continue_status.text() == (
+        "Review and confirm changed correction strategies before continuing."
+    )
+    rows = window._guided_local_preview_confirmation_rows
+    rows["CH3"]["action_button"].click()
+    assert window._guided_correction_continue_btn.isEnabled() is True
+    assert window._guided_correction_continue_status.text() == (
+        "Correction strategies are ready for a draft plan."
+    )
+    rows = window._guided_local_preview_confirmation_rows
+    ch3_combo = rows["CH3"]["strategy_combo"]
+    ch3_combo.setCurrentIndex(
+        ch3_combo.findData("robust_global_event_reject")
+    )
+    assert window._guided_correction_continue_btn.isEnabled() is False
+    assert window._guided_correction_continue_status.text() == (
+        "Review and confirm changed correction strategies before continuing."
+    )
+    rows = window._guided_local_preview_confirmation_rows
+    rows["CH3"]["action_button"].click()
+    assert window._guided_correction_continue_btn.isEnabled() is True
+    assert window._guided_correction_continue_status.text() == (
+        "Correction strategies are ready for a draft plan."
     )
 
     plan = window._build_guided_new_analysis_draft_plan()

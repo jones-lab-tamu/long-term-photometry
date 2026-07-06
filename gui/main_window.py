@@ -2625,6 +2625,7 @@ class MainWindow(QMainWindow):
             self._guided_recording_continue_status.setText(
                 recording_reason
             )
+        self._refresh_guided_correction_continue_state()
 
     def _on_guided_continue_to_recording_structure(self) -> None:
         if not self._guided_select_data_ready_to_continue():
@@ -3725,6 +3726,28 @@ class MainWindow(QMainWindow):
 
         wrapper_layout.addWidget(self._build_guided_diagnostics_step())
         wrapper_layout.addWidget(self._build_guided_confirm_strategy_step())
+        self._guided_correction_continue_status = QLabel(
+            "Confirm correction strategies for all included ROIs to continue."
+        )
+        self._guided_correction_continue_status.setObjectName(
+            "guidedCorrectionContinueStatus"
+        )
+        self._guided_correction_continue_status.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_correction_continue_status.setWordWrap(True)
+        wrapper_layout.addWidget(self._guided_correction_continue_status)
+        self._guided_correction_continue_btn = QPushButton(
+            "Continue to Draft Plan"
+        )
+        self._guided_correction_continue_btn.setObjectName(
+            "guidedCorrectionContinueButton"
+        )
+        self._guided_correction_continue_btn.clicked.connect(
+            self._on_guided_continue_to_draft_plan
+        )
+        self._guided_correction_continue_btn.setEnabled(False)
+        wrapper_layout.addWidget(self._guided_correction_continue_btn)
         return self._build_guided_step_scroll(
             "guidedStepCorrectionApproach",
             "Correction approach",
@@ -7892,6 +7915,7 @@ class MainWindow(QMainWindow):
             self._invalidate_guided_backend_validation(
                 "strategy selection changed"
             )
+            self._refresh_guided_correction_continue_state()
             self._refresh_guided_confirm_strategy_panel()
             return
         button.setEnabled(
@@ -7953,6 +7977,7 @@ class MainWindow(QMainWindow):
             "marked_at_utc": datetime.now(timezone.utc).isoformat(),
         }
         self._invalidate_guided_backend_validation("strategy mark changed")
+        self._refresh_guided_correction_continue_state()
         self._refresh_guided_confirm_strategy_panel()
 
     def _guided_local_choice_is_current_confirmed(
@@ -8002,6 +8027,170 @@ class MainWindow(QMainWindow):
             and choice.get("strategy_family", "dynamic_fit")
             == "dynamic_fit"
             and choice.get("dynamic_fit_mode", strategy) == strategy
+        )
+
+    def _guided_correction_approach_readiness(
+        self,
+    ) -> tuple[bool, str]:
+        """Return whether current evidence-backed choices can enter Draft Plan."""
+        if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
+            return (
+                False,
+                "Confirm correction strategies for all included ROIs to continue.",
+            )
+        self._refresh_guided_local_preview_choice_currency()
+        included = tuple(
+            dict.fromkeys(str(roi) for roi in self._guided_selected_roi_ids()[1])
+        )
+        if not included:
+            return (
+                False,
+                "Confirm correction strategies for all included ROIs to continue.",
+            )
+
+        choices = getattr(self, "_guided_strategy_choices", {})
+        included_choices = [
+            choice
+            for choice in choices.values()
+            if isinstance(choice, dict)
+            and str(choice.get("roi") or "") in included
+            and choice.get("source_type")
+            in {"diagnostic_cache", LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE}
+        ]
+        if any(
+            str(choice.get("stale_reason") or "").startswith(
+                "Selection changed"
+            )
+            for choice in included_choices
+        ):
+            return (
+                False,
+                "Review and confirm changed correction strategies before continuing.",
+            )
+
+        for roi in included:
+            roi_choices = [
+                choice
+                for choice in included_choices
+                if str(choice.get("roi") or "") == roi
+            ]
+            if len(roi_choices) != 1:
+                return (
+                    False,
+                    "Confirm correction strategies for all included ROIs to continue.",
+                )
+            choice = roi_choices[0]
+            strategy = str(choice.get("strategy") or "")
+            if (
+                choice.get("source_type")
+                == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+                and not self._guided_local_choice_is_current_confirmed(
+                    roi, choice
+                )
+            ):
+                if strategy == "signal_only_f0":
+                    return (
+                        False,
+                        "Signal-Only F0 choices require current local preview evidence.",
+                    )
+                if (
+                    choice.get("stale") is True
+                    or choice.get("current") is not True
+                ):
+                    return (
+                        False,
+                        "Regenerate the correction preview and reconfirm stale "
+                        "strategies before continuing.",
+                    )
+                return (
+                    False,
+                    "Confirm correction strategies for all included ROIs to continue.",
+                )
+            if not (
+                choice.get("confirmed") is True
+                and choice.get("choice_source") == "explicit_user_mark"
+                and choice.get("current") is True
+                and choice.get("stale") is not True
+            ):
+                if (
+                    choice.get("stale") is True
+                    or choice.get("current") is not True
+                ):
+                    return (
+                        False,
+                        "Regenerate the correction preview and reconfirm stale "
+                        "strategies before continuing.",
+                    )
+                return (
+                    False,
+                    "Confirm correction strategies for all included ROIs to continue.",
+                )
+
+        from photometry_pipeline.guided_new_analysis_plan import (
+            build_guided_per_roi_production_strategy_map,
+            evaluate_new_analysis_plan_issues,
+        )
+
+        plan = self._build_guided_new_analysis_draft_plan()
+        issue_categories = {
+            issue.category
+            for issue in evaluate_new_analysis_plan_issues(plan)
+            if issue.severity == "blocking"
+        }
+        if issue_categories & {
+            "signal_only_f0_preview_evidence_missing",
+            "signal_only_f0_preview_evidence_invalid",
+        }:
+            return (
+                False,
+                "Signal-Only F0 choices require current local preview evidence.",
+            )
+        if issue_categories & {
+            "signal_only_f0_preview_evidence_stale",
+            "stale_strategy_choice",
+        }:
+            return (
+                False,
+                "Regenerate the correction preview and reconfirm stale "
+                "strategies before continuing.",
+            )
+
+        strategy_map = build_guided_per_roi_production_strategy_map(plan)
+        blockers = set(strategy_map.blocking_categories)
+        if blockers & {
+            "mixed_strategy_families_not_enabled",
+            "signal_only_f0_production_routing_not_enabled",
+        }:
+            return (
+                False,
+                "Mixed dynamic-fit and Signal-Only F0 choices require "
+                "applied-dF/F orchestration before continuing.",
+            )
+        if blockers:
+            return (
+                False,
+                "Confirm correction strategies for all included ROIs to continue.",
+            )
+        return True, "Correction strategies are ready for a draft plan."
+
+    def _refresh_guided_correction_continue_state(self) -> None:
+        button = getattr(self, "_guided_correction_continue_btn", None)
+        status = getattr(self, "_guided_correction_continue_status", None)
+        if button is None or status is None:
+            return
+        ready, message = self._guided_correction_approach_readiness()
+        button.setEnabled(ready)
+        status.setText(message)
+
+    def _on_guided_continue_to_draft_plan(self) -> None:
+        ready, message = self._guided_correction_approach_readiness()
+        self._guided_correction_continue_status.setText(message)
+        self._guided_correction_continue_btn.setEnabled(ready)
+        if not ready:
+            return
+        self._reach_guided_step("Draft plan")
+        self._guided_workflow_stepper.setCurrentRow(
+            self._guided_step_index("Draft plan")
         )
 
     def _rebuild_guided_local_preview_confirmation_rows(self) -> None:
@@ -8820,6 +9009,7 @@ class MainWindow(QMainWindow):
         )
         self._guided_confirm_mark_btn.setEnabled(can_mark)
         self._refresh_guided_correction_next_action()
+        self._refresh_guided_correction_continue_state()
 
     def _build_guided_draft_run_plan(self) -> tuple[GuidedRunPlan | None, list[str]]:
         run_dir = self._current_guided_completed_run_dir()
@@ -10125,6 +10315,14 @@ class MainWindow(QMainWindow):
             for roi, values in current_explicit_choices_by_roi.items()
             if roi in included
         )
+        all_confirmed_signal_only_f0 = bool(
+            included
+            and all(
+                current_explicit_choices_by_roi.get(roi)
+                == ["signal_only_f0"]
+                for roi in included
+            )
+        )
         dynamic_fit_parameter_contract = (
             GuidedNewAnalysisDynamicFitParameterContract()
         )
@@ -10188,6 +10386,9 @@ class MainWindow(QMainWindow):
         if unanimous_confirmed_mode is not None:
             global_corr_strategy = "dynamic_fit"
             df_mode = unanimous_confirmed_mode
+        elif all_confirmed_signal_only_f0:
+            global_corr_strategy = "signal_only_f0"
+            df_mode = None
 
         return GuidedNewAnalysisDraftPlan(
             input_source_path=input_path,

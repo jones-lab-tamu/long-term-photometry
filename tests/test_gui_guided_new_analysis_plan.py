@@ -1330,8 +1330,8 @@ def test_new_analysis_run_preview_mixed_per_roi_strategies_subset_blocked_not_pl
 
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
-    assert "Draft plan completeness: incomplete" in preview_text
-    assert "mixed_dynamic_fit_modes_not_enabled" in preview_text
+    assert "Draft plan completeness: complete" in preview_text
+    assert "mixed_dynamic_fit_modes_execution_not_enabled" in preview_text
     assert "status: not executable under global_dynamic_fit_only.v1" in preview_text
     assert "Execution unavailable" in preview_text
     assert "ready to run" not in preview_text.lower()
@@ -1890,11 +1890,13 @@ def test_guided_new_analysis_preview_request_checks_4J11m(window, tmp_path, monk
     # 3. Missing strategy appears as a local blocking issue
     assert "[unsupported_correction_strategy]" in text
 
-    # 4. signal_only_f0 appears as a local blocking issue
+    # 4. Signal-Only F0 intent is supported, but still needs per-ROI choices.
     from gui.main_window import GUIDED_SIGNAL_ONLY_F0_CARD
     window._guided_correction_intent = GUIDED_SIGNAL_ONLY_F0_CARD
     window._refresh_guided_draft_run_plan_preview()
-    assert "[unsupported_correction_strategy]" in window._guided_draft_run_plan_preview_label.text()
+    signal_only_text = window._guided_draft_run_plan_preview_label.text()
+    assert "[unsupported_correction_strategy]" not in signal_only_text
+    assert "[missing_strategy_choice_for_included_roi]" in signal_only_text
 
     # 5. dynamic_fit with allowed mode passes local checks once output path is valid
     window._guided_correction_intent = "Global Linear Regression"

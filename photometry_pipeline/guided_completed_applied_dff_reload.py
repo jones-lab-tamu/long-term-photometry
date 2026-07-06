@@ -655,7 +655,6 @@ def load_guided_completed_applied_dff_state(run_dir: str | Path | None) -> Guide
         # Strategy validations
         choices = requested_strategy_map.get("per_roi_production_strategy_map", [])
         if isinstance(choices, list):
-            has_dynamic_fit = False
             dynamic_fit_modes = set()
             for idx, choice in enumerate(choices):
                 choice_roi = choice.get("roi_id")
@@ -681,7 +680,6 @@ def load_guided_completed_applied_dff_state(run_dir: str | Path | None) -> Guide
                     )
 
                 if choice_family == "dynamic_fit":
-                    has_dynamic_fit = True
                     if choice_df_mode:
                         dynamic_fit_modes.add(choice_df_mode)
                     if choice_selected != choice_df_mode:
@@ -692,15 +690,6 @@ def load_guided_completed_applied_dff_state(run_dir: str | Path | None) -> Guide
                                 message=f"selected_strategy '{choice_selected}' != dynamic_fit_mode '{choice_df_mode}' for ROI '{choice_roi}'",
                             )
                         )
-
-            if not has_dynamic_fit:
-                issues.append(
-                    GuidedCompletedAppliedDffIssue(
-                        category="applied_dff_provenance_no_dynamic_fit",
-                        severity="blocking",
-                        message="At least one dynamic_fit row is required. All-signal_only_f0 maps are unsupported.",
-                    )
-                )
 
             if len(dynamic_fit_modes) > 1:
                 issues.append(

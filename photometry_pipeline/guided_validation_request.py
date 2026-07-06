@@ -368,15 +368,6 @@ def validate_guided_validation_request(request: GuidedValidationRequest) -> list
             entry.get("strategy_family") for entry in included_entries
         }
         if request.applied_dff_orchestration_enabled:
-            if len(dynamic_modes) == 0 and len(families) > 0:
-                issues.append(GuidedPlanIssue(
-                    category="missing_dynamic_fit_strategy",
-                    message=(
-                        "At least one dynamic_fit strategy is required to "
-                        "provide a dynamic_fit_mode for the phasic pipeline."
-                    ),
-                    severity="blocking",
-                ))
             if len(dynamic_modes) > 1:
                 issues.append(GuidedPlanIssue(
                     category="mixed_dynamic_fit_modes_not_enabled",
@@ -424,17 +415,14 @@ def validate_guided_validation_request(request: GuidedValidationRequest) -> list
     if request.strategy_scope != "global":
         issues.append(GuidedPlanIssue(category="unsupported_strategy_scope", message="Only global strategy scope is supported.", severity="blocking"))
 
-    if request.global_correction_strategy != "dynamic_fit":
-        if request.global_correction_strategy == "signal_only_f0":
-            issues.append(GuidedPlanIssue(category="unsupported_correction_strategy", message="Signal-Only F0 routing is not supported in this validation subset.", severity="blocking"))
-        else:
-            issues.append(GuidedPlanIssue(category="unsupported_correction_strategy", message=f"Unsupported strategy: {request.global_correction_strategy}", severity="blocking"))
-    else:
+    if request.global_correction_strategy == "dynamic_fit":
         # Must have dynamic_fit_mode
         if not request.dynamic_fit_mode:
             issues.append(GuidedPlanIssue(category="missing_dynamic_fit_mode", message="Dynamic fit mode is missing.", severity="blocking"))
         elif request.dynamic_fit_mode not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
             issues.append(GuidedPlanIssue(category="unsupported_dynamic_fit_mode", message=f"Unsupported dynamic fit mode: {request.dynamic_fit_mode}", severity="blocking"))
+    elif request.global_correction_strategy != "signal_only_f0":
+        issues.append(GuidedPlanIssue(category="unsupported_correction_strategy", message=f"Unsupported strategy: {request.global_correction_strategy}", severity="blocking"))
 
     return issues
 
