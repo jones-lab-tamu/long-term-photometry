@@ -30,6 +30,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
+import numpy as np
 
 from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, QObject, QThread, Signal, QSignalBlocker
 from PySide6.QtGui import QAction, QColor, QFont, QPalette, QPixmap
@@ -2722,6 +2723,7 @@ class MainWindow(QMainWindow):
         button.setEnabled(ready)
         status_label.setText(message)
         self._refresh_guided_feature_detection_summary()
+        self._refresh_guided_feature_detection_preview_panel()
 
     def _guided_feature_detection_summary_text(self, plan=None) -> str:
         status = (
@@ -3991,6 +3993,7 @@ class MainWindow(QMainWindow):
         intro.setWordWrap(True)
         layout.addWidget(intro)
         layout.addWidget(self._build_guided_feature_event_profile_editor())
+        layout.addWidget(self._build_guided_feature_detection_preview_panel())
 
         self._guided_feature_detection_continue_status = QLabel(
             "Review and apply feature detection settings before continuing."
@@ -11899,8 +11902,290 @@ class MainWindow(QMainWindow):
                 self._invalidate_guided_backend_validation(
                     "feature detection settings changed"
                 )
+        self._clear_guided_feature_detection_preview_result("Settings changed. Re-generate preview to update.")
         self._refresh_guided_feature_detection_continue_state()
         self._refresh_guided_draft_run_plan_preview()
+
+    def _clear_guided_feature_detection_preview_result(self, reason: str = "") -> None:
+        if hasattr(self, "_guided_feature_preview_status_label"):
+            msg = reason if reason else "Select an ROI and generate preview."
+            self._guided_feature_preview_status_label.setText(msg)
+        if hasattr(self, "_guided_feature_preview_result_table"):
+            self._guided_feature_preview_result_table.setVisible(False)
+
+    def _build_guided_feature_detection_preview_panel(self) -> QGroupBox:
+        group = QGroupBox("Preview feature detection")
+        group.setObjectName("guidedFeatureDetectionPreviewPanel")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+
+        # 1. Plain-language note
+        note = QLabel(
+            "These settings currently apply to all included ROIs. Preview one "
+            "ROI at a time to see how the shared settings behave before "
+            "applying or continuing."
+        )
+        note.setObjectName("guidedFeatureDetectionPreviewNote")
+        note.setProperty("guidedSecondaryText", True)
+        note.setWordWrap(True)
+        self._make_guided_widget_shrinkable(note)
+        layout.addWidget(note)
+
+        # Controls row (ROI label, Combo, Segment label, Generate button)
+        controls_layout = QHBoxLayout()
+        controls_layout.setSpacing(10)
+
+        roi_label = QLabel("ROI:")
+        roi_label.setObjectName("guidedFeaturePreviewRoiLabel")
+        controls_layout.addWidget(roi_label)
+
+        self._guided_feature_preview_roi_combo = QComboBox()
+        self._guided_feature_preview_roi_combo.setObjectName("guidedFeaturePreviewRoiCombo")
+        self._guided_feature_preview_roi_combo.currentIndexChanged.connect(
+            lambda: self._clear_guided_feature_detection_preview_result()
+        )
+        self._make_guided_widget_shrinkable(self._guided_feature_preview_roi_combo)
+        controls_layout.addWidget(self._guided_feature_preview_roi_combo)
+
+        self._guided_feature_preview_segment_label = QLabel("Representative segment: none")
+        self._guided_feature_preview_segment_label.setObjectName("guidedFeaturePreviewSegmentLabel")
+        self._guided_feature_preview_segment_label.setProperty("guidedSecondaryText", True)
+        controls_layout.addWidget(self._guided_feature_preview_segment_label)
+
+        self._guided_feature_preview_generate_btn = QPushButton("Generate Preview")
+        self._guided_feature_preview_generate_btn.setObjectName("guidedFeaturePreviewGenerateButton")
+        self._guided_feature_preview_generate_btn.clicked.connect(self._on_guided_generate_feature_detection_preview)
+        controls_layout.addWidget(self._guided_feature_preview_generate_btn)
+        controls_layout.addStretch(1)
+        layout.addLayout(controls_layout)
+
+        # Status label
+        self._guided_feature_preview_status_label = QLabel("Select an ROI and generate preview.")
+        self._guided_feature_preview_status_label.setObjectName("guidedFeaturePreviewStatusLabel")
+        self._guided_feature_preview_status_label.setWordWrap(True)
+        self._make_guided_widget_shrinkable(self._guided_feature_preview_status_label)
+        layout.addWidget(self._guided_feature_preview_status_label)
+
+        # Table result display (10 rows, 2 columns)
+        self._guided_feature_preview_result_table = QTableWidget(10, 2)
+        self._guided_feature_preview_result_table.setObjectName("guidedFeaturePreviewResultTable")
+        self._guided_feature_preview_result_table.setHorizontalHeaderLabels(["Parameter", "Value"])
+        self._guided_feature_preview_result_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._guided_feature_preview_result_table.verticalHeader().setVisible(False)
+        self._guided_feature_preview_result_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._guided_feature_preview_result_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self._guided_feature_preview_result_table.setFixedHeight(230)
+        self._guided_feature_preview_result_table.setVisible(False)
+        layout.addWidget(self._guided_feature_preview_result_table)
+
+        return group
+
+    def _set_preview_table_row(self, row: int, parameter: str, value: str) -> None:
+        self._guided_feature_preview_result_table.setItem(row, 0, QTableWidgetItem(parameter))
+        self._guided_feature_preview_result_table.setItem(row, 1, QTableWidgetItem(value))
+
+    def _refresh_guided_feature_detection_preview_panel(self) -> None:
+        if not hasattr(self, "_guided_feature_preview_roi_combo"):
+            return
+
+        # Populate ROI selector with included ROIs
+        included_rois = list(self._guided_selected_roi_ids()[1])
+        current_roi = self._guided_feature_preview_roi_combo.currentText()
+
+        with QSignalBlocker(self._guided_feature_preview_roi_combo):
+            self._guided_feature_preview_roi_combo.clear()
+            for roi in included_rois:
+                self._guided_feature_preview_roi_combo.addItem(str(roi), str(roi))
+            if current_roi in included_rois:
+                self._guided_feature_preview_roi_combo.setCurrentText(current_roi)
+            elif included_rois:
+                self._guided_feature_preview_roi_combo.setCurrentIndex(0)
+
+        # Update segment label
+        segment = self._selected_guided_preview_segment()
+        if segment:
+            lbl = segment.get("segment_label") or str(segment.get("discovered_session_index", ""))
+            self._guided_feature_preview_segment_label.setText(f"Representative segment: {lbl}")
+            self._guided_feature_preview_generate_btn.setEnabled(len(included_rois) > 0)
+        else:
+            self._guided_feature_preview_segment_label.setText("Representative segment: none")
+            self._guided_feature_preview_generate_btn.setEnabled(False)
+            self._guided_feature_preview_status_label.setText("Please generate a correction preview in Step 4 first.")
+
+    def _build_guided_feature_detection_preview_context(self, roi_id: str) -> dict:
+        context = {
+            "dynamic_delta_f": {},
+            "signal_only_dff": {}
+        }
+
+        # Load local preview evidence for this ROI
+        evidence = self._guided_local_preview_evidence_for_roi(roi_id, require_current=True)
+        if not evidence or not isinstance(evidence, dict):
+            return context
+
+        result = evidence.get("result", {})
+        if not result or not isinstance(result, dict):
+            return context
+
+        # 3. Require evidence & result to be current and preview_only/production_analysis checks
+        provenance = evidence.get("provenance", {})
+        if not isinstance(provenance, dict):
+            return context
+        if result.get("preview_only") is not True or result.get("production_analysis") is not False:
+            return context
+        if provenance.get("preview_only") is not True or provenance.get("production_analysis") is not False:
+            return context
+
+        sig_only_evidence = result.get("signal_only_f0_preview_evidence", {})
+        if (
+            sig_only_evidence
+            and isinstance(sig_only_evidence, dict)
+            and sig_only_evidence.get("valid") is True
+            and sig_only_evidence.get("current_or_stale") == "current"
+        ):
+            time_sec = sig_only_evidence.get("time_sec")
+            preview_dff = sig_only_evidence.get("preview_dff")
+
+            if time_sec is not None and preview_dff is not None:
+                # 2. Do not invent fs_hz for <=1 sample traces. dt must be finite and >0.
+                if len(time_sec) < 2:
+                    return context
+
+                dt = np.diff(time_sec)
+                median_dt = np.median(dt)
+                if not np.isfinite(median_dt) or median_dt <= 0:
+                    return context
+
+                fs_hz = float(1.0 / median_dt)
+
+                context["signal_only_dff"][roi_id] = {
+                    "time_sec": time_sec,
+                    "trace": preview_dff,
+                    "fs_hz": fs_hz,
+                    "trace_identity": {"roi_id": roi_id, "source": "in_memory_preview"},
+                    "correction_identity": {"strategy": "signal_only_f0"},
+                    "current": True,
+                }
+        return context
+
+    def _on_guided_generate_feature_detection_preview(self) -> None:
+        roi_id = self._guided_feature_preview_roi_combo.currentText()
+        if not roi_id:
+            self._guided_feature_preview_status_label.setText("No ROI selected.")
+            self._guided_feature_preview_result_table.setVisible(False)
+            return
+
+        # Get confirmed correction strategy for this ROI
+        run_dir = self._current_guided_completed_run_dir()
+        choice_key = (run_dir, roi_id)
+        choices = getattr(self, "_guided_strategy_choices", {})
+        choice = choices.get(choice_key)
+        if not choice or not isinstance(choice, dict):
+            self._guided_feature_preview_status_label.setText(
+                f"Preview evidence for {roi_id} is not available in memory. "
+                "Return to Correction Approach and regenerate local preview, or proceed without preview."
+            )
+            self._guided_feature_preview_result_table.setVisible(False)
+            return
+
+        strategy = choice.get("strategy", "")
+
+        # Build request config from current editor settings
+        config_fields, err = self._guided_feature_event_current_values()
+        if err:
+            self._guided_feature_preview_status_label.setText(f"Invalid feature settings: {err}")
+            self._guided_feature_preview_result_table.setVisible(False)
+            return
+
+        from photometry_pipeline.guided_new_analysis_plan import FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+        from photometry_pipeline.guided_feature_detection_preview import (
+            GuidedFeaturePreviewTraceRequest,
+            build_guided_feature_detection_preview,
+            GuidedFeaturePreviewUnsupportedError,
+        )
+
+        # Map dynamic mode normalization
+        if strategy in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+            correction_strategy = "dynamic_fit"
+            dynamic_fit_mode = strategy
+        else:
+            correction_strategy = strategy
+            dynamic_fit_mode = ""
+
+        request = GuidedFeaturePreviewTraceRequest(
+            roi_id=roi_id,
+            event_signal=config_fields.get("event_signal", "delta_f"),
+            correction_strategy=correction_strategy,
+            dynamic_fit_mode=dynamic_fit_mode,
+            feature_settings=config_fields,
+            feature_profile_id="preview-profile",
+        )
+
+        # Build context
+        context = self._build_guided_feature_detection_preview_context(roi_id)
+
+        # Run preview
+        try:
+            result = build_guided_feature_detection_preview(
+                trace_request=request,
+                available_trace_context=context
+            )
+        except GuidedFeaturePreviewUnsupportedError as exc:
+            # Map specific plain language messages
+            exc_str = str(exc)
+            if correction_strategy == "dynamic_fit" and request.event_signal == "dff":
+                msg = (
+                    "Preview is not available for dynamic-fit dF/F before Run because the current local "
+                    "correction preview does not produce authoritative dF/F. Choose delta_f for preview, or proceed without preview."
+                )
+            elif correction_strategy == "signal_only_f0" and request.event_signal == "delta_f":
+                msg = (
+                    "Preview is not available for Signal-Only F0 with delta_f because no authoritative "
+                    "Signal-Only delta-F preview is defined."
+                )
+            elif correction_strategy == "dynamic_fit":
+                msg = (
+                    f"Preview evidence for this ROI is not available in memory. Return to Correction "
+                    "Approach and regenerate local preview, or proceed without preview."
+                )
+            elif "stale" in exc_str.lower() or choice.get("stale"):
+                msg = "Correction preview evidence is stale. Return to Correction Approach and reconfirm the ROI."
+            elif "not found" in exc_str or "No matching" in exc_str:
+                msg = (
+                    f"Preview evidence for {roi_id} is not available in memory. Return to Correction "
+                    "Approach and regenerate local preview, or proceed without preview."
+                )
+            else:
+                msg = exc_str
+            self._guided_feature_preview_status_label.setText(msg)
+            self._guided_feature_preview_result_table.setVisible(False)
+            return
+        except Exception as exc:
+            self._guided_feature_preview_status_label.setText(f"Preview generation failed: {exc}")
+            self._guided_feature_preview_result_table.setVisible(False)
+            return
+
+        # Success! Render results
+        pos_peaks = len(result.positive_peak_indices) if result.positive_peak_indices is not None else 0
+        neg_peaks = len(result.negative_peak_indices) if result.negative_peak_indices is not None else 0
+        total_peaks = pos_peaks + neg_peaks
+        thresh_up = f"{result.threshold_upper:.4f}" if result.threshold_upper is not None else "None"
+        thresh_low = f"{result.threshold_lower:.4f}" if result.threshold_lower is not None else "None"
+
+        self._set_preview_table_row(0, "ROI", result.roi_id)
+        self._set_preview_table_row(1, "Event Signal", result.event_signal)
+        self._set_preview_table_row(2, "Correction Strategy/Mode", f"{request.correction_strategy} / {request.dynamic_fit_mode or 'none'}")
+        self._set_preview_table_row(3, "Positive Events", str(pos_peaks))
+        self._set_preview_table_row(4, "Negative Events", str(neg_peaks))
+        self._set_preview_table_row(5, "Total Events", str(total_peaks))
+        self._set_preview_table_row(6, "Threshold Upper", thresh_up)
+        self._set_preview_table_row(7, "Threshold Lower", thresh_low)
+        self._set_preview_table_row(8, "Feature Settings Digest", result.feature_settings_digest)
+        self._set_preview_table_row(9, "Safety Status", "Preview-only (no files written)")
+
+        self._guided_feature_preview_result_table.setVisible(True)
+        self._guided_feature_preview_status_label.setText("Preview generated successfully.")
 
     def _on_guided_apply_feature_event_profile(self) -> None:
         if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
