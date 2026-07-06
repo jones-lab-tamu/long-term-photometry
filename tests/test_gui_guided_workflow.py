@@ -326,7 +326,8 @@ def test_guided_workflow_stepper_has_expected_steps(window):
     assert stepper.count() == len(GUIDED_WORKFLOW_STEPS)
     assert [stepper.item(i).data(0x0100) for i in range(stepper.count())] == list(GUIDED_WORKFLOW_STEPS)
     assert [stepper.item(i).text() for i in range(stepper.count())] == [
-        f"{idx}. {step}" for idx, step in enumerate(GUIDED_WORKFLOW_STEPS, start=1)
+        f"{idx}. {main_window_module.GUIDED_WORKFLOW_STEP_DISPLAY_LABELS.get(step, step)}"
+        for idx, step in enumerate(GUIDED_WORKFLOW_STEPS, start=1)
     ]
 
 

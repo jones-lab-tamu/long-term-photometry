@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtWidgets import QApplication, QGroupBox, QWidget
 
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
 from photometry_pipeline.guided_new_analysis_plan import (
@@ -267,6 +267,307 @@ def test_new_analysis_draft_plan_displays_summary_fields(window, tmp_path, monke
     assert "Draft plan completeness: incomplete for future RunSpec handoff" in summary_text
     assert "Execution: unavailable, Final Guided Run/RunSpec is not implemented in this stage." in summary_text
     assert "This draft plan is not executable yet. Final Run is not implemented in this stage." in summary_text
+    assert "Plan completeness: Needs attention" in (
+        window._guided_review_plan_status_label.text()
+    )
+    attention = window._guided_review_attention_label.text()
+    assert "Feature detection settings" in attention
+    assert "Output destination" in attention
+    assert window._guided_review_attention_group.isHidden() is False
+
+
+def test_review_plan_page_has_scientist_facing_hierarchy(window):
+    draft_index = list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    window._guided_workflow_stepper.setCurrentRow(draft_index)
+    draft_widget = window._guided_workflow_stack.widget(draft_index)
+    intro = draft_widget.findChild(
+        QWidget, "guidedDraftPlanStepExplanation"
+    )
+
+    assert "Review the analysis plan" in intro.text()
+    assert "No analysis files have been written yet" in intro.text()
+    assert "in-memory GuidedRunPlan" not in intro.text()
+    assert "Review Plan" in (
+        window._guided_workflow_stepper.item(draft_index).text()
+    )
+    assert "Draft plan" not in (
+        window._guided_workflow_stepper.item(draft_index).text()
+    )
+    assert not (
+        window._guided_workflow_stepper.item(
+            list(GUIDED_WORKFLOW_STEPS).index("Run")
+        ).flags()
+        & Qt.ItemIsEnabled
+    )
+
+    object_names = [
+        "guidedReviewPlanStatusPanel",
+        "guidedReviewAnalysisSummaryPanel",
+        "guidedReviewCorrectionPlanPanel",
+        "guidedFeatureEventProfileEditorPanel",
+        "guidedReviewOutputStatusPanel",
+        "guidedOutputDestinationPanel",
+        "guidedReviewNextStepPanel",
+        "guidedReviewAdvancedDetailsPanel",
+    ]
+    groups = [
+        draft_widget.findChild(QGroupBox, object_name)
+        for object_name in object_names
+    ]
+    assert all(group is not None for group in groups)
+    positions = [group.mapToGlobal(QPoint(0, 0)).y() for group in groups]
+    assert positions == sorted(positions)
+    assert window._guided_review_advanced_toggle.isChecked() is False
+    assert window._guided_review_advanced_content.isHidden() is True
+    feature_summary = (
+        window._guided_review_feature_detection_summary_label.text()
+    )
+    assert "Status:" in feature_summary
+    assert "Event signal:" in feature_summary
+    assert "Threshold:" in feature_summary
+    assert "AUC baseline:" in feature_summary
+    window._guided_review_advanced_toggle.click()
+    assert window._guided_review_advanced_content.isHidden() is False
+    assert draft_widget.findChild(
+        QWidget, "guidedPlanReadinessSummaryPanel"
+    ) is not None
+
+
+def _render_review_checkpoint(window, plan):
+    readiness = evaluate_new_analysis_plan_readiness(plan)
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    window._refresh_guided_review_plan_checkpoint(
+        plan, readiness, subset
+    )
+    return readiness, subset
+
+
+def test_review_plan_dynamic_and_mixed_modes_are_plainly_separated(
+    window,
+):
+    dynamic = _complete_new_analysis_plan_for_gui()
+    readiness, _subset = _render_review_checkpoint(window, dynamic)
+    assert readiness.plan_complete_for_handoff is True
+    assert "Plan completeness: Complete" in (
+        window._guided_review_plan_status_label.text()
+    )
+    assert "CH1" in window._guided_review_analysis_summary_label.text()
+    assert "Files written so far: none" in (
+        window._guided_review_output_status_label.text()
+    )
+
+    mixed = _complete_new_analysis_plan_for_gui(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="CH1",
+                selected_strategy="adaptive_event_gated_regression",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+            GuidedPlanCorrectionChoice(
+                roi_id="CH2",
+                selected_strategy="global_linear_regression",
+                source_type="diagnostic_cache",
+                diagnostic_cache_id="cache-1",
+                diagnostic_cache_root="C:/cache",
+                source_setup_signature="setup-1",
+                diagnostic_scope_signature="scope-1",
+                build_request_signature="build-1",
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+        ],
+    )
+    readiness, subset = _render_review_checkpoint(window, mixed)
+
+    assert readiness.plan_complete_for_handoff is True
+    assert subset.first_subset_executable is False
+    status = window._guided_review_plan_status_label.text()
+    next_step = window._guided_review_next_step_label.text()
+    assert "Plan completeness: Complete" in status
+    assert "multiple dynamic-fit modes" in status
+    assert "multiple dynamic-fit modes" in next_step
+    assert "local setup issue" not in status.lower()
+    assert "mixed_dynamic_fit_modes" not in status
+
+
+def test_review_plan_mixed_and_all_signal_only_rows_are_planning_valid(
+    window,
+):
+    dynamic_evidence = {
+        "evidence_source_type": "local_correction_preview",
+        "preview_only": True,
+        "production_analysis": False,
+        "preview_id": "preview-1",
+        "roi": "CH1",
+    }
+    signal_evidence = {
+        "evidence_source_type": "local_preview",
+        "preview_only": True,
+        "production_analysis": False,
+        "preview_id": "preview-2",
+        "roi": "CH2",
+        "roi_id": "CH2",
+        "strategy_family": "signal_only_f0",
+        "selected_strategy": "signal_only_f0",
+        "dynamic_fit_mode": None,
+        "valid": True,
+        "current_or_stale": "current",
+    }
+    mixed = _complete_new_analysis_plan_for_gui(
+        cache_id=None,
+        cache_root_path=None,
+        artifact_record_path=None,
+        provenance_path=None,
+        stale_or_current="missing",
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        applied_dff_orchestration_enabled=True,
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="CH1",
+                selected_strategy="global_linear_regression",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+                evidence_reference=dynamic_evidence,
+            ),
+            GuidedPlanCorrectionChoice(
+                roi_id="CH2",
+                selected_strategy="signal_only_f0",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+                evidence_reference=signal_evidence,
+            ),
+        ],
+    )
+    readiness, _subset = _render_review_checkpoint(window, mixed)
+    correction_text = " ".join(
+        label.text()
+        for label in window._guided_review_correction_plan_layout.parentWidget().findChildren(
+            QWidget
+        )
+        if hasattr(label, "text")
+    )
+    assert readiness.plan_complete_for_handoff is True
+    assert "Global Linear Regression" in correction_text
+    assert "Signal-Only F0" in correction_text
+    assert "Confirmed, current" in correction_text
+
+    all_signal = _complete_new_analysis_plan_for_gui(
+        cache_id=None,
+        cache_root_path=None,
+        artifact_record_path=None,
+        provenance_path=None,
+        stale_or_current="missing",
+        global_correction_strategy="signal_only_f0",
+        dynamic_fit_mode=None,
+        applied_dff_orchestration_enabled=True,
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="CH1",
+                selected_strategy="signal_only_f0",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+                evidence_reference={
+                    **signal_evidence,
+                    "roi": "CH1",
+                    "roi_id": "CH1",
+                },
+            )
+        ],
+    )
+    readiness, _subset = _render_review_checkpoint(window, all_signal)
+    assert readiness.plan_complete_for_handoff is True
+    assert "Plan completeness: Complete" in (
+        window._guided_review_plan_status_label.text()
+    )
+    assert "all-Signal-Only F0" in (
+        window._guided_review_next_step_label.text()
+    )
+    assert "at least one dynamic" not in (
+        window._guided_review_next_step_label.text().lower()
+    )
+
+
+def test_review_plan_stale_and_invalid_signal_evidence_need_attention(
+    window,
+):
+    stale = _complete_new_analysis_plan_for_gui(
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="CH1",
+                selected_strategy="global_linear_regression",
+                source_type="local_correction_preview",
+                current_or_stale="stale",
+                explicit_user_mark=True,
+                evidence_reference={
+                    "evidence_source_type": "local_correction_preview",
+                    "preview_only": True,
+                    "production_analysis": False,
+                },
+            )
+        ]
+    )
+    readiness, _subset = _render_review_checkpoint(window, stale)
+    assert readiness.plan_complete_for_handoff is False
+    assert "Plan completeness: Needs attention" in (
+        window._guided_review_plan_status_label.text()
+    )
+    correction_text = " ".join(
+        label.text()
+        for label in window._guided_review_correction_plan_layout.parentWidget().findChildren(
+            QWidget
+        )
+        if hasattr(label, "text")
+    )
+    assert "Needs reconfirmation" in correction_text
+    assert "Return to Correction Approach" in (
+        window._guided_review_attention_label.text()
+    )
+
+    invalid_signal = _complete_new_analysis_plan_for_gui(
+        global_correction_strategy="signal_only_f0",
+        dynamic_fit_mode=None,
+        applied_dff_orchestration_enabled=True,
+        per_roi_correction_strategy_choices=[
+            GuidedPlanCorrectionChoice(
+                roi_id="CH1",
+                selected_strategy="signal_only_f0",
+                source_type="local_correction_preview",
+                current_or_stale="current",
+                explicit_user_mark=True,
+                evidence_reference={
+                    "evidence_source_type": "local_preview",
+                    "preview_only": True,
+                    "production_analysis": False,
+                    "strategy_family": "signal_only_f0",
+                    "selected_strategy": "signal_only_f0",
+                    "dynamic_fit_mode": None,
+                    "valid": False,
+                    "current_or_stale": "current",
+                },
+            )
+        ],
+    )
+    readiness, _subset = _render_review_checkpoint(window, invalid_signal)
+    assert readiness.plan_complete_for_handoff is False
+    assert "Signal-Only F0 requires current local preview evidence" in (
+        window._guided_review_next_step_label.text()
+    )
+    assert "Signal-Only F0 requires current local preview evidence" in (
+        window._guided_review_attention_label.text()
+    )
 
 
 def test_new_analysis_readiness_rendering_separates_planning_complete_from_execution_unavailable(window):

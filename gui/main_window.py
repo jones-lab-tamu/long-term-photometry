@@ -165,6 +165,9 @@ GUIDED_WORKFLOW_STEPS = (
     "Run",
     "Review",
 )
+GUIDED_WORKFLOW_STEP_DISPLAY_LABELS = {
+    "Draft plan": "Review Plan",
+}
 GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE = {
     "Robust Global Event-Reject Fit": "robust_global_event_reject",
     "Adaptive Event-Gated Fit": "adaptive_event_gated_regression",
@@ -1679,7 +1682,10 @@ class MainWindow(QMainWindow):
         self._guided_workflow_stepper = QListWidget()
         self._guided_workflow_stepper.setObjectName("guidedWorkflowStepper")
         for idx, step in enumerate(GUIDED_WORKFLOW_STEPS, start=1):
-            item = QListWidgetItem(f"{idx}. {step}")
+            display_step = GUIDED_WORKFLOW_STEP_DISPLAY_LABELS.get(
+                step, step
+            )
+            item = QListWidgetItem(f"{idx}. {display_step}")
             item.setData(Qt.UserRole, step)
             self._guided_workflow_stepper.addItem(item)
         self._guided_workflow_stepper.setCurrentRow(0)
@@ -9141,6 +9147,9 @@ class MainWindow(QMainWindow):
             run_preview = build_guided_new_analysis_run_preview(plan)
             execution_spec_preview = build_guided_new_analysis_execution_spec_preview(plan)
             subset_readiness = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+            self._refresh_guided_review_plan_checkpoint(
+                plan, readiness, subset_readiness
+            )
             label.setText(self._guided_new_analysis_draft_plan_summary_text(plan, readiness))
             label.setToolTip("")
 
@@ -9192,6 +9201,329 @@ class MainWindow(QMainWindow):
                 readiness_label.setToolTip("")
 
         self._refresh_guided_draft_run_plan_checklist(plan, errors)
+
+    @staticmethod
+    def _guided_review_attention_items(readiness) -> list[str]:
+        """Translate planning blockers into concise scientist-facing actions."""
+        categories = {
+            issue.category for issue in readiness.blocking_issues
+        }
+        actions: list[str] = []
+        if categories & {
+            "missing_input_source",
+            "invalid_or_missing_input_format",
+            "missing_or_invalid_acquisition_structure",
+        }:
+            actions.append(
+                "Data or recording structure is incomplete. Return to Select "
+                "Data or Recording Structure and complete the required setup."
+            )
+        if categories & {"no_roi_inventory", "no_included_rois"}:
+            actions.append(
+                "No ROIs are included. Return to Select Data and include at "
+                "least one ROI."
+            )
+        if categories & {
+            "missing_strategy_choice_for_included_roi",
+            "stale_strategy_choice",
+        }:
+            actions.append(
+                "One or more correction choices are missing or changed after "
+                "confirmation. Return to Correction Approach and reconfirm "
+                "the affected ROI."
+            )
+        if categories & {
+            "signal_only_f0_preview_evidence_missing",
+            "signal_only_f0_preview_evidence_invalid",
+            "signal_only_f0_preview_evidence_stale",
+        }:
+            actions.append(
+                "Signal-Only F0 requires current local preview evidence. "
+                "Return to Correction Approach and regenerate or reconfirm "
+                "the affected ROI."
+            )
+        if categories & {
+            "missing_feature_event_profile",
+            "feature_event_profile_not_applied",
+            "invalid_feature_event_profile",
+            "stale_feature_event_profile",
+        }:
+            actions.append(
+                "Feature detection settings have not been applied or need "
+                "attention. Review and apply Feature detection settings "
+                "before validation."
+            )
+        if categories & {
+            "missing_output_policy",
+            "output_policy_not_applied",
+            "invalid_output_policy",
+            "stale_output_policy",
+        }:
+            actions.append(
+                "Output destination is not set or needs attention. Choose "
+                "where results should be written later and apply it."
+            )
+        if categories & {
+            "missing_diagnostic_cache",
+            "stale_diagnostic_cache",
+        }:
+            actions.append(
+                "Reusable correction evidence is missing or stale. Return to "
+                "Correction Approach and refresh the required evidence."
+            )
+        if not actions:
+            actions.append(
+                "The plan has unresolved setup details. Review the highlighted "
+                "sections below before validation."
+            )
+        return actions[:5]
+
+    def _refresh_guided_review_plan_checkpoint(
+        self, plan, readiness, subset_readiness
+    ) -> None:
+        """Render the scientist-facing Step 5 review without mutating plan state."""
+        status_label = getattr(
+            self, "_guided_review_plan_status_label", None
+        )
+        if status_label is None:
+            return
+
+        execution_categories = {
+            issue.category for issue in subset_readiness.blocking_issues
+        }
+        if readiness.plan_complete_for_handoff:
+            completeness = "Plan completeness: Complete"
+            if (
+                "mixed_dynamic_fit_modes_execution_not_enabled"
+                in execution_categories
+            ):
+                availability = (
+                    "Execution availability: Complete but not currently "
+                    "executable. The current backend validation/run route does "
+                    "not yet support multiple dynamic-fit modes in one run."
+                )
+            elif (
+                "all_signal_only_f0_backend_validation_not_enabled"
+                in execution_categories
+            ):
+                availability = (
+                    "Execution availability: Complete but not currently "
+                    "executable. Backend validation for all-Signal-Only F0 is "
+                    "not enabled yet."
+                )
+            elif subset_readiness.first_subset_executable:
+                availability = (
+                    "Execution availability: Ready for validation. "
+                    "Validate/Run controls are not enabled in this patch."
+                )
+            else:
+                availability = (
+                    "Execution availability: Complete but not currently "
+                    "executable by the available backend route."
+                )
+        else:
+            completeness = "Plan completeness: Needs attention"
+            availability = (
+                "Execution availability: Not ready because the plan needs "
+                "attention."
+            )
+        status_label.setText(f"{completeness}\n{availability}")
+        if readiness.plan_complete_for_handoff:
+            self._guided_review_attention_group.setVisible(False)
+            self._guided_review_attention_label.setText("")
+        else:
+            actions = self._guided_review_attention_items(readiness)
+            self._guided_review_attention_label.setText(
+                "\n".join(f"• {action}" for action in actions)
+            )
+            self._guided_review_attention_group.setVisible(True)
+
+        sessions = list(
+            (getattr(self, "_discovery_cache", None) or {}).get(
+                "sessions", ()
+            )
+            or ()
+        )
+        if plan.acquisition_mode == "intermittent":
+            timing = (
+                f"{plan.sessions_per_hour or 'not set'} sessions/hour, "
+                f"{plan.session_duration_sec or 'not set'} s/session"
+            )
+        else:
+            timing = (
+                f"{plan.continuous_window_sec or 'not set'} s windows"
+            )
+        included = ", ".join(plan.included_roi_ids) or "none"
+        excluded = ", ".join(plan.excluded_roi_ids) or "none"
+        self._guided_review_analysis_summary_label.setText(
+            f"Dataset/input folder: {plan.input_source_path or 'not set'}\n"
+            f"Input format: {plan.input_format or 'not set'}\n"
+            f"Acquisition mode: {plan.acquisition_mode or 'not set'}\n"
+            f"Recording structure: {timing}\n"
+            f"Sessions discovered: {len(sessions) if sessions else 'not available'}\n"
+            f"Included ROIs: {included}\n"
+            f"Excluded ROIs: {excluded}"
+        )
+
+        feature_status = str(plan.feature_event_profile_status or "missing")
+        if feature_status == "applied" and plan.feature_event_explicitly_applied:
+            feature_display = "Applied"
+            feature_action = "Feature detection settings are part of this plan."
+        elif feature_status == "default_initialized":
+            feature_display = "Not applied"
+            feature_action = (
+                "Review and apply feature detection settings before validation."
+            )
+        else:
+            feature_display = "Needs attention"
+            feature_action = (
+                "Review and apply feature detection settings before validation."
+            )
+        threshold_method = (
+            self._guided_feature_event_peak_method_combo.currentText()
+        )
+        if threshold_method == "percentile":
+            threshold_value = (
+                self._guided_feature_event_peak_pct_edit.text()
+            )
+        elif threshold_method == "absolute":
+            threshold_value = (
+                self._guided_feature_event_peak_abs_edit.text()
+            )
+        else:
+            threshold_value = self._guided_feature_event_peak_k_edit.text()
+        self._guided_review_feature_detection_summary_label.setText(
+            f"Status: {feature_display}\n"
+            f"Event signal: {self._guided_feature_event_signal_combo.currentText()}\n"
+            f"Polarity: {self._guided_feature_event_polarity_combo.currentText()}\n"
+            f"Threshold: {threshold_method} ({threshold_value})\n"
+            "Minimum distance: "
+            f"{self._guided_feature_event_peak_distance_edit.text()} s; "
+            "minimum prominence: "
+            f"{self._guided_feature_event_peak_prominence_edit.text()}; "
+            f"minimum width: {self._guided_feature_event_peak_width_edit.text()} s\n"
+            f"AUC baseline: {self._guided_feature_event_auc_baseline_combo.currentText()}\n"
+            f"{feature_action}"
+        )
+
+        correction_layout = self._guided_review_correction_plan_layout
+        while correction_layout.count():
+            item = correction_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for column, heading in enumerate(
+            ("ROI", "Correction strategy", "Evidence status", "Notes")
+        ):
+            label = QLabel(heading)
+            label.setProperty("guidedTableHeader", True)
+            correction_layout.addWidget(label, 0, column)
+
+        choices_by_roi = {
+            choice.roi_id: choice
+            for choice in plan.per_roi_correction_strategy_choices
+        }
+        for row, roi in enumerate(plan.included_roi_ids, start=1):
+            choice = choices_by_roi.get(roi)
+            if choice is None:
+                strategy = "Not selected"
+                evidence_status = "Needs confirmation"
+                notes = "Return to Correction Approach."
+            else:
+                strategy = self._guided_confirm_strategy_label(
+                    choice.selected_strategy
+                )
+                reference = (
+                    choice.evidence_reference
+                    if isinstance(choice.evidence_reference, dict)
+                    else {}
+                )
+                if choice.current_or_stale != "current":
+                    evidence_status = "Needs reconfirmation"
+                    notes = "Preview evidence is stale or the choice changed."
+                elif choice.selected_strategy == "signal_only_f0" and not (
+                    reference.get("valid") is True
+                    and reference.get("current_or_stale") == "current"
+                    and reference.get("preview_only") is True
+                    and reference.get("production_analysis") is False
+                ):
+                    evidence_status = "Needs attention"
+                    notes = (
+                        "Signal-Only F0 requires current local preview evidence."
+                    )
+                elif choice.explicit_user_mark:
+                    evidence_status = "Confirmed, current"
+                    notes = (
+                        "Uses signal-only baseline"
+                        if choice.selected_strategy == "signal_only_f0"
+                        else "Dynamic fit"
+                    )
+                else:
+                    evidence_status = "Needs confirmation"
+                    notes = "Return to Correction Approach."
+            for column, text in enumerate(
+                (roi, strategy, evidence_status, notes)
+            ):
+                label = QLabel(str(text))
+                label.setWordWrap(True)
+                correction_layout.addWidget(label, row, column)
+
+        output_path = plan.output_policy_path or plan.output_base_path
+        self._guided_review_output_status_label.setText(
+            f"Output destination: {output_path or 'not set'}\n"
+            "Files written so far: none"
+        )
+
+        if not readiness.plan_complete_for_handoff:
+            signal_issue = any(
+                issue.category
+                in {
+                    "signal_only_f0_preview_evidence_missing",
+                    "signal_only_f0_preview_evidence_invalid",
+                    "signal_only_f0_preview_evidence_stale",
+                }
+                for issue in readiness.blocking_issues
+            )
+            if signal_issue:
+                next_text = (
+                    "This plan needs attention before validation. Signal-Only "
+                    "F0 requires current local preview evidence. Return to "
+                    "Correction Approach and reconfirm the affected ROI."
+                )
+            else:
+                next_text = (
+                    "This plan needs attention before validation. Return to "
+                    "the indicated step and update the highlighted choices."
+                )
+        elif (
+            "mixed_dynamic_fit_modes_execution_not_enabled"
+            in execution_categories
+        ):
+            next_text = (
+                "This plan is complete, but the current backend "
+                "validation/run route does not yet support multiple "
+                "dynamic-fit modes in one run."
+            )
+        elif (
+            "all_signal_only_f0_backend_validation_not_enabled"
+            in execution_categories
+        ):
+            next_text = (
+                "This plan is complete, but backend validation for "
+                "all-Signal-Only F0 is not enabled yet."
+            )
+        elif subset_readiness.first_subset_executable:
+            next_text = (
+                "This plan is ready for validation. Validate/Run controls are "
+                "not enabled in this patch."
+            )
+        else:
+            next_text = (
+                "This plan is complete, but the current backend route cannot "
+                "execute it yet. See Advanced details for the technical "
+                "limitations."
+            )
+        self._guided_review_next_step_label.setText(next_text)
 
     def _guided_dataset_contract_now_utc(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -11929,22 +12261,34 @@ class MainWindow(QMainWindow):
         self._refresh_guided_draft_run_plan_preview()
 
     def _build_guided_feature_event_profile_editor(self) -> QGroupBox:
-        group = QGroupBox("Feature/event profile")
+        group = QGroupBox("Feature detection")
         group.setObjectName("guidedFeatureEventProfileEditorPanel")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
 
         note = QLabel(
-            "Run-level draft profile only.\n"
-            "Preview only; does not extract features or write outputs.\n"
-            "Apply explicitly to add/update the draft plan profile."
+            "These settings define downstream event detection and feature "
+            "extraction. Review and apply them before validation. Applying "
+            "settings updates only this in-memory plan and writes no outputs."
         )
         note.setObjectName("guidedFeatureEventProfileEditorNote")
         note.setProperty("guidedSecondaryText", True)
         note.setWordWrap(True)
         self._make_guided_widget_shrinkable(note)
         layout.addWidget(note)
+
+        self._guided_review_feature_detection_summary_label = QLabel("")
+        self._guided_review_feature_detection_summary_label.setObjectName(
+            "guidedReviewFeatureDetectionSummary"
+        )
+        self._guided_review_feature_detection_summary_label.setWordWrap(True)
+        self._guided_review_feature_detection_summary_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        layout.addWidget(
+            self._guided_review_feature_detection_summary_label
+        )
 
         defaults = self._guided_feature_event_editor_defaults()
         form = QFormLayout()
@@ -12422,7 +12766,10 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
 
         explain_label = QLabel(
-            "Review and export the in-memory GuidedRunPlan. This does not run analysis."
+            "Review the analysis plan assembled from the previous steps. "
+            "Check that the dataset, recording structure, ROIs, and correction "
+            "choices match your intended analysis. No analysis files have "
+            "been written yet."
         )
         explain_label.setObjectName("guidedDraftPlanStepExplanation")
         explain_label.setProperty("guidedSecondaryText", True)
@@ -12430,13 +12777,135 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(explain_label)
         layout.addWidget(explain_label)
 
-        layout.addWidget(self._build_guided_dataset_contract_panel())
-        layout.addWidget(self._build_guided_feature_event_profile_editor())
-        layout.addWidget(self._build_guided_output_policy_editor())
-        layout.addWidget(self._build_guided_draft_plan_export_editor())
-        layout.addWidget(self._build_guided_imported_plan_review_panel())
+        plan_status_group = QGroupBox("Plan status")
+        plan_status_group.setObjectName("guidedReviewPlanStatusPanel")
+        plan_status_layout = QVBoxLayout(plan_status_group)
+        plan_status_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_review_plan_status_label = QLabel("")
+        self._guided_review_plan_status_label.setObjectName(
+            "guidedReviewPlanStatus"
+        )
+        self._guided_review_plan_status_label.setWordWrap(True)
+        self._guided_review_plan_status_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        plan_status_layout.addWidget(self._guided_review_plan_status_label)
+        layout.addWidget(plan_status_group)
 
-        readiness_group = QGroupBox("Plan readiness summary")
+        self._guided_review_attention_group = QGroupBox(
+            "What needs attention"
+        )
+        self._guided_review_attention_group.setObjectName(
+            "guidedReviewAttentionPanel"
+        )
+        attention_layout = QVBoxLayout(
+            self._guided_review_attention_group
+        )
+        attention_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_review_attention_label = QLabel("")
+        self._guided_review_attention_label.setObjectName(
+            "guidedReviewAttention"
+        )
+        self._guided_review_attention_label.setWordWrap(True)
+        self._guided_review_attention_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        attention_layout.addWidget(self._guided_review_attention_label)
+        self._guided_review_attention_group.setVisible(False)
+        layout.addWidget(self._guided_review_attention_group)
+
+        analysis_group = QGroupBox("Analysis summary")
+        analysis_group.setObjectName("guidedReviewAnalysisSummaryPanel")
+        analysis_layout = QVBoxLayout(analysis_group)
+        analysis_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_review_analysis_summary_label = QLabel("")
+        self._guided_review_analysis_summary_label.setObjectName(
+            "guidedReviewAnalysisSummary"
+        )
+        self._guided_review_analysis_summary_label.setWordWrap(True)
+        self._guided_review_analysis_summary_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        analysis_layout.addWidget(self._guided_review_analysis_summary_label)
+        layout.addWidget(analysis_group)
+
+        correction_group = QGroupBox("Correction plan")
+        correction_group.setObjectName("guidedReviewCorrectionPlanPanel")
+        self._guided_review_correction_plan_layout = QGridLayout(
+            correction_group
+        )
+        self._guided_review_correction_plan_layout.setContentsMargins(
+            10, 8, 10, 8
+        )
+        layout.addWidget(correction_group)
+
+        layout.addWidget(self._build_guided_feature_event_profile_editor())
+
+        output_group = QGroupBox("Output destination")
+        output_group.setObjectName("guidedReviewOutputStatusPanel")
+        output_layout = QVBoxLayout(output_group)
+        output_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_review_output_status_label = QLabel("")
+        self._guided_review_output_status_label.setObjectName(
+            "guidedReviewOutputStatus"
+        )
+        self._guided_review_output_status_label.setWordWrap(True)
+        self._guided_review_output_status_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        output_layout.addWidget(self._guided_review_output_status_label)
+        layout.addWidget(output_group)
+        layout.addWidget(self._build_guided_output_policy_editor())
+
+        next_group = QGroupBox("Next step")
+        next_group.setObjectName("guidedReviewNextStepPanel")
+        next_layout = QVBoxLayout(next_group)
+        next_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_review_next_step_label = QLabel("")
+        self._guided_review_next_step_label.setObjectName(
+            "guidedReviewNextStep"
+        )
+        self._guided_review_next_step_label.setWordWrap(True)
+        self._guided_review_next_step_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        next_layout.addWidget(self._guided_review_next_step_label)
+        layout.addWidget(next_group)
+
+        advanced_group = QGroupBox("Advanced details")
+        advanced_group.setObjectName("guidedReviewAdvancedDetailsPanel")
+        advanced_layout = QVBoxLayout(advanced_group)
+        advanced_layout.setContentsMargins(10, 8, 10, 8)
+        advanced_layout.setSpacing(10)
+        self._guided_review_advanced_toggle = QPushButton(
+            "Show advanced details"
+        )
+        self._guided_review_advanced_toggle.setObjectName(
+            "guidedReviewAdvancedDetailsToggle"
+        )
+        self._guided_review_advanced_toggle.setCheckable(True)
+        advanced_layout.addWidget(
+            self._guided_review_advanced_toggle,
+            alignment=Qt.AlignLeft,
+        )
+        self._guided_review_advanced_content = QWidget()
+        advanced_content_layout = QVBoxLayout(
+            self._guided_review_advanced_content
+        )
+        advanced_content_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_content_layout.setSpacing(10)
+
+        advanced_content_layout.addWidget(
+            self._build_guided_dataset_contract_panel()
+        )
+        advanced_content_layout.addWidget(
+            self._build_guided_draft_plan_export_editor()
+        )
+        advanced_content_layout.addWidget(
+            self._build_guided_imported_plan_review_panel()
+        )
+
+        readiness_group = QGroupBox("Technical plan readiness")
         readiness_group.setObjectName("guidedPlanReadinessSummaryPanel")
         readiness_layout = QVBoxLayout(readiness_group)
         readiness_layout.setContentsMargins(10, 8, 10, 8)
@@ -12447,9 +12916,9 @@ class MainWindow(QMainWindow):
         self._guided_plan_readiness_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._make_guided_widget_shrinkable(self._guided_plan_readiness_summary_label)
         readiness_layout.addWidget(self._guided_plan_readiness_summary_label)
-        layout.addWidget(readiness_group)
+        advanced_content_layout.addWidget(readiness_group)
 
-        draft_group = QGroupBox("Draft run-plan preview")
+        draft_group = QGroupBox("Technical draft-plan preview")
         draft_group.setObjectName("guidedDraftRunPlanPreviewPanel")
         draft_layout = QVBoxLayout(draft_group)
         draft_layout.setContentsMargins(10, 8, 10, 8)
@@ -12460,7 +12929,7 @@ class MainWindow(QMainWindow):
         self._guided_draft_run_plan_preview_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._make_guided_widget_shrinkable(self._guided_draft_run_plan_preview_label)
         draft_layout.addWidget(self._guided_draft_run_plan_preview_label)
-        layout.addWidget(draft_group)
+        advanced_content_layout.addWidget(draft_group)
 
         self._guided_new_analysis_run_preview_group = QGroupBox("Non-executing run preview")
         self._guided_new_analysis_run_preview_group.setObjectName("guidedNewAnalysisRunPreviewPanel")
@@ -12474,9 +12943,11 @@ class MainWindow(QMainWindow):
         self._guided_new_analysis_run_preview_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._make_guided_widget_shrinkable(self._guided_new_analysis_run_preview_label)
         run_preview_layout.addWidget(self._guided_new_analysis_run_preview_label)
-        layout.addWidget(self._guided_new_analysis_run_preview_group)
+        advanced_content_layout.addWidget(
+            self._guided_new_analysis_run_preview_group
+        )
 
-        checklist_group = QGroupBox("Draft plan checklist")
+        checklist_group = QGroupBox("Technical draft-plan checklist")
         checklist_group.setObjectName("guidedDraftRunPlanChecklistPanel")
         checklist_layout = QVBoxLayout(checklist_group)
         checklist_layout.setContentsMargins(10, 8, 10, 8)
@@ -12487,12 +12958,26 @@ class MainWindow(QMainWindow):
         self._guided_draft_run_plan_checklist_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._make_guided_widget_shrinkable(self._guided_draft_run_plan_checklist_label)
         checklist_layout.addWidget(self._guided_draft_run_plan_checklist_label)
-        layout.addWidget(checklist_group)
+        advanced_content_layout.addWidget(checklist_group)
+
+        advanced_layout.addWidget(self._guided_review_advanced_content)
+        self._guided_review_advanced_content.setVisible(False)
+        self._guided_review_advanced_toggle.toggled.connect(
+            self._guided_review_advanced_content.setVisible
+        )
+        self._guided_review_advanced_toggle.toggled.connect(
+            lambda checked: self._guided_review_advanced_toggle.setText(
+                "Hide advanced details"
+                if checked
+                else "Show advanced details"
+            )
+        )
+        layout.addWidget(advanced_group)
 
         self._refresh_guided_confirm_strategy_panel()
         return self._build_guided_step_scroll(
             "guidedStepDraftPlan",
-            "Draft plan",
+            "Review Plan",
             [],
             wrapper,
         )
