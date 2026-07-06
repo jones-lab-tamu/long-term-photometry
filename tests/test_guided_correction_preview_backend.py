@@ -22,9 +22,45 @@ from photometry_pipeline.guided_diagnostic_cache import (
     write_build_request_json,
     write_json_file,
 )
+from photometry_pipeline.config import Config
+from photometry_pipeline.core.types import Chunk
 
 
 PREVIEW_ID = "preview_20260617T010203Z_abcd1234"
+
+
+def test_local_dynamic_fit_preview_dff_uses_fractional_ratio_units():
+    chunk = Chunk(
+        chunk_id=0,
+        source_file="memory",
+        format="preview",
+        time_sec=np.array([0.0, 1.0, 2.0]),
+        uv_raw=np.full((3, 1), 10.0),
+        sig_raw=np.array([[10.0], [10.5], [9.5]]),
+        uv_fit=np.full((3, 1), 10.0),
+        delta_f=np.array([[0.0], [0.5], [-0.5]]),
+        fs_hz=1.0,
+        channel_names=["CH1"],
+    )
+
+    evidence = (
+        correction_preview_module._compute_local_dynamic_fit_dff_evidence(
+            chunk,
+            Config(
+                baseline_method="uv_raw_percentile_session",
+                baseline_percentile=10.0,
+            ),
+            method="global_linear_regression",
+            roi="CH1",
+        )
+    )
+
+    np.testing.assert_allclose(
+        evidence["preview_dff"], [0.0, 0.05, -0.05]
+    )
+    assert evidence["local_preview_f0"] == 10.0
+    assert evidence["dff_scale"] == "fractional_ratio"
+    assert evidence["dff_formula"] == "delta_f / local_preview_f0"
 
 
 def test_local_signal_only_f0_preview_computes_in_memory_and_preserves_negative():
@@ -583,6 +619,36 @@ def test_local_preview_real_rwd_nonfirst_session_uses_selected_file_and_local_ch
     assert provenance["source_type"] == "local_raw_segment"
     assert provenance["preview_only"] is True
     assert provenance["production_analysis"] is False
+    dynamic_evidence = result["method_statuses"][
+        "global_linear_regression"
+    ]["local_preview_dff_evidence"]
+    assert dynamic_evidence["valid"] is True
+    assert dynamic_evidence["roi_id"] == "CH2"
+    assert dynamic_evidence["dynamic_fit_mode"] == (
+        "global_linear_regression"
+    )
+    assert dynamic_evidence["trace_source"] == (
+        "local_correction_preview_dff"
+    )
+    assert dynamic_evidence["dff_scale"] == "fractional_ratio"
+    assert dynamic_evidence["preview_only"] is True
+    assert dynamic_evidence["production_analysis"] is False
+    assert len(dynamic_evidence["time_sec"]) == len(
+        dynamic_evidence["preview_dff"]
+    )
+    diagnostics = _load_json(
+        Path(
+            result["method_statuses"]["global_linear_regression"][
+                "diagnostics_json"
+            ]
+        )
+    )
+    assert "_retained_local_dff_evidence" not in diagnostics
+    assert "preview_dff" not in diagnostics
+    summary = _load_json(Path(result["preview_summary_path"]))
+    assert "local_preview_dff_evidence" not in summary[
+        "method_statuses"
+    ]["global_linear_regression"]
     evidence = result["signal_only_f0_preview_evidence"]
     assert evidence["evidence_source_type"] == "local_preview"
     assert evidence["strategy_family"] == "signal_only_f0"

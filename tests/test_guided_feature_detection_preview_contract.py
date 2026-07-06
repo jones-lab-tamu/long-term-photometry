@@ -357,7 +357,31 @@ def test_trace_provider_boundary_dynamic_delta_f_mismatches():
         resolve_guided_feature_preview_trace(req_mismatch_mode, context)
 
 
-def test_trace_provider_boundary_dynamic_dff_unsupported():
+def _dynamic_dff_context(*, roi="CH1", mode="global_linear_regression", current=True):
+    return {
+        "dynamic_dff": {
+            (roi, mode): {
+                "time_sec": np.arange(10, dtype=float),
+                "trace": np.linspace(-1.0, 1.0, 10),
+                "fs_hz": 1.0,
+                "trace_identity": {
+                    "roi_id": roi,
+                    "trace_source": "local_correction_preview_dff",
+                    "dff_scale": "fractional_ratio",
+                    "preview_only": True,
+                    "production_analysis": False,
+                },
+                "correction_identity": {
+                    "correction_strategy": "dynamic_fit",
+                    "dynamic_fit_mode": mode,
+                },
+                "current": current,
+            }
+        }
+    }
+
+
+def test_trace_provider_boundary_dynamic_dff_local_preview():
     request = GuidedFeaturePreviewTraceRequest(
         roi_id="CH1",
         event_signal="dff",
@@ -367,9 +391,56 @@ def test_trace_provider_boundary_dynamic_dff_unsupported():
         feature_settings=_valid_settings(),
     )
 
-    # Even if context had it, should fail pre-run
-    with pytest.raises(GuidedFeaturePreviewUnsupportedError, match="dynamic-fit dF/F preview is unavailable pre-Run"):
+    resolved = resolve_guided_feature_preview_trace(
+        request, _dynamic_dff_context()
+    )
+
+    assert resolved.event_signal == "dff"
+    assert resolved.trace_kind == "local_correction_preview_dff"
+    assert resolved.source_kind == "local_correction_preview"
+    assert resolved.preview_only is True
+    assert resolved.production_analysis is False
+
+
+def test_trace_provider_boundary_dynamic_dff_rejects_missing_stale_or_mismatch():
+    request = GuidedFeaturePreviewTraceRequest(
+        roi_id="CH1",
+        event_signal="dff",
+        correction_strategy="dynamic_fit",
+        dynamic_fit_mode="global_linear_regression",
+        feature_profile_id="prof_1",
+        feature_settings=_valid_settings(),
+    )
+    with pytest.raises(
+        GuidedFeaturePreviewUnsupportedError,
+        match="No matching local correction-preview",
+    ):
         resolve_guided_feature_preview_trace(request, {})
+
+    with pytest.raises(GuidedFeaturePreviewUnsupportedError, match="stale"):
+        resolve_guided_feature_preview_trace(
+            request, _dynamic_dff_context(current=False)
+        )
+
+    mismatched = _dynamic_dff_context()
+    mismatched["dynamic_dff"][
+        ("CH1", "global_linear_regression")
+    ]["trace_identity"]["roi_id"] = "CH2"
+    with pytest.raises(
+        GuidedFeaturePreviewUnsupportedError,
+        match="identity does not match",
+    ):
+        resolve_guided_feature_preview_trace(request, mismatched)
+
+    percent_scaled = _dynamic_dff_context()
+    percent_scaled["dynamic_dff"][
+        ("CH1", "global_linear_regression")
+    ]["trace_identity"]["dff_scale"] = "percent"
+    with pytest.raises(
+        GuidedFeaturePreviewUnsupportedError,
+        match="identity does not match",
+    ):
+        resolve_guided_feature_preview_trace(request, percent_scaled)
 
 
 def test_trace_provider_boundary_signal_only_dff():
@@ -543,7 +614,10 @@ def test_composed_preview_unsupported():
     )
 
     # Fails with unsupported trace before detector runs
-    with pytest.raises(GuidedFeaturePreviewUnsupportedError, match="dynamic-fit dF/F preview is unavailable pre-Run"):
+    with pytest.raises(
+        GuidedFeaturePreviewUnsupportedError,
+        match="No matching local correction-preview dynamic-fit dF/F trace",
+    ):
         build_guided_feature_detection_preview(
             trace_request=request, available_trace_context={}
         )

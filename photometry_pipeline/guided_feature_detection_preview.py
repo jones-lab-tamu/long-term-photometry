@@ -250,7 +250,56 @@ def resolve_guided_feature_preview_trace(
         strategy = "dynamic_fit"
 
     if strategy == "dynamic_fit":
-        if event_signal == "delta_f":
+        if event_signal == "dff":
+            mode_map = available_trace_context.get("dynamic_dff", {})
+            trace_key = (roi_id, fit_mode)
+            if trace_key not in mode_map:
+                raise GuidedFeaturePreviewUnsupportedError(
+                    "No matching local correction-preview dynamic-fit dF/F "
+                    f"trace found for ROI '{roi_id}' and mode '{fit_mode}'"
+                )
+            trace_data = mode_map[trace_key]
+            trace_identity = trace_data.get("trace_identity", {})
+            correction_identity = trace_data.get(
+                "correction_identity", {}
+            )
+            if trace_data.get("stale", False) or not trace_data.get(
+                "current", True
+            ):
+                raise GuidedFeaturePreviewUnsupportedError(
+                    f"Dynamic-fit dF/F trace for ROI '{roi_id}' is stale."
+                )
+            if not (
+                isinstance(trace_identity, dict)
+                and trace_identity.get("roi_id") == roi_id
+                and trace_identity.get("trace_source")
+                == "local_correction_preview_dff"
+                and trace_identity.get("dff_scale") == "fractional_ratio"
+                and trace_identity.get("preview_only") is True
+                and trace_identity.get("production_analysis") is False
+                and isinstance(correction_identity, dict)
+                and correction_identity.get("correction_strategy")
+                == "dynamic_fit"
+                and correction_identity.get("dynamic_fit_mode") == fit_mode
+            ):
+                raise GuidedFeaturePreviewUnsupportedError(
+                    "Dynamic-fit dF/F trace identity does not match the "
+                    "requested local preview strategy."
+                )
+            return GuidedFeaturePreviewTrace(
+                roi_id=roi_id,
+                time_sec=trace_data["time_sec"],
+                trace=trace_data["trace"],
+                fs_hz=trace_data["fs_hz"],
+                event_signal="dff",
+                trace_kind="local_correction_preview_dff",
+                correction_strategy=strategy,
+                dynamic_fit_mode=fit_mode,
+                trace_identity=trace_identity,
+                correction_identity=correction_identity,
+                source_kind="local_correction_preview",
+            )
+        elif event_signal == "delta_f":
             # Lookup in dynamic_delta_f
             mode_map = available_trace_context.get("dynamic_delta_f", {})
             trace_key = (roi_id, fit_mode)
@@ -276,10 +325,6 @@ def resolve_guided_feature_preview_trace(
                 trace_identity=trace_data["trace_identity"],
                 correction_identity=trace_data["correction_identity"],
                 source_kind=trace_data.get("source_kind", "preview_derived"),
-            )
-        elif event_signal == "dff":
-            raise GuidedFeaturePreviewUnsupportedError(
-                "dynamic-fit dF/F preview is unavailable pre-Run"
             )
         else:
             raise GuidedFeaturePreviewUnsupportedError(

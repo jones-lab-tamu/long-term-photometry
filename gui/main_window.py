@@ -12044,6 +12044,8 @@ class MainWindow(QMainWindow):
             self._guided_feature_preview_status_label.setText(msg)
         if hasattr(self, "_guided_feature_preview_plot"):
             self._guided_feature_preview_plot.clear_result()
+        if hasattr(self, "_guided_feature_preview_source_note"):
+            self._guided_feature_preview_source_note.setVisible(False)
         if hasattr(self, "_guided_feature_preview_result_table"):
             self._guided_feature_preview_result_table.setVisible(False)
         if hasattr(self, "_guided_feature_preview_details_content"):
@@ -12120,6 +12122,21 @@ class MainWindow(QMainWindow):
         self._guided_feature_preview_status_label.setWordWrap(True)
         self._make_guided_widget_shrinkable(self._guided_feature_preview_status_label)
         layout.addWidget(self._guided_feature_preview_status_label)
+
+        self._guided_feature_preview_source_note = QLabel(
+            "Preview trace: local correction-preview dF/F (fractional "
+            "units). This preview is for parameter tuning only. Final run "
+            "outputs may differ."
+        )
+        self._guided_feature_preview_source_note.setObjectName(
+            "guidedFeaturePreviewSourceNote"
+        )
+        self._guided_feature_preview_source_note.setWordWrap(True)
+        self._guided_feature_preview_source_note.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_feature_preview_source_note.setVisible(False)
+        layout.addWidget(self._guided_feature_preview_source_note)
 
         self._guided_feature_preview_plot = _GuidedFeaturePreviewPlot()
         self._guided_feature_preview_plot.clear_result()
@@ -12281,6 +12298,7 @@ class MainWindow(QMainWindow):
     def _build_guided_feature_detection_preview_context(self, roi_id: str) -> dict:
         context = {
             "dynamic_delta_f": {},
+            "dynamic_dff": {},
             "signal_only_dff": {}
         }
 
@@ -12322,6 +12340,63 @@ class MainWindow(QMainWindow):
             return context
         if provenance.get("preview_only") is not True or provenance.get("production_analysis") is not False:
             return context
+
+        method_statuses = result.get("method_statuses", {})
+        if isinstance(method_statuses, dict):
+            for mode, raw_status in method_statuses.items():
+                status = (
+                    raw_status if isinstance(raw_status, dict) else {}
+                )
+                retained = status.get("local_preview_dff_evidence")
+                if not (
+                    status.get("status") == "success"
+                    and isinstance(retained, dict)
+                    and retained.get("valid") is True
+                    and retained.get("current_or_stale") == "current"
+                    and retained.get("preview_only") is True
+                    and retained.get("production_analysis") is False
+                    and retained.get("trace_source")
+                    == "local_correction_preview_dff"
+                    and retained.get("roi_id") == roi_id
+                    and retained.get("dynamic_fit_mode") == mode
+                ):
+                    continue
+                time_sec = retained.get("time_sec")
+                preview_dff = retained.get("preview_dff")
+                if time_sec is None or preview_dff is None:
+                    continue
+                time_array = np.asarray(time_sec, dtype=float).reshape(-1)
+                trace_array = np.asarray(
+                    preview_dff, dtype=float
+                ).reshape(-1)
+                if (
+                    time_array.size < 2
+                    or time_array.size != trace_array.size
+                ):
+                    continue
+                median_dt = float(np.median(np.diff(time_array)))
+                if not np.isfinite(median_dt) or median_dt <= 0:
+                    continue
+                context["dynamic_dff"][(roi_id, str(mode))] = {
+                    "time_sec": time_array,
+                    "trace": trace_array,
+                    "fs_hz": 1.0 / median_dt,
+                    "trace_identity": {
+                        "roi_id": roi_id,
+                        "trace_source": "local_correction_preview_dff",
+                        "preview_id": str(result.get("preview_id") or ""),
+                        "preview_only": True,
+                        "production_analysis": False,
+                        "dff_scale": retained.get("dff_scale"),
+                        "baseline_scope": retained.get("baseline_scope"),
+                    },
+                    "correction_identity": {
+                        "correction_strategy": "dynamic_fit",
+                        "dynamic_fit_mode": str(mode),
+                    },
+                    "current": True,
+                    "source_kind": "local_correction_preview",
+                }
 
         sig_only_evidence = result.get("signal_only_f0_preview_evidence", {})
         if (
@@ -12381,18 +12456,11 @@ class MainWindow(QMainWindow):
 
         from photometry_pipeline.guided_new_analysis_plan import FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
 
-        # Explicitly check for dynamic-fit strategy
+        # Normalize dynamic-fit strategy; trace availability is checked below.
         is_dynamic_fit = (
             strategy in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
             or choice.get("strategy_family") == "dynamic_fit"
         )
-        if is_dynamic_fit:
-            self._guided_feature_preview_status_label.setText(
-                "Preview is not available for dynamic-fit strategies because dynamic-fit trace arrays "
-                "are not retained in memory yet. Proceed without preview."
-            )
-            self._guided_feature_preview_result_table.setVisible(False)
-            return
 
         # Check for current local preview evidence
         evidence = self._guided_local_preview_evidence_for_roi(roi_id, require_current=True)
@@ -12418,9 +12486,16 @@ class MainWindow(QMainWindow):
         )
 
         # Map dynamic mode normalization
-        if strategy in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
+        if is_dynamic_fit:
             correction_strategy = "dynamic_fit"
-            dynamic_fit_mode = strategy
+            dynamic_fit_mode = str(
+                choice.get("dynamic_fit_mode")
+                or (
+                    strategy
+                    if strategy in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+                    else ""
+                )
+            )
         else:
             correction_strategy = strategy
             dynamic_fit_mode = ""
@@ -12436,6 +12511,30 @@ class MainWindow(QMainWindow):
 
         # Build context
         context = self._build_guided_feature_detection_preview_context(roi_id)
+        if (
+            correction_strategy == "dynamic_fit"
+            and request.event_signal == "dff"
+            and (roi_id, dynamic_fit_mode)
+            not in context.get("dynamic_dff", {})
+        ):
+            self._guided_feature_preview_status_label.setText(
+                "Feature preview is not available because the local "
+                "correction preview does not retain a dynamic-fit dF/F trace "
+                "in memory for this ROI/segment yet."
+            )
+            return
+        if (
+            correction_strategy == "dynamic_fit"
+            and request.event_signal == "delta_f"
+            and (roi_id, dynamic_fit_mode)
+            not in context.get("dynamic_delta_f", {})
+        ):
+            self._guided_feature_preview_status_label.setText(
+                "Feature preview is not available for dynamic-fit delta_f "
+                "because this Step 5 path retains only local "
+                "correction-preview dF/F."
+            )
+            return
         if (
             correction_strategy == "signal_only_f0"
             and request.event_signal == "dff"
@@ -12509,6 +12608,7 @@ class MainWindow(QMainWindow):
 
         self._guided_feature_preview_last_result = result
         self._guided_feature_preview_plot.set_result(result)
+        self._guided_feature_preview_source_note.setVisible(True)
         self._guided_feature_preview_details_toggle.setVisible(True)
         self._guided_feature_preview_result_table.setVisible(True)
         self._guided_feature_preview_status_label.setText("Preview generated successfully.")

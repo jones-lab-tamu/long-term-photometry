@@ -197,6 +197,69 @@ def _setup_signal_only_evidence(window, *, time_sec, preview_dff, valid=True, cu
     window._refresh_guided_feature_detection_preview_panel()
 
 
+def _setup_dynamic_evidence(
+    window,
+    *,
+    time_sec,
+    preview_dff=None,
+    mode="global_linear_regression",
+):
+    window._roi_list.clear()
+    window._guided_roi_list.clear()
+    for roi_list in (window._roi_list, window._guided_roi_list):
+        item = QListWidgetItem("CH1")
+        item.setCheckState(Qt.Checked)
+        roi_list.addItem(item)
+    choice_key = window._guided_confirm_choice_key(
+        LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, "CH1"
+    )
+    window._guided_strategy_choices[choice_key] = {
+        "strategy": mode,
+        "roi": "CH1",
+        "strategy_family": "dynamic_fit",
+        "dynamic_fit_mode": mode,
+    }
+    method_status = {"status": "success"}
+    if preview_dff is not None:
+        method_status["local_preview_dff_evidence"] = {
+            "roi_id": "CH1",
+            "strategy_family": "dynamic_fit",
+            "selected_strategy": mode,
+            "dynamic_fit_mode": mode,
+            "trace_source": "local_correction_preview_dff",
+            "dff_scale": "fractional_ratio",
+            "preview_only": True,
+            "production_analysis": False,
+            "current_or_stale": "current",
+            "valid": True,
+            "time_sec": np.asarray(time_sec, dtype=float),
+            "preview_dff": np.asarray(preview_dff, dtype=float),
+            "baseline_scope": "selected_local_preview_segment",
+        }
+    window._guided_local_preview_evidence_by_roi["CH1"] = {
+        "setup_signature": "test-setup-sig",
+        "locked_evidence_candidates": {},
+        "result": {
+            "preview_id": "dynamic-preview",
+            "roi": "CH1",
+            "source_type": "local_raw_segment",
+            "preview_only": True,
+            "production_analysis": False,
+            "preview_segment_label": "session-1",
+            "method_statuses": {mode: method_status},
+        },
+        "provenance": {
+            "preview_only": True,
+            "production_analysis": False,
+            "selected_roi": "CH1",
+            "selected_segment_label": "session-1",
+            "preview_id": "dynamic-preview",
+        },
+    }
+    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._refresh_guided_feature_detection_preview_panel()
+
+
 def test_evidence_lookup_resolution(window):
     """Verify that _guided_local_preview_evidence_for_roi resolves evidence correctly."""
     t = np.arange(10) * 0.1
@@ -405,39 +468,85 @@ def test_generate_preview_stale_evidence(window):
     assert "Preview evidence for CH1 is not available in memory" in status_lbl.text()
 
 
-def test_generate_preview_dynamic_fit_unsupported(window):
-    """Verify dynamic-fit preview displays the correct explicit dynamic-fit warning message."""
-    # 1. Setup ROI
-    window._roi_list.clear()
-    window._guided_roi_list.clear()
-    item = QListWidgetItem("CH1")
-    item.setCheckState(Qt.Checked)
-    window._roi_list.addItem(item)
-    window._guided_roi_list.addItem(QListWidgetItem(item))
+def test_generate_preview_dynamic_fit_dff_success(window):
+    t = np.arange(100, dtype=float) * 0.1
+    y = np.zeros(100)
+    y[20] = 5.0
+    y[60] = -5.0
+    _setup_dynamic_evidence(window, time_sec=t, preview_dff=y)
 
-    # 2. Setup confirmed strategy choice for ROI (a dynamic fit mode)
-    choice_key = window._guided_confirm_choice_key(LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, "CH1")
-    window._guided_strategy_choices[choice_key] = {
-        "strategy": "global_linear_regression",
-        "roi": "CH1",
-        "strategy_family": "dynamic_fit"
-    }
-
-    # Set Event signal to delta_f
-    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
-
-    # Populate dropdowns
-    window._refresh_guided_feature_detection_preview_panel()
-
-    # 3. Trigger Generate
     window._on_guided_generate_feature_detection_preview()
 
     status_lbl = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel")
     result_table = window.findChild(QTableWidget, "guidedFeaturePreviewResultTable")
+    source_note = window.findChild(
+        QLabel, "guidedFeaturePreviewSourceNote"
+    )
 
-    # Should show the explicit dynamic-fit warning message and hide the table
-    assert "Preview is not available for dynamic-fit strategies because dynamic-fit trace arrays" in status_lbl.text()
-    assert result_table.isHidden()
+    assert status_lbl.text() == "Preview generated successfully."
+    assert not window._guided_feature_preview_plot.isHidden()
+    assert np.array_equal(window._guided_feature_preview_plot.time_sec, t)
+    assert np.array_equal(window._guided_feature_preview_plot.trace, y)
+    assert not result_table.isHidden()
+    assert not source_note.isHidden()
+    assert "local correction-preview dF/F" in source_note.text()
+    assert "Final run outputs may differ" in source_note.text()
+    assert not window._guided_feature_detection_continue_btn.isEnabled()
+
+
+def test_generate_preview_dynamic_fit_missing_dff(window):
+    t = np.arange(100, dtype=float) * 0.1
+    _setup_dynamic_evidence(window, time_sec=t, preview_dff=None)
+
+    window._on_guided_generate_feature_detection_preview()
+
+    assert window._guided_feature_preview_status_label.text() == (
+        "Feature preview is not available because the local correction "
+        "preview does not retain a dynamic-fit dF/F trace in memory for this "
+        "ROI/segment yet."
+    )
+    assert window._guided_feature_preview_plot.isHidden()
+    assert window._guided_feature_preview_result_table.isHidden()
+
+
+def test_generate_preview_dynamic_fit_delta_f_does_not_fallback(window):
+    t = np.arange(100, dtype=float) * 0.1
+    _setup_dynamic_evidence(window, time_sec=t, preview_dff=np.sin(t))
+    window._guided_feature_event_signal_combo.setCurrentText("delta_f")
+
+    window._on_guided_generate_feature_detection_preview()
+
+    assert "retains only local correction-preview dF/F" in (
+        window._guided_feature_preview_status_label.text()
+    )
+    assert window._guided_feature_preview_plot.isHidden()
+
+
+def test_generate_preview_dynamic_fit_no_evidence(window):
+    window._roi_list.clear()
+    window._guided_roi_list.clear()
+    for roi_list in (window._roi_list, window._guided_roi_list):
+        item = QListWidgetItem("CH1")
+        item.setCheckState(Qt.Checked)
+        roi_list.addItem(item)
+    choice_key = window._guided_confirm_choice_key(
+        LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, "CH1"
+    )
+    window._guided_strategy_choices[choice_key] = {
+        "strategy": "global_linear_regression",
+        "roi": "CH1",
+        "strategy_family": "dynamic_fit",
+        "dynamic_fit_mode": "global_linear_regression",
+    }
+    window._guided_local_preview_evidence_by_roi.clear()
+    window._guided_feature_event_signal_combo.setCurrentText("dff")
+    window._refresh_guided_feature_detection_preview_panel()
+
+    window._on_guided_generate_feature_detection_preview()
+
+    assert "Preview evidence for CH1 is not available in memory" in (
+        window._guided_feature_preview_status_label.text()
+    )
     assert window._guided_feature_preview_plot.isHidden()
 
 
@@ -515,3 +624,23 @@ def test_no_read_or_write_sentinels(window, monkeypatch):
     window._on_guided_generate_feature_detection_preview()
     status_lbl = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel")
     assert status_lbl.text() == "Preview generated successfully."
+
+
+def test_dynamic_preview_no_read_or_write_sentinels(window, monkeypatch):
+    def forbidden_call(*args, **kwargs):
+        raise AssertionError("Forbidden external/cache access attempted!")
+
+    import gui.main_window as main_window_module
+    monkeypatch.setattr(main_window_module, "open_phasic_cache", forbidden_call)
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", forbidden_call)
+    monkeypatch.setattr(subprocess, "Popen", forbidden_call)
+
+    t = np.arange(100, dtype=float) * 0.1
+    _setup_dynamic_evidence(window, time_sec=t, preview_dff=np.sin(t))
+    window._on_guided_generate_feature_detection_preview()
+
+    assert (
+        window._guided_feature_preview_status_label.text()
+        == "Preview generated successfully."
+    )

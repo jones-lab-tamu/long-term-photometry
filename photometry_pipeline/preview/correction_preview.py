@@ -975,6 +975,82 @@ def _method_metadata_for_roi(chunk: Chunk, roi: str) -> dict[str, Any]:
     return selected
 
 
+def _compute_local_dynamic_fit_dff_evidence(
+    chunk: Chunk,
+    cfg: Config,
+    *,
+    method: str,
+    roi: str,
+) -> dict[str, Any]:
+    """Build bounded, fractional local-preview dF/F for decision support."""
+    base = {
+        "roi_id": str(roi),
+        "strategy_family": "dynamic_fit",
+        "selected_strategy": str(method),
+        "dynamic_fit_mode": str(method),
+        "trace_source": "local_correction_preview_dff",
+        "dff_scale": "fractional_ratio",
+        "dff_formula": "delta_f / local_preview_f0",
+        "preview_only": True,
+        "production_analysis": False,
+        "current_or_stale": "current",
+        "valid": False,
+        "time_sec": np.asarray(chunk.time_sec, dtype=float).reshape(-1).copy(),
+        "preview_dff": np.asarray([], dtype=float),
+        "issues": [],
+    }
+    if chunk.delta_f is None or chunk.uv_fit is None:
+        return {
+            **base,
+            "issues": ["Dynamic-fit preview did not produce required arrays."],
+        }
+    if cfg.baseline_method == "uv_raw_percentile_session":
+        baseline_values = np.asarray(
+            chunk.uv_raw[:, 0], dtype=float
+        ).reshape(-1)
+        baseline_source = "local_segment_uv_raw_percentile"
+    elif cfg.baseline_method == "uv_globalfit_percentile_session":
+        baseline_values = np.asarray(
+            chunk.uv_fit[:, 0], dtype=float
+        ).reshape(-1)
+        baseline_source = "local_segment_fitted_reference_percentile"
+    else:
+        return {
+            **base,
+            "issues": [
+                f"Unsupported local-preview baseline method: {cfg.baseline_method}"
+            ],
+        }
+    finite_baseline = baseline_values[np.isfinite(baseline_values)]
+    if finite_baseline.size < 2:
+        return {
+            **base,
+            "issues": ["Local-preview baseline has too few finite samples."],
+        }
+    f0 = float(
+        np.percentile(finite_baseline, float(cfg.baseline_percentile))
+    )
+    if not np.isfinite(f0) or f0 <= float(cfg.f0_min_value):
+        return {
+            **base,
+            "issues": ["Local-preview F0 is invalid or below f0_min_value."],
+        }
+    delta_f = np.asarray(chunk.delta_f[:, 0], dtype=float).reshape(-1)
+    preview_dff = delta_f / f0
+    return {
+        **base,
+        "valid": True,
+        "preview_dff": preview_dff.copy(),
+        "local_preview_f0": f0,
+        "baseline_source": baseline_source,
+        "baseline_scope": "selected_local_preview_segment",
+        "interpretation": (
+            "Local correction-preview dF/F for parameter tuning only; "
+            "final run outputs may differ."
+        ),
+    }
+
+
 def _write_method_trace_csv(
     path: str,
     *,
@@ -1055,6 +1131,12 @@ def _run_preview_method(
             raise GuidedCorrectionPreviewError(f"{method} did not produce fit_ref and delta_f.")
         chunk.uv_fit = uv_fit
         chunk.delta_f = delta_f
+        retained_dff_evidence = _compute_local_dynamic_fit_dff_evidence(
+            chunk,
+            cfg,
+            method=method,
+            roi=roi,
+        )
         _write_method_trace_csv(trace_path, method=method, record=record, chunk=chunk)
         artifacts["trace_csv"] = trace_path
         diagnostics.update(
@@ -1069,11 +1151,14 @@ def _run_preview_method(
                 "dff_summary": {"available": False, "reason": "dff normalization not run in Stage 4C2 preview"},
                 "dynamic_fit_metadata": _method_metadata_for_roi(chunk, roi),
                 "artifact_paths": dict(artifacts),
+                "_retained_local_dff_evidence": retained_dff_evidence,
             }
         )
     except Exception as exc:
         diagnostics["errors"] = [str(exc)]
-    _write_json(diagnostics_path, diagnostics)
+    written_diagnostics = dict(diagnostics)
+    written_diagnostics.pop("_retained_local_dff_evidence", None)
+    _write_json(diagnostics_path, written_diagnostics)
     return diagnostics, artifacts
 
 
@@ -1533,6 +1618,11 @@ def run_guided_local_correction_preview(
             "trace_csv": artifacts.get("trace_csv", ""),
             "strategy_recommendation": None,
         }
+        retained_dff = diagnostics.get("_retained_local_dff_evidence")
+        if isinstance(retained_dff, dict):
+            method_statuses[method][
+                "local_preview_dff_evidence"
+            ] = retained_dff
         generated_artifacts[f"{method}_diagnostics_json"] = artifacts.get(
             "diagnostics_json", ""
         )
@@ -1609,10 +1699,18 @@ def run_guided_local_correction_preview(
     provenance_path = os.path.join(output_dir, PREVIEW_PROVENANCE_FILENAME)
     _write_json(provenance_path, provenance)
     generated_artifacts["preview_provenance_json"] = provenance_path
+    persisted_method_statuses = {
+        method: {
+            key: value
+            for key, value in method_status.items()
+            if key != "local_preview_dff_evidence"
+        }
+        for method, method_status in method_statuses.items()
+    }
     summary = build_preview_summary(
         preview_id=pid,
         status=status,
-        method_statuses=method_statuses,
+        method_statuses=persisted_method_statuses,
         errors=errors,
         generated_artifact_paths=generated_artifacts,
     )
