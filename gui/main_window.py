@@ -32,6 +32,7 @@ from pathlib import Path
 from statistics import median
 import numpy as np
 
+
 from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, QObject, QThread, Signal, QSignalBlocker
 from PySide6.QtGui import QAction, QColor, QFont, QPalette, QPixmap
 from PySide6.QtWidgets import (
@@ -7920,6 +7921,7 @@ class MainWindow(QMainWindow):
         entry = getattr(
             self, "_guided_local_preview_evidence_by_roi", {}
         ).get(str(roi))
+
         if not isinstance(entry, dict):
             return None
         result = entry.get("result")
@@ -11942,10 +11944,12 @@ class MainWindow(QMainWindow):
 
         self._guided_feature_preview_roi_combo = QComboBox()
         self._guided_feature_preview_roi_combo.setObjectName("guidedFeaturePreviewRoiCombo")
+        self._guided_feature_preview_roi_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self._guided_feature_preview_roi_combo.setMinimumContentsLength(6)
+        self._guided_feature_preview_roi_combo.setMinimumWidth(80)
         self._guided_feature_preview_roi_combo.currentIndexChanged.connect(
             lambda: self._clear_guided_feature_detection_preview_result()
         )
-        self._make_guided_widget_shrinkable(self._guided_feature_preview_roi_combo)
         controls_layout.addWidget(self._guided_feature_preview_roi_combo)
 
         self._guided_feature_preview_segment_label = QLabel("Representative segment: none")
@@ -12002,12 +12006,18 @@ class MainWindow(QMainWindow):
             elif included_rois:
                 self._guided_feature_preview_roi_combo.setCurrentIndex(0)
 
-        # Update segment label
+        # Update segment label and visibility/enablement
         segment = self._selected_guided_preview_segment()
-        if segment:
+        if not included_rois:
+            self._guided_feature_preview_segment_label.setText("Representative segment: none")
+            self._guided_feature_preview_generate_btn.setEnabled(False)
+            self._guided_feature_preview_status_label.setText("No included ROIs available.")
+        elif segment:
             lbl = segment.get("segment_label") or str(segment.get("discovered_session_index", ""))
             self._guided_feature_preview_segment_label.setText(f"Representative segment: {lbl}")
-            self._guided_feature_preview_generate_btn.setEnabled(len(included_rois) > 0)
+            self._guided_feature_preview_generate_btn.setEnabled(True)
+            if self._guided_feature_preview_status_label.text() in ("No included ROIs available.", "Please generate a correction preview in Step 4 first."):
+                self._guided_feature_preview_status_label.setText("Select an ROI and generate preview.")
         else:
             self._guided_feature_preview_segment_label.setText("Representative segment: none")
             self._guided_feature_preview_generate_btn.setEnabled(False)
@@ -12021,6 +12031,7 @@ class MainWindow(QMainWindow):
 
         # Load local preview evidence for this ROI
         evidence = self._guided_local_preview_evidence_for_roi(roi_id, require_current=True)
+
         if not evidence or not isinstance(evidence, dict):
             return context
 
@@ -12071,14 +12082,16 @@ class MainWindow(QMainWindow):
 
     def _on_guided_generate_feature_detection_preview(self) -> None:
         roi_id = self._guided_feature_preview_roi_combo.currentText()
+
         if not roi_id:
             self._guided_feature_preview_status_label.setText("No ROI selected.")
             self._guided_feature_preview_result_table.setVisible(False)
             return
 
         # Get confirmed correction strategy for this ROI
-        run_dir = self._current_guided_completed_run_dir()
-        choice_key = (run_dir, roi_id)
+        choice_key = self._guided_confirm_choice_key(
+            LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, roi_id
+        )
         choices = getattr(self, "_guided_strategy_choices", {})
         choice = choices.get(choice_key)
         if not choice or not isinstance(choice, dict):
@@ -12091,6 +12104,31 @@ class MainWindow(QMainWindow):
 
         strategy = choice.get("strategy", "")
 
+        from photometry_pipeline.guided_new_analysis_plan import FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+
+        # Explicitly check for dynamic-fit strategy
+        is_dynamic_fit = (
+            strategy in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+            or choice.get("strategy_family") == "dynamic_fit"
+        )
+        if is_dynamic_fit:
+            self._guided_feature_preview_status_label.setText(
+                "Preview is not available for dynamic-fit strategies because dynamic-fit trace arrays "
+                "are not retained in memory yet. Proceed without preview."
+            )
+            self._guided_feature_preview_result_table.setVisible(False)
+            return
+
+        # Check for current local preview evidence
+        evidence = self._guided_local_preview_evidence_for_roi(roi_id, require_current=True)
+        if not evidence or not isinstance(evidence, dict):
+            self._guided_feature_preview_status_label.setText(
+                f"Preview evidence for {roi_id} is not available in memory. "
+                "Return to Correction Approach and regenerate local preview, or proceed without preview."
+            )
+            self._guided_feature_preview_result_table.setVisible(False)
+            return
+
         # Build request config from current editor settings
         config_fields, err = self._guided_feature_event_current_values()
         if err:
@@ -12098,7 +12136,6 @@ class MainWindow(QMainWindow):
             self._guided_feature_preview_result_table.setVisible(False)
             return
 
-        from photometry_pipeline.guided_new_analysis_plan import FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
         from photometry_pipeline.guided_feature_detection_preview import (
             GuidedFeaturePreviewTraceRequest,
             build_guided_feature_detection_preview,
