@@ -67,6 +67,21 @@ def infer_guided_recording_structure(
         )
 
     contracts = [dict(contract) for contract in rwd_chunk_contracts]
+    sessions = list((discovery_cache or {}).get("sessions") or ())
+    sampling_evidence = {
+        "duration_source": "sampled_rwd_chunk_contracts",
+        "duration_sample_size": len(contracts),
+        "duration_sample_session_ids": [
+            str(contract.get("sample_session_id") or "")
+            for contract in contracts
+        ],
+        "duration_sample_paths": [
+            str(contract.get("csv_path") or "")
+            for contract in contracts
+        ],
+        "n_sessions_available": len(sessions),
+        "duration_sampling_strategy": "first_middle_last",
+    }
     try:
         durations = [
             float(contract["chunk_duration_sec"])
@@ -80,6 +95,7 @@ def infer_guided_recording_structure(
             evidence={
                 "resolved_format": resolved,
                 "source_path": source_path,
+                **sampling_evidence,
                 "error": f"{type(exc).__name__}: {exc}",
             },
             message=(
@@ -105,6 +121,7 @@ def infer_guided_recording_structure(
             evidence={
                 "resolved_format": resolved,
                 "source_path": source_path,
+                **sampling_evidence,
                 "chunk_duration_sec": durations,
             },
             message=(
@@ -113,7 +130,6 @@ def infer_guided_recording_structure(
             ),
         )
 
-    sessions = list((discovery_cache or {}).get("sessions") or ())
     starts = [
         _parse_rwd_session_start(session.get("session_id"))
         for session in sessions
@@ -127,7 +143,7 @@ def infer_guided_recording_structure(
             evidence={
                 "resolved_format": resolved,
                 "source_path": source_path,
-                "duration_source": "rwd_chunk_contracts",
+                **sampling_evidence,
                 "chunk_duration_sec": durations,
                 "session_ids": [
                     session.get("session_id")
@@ -163,7 +179,7 @@ def infer_guided_recording_structure(
             evidence={
                 "resolved_format": resolved,
                 "source_path": source_path,
-                "duration_source": "rwd_chunk_contracts",
+                **sampling_evidence,
                 "chunk_duration_sec": durations,
                 "session_start_intervals_sec": intervals,
                 "candidate_sessions_per_hour": rate,
@@ -185,7 +201,7 @@ def infer_guided_recording_structure(
         evidence={
             "resolved_format": resolved,
             "source_path": source_path,
-            "duration_source": "rwd_chunk_contracts",
+            **sampling_evidence,
             "cadence_source": "ordered_rwd_session_ids",
             "chunk_duration_sec": durations,
             "session_start_intervals_sec": intervals,

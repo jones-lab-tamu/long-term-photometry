@@ -3100,10 +3100,28 @@ class MainWindow(QMainWindow):
         contracts: list[dict[str, object]] = []
         if resolved_format == "rwd":
             try:
-                contracts = [
-                    self._infer_rwd_chunk_contract(str(session["path"]))
+                sessions = [
+                    session
                     for session in discovery.get("sessions", [])
                     if isinstance(session, dict) and session.get("path")
+                ]
+                sample_indices = sorted(
+                    {
+                        0,
+                        len(sessions) // 2,
+                        len(sessions) - 1,
+                    }
+                ) if sessions else []
+                contracts = [
+                    {
+                        **self._infer_rwd_chunk_contract(
+                            str(sessions[index]["path"])
+                        ),
+                        "sample_session_id": str(
+                            sessions[index].get("session_id") or ""
+                        ),
+                    }
+                    for index in sample_indices
                 ]
             except Exception as exc:
                 return GuidedRecordingStructureInference(

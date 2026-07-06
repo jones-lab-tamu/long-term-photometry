@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import h5py
@@ -2153,6 +2154,77 @@ def test_guided_ambiguous_or_unsupported_timing_does_not_overwrite_values(
         "Automatic timing detection is not available for this format yet."
     )
     assert window._guided_use_detected_timing_btn.isHidden() is True
+
+
+def test_guided_rwd_timing_duration_reads_are_bounded(
+    window, tmp_path, monkeypatch
+):
+    _set_guided_rwd_intermittent(window)
+    start = datetime(2025, 1, 1)
+    session_ids = [
+        (start + timedelta(minutes=30 * index)).strftime(
+            "%Y_%m_%d-%H_%M_%S"
+        )
+        for index in range(30)
+    ]
+    calls = []
+
+    def infer_contract(path):
+        calls.append(path)
+        return {"csv_path": path, "chunk_duration_sec": 600.0}
+
+    monkeypatch.setattr(
+        window, "_infer_rwd_chunk_contract", infer_contract
+    )
+    discovery = _timed_discovery(tmp_path / "many", session_ids)
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+
+    assert len(calls) == 3
+    assert calls == [
+        discovery["sessions"][0]["path"],
+        discovery["sessions"][15]["path"],
+        discovery["sessions"][29]["path"],
+    ]
+    assert window._guided_sessions_per_hour_edit.text() == "2"
+    evidence = window._guided_recording_timing_inference.evidence
+    assert evidence["duration_sample_size"] == 3
+    assert evidence["n_sessions_available"] == 30
+    assert evidence["duration_sampling_strategy"] == "first_middle_last"
+    assert evidence["duration_sample_paths"] == calls
+
+
+def test_guided_rwd_disagreeing_duration_sample_is_ambiguous(
+    window, tmp_path, monkeypatch
+):
+    _set_guided_rwd_intermittent(window)
+    window._guided_sessions_per_hour_edit.setText("3")
+    window._guided_session_duration_edit.setText("500")
+    start = datetime(2025, 1, 1)
+    session_ids = [
+        (start + timedelta(minutes=30 * index)).strftime(
+            "%Y_%m_%d-%H_%M_%S"
+        )
+        for index in range(30)
+    ]
+    calls = []
+
+    def infer_contract(path):
+        calls.append(path)
+        duration = 650.0 if len(calls) == 2 else 600.0
+        return {"csv_path": path, "chunk_duration_sec": duration}
+
+    monkeypatch.setattr(
+        window, "_infer_rwd_chunk_contract", infer_contract
+    )
+    discovery = _timed_discovery(tmp_path / "mixed", session_ids)
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+
+    assert len(calls) == 3
+    assert window._guided_recording_timing_inference.status == "ambiguous"
+    assert window._guided_sessions_per_hour_edit.text() == "3"
+    assert window._guided_session_duration_edit.text() == "500"
 
 
 def test_guided_recording_requiredness_updates_with_format_and_mode(window):
