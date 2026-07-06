@@ -33,8 +33,8 @@ from statistics import median
 import numpy as np
 
 
-from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, QObject, QThread, Signal, QSignalBlocker
-from PySide6.QtGui import QAction, QColor, QFont, QPalette, QPixmap
+from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, QObject, QThread, Signal, QSignalBlocker, QRectF, QPointF
+from PySide6.QtGui import QAction, QColor, QFont, QPalette, QPixmap, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QCheckBox, QSpinBox,
@@ -139,6 +139,135 @@ from photometry_pipeline.tuning.cache_correction_retune import run_cache_correct
 from tools.run_applied_dff_batch import AppliedDffBatchError, run_applied_dff_batch
 import dataclasses
 from typing import get_args
+
+
+class _GuidedFeaturePreviewPlot(QWidget):
+    """Small in-memory trace/event plot; never renders or saves a file."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("guidedFeaturePreviewPlot")
+        self.setMinimumHeight(240)
+        self.time_sec = np.asarray([], dtype=float)
+        self.trace = np.asarray([], dtype=float)
+        self.positive_peak_indices = np.asarray([], dtype=int)
+        self.negative_peak_indices = np.asarray([], dtype=int)
+        self.threshold_upper = None
+        self.threshold_lower = None
+
+    def clear_result(self) -> None:
+        self.time_sec = np.asarray([], dtype=float)
+        self.trace = np.asarray([], dtype=float)
+        self.positive_peak_indices = np.asarray([], dtype=int)
+        self.negative_peak_indices = np.asarray([], dtype=int)
+        self.threshold_upper = None
+        self.threshold_lower = None
+        self.setVisible(False)
+        self.update()
+
+    def set_result(self, result) -> None:
+        self.time_sec = np.asarray(result.time_sec, dtype=float).copy()
+        rendered = (
+            result.prefiltered_trace
+            if result.prefiltered_trace is not None
+            else result.trace
+        )
+        self.trace = np.asarray(rendered, dtype=float).copy()
+        self.positive_peak_indices = np.asarray(
+            result.positive_peak_indices, dtype=int
+        ).copy()
+        self.negative_peak_indices = np.asarray(
+            result.negative_peak_indices, dtype=int
+        ).copy()
+        self.threshold_upper = result.threshold_upper
+        self.threshold_lower = result.threshold_lower
+        self.setVisible(True)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self.time_sec.size < 2 or self.trace.size != self.time_sec.size:
+            return
+        finite = np.isfinite(self.time_sec) & np.isfinite(self.trace)
+        if np.count_nonzero(finite) < 2:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        plot = QRectF(54, 16, max(1, self.width() - 72), max(1, self.height() - 54))
+        painter.fillRect(self.rect(), QColor("#ffffff"))
+        painter.setPen(QPen(QColor("#777777"), 1))
+        painter.drawRect(plot)
+
+        x_values = self.time_sec[finite]
+        y_values = self.trace[finite]
+        x_min, x_max = float(np.min(x_values)), float(np.max(x_values))
+        y_candidates = list(y_values)
+        for threshold in (self.threshold_upper, self.threshold_lower):
+            if threshold is not None and np.isfinite(threshold):
+                y_candidates.append(float(threshold))
+        y_min, y_max = float(np.min(y_candidates)), float(np.max(y_candidates))
+        if x_max <= x_min:
+            x_max = x_min + 1.0
+        if y_max <= y_min:
+            y_max = y_min + 1.0
+        y_pad = 0.05 * (y_max - y_min)
+        y_min -= y_pad
+        y_max += y_pad
+
+        def point(index: int) -> QPointF:
+            x = plot.left() + (
+                (float(self.time_sec[index]) - x_min) / (x_max - x_min)
+            ) * plot.width()
+            y = plot.bottom() - (
+                (float(self.trace[index]) - y_min) / (y_max - y_min)
+            ) * plot.height()
+            return QPointF(x, y)
+
+        def threshold_y(value: float) -> float:
+            return plot.bottom() - (
+                (float(value) - y_min) / (y_max - y_min)
+            ) * plot.height()
+
+        finite_indices = np.flatnonzero(finite)
+        painter.setPen(QPen(QColor("#336699"), 1.25))
+        for left, right in zip(finite_indices, finite_indices[1:]):
+            if right == left + 1:
+                painter.drawLine(point(int(left)), point(int(right)))
+
+        for threshold, color in (
+            (self.threshold_upper, QColor("#d97706")),
+            (self.threshold_lower, QColor("#7c3aed")),
+        ):
+            if threshold is not None and np.isfinite(threshold):
+                painter.setPen(QPen(color, 1, Qt.DashLine))
+                y = threshold_y(float(threshold))
+                painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+
+        for indices, color in (
+            (self.positive_peak_indices, QColor("#dc2626")),
+            (self.negative_peak_indices, QColor("#0f766e")),
+        ):
+            painter.setPen(QPen(color, 2))
+            for index in indices:
+                idx = int(index)
+                if 0 <= idx < self.trace.size and finite[idx]:
+                    p = point(idx)
+                    painter.drawLine(
+                        QPointF(p.x() - 4, p.y() - 4),
+                        QPointF(p.x() + 4, p.y() + 4),
+                    )
+                    painter.drawLine(
+                        QPointF(p.x() - 4, p.y() + 4),
+                        QPointF(p.x() + 4, p.y() - 4),
+                    )
+
+        painter.setPen(QColor("#333333"))
+        painter.drawText(8, 28, "Signal")
+        painter.drawText(
+            int(plot.center().x() - 25), self.height() - 10, "Time (s)"
+        )
+        painter.end()
 
 
 _SETTINGS_GROUP = "run_config"
@@ -11909,11 +12038,22 @@ class MainWindow(QMainWindow):
         self._refresh_guided_draft_run_plan_preview()
 
     def _clear_guided_feature_detection_preview_result(self, reason: str = "") -> None:
+        self._guided_feature_preview_last_result = None
         if hasattr(self, "_guided_feature_preview_status_label"):
             msg = reason if reason else "Select an ROI and generate preview."
             self._guided_feature_preview_status_label.setText(msg)
+        if hasattr(self, "_guided_feature_preview_plot"):
+            self._guided_feature_preview_plot.clear_result()
         if hasattr(self, "_guided_feature_preview_result_table"):
             self._guided_feature_preview_result_table.setVisible(False)
+        if hasattr(self, "_guided_feature_preview_details_content"):
+            self._guided_feature_preview_details_content.setVisible(False)
+        if hasattr(self, "_guided_feature_preview_details_toggle"):
+            self._guided_feature_preview_details_toggle.setChecked(False)
+            self._guided_feature_preview_details_toggle.setText(
+                "Show preview details"
+            )
+            self._guided_feature_preview_details_toggle.setVisible(False)
 
     def _build_guided_feature_detection_preview_panel(self) -> QGroupBox:
         group = QGroupBox("Preview feature detection")
@@ -11948,14 +12088,24 @@ class MainWindow(QMainWindow):
         self._guided_feature_preview_roi_combo.setMinimumContentsLength(6)
         self._guided_feature_preview_roi_combo.setMinimumWidth(80)
         self._guided_feature_preview_roi_combo.currentIndexChanged.connect(
-            lambda: self._clear_guided_feature_detection_preview_result()
+            self._on_guided_feature_preview_roi_changed
         )
         controls_layout.addWidget(self._guided_feature_preview_roi_combo)
 
-        self._guided_feature_preview_segment_label = QLabel("Representative segment: none")
-        self._guided_feature_preview_segment_label.setObjectName("guidedFeaturePreviewSegmentLabel")
-        self._guided_feature_preview_segment_label.setProperty("guidedSecondaryText", True)
-        controls_layout.addWidget(self._guided_feature_preview_segment_label)
+        segment_label = QLabel("Segment:")
+        segment_label.setObjectName("guidedFeaturePreviewSegmentLabel")
+        controls_layout.addWidget(segment_label)
+        self._guided_feature_preview_segment_combo = QComboBox()
+        self._guided_feature_preview_segment_combo.setObjectName(
+            "guidedFeaturePreviewSegmentCombo"
+        )
+        self._guided_feature_preview_segment_combo.setMinimumWidth(150)
+        self._guided_feature_preview_segment_combo.currentIndexChanged.connect(
+            lambda: self._clear_guided_feature_detection_preview_result(
+                "Segment changed. Generate preview to update."
+            )
+        )
+        controls_layout.addWidget(self._guided_feature_preview_segment_combo)
 
         self._guided_feature_preview_generate_btn = QPushButton("Generate Preview")
         self._guided_feature_preview_generate_btn.setObjectName("guidedFeaturePreviewGenerateButton")
@@ -11971,7 +12121,33 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_feature_preview_status_label)
         layout.addWidget(self._guided_feature_preview_status_label)
 
-        # Table result display (10 rows, 2 columns)
+        self._guided_feature_preview_plot = _GuidedFeaturePreviewPlot()
+        self._guided_feature_preview_plot.clear_result()
+        layout.addWidget(self._guided_feature_preview_plot)
+
+        self._guided_feature_preview_details_toggle = QToolButton()
+        self._guided_feature_preview_details_toggle.setObjectName(
+            "guidedFeaturePreviewDetailsToggle"
+        )
+        self._guided_feature_preview_details_toggle.setText(
+            "Show preview details"
+        )
+        self._guided_feature_preview_details_toggle.setCheckable(True)
+        self._guided_feature_preview_details_toggle.toggled.connect(
+            self._on_guided_feature_preview_details_toggled
+        )
+        self._guided_feature_preview_details_toggle.setVisible(False)
+        layout.addWidget(
+            self._guided_feature_preview_details_toggle,
+            alignment=Qt.AlignLeft,
+        )
+
+        self._guided_feature_preview_details_content = QWidget()
+        details_layout = QVBoxLayout(
+            self._guided_feature_preview_details_content
+        )
+        details_layout.setContentsMargins(0, 0, 0, 0)
+
         self._guided_feature_preview_result_table = QTableWidget(10, 2)
         self._guided_feature_preview_result_table.setObjectName("guidedFeaturePreviewResultTable")
         self._guided_feature_preview_result_table.setHorizontalHeaderLabels(["Parameter", "Value"])
@@ -11981,9 +12157,90 @@ class MainWindow(QMainWindow):
         self._guided_feature_preview_result_table.setSelectionMode(QAbstractItemView.NoSelection)
         self._guided_feature_preview_result_table.setFixedHeight(230)
         self._guided_feature_preview_result_table.setVisible(False)
-        layout.addWidget(self._guided_feature_preview_result_table)
+        details_layout.addWidget(self._guided_feature_preview_result_table)
+        self._guided_feature_preview_details_content.setVisible(False)
+        layout.addWidget(self._guided_feature_preview_details_content)
 
         return group
+
+    def _on_guided_feature_preview_details_toggled(
+        self, checked: bool
+    ) -> None:
+        self._guided_feature_preview_details_content.setVisible(checked)
+        self._guided_feature_preview_details_toggle.setText(
+            "Hide preview details" if checked else "Show preview details"
+        )
+
+    def _on_guided_feature_preview_roi_changed(self) -> None:
+        self._refresh_guided_feature_preview_segment_choices()
+        self._clear_guided_feature_detection_preview_result(
+            "ROI changed. Generate preview to update."
+        )
+
+    def _guided_feature_preview_segments_for_roi(
+        self, roi_id: str
+    ) -> list[dict[str, object]]:
+        """Return only segment evidence already retained in memory."""
+        evidence = self._guided_local_preview_evidence_for_roi(
+            roi_id, require_current=True
+        )
+        if not isinstance(evidence, dict):
+            return []
+        result = evidence.get("result")
+        provenance = evidence.get("provenance")
+        if not isinstance(result, dict) or not isinstance(provenance, dict):
+            return []
+        label = str(
+            provenance.get("selected_segment_label")
+            or result.get("preview_segment_label")
+            or "retained preview segment"
+        )
+        return [
+            {
+                "segment_label": label,
+                "selected_segment_index": provenance.get(
+                    "selected_segment_index",
+                    result.get("chunk_index"),
+                ),
+                "preview_id": str(
+                    result.get("preview_id")
+                    or provenance.get("preview_id")
+                    or ""
+                ),
+            }
+        ]
+
+    def _refresh_guided_feature_preview_segment_choices(self) -> None:
+        if not hasattr(self, "_guided_feature_preview_segment_combo"):
+            return
+        roi_id = self._guided_feature_preview_roi_combo.currentText()
+        segments = self._guided_feature_preview_segments_for_roi(roi_id)
+        current_preview_id = ""
+        current_data = self._guided_feature_preview_segment_combo.currentData()
+        if isinstance(current_data, dict):
+            current_preview_id = str(current_data.get("preview_id") or "")
+        with QSignalBlocker(self._guided_feature_preview_segment_combo):
+            self._guided_feature_preview_segment_combo.clear()
+            for segment in segments:
+                self._guided_feature_preview_segment_combo.addItem(
+                    str(segment["segment_label"]), dict(segment)
+                )
+            if current_preview_id:
+                for index in range(
+                    self._guided_feature_preview_segment_combo.count()
+                ):
+                    data = self._guided_feature_preview_segment_combo.itemData(
+                        index
+                    )
+                    if (
+                        isinstance(data, dict)
+                        and str(data.get("preview_id") or "")
+                        == current_preview_id
+                    ):
+                        self._guided_feature_preview_segment_combo.setCurrentIndex(
+                            index
+                        )
+                        break
 
     def _set_preview_table_row(self, row: int, parameter: str, value: str) -> None:
         self._guided_feature_preview_result_table.setItem(row, 0, QTableWidgetItem(parameter))
@@ -12006,20 +12263,18 @@ class MainWindow(QMainWindow):
             elif included_rois:
                 self._guided_feature_preview_roi_combo.setCurrentIndex(0)
 
-        # Update segment label and visibility/enablement
-        segment = self._selected_guided_preview_segment()
+        self._refresh_guided_feature_preview_segment_choices()
+        segment_available = (
+            self._guided_feature_preview_segment_combo.count() > 0
+        )
         if not included_rois:
-            self._guided_feature_preview_segment_label.setText("Representative segment: none")
             self._guided_feature_preview_generate_btn.setEnabled(False)
             self._guided_feature_preview_status_label.setText("No included ROIs available.")
-        elif segment:
-            lbl = segment.get("segment_label") or str(segment.get("discovered_session_index", ""))
-            self._guided_feature_preview_segment_label.setText(f"Representative segment: {lbl}")
+        elif segment_available:
             self._guided_feature_preview_generate_btn.setEnabled(True)
             if self._guided_feature_preview_status_label.text() in ("No included ROIs available.", "Please generate a correction preview in Step 4 first."):
                 self._guided_feature_preview_status_label.setText("Select an ROI and generate preview.")
         else:
-            self._guided_feature_preview_segment_label.setText("Representative segment: none")
             self._guided_feature_preview_generate_btn.setEnabled(False)
             self._guided_feature_preview_status_label.setText("Please generate a correction preview in Step 4 first.")
 
@@ -12038,11 +12293,31 @@ class MainWindow(QMainWindow):
         result = evidence.get("result", {})
         if not result or not isinstance(result, dict):
             return context
-
-        # 3. Require evidence & result to be current and preview_only/production_analysis checks
         provenance = evidence.get("provenance", {})
         if not isinstance(provenance, dict):
             return context
+        selected_segment = (
+            self._guided_feature_preview_segment_combo.currentData()
+            if hasattr(self, "_guided_feature_preview_segment_combo")
+            else None
+        )
+        if isinstance(selected_segment, dict):
+            selected_preview_id = str(
+                selected_segment.get("preview_id") or ""
+            )
+            evidence_preview_id = str(
+                result.get("preview_id")
+                or provenance.get("preview_id")
+                or ""
+            )
+            if (
+                selected_preview_id
+                and evidence_preview_id
+                and selected_preview_id != evidence_preview_id
+            ):
+                return context
+
+        # 3. Require evidence & result to be current and preview_only/production_analysis checks
         if result.get("preview_only") is not True or result.get("production_analysis") is not False:
             return context
         if provenance.get("preview_only") is not True or provenance.get("production_analysis") is not False:
@@ -12082,10 +12357,10 @@ class MainWindow(QMainWindow):
 
     def _on_guided_generate_feature_detection_preview(self) -> None:
         roi_id = self._guided_feature_preview_roi_combo.currentText()
+        self._clear_guided_feature_detection_preview_result()
 
         if not roi_id:
             self._guided_feature_preview_status_label.setText("No ROI selected.")
-            self._guided_feature_preview_result_table.setVisible(False)
             return
 
         # Get confirmed correction strategy for this ROI
@@ -12161,6 +12436,17 @@ class MainWindow(QMainWindow):
 
         # Build context
         context = self._build_guided_feature_detection_preview_context(roi_id)
+        if (
+            correction_strategy == "signal_only_f0"
+            and request.event_signal == "dff"
+            and roi_id not in context.get("signal_only_dff", {})
+        ):
+            self._guided_feature_preview_status_label.setText(
+                "Feature preview is not available because the local "
+                "correction preview does not retain preview trace arrays in "
+                "memory for this ROI/segment yet."
+            )
+            return
 
         # Run preview
         try:
@@ -12221,6 +12507,9 @@ class MainWindow(QMainWindow):
         self._set_preview_table_row(8, "Feature Settings Digest", result.feature_settings_digest)
         self._set_preview_table_row(9, "Safety Status", "Preview-only (no files written)")
 
+        self._guided_feature_preview_last_result = result
+        self._guided_feature_preview_plot.set_result(result)
+        self._guided_feature_preview_details_toggle.setVisible(True)
         self._guided_feature_preview_result_table.setVisible(True)
         self._guided_feature_preview_status_label.setText("Preview generated successfully.")
 

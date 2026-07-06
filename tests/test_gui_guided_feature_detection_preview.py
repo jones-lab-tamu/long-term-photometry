@@ -1,13 +1,20 @@
 """GUI tests for the Guided Feature Detection selected-ROI preview UI."""
 
 import os
+from types import SimpleNamespace
 import pytest
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QListWidgetItem, QGroupBox, QComboBox, QPushButton, QLabel, QTableWidget
+from PySide6.QtWidgets import QApplication, QListWidgetItem, QGroupBox, QComboBox, QPushButton, QLabel, QTableWidget, QWidget, QToolButton
 
 from gui.main_window import MainWindow, LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
 from photometry_pipeline.guided_feature_detection_preview import GuidedFeaturePreviewUnsupportedError
+
+
+MISSING_TRACE_MESSAGE = (
+    "Feature preview is not available because the local correction preview "
+    "does not retain preview trace arrays in memory for this ROI/segment yet."
+)
 
 
 @pytest.fixture(scope="module")
@@ -69,6 +76,14 @@ def test_preview_panel_layout_and_elements(window):
     # Segment label
     segment_lbl = panel.findChild(QLabel, "guidedFeaturePreviewSegmentLabel")
     assert segment_lbl is not None
+    segment_combo = panel.findChild(
+        QComboBox, "guidedFeaturePreviewSegmentCombo"
+    )
+    assert segment_combo is not None
+
+    plot = panel.findChild(QWidget, "guidedFeaturePreviewPlot")
+    assert plot is not None
+    assert plot.isHidden()
 
     # Generate button
     gen_btn = panel.findChild(QPushButton, "guidedFeaturePreviewGenerateButton")
@@ -219,15 +234,103 @@ def test_manual_regression_success_path(window):
 
     status_lbl = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel")
     result_table = window.findChild(QTableWidget, "guidedFeaturePreviewResultTable")
+    plot = window.findChild(QWidget, "guidedFeaturePreviewPlot")
 
     assert status_lbl.text() == "Preview generated successfully."
     assert not result_table.isHidden()
+    assert not plot.isHidden()
+    assert np.array_equal(plot.time_sec, t)
+    assert np.array_equal(plot.trace, y)
 
     # 10-row parameters mapped correctly
     assert result_table.item(0, 1).text() == "CH1"
     assert result_table.item(1, 1).text() == "dff"
     assert result_table.item(2, 1).text() == "signal_only_f0 / none"
     assert result_table.item(9, 1).text() == "Preview-only (no files written)"
+    details_toggle = window.findChild(
+        QToolButton, "guidedFeaturePreviewDetailsToggle"
+    )
+    assert not details_toggle.isHidden()
+    assert window._guided_feature_preview_details_content.isHidden()
+    details_toggle.click()
+    assert not window._guided_feature_preview_details_content.isHidden()
+
+
+def test_visual_plot_renders_events_and_thresholds(
+    window, monkeypatch
+):
+    t = np.arange(8, dtype=float)
+    y = np.array([0.0, 2.0, 0.0, -2.0, 0.0, 3.0, 0.0, -3.0])
+    _setup_signal_only_evidence(window, time_sec=t, preview_dff=y)
+    expected = SimpleNamespace(
+        roi_id="CH1",
+        event_signal="dff",
+        time_sec=t,
+        trace=y,
+        prefiltered_trace=y.copy(),
+        threshold_upper=1.5,
+        threshold_lower=-1.5,
+        positive_peak_indices=np.array([1, 5]),
+        negative_peak_indices=np.array([3, 7]),
+        positive_peak_times_sec=np.array([1.0, 5.0]),
+        negative_peak_times_sec=np.array([3.0, 7.0]),
+        feature_settings_digest="digest",
+    )
+    import photometry_pipeline.guided_feature_detection_preview as preview_module
+    monkeypatch.setattr(
+        preview_module,
+        "build_guided_feature_detection_preview",
+        lambda **_kwargs: expected,
+    )
+
+    window._on_guided_generate_feature_detection_preview()
+
+    plot = window.findChild(QWidget, "guidedFeaturePreviewPlot")
+    assert not plot.isHidden()
+    assert np.array_equal(plot.positive_peak_indices, [1, 5])
+    assert np.array_equal(plot.negative_peak_indices, [3, 7])
+    assert plot.threshold_upper == pytest.approx(1.5)
+    assert plot.threshold_lower == pytest.approx(-1.5)
+    assert window._guided_feature_preview_last_result is expected
+
+
+def test_only_retained_in_memory_segment_is_selectable(window):
+    t = np.arange(10, dtype=float) * 0.1
+    _setup_signal_only_evidence(window, time_sec=t, preview_dff=np.sin(t))
+
+    segment_combo = window.findChild(
+        QComboBox, "guidedFeaturePreviewSegmentCombo"
+    )
+    assert segment_combo.count() == 1
+    assert segment_combo.currentText() == "retained preview segment"
+
+
+def test_roi_and_segment_changes_clear_visual_plot(window):
+    t = np.arange(100, dtype=float) * 0.1
+    _setup_signal_only_evidence(window, time_sec=t, preview_dff=np.sin(t))
+    window._on_guided_generate_feature_detection_preview()
+    plot = window.findChild(QWidget, "guidedFeaturePreviewPlot")
+    assert not plot.isHidden()
+
+    segment_combo = window.findChild(
+        QComboBox, "guidedFeaturePreviewSegmentCombo"
+    )
+    segment_combo.addItem(
+        "future retained segment",
+        {"segment_label": "future retained segment", "preview_id": "two"},
+    )
+    segment_combo.setCurrentIndex(1)
+    assert plot.isHidden()
+    assert plot.time_sec.size == 0
+
+    segment_combo.setCurrentIndex(0)
+    window._on_guided_generate_feature_detection_preview()
+    assert not plot.isHidden()
+    roi_combo = window.findChild(QComboBox, "guidedFeaturePreviewRoiCombo")
+    roi_combo.addItem("CH2", "CH2")
+    roi_combo.setCurrentIndex(roi_combo.findText("CH2"))
+    assert plot.isHidden()
+    assert plot.time_sec.size == 0
 
 
 def test_generate_preview_insufficient_samples(window):
@@ -241,7 +344,7 @@ def test_generate_preview_insufficient_samples(window):
     status_lbl = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel")
     result_table = window.findChild(QTableWidget, "guidedFeaturePreviewResultTable")
 
-    assert "Preview evidence for CH1 is not available in memory" in status_lbl.text()
+    assert status_lbl.text() == MISSING_TRACE_MESSAGE
     assert result_table.isHidden()
 
 
@@ -256,7 +359,7 @@ def test_generate_preview_non_finite_dt(window):
     status_lbl = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel")
     result_table = window.findChild(QTableWidget, "guidedFeaturePreviewResultTable")
 
-    assert "Preview evidence for CH1 is not available in memory" in status_lbl.text()
+    assert status_lbl.text() == MISSING_TRACE_MESSAGE
     assert result_table.isHidden()
 
 
@@ -271,7 +374,7 @@ def test_generate_preview_non_positive_dt(window):
     status_lbl = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel")
     result_table = window.findChild(QTableWidget, "guidedFeaturePreviewResultTable")
 
-    assert "Preview evidence for CH1 is not available in memory" in status_lbl.text()
+    assert status_lbl.text() == MISSING_TRACE_MESSAGE
     assert result_table.isHidden()
 
 
@@ -284,12 +387,12 @@ def test_generate_preview_stale_evidence(window):
     _setup_signal_only_evidence(window, time_sec=t, preview_dff=y, valid=False)
     window._on_guided_generate_feature_detection_preview()
     status_lbl = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel")
-    assert "Preview evidence for CH1 is not available in memory" in status_lbl.text()
+    assert status_lbl.text() == MISSING_TRACE_MESSAGE
 
     # 2. current_or_stale == "stale"
     _setup_signal_only_evidence(window, time_sec=t, preview_dff=y, current_or_stale="stale")
     window._on_guided_generate_feature_detection_preview()
-    assert "Preview evidence for CH1 is not available in memory" in status_lbl.text()
+    assert status_lbl.text() == MISSING_TRACE_MESSAGE
 
     # 3. preview_only in result is False
     _setup_signal_only_evidence(window, time_sec=t, preview_dff=y, preview_only=False)
@@ -335,6 +438,7 @@ def test_generate_preview_dynamic_fit_unsupported(window):
     # Should show the explicit dynamic-fit warning message and hide the table
     assert "Preview is not available for dynamic-fit strategies because dynamic-fit trace arrays" in status_lbl.text()
     assert result_table.isHidden()
+    assert window._guided_feature_preview_plot.isHidden()
 
 
 def test_generate_preview_missing_evidence(window):
@@ -373,6 +477,7 @@ def test_settings_changed_invalidates_preview(window):
     status_lbl = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel")
     assert "Settings changed" in status_lbl.text()
     assert result_table.isHidden()
+    assert window._guided_feature_preview_plot.isHidden()
 
 
 def test_preview_safety_and_continue_gating(window, tmp_path):
