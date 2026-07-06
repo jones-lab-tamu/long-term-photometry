@@ -121,6 +121,7 @@ from photometry_pipeline.preview.correction_preview import (
     PREVIEW_PROVENANCE_FILENAME,
     PREVIEW_SUMMARY_FILENAME,
     resolve_completed_run_preview_source,
+    compute_guided_local_preview_dff_trace_in_memory,
     run_guided_correction_preview_comparison,
     run_guided_local_correction_preview,
 )
@@ -12197,52 +12198,111 @@ class MainWindow(QMainWindow):
     def _guided_feature_preview_segments_for_roi(
         self, roi_id: str
     ) -> list[dict[str, object]]:
-        """Return only segment evidence already retained in memory."""
+        """Return discovered previewable segments and retained-evidence identity."""
         evidence = self._guided_local_preview_evidence_for_roi(
             roi_id, require_current=True
         )
-        if not isinstance(evidence, dict):
-            return []
-        result = evidence.get("result")
-        provenance = evidence.get("provenance")
-        if not isinstance(result, dict) or not isinstance(provenance, dict):
-            return []
-        label = str(
-            provenance.get("selected_segment_label")
-            or result.get("preview_segment_label")
-            or "retained preview segment"
+        result = (
+            evidence.get("result")
+            if isinstance(evidence, dict)
+            and isinstance(evidence.get("result"), dict)
+            else {}
         )
-        return [
-            {
-                "segment_label": label,
-                "selected_segment_index": provenance.get(
-                    "selected_segment_index",
-                    result.get("chunk_index"),
-                ),
-                "preview_id": str(
-                    result.get("preview_id")
-                    or provenance.get("preview_id")
-                    or ""
-                ),
-            }
-        ]
+        provenance = (
+            evidence.get("provenance")
+            if isinstance(evidence, dict)
+            and isinstance(evidence.get("provenance"), dict)
+            else {}
+        )
+        retained_index = provenance.get(
+            "selected_segment_index", result.get("chunk_index")
+        )
+        retained_source = os.path.realpath(
+            str(
+                provenance.get("source_file")
+                or result.get("source_file")
+                or ""
+            )
+        )
+        retained_preview_id = str(
+            result.get("preview_id")
+            or provenance.get("preview_id")
+            or ""
+        )
+        segments: list[dict[str, object]] = []
+        discovery = getattr(self, "_discovery_cache", None) or {}
+        for fallback_index, session in enumerate(
+            discovery.get("sessions", ())
+        ):
+            if (
+                not isinstance(session, dict)
+                or not session.get("included_in_preview", True)
+                or not session.get("path")
+            ):
+                continue
+            index = int(session.get("index", fallback_index))
+            source_path = os.path.realpath(str(session["path"]))
+            label = str(session.get("session_id") or index)
+            retained = bool(
+                retained_preview_id
+                and (
+                    (
+                        retained_index is not None
+                        and int(retained_index) == index
+                    )
+                    or (
+                        retained_source
+                        and retained_source == source_path
+                    )
+                )
+            )
+            segments.append(
+                {
+                    "segment_label": label,
+                    "discovered_session_index": index,
+                    "source_path": source_path,
+                    "adapter_chunk_index": 0,
+                    "retained_preview_id": (
+                        retained_preview_id if retained else ""
+                    ),
+                }
+            )
+        if not segments and retained_preview_id:
+            segments.append(
+                {
+                    "segment_label": str(
+                        provenance.get("selected_segment_label")
+                        or result.get("preview_segment_label")
+                        or "retained preview segment"
+                    ),
+                    "discovered_session_index": retained_index,
+                    "source_path": retained_source,
+                    "adapter_chunk_index": int(
+                        result.get("adapter_local_chunk_id", 0)
+                    ),
+                    "retained_preview_id": retained_preview_id,
+                }
+            )
+        return segments
 
     def _refresh_guided_feature_preview_segment_choices(self) -> None:
         if not hasattr(self, "_guided_feature_preview_segment_combo"):
             return
         roi_id = self._guided_feature_preview_roi_combo.currentText()
         segments = self._guided_feature_preview_segments_for_roi(roi_id)
-        current_preview_id = ""
+        current_segment_index = None
         current_data = self._guided_feature_preview_segment_combo.currentData()
         if isinstance(current_data, dict):
-            current_preview_id = str(current_data.get("preview_id") or "")
+            current_segment_index = current_data.get(
+                "discovered_session_index"
+            )
         with QSignalBlocker(self._guided_feature_preview_segment_combo):
             self._guided_feature_preview_segment_combo.clear()
             for segment in segments:
                 self._guided_feature_preview_segment_combo.addItem(
                     str(segment["segment_label"]), dict(segment)
                 )
-            if current_preview_id:
+            if current_segment_index is not None:
                 for index in range(
                     self._guided_feature_preview_segment_combo.count()
                 ):
@@ -12251,8 +12311,8 @@ class MainWindow(QMainWindow):
                     )
                     if (
                         isinstance(data, dict)
-                        and str(data.get("preview_id") or "")
-                        == current_preview_id
+                        and data.get("discovered_session_index")
+                        == current_segment_index
                     ):
                         self._guided_feature_preview_segment_combo.setCurrentIndex(
                             index
@@ -12321,16 +12381,15 @@ class MainWindow(QMainWindow):
         )
         if isinstance(selected_segment, dict):
             selected_preview_id = str(
-                selected_segment.get("preview_id") or ""
+                selected_segment.get("retained_preview_id") or ""
             )
             evidence_preview_id = str(
                 result.get("preview_id")
                 or provenance.get("preview_id")
                 or ""
             )
-            if (
-                selected_preview_id
-                and evidence_preview_id
+            if not selected_preview_id or (
+                evidence_preview_id
                 and selected_preview_id != evidence_preview_id
             ):
                 return context
@@ -12430,6 +12489,99 @@ class MainWindow(QMainWindow):
                 }
         return context
 
+    def _guided_feature_preview_choice_is_current(
+        self, choice: object
+    ) -> bool:
+        if not isinstance(choice, dict):
+            return False
+        return bool(
+            choice.get("confirmed") is True
+            and choice.get("current") is True
+            and choice.get("stale") is not True
+            and choice.get("preview_only") is True
+            and choice.get("production_analysis") is False
+            and choice.get("source_type")
+            == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
+            and str(choice.get("setup_signature") or "")
+            == self._guided_local_preview_setup_signature()
+        )
+
+    def _guided_feature_preview_config_overrides(
+        self, segment: dict[str, object], input_format: str
+    ) -> dict[str, object]:
+        source_path = str(segment.get("source_path") or "")
+        if input_format == "rwd":
+            contract = self._infer_rwd_chunk_contract(source_path)
+            return {
+                "target_fs_hz": float(contract["fs_hz"]),
+                "chunk_duration_sec": float(
+                    contract["chunk_duration_sec"]
+                ),
+                "rwd_time_col": str(contract["time_col"]),
+                "uv_suffix": str(contract["uv_suffix"]),
+                "sig_suffix": str(contract["sig_suffix"]),
+            }
+        overrides = self._infer_dataset_contract_overrides(input_format)
+        result = dict(overrides) if isinstance(overrides, dict) else {}
+        duration_text = self._duration_edit.text().strip()
+        if duration_text:
+            result["chunk_duration_sec"] = float(duration_text)
+        return result
+
+    @staticmethod
+    def _guided_feature_preview_context_from_trace(
+        trace_result: dict[str, object],
+        *,
+        roi_id: str,
+        correction_strategy: str,
+        dynamic_fit_mode: str,
+    ) -> dict[str, object]:
+        context: dict[str, object] = {
+            "dynamic_delta_f": {},
+            "dynamic_dff": {},
+            "signal_only_dff": {},
+        }
+        trace = {
+            "time_sec": trace_result["time_sec"],
+            "trace": trace_result["preview_dff"],
+            "fs_hz": trace_result["fs_hz"],
+            "current": True,
+            "source_kind": "local_correction_preview",
+        }
+        if correction_strategy == "dynamic_fit":
+            trace.update(
+                trace_identity={
+                    "roi_id": roi_id,
+                    "trace_source": "local_correction_preview_dff",
+                    "preview_only": True,
+                    "production_analysis": False,
+                    "dff_scale": "fractional_ratio",
+                    "segment_label": trace_result.get("segment_label"),
+                },
+                correction_identity={
+                    "correction_strategy": "dynamic_fit",
+                    "dynamic_fit_mode": dynamic_fit_mode,
+                },
+            )
+            context["dynamic_dff"] = {
+                (roi_id, dynamic_fit_mode): trace
+            }
+        else:
+            trace.update(
+                trace_identity={
+                    "roi_id": roi_id,
+                    "source": "in_memory_preview",
+                    "trace_source": "local_correction_preview_dff",
+                    "preview_only": True,
+                    "production_analysis": False,
+                    "dff_scale": "fractional_ratio",
+                    "segment_label": trace_result.get("segment_label"),
+                },
+                correction_identity={"strategy": "signal_only_f0"},
+            )
+            context["signal_only_dff"] = {roi_id: trace}
+        return context
+
     def _on_guided_generate_feature_detection_preview(self) -> None:
         roi_id = self._guided_feature_preview_roi_combo.currentText()
         self._clear_guided_feature_detection_preview_result()
@@ -12444,12 +12596,11 @@ class MainWindow(QMainWindow):
         )
         choices = getattr(self, "_guided_strategy_choices", {})
         choice = choices.get(choice_key)
-        if not choice or not isinstance(choice, dict):
+        if not self._guided_feature_preview_choice_is_current(choice):
             self._guided_feature_preview_status_label.setText(
-                f"Preview evidence for {roi_id} is not available in memory. "
-                "Return to Correction Approach and regenerate local preview, or proceed without preview."
+                f"Correction strategy for {roi_id} is missing or stale. "
+                "Return to Correction Approach and reconfirm it."
             )
-            self._guided_feature_preview_result_table.setVisible(False)
             return
 
         strategy = choice.get("strategy", "")
@@ -12462,15 +12613,14 @@ class MainWindow(QMainWindow):
             or choice.get("strategy_family") == "dynamic_fit"
         )
 
-        # Check for current local preview evidence
-        evidence = self._guided_local_preview_evidence_for_roi(roi_id, require_current=True)
-        if not evidence or not isinstance(evidence, dict):
+        segment = self._guided_feature_preview_segment_combo.currentData()
+        if not isinstance(segment, dict):
             self._guided_feature_preview_status_label.setText(
-                f"Preview evidence for {roi_id} is not available in memory. "
-                "Return to Correction Approach and regenerate local preview, or proceed without preview."
+                "No valid preview segment is selected."
             )
-            self._guided_feature_preview_result_table.setVisible(False)
             return
+        source_path = str(segment.get("source_path") or "")
+        segment_index = segment.get("discovered_session_index")
 
         # Build request config from current editor settings
         config_fields, err = self._guided_feature_event_current_values()
@@ -12509,43 +12659,104 @@ class MainWindow(QMainWindow):
             feature_profile_id="preview-profile",
         )
 
-        # Build context
-        context = self._build_guided_feature_detection_preview_context(roi_id)
-        if (
-            correction_strategy == "dynamic_fit"
-            and request.event_signal == "dff"
-            and (roi_id, dynamic_fit_mode)
-            not in context.get("dynamic_dff", {})
-        ):
-            self._guided_feature_preview_status_label.setText(
-                "Feature preview is not available because the local "
-                "correction preview does not retain a dynamic-fit dF/F trace "
-                "in memory for this ROI/segment yet."
-            )
-            return
-        if (
-            correction_strategy == "dynamic_fit"
-            and request.event_signal == "delta_f"
-            and (roi_id, dynamic_fit_mode)
-            not in context.get("dynamic_delta_f", {})
-        ):
+        if correction_strategy == "dynamic_fit" and request.event_signal != "dff":
             self._guided_feature_preview_status_label.setText(
                 "Feature preview is not available for dynamic-fit delta_f "
-                "because this Step 5 path retains only local "
+                "because this Step 5 path supports only local "
                 "correction-preview dF/F."
             )
             return
-        if (
+
+        # Reuse retained evidence only when it belongs to the selected segment.
+        context = self._build_guided_feature_detection_preview_context(roi_id)
+        has_trace = (
+            correction_strategy == "dynamic_fit"
+            and (roi_id, dynamic_fit_mode)
+            in context.get("dynamic_dff", {})
+        ) or (
             correction_strategy == "signal_only_f0"
-            and request.event_signal == "dff"
-            and roi_id not in context.get("signal_only_dff", {})
-        ):
+            and roi_id in context.get("signal_only_dff", {})
+        )
+        if not has_trace and request.event_signal == "dff":
+            if not source_path or segment_index is None:
+                self._guided_feature_preview_status_label.setText(
+                    "The selected preview segment is unavailable."
+                )
+                return
+            discovery = getattr(self, "_discovery_cache", None) or {}
+            input_format = str(
+                discovery.get("resolved_format")
+                or self._guided_format_combo.currentText()
+                or ""
+            ).strip().lower()
             self._guided_feature_preview_status_label.setText(
-                "Feature preview is not available because the local "
-                "correction preview does not retain preview trace arrays in "
-                "memory for this ROI/segment yet."
+                "Computing local preview for selected segment..."
             )
-            return
+            self._guided_feature_preview_generate_btn.setEnabled(False)
+            QApplication.processEvents()
+            try:
+                trace_result = (
+                    compute_guided_local_preview_dff_trace_in_memory(
+                        source_path,
+                        roi=roi_id,
+                        chunk_index=int(segment_index),
+                        adapter_chunk_index=int(
+                            segment.get("adapter_chunk_index", 0)
+                        ),
+                        segment_label=str(
+                            segment.get("segment_label")
+                            or segment_index
+                        ),
+                        input_format=input_format,
+                        config_path=self._active_config_source_path(),
+                        strategy_family=str(
+                            choice.get("strategy_family")
+                            or correction_strategy
+                        ),
+                        strategy=str(strategy),
+                        dynamic_fit_mode=(
+                            dynamic_fit_mode or None
+                        ),
+                        config_overrides=(
+                            self._guided_feature_preview_config_overrides(
+                                segment, input_format
+                            )
+                        ),
+                    )
+                )
+            except Exception as exc:
+                self._guided_feature_preview_status_label.setText(
+                    f"Local preview computation failed: {exc}"
+                )
+                return
+            finally:
+                self._guided_feature_preview_generate_btn.setEnabled(
+                    bool(
+                        self._guided_feature_preview_roi_combo.currentText()
+                        and self._guided_feature_preview_segment_combo.count()
+                    )
+                )
+            if (
+                not isinstance(trace_result, dict)
+                or trace_result.get("valid") is not True
+            ):
+                issues = (
+                    trace_result.get("issues", ())
+                    if isinstance(trace_result, dict)
+                    else ()
+                )
+                detail = str(next(iter(issues), "trace unavailable"))
+                self._guided_feature_preview_status_label.setText(
+                    f"Local preview computation failed: {detail}"
+                )
+                return
+            self._guided_feature_preview_on_demand_trace = trace_result
+            context = self._guided_feature_preview_context_from_trace(
+                trace_result,
+                roi_id=roi_id,
+                correction_strategy=correction_strategy,
+                dynamic_fit_mode=dynamic_fit_mode,
+            )
 
         # Run preview
         try:

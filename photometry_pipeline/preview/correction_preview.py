@@ -178,6 +178,180 @@ def compute_guided_local_signal_only_f0_preview(
     }
 
 
+def compute_guided_local_preview_dff_trace_in_memory(
+    source_file: str | os.PathLike[str],
+    *,
+    roi: str,
+    chunk_index: int,
+    adapter_chunk_index: int = 0,
+    segment_label: str = "",
+    input_format: str,
+    config_path: str | os.PathLike[str],
+    strategy_family: str,
+    strategy: str,
+    dynamic_fit_mode: str | None = None,
+    config_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compute one local fractional dF/F trace without creating artifacts."""
+    family = str(strategy_family or "").strip()
+    selected = str(strategy or "").strip()
+    mode = str(dynamic_fit_mode or selected or "").strip()
+    base = {
+        "ok": False,
+        "valid": False,
+        "strategy_family": family,
+        "strategy": selected,
+        "dynamic_fit_mode": mode if family == "dynamic_fit" else None,
+        "roi_id": str(roi),
+        "segment_label": str(segment_label or chunk_index),
+        "discovered_session_index": int(chunk_index),
+        "adapter_chunk_index": int(adapter_chunk_index),
+        "source_file": _resolve_path(source_file),
+        "time_sec": np.asarray([], dtype=float),
+        "preview_dff": np.asarray([], dtype=float),
+        "fs_hz": None,
+        "trace_source": "local_correction_preview_dff",
+        "dff_scale": "fractional_ratio",
+        "preview_only": True,
+        "production_analysis": False,
+        "current_or_stale": "current",
+        "issues": [],
+    }
+    try:
+        source_path = _resolve_path(source_file)
+        config_source = _resolve_path(config_path)
+        if not os.path.isfile(source_path):
+            raise GuidedCorrectionPreviewError(
+                "Selected preview segment is unavailable."
+            )
+        if not os.path.isfile(config_source):
+            raise GuidedCorrectionPreviewError(
+                "Correction configuration is unavailable."
+            )
+        cfg = Config.from_yaml(config_source)
+        overrides = {
+            str(key): value
+            for key, value in (config_overrides or {}).items()
+            if str(key) in Config.__dataclass_fields__
+        }
+        if overrides:
+            cfg_values = dataclasses.asdict(cfg)
+            cfg_values.update(overrides)
+            cfg = Config(**cfg_values)
+        raw_chunk = load_chunk(
+            source_path,
+            str(input_format).strip().lower(),
+            cfg,
+            int(adapter_chunk_index),
+        )
+        if roi not in raw_chunk.channel_names:
+            raise GuidedCorrectionPreviewError(
+                f"Requested ROI '{roi}' is not present in the selected segment."
+            )
+        roi_index = raw_chunk.channel_names.index(roi)
+        source_time = np.asarray(
+            raw_chunk.time_sec, dtype=float
+        ).reshape(-1)
+        segment_start = float(source_time[0])
+        segment_end = segment_start + float(cfg.chunk_duration_sec)
+        mask = (source_time >= segment_start) & (source_time < segment_end)
+        if int(np.count_nonzero(mask)) < 3:
+            raise GuidedCorrectionPreviewError(
+                "Selected preview segment contains too few samples."
+            )
+        record = {
+            "roi": str(roi),
+            "chunk_id": int(adapter_chunk_index),
+            "source_file": source_path,
+            "time_sec": source_time[mask] - segment_start,
+            "sig_raw": np.asarray(
+                raw_chunk.sig_raw[:, roi_index], dtype=float
+            ).reshape(-1)[mask],
+            "uv_raw": np.asarray(
+                raw_chunk.uv_raw[:, roi_index], dtype=float
+            ).reshape(-1)[mask],
+            "fs_hz": float(raw_chunk.fs_hz),
+            "window": None,
+            "metadata": dict(raw_chunk.metadata or {}),
+        }
+        if family == "signal_only_f0" and selected == "signal_only_f0":
+            evidence = compute_guided_local_signal_only_f0_preview(
+                record["sig_raw"],
+                record["time_sec"],
+                roi_id=str(roi),
+            )
+        elif family == "dynamic_fit":
+            method_result = validate_preview_methods([mode])
+            if not method_result.ok:
+                raise GuidedCorrectionPreviewError(method_result.reason)
+            method_cfg = _config_for_method(cfg, mode)
+            chunk = _make_preview_chunk(record, str(roi))
+            chunk.uv_filt, _ = preprocessing.lowpass_filter_with_meta(
+                chunk.uv_raw, chunk.fs_hz, method_cfg
+            )
+            chunk.sig_filt, _ = preprocessing.lowpass_filter_with_meta(
+                chunk.sig_raw, chunk.fs_hz, method_cfg
+            )
+            uv_fit, delta_f = regression.fit_chunk_dynamic(
+                chunk, method_cfg, mode="phasic"
+            )
+            if uv_fit is None or delta_f is None:
+                raise GuidedCorrectionPreviewError(
+                    f"{mode} did not produce fit_ref and delta_f."
+                )
+            chunk.uv_fit = uv_fit
+            chunk.delta_f = delta_f
+            evidence = _compute_local_dynamic_fit_dff_evidence(
+                chunk,
+                method_cfg,
+                method=mode,
+                roi=str(roi),
+            )
+        else:
+            raise GuidedCorrectionPreviewError(
+                f"Unsupported correction strategy: {family}/{selected}"
+            )
+        preview_dff = np.asarray(
+            evidence.get("preview_dff", ()), dtype=float
+        ).reshape(-1)
+        time_sec = np.asarray(
+            evidence.get("time_sec", ()), dtype=float
+        ).reshape(-1)
+        if (
+            evidence.get("valid") is not True
+            or preview_dff.size < 2
+            or preview_dff.size != time_sec.size
+        ):
+            issues = list(evidence.get("issues") or ())
+            raise GuidedCorrectionPreviewError(
+                issues[0] if issues else "Local preview dF/F is unavailable."
+            )
+        return {
+            **base,
+            **{
+                key: value
+                for key, value in evidence.items()
+                if key not in {"strategy_family", "dynamic_fit_mode"}
+            },
+            "ok": True,
+            "valid": True,
+            "strategy_family": family,
+            "strategy": selected,
+            "dynamic_fit_mode": mode if family == "dynamic_fit" else None,
+            "time_sec": time_sec.copy(),
+            "preview_dff": preview_dff.copy(),
+            "fs_hz": float(record["fs_hz"]),
+            "trace_source": "local_correction_preview_dff",
+            "dff_scale": "fractional_ratio",
+            "issues": [],
+        }
+    except Exception as exc:
+        return {
+            **base,
+            "issues": [f"{type(exc).__name__}: {exc}"],
+        }
+
+
 def _signal_only_f0_preview_metadata(
     evidence: dict[str, Any],
 ) -> dict[str, Any]:

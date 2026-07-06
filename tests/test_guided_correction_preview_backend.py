@@ -11,6 +11,7 @@ from photometry_pipeline.preview.correction_preview import (
     METHOD_DIAGNOSTICS_FILENAME_TEMPLATE,
     PREVIEW_PROVENANCE_FILENAME,
     PREVIEW_SUMMARY_FILENAME,
+    compute_guided_local_preview_dff_trace_in_memory,
     compute_guided_local_signal_only_f0_preview,
     run_guided_correction_preview_comparison,
     run_guided_local_correction_preview,
@@ -661,6 +662,85 @@ def test_local_preview_real_rwd_nonfirst_session_uses_selected_file_and_local_ch
         "strategy_family"
     ] == "signal_only_f0"
     assert not (tmp_path / "applied_dff").exists()
+
+
+def test_on_demand_local_preview_service_is_no_write_and_strategy_exact(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "session-2" / "fluorescence.csv"
+    _write_realistic_rwd_session(source, offset=20.0)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 20.0\n"
+        "chunk_duration_sec: 600.0\n"
+        "rwd_time_col: TimeStamp\n"
+        "uv_suffix: '-410'\n"
+        "sig_suffix: '-470'\n"
+        "lowpass_hz: 1.0\n"
+        "filter_order: 3\n",
+        encoding="utf-8",
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("on-demand preview attempted an artifact write")
+
+    monkeypatch.setattr(correction_preview_module, "_write_json", forbidden)
+    monkeypatch.setattr(
+        correction_preview_module, "_write_method_trace_csv", forbidden
+    )
+    monkeypatch.setattr(
+        correction_preview_module.os, "makedirs", forbidden
+    )
+
+    result = compute_guided_local_preview_dff_trace_in_memory(
+        source,
+        roi="CH2",
+        chunk_index=2,
+        adapter_chunk_index=0,
+        segment_label="session-2",
+        input_format="rwd",
+        config_path=config,
+        strategy_family="dynamic_fit",
+        strategy="global_linear_regression",
+        dynamic_fit_mode="global_linear_regression",
+    )
+
+    assert result["valid"] is True
+    assert result["strategy_family"] == "dynamic_fit"
+    assert result["strategy"] == "global_linear_regression"
+    assert result["dynamic_fit_mode"] == "global_linear_regression"
+    assert result["discovered_session_index"] == 2
+    assert result["adapter_chunk_index"] == 0
+    assert result["dff_scale"] == "fractional_ratio"
+    assert result["preview_only"] is True
+    assert result["production_analysis"] is False
+    assert len(result["time_sec"]) == len(result["preview_dff"])
+    assert not (tmp_path / "local-preview").exists()
+
+
+def test_on_demand_local_preview_service_rejects_strategy_mismatch(
+    tmp_path,
+):
+    source = tmp_path / "session-0" / "fluorescence.csv"
+    _write_realistic_rwd_session(source, offset=0.0)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 20.0\nchunk_duration_sec: 600.0\n",
+        encoding="utf-8",
+    )
+
+    result = compute_guided_local_preview_dff_trace_in_memory(
+        source,
+        roi="CH1",
+        chunk_index=0,
+        input_format="rwd",
+        config_path=config,
+        strategy_family="signal_only_f0",
+        strategy="global_linear_regression",
+    )
+
+    assert result["valid"] is False
+    assert "Unsupported correction strategy" in result["issues"][0]
 
 
 def test_local_preview_can_omit_signal_only_f0_evidence(tmp_path):

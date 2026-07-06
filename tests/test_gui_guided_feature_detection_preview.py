@@ -11,10 +11,7 @@ from gui.main_window import MainWindow, LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
 from photometry_pipeline.guided_feature_detection_preview import GuidedFeaturePreviewUnsupportedError
 
 
-MISSING_TRACE_MESSAGE = (
-    "Feature preview is not available because the local correction preview "
-    "does not retain preview trace arrays in memory for this ROI/segment yet."
-)
+MISSING_TRACE_MESSAGE = "The selected preview segment is unavailable."
 
 
 @pytest.fixture(scope="module")
@@ -166,7 +163,14 @@ def _setup_signal_only_evidence(window, *, time_sec, preview_dff, valid=True, cu
     window._guided_strategy_choices[choice_key] = {
         "strategy": "signal_only_f0",
         "roi": "CH1",
-        "strategy_family": "signal_only_f0"
+        "strategy_family": "signal_only_f0",
+        "confirmed": True,
+        "current": True,
+        "stale": False,
+        "preview_only": True,
+        "production_analysis": False,
+        "source_type": LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
+        "setup_signature": "test-setup-sig",
     }
 
     # Registry evidence structure
@@ -218,6 +222,13 @@ def _setup_dynamic_evidence(
         "roi": "CH1",
         "strategy_family": "dynamic_fit",
         "dynamic_fit_mode": mode,
+        "confirmed": True,
+        "current": True,
+        "stale": False,
+        "preview_only": True,
+        "production_analysis": False,
+        "source_type": LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
+        "setup_signature": "test-setup-sig",
     }
     method_status = {"status": "success"}
     if preview_dff is not None:
@@ -368,6 +379,166 @@ def test_only_retained_in_memory_segment_is_selectable(window):
     assert segment_combo.currentText() == "retained preview segment"
 
 
+def test_segment_selector_lists_all_discovered_previewable_sessions(window):
+    _setup_signal_only_evidence(
+        window,
+        time_sec=np.arange(10, dtype=float),
+        preview_dff=np.zeros(10),
+    )
+    window._discovery_cache = {
+        "resolved_format": "rwd",
+        "sessions": [
+            {
+                "index": 0,
+                "session_id": "session-1",
+                "path": "C:/raw/session-1.csv",
+                "included_in_preview": True,
+            },
+            {
+                "index": 1,
+                "session_id": "session-2",
+                "path": "C:/raw/session-2.csv",
+                "included_in_preview": True,
+            },
+            {
+                "index": 2,
+                "session_id": "excluded",
+                "path": "C:/raw/excluded.csv",
+                "included_in_preview": False,
+            },
+        ],
+    }
+    window._refresh_guided_feature_detection_preview_panel()
+
+    combo = window._guided_feature_preview_segment_combo
+    assert [combo.itemText(i) for i in range(combo.count())] == [
+        "session-1",
+        "session-2",
+    ]
+    assert combo.itemData(1)["discovered_session_index"] == 1
+    assert combo.itemData(1)["adapter_chunk_index"] == 0
+
+
+@pytest.mark.parametrize(
+    ("family", "strategy"),
+    [
+        ("signal_only_f0", "signal_only_f0"),
+        ("dynamic_fit", "global_linear_regression"),
+    ],
+)
+def test_generate_preview_computes_selected_nonretained_segment_on_demand(
+    window, monkeypatch, family, strategy
+):
+    if family == "dynamic_fit":
+        _setup_dynamic_evidence(
+            window,
+            time_sec=np.arange(10, dtype=float),
+            preview_dff=np.zeros(10),
+            mode=strategy,
+        )
+    else:
+        _setup_signal_only_evidence(
+            window,
+            time_sec=np.arange(10, dtype=float),
+            preview_dff=np.zeros(10),
+        )
+    window._guided_local_preview_evidence_by_roi.clear()
+    window._discovery_cache = {
+        "resolved_format": "rwd",
+        "sessions": [
+            {
+                "index": 0,
+                "session_id": "session-1",
+                "path": "C:/raw/session-1.csv",
+            },
+            {
+                "index": 1,
+                "session_id": "session-2",
+                "path": "C:/raw/session-2.csv",
+            },
+        ],
+    }
+    window._guided_feature_preview_config_overrides = (
+        lambda _segment, _fmt: {}
+    )
+    window._active_config_source_path = lambda: "C:/config.yaml"
+    calls = []
+    t = np.arange(100, dtype=float) * 0.1
+    y = np.sin(t)
+
+    def compute(source_file, **kwargs):
+        calls.append((source_file, kwargs))
+        return {
+            "valid": True,
+            "time_sec": t,
+            "preview_dff": y,
+            "fs_hz": 10.0,
+            "segment_label": kwargs["segment_label"],
+            "issues": [],
+        }
+
+    import gui.main_window as main_window_module
+    monkeypatch.setattr(
+        main_window_module,
+        "compute_guided_local_preview_dff_trace_in_memory",
+        compute,
+    )
+    window._refresh_guided_feature_detection_preview_panel()
+    window._guided_feature_preview_segment_combo.setCurrentIndex(1)
+
+    window._on_guided_generate_feature_detection_preview()
+
+    assert window._guided_feature_preview_status_label.text() == (
+        "Preview generated successfully."
+    )
+    assert len(calls) == 1
+    source_file, kwargs = calls[0]
+    assert source_file.endswith("session-2.csv")
+    assert kwargs["chunk_index"] == 1
+    assert kwargs["strategy_family"] == family
+    assert kwargs["strategy"] == strategy
+    assert kwargs["dynamic_fit_mode"] == (
+        strategy if family == "dynamic_fit" else None
+    )
+    assert np.array_equal(
+        window._guided_feature_preview_plot.trace, y
+    )
+    assert window._guided_feature_preview_on_demand_trace["valid"] is True
+
+
+def test_on_demand_preview_refuses_stale_confirmed_choice(
+    window, monkeypatch
+):
+    _setup_signal_only_evidence(
+        window,
+        time_sec=np.arange(10, dtype=float),
+        preview_dff=np.zeros(10),
+    )
+    choice = next(iter(window._guided_strategy_choices.values()))
+    choice.update(current=False, stale=True)
+    window._discovery_cache = {
+        "resolved_format": "rwd",
+        "sessions": [
+            {"index": 0, "session_id": "s1", "path": "C:/raw/s1.csv"}
+        ],
+    }
+    window._refresh_guided_feature_detection_preview_panel()
+    import gui.main_window as main_window_module
+    monkeypatch.setattr(
+        main_window_module,
+        "compute_guided_local_preview_dff_trace_in_memory",
+        lambda *_args, **_kwargs: pytest.fail(
+            "stale choice must not compute"
+        ),
+    )
+
+    window._on_guided_generate_feature_detection_preview()
+
+    assert "missing or stale" in (
+        window._guided_feature_preview_status_label.text()
+    )
+
+
 def test_roi_and_segment_changes_clear_visual_plot(window):
     t = np.arange(100, dtype=float) * 0.1
     _setup_signal_only_evidence(window, time_sec=t, preview_dff=np.sin(t))
@@ -460,12 +631,12 @@ def test_generate_preview_stale_evidence(window):
     # 3. preview_only in result is False
     _setup_signal_only_evidence(window, time_sec=t, preview_dff=y, preview_only=False)
     window._on_guided_generate_feature_detection_preview()
-    assert "Preview evidence for CH1 is not available in memory" in status_lbl.text()
+    assert status_lbl.text() == "No valid preview segment is selected."
 
     # 4. production_analysis in result is True
     _setup_signal_only_evidence(window, time_sec=t, preview_dff=y, production_analysis=True)
     window._on_guided_generate_feature_detection_preview()
-    assert "Preview evidence for CH1 is not available in memory" in status_lbl.text()
+    assert status_lbl.text() == "No valid preview segment is selected."
 
 
 def test_generate_preview_dynamic_fit_dff_success(window):
@@ -500,10 +671,9 @@ def test_generate_preview_dynamic_fit_missing_dff(window):
 
     window._on_guided_generate_feature_detection_preview()
 
-    assert window._guided_feature_preview_status_label.text() == (
-        "Feature preview is not available because the local correction "
-        "preview does not retain a dynamic-fit dF/F trace in memory for this "
-        "ROI/segment yet."
+    assert (
+        window._guided_feature_preview_status_label.text()
+        == MISSING_TRACE_MESSAGE
     )
     assert window._guided_feature_preview_plot.isHidden()
     assert window._guided_feature_preview_result_table.isHidden()
@@ -516,7 +686,7 @@ def test_generate_preview_dynamic_fit_delta_f_does_not_fallback(window):
 
     window._on_guided_generate_feature_detection_preview()
 
-    assert "retains only local correction-preview dF/F" in (
+    assert "supports only local correction-preview dF/F" in (
         window._guided_feature_preview_status_label.text()
     )
     assert window._guided_feature_preview_plot.isHidden()
@@ -544,7 +714,7 @@ def test_generate_preview_dynamic_fit_no_evidence(window):
 
     window._on_guided_generate_feature_detection_preview()
 
-    assert "Preview evidence for CH1 is not available in memory" in (
+    assert "Correction strategy for CH1 is missing or stale" in (
         window._guided_feature_preview_status_label.text()
     )
     assert window._guided_feature_preview_plot.isHidden()
@@ -567,7 +737,7 @@ def test_generate_preview_missing_evidence(window):
     status_lbl = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel")
     result_table = window.findChild(QTableWidget, "guidedFeaturePreviewResultTable")
 
-    assert "Preview evidence for CH1 is not available in memory" in status_lbl.text()
+    assert "Correction strategy for CH1 is missing or stale" in status_lbl.text()
     assert result_table.isHidden()
 
 
