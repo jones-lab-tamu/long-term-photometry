@@ -161,11 +161,13 @@ GUIDED_WORKFLOW_STEPS = (
     "Select data",
     "Recording structure",
     "Correction approach",
+    "Feature detection",
     "Draft plan",
     "Run",
     "Review",
 )
 GUIDED_WORKFLOW_STEP_DISPLAY_LABELS = {
+    "Feature detection": "Feature Detection",
     "Draft plan": "Review Plan",
 }
 GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE = {
@@ -1771,6 +1773,7 @@ class MainWindow(QMainWindow):
             self._build_guided_select_data_step(),
             self._build_guided_recording_structure_step(),
             self._build_guided_correction_approach_step(),
+            self._build_guided_feature_detection_step(),
             self._build_guided_draft_plan_step(),
             self._build_guided_run_step(),
             self._build_guided_review_step(),
@@ -2632,6 +2635,7 @@ class MainWindow(QMainWindow):
                 recording_reason
             )
         self._refresh_guided_correction_continue_state()
+        self._refresh_guided_feature_detection_continue_state()
 
     def _on_guided_continue_to_recording_structure(self) -> None:
         if not self._guided_select_data_ready_to_continue():
@@ -2649,6 +2653,146 @@ class MainWindow(QMainWindow):
         self._reach_guided_step("Correction approach")
         self._guided_workflow_stepper.setCurrentRow(
             self._guided_step_index("Correction approach")
+        )
+
+    def _guided_feature_detection_readiness(self) -> tuple[bool, str]:
+        status = str(
+            getattr(
+                self,
+                "_guided_new_analysis_feature_event_profile_status",
+                "missing",
+            )
+            or "missing"
+        )
+        errors = list(
+            getattr(
+                self,
+                "_guided_new_analysis_feature_event_profile_errors",
+                (),
+            )
+            or ()
+        )
+        stale_reasons = list(
+            getattr(
+                self,
+                "_guided_new_analysis_feature_event_profile_stale_reasons",
+                (),
+            )
+            or ()
+        )
+        profile = getattr(
+            self, "_guided_new_analysis_feature_event_profile", None
+        )
+        if (
+            status == "applied"
+            and isinstance(profile, dict)
+            and bool(profile)
+            and not errors
+            and not stale_reasons
+        ):
+            return True, "Feature detection settings are applied and current."
+        if status == "stale":
+            return (
+                False,
+                "Feature detection settings changed after they were applied. "
+                "Review and apply them again.",
+            )
+        if status in {"invalid", "unavailable"}:
+            detail = str(errors[0]).strip() if errors else ""
+            return (
+                False,
+                "Feature detection settings need attention before continuing."
+                + (f" {detail}" if detail else ""),
+            )
+        return (
+            False,
+            "Review and apply feature detection settings before continuing.",
+        )
+
+    def _refresh_guided_feature_detection_continue_state(self) -> None:
+        button = getattr(
+            self, "_guided_feature_detection_continue_btn", None
+        )
+        status_label = getattr(
+            self, "_guided_feature_detection_continue_status", None
+        )
+        if button is None or status_label is None:
+            return
+        ready, message = self._guided_feature_detection_readiness()
+        button.setEnabled(ready)
+        status_label.setText(message)
+        self._refresh_guided_feature_detection_summary()
+
+    def _guided_feature_detection_summary_text(self, plan=None) -> str:
+        status = (
+            str(plan.feature_event_profile_status or "missing")
+            if plan is not None
+            else str(
+                getattr(
+                    self,
+                    "_guided_new_analysis_feature_event_profile_status",
+                    "missing",
+                )
+                or "missing"
+            )
+        )
+        explicitly_applied = (
+            bool(plan.feature_event_explicitly_applied)
+            if plan is not None
+            else status == "applied"
+        )
+        if status == "applied" and explicitly_applied:
+            display = "Applied"
+            action = "Feature detection settings are part of this plan."
+        elif status == "default_initialized":
+            display = "Not applied"
+            action = (
+                "Review and apply feature detection settings before continuing."
+            )
+        else:
+            display = "Needs attention"
+            action = (
+                "Review and apply feature detection settings before continuing."
+            )
+        threshold_method = (
+            self._guided_feature_event_peak_method_combo.currentText()
+        )
+        if threshold_method == "percentile":
+            threshold_value = self._guided_feature_event_peak_pct_edit.text()
+        elif threshold_method == "absolute":
+            threshold_value = self._guided_feature_event_peak_abs_edit.text()
+        else:
+            threshold_value = self._guided_feature_event_peak_k_edit.text()
+        return (
+            f"Status: {display}\n"
+            f"Event signal: {self._guided_feature_event_signal_combo.currentText()}\n"
+            f"Polarity: {self._guided_feature_event_polarity_combo.currentText()}\n"
+            f"Threshold: {threshold_method} ({threshold_value})\n"
+            "Minimum distance: "
+            f"{self._guided_feature_event_peak_distance_edit.text()} s; "
+            "minimum prominence: "
+            f"{self._guided_feature_event_peak_prominence_edit.text()}; "
+            f"minimum width: {self._guided_feature_event_peak_width_edit.text()} s\n"
+            f"AUC baseline: {self._guided_feature_event_auc_baseline_combo.currentText()}\n"
+            f"{action}"
+        )
+
+    def _refresh_guided_feature_detection_summary(self) -> None:
+        label = getattr(
+            self, "_guided_feature_detection_summary_label", None
+        )
+        if label is not None:
+            label.setText(self._guided_feature_detection_summary_text())
+
+    def _on_guided_continue_to_review_plan(self) -> None:
+        ready, message = self._guided_feature_detection_readiness()
+        self._guided_feature_detection_continue_btn.setEnabled(ready)
+        self._guided_feature_detection_continue_status.setText(message)
+        if not ready:
+            return
+        self._reach_guided_step("Draft plan")
+        self._guided_workflow_stepper.setCurrentRow(
+            self._guided_step_index("Draft plan")
         )
 
     def _display_path(self, path: str, *, max_chars: int = 60) -> str:
@@ -3744,13 +3888,13 @@ class MainWindow(QMainWindow):
         self._guided_correction_continue_status.setWordWrap(True)
         wrapper_layout.addWidget(self._guided_correction_continue_status)
         self._guided_correction_continue_btn = QPushButton(
-            "Continue to Draft Plan"
+            "Continue to Feature Detection"
         )
         self._guided_correction_continue_btn.setObjectName(
             "guidedCorrectionContinueButton"
         )
         self._guided_correction_continue_btn.clicked.connect(
-            self._on_guided_continue_to_draft_plan
+            self._on_guided_continue_to_feature_detection
         )
         self._guided_correction_continue_btn.setEnabled(False)
         wrapper_layout.addWidget(self._guided_correction_continue_btn)
@@ -3829,6 +3973,52 @@ class MainWindow(QMainWindow):
             self._guided_correction_select_buttons[title] = select_btn
             layout.addWidget(select_btn)
         return card
+
+    def _build_guided_feature_detection_step(self) -> QWidget:
+        wrapper = QWidget()
+        wrapper.setObjectName("guidedFeatureDetectionContent")
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            "These settings define how events and features will be extracted "
+            "from corrected traces. Review and apply them before reviewing "
+            "the full plan. Applying settings updates only the in-memory "
+            "Guided plan; no feature extraction runs and no outputs are written."
+        )
+        intro.setObjectName("guidedFeatureDetectionStepExplanation")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        layout.addWidget(self._build_guided_feature_event_profile_editor())
+
+        self._guided_feature_detection_continue_status = QLabel(
+            "Review and apply feature detection settings before continuing."
+        )
+        self._guided_feature_detection_continue_status.setObjectName(
+            "guidedFeatureDetectionContinueStatus"
+        )
+        self._guided_feature_detection_continue_status.setWordWrap(True)
+        layout.addWidget(self._guided_feature_detection_continue_status)
+
+        self._guided_feature_detection_continue_btn = QPushButton(
+            "Continue to Review Plan"
+        )
+        self._guided_feature_detection_continue_btn.setObjectName(
+            "guidedFeatureDetectionContinueButton"
+        )
+        self._guided_feature_detection_continue_btn.setEnabled(False)
+        self._guided_feature_detection_continue_btn.clicked.connect(
+            self._on_guided_continue_to_review_plan
+        )
+        layout.addWidget(self._guided_feature_detection_continue_btn)
+
+        return self._build_guided_step_scroll(
+            "guidedStepFeatureDetection",
+            "Feature Detection",
+            [],
+            wrapper,
+        )
 
     def _select_guided_reference_correction_card(self, card_title: str) -> None:
         """Reference correction cards sync to existing Dynamic Fit Mode only."""
@@ -8177,7 +8367,10 @@ class MainWindow(QMainWindow):
                 False,
                 "Confirm correction strategies for all included ROIs to continue.",
             )
-        return True, "Correction strategies are ready for a draft plan."
+        return (
+            True,
+            "Correction strategies are ready. Continue to Feature Detection.",
+        )
 
     def _refresh_guided_correction_continue_state(self) -> None:
         button = getattr(self, "_guided_correction_continue_btn", None)
@@ -8188,15 +8381,15 @@ class MainWindow(QMainWindow):
         button.setEnabled(ready)
         status.setText(message)
 
-    def _on_guided_continue_to_draft_plan(self) -> None:
+    def _on_guided_continue_to_feature_detection(self) -> None:
         ready, message = self._guided_correction_approach_readiness()
         self._guided_correction_continue_status.setText(message)
         self._guided_correction_continue_btn.setEnabled(ready)
         if not ready:
             return
-        self._reach_guided_step("Draft plan")
+        self._reach_guided_step("Feature detection")
         self._guided_workflow_stepper.setCurrentRow(
-            self._guided_step_index("Draft plan")
+            self._guided_step_index("Feature detection")
         )
 
     def _rebuild_guided_local_preview_confirmation_rows(self) -> None:
@@ -9130,6 +9323,7 @@ class MainWindow(QMainWindow):
         return "\n".join(lines)
 
     def _refresh_guided_draft_run_plan_preview(self) -> None:
+        self._refresh_guided_feature_detection_continue_state()
         label = getattr(self, "_guided_draft_run_plan_preview_label", None)
         if label is None:
             return
@@ -9250,8 +9444,8 @@ class MainWindow(QMainWindow):
         }:
             actions.append(
                 "Feature detection settings have not been applied or need "
-                "attention. Review and apply Feature detection settings "
-                "before validation."
+                "attention. Return to Feature Detection and apply current "
+                "settings before validation."
             )
         if categories & {
             "missing_output_policy",
@@ -9365,45 +9559,8 @@ class MainWindow(QMainWindow):
             f"Excluded ROIs: {excluded}"
         )
 
-        feature_status = str(plan.feature_event_profile_status or "missing")
-        if feature_status == "applied" and plan.feature_event_explicitly_applied:
-            feature_display = "Applied"
-            feature_action = "Feature detection settings are part of this plan."
-        elif feature_status == "default_initialized":
-            feature_display = "Not applied"
-            feature_action = (
-                "Review and apply feature detection settings before validation."
-            )
-        else:
-            feature_display = "Needs attention"
-            feature_action = (
-                "Review and apply feature detection settings before validation."
-            )
-        threshold_method = (
-            self._guided_feature_event_peak_method_combo.currentText()
-        )
-        if threshold_method == "percentile":
-            threshold_value = (
-                self._guided_feature_event_peak_pct_edit.text()
-            )
-        elif threshold_method == "absolute":
-            threshold_value = (
-                self._guided_feature_event_peak_abs_edit.text()
-            )
-        else:
-            threshold_value = self._guided_feature_event_peak_k_edit.text()
         self._guided_review_feature_detection_summary_label.setText(
-            f"Status: {feature_display}\n"
-            f"Event signal: {self._guided_feature_event_signal_combo.currentText()}\n"
-            f"Polarity: {self._guided_feature_event_polarity_combo.currentText()}\n"
-            f"Threshold: {threshold_method} ({threshold_value})\n"
-            "Minimum distance: "
-            f"{self._guided_feature_event_peak_distance_edit.text()} s; "
-            "minimum prominence: "
-            f"{self._guided_feature_event_peak_prominence_edit.text()}; "
-            f"minimum width: {self._guided_feature_event_peak_width_edit.text()} s\n"
-            f"AUC baseline: {self._guided_feature_event_auc_baseline_combo.currentText()}\n"
-            f"{feature_action}"
+            self._guided_feature_detection_summary_text(plan)
         )
 
         correction_layout = self._guided_review_correction_plan_layout
@@ -11718,6 +11875,33 @@ class MainWindow(QMainWindow):
             signal_excursion_polarity_text=self._guided_feature_event_polarity_combo.currentText(),
         )
 
+    def _on_guided_feature_detection_editor_changed(
+        self, *_args
+    ) -> None:
+        if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
+            return
+        if (
+            self._guided_new_analysis_feature_event_profile_status
+            == "applied"
+        ):
+            current_values, error = self._guided_feature_event_current_values()
+            stored = dict(
+                self._guided_new_analysis_feature_event_profile or {}
+            )
+            stored.pop("profile_id", None)
+            if error or current_values != stored:
+                self._guided_new_analysis_feature_event_profile_status = (
+                    "stale"
+                )
+                self._guided_new_analysis_feature_event_profile_stale_reasons = [
+                    "feature detection settings changed after application"
+                ]
+                self._invalidate_guided_backend_validation(
+                    "feature detection settings changed"
+                )
+        self._refresh_guided_feature_detection_continue_state()
+        self._refresh_guided_draft_run_plan_preview()
+
     def _on_guided_apply_feature_event_profile(self) -> None:
         if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
             self._on_guided_apply_feature_event_profile_new_analysis()
@@ -12278,16 +12462,16 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(note)
         layout.addWidget(note)
 
-        self._guided_review_feature_detection_summary_label = QLabel("")
-        self._guided_review_feature_detection_summary_label.setObjectName(
-            "guidedReviewFeatureDetectionSummary"
+        self._guided_feature_detection_summary_label = QLabel("")
+        self._guided_feature_detection_summary_label.setObjectName(
+            "guidedFeatureDetectionSummary"
         )
-        self._guided_review_feature_detection_summary_label.setWordWrap(True)
-        self._guided_review_feature_detection_summary_label.setTextInteractionFlags(
+        self._guided_feature_detection_summary_label.setWordWrap(True)
+        self._guided_feature_detection_summary_label.setTextInteractionFlags(
             Qt.TextSelectableByMouse
         )
         layout.addWidget(
-            self._guided_review_feature_detection_summary_label
+            self._guided_feature_detection_summary_label
         )
 
         defaults = self._guided_feature_event_editor_defaults()
@@ -12380,6 +12564,28 @@ class MainWindow(QMainWindow):
         self._guided_feature_event_status_label.setWordWrap(True)
         self._make_guided_widget_shrinkable(self._guided_feature_event_status_label)
         layout.addWidget(self._guided_feature_event_status_label)
+
+        for combo in (
+            self._guided_feature_event_signal_combo,
+            self._guided_feature_event_polarity_combo,
+            self._guided_feature_event_peak_method_combo,
+            self._guided_feature_event_pre_filter_combo,
+            self._guided_feature_event_auc_baseline_combo,
+        ):
+            combo.currentIndexChanged.connect(
+                self._on_guided_feature_detection_editor_changed
+            )
+        for edit in (
+            self._guided_feature_event_peak_k_edit,
+            self._guided_feature_event_peak_pct_edit,
+            self._guided_feature_event_peak_abs_edit,
+            self._guided_feature_event_peak_distance_edit,
+            self._guided_feature_event_peak_prominence_edit,
+            self._guided_feature_event_peak_width_edit,
+        ):
+            edit.textEdited.connect(
+                self._on_guided_feature_detection_editor_changed
+            )
 
         return group
 
@@ -12839,7 +13045,24 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(correction_group)
 
-        layout.addWidget(self._build_guided_feature_event_profile_editor())
+        feature_group = QGroupBox("Feature Detection")
+        feature_group.setObjectName(
+            "guidedReviewFeatureDetectionPanel"
+        )
+        feature_layout = QVBoxLayout(feature_group)
+        feature_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_review_feature_detection_summary_label = QLabel("")
+        self._guided_review_feature_detection_summary_label.setObjectName(
+            "guidedReviewFeatureDetectionSummary"
+        )
+        self._guided_review_feature_detection_summary_label.setWordWrap(True)
+        self._guided_review_feature_detection_summary_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        feature_layout.addWidget(
+            self._guided_review_feature_detection_summary_label
+        )
+        layout.addWidget(feature_group)
 
         output_group = QGroupBox("Output destination")
         output_group.setObjectName("guidedReviewOutputStatusPanel")

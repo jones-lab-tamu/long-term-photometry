@@ -304,7 +304,7 @@ def test_review_plan_page_has_scientist_facing_hierarchy(window):
         "guidedReviewPlanStatusPanel",
         "guidedReviewAnalysisSummaryPanel",
         "guidedReviewCorrectionPlanPanel",
-        "guidedFeatureEventProfileEditorPanel",
+        "guidedReviewFeatureDetectionPanel",
         "guidedReviewOutputStatusPanel",
         "guidedOutputDestinationPanel",
         "guidedReviewNextStepPanel",
@@ -315,6 +315,15 @@ def test_review_plan_page_has_scientist_facing_hierarchy(window):
         for object_name in object_names
     ]
     assert all(group is not None for group in groups)
+    assert draft_widget.findChild(
+        QGroupBox, "guidedFeatureEventProfileEditorPanel"
+    ) is None
+    feature_widget = window._guided_workflow_stack.widget(
+        list(GUIDED_WORKFLOW_STEPS).index("Feature detection")
+    )
+    assert feature_widget.findChild(
+        QGroupBox, "guidedFeatureEventProfileEditorPanel"
+    ) is not None
     positions = [group.mapToGlobal(QPoint(0, 0)).y() for group in groups]
     assert positions == sorted(positions)
     assert window._guided_review_advanced_toggle.isChecked() is False

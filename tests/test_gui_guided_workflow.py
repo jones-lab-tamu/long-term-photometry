@@ -337,6 +337,7 @@ def test_guided_workflow_stepper_switches_placeholder_panels(window):
         "guidedStepSelectData",
         "guidedStepRecordingStructure",
         "guidedStepCorrectionApproach",
+        "guidedStepFeatureDetection",
         "guidedStepDraftPlan",
         "guidedStepRun",
         "guidedStepReview",
@@ -878,6 +879,58 @@ def test_guided_new_analysis_feature_event_profile_requires_apply_without_open_r
         "raw command",
     )
     assert not any(term in visible for term in prohibited)
+
+
+def test_guided_feature_detection_step_gates_review_and_writes_nothing(
+    window, tmp_path
+):
+    window._set_guided_workflow_mode("new_analysis")
+    feature_index = list(GUIDED_WORKFLOW_STEPS).index("Feature detection")
+    draft_index = list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    window._reach_guided_step("Feature detection")
+    window._guided_workflow_stepper.setCurrentRow(feature_index)
+    feature_widget = window._guided_workflow_stack.widget(feature_index)
+
+    intro = feature_widget.findChild(
+        QWidget, "guidedFeatureDetectionStepExplanation"
+    )
+    assert "no outputs are written" in intro.text()
+    assert feature_widget.findChild(
+        QWidget, "guidedFeatureEventProfileEditorPanel"
+    ) is not None
+    assert window._guided_feature_detection_continue_btn.isEnabled() is False
+    assert window._guided_feature_detection_continue_status.text() == (
+        "Review and apply feature detection settings before continuing."
+    )
+    assert list(tmp_path.iterdir()) == []
+
+    window._guided_feature_event_apply_btn.click()
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
+    assert "Status: Applied" in (
+        window._guided_feature_detection_summary_label.text()
+    )
+    assert list(tmp_path.iterdir()) == []
+
+    window._guided_feature_detection_continue_btn.click()
+    assert window._guided_workflow_stepper.currentRow() == draft_index
+    assert list(tmp_path.iterdir()) == []
+
+    window._guided_feature_event_peak_k_edit.setFocus()
+    window._guided_feature_event_peak_k_edit.selectAll()
+    QTest.keyClicks(window._guided_feature_event_peak_k_edit, "4")
+    assert window._guided_feature_detection_continue_btn.isEnabled() is False
+    assert window._guided_feature_detection_continue_status.text() == (
+        "Feature detection settings changed after they were applied. "
+        "Review and apply them again."
+    )
+
+    window._guided_feature_event_peak_k_edit.selectAll()
+    QTest.keyClicks(window._guided_feature_event_peak_k_edit, "0")
+    window._guided_feature_event_apply_btn.click()
+    assert window._guided_feature_detection_continue_btn.isEnabled() is False
+    assert window._guided_feature_detection_continue_status.text().startswith(
+        "Feature detection settings need attention before continuing."
+    )
 
 
 def test_guided_new_analysis_feature_event_profile_invalid_status_is_actionable(
@@ -5127,14 +5180,16 @@ def test_gui_export_missing_parent_resolved_rejection(window, tmp_path, monkeypa
     assert "Export failed: Parent directory of export path does not exist." in window._guided_export_status_label.text()
 
 
-def test_gui_stepper_order_has_draft_plan_after_confirm_strategy():
+def test_gui_stepper_order_has_feature_detection_before_review_plan():
     steps = list(GUIDED_WORKFLOW_STEPS)
     assert "Draft plan" in steps
     assert "Diagnostics" not in steps
     assert "Confirm strategy" not in steps
     confirm_idx = steps.index("Correction approach")
+    feature_idx = steps.index("Feature detection")
     draft_idx = steps.index("Draft plan")
-    assert draft_idx == confirm_idx + 1
+    assert feature_idx == confirm_idx + 1
+    assert draft_idx == feature_idx + 1
 
 
 def _configure_correction_to_draft_gate(
@@ -5232,7 +5287,7 @@ def test_guided_correction_to_draft_plan_starts_locked(window):
     )
 
 
-def test_guided_correction_gate_ready_unlocks_only_draft_plan(
+def test_guided_correction_gate_ready_unlocks_only_feature_detection(
     window, monkeypatch
 ):
     _configure_correction_to_draft_gate(
@@ -5246,15 +5301,23 @@ def test_guided_correction_gate_ready_unlocks_only_draft_plan(
 
     assert window._guided_correction_continue_btn.isEnabled() is True
     assert window._guided_correction_continue_status.text() == (
-        "Correction strategies are ready for a draft plan."
+        "Correction strategies are ready. Continue to Feature Detection."
+    )
+    assert window._guided_correction_continue_btn.text() == (
+        "Continue to Feature Detection"
     )
     window._guided_correction_continue_btn.click()
 
+    feature_index = list(GUIDED_WORKFLOW_STEPS).index("Feature detection")
     draft_index = list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
     run_index = list(GUIDED_WORKFLOW_STEPS).index("Run")
     review_index = list(GUIDED_WORKFLOW_STEPS).index("Review")
-    assert window._guided_workflow_stepper.currentRow() == draft_index
+    assert window._guided_workflow_stepper.currentRow() == feature_index
     assert (
+        window._guided_workflow_stepper.item(feature_index).flags()
+        & Qt.ItemIsEnabled
+    )
+    assert not (
         window._guided_workflow_stepper.item(draft_index).flags()
         & Qt.ItemIsEnabled
     )
@@ -5310,13 +5373,13 @@ def test_guided_correction_gate_requires_reconfirmation_after_change_or_stale(
             },
             False,
             True,
-            "Correction strategies are ready for a draft plan.",
+            "Correction strategies are ready. Continue to Feature Detection.",
         ),
         (
             {"CH1": "signal_only_f0", "CH2": "signal_only_f0"},
             False,
             True,
-            "Correction strategies are ready for a draft plan.",
+            "Correction strategies are ready. Continue to Feature Detection.",
         ),
         (
             {
@@ -5325,7 +5388,7 @@ def test_guided_correction_gate_requires_reconfirmation_after_change_or_stale(
             },
             False,
             True,
-            "Correction strategies are ready for a draft plan.",
+            "Correction strategies are ready. Continue to Feature Detection.",
         ),
         (
             {
@@ -5335,7 +5398,7 @@ def test_guided_correction_gate_requires_reconfirmation_after_change_or_stale(
             },
             False,
             True,
-            "Correction strategies are ready for a draft plan.",
+            "Correction strategies are ready. Continue to Feature Detection.",
         ),
         (
             {
@@ -5965,7 +6028,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     )
     assert window._guided_correction_continue_btn.isEnabled() is True
     assert window._guided_correction_continue_status.text() == (
-        "Correction strategies are ready for a draft plan."
+        "Correction strategies are ready. Continue to Feature Detection."
     )
 
     rows = window._guided_local_preview_confirmation_rows
@@ -5981,7 +6044,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     rows["CH3"]["action_button"].click()
     assert window._guided_correction_continue_btn.isEnabled() is True
     assert window._guided_correction_continue_status.text() == (
-        "Correction strategies are ready for a draft plan."
+        "Correction strategies are ready. Continue to Feature Detection."
     )
     rows = window._guided_local_preview_confirmation_rows
     ch3_combo = rows["CH3"]["strategy_combo"]
@@ -5996,7 +6059,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     rows["CH3"]["action_button"].click()
     assert window._guided_correction_continue_btn.isEnabled() is True
     assert window._guided_correction_continue_status.text() == (
-        "Correction strategies are ready for a draft plan."
+        "Correction strategies are ready. Continue to Feature Detection."
     )
 
     plan = window._build_guided_new_analysis_draft_plan()
@@ -6514,7 +6577,12 @@ def test_gui_draft_plan_contains_moved_plan_panels(window):
     draft_step_widget = window._guided_workflow_stack.widget(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
 
     # Verify moved panels are present
-    assert draft_step_widget.findChild(QWidget, "guidedFeatureEventProfileEditorPanel") is not None
+    assert draft_step_widget.findChild(
+        QWidget, "guidedFeatureEventProfileEditorPanel"
+    ) is None
+    assert draft_step_widget.findChild(
+        QWidget, "guidedReviewFeatureDetectionPanel"
+    ) is not None
     assert draft_step_widget.findChild(QWidget, "guidedOutputDestinationPanel") is not None
     assert draft_step_widget.findChild(QWidget, "guidedDraftPlanExportPanel") is not None
     assert draft_step_widget.findChild(QWidget, "guidedPlanReadinessSummaryPanel") is not None
@@ -6524,6 +6592,12 @@ def test_gui_draft_plan_contains_moved_plan_panels(window):
     # Verify correction controls are NOT part of the Draft Plan step
     assert draft_step_widget.findChild(QWidget, "guidedConfirmStrategyRoiCombo") is None
     assert draft_step_widget.findChild(QWidget, "guidedConfirmStrategyChoiceCombo") is None
+    feature_step_widget = window._guided_workflow_stack.widget(
+        list(GUIDED_WORKFLOW_STEPS).index("Feature detection")
+    )
+    assert feature_step_widget.findChild(
+        QWidget, "guidedFeatureEventProfileEditorPanel"
+    ) is not None
 
 
 def test_gui_new_analysis_run_preview_panel_hidden_in_completed_run_mode(window, tmp_path, monkeypatch):
