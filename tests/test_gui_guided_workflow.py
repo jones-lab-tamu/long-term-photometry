@@ -2387,28 +2387,205 @@ def test_guided_format_change_is_lightweight_and_clears_stale_discovery(
     )
 
 
-def test_guided_roi_discovery_button_reuses_existing_discovery_handler(window, monkeypatch):
-    called = {"discover": False}
+def test_guided_roi_discovery_button_reuses_existing_discovery_handler(
+    window, tmp_path, monkeypatch
+):
+    import threading
 
-    def _fake_discover():
-        called["discover"] = True
-        discovery = {
-            "resolved_format": "rwd",
-            "n_total_discovered": 1,
-            "n_preview": 1,
-            "sessions": [{"session_id": "s1"}],
-            "rois": [{"roi_id": "ROI_A"}],
-        }
-        window._discovery_cache = discovery
-        window._populate_discovery_ui(discovery)
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_input_dir_edit.setText(str(input_dir))
+    window._guided_output_dir_edit.setText(str(output_dir))
 
-    monkeypatch.setattr(window, "_on_discover", _fake_discover)
+    started = threading.Event()
+    release = threading.Event()
+    discovery = {
+        "input_dir": str(input_dir),
+        "resolved_format": "rwd",
+        "n_total_discovered": 1,
+        "n_preview": 1,
+        "sessions": [{"session_id": "s1"}],
+        "rois": [{"roi_id": "ROI_A"}],
+    }
+
+    class BlockingSpec:
+        def run_discovery(self):
+            started.set()
+            assert release.wait(timeout=5)
+            return discovery
+
+    monkeypatch.setattr(
+        window,
+        "_on_discover",
+        lambda: pytest.fail("Guided worker must not call _on_discover"),
+    )
+    monkeypatch.setattr(
+        window,
+        "_build_discovery_spec",
+        lambda: pytest.fail(
+            "Guided handler must not build discovery spec on GUI thread"
+        ),
+    )
+    monkeypatch.setattr(
+        window,
+        "_build_discovery_spec_from_snapshot",
+        lambda snapshot: BlockingSpec(),
+    )
+    monkeypatch.setattr(
+        main_window_module, "GUIDED_DISCOVERY_DIAGNOSTICS", True
+    )
     window._on_guided_discover_rois()
 
-    assert called["discover"] is True
+    assert started.wait(timeout=5)
+    assert window._guided_roi_discovery_running is True
+    assert window._guided_discover_rois_btn.isEnabled() is False
+    assert window._guided_discover_rois_btn.text() == "Discovering..."
+    assert window._guided_roi_discovery_progress.isHidden() is False
+    assert window._guided_input_dir_edit.isEnabled() is False
+    assert window._guided_format_combo.isEnabled() is False
+    release.set()
+    for _ in range(100):
+        QApplication.processEvents()
+        if not window._guided_roi_discovery_running:
+            break
+        QTest.qWait(10)
+
+    assert window._guided_roi_discovery_running is False
     assert window._guided_roi_list.item(0).text() == "ROI_A"
     assert window._guided_resolved_format_label.text() == "rwd"
     assert "Format: rwd" in window._guided_discovery_summary_label.text()
+    assert window._guided_roi_discovery_progress.isHidden() is True
+    assert window._guided_discover_rois_btn.isEnabled() is True
+    assert window._guided_discover_rois_btn.text() == "Select ROIs..."
+    assert window._guided_input_dir_edit.isEnabled() is True
+    assert window._guided_format_combo.isEnabled() is True
+    assert window._guided_select_data_continue_btn.isEnabled() is True
+    for _ in range(100):
+        QApplication.processEvents()
+        if window._guided_roi_discovery_thread is None:
+            break
+        QTest.qWait(10)
+    assert window._guided_roi_discovery_thread is None
+    assert window._guided_roi_discovery_worker is None
+    diagnostic_log = window._log_view.toPlainText()
+    for label in (
+        "handler_entered",
+        "worker_run_entered",
+        "worker_build_spec_start",
+        "worker_build_spec_end",
+        "run_discovery_start",
+        "run_discovery_end",
+        "success_slot_entered",
+        "complete",
+    ):
+        assert f"GUIDED_DISCOVERY_DIAG" in diagnostic_log
+        assert f"label={label}" in diagnostic_log
+    assert "worker_is_gui_thread=False" in diagnostic_log
+
+
+def test_guided_roi_discovery_restores_busy_state_after_failure(
+    window, tmp_path, monkeypatch
+):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    window._guided_input_dir_edit.setText(str(input_dir))
+
+    class FailingSpec:
+        def run_discovery(self):
+            raise RuntimeError("simulated discovery failure")
+
+    critical = []
+    monkeypatch.setattr(
+        window,
+        "_build_discovery_spec_from_snapshot",
+        lambda snapshot: FailingSpec(),
+    )
+    monkeypatch.setattr(
+        main_window_module, "GUIDED_DISCOVERY_DIAGNOSTICS", True
+    )
+    monkeypatch.setattr(
+        main_window_module.QMessageBox,
+        "critical",
+        lambda *_args: critical.append(_args[-1]),
+    )
+    window._on_guided_discover_rois()
+    for _ in range(100):
+        QApplication.processEvents()
+        if not window._guided_roi_discovery_running:
+            break
+        QTest.qWait(10)
+
+    assert window._guided_roi_discovery_running is False
+    assert window._guided_roi_discovery_progress.isHidden() is True
+    assert window._guided_discover_rois_btn.isEnabled() is True
+    assert window._guided_discover_rois_btn.text() == "Select ROIs..."
+    assert window._guided_discovery_summary_label.text() == (
+        "ROI discovery failed. Check the selected input and try again."
+    )
+    assert "simulated discovery failure" in critical[0]
+    for _ in range(100):
+        QApplication.processEvents()
+        if window._guided_roi_discovery_thread is None:
+            break
+        QTest.qWait(10)
+    assert window._guided_roi_discovery_thread is None
+    assert window._guided_roi_discovery_worker is None
+    diagnostic_log = window._log_view.toPlainText()
+    assert "GUIDED_DISCOVERY_DIAG" in diagnostic_log
+    assert "label=worker_failure" in diagnostic_log
+    assert "label=failure_slot_entered" in diagnostic_log
+    assert "label=complete" in diagnostic_log
+
+
+def test_guided_roi_discovery_worker_spec_build_failure_restores_ui(
+    window, tmp_path, monkeypatch
+):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    window._guided_input_dir_edit.setText(str(input_dir))
+
+    def fail_builder(snapshot):
+        raise RuntimeError("simulated spec build failure")
+
+    critical = []
+    monkeypatch.setattr(
+        window,
+        "_build_discovery_spec_from_snapshot",
+        fail_builder,
+    )
+    monkeypatch.setattr(
+        main_window_module.QMessageBox,
+        "critical",
+        lambda *_args: critical.append(_args[-1]),
+    )
+    window._on_guided_discover_rois()
+    for _ in range(100):
+        QApplication.processEvents()
+        if not window._guided_roi_discovery_running:
+            break
+        QTest.qWait(10)
+
+    assert window._guided_roi_discovery_running is False
+    assert window._guided_roi_discovery_progress.isHidden() is True
+    assert window._guided_discover_rois_btn.isEnabled() is True
+    assert "simulated spec build failure" in critical[0]
+
+
+def test_guided_roi_discovery_running_guard_blocks_duplicate_call(
+    window, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        window, "_build_discovery_spec", lambda: calls.append("discover")
+    )
+    window._guided_roi_discovery_running = True
+
+    window._on_guided_discover_rois()
+
+    assert calls == []
 
 
 def test_guided_format_change_status_uses_only_select_data_language(

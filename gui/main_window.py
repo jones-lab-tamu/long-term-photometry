@@ -24,13 +24,14 @@ import math
 import secrets
 import shutil
 import subprocess as _subprocess
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
 
-from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, Signal, QSignalBlocker
+from PySide6.QtCore import Qt, QSettings, QTimer, QSize, QEventLoop, QByteArray, QBuffer, QIODevice, QObject, QThread, Signal, QSignalBlocker
 from PySide6.QtGui import QAction, QColor, QFont, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -175,6 +176,7 @@ GUIDED_CORRECTION_PREVIEW_METHOD_LABELS = {
     "global_linear_regression": "Global Linear Regression",
 }
 GUIDED_SIGNAL_ONLY_F0_CARD = "Signal-Only F0"
+GUIDED_DISCOVERY_DIAGNOSTICS = False
 LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE = "local_correction_preview"
 LOCAL_CORRECTION_PREVIEW_RECOMPUTE_MESSAGE = (
     "Confirmed from local correction preview. Final analysis will recompute "
@@ -217,6 +219,69 @@ def _pixmap_sha256_png(pix: QPixmap) -> str:
     finally:
         buffer.close()
     return _sha256_bytes(bytes(payload))
+
+
+class _GuidedRoiDiscoveryWorker(QObject):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    diagnostic = Signal(object)
+
+    def __init__(
+        self,
+        snapshot: dict[str, object],
+        spec_builder,
+        *,
+        start_monotonic: float,
+        gui_thread_id: int,
+    ):
+        super().__init__()
+        self._snapshot = dict(snapshot)
+        self._spec_builder = spec_builder
+        self._start_monotonic = float(start_monotonic)
+        self._gui_thread_id = int(gui_thread_id)
+
+    def _diag(self, label: str, **fields) -> None:
+        if not GUIDED_DISCOVERY_DIAGNOSTICS:
+            return
+        self.diagnostic.emit(
+            {
+                "elapsed_sec": time.monotonic() - self._start_monotonic,
+                "thread_id": threading.get_ident(),
+                "gui_thread_id": self._gui_thread_id,
+                "label": label,
+                "fields": fields,
+            }
+        )
+
+    def run(self) -> None:
+        self._diag("worker_run_entered")
+        try:
+            build_started = time.monotonic()
+            self._diag("worker_build_spec_start")
+            spec = self._spec_builder(self._snapshot)
+            self._diag(
+                "worker_build_spec_end",
+                duration_sec=time.monotonic() - build_started,
+            )
+            started = time.monotonic()
+            self._diag("run_discovery_start")
+            result = spec.run_discovery()
+            self._diag(
+                "run_discovery_end",
+                duration_sec=time.monotonic() - started,
+                sessions=len(result.get("sessions", [])),
+                rois=len(result.get("rois", [])),
+                resolved_format=result.get("resolved_format", ""),
+            )
+            self._diag("worker_emit_success")
+            self.succeeded.emit(result)
+        except Exception as exc:
+            self._diag(
+                "worker_failure",
+                exception_type=type(exc).__name__,
+                message=str(exc),
+            )
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
 def _open_folder(path: str) -> None:
@@ -1628,6 +1693,11 @@ class MainWindow(QMainWindow):
         self._guided_recording_timing_user_edited = False
         self._guided_recording_timing_applying = False
         self._guided_recording_timing_inference = None
+        self._guided_roi_discovery_running = False
+        self._guided_roi_discovery_thread = None
+        self._guided_roi_discovery_worker = None
+        self._guided_roi_discovery_diag_start = None
+        self._guided_roi_discovery_gui_thread_id = threading.get_ident()
         self._guided_diagnostics_status = "not_generated"
         self._guided_strategy_choices = {}
         self._guided_local_preview_evidence_by_roi = {}
@@ -1898,12 +1968,12 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_input_dir_edit)
         input_row = QHBoxLayout()
         input_row.addWidget(self._guided_input_dir_edit)
-        input_browse = QPushButton("Browse...")
-        input_browse.setObjectName("guidedInputDirectoryBrowse")
-        input_browse.clicked.connect(
+        self._guided_input_browse_btn = QPushButton("Browse...")
+        self._guided_input_browse_btn.setObjectName("guidedInputDirectoryBrowse")
+        self._guided_input_browse_btn.clicked.connect(
             lambda: self._browse_dir(self._guided_input_dir_edit, "Select Input Directory")
         )
-        input_row.addWidget(input_browse)
+        input_row.addWidget(self._guided_input_browse_btn)
         form.addRow("Input folder:", input_row)
 
         self._guided_output_dir_edit = QLineEdit()
@@ -1912,12 +1982,12 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_output_dir_edit)
         output_row = QHBoxLayout()
         output_row.addWidget(self._guided_output_dir_edit)
-        output_browse = QPushButton("Browse...")
-        output_browse.setObjectName("guidedOutputDirectoryBrowse")
-        output_browse.clicked.connect(
+        self._guided_output_browse_btn = QPushButton("Browse...")
+        self._guided_output_browse_btn.setObjectName("guidedOutputDirectoryBrowse")
+        self._guided_output_browse_btn.clicked.connect(
             lambda: self._browse_dir(self._guided_output_dir_edit, "Select Output Base Directory")
         )
-        output_row.addWidget(output_browse)
+        output_row.addWidget(self._guided_output_browse_btn)
         form.addRow("Output folder:", output_row)
 
         self._guided_format_combo = QComboBox()
@@ -1956,6 +2026,14 @@ class MainWindow(QMainWindow):
         self._guided_discovery_summary_label.setProperty("guidedSecondaryText", True)
         self._guided_discovery_summary_label.setWordWrap(True)
         roi_layout.addWidget(self._guided_discovery_summary_label)
+        self._guided_roi_discovery_progress = QProgressBar()
+        self._guided_roi_discovery_progress.setObjectName(
+            "guidedRoiDiscoveryProgress"
+        )
+        self._guided_roi_discovery_progress.setRange(0, 0)
+        self._guided_roi_discovery_progress.setTextVisible(False)
+        self._guided_roi_discovery_progress.setVisible(False)
+        roi_layout.addWidget(self._guided_roi_discovery_progress)
 
         self._guided_roi_list = QListWidget()
         self._guided_roi_list.setObjectName("guidedRoiList")
@@ -3001,10 +3079,252 @@ class MainWindow(QMainWindow):
                 )
         self._refresh_guided_navigation_state()
 
+    def _guided_roi_discovery_diag(self, label: str, **fields) -> None:
+        if (
+            not GUIDED_DISCOVERY_DIAGNOSTICS
+            or self._guided_roi_discovery_diag_start is None
+        ):
+            return
+        elapsed = time.monotonic() - self._guided_roi_discovery_diag_start
+        thread_id = threading.get_ident()
+        thread_name = (
+            "GUI"
+            if thread_id == self._guided_roi_discovery_gui_thread_id
+            else threading.current_thread().name
+        )
+        details = " ".join(
+            f"{key}={value!r}" for key, value in fields.items()
+        )
+        line = (
+            f"GUIDED_DISCOVERY_DIAG +{elapsed:.3f}s "
+            f"thread={thread_name} thread_id={thread_id} "
+            f"label={label}"
+        )
+        if details:
+            line += " " + details
+        self._append_log(line)
+
+    def _on_guided_discovery_diag_event(
+        self, event: dict[str, object]
+    ) -> None:
+        if not GUIDED_DISCOVERY_DIAGNOSTICS:
+            return
+        fields = dict(event.get("fields") or {})
+        fields["worker_elapsed_sec"] = round(
+            float(event.get("elapsed_sec") or 0.0), 6
+        )
+        fields["worker_thread_id"] = event.get("thread_id")
+        fields["worker_is_gui_thread"] = (
+            event.get("thread_id") == event.get("gui_thread_id")
+        )
+        self._guided_roi_discovery_diag(
+            str(event.get("label") or "worker_event"), **fields
+        )
+
+    def _set_guided_roi_discovery_running(
+        self, running: bool, *, succeeded: bool | None = None
+    ) -> None:
+        self._guided_roi_discovery_running = bool(running)
+        self._guided_discover_rois_btn.setEnabled(not running)
+        self._guided_discover_rois_btn.setText(
+            "Discovering..." if running else "Select ROIs..."
+        )
+        self._guided_roi_discovery_progress.setVisible(bool(running))
+        for widget in (
+            self._guided_input_dir_edit,
+            self._guided_input_browse_btn,
+            self._guided_output_dir_edit,
+            self._guided_output_browse_btn,
+            self._guided_format_combo,
+        ):
+            widget.setEnabled(not running)
+        if running:
+            self._guided_discovery_summary_label.setText(
+                "Discovering ROIs..."
+            )
+        elif succeeded is False:
+            self._guided_discovery_summary_label.setText(
+                "ROI discovery failed. Check the selected input and try again."
+            )
+
     def _on_guided_discover_rois(self) -> None:
-        """Run the existing ROI discovery path and mirror its shared ROI state."""
-        self._on_discover()
-        self._sync_guided_discovery_from_full()
+        """Start shared discovery off the GUI thread."""
+        if not self._guided_roi_discovery_running:
+            self._guided_roi_discovery_diag_start = time.monotonic()
+        self._guided_roi_discovery_diag("handler_entered")
+        if self._guided_roi_discovery_running:
+            self._guided_roi_discovery_diag("duplicate_guard_return")
+            return
+        self._guided_roi_discovery_diag("input_validation_start")
+        input_dir = self._input_dir.text().strip()
+        config_path = self._active_config_source_path()
+        if not input_dir or not os.path.isdir(input_dir):
+            self._guided_roi_discovery_diag(
+                "input_validation_failed", reason="invalid_input_dir"
+            )
+            QMessageBox.warning(
+                self,
+                "ROI Selection Error",
+                "Select a valid input directory first.",
+            )
+            self._guided_roi_discovery_diag_start = None
+            return
+        if not config_path or not os.path.isfile(config_path):
+            self._guided_roi_discovery_diag(
+                "input_validation_failed", reason="invalid_config_path"
+            )
+            message = (
+                "Select a valid custom config YAML first."
+                if self._is_custom_config_enabled()
+                else f"Default lab baseline config is missing:\n{config_path}"
+            )
+            QMessageBox.warning(
+                self, "ROI Selection Error", message
+            )
+            self._guided_roi_discovery_diag_start = None
+            return
+
+        self._set_guided_roi_discovery_running(True)
+        self._guided_roi_discovery_diag(
+            "busy_state_set", input=input_dir, config=config_path
+        )
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        try:
+            snapshot_started = time.monotonic()
+            self._guided_roi_discovery_diag("discovery_snapshot_start")
+            snapshot = self._snapshot_guided_discovery_inputs()
+            self._guided_roi_discovery_diag(
+                "discovery_snapshot_end",
+                duration_sec=time.monotonic() - snapshot_started,
+            )
+        except Exception as exc:
+            self._guided_roi_discovery_diag(
+                "discovery_snapshot_failure",
+                exception_type=type(exc).__name__,
+                message=str(exc),
+            )
+            self._on_guided_roi_discovery_failed(
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+
+        self._guided_roi_discovery_diag("thread_worker_create_start")
+        thread = QThread(self)
+        worker = _GuidedRoiDiscoveryWorker(
+            snapshot,
+            self._build_discovery_spec_from_snapshot,
+            start_monotonic=self._guided_roi_discovery_diag_start,
+            gui_thread_id=self._guided_roi_discovery_gui_thread_id,
+        )
+        worker.moveToThread(thread)
+        self._guided_roi_discovery_thread = thread
+        self._guided_roi_discovery_worker = worker
+        thread.started.connect(worker.run)
+        worker.diagnostic.connect(
+            self._on_guided_discovery_diag_event
+        )
+        worker.succeeded.connect(
+            self._on_guided_roi_discovery_succeeded
+        )
+        worker.failed.connect(self._on_guided_roi_discovery_failed)
+        worker.succeeded.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.succeeded.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            self._cleanup_guided_roi_discovery_worker
+        )
+        self._guided_roi_discovery_diag("thread_start_before")
+        thread.start()
+        self._guided_roi_discovery_diag("thread_start_after")
+
+    def _on_guided_roi_discovery_succeeded(
+        self, discovery: dict[str, object]
+    ) -> None:
+        self._guided_roi_discovery_diag(
+            "success_slot_entered",
+            sessions=len(discovery.get("sessions", [])),
+            rois=len(discovery.get("rois", [])),
+        )
+        self._discovery_cache = discovery
+        populate_started = time.monotonic()
+        self._guided_roi_discovery_diag("populate_discovery_ui_before")
+        self._populate_discovery_ui(discovery)
+        self._guided_roi_discovery_diag(
+            "populate_discovery_ui_after",
+            duration_sec=time.monotonic() - populate_started,
+        )
+        self._append_log(
+            "ROI selection ready: "
+            f"{len(discovery.get('rois', []))} ROIs found "
+            f"(format={discovery.get('resolved_format', '?')})."
+        )
+        self._guided_roi_discovery_diag("busy_state_clear_before")
+        self._set_guided_roi_discovery_running(
+            False, succeeded=True
+        )
+        self._guided_roi_discovery_diag("busy_state_clear_after")
+        self._guided_roi_discovery_diag(
+            "navigation_refresh_before"
+        )
+        self._refresh_guided_navigation_state()
+        self._guided_roi_discovery_diag(
+            "navigation_refresh_after"
+        )
+        self._guided_roi_discovery_diag(
+            "complete",
+            total_sec=(
+                time.monotonic()
+                - self._guided_roi_discovery_diag_start
+            ),
+        )
+        self._guided_roi_discovery_diag("success_slot_exiting")
+
+    def _on_guided_roi_discovery_failed(self, message: str) -> None:
+        self._guided_roi_discovery_diag(
+            "failure_slot_entered", message=message
+        )
+        self._discovery_cache = None
+        self._discovery_summary.setText("Discovery failed.")
+        self._sessions_list.clear()
+        self._roi_list.clear()
+        self._guided_roi_list.clear()
+        if hasattr(self, "_roi_selection_container"):
+            self._roi_selection_container.setVisible(False)
+        self._rep_session_combo.clear()
+        self._rep_session_combo.addItem("(auto)")
+        self._append_log(f"Discovery error: {message}")
+        self._set_guided_roi_discovery_running(
+            False, succeeded=False
+        )
+        self._refresh_guided_navigation_state()
+        self._guided_roi_discovery_diag(
+            "complete",
+            total_sec=(
+                time.monotonic()
+                - self._guided_roi_discovery_diag_start
+            ),
+            status="failed",
+        )
+        QMessageBox.critical(
+            self, "ROI Selection Failed", str(message)
+        )
+        if self._guided_roi_discovery_thread is None:
+            self._guided_roi_discovery_diag_start = None
+
+    def _cleanup_guided_roi_discovery_worker(self) -> None:
+        self._guided_roi_discovery_diag("worker_thread_cleanup")
+        self._guided_roi_discovery_worker = None
+        self._guided_roi_discovery_thread = None
+        self._guided_roi_discovery_diag_start = None
+
+    def closeEvent(self, event) -> None:
+        thread = getattr(self, "_guided_roi_discovery_thread", None)
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait()
+        super().closeEvent(event)
 
     def _on_guided_recording_timing_user_edit(self, _text: str) -> None:
         if self._guided_recording_timing_applying:
@@ -3088,6 +3408,7 @@ class MainWindow(QMainWindow):
     def _infer_guided_recording_timing_from_discovery(
         self,
     ) -> GuidedRecordingStructureInference:
+        infer_started = time.monotonic()
         discovery = getattr(self, "_discovery_cache", None) or {}
         resolved_format = str(
             discovery.get("resolved_format")
@@ -3098,13 +3419,18 @@ class MainWindow(QMainWindow):
             or self._guided_input_dir_edit.text()
         )
         contracts: list[dict[str, object]] = []
+        sessions = [
+            session
+            for session in discovery.get("sessions", [])
+            if isinstance(session, dict) and session.get("path")
+        ]
+        self._guided_roi_discovery_diag(
+            "recording_timing_infer_start",
+            resolved_format=resolved_format,
+            sessions=len(sessions),
+        )
         if resolved_format == "rwd":
             try:
-                sessions = [
-                    session
-                    for session in discovery.get("sessions", [])
-                    if isinstance(session, dict) and session.get("path")
-                ]
                 sample_indices = sorted(
                     {
                         0,
@@ -3112,18 +3438,43 @@ class MainWindow(QMainWindow):
                         len(sessions) - 1,
                     }
                 ) if sessions else []
-                contracts = [
-                    {
-                        **self._infer_rwd_chunk_contract(
-                            str(sessions[index]["path"])
+                for index in sample_indices:
+                    session = sessions[index]
+                    path = str(session["path"])
+                    session_id = str(session.get("session_id") or "")
+                    sample_started = time.monotonic()
+                    self._guided_roi_discovery_diag(
+                        "rwd_contract_sample_before",
+                        sample_index=index,
+                        session_id=session_id,
+                        path=path,
+                    )
+                    contract = self._infer_rwd_chunk_contract(path)
+                    contracts.append(
+                        {
+                            **contract,
+                            "sample_session_id": session_id,
+                        }
+                    )
+                    self._guided_roi_discovery_diag(
+                        "rwd_contract_sample_after",
+                        sample_index=index,
+                        session_id=session_id,
+                        duration_sec=(
+                            time.monotonic() - sample_started
                         ),
-                        "sample_session_id": str(
-                            sessions[index].get("session_id") or ""
+                        inferred_duration_sec=contract.get(
+                            "chunk_duration_sec"
                         ),
-                    }
-                    for index in sample_indices
-                ]
+                    )
             except Exception as exc:
+                self._guided_roi_discovery_diag(
+                    "recording_timing_infer_end",
+                    duration_sec=time.monotonic() - infer_started,
+                    sampled_contracts=len(contracts),
+                    status="failed",
+                    exception_type=type(exc).__name__,
+                )
                 return GuidedRecordingStructureInference(
                     supported=True,
                     status="failed",
@@ -3137,18 +3488,34 @@ class MainWindow(QMainWindow):
                         "sessions per hour and session duration manually."
                     ),
                 )
-        return infer_guided_recording_structure(
+        result = infer_guided_recording_structure(
             discovery,
             source_path,
             resolved_format,
             rwd_chunk_contracts=contracts,
         )
+        self._guided_roi_discovery_diag(
+            "recording_timing_infer_end",
+            duration_sec=time.monotonic() - infer_started,
+            sampled_contracts=len(contracts),
+            status=result.status,
+        )
+        return result
 
     def _refresh_guided_recording_timing_inference(self) -> None:
+        refresh_started = time.monotonic()
+        self._guided_roi_discovery_diag(
+            "recording_timing_refresh_start"
+        )
         if (
             not hasattr(self, "_guided_recording_timing_inference_label")
             or getattr(self, "_discovery_cache", None) is None
         ):
+            self._guided_roi_discovery_diag(
+                "recording_timing_refresh_end",
+                duration_sec=time.monotonic() - refresh_started,
+                outcome="unavailable",
+            )
             return
         discovery = self._discovery_cache
         source_key = self._guided_recording_timing_discovery_key(discovery)
@@ -3161,9 +3528,21 @@ class MainWindow(QMainWindow):
                 "Using manually entered session timing."
             )
             self._refresh_guided_use_detected_timing_action()
+            self._guided_roi_discovery_diag(
+                "recording_timing_refresh_end",
+                duration_sec=time.monotonic() - refresh_started,
+                outcome="manual_preserved",
+            )
             return
 
+        self._guided_roi_discovery_diag(
+            "recording_timing_infer_before"
+        )
         inference = self._infer_guided_recording_timing_from_discovery()
+        self._guided_roi_discovery_diag(
+            "recording_timing_infer_after",
+            status=inference.status,
+        )
         self._guided_recording_timing_inference = inference
         self._guided_recording_timing_inference_label.setText(
             inference.message
@@ -3174,11 +3553,26 @@ class MainWindow(QMainWindow):
             or inference.session_duration_sec is None
         ):
             self._refresh_guided_use_detected_timing_action()
+            self._guided_roi_discovery_diag(
+                "recording_timing_refresh_end",
+                duration_sec=time.monotonic() - refresh_started,
+                outcome=inference.status,
+            )
             return
         self._apply_guided_detected_timing()
+        self._guided_roi_discovery_diag(
+            "recording_timing_refresh_end",
+            duration_sec=time.monotonic() - refresh_started,
+            outcome="inferred_applied",
+        )
 
     def _sync_guided_discovery_from_full(self) -> None:
+        sync_started = time.monotonic()
+        self._guided_roi_discovery_diag("guided_sync_start")
         if not hasattr(self, "_guided_roi_list"):
+            self._guided_roi_discovery_diag(
+                "guided_sync_skipped", reason="guided_roi_list_missing"
+            )
             return
         blockers = [QSignalBlocker(self._guided_roi_list)]
         self._guided_roi_list.clear()
@@ -3207,8 +3601,18 @@ class MainWindow(QMainWindow):
                 )
         self._refresh_guided_setup_summary()
         self._sync_guided_recording_visibility()
+        self._guided_roi_discovery_diag(
+            "timing_inference_refresh_before"
+        )
         self._refresh_guided_recording_timing_inference()
+        self._guided_roi_discovery_diag(
+            "timing_inference_refresh_after"
+        )
         self._refresh_guided_navigation_state()
+        self._guided_roi_discovery_diag(
+            "guided_sync_end",
+            duration_sec=time.monotonic() - sync_started,
+        )
 
     def _on_guided_roi_item_changed(self, item: QListWidgetItem) -> None:
         if getattr(self, "_guided_setup_syncing", False):
@@ -17271,16 +17675,26 @@ class MainWindow(QMainWindow):
             "sample_count": int(sample_count),
         }
 
-    def _infer_npm_dataset_contract_overrides(self, fmt_text: str) -> dict:
+    def _infer_npm_dataset_contract_overrides(
+        self,
+        fmt_text: str,
+        *,
+        input_path: str | None = None,
+        baseline_config: Config | None = None,
+    ) -> dict:
         if fmt_text not in ("auto", "npm"):
             return {}
 
-        input_path = self._input_dir.text().strip()
+        input_path = (
+            self._input_dir.text().strip()
+            if input_path is None
+            else str(input_path)
+        )
         csv_paths = self._discover_npm_csv_files(input_path)
         if not csv_paths:
             return {}
 
-        cfg = self._active_baseline_config()
+        cfg = baseline_config or self._active_baseline_config()
         try:
             base = self._infer_npm_chunk_contract(csv_paths[0], cfg)
         except ValueError:
@@ -17708,7 +18122,14 @@ class MainWindow(QMainWindow):
             "All raw files remain unmodified."
         )
 
-    def _infer_rwd_dataset_contract_overrides(self, fmt_text: str) -> dict:
+    def _infer_rwd_dataset_contract_overrides(
+        self,
+        fmt_text: str,
+        *,
+        input_path: str | None = None,
+        exclude_final_override: bool | None = None,
+        emit_warning: bool = True,
+    ) -> dict:
         """
         Infer RWD acquisition contract from selected input data.
 
@@ -17719,7 +18140,11 @@ class MainWindow(QMainWindow):
             return {}
 
         t_total = self._timing_start("rwd_contract_inference_total", extra=f"format={fmt_text}")
-        input_path = self._input_dir.text().strip()
+        input_path = (
+            self._input_dir.text().strip()
+            if input_path is None
+            else str(input_path)
+        )
         t_inspect = self._timing_start("selected_input_inspection", extra=f"input={input_path}")
         csv_paths = self._discover_rwd_csv_files(input_path)
         self._timing_end("selected_input_inspection", t_inspect, extra=f"csv_files={len(csv_paths)}")
@@ -17912,15 +18337,23 @@ class MainWindow(QMainWindow):
                 )
         self._timing_end("rwd_contract_cross_chunk_validation", t_cross)
 
-        exclude_final = bool(
-            (
-                getattr(self, "_exclude_incomplete_final_rwd_chunk_cb", None)
-                and self._exclude_incomplete_final_rwd_chunk_cb.isChecked()
-            )
-            or getattr(
-                self._active_baseline_config(),
-                "exclude_incomplete_final_rwd_chunk",
-                False,
+        exclude_final = (
+            bool(exclude_final_override)
+            if exclude_final_override is not None
+            else bool(
+                (
+                    getattr(
+                        self,
+                        "_exclude_incomplete_final_rwd_chunk_cb",
+                        None,
+                    )
+                    and self._exclude_incomplete_final_rwd_chunk_cb.isChecked()
+                )
+                or getattr(
+                    self._active_baseline_config(),
+                    "exclude_incomplete_final_rwd_chunk",
+                    False,
+                )
             )
         )
         excluded_chunks: list[dict[str, object]] = []
@@ -18024,6 +18457,7 @@ class MainWindow(QMainWindow):
         }
         if excluded_chunks:
             out["rwd_excluded_source_files"] = [str(x["file"]) for x in excluded_chunks]
+        if excluded_chunks and emit_warning:
             warning = (
                 "WARNING: Excluded incomplete final RWD chunk by explicit policy. "
                 f"Analysis used {len(contracts) - 1} valid chunks. "
@@ -19090,6 +19524,82 @@ class MainWindow(QMainWindow):
     # Button handlers
     # ==================================================================
 
+    def _snapshot_guided_discovery_inputs(self) -> dict[str, object]:
+        """Capture cheap plain values needed for worker-side spec building."""
+        return {
+            "input_dir": self._input_dir.text().strip(),
+            "format": self._format_combo.currentText(),
+            "acquisition_mode": self._selected_acquisition_mode(),
+            "continuous_window_sec": float(
+                self._continuous_window_sec_spin.value()
+            ),
+            "allow_partial_final_window": bool(
+                self._allow_partial_final_window_cb.isChecked()
+            ),
+            "config_source_path": self._active_config_source_path(),
+            "exclude_incomplete_final_rwd_chunk": bool(
+                self._exclude_incomplete_final_rwd_chunk_cb.isChecked()
+            ),
+        }
+
+    def _build_discovery_spec_from_snapshot(
+        self,
+        snapshot: dict[str, object],
+        *,
+        emit_warning: bool = False,
+    ) -> RunSpec:
+        """Build a discovery spec from plain values without reading widgets."""
+        fmt = str(snapshot["format"])
+        input_dir = str(snapshot["input_dir"])
+        config_source_path = str(snapshot["config_source_path"])
+        try:
+            baseline_config = Config.from_yaml(config_source_path)
+        except Exception:
+            baseline_config = Config()
+        npm_overrides = self._infer_npm_dataset_contract_overrides(
+            fmt,
+            input_path=input_dir,
+            baseline_config=baseline_config,
+        )
+        if npm_overrides:
+            data_contract_overrides = npm_overrides
+        else:
+            exclude_final = bool(
+                snapshot["exclude_incomplete_final_rwd_chunk"]
+                or getattr(
+                    baseline_config,
+                    "exclude_incomplete_final_rwd_chunk",
+                    False,
+                )
+            )
+            data_contract_overrides = (
+                self._infer_rwd_dataset_contract_overrides(
+                    fmt,
+                    input_path=input_dir,
+                    exclude_final_override=exclude_final,
+                    emit_warning=emit_warning,
+                )
+            )
+        if not isinstance(data_contract_overrides, dict):
+            data_contract_overrides = {}
+        return RunSpec(
+            input_dir=input_dir,
+            run_dir="",
+            format=fmt,
+            acquisition_mode=str(snapshot["acquisition_mode"]),
+            continuous_window_sec=float(
+                snapshot["continuous_window_sec"]
+            ),
+            continuous_step_sec=float(
+                snapshot["continuous_window_sec"]
+            ),
+            allow_partial_final_window=bool(
+                snapshot["allow_partial_final_window"]
+            ),
+            config_source_path=config_source_path,
+            data_contract_overrides=data_contract_overrides,
+        )
+
     def _build_discovery_spec(self) -> RunSpec:
         """Build a lightweight RunSpec for discovery/preview only.
 
@@ -19098,22 +19608,9 @@ class MainWindow(QMainWindow):
         run_dir is left empty since discovery never writes to it.
         """
         t_discovery_spec = self._timing_start("build_discovery_spec")
-        fmt = self._format_combo.currentText()
-        t_contract = self._timing_start("dataset_contract_inference_discovery")
-        data_contract_overrides = self._infer_dataset_contract_overrides(fmt)
-        self._timing_end("dataset_contract_inference_discovery", t_contract)
-        if not isinstance(data_contract_overrides, dict):
-            data_contract_overrides = {}
-        spec = RunSpec(
-            input_dir=self._input_dir.text().strip(),
-            run_dir="",
-            format=fmt,
-            acquisition_mode=self._selected_acquisition_mode(),
-            continuous_window_sec=float(self._continuous_window_sec_spin.value()),
-            continuous_step_sec=float(self._continuous_window_sec_spin.value()),
-            allow_partial_final_window=bool(self._allow_partial_final_window_cb.isChecked()),
-            config_source_path=self._active_config_source_path(),
-            data_contract_overrides=data_contract_overrides,
+        snapshot = self._snapshot_guided_discovery_inputs()
+        spec = self._build_discovery_spec_from_snapshot(
+            snapshot, emit_warning=True
         )
         self._timing_end("build_discovery_spec", t_discovery_spec)
         return spec
@@ -19181,6 +19678,12 @@ class MainWindow(QMainWindow):
 
     def _populate_discovery_ui(self, disco: dict):
         """Fill ROI checklist and compatibility session data from discovery JSON."""
+        populate_started = time.monotonic()
+        self._guided_roi_discovery_diag(
+            "populate_ui_start",
+            sessions=len(disco.get("sessions", [])),
+            rois=len(disco.get("rois", [])),
+        )
         if hasattr(self, "_roi_selection_container"):
             self._roi_selection_container.setVisible(True)
 
@@ -19200,6 +19703,10 @@ class MainWindow(QMainWindow):
             preview_flag = sess.get("included_in_preview", False)
             label = f"{sid}  {'[preview]' if preview_flag else ''}"
             self._sessions_list.addItem(label)
+        self._guided_roi_discovery_diag(
+            "populate_sessions_done",
+            duration_sec=time.monotonic() - populate_started,
+        )
 
         # ROIs checklist (all checked by default, exact order)
         self._roi_list.clear()
@@ -19212,6 +19719,10 @@ class MainWindow(QMainWindow):
             item.setCheckState(Qt.Checked)
             self._roi_list.addItem(item)
         self._roi_list.blockSignals(False)
+        self._guided_roi_discovery_diag(
+            "populate_rois_done",
+            duration_sec=time.monotonic() - populate_started,
+        )
 
         # Representative session dropdown
         self._rep_session_combo.blockSignals(True)
@@ -19220,10 +19731,26 @@ class MainWindow(QMainWindow):
         for sess in sessions:
             self._rep_session_combo.addItem(sess.get("session_id", "?"))
         self._rep_session_combo.blockSignals(False)
+        self._guided_roi_discovery_diag(
+            "populate_representative_combo_done",
+            duration_sec=time.monotonic() - populate_started,
+        )
 
         # Discovery outcome changes run intent; force readiness/summary refresh.
+        self._guided_roi_discovery_diag("populate_on_config_changed_before")
         self._on_config_changed()
+        self._guided_roi_discovery_diag("populate_on_config_changed_after")
+        self._guided_roi_discovery_diag(
+            "populate_guided_sync_before"
+        )
         self._sync_guided_discovery_from_full()
+        self._guided_roi_discovery_diag(
+            "populate_guided_sync_after"
+        )
+        self._guided_roi_discovery_diag(
+            "populate_ui_end",
+            duration_sec=time.monotonic() - populate_started,
+        )
 
     def _on_roi_select_all(self):
         """Check all ROI items in the checklist."""
@@ -21059,7 +21586,15 @@ class MainWindow(QMainWindow):
 
     def _emit_gui_timing(self, event: str, step: str, elapsed_sec: float | None = None, extra: str = "") -> None:
         """Emit grep-friendly GUI preflight timing lines."""
-        if not self._gui_timing_enabled:
+        if (
+            not self._gui_timing_enabled
+            or threading.get_ident()
+            != getattr(
+                self,
+                "_guided_roi_discovery_gui_thread_id",
+                threading.get_ident(),
+            )
+        ):
             return
         action = self._timing_action or "unknown"
         if elapsed_sec is None:
@@ -21075,14 +21610,30 @@ class MainWindow(QMainWindow):
             pass
 
     def _timing_start(self, step: str, extra: str = "") -> float:
-        if not self._gui_timing_enabled:
+        if (
+            not self._gui_timing_enabled
+            or threading.get_ident()
+            != getattr(
+                self,
+                "_guided_roi_discovery_gui_thread_id",
+                threading.get_ident(),
+            )
+        ):
             return 0.0
         t0 = time.perf_counter()
         self._emit_gui_timing("START", step, extra=extra)
         return t0
 
     def _timing_end(self, step: str, t0: float, extra: str = "") -> None:
-        if not self._gui_timing_enabled:
+        if (
+            not self._gui_timing_enabled
+            or threading.get_ident()
+            != getattr(
+                self,
+                "_guided_roi_discovery_gui_thread_id",
+                threading.get_ident(),
+            )
+        ):
             return
         elapsed = time.perf_counter() - t0
         self._emit_gui_timing("END", step, elapsed_sec=elapsed, extra=extra)
