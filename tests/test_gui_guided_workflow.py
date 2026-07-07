@@ -6699,7 +6699,7 @@ def test_gui_imported_plan_review_panel_is_draft_plan_only(window):
     assert draft_step.findChild(QWidget, "guidedImportedPlanStatusLabel") is not None
     assert draft_step.findChild(QWidget, "guidedImportedPlanSummaryLabel") is not None
     assert draft_step.findChild(QWidget, "guidedImportedPlanAdoptionStatusLabel") is not None
-    assert "Open an exported GuidedRunPlan JSON for read-only review" in "\n".join(_label_texts(panel))
+    assert "Open an exported completed-run review-plan JSON for read-only review" in "\n".join(_label_texts(panel))
     assert "Eligibility is informational only" in _adoption_status_text(window)
     assert confirm_step.findChild(QWidget, "guidedImportedPlanReviewPanel") is None
 

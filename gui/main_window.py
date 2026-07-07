@@ -2990,9 +2990,22 @@ class MainWindow(QMainWindow):
         dataset_group = getattr(self, "_guided_dataset_contract_group", None)
         if dataset_group is not None:
             dataset_group.setVisible(mode == "new_analysis")
+        self._refresh_guided_imported_plan_review_visibility()
         if hasattr(self, "_guided_confirm_context_label"):
             self._refresh_guided_confirm_strategy_panel()
         self._refresh_guided_draft_run_plan_preview()
+
+    def _refresh_guided_imported_plan_review_visibility(self) -> None:
+        """Imported plan review is completed-run tooling; hide it in
+        new-analysis mode unless the user has already opened a plan."""
+        group = getattr(self, "_guided_imported_plan_review_group", None)
+        if group is None:
+            return
+        mode = getattr(self, "_guided_workflow_mode", "start")
+        has_candidate = (
+            getattr(self, "_guided_imported_plan_candidate", None) is not None
+        )
+        group.setVisible(mode != "new_analysis" or has_candidate)
 
     def _refresh_guided_start_panel(self) -> None:
         if not hasattr(self, "_guided_start_status_label"):
@@ -9635,34 +9648,41 @@ class MainWindow(QMainWindow):
                 in execution_categories
             ):
                 availability = (
-                    "Execution availability: Complete but not currently "
-                    "executable. The current backend validation/run route does "
-                    "not yet support multiple dynamic-fit modes in one run."
+                    "Execution availability: Guided Run supports one shared "
+                    "dynamic-fit correction strategy across included ROIs, "
+                    "and this plan currently has multiple dynamic-fit "
+                    "modes. Choose the same dynamic-fit strategy for all "
+                    "included ROIs to run from Guided Mode, or use Full "
+                    "Control for mixed per-ROI strategies."
                 )
             elif (
                 "all_signal_only_f0_backend_validation_not_enabled"
                 in execution_categories
             ):
                 availability = (
-                    "Execution availability: Complete but not currently "
-                    "executable. Backend validation for all-Signal-Only F0 is "
-                    "not enabled yet."
+                    "Execution availability: Guided Run does not yet "
+                    "support an all-Signal-Only F0 analysis. Use Full "
+                    "Control for this configuration."
                 )
             elif subset_readiness.first_subset_executable:
                 availability = (
-                    "Execution availability: Ready for validation. "
-                    "Validate/Run controls are not enabled in this patch."
+                    "Execution availability: This plan is ready. Go to "
+                    "the Run step to validate the request. If validation "
+                    "passes, Guided Run can start the supported analysis."
                 )
             else:
                 availability = (
-                    "Execution availability: Complete but not currently "
-                    "executable by the available backend route."
+                    "Execution availability: This plan is complete, but "
+                    "Guided Run does not yet support this configuration. "
+                    "Review the readiness details below, or use Full "
+                    "Control for this analysis."
                 )
         else:
             completeness = "Plan completeness: Needs attention"
             availability = (
-                "Execution availability: Not ready because the plan needs "
-                "attention."
+                "Execution availability: This plan needs attention before "
+                "validation. Return to the indicated step and update the "
+                "highlighted choices."
             )
         status_label.setText(f"{completeness}\n{availability}")
         if readiness.plan_complete_for_handoff:
@@ -9800,28 +9820,32 @@ class MainWindow(QMainWindow):
             in execution_categories
         ):
             next_text = (
-                "This plan is complete, but the current backend "
-                "validation/run route does not yet support multiple "
-                "dynamic-fit modes in one run."
+                "Guided Run currently supports one shared dynamic-fit "
+                "correction strategy across included ROIs, and this plan "
+                "has multiple dynamic-fit modes. Choose the same "
+                "dynamic-fit strategy for all included ROIs to run from "
+                "Guided Mode, or use Full Control for mixed per-ROI "
+                "strategies."
             )
         elif (
             "all_signal_only_f0_backend_validation_not_enabled"
             in execution_categories
         ):
             next_text = (
-                "This plan is complete, but backend validation for "
-                "all-Signal-Only F0 is not enabled yet."
+                "Guided Run does not yet support an all-Signal-Only F0 "
+                "analysis. Use Full Control for this configuration."
             )
         elif subset_readiness.first_subset_executable:
             next_text = (
-                "This plan is ready for validation. Validate/Run controls are "
-                "not enabled in this patch."
+                "This plan is ready. Go to the Run step to validate the "
+                "request. If validation passes, Guided Run can start the "
+                "supported analysis."
             )
         else:
             next_text = (
-                "This plan is complete, but the current backend route cannot "
-                "execute it yet. See Advanced details for the technical "
-                "limitations."
+                "This plan is complete, but Guided Run does not yet "
+                "support this configuration. Review the readiness details "
+                "below, or use Full Control for this analysis."
             )
         self._guided_review_next_step_label.setText(next_text)
 
@@ -11178,9 +11202,9 @@ class MainWindow(QMainWindow):
         lines = [
             "Status: new_analysis draft plan",
             (
-                "Draft plan completeness: complete for future RunSpec handoff"
+                "Draft plan completeness: complete for the future analysis configuration"
                 if readiness.plan_complete_for_handoff
-                else "Draft plan completeness: incomplete for future RunSpec handoff"
+                else "Draft plan completeness: incomplete for the future analysis configuration"
             ),
             (
                 "Execution: eligible for the supported first execution "
@@ -11325,9 +11349,9 @@ class MainWindow(QMainWindow):
         ]
         lines = [
             (
-                "Draft plan completeness: complete for future RunSpec handoff"
+                "Draft plan completeness: complete for the future analysis configuration"
                 if readiness.plan_complete_for_handoff
-                else "Draft plan completeness: incomplete for future RunSpec handoff"
+                else "Draft plan completeness: incomplete for the future analysis configuration"
             ),
             f"Ready sections: {'; '.join(ready_sections) if ready_sections else 'none'}",
             f"Not ready sections: {'; '.join(not_ready_sections) if not_ready_sections else 'none'}",
@@ -11428,9 +11452,9 @@ class MainWindow(QMainWindow):
             f"Preview schema version: {preview.preview_schema_version}",
             f"Plan schema version: {preview.plan_schema_version}",
             (
-                "Draft plan completeness: complete for future RunSpec handoff"
+                "Draft plan completeness: complete for the future analysis configuration"
                 if readiness.get("plan_complete_for_handoff")
-                else "Draft plan completeness: incomplete for future RunSpec handoff"
+                else "Draft plan completeness: incomplete for the future analysis configuration"
             ),
             (
                 "Execution: eligible for the supported first execution "
@@ -13609,16 +13633,16 @@ class MainWindow(QMainWindow):
         return group
 
     def _build_guided_output_policy_editor(self) -> QGroupBox:
-        group = QGroupBox("Output destination")
+        group = QGroupBox("Set output destination")
         group.setObjectName("guidedOutputDestinationPanel")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
 
         note = QLabel(
-            "Planning only; no directories or files are created.\n"
-            "Apply explicitly to add/update the draft plan output policy.\n"
-            "Execution remains disabled until a later stage."
+            "Applying this destination does not create files. If validation "
+            "passes and this setup is supported, Guided Run will create a "
+            "new run folder inside this location."
         )
         note.setObjectName("guidedOutputDestinationNote")
         note.setProperty("guidedSecondaryText", True)
@@ -13666,9 +13690,12 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
 
         explain_label = QLabel(
-            "Writes one reviewable GuidedRunPlan JSON file only when Export is clicked.\n"
-            "Does not run analysis, create output folders, or generate RunSpec.\n"
-            "The export path is separate from the future analysis output destination."
+            "Technical/troubleshooting tool: writes one reviewable JSON "
+            "file only when Export is clicked.\n"
+            "Does not validate the request, run analysis, or create "
+            "output folders.\n"
+            "The export path is separate from the future analysis output "
+            "destination."
         )
         explain_label.setObjectName("guidedDraftPlanExportExplanation")
         explain_label.setProperty("guidedSecondaryText", True)
@@ -13858,22 +13885,23 @@ class MainWindow(QMainWindow):
         if is_completed_run_mode:
             self._guided_export_btn.setText("Export completed-run review plan JSON")
             self._guided_draft_plan_export_explanation_label.setText(
-                "Writes one reviewable GuidedRunPlan JSON file only when Export "
-                "is clicked.\n"
-                "Does not run analysis, create output folders, or generate "
-                "RunSpec.\n"
-                "The export path is separate from the future analysis output "
-                "destination."
+                "Technical/troubleshooting tool: writes one reviewable "
+                "completed-run review-plan JSON file only when Export is "
+                "clicked.\n"
+                "Does not run analysis or create output folders.\n"
+                "The export path is separate from the future analysis "
+                "output destination."
             )
         else:
             self._guided_export_btn.setText("Export new-analysis draft plan JSON")
             self._guided_draft_plan_export_explanation_label.setText(
-                "Writes one reviewable GuidedNewAnalysisDraftPlan JSON file "
-                "only when Export is clicked.\n"
-                "Does not run analysis, validate the request, or create "
+                "Technical/troubleshooting tool: writes one reviewable "
+                "new-analysis draft-plan JSON file only when Export is "
+                "clicked.\n"
+                "Does not validate the request, run analysis, or create "
                 "output folders.\n"
-                "The export path is separate from the future analysis output "
-                "destination."
+                "The export path is separate from the future analysis "
+                "output destination."
             )
         run_dir = self._current_guided_completed_run_dir()
         synced_run = getattr(self, "_guided_export_editor_synced_run", None)
@@ -14198,13 +14226,13 @@ class MainWindow(QMainWindow):
         next_layout.addWidget(self._guided_review_next_step_label)
         layout.addWidget(next_group)
 
-        advanced_group = QGroupBox("Advanced details")
+        advanced_group = QGroupBox("Technical/troubleshooting details")
         advanced_group.setObjectName("guidedReviewAdvancedDetailsPanel")
         advanced_layout = QVBoxLayout(advanced_group)
         advanced_layout.setContentsMargins(10, 8, 10, 8)
         advanced_layout.setSpacing(10)
         self._guided_review_advanced_toggle = QPushButton(
-            "Show advanced details"
+            "Show technical details"
         )
         self._guided_review_advanced_toggle.setObjectName(
             "guidedReviewAdvancedDetailsToggle"
@@ -14293,9 +14321,9 @@ class MainWindow(QMainWindow):
         )
         self._guided_review_advanced_toggle.toggled.connect(
             lambda checked: self._guided_review_advanced_toggle.setText(
-                "Hide advanced details"
+                "Hide technical details"
                 if checked
-                else "Show advanced details"
+                else "Show technical details"
             )
         )
         layout.addWidget(advanced_group)
@@ -14318,8 +14346,9 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
 
         explain = QLabel(
-            "Review and explicitly apply an in-memory dataset contract snapshot for planning. "
-            "This does not generate RunSpec, argv, config files, validation, runs, or output folders."
+            "Review and explicitly apply the detected dataset settings for "
+            "planning. This does not validate the request, run analysis, "
+            "or create output folders."
         )
         explain.setObjectName("guidedDatasetContractExplanation")
         explain.setProperty("guidedSecondaryText", True)
@@ -14531,14 +14560,16 @@ class MainWindow(QMainWindow):
         return group
 
     def _build_guided_imported_plan_review_panel(self) -> QGroupBox:
-        group = QGroupBox("Imported plan review")
+        group = QGroupBox("Imported plan review (completed-run tool)")
         group.setObjectName("guidedImportedPlanReviewPanel")
+        self._guided_imported_plan_review_group = group
         layout = QVBoxLayout(group)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
 
         explain_label = QLabel(
-            "Open an exported GuidedRunPlan JSON for read-only review. This does not adopt the plan, "
+            "Open an exported completed-run review-plan JSON for read-only "
+            "review. This does not adopt the plan, "
             "change the current draft plan, run analysis, or write outputs."
         )
         explain_label.setObjectName("guidedImportedPlanReviewExplanation")
@@ -14552,7 +14583,7 @@ class MainWindow(QMainWindow):
         form.setSpacing(6)
         self._guided_imported_plan_path_edit = QLineEdit()
         self._guided_imported_plan_path_edit.setObjectName("guidedImportedPlanPathEdit")
-        self._guided_imported_plan_path_edit.setPlaceholderText("Enter path to exported GuidedRunPlan JSON...")
+        self._guided_imported_plan_path_edit.setPlaceholderText("Enter path to exported completed-run review-plan JSON...")
         self._make_guided_widget_shrinkable(self._guided_imported_plan_path_edit)
         form.addRow("Plan JSON path:", self._guided_imported_plan_path_edit)
         layout.addLayout(form)
@@ -14614,6 +14645,7 @@ class MainWindow(QMainWindow):
                     self._guided_imported_plan_adoption_status
                 )
             )
+        self._refresh_guided_imported_plan_review_visibility()
 
     def _show_guided_imported_plan_open_failed(self, reason: str) -> None:
         self._reset_guided_imported_plan_review_display()
@@ -14785,6 +14817,7 @@ class MainWindow(QMainWindow):
         adoption_label = getattr(self, "_guided_imported_plan_adoption_status_label", None)
         if adoption_label is not None:
             adoption_label.setText(self._guided_imported_plan_adoption_status_text(adoption_status))
+        self._refresh_guided_imported_plan_review_visibility()
 
     def _guided_completed_run_basic_validity(self, run_dir: str) -> str:
         if not run_dir:

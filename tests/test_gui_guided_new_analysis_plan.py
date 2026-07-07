@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtWidgets import QApplication, QGroupBox, QWidget
+from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QWidget
 
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
 from photometry_pipeline.guided_new_analysis_plan import (
@@ -18,6 +18,9 @@ from photometry_pipeline.guided_new_analysis_plan import (
 from tests.test_gui_guided_workflow import (
     _configure_guided_raw_cache_setup,
     _generate_ready_guided_correction_preview,
+    _label_texts,
+    _load_preview_completed_run,
+    _make_preview_completed_run,
     _write_minimal_guided_cache_outputs,
     _FakeDiagnosticCacheRunner,
 )
@@ -264,7 +267,7 @@ def test_new_analysis_draft_plan_displays_summary_fields(window, tmp_path, monke
     assert "Correction strategy coverage:" in summary_text
     assert "Feature/event profile status: default_initialized" in summary_text
     assert "Output policy status: missing" in summary_text
-    assert "Draft plan completeness: incomplete for future RunSpec handoff" in summary_text
+    assert "Draft plan completeness: incomplete for the future analysis configuration" in summary_text
     assert "Execution: not available for this configuration yet" in summary_text
     assert "This draft plan is not executable yet for this configuration. See blocking issues above." in summary_text
     assert "Plan completeness: Needs attention" in (
@@ -406,6 +409,12 @@ def test_review_plan_dynamic_and_mixed_modes_are_plainly_separated(
     assert "multiple dynamic-fit modes" in next_step
     assert "local setup issue" not in status.lower()
     assert "mixed_dynamic_fit_modes" not in status
+    # 4J16k5c: mixed dynamic-fit guidance must be actionable, not a status code.
+    for text in (status, next_step):
+        assert "one shared dynamic-fit correction strategy" in text
+        assert "Full Control" in text
+        assert "backend validation/run route" not in text
+        assert "not enabled in this patch" not in text
 
 
 def test_review_plan_mixed_and_all_signal_only_rows_are_planning_valid(
@@ -507,6 +516,11 @@ def test_review_plan_mixed_and_all_signal_only_rows_are_planning_valid(
     assert "at least one dynamic" not in (
         window._guided_review_next_step_label.text().lower()
     )
+    # 4J16k5c: all-Signal-Only-F0 guidance must be actionable, not a status code.
+    next_step_text = window._guided_review_next_step_label.text()
+    assert "does not yet support" in next_step_text
+    assert "Full Control" in next_step_text
+    assert "backend validation for all-Signal-Only F0 is not enabled yet" not in next_step_text
 
 
 def test_review_plan_stale_and_invalid_signal_evidence_need_attention(
@@ -588,9 +602,9 @@ def test_new_analysis_readiness_rendering_separates_planning_complete_from_execu
     window._refresh_guided_new_analysis_draft_plan_checklist(plan, readiness)
     checklist = window._guided_draft_run_plan_checklist_label.text()
 
-    assert "Draft plan completeness: complete for future RunSpec handoff" in summary
+    assert "Draft plan completeness: complete for the future analysis configuration" in summary
     assert "Execution: not available for this configuration yet" in summary
-    assert "Draft plan completeness: complete for future RunSpec handoff" in readiness_summary
+    assert "Draft plan completeness: complete for the future analysis configuration" in readiness_summary
     assert "Execution: not available for this configuration yet" in readiness_summary
     assert "Execution availability: unavailable" in checklist
     assert "Draft plan complete for handoff: true" in checklist
@@ -1490,7 +1504,7 @@ def test_new_analysis_run_preview_shows_missing_execution_subset_fields(window, 
 
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
-    assert "Draft plan completeness: complete for future RunSpec handoff" in preview_text
+    assert "Draft plan completeness: complete for the future analysis configuration" in preview_text
     assert "status: not executable under global_dynamic_fit_only.v1" in preview_text
     assert "Execution-subset blockers:" in preview_text
     assert "missing_rwd_dataset_contract" in preview_text
@@ -1592,6 +1606,40 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "output folder created" not in preview_text
 
 
+def test_review_plan_ready_first_subset_next_step_is_honest(
+    window,
+    tmp_path,
+    monkeypatch,
+):
+    """4J16k5c: a genuinely ready, first-subset-eligible plan must not say
+    Run/Validate are unavailable in the primary Review Plan status/next-step
+    text; it must point the user to the Run step instead."""
+    _configure_complete_guided_new_analysis_draft(
+        window,
+        tmp_path,
+        monkeypatch,
+        acquisition_mode="intermittent",
+    )
+    window._guided_dataset_contract_apply_btn.click()
+
+    status = window._guided_review_plan_status_label.text()
+    next_step = window._guided_review_next_step_label.text()
+
+    for text in (status, next_step):
+        assert "Validate/Run controls are not enabled" not in text
+        assert "not enabled in this patch" not in text
+        assert "execution remains disabled" not in text.lower()
+        assert "RunSpec not implemented" not in text
+        assert "backend route" not in text
+
+    assert "Plan completeness: Complete" in status
+    assert "Go to the Run step to validate the request" in status
+    assert "Guided Run can start the supported analysis" in status
+    assert "This plan is ready" in next_step
+    assert "Go to the Run step to validate the request" in next_step
+    assert "Guided Run can start the supported analysis" in next_step
+
+
 def test_new_analysis_run_preview_stale_dataset_contract_keeps_dataset_blocker(
     window,
     tmp_path,
@@ -1628,7 +1676,7 @@ def test_new_analysis_run_preview_panel_shows_incomplete_plan_unresolved_items(w
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
     assert "Guided run readiness preview" in preview_text
-    assert "Draft plan completeness: incomplete for future RunSpec handoff" in preview_text
+    assert "Draft plan completeness: incomplete for the future analysis configuration" in preview_text
     assert "Run preview unresolved items:" in preview_text
     assert "missing_diagnostic_cache" in preview_text
     assert "missing_output_policy" in preview_text
@@ -1642,7 +1690,7 @@ def test_new_analysis_run_preview_complete_plan_keeps_execution_unavailable(wind
 
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
-    assert "Draft plan completeness: complete for future RunSpec handoff" in preview_text
+    assert "Draft plan completeness: complete for the future analysis configuration" in preview_text
     assert "per_roi_correction_execution_contract_unresolved" not in preview_text
     assert "global collapse false" in preview_text
     assert "missing_rwd_dataset_contract" in preview_text
@@ -2468,3 +2516,124 @@ def test_new_analysis_export_ui_label_is_honest_and_differs_by_mode(
     )
     completed_run_label = window._guided_export_btn.text()
     assert "completed-run" in completed_run_label.lower()
+
+
+# --- 4J16k5c: make Review Plan scientist-facing ----------------------------
+
+
+def test_review_plan_output_destination_boxes_are_distinct_and_honest(window):
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    draft_step = window._guided_workflow_stack.widget(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    readonly_box = draft_step.findChild(QGroupBox, "guidedReviewOutputStatusPanel")
+    editable_box = draft_step.findChild(QGroupBox, "guidedOutputDestinationPanel")
+    assert readonly_box is not None
+    assert editable_box is not None
+    assert readonly_box.title() != editable_box.title()
+    assert readonly_box.title() == "Output destination"
+    assert "Set" in editable_box.title() or "Change" in editable_box.title()
+
+    note_text = "\n".join(_label_texts(editable_box))
+    assert "Execution remains disabled until a later stage" not in note_text
+    assert "does not create files" in note_text
+    assert "Guided Run will create a new run folder" in note_text
+
+
+def test_review_plan_imported_plan_review_hidden_in_new_analysis_mode(
+    window, tmp_path, monkeypatch
+):
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+
+    assert window._guided_imported_plan_candidate is None
+    assert window._guided_imported_plan_review_group.isHidden() is True
+
+
+def test_review_plan_imported_plan_review_visible_in_completed_run_mode(
+    window, tmp_path, monkeypatch
+):
+    run_dir = _make_preview_completed_run(tmp_path)
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+
+    assert window._guided_workflow_mode == "open_results"
+    assert window._guided_imported_plan_review_group.isHidden() is False
+
+
+def test_review_plan_primary_content_has_no_internal_class_names(
+    window, tmp_path, monkeypatch
+):
+    """The default (non-technical) Review Plan view is the scientist-facing
+    checklist: it must never mention internal plan class names, RunSpec, or
+    argv. (The Technical details section may still surface deep backend
+    status values/dict keys that are out of scope for this GUI-prose-only
+    patch; that section is checked separately below for the specific prose
+    this patch changed.)"""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    draft_step = window._guided_workflow_stack.widget(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    assert window._guided_review_advanced_content.isHidden() is True
+
+    primary_labels = [
+        label
+        for label in draft_step.findChildren(QLabel)
+        if not _is_descendant(label, window._guided_review_advanced_content)
+    ]
+    visible_text = "\n".join(label.text() for label in primary_labels)
+    forbidden = ("GuidedNewAnalysisDraftPlan", "GuidedRunPlan", "RunSpec", "argv")
+    for term in forbidden:
+        assert term not in visible_text
+
+    button_texts = [
+        button.text() for button in draft_step.findChildren(QPushButton)
+    ]
+    for term in forbidden:
+        assert not any(term in text for text in button_texts)
+
+    assert "Show technical details" in button_texts
+    assert "Show advanced details" not in button_texts
+
+
+def test_review_plan_technical_details_prose_has_no_internal_class_names(
+    window, tmp_path, monkeypatch
+):
+    """The Technical details section's own explanatory prose (export/import
+    panels, dataset contract) must not name internal plan classes, even
+    though deep backend status dict keys/values are out of scope here."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    draft_step = window._guided_workflow_stack.widget(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    window._guided_review_advanced_toggle.click()
+    assert window._guided_review_advanced_content.isHidden() is False
+
+    export_panel = draft_step.findChild(QGroupBox, "guidedDraftPlanExportPanel")
+    dataset_panel = draft_step.findChild(QGroupBox, "guidedDatasetContractPanel")
+    imported_panel = draft_step.findChild(QGroupBox, "guidedImportedPlanReviewPanel")
+    for panel in (export_panel, dataset_panel, imported_panel):
+        assert panel is not None
+        text = "\n".join(_label_texts(panel))
+        assert "GuidedNewAnalysisDraftPlan" not in text
+        assert "GuidedRunPlan" not in text
+
+    assert "Hide technical details" in [
+        button.text() for button in draft_step.findChildren(QPushButton)
+    ]
+
+
+def _is_descendant(widget, ancestor) -> bool:
+    parent = widget.parentWidget()
+    while parent is not None:
+        if parent is ancestor:
+            return True
+        parent = parent.parentWidget()
+    return False
