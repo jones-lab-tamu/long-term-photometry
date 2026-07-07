@@ -3288,9 +3288,10 @@ def test_guided_confirm_strategy_new_analysis_blocks_without_diagnostic_cache(wi
     assert window._guided_confirm_roi_combo.isEnabled() is False
     assert window._guided_confirm_strategy_combo.isEnabled() is False
     assert window._guided_confirm_mark_btn.isEnabled() is False
-    assert "Build a diagnostic cache before confirming correction strategies" in (
+    assert "Generate a local correction preview before confirming this strategy" in (
         window._guided_confirm_context_label.text()
     )
+    assert "Build a diagnostic cache" not in window._guided_confirm_context_label.text()
     progress = window._guided_confirm_strategy_progress_label.text()
     assert progress == "0/0 included ROIs confirmed."
     assert "Open Results must be used first" not in progress
@@ -3583,7 +3584,7 @@ def test_guided_confirm_strategy_new_analysis_rejects_completed_run_like_folder_
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Correction approach"))
 
     assert window._guided_confirm_roi_combo.isEnabled() is False
-    assert "Build a diagnostic cache before confirming correction strategies" in window._guided_confirm_context_label.text()
+    assert "Generate a local correction preview before confirming this strategy" in window._guided_confirm_context_label.text()
     assert window._guided_confirm_source_type == ""
 
 

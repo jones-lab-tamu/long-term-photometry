@@ -224,6 +224,110 @@ def _valid_stage2c_draft(tmp_path: Path) -> GuidedNewAnalysisDraftPlan:
     return draft
 
 
+def _apply_valid_local_preview_correction_evidence(
+    draft: GuidedNewAnalysisDraftPlan,
+    *,
+    roi_id: str = "CH1",
+    strategy: str = "global_linear_regression",
+) -> None:
+    """Populate a cache-free local_correction_preview correction choice,
+    using source/setup-bound currentness instead of diagnostic-cache
+    identity."""
+    from photometry_pipeline.guided_new_analysis_plan import (
+        compute_guided_local_preview_source_setup_signature,
+    )
+
+    source_root = Path(draft.resolved_input_source_path or draft.input_source_path or "")
+    draft.discovered_roi_ids = [roi_id]
+    draft.included_roi_ids = [roi_id]
+    draft.excluded_roi_ids = []
+    draft.sessions_per_hour = 6
+    draft.session_duration_sec = 120.0
+    draft.correction_preview_result_id = "local-preview-001"
+    draft.correction_preview_status = "current"
+    draft.correction_preview_source_cache_id = None
+
+    signature = compute_guided_local_preview_source_setup_signature(draft)
+
+    draft.per_roi_correction_strategy_choices = [
+        GuidedPlanCorrectionChoice(
+            roi_id=roi_id,
+            selected_strategy=strategy,
+            source_type="local_correction_preview",
+            source_setup_signature=signature,
+            evidence_chunk=0,
+            current_or_stale="current",
+            explicit_user_mark=True,
+            evidence_reference={
+                "preview_only": True,
+                "production_analysis": False,
+                "preview_id": draft.correction_preview_result_id,
+            },
+        )
+    ]
+    draft.dataset_contract_snapshot = GuidedNewAnalysisDatasetContractSnapshot(
+        status="applied",
+        input_format="rwd",
+        resolved_input_format="rwd",
+        acquisition_mode="intermittent",
+        contract_values={
+            "rwd_time_col": "Time(s)",
+            "uv_suffix": "-410",
+            "sig_suffix": "-470",
+            "exclude_incomplete_final_rwd_chunk": False,
+        },
+        source_identity=GuidedNewAnalysisDatasetContractSourceIdentity(
+            input_source_path=str(source_root),
+            resolved_input_source_path=str(source_root),
+            input_format="rwd",
+            resolved_input_format="rwd",
+            acquisition_mode="intermittent",
+            sessions_per_hour=6,
+            session_duration_sec=120.0,
+            allow_partial_final_window=False,
+            exclude_incomplete_final_rwd_chunk=False,
+            discovered_roi_ids=(roi_id,),
+            included_roi_ids=(roi_id,),
+            source_setup_signature=None,
+            diagnostic_cache_contract_identity=None,
+        ),
+        explicitly_applied=True,
+    )
+    draft.output_policy_status = "applied"
+    draft.output_policy_path = str(source_root.parent / "planned_outputs")
+    draft.output_policy_validation_issues = []
+    draft.output_policy_stale_reasons = []
+    draft.output_policy_explicitly_applied = True
+
+
+def _valid_local_preview_stage2c_draft(tmp_path: Path) -> GuidedNewAnalysisDraftPlan:
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(_create_tiny_rwd_fixture(tmp_path)),
+        input_format="rwd",
+        acquisition_mode="intermittent",
+    )
+    draft.feature_event_profile_status = "applied"
+    draft.feature_event_profile_id = "feature-profile-001"
+    draft.feature_event_explicitly_applied = True
+    draft.feature_event_values = {
+        "event_signal": "dff",
+        "signal_excursion_polarity": "positive",
+        "peak_threshold_method": "percentile",
+        "peak_threshold_percentile": 90.0,
+        "peak_min_distance_sec": 1.0,
+        "peak_min_prominence_k": 2.0,
+        "peak_min_width_sec": 0.5,
+        "peak_pre_filter": "none",
+        "event_auc_baseline": "zero",
+        "peak_threshold_k": 1.0,
+        "peak_threshold_abs": 0.2,
+    }
+    draft.feature_event_validation_issues = []
+    draft.feature_event_stale_reasons = []
+    _apply_valid_local_preview_correction_evidence(draft)
+    return draft
+
+
 def _cache_payloads(draft: GuidedNewAnalysisDraftPlan) -> tuple[dict, dict]:
     artifact = json.loads(Path(draft.artifact_record_path or "").read_text(encoding="utf-8"))
     provenance = json.loads(Path(draft.provenance_path or "").read_text(encoding="utf-8"))
@@ -538,6 +642,11 @@ def test_stage_2c_materializes_cache_and_evidence_facts(tmp_path: Path):
     assert not hasattr(reference, "selected_at_utc")
     assert result.facts.output.available is True
     assert result.facts.unresolved_required_inputs == ()
+    # 4J16k9: diagnostic-cache-backed marks must keep using cache-bound
+    # currentness, not the new source/setup-bound rule.
+    assert result.facts.correction.currentness_rule_version == (
+        "cache_bound_currentness.v1"
+    )
 
 
 def test_missing_diagnostic_cache_pointer_blocks(tmp_path: Path):
@@ -551,6 +660,119 @@ def test_missing_diagnostic_cache_pointer_blocks(tmp_path: Path):
 
     assert isinstance(result, GuidedBackendValidationMaterializationFailure)
     assert result.blocking_issues[0].category == "diagnostic_cache_missing"
+
+
+def test_stage_2c_materializes_local_preview_evidence_without_diagnostic_cache(
+    tmp_path: Path,
+):
+    draft = _valid_local_preview_stage2c_draft(tmp_path)
+    assert draft.cache_root_path is None
+    assert draft.artifact_record_path is None
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    cache = result.facts.diagnostic_cache
+    assert cache.available is False
+    assert cache.cache_id == ""
+    assert cache.cache_root_canonical == ""
+
+    evidence = result.facts.evidence_references
+    assert evidence.complete is True
+    assert len(evidence.references) == 1
+    reference = evidence.references[0]
+    assert reference.evidence_kind == "local_correction_preview"
+    assert reference.diagnostic_cache_id == ""
+    assert reference.source_setup_signature != ""
+    assert reference.roi_id == "CH1"
+    assert reference.selected_dynamic_fit_mode == "global_linear_regression"
+
+    correction = result.facts.correction
+    assert correction.available is True
+    assert (
+        correction.currentness_rule_version == "source_setup_bound_currentness.v1"
+    )
+    assert correction.confirmed_marks[0].diagnostic_cache_id == ""
+    assert correction.confirmed_marks[0].source_setup_signature != ""
+
+    assert result.facts.output.available is True
+    assert result.facts.unresolved_required_inputs == ()
+
+
+def test_local_preview_missing_signature_blocks(tmp_path: Path):
+    draft = _valid_local_preview_stage2c_draft(tmp_path)
+    stale_choice = replace(
+        draft.per_roi_correction_strategy_choices[0],
+        source_setup_signature=None,
+    )
+    draft.per_roi_correction_strategy_choices = [stale_choice]
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert (
+        result.blocking_issues[0].category == "local_preview_setup_signature_missing"
+    )
+
+
+def test_local_preview_signature_mismatch_blocks(tmp_path: Path):
+    draft = _valid_local_preview_stage2c_draft(tmp_path)
+    # Simulate the included-ROI scope changing after the local-preview mark
+    # was confirmed: the stored signature no longer matches the plan's
+    # current resolved setup.
+    draft.included_roi_ids = ["CH1", "CH2"]
+    draft.discovered_roi_ids = ["CH1", "CH2"]
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category in (
+        "local_preview_setup_signature_mismatch",
+        "missing_confirmed_strategy_mark",
+    )
+
+
+def test_mixed_local_preview_and_diagnostic_cache_evidence_blocks(tmp_path: Path):
+    draft = _valid_stage2c_draft(tmp_path)
+    cache_choice = draft.per_roi_correction_strategy_choices[0]
+    from photometry_pipeline.guided_new_analysis_plan import (
+        compute_guided_local_preview_source_setup_signature,
+    )
+
+    draft.discovered_roi_ids = ["CH1", "CH2"]
+    draft.included_roi_ids = ["CH1", "CH2"]
+    local_choice = GuidedPlanCorrectionChoice(
+        roi_id="CH2",
+        selected_strategy="global_linear_regression",
+        source_type="local_correction_preview",
+        source_setup_signature=compute_guided_local_preview_source_setup_signature(
+            draft
+        ),
+        evidence_chunk=0,
+        current_or_stale="current",
+        explicit_user_mark=True,
+        evidence_reference={
+            "preview_only": True,
+            "production_analysis": False,
+            "preview_id": "local-preview-002",
+        },
+    )
+    draft.per_roi_correction_strategy_choices = [cache_choice, local_choice]
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert (
+        result.blocking_issues[0].category == "mixed_correction_evidence_source_types"
+    )
 
 
 def test_cache_without_completed_run_rejection_blocks(tmp_path: Path):

@@ -494,6 +494,7 @@ def test_refusal_taxonomy_is_complete_and_duplicate_free():
         "diagnostic_cache_not_completed_run_ineligible",
         "diagnostic_cache_identity_mismatch",
         "evidence_reference_missing_or_stale",
+        "local_preview_setup_signature_mismatch",
         "missing_feature_event_profile",
         "invalid_feature_event_profile",
         "stale_feature_event_profile",
@@ -907,7 +908,7 @@ def test_compiler_uses_facts_not_mutable_draft_payload_fields():
         ("dataset", "missing_or_stale_dataset_contract"),
         ("roi", "missing_roi_inventory"),
         ("correction", "missing_confirmed_strategy_mark"),
-        ("cache", "missing_or_stale_diagnostic_cache"),
+        ("cache", "local_preview_setup_signature_mismatch"),
         ("cache_rejection", "diagnostic_cache_not_completed_run_ineligible"),
         ("evidence", "evidence_reference_missing_or_stale"),
         ("feature", "invalid_feature_event_profile"),
@@ -1101,7 +1102,7 @@ def test_identity_is_deterministic_digest_with_pinned_vector():
     first = contracts.compute_guided_backend_validation_request_identity(request)
 
     assert first == (
-        "f87b48ff4ce15ac5ddb2ffed5d51e07aa816c832a9d5ac35597f354709c2f2e3"
+        "2245f3c7e1045aa3d372791bf6d27db0aa25364fe5b7596626190f7d0aaa231c"
     )
     assert first == contracts.compute_guided_backend_validation_request_identity(
         request

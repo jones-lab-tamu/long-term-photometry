@@ -10,7 +10,10 @@ import pytest
 
 import photometry_pipeline.guided_backend_validation_request as contracts
 import photometry_pipeline.guided_production_mapping as mapping
-from tests.test_guided_backend_validator import _request as _valid_request
+from tests.test_guided_backend_validator import (
+    _local_preview_request,
+    _request as _valid_request,
+)
 
 
 _A = "a" * 64
@@ -118,6 +121,18 @@ def test_valid_request_maps_to_frozen_identity_bearing_intent():
     assert result.intent.input_source.candidate_files[0].canonical_relative_path
     with pytest.raises(FrozenInstanceError):
         result.intent.mapping_contract_version = "changed"  # type: ignore[misc]
+
+
+def test_local_preview_request_maps_without_diagnostic_cache_fields():
+    """4J16k9 regression: the supported local-preview path (no diagnostic
+    cache) must map to a production execution intent identically to the
+    cache-backed path, proving production mapping does not require
+    cache_root_path/artifact_record_path or read diagnostic-cache facts."""
+    result = _map(request=_local_preview_request())
+    assert isinstance(result, mapping.GuidedProductionMappingSuccess)
+    assert result.status == "mapped"
+    assert result.intent.execution_profile.execution_mode == "phasic"
+    assert result.intent.execution_profile.run_type == "full"
 
 
 def test_intent_identity_recomputes_and_is_deterministic():

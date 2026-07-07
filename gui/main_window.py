@@ -9209,7 +9209,12 @@ class MainWindow(QMainWindow):
                 source_label = "Diagnostic cache"
                 source, status = self._resolve_current_guided_confirm_diagnostic_cache_source()
                 if source is None:
-                    reason = status.message
+                    reason = (
+                        "Generate a local correction preview before "
+                        "confirming this strategy."
+                        if status.code == "missing_diagnostic_cache"
+                        else status.message
+                    )
                     source_identity = ""
                     source_display = "none"
                     if status.stale or status.code == "stale":
@@ -11991,6 +11996,10 @@ class MainWindow(QMainWindow):
             source_key = self._guided_confirm_choice_key(
                 source_type, None, roi
             )
+            from photometry_pipeline.guided_new_analysis_plan import (
+                compute_guided_local_preview_source_setup_signature,
+            )
+
             source_fields = {
                 "source_type": LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
                 "evidence_source_type": LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE,
@@ -11999,6 +12008,11 @@ class MainWindow(QMainWindow):
                 "local_preview_evidence": reference,
                 "setup_signature": (
                     self._guided_local_preview_setup_signature()
+                ),
+                "source_setup_signature": (
+                    compute_guided_local_preview_source_setup_signature(
+                        self._build_guided_new_analysis_draft_plan()
+                    )
                 ),
                 "current": True,
                 "stale": False,

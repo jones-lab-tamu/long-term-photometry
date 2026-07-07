@@ -3,11 +3,14 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+import numpy as np
 import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QWidget
 
+import photometry_pipeline.preview.correction_preview as correction_preview_module
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
+from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDatasetContractSnapshot,
     GuidedNewAnalysisDraftPlan,
@@ -238,6 +241,149 @@ def _configure_complete_guided_new_analysis_draft(
         window._guided_confirm_mark_btn.click()
 
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
+    window._guided_feature_event_apply_btn.click()
+
+    output_parent = tmp_path / "planned_outputs"
+    output_parent.mkdir()
+    output_target = output_parent / "future_run_outputs"
+    window._guided_output_path_edit.setText(str(output_target))
+    window._guided_output_apply_btn.click()
+    return output_parent, output_target
+
+
+def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
+    window,
+    tmp_path,
+    monkeypatch,
+    *,
+    strategy_by_roi=None,
+):
+    """Drive the standard cache-free local-preview path: no diagnostic
+    cache is ever built. Correction preview comes from
+    run_guided_local_correction_preview (source_type local_raw_segment),
+    matching what a user gets by never expanding the "Optional: prepare
+    reusable full correction evidence" panel."""
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+
+    input_dir = tmp_path / "raw_input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    window._guided_input_dir_edit.setText(str(input_dir))
+    window._guided_output_dir_edit.setText(str(output_dir))
+    window._mode_combo.setCurrentText("both")
+    idx = window._format_combo.findText("rwd")
+    window._format_combo.setCurrentIndex(idx)
+
+    rois = ("CH1", "CH2", "CH3")
+    source_files = []
+    for index in range(2):
+        session_dir = input_dir / f"session-{index}"
+        session_dir.mkdir()
+        source_file = session_dir / "fluorescence.csv"
+        rows = ["Time(s),CH1-410,CH1-470"]
+        rows.extend(f"{row_index / 20.0:.2f},1.0,2.0" for row_index in range(400))
+        source_file.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        source_files.append(source_file)
+    discovery = {
+        "resolved_format": "rwd",
+        "n_total_discovered": len(source_files),
+        "n_preview": len(source_files),
+        "sessions": [
+            {
+                "index": index,
+                "session_id": f"session-{index}",
+                "path": str(source_file),
+                "included_in_preview": True,
+            }
+            for index, source_file in enumerate(source_files)
+        ],
+        "rois": [{"roi_id": roi} for roi in rois],
+    }
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        lambda _fmt: {
+            "rwd_time_col": "Time(s)",
+            "uv_suffix": "-410",
+            "sig_suffix": "-470",
+        },
+    )
+    monkeypatch.setattr(
+        window,
+        "_infer_rwd_chunk_contract",
+        lambda path: {
+            "csv_path": path,
+            "fs_hz": 20.0,
+            "chunk_duration_sec": 600.0,
+            "time_col": "Time(s)",
+            "uv_suffix": "-410",
+            "sig_suffix": "-470",
+        },
+    )
+    time_sec = np.arange(2400, dtype=float) / 20.0
+    uv = 1.0 + 0.03 * np.sin(time_sec * 0.15)
+    sig = 1.25 * uv + 0.04 * np.sin(time_sec * 0.7)
+
+    def fake_load_chunk(path, input_format, _config, chunk_id):
+        return Chunk(
+            chunk_id=chunk_id,
+            source_file=path,
+            format=input_format,
+            time_sec=time_sec,
+            uv_raw=np.column_stack((uv, uv, uv)),
+            sig_raw=np.column_stack((sig, sig * 1.01, sig * 0.99)),
+            fs_hz=20.0,
+            channel_names=list(rois),
+            metadata={},
+        )
+
+    monkeypatch.setattr(correction_preview_module, "load_chunk", fake_load_chunk)
+
+    acquisition_idx = window._guided_acquisition_mode_combo.findData("intermittent")
+    if acquisition_idx >= 0:
+        window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_idx)
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.setText("120")
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    assert window._guided_diagnostic_cache_record is None
+
+    for roi in rois:
+        roi_idx = window._guided_preview_roi_combo.findData(roi)
+        assert roi_idx >= 0
+        window._guided_preview_roi_combo.setCurrentIndex(roi_idx)
+        assert window._guided_preview_generate_btn.isEnabled()
+        window._guided_preview_generate_btn.click()
+        result = window._guided_preview_last_result
+        assert result["status"] in {"success", "partial"}
+        assert result["source_type"] == "local_raw_segment"
+        assert window._guided_diagnostic_cache_record is None
+
+        window._guided_confirm_roi_combo.setCurrentIndex(
+            window._guided_confirm_roi_combo.findData(roi)
+        )
+        window._guided_confirm_chunk_combo.setCurrentIndex(0)
+        strategy_text = "Global Linear Regression"
+        if strategy_by_roi and roi in strategy_by_roi:
+            strategy_text = strategy_by_roi[roi]
+        strategy_index = window._guided_confirm_strategy_combo.findText(strategy_text)
+        if strategy_index < 0:
+            strategy_index = window._guided_confirm_strategy_combo.findData(strategy_text)
+        assert strategy_index >= 0
+        window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
+        window._guided_confirm_ack_cb.setChecked(True)
+        assert window._guided_confirm_mark_btn.isEnabled()
+        window._guided_confirm_mark_btn.click()
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
     window._guided_feature_event_apply_btn.click()
 
     output_parent = tmp_path / "planned_outputs"
@@ -1060,6 +1206,239 @@ def test_review_plan_uniform_dynamic_fit_navigates_to_run_and_validates(
     }
     assert "dataset_snapshot_missing_or_invalid" not in issue_codes
     assert "dynamic_fit_mode_mismatch" not in issue_codes
+
+
+@pytest.mark.parametrize(
+    "strategy_label",
+    (
+        "Robust Global Event-Reject Fit",
+        "Adaptive Event-Gated Fit",
+        "Global Linear Regression",
+    ),
+)
+def test_review_plan_local_preview_without_diagnostic_cache_navigates_to_run_and_validates(
+    window, tmp_path, monkeypatch, strategy_label
+):
+    """4J16k9: proves the standard local-preview path validates without
+    ever building a diagnostic cache, and that acceptance actually reaches
+    Guided Run availability. The diagnostic-cache panel is never touched;
+    local preview comes from run_guided_local_correction_preview
+    (source_type local_raw_segment), and Validate must accept using
+    source/setup-bound currentness instead of diagnostic-cache identity."""
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+    import photometry_pipeline.guided_production_mapping as production_mapping
+
+    strategy_by_roi = {roi: strategy_label for roi in ("CH1", "CH2", "CH3")}
+    _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
+        window,
+        tmp_path,
+        monkeypatch,
+        strategy_by_roi=strategy_by_roi,
+    )
+    _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.cache_root_path is None
+    assert plan.artifact_record_path is None
+    assert plan.per_roi_correction_strategy_choices[0].source_type == (
+        "local_correction_preview"
+    )
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    assert subset.first_subset_executable is True, subset.blocking_issues
+
+    status = window._guided_review_plan_status_label.text()
+    assert "This plan is ready. Go to the Run step to validate" in status
+    assert window._guided_review_go_to_run_btn.isEnabled() is True
+
+    window._guided_review_go_to_run_btn.click()
+    assert window._guided_workflow_stepper.currentRow() == (
+        list(GUIDED_WORKFLOW_STEPS).index("Run")
+    )
+    assert window._guided_backend_validate_btn.isEnabled() is True
+
+    build_identity = production_mapping.build_application_build_identity(
+        distribution_name="photometry-pipeline",
+        distribution_version="1.0.0",
+        source_revision_kind="git",
+        source_revision="abc123",
+        source_tree_state="clean",
+    )
+    monkeypatch.setattr(
+        request_builder,
+        "resolve_application_build_identity",
+        lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+    )
+    window._guided_backend_validate_btn.click()
+    outcome = window._guided_backend_validation_outcome
+    issue_codes = {issue.detail_code for issue in outcome.blocking_issues}
+    assert "cache_pointer_missing" not in issue_codes
+    assert outcome.status == "validator_accepted", (outcome.status, issue_codes)
+
+    # Prove the acceptance gate reaches a genuine Run-authorization attempt
+    # (not skipped for context/revision/build-identity reasons) and that
+    # nothing about local-preview/diagnostic-cache evidence blocks it.
+    #
+    # window._guided_run_btn.isEnabled() cannot be asserted True here: a
+    # real (non-mocked) authorization attempt for this GUI-constructed plan
+    # currently fails inside guided_production_mapping.py for reasons that
+    # are pre-existing and unrelated to diagnostic-cache/local-preview
+    # currentness (see report Part 2/6 — production mapping's typed-field
+    # allow-lists and intent-identity canonicalizer do not yet handle every
+    # field a real Guided new-analysis draft plan produces, for cache-backed
+    # plans too). Fixing that is out of scope ("do not change production
+    # mapping"). What this test proves instead: the authorization attempt is
+    # genuinely reached and fails for a category unrelated to this patch.
+    import photometry_pipeline.guided_run_authorization as run_authorization
+
+    context = window._capture_guided_backend_validation_context()
+    mapping_contract = production_mapping.build_guided_production_mapping_contract()
+    authorization_request = run_authorization.build_guided_run_authorization_request(
+        stored_validation_outcome=outcome,
+        stored_validation_outcome_revision=window._guided_backend_validation_revision,
+        current_gui_revision=window._guided_backend_validation_revision,
+        current_validation_context=context,
+        application_build_identity=build_identity,
+        production_mapping_contract=mapping_contract,
+    )
+    authorization_result = run_authorization.authorize_guided_run(
+        authorization_request
+    )
+    diagnostic_cache_related_categories = {
+        "missing_or_stale_diagnostic_cache",
+        "diagnostic_cache_not_completed_run_ineligible",
+        "diagnostic_cache_identity_mismatch",
+        "local_preview_setup_signature_mismatch",
+        "local_preview_setup_signature_missing",
+        "mixed_correction_evidence_source_types",
+    }
+    authorization_categories = {
+        issue.category for issue in authorization_result.blocking_issues
+    }
+    assert not (authorization_categories & diagnostic_cache_related_categories), (
+        authorization_result.blocking_issues
+    )
+
+
+def test_local_preview_source_setup_drift_after_confirmation_blocks_validate_and_run(
+    window, tmp_path, monkeypatch
+):
+    """4J16k9 follow-up: proves the source/setup signature actually detects
+    drift. Confirm local-preview evidence for all included ROIs, then
+    change acquisition/session timing (a field the signature covers) after
+    confirmation, without re-confirming. Validate must reject the now-stale
+    local-preview evidence, and Guided Run must not become available."""
+    strategy_by_roi = {
+        roi: "Robust Global Event-Reject Fit" for roi in ("CH1", "CH2", "CH3")
+    }
+    _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
+        window,
+        tmp_path,
+        monkeypatch,
+        strategy_by_roi=strategy_by_roi,
+    )
+    _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+
+    plan_before = window._build_guided_new_analysis_draft_plan()
+    subset_before = evaluate_guided_new_analysis_execution_subset_readiness(
+        plan_before
+    )
+    assert subset_before.first_subset_executable is True, (
+        subset_before.blocking_issues
+    )
+
+    # Drift: session duration changes after local-preview confirmation,
+    # without regenerating the preview or re-confirming the strategy. This
+    # is exactly the kind of "confirmed under different settings than are
+    # now being validated" drift the source/setup signature exists to
+    # catch.
+    window._guided_session_duration_edit.setText("180")
+
+    plan_after = window._build_guided_new_analysis_draft_plan()
+    assert plan_after.session_duration_sec == 180.0
+    # The GUI-side plan-readiness layer detects this drift through several
+    # overlapping, pre-existing staleness mechanisms (dataset-contract
+    # staleness, strategy-mark staleness) before backend Validate is even
+    # attempted; the point proven here is that readiness correctly flips to
+    # not-executable, not which specific category fires first.
+    subset_after = evaluate_guided_new_analysis_execution_subset_readiness(
+        plan_after
+    )
+    assert subset_after.first_subset_executable is False, (
+        subset_after.blocking_issues
+    )
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Run")
+    )
+    window._guided_backend_validate_btn.click()
+    outcome = window._guided_backend_validation_outcome
+    assert outcome.status != "validator_accepted"
+    # The GUI's own pre-existing staleness tracking
+    # (_refresh_guided_local_preview_choice_currency, driven by the widget
+    # -based _guided_local_preview_setup_signature) already marks the choice
+    # stale on this exact drift before backend materialization is reached,
+    # so this surfaces as "strategy_mark_stale" here. The new source/setup
+    # signature is a second, independent layer that catches the same drift
+    # even when GUI-side staleness tracking is bypassed entirely — proven
+    # directly against materialize_guided_backend_validation_facts by
+    # test_local_preview_signature_mismatch_blocks in
+    # tests/test_guided_backend_validation_materialization.py.
+    issue_codes = {issue.detail_code for issue in outcome.blocking_issues}
+    assert issue_codes & {
+        "strategy_mark_stale",
+        "local_preview_signature_mismatch",
+        "local_preview_signature_missing",
+    }, issue_codes
+    assert window._guided_run_btn.isEnabled() is False
+
+
+def test_local_preview_mark_evidence_binding_mismatch_blocks_validator(monkeypatch):
+    """4J16k9 follow-up: proves that if a compiled request's correction mark
+    and evidence reference ever disagreed (evidence_reference_id or
+    evidence_chunk mismatch) for local-preview evidence, the final
+    validator rejects it rather than silently accepting.
+
+    This is deliberately exercised at the compiled-request/validator layer,
+    not via the GUI: for the local_correction_preview path, materialization
+    builds each ROI's evidence reference directly from that same ROI's
+    GuidedPlanCorrectionChoice in a single pass (see
+    _materialize_local_preview_evidence_references), so a real GUI
+    confirmation cannot itself produce a mark/evidence divergence for a
+    single choice object. The mark-vs-evidence cross-check exercised here
+    is defense-in-depth in the compiled GuidedBackendValidationRequest
+    contract, guarding against a future compiler bug or a
+    tampered/deserialized request, not a state reachable from today's GUI.
+
+    Guided Run availability is gated exclusively by this validator's
+    accepted=True result (_refresh_guided_run_readiness_display requires
+    outcome.status == "validator_accepted"), so proving rejection here is
+    equivalent to proving Run cannot become available for a mismatched
+    request.
+    """
+    import photometry_pipeline.guided_backend_validator as validator
+    from dataclasses import replace
+    from tests.test_guided_backend_validator import (
+        _local_preview_request,
+        _contract,
+    )
+
+    request = _local_preview_request()
+    mismatched_mark = replace(
+        request.correction.confirmed_marks[0],
+        evidence_reference_id="a-different-evidence-reference-id",
+    )
+    request = replace(
+        request,
+        correction=replace(request.correction, confirmed_marks=(mismatched_mark,)),
+    )
+    identity = validator.compute_guided_backend_validation_request_identity(request)
+    result = validator.validate_guided_backend_validation_request(
+        request,
+        canonical_request_identity=identity,
+        validator_contract=_contract(),
+    )
+    assert result.accepted is False
+    assert result.blocking_issues[0].category == "evidence_reference_missing_or_stale"
 
 
 def test_review_plan_all_signal_only_f0_remains_unsupported_after_confirming_settings(

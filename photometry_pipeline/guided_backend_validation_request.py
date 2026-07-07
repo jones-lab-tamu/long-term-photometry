@@ -104,6 +104,7 @@ CORRECTION_EVIDENCE_REFUSAL_CATEGORIES = (
     "diagnostic_cache_not_completed_run_ineligible",
     "diagnostic_cache_identity_mismatch",
     "evidence_reference_missing_or_stale",
+    "local_preview_setup_signature_mismatch",
 )
 FEATURE_EVENT_REFUSAL_CATEGORIES = (
     "missing_feature_event_profile",
@@ -536,13 +537,22 @@ class GuidedBackendConfirmedStrategyMark:
         for name in (
             "roi_id",
             "selected_dynamic_fit_mode",
-            "diagnostic_cache_id",
             "source_setup_signature",
-            "diagnostic_scope_signature",
-            "build_request_signature",
             "evidence_reference_id",
         ):
             _require_non_empty(getattr(self, name), name)
+        # diagnostic_cache_id/diagnostic_scope_signature/build_request_signature
+        # are cache-identity fields: non-empty for diagnostic_cache-backed
+        # marks, empty for local_correction_preview marks (which prove
+        # currentness via source_setup_signature instead).
+        if bool(self.diagnostic_cache_id) != bool(self.diagnostic_scope_signature) or bool(
+            self.diagnostic_cache_id
+        ) != bool(self.build_request_signature):
+            raise GuidedBackendValidationRequestContractError(
+                "diagnostic_cache_id, diagnostic_scope_signature, and "
+                "build_request_signature must be either all present or all "
+                "empty."
+            )
         if self.explicit_user_mark is not True or self.current is not True:
             raise GuidedBackendValidationRequestContractError(
                 "Confirmed strategy marks must be explicit and current."
@@ -641,12 +651,10 @@ class GuidedBackendEvidenceReference:
     selected_dynamic_fit_mode: str = ""
 
     def __post_init__(self) -> None:
-        for name in (
-            "evidence_reference_id",
-            "evidence_kind",
-            "diagnostic_cache_id",
-            "source_setup_signature",
-        ):
+        required_fields = ["evidence_reference_id", "evidence_kind", "source_setup_signature"]
+        if self.evidence_kind != "local_correction_preview":
+            required_fields.append("diagnostic_cache_id")
+        for name in required_fields:
             _require_non_empty(getattr(self, name), name)
         if self.evidence_chunk is not None and (
             isinstance(self.evidence_chunk, bool)
@@ -686,8 +694,37 @@ class GuidedBackendDiagnosticEvidenceRequest:
     production_analysis: bool
     stale_reasons: tuple[str, ...] = ()
     unresolved_inputs: tuple[str, ...] = ()
+    available: bool = True
 
     def __post_init__(self) -> None:
+        for name in ("evidence_references", "stale_reasons", "unresolved_inputs"):
+            _require_tuple(getattr(self, name), name)
+        if not self.available:
+            # Cache-free local-preview evidence path: no diagnostic-cache
+            # identity is required or claimed. All cache-identity fields
+            # must be empty so this state cannot be mistaken for a resolved
+            # diagnostic cache.
+            if (
+                self.cache_id
+                or self.cache_root_canonical
+                or self.source_setup_signature
+                or self.diagnostic_scope_signature
+                or self.build_request_signature
+                or self.artifact_semantic_digest
+                or self.provenance_semantic_digest
+                or self.completed_run_rejection_category
+                or self.resolver_status
+                or self.preliminary_cache is not False
+                or self.production_analysis is not False
+                or not self.evidence_references
+                or self.stale_reasons
+                or self.unresolved_inputs
+            ):
+                raise GuidedBackendValidationRequestContractError(
+                    "Unavailable diagnostic evidence must not carry cache "
+                    "identity fields."
+                )
+            return
         for name in (
             "cache_id",
             "cache_root_canonical",
@@ -703,8 +740,6 @@ class GuidedBackendDiagnosticEvidenceRequest:
             self.provenance_semantic_digest,
             "provenance_semantic_digest",
         )
-        for name in ("evidence_references", "stale_reasons", "unresolved_inputs"):
-            _require_tuple(getattr(self, name), name)
         if (
             not self.evidence_references
             or self.completed_run_rejection_category
@@ -1632,48 +1667,6 @@ def compile_guided_backend_validation_request(
         )
 
     cache_facts = facts.diagnostic_cache
-    if (
-        not cache_facts.available
-        or cache_facts.resolver_status != "current"
-        or cache_facts.preliminary_cache is not True
-        or cache_facts.production_analysis is not False
-    ):
-        return _failure(
-            "missing_or_stale_diagnostic_cache",
-            "diagnostic_evidence",
-            "A current preliminary diagnostic cache is required.",
-            detail_code="diagnostic_cache_unavailable",
-        )
-    if (
-        cache_facts.completed_run_rejection_category
-        != "guided_diagnostic_cache_ineligible"
-    ):
-        return _failure(
-            "diagnostic_cache_not_completed_run_ineligible",
-            "diagnostic_evidence",
-            "Diagnostic cache lacks the required completed-run rejection category.",
-            detail_code="completed_run_rejection_mismatch",
-        )
-    if (
-        not cache_facts.cache_id
-        or not cache_facts.cache_root_canonical
-        or not cache_facts.source_setup_signature
-        or not cache_facts.diagnostic_scope_signature
-        or not cache_facts.build_request_signature
-        or not cache_facts.artifact_semantic_digest
-        or not cache_facts.provenance_semantic_digest
-        or dataset_facts.dataset_source_setup_signature
-        != cache_facts.source_setup_signature
-        or dataset_facts.diagnostic_cache_contract_identity
-        != cache_facts.build_request_signature
-    ):
-        return _failure(
-            "diagnostic_cache_identity_mismatch",
-            "diagnostic_evidence",
-            "Diagnostic cache identity is incomplete or disagrees with dataset facts.",
-            detail_code="diagnostic_cache_identity_mismatch",
-        )
-
     evidence_facts = facts.evidence_references
     if not evidence_facts.complete or not evidence_facts.references:
         return _failure(
@@ -1692,33 +1685,102 @@ def compile_guided_backend_validation_request(
             "Evidence references must cover every included ROI exactly once.",
             detail_code="evidence_roi_coverage_mismatch",
         )
-    for mark in correction_facts.confirmed_marks:
-        reference = evidence_by_roi.get(mark.roi_id)
+
+    if cache_facts.available:
         if (
-            reference is None
-            or reference.current is not True
-            or reference.evidence_reference_id != mark.evidence_reference_id
-            or reference.selected_dynamic_fit_mode
-            != mark.selected_dynamic_fit_mode
-            or reference.diagnostic_cache_id != cache_facts.cache_id
-            or mark.diagnostic_cache_id != cache_facts.cache_id
-            or reference.source_setup_signature
+            cache_facts.resolver_status != "current"
+            or cache_facts.preliminary_cache is not True
+            or cache_facts.production_analysis is not False
+        ):
+            return _failure(
+                "missing_or_stale_diagnostic_cache",
+                "diagnostic_evidence",
+                "A current preliminary diagnostic cache is required.",
+                detail_code="diagnostic_cache_unavailable",
+            )
+        if (
+            cache_facts.completed_run_rejection_category
+            != "guided_diagnostic_cache_ineligible"
+        ):
+            return _failure(
+                "diagnostic_cache_not_completed_run_ineligible",
+                "diagnostic_evidence",
+                "Diagnostic cache lacks the required completed-run rejection category.",
+                detail_code="completed_run_rejection_mismatch",
+            )
+        if (
+            not cache_facts.cache_id
+            or not cache_facts.cache_root_canonical
+            or not cache_facts.source_setup_signature
+            or not cache_facts.diagnostic_scope_signature
+            or not cache_facts.build_request_signature
+            or not cache_facts.artifact_semantic_digest
+            or not cache_facts.provenance_semantic_digest
+            or dataset_facts.dataset_source_setup_signature
             != cache_facts.source_setup_signature
-            or mark.source_setup_signature != cache_facts.source_setup_signature
-            or reference.diagnostic_scope_signature
-            != cache_facts.diagnostic_scope_signature
-            or mark.diagnostic_scope_signature
-            != cache_facts.diagnostic_scope_signature
-            or reference.build_request_signature
+            or dataset_facts.diagnostic_cache_contract_identity
             != cache_facts.build_request_signature
-            or mark.build_request_signature != cache_facts.build_request_signature
         ):
             return _failure(
                 "diagnostic_cache_identity_mismatch",
                 "diagnostic_evidence",
-                "Correction marks and evidence references do not bind to cache identity.",
-                detail_code="mark_evidence_cache_binding_mismatch",
+                "Diagnostic cache identity is incomplete or disagrees with dataset facts.",
+                detail_code="diagnostic_cache_identity_mismatch",
             )
+        for mark in correction_facts.confirmed_marks:
+            reference = evidence_by_roi.get(mark.roi_id)
+            if (
+                reference is None
+                or reference.current is not True
+                or reference.evidence_reference_id != mark.evidence_reference_id
+                or reference.selected_dynamic_fit_mode
+                != mark.selected_dynamic_fit_mode
+                or reference.diagnostic_cache_id != cache_facts.cache_id
+                or mark.diagnostic_cache_id != cache_facts.cache_id
+                or reference.source_setup_signature
+                != cache_facts.source_setup_signature
+                or mark.source_setup_signature != cache_facts.source_setup_signature
+                or reference.diagnostic_scope_signature
+                != cache_facts.diagnostic_scope_signature
+                or mark.diagnostic_scope_signature
+                != cache_facts.diagnostic_scope_signature
+                or reference.build_request_signature
+                != cache_facts.build_request_signature
+                or mark.build_request_signature != cache_facts.build_request_signature
+            ):
+                return _failure(
+                    "diagnostic_cache_identity_mismatch",
+                    "diagnostic_evidence",
+                    "Correction marks and evidence references do not bind to cache identity.",
+                    detail_code="mark_evidence_cache_binding_mismatch",
+                )
+    else:
+        # Cache-free local-preview evidence path: currentness is proven by
+        # a source/setup signature bound to the plan's resolved input
+        # source, acquisition/session settings, and included-ROI scope
+        # (see compute_guided_local_preview_source_setup_signature), not by
+        # diagnostic-cache identity.
+        for mark in correction_facts.confirmed_marks:
+            reference = evidence_by_roi.get(mark.roi_id)
+            if (
+                reference is None
+                or reference.current is not True
+                or reference.evidence_kind != "local_correction_preview"
+                or reference.evidence_reference_id != mark.evidence_reference_id
+                or reference.selected_dynamic_fit_mode
+                != mark.selected_dynamic_fit_mode
+                or reference.diagnostic_cache_id
+                or mark.diagnostic_cache_id
+                or not reference.source_setup_signature
+                or reference.source_setup_signature != mark.source_setup_signature
+            ):
+                return _failure(
+                    "local_preview_setup_signature_mismatch",
+                    "diagnostic_evidence",
+                    "Correction marks and evidence references do not bind to "
+                    "a consistent local-preview source/setup signature.",
+                    detail_code="mark_evidence_local_preview_binding_mismatch",
+                )
 
     feature_facts = facts.feature_event
     if (
@@ -1924,30 +1986,52 @@ def compile_guided_backend_validation_request(
             ),
             applied_dff_orchestration_enabled=draft.applied_dff_orchestration_enabled,
         )
-        diagnostic_request = GuidedBackendDiagnosticEvidenceRequest(
-            cache_id=cache_facts.cache_id,
-            cache_root_canonical=cache_facts.cache_root_canonical,
-            source_setup_signature=cache_facts.source_setup_signature,
-            diagnostic_scope_signature=cache_facts.diagnostic_scope_signature,
-            build_request_signature=cache_facts.build_request_signature,
-            artifact_contract_version=(
-                GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION
-            ),
-            provenance_schema_version=(
-                GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION
-            ),
-            artifact_semantic_digest=cache_facts.artifact_semantic_digest,
-            provenance_semantic_digest=cache_facts.provenance_semantic_digest,
-            evidence_references=evidence_facts.references,
-            completed_run_rejection_category=(
-                cache_facts.completed_run_rejection_category
-            ),
-            resolver_status=cache_facts.resolver_status,
-            preliminary_cache=cache_facts.preliminary_cache,
-            production_analysis=cache_facts.production_analysis,
-            stale_reasons=(),
-            unresolved_inputs=(),
-        )
+        if cache_facts.available:
+            diagnostic_request = GuidedBackendDiagnosticEvidenceRequest(
+                cache_id=cache_facts.cache_id,
+                cache_root_canonical=cache_facts.cache_root_canonical,
+                source_setup_signature=cache_facts.source_setup_signature,
+                diagnostic_scope_signature=cache_facts.diagnostic_scope_signature,
+                build_request_signature=cache_facts.build_request_signature,
+                artifact_contract_version=(
+                    GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION
+                ),
+                provenance_schema_version=(
+                    GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION
+                ),
+                artifact_semantic_digest=cache_facts.artifact_semantic_digest,
+                provenance_semantic_digest=cache_facts.provenance_semantic_digest,
+                evidence_references=evidence_facts.references,
+                completed_run_rejection_category=(
+                    cache_facts.completed_run_rejection_category
+                ),
+                resolver_status=cache_facts.resolver_status,
+                preliminary_cache=cache_facts.preliminary_cache,
+                production_analysis=cache_facts.production_analysis,
+                stale_reasons=(),
+                unresolved_inputs=(),
+                available=True,
+            )
+        else:
+            diagnostic_request = GuidedBackendDiagnosticEvidenceRequest(
+                cache_id="",
+                cache_root_canonical="",
+                source_setup_signature="",
+                diagnostic_scope_signature="",
+                build_request_signature="",
+                artifact_contract_version="",
+                provenance_schema_version="",
+                artifact_semantic_digest="",
+                provenance_semantic_digest="",
+                evidence_references=evidence_facts.references,
+                completed_run_rejection_category="",
+                resolver_status="",
+                preliminary_cache=False,
+                production_analysis=False,
+                stale_reasons=(),
+                unresolved_inputs=(),
+                available=False,
+            )
         feature_request = GuidedBackendFeatureEventRequest(
             profile_schema_version=feature_facts.profile_schema_version,
             profile_id=feature_facts.profile_id,
@@ -2185,6 +2269,7 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "production_analysis",
         "stale_reasons",
         "unresolved_inputs",
+        "available",
     ),
     GuidedBackendFeatureEventRequest: (
         "profile_schema_version",

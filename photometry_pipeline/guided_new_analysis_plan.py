@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
+import hashlib
+import json
 from typing import Any
 
 from photometry_pipeline.config import Config
@@ -616,6 +618,68 @@ class GuidedPlanCorrectionChoice:
     explicit_user_mark: bool = False
     selected_at_utc: str | None = None
     evidence_reference: dict[str, Any] = field(default_factory=dict)
+
+
+LOCAL_PREVIEW_SOURCE_SETUP_CURRENTNESS_RULE_VERSION = (
+    "source_setup_bound_currentness.v1"
+)
+
+
+def compute_guided_local_preview_source_setup_signature(
+    plan: "GuidedNewAnalysisDraftPlan",
+) -> str:
+    """Source/setup-bound currentness signature for local_correction_preview
+    correction evidence.
+
+    Binds a confirmed correction choice to the plan's currently resolved
+    input source, acquisition/session settings, and included-ROI scope,
+    independent of any diagnostic cache. Used to prove that local-preview
+    evidence was confirmed against the same setup the plan is currently
+    being validated against, without requiring a diagnostic-cache identity
+    match (diagnostic-cache-backed evidence keeps using cache identity for
+    the same purpose).
+
+    Deliberately global/setup-level, not per-ROI or per-strategy: this
+    signature only has to prove "nothing about the input/acquisition/ROI
+    scope changed since this evidence was confirmed." The fields it does
+    NOT cover are proven by other, independent checks that already run
+    unconditionally for every evidence source type:
+      - ROI identity: per-ROI evidence/mark coverage checks
+        (_materialize_local_preview_evidence_references,
+        _validate_semantics) require every included ROI to have exactly
+        one mark and one evidence reference.
+      - selected strategy/mode: cross-checked between mark and evidence
+        per ROI (guided_backend_validator._validate_semantics
+        "mark_evidence_mode_mismatch"), plus the unanimity check
+        (mixed_dynamic_fit_modes).
+      - evidence_reference_id / evidence_chunk: cross-checked between mark
+        and evidence per ROI (guided_backend_validator._validate_semantics
+        "mark_evidence_reference_mismatch"), unconditionally for both
+        diagnostic-cache-backed and local-preview evidence.
+      - explicit_user_mark / current_or_stale: required directly on the
+        GuidedPlanCorrectionChoice by
+        _materialize_local_preview_evidence_references and
+        _materialize_correction_facts.
+    See tests/test_gui_guided_new_analysis_plan.py::
+    test_local_preview_source_setup_drift_after_confirmation_blocks_validate_and_run
+    and ::test_local_preview_mark_evidence_binding_mismatch_blocks_validator
+    for the drift/mismatch proofs.
+    """
+    payload = {
+        "resolved_input_source_path": (
+            plan.resolved_input_source_path or plan.input_source_path or ""
+        ),
+        "input_format": plan.input_format or "",
+        "acquisition_mode": plan.acquisition_mode or "",
+        "sessions_per_hour": plan.sessions_per_hour,
+        "session_duration_sec": plan.session_duration_sec,
+        "continuous_window_sec": plan.continuous_window_sec,
+        "continuous_step_sec": plan.continuous_step_sec,
+        "allow_partial_final_window": bool(plan.allow_partial_final_window),
+        "included_roi_ids": sorted(str(x) for x in plan.included_roi_ids),
+    }
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)

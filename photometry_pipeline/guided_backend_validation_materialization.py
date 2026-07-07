@@ -39,9 +39,11 @@ from photometry_pipeline.guided_new_analysis_plan import (
     FEATURE_EVENT_CONFIG_FIELDS,
     FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
     FORBIDDEN_CORRECTION_STRATEGIES,
+    LOCAL_PREVIEW_SOURCE_SETUP_CURRENTNESS_RULE_VERSION,
     build_guided_per_roi_production_strategy_map,
     build_guided_feature_event_effective_values_preview,
     classify_output_base_safety_ownership,
+    compute_guided_local_preview_source_setup_signature,
 )
 from photometry_pipeline.guided_completed_run_rejection_policy import (
     AMBIGUOUS_GUIDED_DIAGNOSTIC_CACHE_METADATA,
@@ -134,6 +136,9 @@ STAGE_2C_VALID_ISSUES = {
     "mixed_dynamic_fit_modes",
     "signal_only_not_supported_for_validate",
     "forbidden_strategy_state",
+    "mixed_correction_evidence_source_types",
+    "local_preview_setup_signature_missing",
+    "local_preview_setup_signature_mismatch",
     # Stage 2d categories
     "output_policy_missing",
     "output_policy_stale",
@@ -263,6 +268,36 @@ def _materialize_diagnostic_cache(
     dict[str, Any] | None,
     GuidedBackendValidationMaterializationFailure | None,
 ]:
+    included = set(draft.included_roi_ids)
+    choices_by_roi = {
+        choice.roi_id: choice
+        for choice in draft.per_roi_correction_strategy_choices
+    }
+    present_source_types = {
+        choices_by_roi[roi].source_type
+        for roi in included
+        if roi in choices_by_roi
+    }
+
+    if present_source_types == {"local_correction_preview"}:
+        # Every included ROI with a mark uses local-preview evidence, which
+        # is bound to source/setup currentness (see
+        # _materialize_evidence_references / _materialize_correction_facts),
+        # not diagnostic-cache identity. No cache pointer is required.
+        return GuidedBackendDiagnosticCacheFacts(available=False), {}, None
+
+    if "local_correction_preview" in present_source_types and (
+        "diagnostic_cache" in present_source_types
+    ):
+        return None, None, _failure(
+            "mixed_correction_evidence_source_types",
+            "diagnostic_cache",
+            "Included ROIs mix local-preview and diagnostic-cache-backed "
+            "correction evidence; use one evidence source for all included "
+            "ROIs.",
+            detail_code="mixed_evidence_source_types",
+        )
+
     cache_pointer = draft.artifact_record_path or draft.cache_root_path
     if not cache_pointer:
         return None, None, _failure(
@@ -564,6 +599,11 @@ def _materialize_evidence_references(
     for choice in draft.per_roi_correction_strategy_choices:
         if choice.roi_id in choices_by_roi:
             choices_by_roi[choice.roi_id].append(choice)
+
+    if not cache_facts.available:
+        return _materialize_local_preview_evidence_references(
+            draft, included, choices_by_roi
+        )
 
     references: list[GuidedBackendEvidenceReference] = []
     modes: set[str] = set()
@@ -873,6 +913,138 @@ def _materialize_evidence_references(
     ), None
 
 
+def _materialize_local_preview_evidence_references(
+    draft: GuidedNewAnalysisDraftPlan,
+    included: tuple[str, ...],
+    choices_by_roi: dict[str, list[Any]],
+) -> tuple[
+    GuidedBackendEvidenceReferenceFacts | None,
+    GuidedBackendValidationMaterializationFailure | None,
+]:
+    """Evidence-reference materialization for the cache-free local-preview
+    path: currentness is proven by a source/setup signature bound to the
+    plan's resolved input source, acquisition/session settings, and
+    included-ROI scope, instead of diagnostic-cache identity."""
+    expected_signature = compute_guided_local_preview_source_setup_signature(draft)
+    references: list[GuidedBackendEvidenceReference] = []
+    modes: set[str] = set()
+
+    for roi_id in included:
+        choices = choices_by_roi[roi_id]
+        if not choices:
+            return None, _failure(
+                "missing_confirmed_strategy_mark",
+                "evidence_references",
+                f"Included ROI '{roi_id}' has no confirmed strategy mark.",
+                detail_code="strategy_mark_missing",
+            )
+        if len(choices) != 1:
+            return None, _failure(
+                "duplicate_confirmed_strategy_mark",
+                "evidence_references",
+                f"Included ROI '{roi_id}' has duplicate confirmed strategy marks.",
+                detail_code="strategy_mark_duplicate",
+            )
+        choice = choices[0]
+        if choice.current_or_stale != "current":
+            return None, _failure(
+                "stale_strategy_mark",
+                "evidence_references",
+                f"Strategy mark for ROI '{roi_id}' is stale.",
+                detail_code="strategy_mark_stale",
+            )
+        if not choice.explicit_user_mark:
+            return None, _failure(
+                "non_explicit_strategy_mark",
+                "evidence_references",
+                f"Strategy mark for ROI '{roi_id}' is not explicit.",
+                detail_code="strategy_mark_not_explicit",
+            )
+        if choice.selected_strategy == "signal_only_f0":
+            return None, _failure(
+                "signal_only_not_supported_for_validate",
+                "evidence_references",
+                "Signal-Only is not supported by the first validation subset.",
+                detail_code="signal_only",
+            )
+        if (
+            choice.selected_strategy in FORBIDDEN_CORRECTION_STRATEGIES
+            or choice.selected_strategy not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+        ):
+            return None, _failure(
+                "forbidden_strategy_state",
+                "evidence_references",
+                f"Strategy '{choice.selected_strategy}' is not supported.",
+                detail_code="strategy_forbidden",
+            )
+        modes.add(choice.selected_strategy)
+
+        evidence_reference = (
+            choice.evidence_reference
+            if isinstance(choice.evidence_reference, dict)
+            else {}
+        )
+        if (
+            evidence_reference.get("preview_only") is not True
+            or evidence_reference.get("production_analysis") is not False
+        ):
+            return None, _failure(
+                "evidence_reference_missing_or_stale",
+                "evidence_references",
+                f"Local-preview evidence for ROI '{roi_id}' is not marked as "
+                "preview-only decision support.",
+                detail_code="local_preview_evidence_not_decision_support",
+            )
+
+        signature = str(choice.source_setup_signature or "")
+        if not signature:
+            return None, _failure(
+                "local_preview_setup_signature_missing",
+                "evidence_references",
+                f"Local-preview correction choice for ROI '{roi_id}' does not "
+                "record source/setup currentness information.",
+                detail_code="local_preview_signature_missing",
+            )
+        if signature != expected_signature:
+            return None, _failure(
+                "local_preview_setup_signature_mismatch",
+                "evidence_references",
+                f"Local-preview correction choice for ROI '{roi_id}' was "
+                "confirmed against a different input source, acquisition, or "
+                "included-ROI setup than the current draft plan.",
+                detail_code="local_preview_signature_mismatch",
+            )
+
+        references.append(
+            GuidedBackendEvidenceReference(
+                evidence_reference_id=str(
+                    evidence_reference.get("preview_id")
+                    or choice.selected_at_utc
+                    or f"{roi_id}:{signature}"
+                ),
+                evidence_kind="local_correction_preview",
+                diagnostic_cache_id="",
+                source_setup_signature=signature,
+                evidence_chunk=choice.evidence_chunk,
+                roi_id=roi_id,
+                selected_dynamic_fit_mode=choice.selected_strategy,
+                current=True,
+            )
+        )
+
+    if len(modes) != 1:
+        return None, _failure(
+            "mixed_dynamic_fit_modes",
+            "evidence_references",
+            "Included ROIs must use one supported dynamic-fit mode.",
+            detail_code="mixed_modes",
+        )
+    return GuidedBackendEvidenceReferenceFacts(
+        references=tuple(references),
+        complete=True,
+    ), None
+
+
 def _materialize_dataset_and_roi_facts(
     draft: GuidedNewAnalysisDraftPlan,
     source_facts: GuidedBackendSourceSnapshotFacts,
@@ -972,7 +1144,7 @@ def _materialize_dataset_and_roi_facts(
             "Dataset timing or incomplete-final policy is stale.",
             detail_code="dataset_timing_policy_mismatch",
         )
-    if (
+    if cache_facts.available and (
         identity.source_setup_signature != cache_facts.source_setup_signature
         or identity.diagnostic_cache_contract_identity
         != cache_facts.build_request_signature
@@ -1132,11 +1304,20 @@ def _materialize_correction_facts(
                 f"Request-ready correction binding is missing for ROI '{roi_id}'.",
                 detail_code="confirmed_binding_missing",
             )
+        if evidence.evidence_kind == "local_correction_preview":
+            expected_signature = compute_guided_local_preview_source_setup_signature(
+                draft
+            )
+            identity_current = bool(evidence.source_setup_signature) and (
+                evidence.source_setup_signature == expected_signature
+            )
+        else:
+            identity_current = evidence.diagnostic_cache_id == cache_facts.cache_id
         if (
             not choice.explicit_user_mark
             or choice.current_or_stale != "current"
             or evidence.current is not True
-            or evidence.diagnostic_cache_id != cache_facts.cache_id
+            or not identity_current
         ):
             return None, _failure(
                 "correction_facts_missing",
@@ -1148,10 +1329,10 @@ def _materialize_correction_facts(
             GuidedBackendConfirmedStrategyMarkFacts(
                 roi_id=roi_id,
                 selected_dynamic_fit_mode=global_mode,
-                diagnostic_cache_id=cache_facts.cache_id,
-                source_setup_signature=cache_facts.source_setup_signature,
-                diagnostic_scope_signature=cache_facts.diagnostic_scope_signature,
-                build_request_signature=cache_facts.build_request_signature,
+                diagnostic_cache_id=evidence.diagnostic_cache_id,
+                source_setup_signature=evidence.source_setup_signature,
+                diagnostic_scope_signature=evidence.diagnostic_scope_signature,
+                build_request_signature=evidence.build_request_signature,
                 evidence_reference_id=evidence.evidence_reference_id,
                 evidence_chunk=evidence.evidence_chunk,
                 explicit_user_mark=True,
@@ -1159,11 +1340,17 @@ def _materialize_correction_facts(
             )
         )
     strategy_map = build_guided_per_roi_production_strategy_map(draft)
+    currentness_rule_version = (
+        "cache_bound_currentness.v1"
+        if cache_facts.available
+        else LOCAL_PREVIEW_SOURCE_SETUP_CURRENTNESS_RULE_VERSION
+    )
     return GuidedBackendCorrectionFacts(
         available=True,
         global_dynamic_fit_mode=global_mode,
         dynamic_fit_parameter_values=tuple(parameter_values),
         confirmed_marks=tuple(marks),
+        currentness_rule_version=currentness_rule_version,
         production_strategy_map_version=strategy_map.version,
         per_roi_production_strategy_map=tuple(
             GuidedBackendPerRoiProductionStrategy(
@@ -1262,8 +1449,7 @@ def _materialize_output_facts(
     if (
         not source_facts.available
         or not source_facts.source_root_canonical
-        or not cache_facts.available
-        or not cache_facts.cache_root_canonical
+        or (cache_facts.available and not cache_facts.cache_root_canonical)
     ):
         return None, _failure(
             "output_protected_root_context_incomplete",
@@ -1279,9 +1465,11 @@ def _materialize_output_facts(
             detail_code="additional_roots_invalid",
         )
 
-    protected_roots: list[tuple[str, str]] = [
-        ("diagnostic_cache", cache_facts.cache_root_canonical)
-    ]
+    protected_roots: list[tuple[str, str]] = []
+    if cache_facts.available:
+        protected_roots.append(
+            ("diagnostic_cache", cache_facts.cache_root_canonical)
+        )
     for item in additional_protected_roots:
         if (
             not isinstance(item, tuple)

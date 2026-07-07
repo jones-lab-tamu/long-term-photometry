@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import builtins
-from dataclasses import FrozenInstanceError, fields
+from dataclasses import FrozenInstanceError, fields, replace
 import os
 from pathlib import Path
 
@@ -252,6 +252,51 @@ def _request() -> contracts.GuidedBackendValidationRequest:
     )
 
 
+def _local_preview_request() -> contracts.GuidedBackendValidationRequest:
+    """A request variant using cache-free local_correction_preview evidence,
+    proving currentness via source/setup signature instead of diagnostic-
+    cache identity."""
+    base = _request()
+    mark = replace(
+        base.correction.confirmed_marks[0],
+        diagnostic_cache_id="",
+        diagnostic_scope_signature="",
+        build_request_signature="",
+        source_setup_signature="local-preview-setup-signature",
+    )
+    evidence = replace(
+        base.diagnostic_evidence.evidence_references[0],
+        evidence_kind="local_correction_preview",
+        diagnostic_cache_id="",
+        diagnostic_scope_signature="",
+        build_request_signature="",
+        source_setup_signature="local-preview-setup-signature",
+    )
+    correction = replace(
+        base.correction,
+        confirmed_marks=(mark,),
+        currentness_rule_version="source_setup_bound_currentness.v1",
+    )
+    diagnostic = replace(
+        base.diagnostic_evidence,
+        cache_id="",
+        cache_root_canonical="",
+        source_setup_signature="",
+        diagnostic_scope_signature="",
+        build_request_signature="",
+        artifact_contract_version="",
+        provenance_schema_version="",
+        artifact_semantic_digest="",
+        provenance_semantic_digest="",
+        evidence_references=(evidence,),
+        completed_run_rejection_category="",
+        resolver_status="",
+        preliminary_cache=False,
+        available=False,
+    )
+    return replace(base, correction=correction, diagnostic_evidence=diagnostic)
+
+
 def _unchecked(instance, **changes):
     replacement = object.__new__(type(instance))
     for item in fields(instance):
@@ -279,6 +324,64 @@ def _validate(
 
 def _category(result) -> str:
     return result.blocking_issues[0].category
+
+
+def test_local_preview_request_accepted_without_diagnostic_cache():
+    result = _validate(_local_preview_request())
+    assert result.accepted is True
+    assert result.status == "accepted"
+
+
+def test_local_preview_request_rejects_cache_backed_evidence_kind():
+    request = _local_preview_request()
+    # Bypass GuidedBackendEvidenceReference.__post_init__ (which already
+    # refuses to construct a cache-backed evidence_kind with an empty
+    # diagnostic_cache_id) to prove the validator itself also rejects this
+    # inconsistency, independent of the earlier construction-time guard.
+    stale_evidence = _unchecked(
+        request.diagnostic_evidence.evidence_references[0],
+        evidence_kind="correction_preview",
+    )
+    request = replace(
+        request,
+        diagnostic_evidence=replace(
+            request.diagnostic_evidence, evidence_references=(stale_evidence,)
+        ),
+    )
+    result = _validate(request)
+    assert result.accepted is False
+    assert _category(result) == "evidence_reference_missing_or_stale"
+
+
+def test_local_preview_request_rejects_signature_mismatch():
+    request = _local_preview_request()
+    mismatched_mark = replace(
+        request.correction.confirmed_marks[0],
+        source_setup_signature="different-signature",
+    )
+    request = replace(
+        request,
+        correction=replace(request.correction, confirmed_marks=(mismatched_mark,)),
+    )
+    result = _validate(request)
+    assert result.accepted is False
+    assert _category(result) == "local_preview_setup_signature_mismatch"
+
+
+def test_diagnostic_cache_backed_request_still_requires_cache():
+    request = _request()
+    assert request.diagnostic_evidence.available is True
+    result = _validate(request)
+    assert result.accepted is True
+
+    unavailable_but_cache_shaped = replace(
+        request,
+        diagnostic_evidence=_unchecked(
+            request.diagnostic_evidence, cache_id="tampered-cache-id"
+        ),
+    )
+    tampered_result = _validate(unavailable_but_cache_shaped)
+    assert tampered_result.accepted is False
 
 
 def test_module_has_strict_backend_neutral_import_boundary():

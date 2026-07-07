@@ -65,6 +65,7 @@ GUIDED_BACKEND_VALIDATOR_REFUSAL_CATEGORIES = (
     "diagnostic_cache_not_completed_run_ineligible",
     "missing_or_stale_diagnostic_cache",
     "evidence_reference_missing_or_stale",
+    "local_preview_setup_signature_mismatch",
     "invalid_feature_event_profile",
     "feature_event_effective_value_unresolved",
     "missing_output_policy",
@@ -686,50 +687,65 @@ def _validate_semantics(
         )
 
     diagnostic = request.diagnostic_evidence
-    if (
-        not _is_non_empty_string(diagnostic.cache_id)
-        or not _is_non_empty_string(diagnostic.cache_root_canonical)
-        or not _is_non_empty_string(diagnostic.source_setup_signature)
-        or not _is_non_empty_string(diagnostic.diagnostic_scope_signature)
-        or not _is_non_empty_string(diagnostic.build_request_signature)
-        or diagnostic.artifact_contract_version
-        != GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION
-        or diagnostic.provenance_schema_version
-        != GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION
-        or not _is_sha256_lower(diagnostic.artifact_semantic_digest)
-        or not _is_sha256_lower(diagnostic.provenance_semantic_digest)
-    ):
-        return _issue(
-            "diagnostic_cache_identity_mismatch",
-            "diagnostic_evidence",
-            "Diagnostic-cache identity is incomplete or unsupported.",
-            "diagnostic_cache_identity_invalid",
-        )
-    if (
-        diagnostic.completed_run_rejection_category
-        != "guided_diagnostic_cache_ineligible"
-    ):
-        return _issue(
-            "diagnostic_cache_not_completed_run_ineligible",
-            "diagnostic_evidence",
-            "The cache lacks the required completed-run rejection category.",
-            "completed_run_rejection_mismatch",
-        )
-    if (
-        diagnostic.resolver_status != "current"
-        or diagnostic.preliminary_cache is not True
-        or diagnostic.production_analysis is not False
-        or not _is_tuple(diagnostic.stale_reasons)
-        or diagnostic.stale_reasons
-        or not _is_tuple(diagnostic.unresolved_inputs)
-        or diagnostic.unresolved_inputs
-    ):
-        return _issue(
-            "missing_or_stale_diagnostic_cache",
-            "diagnostic_evidence",
-            "The diagnostic cache is stale or not preliminary.",
-            "diagnostic_cache_not_current",
-        )
+    if diagnostic.available:
+        if (
+            not _is_non_empty_string(diagnostic.cache_id)
+            or not _is_non_empty_string(diagnostic.cache_root_canonical)
+            or not _is_non_empty_string(diagnostic.source_setup_signature)
+            or not _is_non_empty_string(diagnostic.diagnostic_scope_signature)
+            or not _is_non_empty_string(diagnostic.build_request_signature)
+            or diagnostic.artifact_contract_version
+            != GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION
+            or diagnostic.provenance_schema_version
+            != GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION
+            or not _is_sha256_lower(diagnostic.artifact_semantic_digest)
+            or not _is_sha256_lower(diagnostic.provenance_semantic_digest)
+        ):
+            return _issue(
+                "diagnostic_cache_identity_mismatch",
+                "diagnostic_evidence",
+                "Diagnostic-cache identity is incomplete or unsupported.",
+                "diagnostic_cache_identity_invalid",
+            )
+        if (
+            diagnostic.completed_run_rejection_category
+            != "guided_diagnostic_cache_ineligible"
+        ):
+            return _issue(
+                "diagnostic_cache_not_completed_run_ineligible",
+                "diagnostic_evidence",
+                "The cache lacks the required completed-run rejection category.",
+                "completed_run_rejection_mismatch",
+            )
+        if (
+            diagnostic.resolver_status != "current"
+            or diagnostic.preliminary_cache is not True
+            or diagnostic.production_analysis is not False
+            or not _is_tuple(diagnostic.stale_reasons)
+            or diagnostic.stale_reasons
+            or not _is_tuple(diagnostic.unresolved_inputs)
+            or diagnostic.unresolved_inputs
+        ):
+            return _issue(
+                "missing_or_stale_diagnostic_cache",
+                "diagnostic_evidence",
+                "The diagnostic cache is stale or not preliminary.",
+                "diagnostic_cache_not_current",
+            )
+    else:
+        if (
+            _is_non_empty_string(diagnostic.cache_id)
+            or _is_non_empty_string(diagnostic.cache_root_canonical)
+            or diagnostic.preliminary_cache is not False
+            or diagnostic.production_analysis is not False
+        ):
+            return _issue(
+                "diagnostic_cache_identity_mismatch",
+                "diagnostic_evidence",
+                "Unavailable diagnostic evidence must not carry cache "
+                "identity fields.",
+                "unavailable_diagnostic_evidence_carries_cache_identity",
+            )
     if (
         not _is_tuple(diagnostic.evidence_references)
         or not diagnostic.evidence_references
@@ -740,6 +756,20 @@ def _validate_semantics(
             "Evidence references are required.",
             "evidence_references_missing",
         )
+    _evidence_identity_fields = (
+        ("evidence_reference_id", "evidence_kind", "roi_id", "selected_dynamic_fit_mode")
+        if not diagnostic.available
+        else (
+            "evidence_reference_id",
+            "evidence_kind",
+            "diagnostic_cache_id",
+            "source_setup_signature",
+            "diagnostic_scope_signature",
+            "build_request_signature",
+            "roi_id",
+            "selected_dynamic_fit_mode",
+        )
+    )
     for reference in diagnostic.evidence_references:
         if getattr(reference, "current", None) is not True:
             return _issue(
@@ -750,22 +780,22 @@ def _validate_semantics(
             )
         if any(
             not _is_non_empty_string(getattr(reference, field_name, None))
-            for field_name in (
-                "evidence_reference_id",
-                "evidence_kind",
-                "diagnostic_cache_id",
-                "source_setup_signature",
-                "diagnostic_scope_signature",
-                "build_request_signature",
-                "roi_id",
-                "selected_dynamic_fit_mode",
-            )
+            for field_name in _evidence_identity_fields
         ):
             return _issue(
                 "evidence_reference_missing_or_stale",
                 "diagnostic_evidence",
                 "Evidence reference identity fields must be complete.",
                 "evidence_reference_identity_incomplete",
+            )
+        if not diagnostic.available and getattr(
+            reference, "evidence_kind", ""
+        ) != "local_correction_preview":
+            return _issue(
+                "evidence_reference_missing_or_stale",
+                "diagnostic_evidence",
+                "Cache-free evidence must be local-preview evidence.",
+                "evidence_kind_mismatch_for_unavailable_cache",
             )
         evidence_chunk = getattr(reference, "evidence_chunk", None)
         if (
@@ -932,7 +962,7 @@ def _validate_semantics(
             "ROI inventory identity does not match source content.",
             "roi_source_content_digest_mismatch",
         )
-    if (
+    if diagnostic.available and (
         dataset.dataset_source_setup_signature
         != diagnostic.source_setup_signature
         or dataset.diagnostic_cache_contract_identity
@@ -978,28 +1008,44 @@ def _validate_semantics(
                 "Correction marks and evidence disagree on selected mode.",
                 "mark_evidence_mode_mismatch",
             )
-        if (
-            mark.diagnostic_cache_id != diagnostic.cache_id
-            or reference.diagnostic_cache_id != diagnostic.cache_id
-            or mark.source_setup_signature
-            != diagnostic.source_setup_signature
-            or reference.source_setup_signature
-            != diagnostic.source_setup_signature
-            or mark.diagnostic_scope_signature
-            != diagnostic.diagnostic_scope_signature
-            or reference.diagnostic_scope_signature
-            != diagnostic.diagnostic_scope_signature
-            or mark.build_request_signature
-            != diagnostic.build_request_signature
-            or reference.build_request_signature
-            != diagnostic.build_request_signature
-        ):
-            return _issue(
-                "diagnostic_cache_identity_mismatch",
-                "cross_section",
-                "Correction marks or evidence do not bind to the cache.",
-                "mark_evidence_cache_binding_mismatch",
-            )
+        if diagnostic.available:
+            if (
+                mark.diagnostic_cache_id != diagnostic.cache_id
+                or reference.diagnostic_cache_id != diagnostic.cache_id
+                or mark.source_setup_signature
+                != diagnostic.source_setup_signature
+                or reference.source_setup_signature
+                != diagnostic.source_setup_signature
+                or mark.diagnostic_scope_signature
+                != diagnostic.diagnostic_scope_signature
+                or reference.diagnostic_scope_signature
+                != diagnostic.diagnostic_scope_signature
+                or mark.build_request_signature
+                != diagnostic.build_request_signature
+                or reference.build_request_signature
+                != diagnostic.build_request_signature
+            ):
+                return _issue(
+                    "diagnostic_cache_identity_mismatch",
+                    "cross_section",
+                    "Correction marks or evidence do not bind to the cache.",
+                    "mark_evidence_cache_binding_mismatch",
+                )
+        else:
+            if (
+                mark.diagnostic_cache_id
+                or reference.diagnostic_cache_id
+                or not mark.source_setup_signature
+                or mark.source_setup_signature
+                != reference.source_setup_signature
+            ):
+                return _issue(
+                    "local_preview_setup_signature_mismatch",
+                    "cross_section",
+                    "Correction marks or evidence do not bind to a "
+                    "consistent local-preview source/setup signature.",
+                    "mark_evidence_local_preview_binding_mismatch",
+                )
         if (
             mark.evidence_reference_id != reference.evidence_reference_id
             or mark.evidence_chunk != reference.evidence_chunk
