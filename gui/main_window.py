@@ -325,6 +325,13 @@ GUIDED_CONFIRM_STRATEGIES = (
     ("Global Linear Regression", "global_linear_regression"),
     ("Signal-Only F0", "signal_only_f0"),
 )
+GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES = frozenset((
+    "missing_rwd_dataset_contract",
+    "unsupported_dataset_contract_snapshot",
+    "invalid_dataset_contract_snapshot",
+    "stale_dataset_contract_snapshot",
+    "inconsistent_dataset_contract_snapshot",
+))
 
 
 def _generate_run_id():
@@ -2962,6 +2969,31 @@ class MainWindow(QMainWindow):
         self._reach_guided_step("Draft plan")
         self._guided_workflow_stepper.setCurrentRow(
             self._guided_step_index("Draft plan")
+        )
+
+    def _on_guided_continue_to_run(self) -> None:
+        from photometry_pipeline.guided_new_analysis_plan import (
+            evaluate_guided_new_analysis_execution_subset_readiness,
+            evaluate_new_analysis_plan_readiness,
+        )
+
+        plan = self._build_guided_new_analysis_draft_plan()
+        readiness = evaluate_new_analysis_plan_readiness(plan)
+        subset_readiness = evaluate_guided_new_analysis_execution_subset_readiness(
+            plan
+        )
+        ready = bool(
+            readiness.plan_complete_for_handoff
+            and subset_readiness.first_subset_executable
+        )
+        button = getattr(self, "_guided_review_go_to_run_btn", None)
+        if button is not None:
+            button.setEnabled(ready)
+        if not ready:
+            return
+        self._reach_guided_step("Run")
+        self._guided_workflow_stepper.setCurrentRow(
+            self._guided_step_index("Run")
         )
 
     def _display_path(self, path: str, *, max_chars: int = 60) -> str:
@@ -9709,6 +9741,14 @@ class MainWindow(QMainWindow):
                     "support an all-Signal-Only F0 analysis. Use Full "
                     "Control for this configuration."
                 )
+            elif execution_categories & GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES:
+                availability = (
+                    "Execution availability: This plan is complete, but "
+                    "the detected dataset settings have not been "
+                    "confirmed yet. Confirm the detected settings below "
+                    "before validation. This does not create files or "
+                    "run analysis."
+                )
             elif subset_readiness.first_subset_executable:
                 availability = (
                     "Execution availability: This plan is ready. Go to "
@@ -9880,6 +9920,13 @@ class MainWindow(QMainWindow):
                 "Guided Run does not yet support an all-Signal-Only F0 "
                 "analysis. Use Full Control for this configuration."
             )
+        elif execution_categories & GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES:
+            next_text = (
+                "Confirm the detected dataset settings so backend "
+                "validation and Guided Run use the same sessions, timing, "
+                "and included data shown in this plan. This does not "
+                "create files or run analysis."
+            )
         elif subset_readiness.first_subset_executable:
             next_text = (
                 "This plan is ready. Go to the Run step to validate the "
@@ -9893,6 +9940,21 @@ class MainWindow(QMainWindow):
                 "below, or use Full Control for this analysis."
             )
         self._guided_review_next_step_label.setText(next_text)
+        dataset_contract_action_btn = getattr(
+            self, "_guided_review_dataset_contract_action_btn", None
+        )
+        if dataset_contract_action_btn is not None:
+            dataset_contract_action_btn.setVisible(
+                bool(execution_categories & GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES)
+            )
+        go_to_run_btn = getattr(self, "_guided_review_go_to_run_btn", None)
+        if go_to_run_btn is not None:
+            go_to_run_btn.setEnabled(
+                bool(
+                    readiness.plan_complete_for_handoff
+                    and subset_readiness.first_subset_executable
+                )
+            )
 
     def _guided_dataset_contract_now_utc(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -14310,6 +14372,32 @@ class MainWindow(QMainWindow):
             Qt.TextSelectableByMouse
         )
         next_layout.addWidget(self._guided_review_next_step_label)
+        self._guided_review_dataset_contract_action_btn = QPushButton(
+            "Confirm detected dataset settings"
+        )
+        self._guided_review_dataset_contract_action_btn.setObjectName(
+            "guidedReviewDatasetContractActionButton"
+        )
+        self._guided_review_dataset_contract_action_btn.clicked.connect(
+            self._on_guided_apply_dataset_contract
+        )
+        self._guided_review_dataset_contract_action_btn.setVisible(False)
+        next_layout.addWidget(
+            self._guided_review_dataset_contract_action_btn,
+            alignment=Qt.AlignLeft,
+        )
+        self._guided_review_go_to_run_btn = QPushButton("Go to Run")
+        self._guided_review_go_to_run_btn.setObjectName(
+            "guidedReviewGoToRunButton"
+        )
+        self._guided_review_go_to_run_btn.clicked.connect(
+            self._on_guided_continue_to_run
+        )
+        self._guided_review_go_to_run_btn.setEnabled(False)
+        next_layout.addWidget(
+            self._guided_review_go_to_run_btn,
+            alignment=Qt.AlignLeft,
+        )
         layout.addWidget(next_group)
 
         advanced_group = QGroupBox("Technical/troubleshooting details")

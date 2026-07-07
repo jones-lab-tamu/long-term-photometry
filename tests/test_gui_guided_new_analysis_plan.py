@@ -905,6 +905,237 @@ def test_run_page_unanimous_robust_marks_drive_dynamic_fit_contract(
     )
 
 
+# 4J16k8: GUI-reachability tests for the first supported Guided path.
+#
+# These tests drive real widget clicks (Correction Approach confirm-strategy
+# controls, the Review Plan detected-settings confirmation action, the
+# Review Plan "Go to Run" navigation button, and the Run step Validate
+# button) rather than injecting a pre-built ready state or jumping the
+# stepper directly. They exist because manual GUI testing found two
+# separate first-user blockers:
+#
+# 1. A plan could read "Plan completeness: Complete" in Review Plan while
+#    every visible correction-strategy configuration was still blocked from
+#    Validate/Run by an unrelated, unsurfaced precondition: the detected
+#    dataset/recording settings had never been explicitly confirmed.
+# 2. Even after that precondition was satisfied, Review Plan had no visible
+#    forward action and the left stepper would not let the user click ahead
+#    to Run, so "ready" was not actually reachable.
+#
+# The wording is intentionally format-neutral in the visible Review Plan
+# text (the app is not RWD-specific), even though the underlying blocking
+# category and the test fixtures use RWD input, matching the currently
+# supported first path.
+
+
+def test_review_plan_uniform_robust_without_confirmed_settings_names_the_blocker(
+    window, tmp_path, monkeypatch
+):
+    """Before detected settings are confirmed, the blocker must be named
+    correctly, in format-neutral language, and must not blame the (fully
+    valid) correction strategy or offer a working Go-to-Run action."""
+    robust_by_roi = {
+        roi: "Robust Global Event-Reject Fit" for roi in ("CH1", "CH2", "CH3")
+    }
+    _configure_complete_guided_new_analysis_draft(
+        window,
+        tmp_path,
+        monkeypatch,
+        acquisition_mode="intermittent",
+        strategy_by_roi=robust_by_roi,
+        write_rwd_file=True,
+        session_duration=600,
+    )
+    # Detected settings intentionally left unconfirmed.
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.dataset_contract_snapshot.current_applied is False
+    readiness = evaluate_new_analysis_plan_readiness(plan)
+    assert readiness.plan_complete_for_handoff is True
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    assert subset.first_subset_executable is False
+
+    status = window._guided_review_plan_status_label.text()
+    next_step = window._guided_review_next_step_label.text()
+    assert "Plan completeness: Complete" in status
+    assert "detected dataset settings have not been confirmed yet" in status
+    assert "does not yet support this configuration" not in status
+    assert "RWD" not in status
+    assert "Confirm the detected dataset settings" in next_step
+    assert "RWD" not in next_step
+    assert window._guided_review_dataset_contract_action_btn.isHidden() is False
+    assert window._guided_review_dataset_contract_action_btn.text() == (
+        "Confirm detected dataset settings"
+    )
+    assert window._guided_review_go_to_run_btn.isEnabled() is False
+
+    # Clicking "Go to Run" while not ready must refuse to navigate.
+    starting_row = window._guided_workflow_stepper.currentRow()
+    window._guided_review_go_to_run_btn.click()
+    assert window._guided_workflow_stepper.currentRow() == starting_row
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Run")
+    )
+    window._guided_backend_validate_btn.click()
+    assert window._guided_backend_validation_outcome.status != "validator_accepted"
+    issue_codes = {
+        issue.detail_code
+        for issue in window._guided_backend_validation_outcome.blocking_issues
+    }
+    assert "dataset_snapshot_missing_or_invalid" in issue_codes
+    assert window._guided_run_btn.isEnabled() is False
+
+
+def _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch):
+    """Confirm detected dataset settings using the control surfaced in the
+    normal Review Plan path (not the Technical-details panel)."""
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        MainWindow._infer_dataset_contract_overrides.__get__(window, MainWindow),
+    )
+    assert window._guided_review_dataset_contract_action_btn.isHidden() is False
+    window._guided_review_dataset_contract_action_btn.click()
+
+
+@pytest.mark.parametrize(
+    "strategy_label",
+    (
+        "Robust Global Event-Reject Fit",
+        "Adaptive Event-Gated Fit",
+        "Global Linear Regression",
+    ),
+)
+def test_review_plan_uniform_dynamic_fit_navigates_to_run_and_validates(
+    window, tmp_path, monkeypatch, strategy_label
+):
+    """Critical test: proves, without _set_ready() or an injected retained
+    startup transaction, that a real GUI walkthrough for each of the three
+    visible shared dynamic-fit strategies can (a) confirm detected settings
+    via the visible Review Plan action, (b) navigate to Run by clicking the
+    visible "Go to Run" button (not by jumping the stepper directly), and
+    (c) reach an accepted backend Validate outcome."""
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+
+    strategy_by_roi = {roi: strategy_label for roi in ("CH1", "CH2", "CH3")}
+    _configure_complete_guided_new_analysis_draft(
+        window,
+        tmp_path,
+        monkeypatch,
+        acquisition_mode="intermittent",
+        strategy_by_roi=strategy_by_roi,
+        write_rwd_file=True,
+        session_duration=600,
+    )
+    _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.dataset_contract_snapshot.current_applied is True
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    assert subset.first_subset_executable is True
+
+    status = window._guided_review_plan_status_label.text()
+    assert "This plan is ready. Go to the Run step to validate" in status
+    assert window._guided_review_dataset_contract_action_btn.isHidden() is True
+    assert window._guided_review_go_to_run_btn.isEnabled() is True
+
+    # Navigate using the visible forward action, not the left stepper.
+    window._guided_review_go_to_run_btn.click()
+    assert window._guided_workflow_stepper.currentRow() == (
+        list(GUIDED_WORKFLOW_STEPS).index("Run")
+    )
+    assert window._guided_backend_validate_btn.isHidden() is False
+    assert window._guided_backend_validate_btn.isEnabled() is True
+
+    monkeypatch.setattr(
+        request_builder,
+        "resolve_application_build_identity",
+        lambda **_kwargs: SimpleNamespace(build_identity=None),
+    )
+    window._guided_backend_validate_btn.click()
+    assert window._guided_backend_validation_outcome.status == "validator_accepted"
+    issue_codes = {
+        issue.detail_code
+        for issue in window._guided_backend_validation_outcome.blocking_issues
+    }
+    assert "dataset_snapshot_missing_or_invalid" not in issue_codes
+    assert "dynamic_fit_mode_mismatch" not in issue_codes
+
+
+def test_review_plan_all_signal_only_f0_remains_unsupported_after_confirming_settings(
+    window, tmp_path, monkeypatch
+):
+    """Signal-Only F0 must remain independently unsupported and must not
+    offer a working Go-to-Run action, even after detected settings are
+    confirmed; the message must not fall back to a dataset-settings
+    explanation once that precondition is satisfied."""
+    signal_by_roi = {roi: "Signal-Only F0" for roi in ("CH1", "CH2", "CH3")}
+    _configure_complete_guided_new_analysis_draft(
+        window,
+        tmp_path,
+        monkeypatch,
+        acquisition_mode="intermittent",
+        strategy_by_roi=signal_by_roi,
+        write_rwd_file=True,
+        session_duration=600,
+    )
+    _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.dataset_contract_snapshot.current_applied is True
+
+    status = window._guided_review_plan_status_label.text()
+    next_step = window._guided_review_next_step_label.text()
+    assert "does not yet support an all-Signal-Only F0 analysis" in status
+    assert "does not yet support an all-Signal-Only F0 analysis" in next_step
+    assert "detected dataset settings" not in status
+    assert window._guided_review_dataset_contract_action_btn.isHidden() is True
+    assert window._guided_review_go_to_run_btn.isEnabled() is False
+
+    starting_row = window._guided_workflow_stepper.currentRow()
+    window._guided_review_go_to_run_btn.click()
+    assert window._guided_workflow_stepper.currentRow() == starting_row
+
+
+def test_review_plan_mixed_dynamic_fit_remains_unsupported_after_confirming_settings(
+    window, tmp_path, monkeypatch
+):
+    """Mixed dynamic-fit modes must remain independently unsupported and
+    must not offer a working Go-to-Run action, even after detected settings
+    are confirmed; the message must not fall back to a dataset-settings
+    explanation once that precondition is satisfied."""
+    mixed_by_roi = {
+        "CH1": "Robust Global Event-Reject Fit",
+        "CH2": "Adaptive Event-Gated Fit",
+        "CH3": "Global Linear Regression",
+    }
+    _configure_complete_guided_new_analysis_draft(
+        window,
+        tmp_path,
+        monkeypatch,
+        acquisition_mode="intermittent",
+        strategy_by_roi=mixed_by_roi,
+        write_rwd_file=True,
+        session_duration=600,
+    )
+    _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.dataset_contract_snapshot.current_applied is True
+
+    status = window._guided_review_plan_status_label.text()
+    next_step = window._guided_review_next_step_label.text()
+    assert "one shared dynamic-fit correction strategy" in status
+    assert "one shared dynamic-fit correction strategy" in next_step
+    assert "detected dataset settings" not in status
+    assert window._guided_review_dataset_contract_action_btn.isHidden() is True
+    assert window._guided_review_go_to_run_btn.isEnabled() is False
+
+    starting_row = window._guided_workflow_stepper.currentRow()
+    window._guided_review_go_to_run_btn.click()
+    assert window._guided_workflow_stepper.currentRow() == starting_row
+
+
 def test_new_analysis_dataset_contract_missing_duration_or_semantics_cannot_apply(
     window, tmp_path, monkeypatch
 ):
