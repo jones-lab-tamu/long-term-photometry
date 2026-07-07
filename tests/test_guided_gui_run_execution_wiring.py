@@ -790,3 +790,176 @@ def test_close_event_allowed_when_guided_run_not_active(window):
     event = QCloseEvent()
     window.closeEvent(event)
     assert event.isAccepted() is True
+
+
+@pytest.mark.parametrize(
+    "strategy_label",
+    (
+        "Robust Global Event-Reject Fit",
+        "Adaptive Event-Gated Fit",
+        "Global Linear Regression",
+    ),
+)
+def test_real_gui_path_press_run_after_authorization(
+    window, tmp_path, monkeypatch, qapp, strategy_label
+):
+    """4J16k11: drives the real cache-free local-preview new_analysis path
+    (the same one 4J16k10 gets to validator_accepted / authorized / Run
+    button enabled) through an actual click of the real Guided Run button,
+    with nothing mocked below the click except the actual expensive/
+    environment-dependent analysis subprocess: real worker thread, real
+    execute_guided_backend_run -> run_guided_startup_to_wrapper -> real
+    allocation -> real materialization -> real wrapper invocation.
+
+    Every other test in this file hand-builds a GuidedStartupTransactionRequest
+    via the `startup_request`/`allocation_case` fixtures, which hard-code a
+    correct GuidedStartupFilesystemPolicy. That coverage proves the
+    worker/close-guard/signal wiring is correct, but it never exercised the
+    real computation in guided_execution_request_builder.py that derives
+    filesystem_policy from actual GUI/output-destination state -- which is
+    exactly what this test adds.
+
+    4J16k11 audit finding (fixed here): for a brand-new output destination
+    (the standard case for "new analysis" -- the output folder is never
+    created ahead of Run, by design: see
+    GuidedProductionExecutionProfile.allocate_output_at_future_run_start_only
+    and the "no_directories_created" contract flags asserted throughout
+    authorization/payload derivation), `build_guided_startup_request_from_
+    validation` used to compute `output_base_exists_or_creatable =
+    output_base.exists()` -- literal *current* existence only, never
+    whether the path was actually creatable -- so every real Guided Run
+    press failed immediately with the misleading message "the validated
+    setup is no longer current." `guided_execution_request_builder.
+    _output_base_creatability` now walks up to the nearest existing
+    ancestor; `guided_startup_allocation.allocate_guided_startup_directory`
+    now actually creates output_base (once every safety check has passed)
+    instead of requiring it to already exist.
+
+    This test uses the same controlled real-wrapper-boundary technique as
+    test_real_backend_reaches_initial_status_boundary_only below: the real
+    wrapper script runs in-process up to writing its initial "running"
+    status, with the actual analysis subprocess forbidden. This proves the
+    fix reaches a real, stable boundary without paying for -- or being
+    fragile to unrelated failures in -- the full pipeline run (a live
+    manual run of this path further confirms real allocation,
+    materialization, and wrapper invocation now succeed; the wrapper's
+    own analysis subprocess then fails for reasons in
+    analyze_photometry.py/tools/run_full_pipeline_deliverables.py, a
+    separate backend/runner concern out of scope for this patch).
+    """
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+    import photometry_pipeline.guided_production_mapping as production_mapping
+    import photometry_pipeline.guided_startup_transaction as startup_transaction
+    from gui.main_window import GUIDED_WORKFLOW_STEPS
+    from tests.test_gui_guided_new_analysis_plan import (
+        _configure_complete_guided_new_analysis_draft_without_diagnostic_cache,
+        _confirm_detected_dataset_settings_via_review_plan_button,
+    )
+
+    strategy_by_roi = {roi: strategy_label for roi in ("CH1", "CH2", "CH3")}
+    _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
+        window, tmp_path, monkeypatch, strategy_by_roi=strategy_by_roi
+    )
+    _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    window._guided_review_go_to_run_btn.click()
+
+    build_identity = production_mapping.build_application_build_identity(
+        distribution_name="photometry-pipeline",
+        distribution_version="1.0.0",
+        source_revision_kind="git",
+        source_revision="abc123",
+        source_tree_state="clean",
+    )
+    monkeypatch.setattr(
+        request_builder,
+        "resolve_application_build_identity",
+        lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+    )
+    window._guided_backend_validate_btn.click()
+    outcome = window._guided_backend_validation_outcome
+    assert outcome.status == "validator_accepted"
+    auth = window._guided_run_authorization_result
+    assert getattr(auth, "status", None) == "authorized"
+    assert window._guided_run_btn.isEnabled() is True
+
+    # The gate now accepts this real, GUI-constructed, never-before-used
+    # output destination.
+    retained_request = window._current_guided_startup_transaction_request()
+    assert retained_request is not None
+    gate_issue = startup_transaction._gate_issue(retained_request)
+    assert gate_issue is None
+
+    # Output base and the planned run directory must not exist yet --
+    # nothing is allocated during Validate/authorization, only at Run press.
+    output_base = Path(auth.production_intent.output_policy.output_base_canonical)
+    planned_run_dir = Path(retained_request.planned_allocated_run_dir)
+    assert not output_base.exists()
+    assert not planned_run_dir.exists()
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        staticmethod(lambda *args, **kwargs: None),
+    )
+
+    runner, calls = _real_wrapper_runner(monkeypatch)
+    window._guided_backend_execution_runner = runner
+
+    # Real click: real worker thread, real execute_guided_backend_run, real
+    # run_guided_startup_to_wrapper, real allocation, real materialization,
+    # real (controlled-boundary) wrapper invocation. Nothing below the
+    # click is mocked except the actual analysis subprocess.
+    window._guided_run_btn.click()
+    # Worker started off the GUI thread: control returns immediately with
+    # the running-state guard already active (no GUI-thread blocking).
+    assert window._guided_backend_execution_active is True
+    assert window._guided_backend_validate_btn.isEnabled() is False
+
+    # Close guard must refuse to close while active.
+    shown = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        staticmethod(lambda *args, **kwargs: shown.append(args)),
+    )
+    close_event = QCloseEvent()
+    window.closeEvent(close_event)
+    assert close_event.isAccepted() is False
+    assert shown, "close guard did not activate while execution was active"
+
+    _pump_until(qapp, lambda: window._guided_run_execution_thread is None)
+
+    result = window._guided_backend_execution_result
+    assert result.status == "wrapper_running"
+    assert result.ok is True
+    assert result.wrapper_started is True
+    assert result.wrapper_completed is False
+    assert result.blocking_issues == ()
+    assert calls == {"live_verify": 1, "analysis": 0, "root_makedirs": 0}
+
+    # Output base and the run directory are created only now, at Run press.
+    assert output_base.is_dir()
+    assert planned_run_dir.is_dir()
+    run_status = json.loads((planned_run_dir / "status.json").read_bytes())
+    assert run_status["phase"] == "initializing"
+    assert run_status["status"] == "running"
+
+    # Coherent post-click state: no hang, guards cleared, an accurate
+    # "running" message (not the misleading pre-fix staleness message).
+    assert window._guided_backend_execution_active is False
+    assert window._guided_backend_validate_btn.isEnabled() is True
+    assert window._guided_run_readiness_label.text() == "Guided Run has started."
+    assert window._guided_run_execution_worker is None
+    assert window._guided_run_execution_thread is None
+
+    # The accurate, non-misleading message for a genuinely not-creatable
+    # output destination (a scenario the real GUI cannot actually reach --
+    # gui/main_window.py's Apply-output-destination step already refuses to
+    # apply a policy whose parent folder does not exist, and re-verifies
+    # this at Validate time) is covered directly against
+    # execute_guided_backend_run in
+    # tests/test_guided_backend_execution.py::
+    # test_output_not_creatable_maps_to_accurate_message.

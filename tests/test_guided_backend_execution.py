@@ -184,6 +184,74 @@ def test_diagnostics_preserve_internal_state_without_user_exposure(
     assert result.gui_run_enabled is False
 
 
+def test_output_not_creatable_maps_to_accurate_message(allocation_case):
+    """4J16k11: a genuinely not-creatable output destination (its parent
+    folder does not exist either) must not be reported with the generic
+    "validated setup is no longer current" message shared by every other
+    pure-plan gate refusal -- that message is actively false for this
+    cause (the setup is current; the output location is unusable) and
+    would send a scientist to redo Validate for no reason."""
+    request, _plan = allocation_case
+    not_creatable_request = replace(
+        request,
+        filesystem_policy=replace(
+            request.filesystem_policy,
+            output_base_exists_or_creatable=False,
+            output_base_is_directory_or_creatable=False,
+        ),
+    )
+    result = backend.execute_guided_backend_run(
+        request=not_creatable_request,
+        runner=lambda command: pytest.fail("runner called"),
+    )
+    assert result.status == "refused_before_startup"
+    assert result.ok is False
+    assert result.blocking_issues[0].category == "pure_plan_output_not_creatable"
+    assert result.user_summary == (
+        "Guided Run could not find or create the selected output folder. "
+        "Choose a writable output destination and try again."
+    )
+    assert "no longer current" not in result.user_summary
+
+
+def test_output_base_not_a_directory_also_gets_accurate_message(allocation_case):
+    request, _plan = allocation_case
+    not_a_directory_request = replace(
+        request,
+        filesystem_policy=replace(
+            request.filesystem_policy,
+            output_base_is_directory_or_creatable=False,
+        ),
+    )
+    result = backend.execute_guided_backend_run(
+        request=not_a_directory_request,
+        runner=lambda command: pytest.fail("runner called"),
+    )
+    assert result.blocking_issues[0].category == "pure_plan_output_not_creatable"
+    assert "no longer current" not in result.user_summary
+
+
+def test_other_pure_plan_refusals_keep_generic_staleness_message(
+    allocation_case,
+):
+    """Only the output-creatability categories get the accurate message;
+    every other pure-plan gate refusal keeps its existing generic text
+    (unchanged behavior, not broadened by this patch)."""
+    request, _plan = allocation_case
+    stale_request = replace(request, explicit_user_run_transition=False)
+    result = backend.execute_guided_backend_run(
+        request=stale_request,
+        runner=lambda command: pytest.fail("runner called"),
+    )
+    assert result.status == "refused_before_startup"
+    assert result.blocking_issues[0].category == "pure_plan_not_accepted"
+    assert (
+        result.user_summary
+        == "Guided Run could not start because the validated setup is no "
+        "longer current."
+    )
+
+
 def test_all_user_summaries_exclude_internal_terms():
     prohibited = (
         "manifest",

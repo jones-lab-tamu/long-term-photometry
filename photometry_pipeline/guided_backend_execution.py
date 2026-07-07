@@ -59,6 +59,11 @@ class GuidedBackendExecutionResult:
     completed_run_claim: bool = False
 
 
+_OUTPUT_NOT_CREATABLE_SUMMARY = (
+    "Guided Run could not find or create the selected output folder. "
+    "Choose a writable output destination and try again."
+)
+
 _STATUS_MAP = {
     "refused_before_allocation": (
         "refused_before_startup",
@@ -148,6 +153,12 @@ def execute_guided_backend_run(
             "Guided Run could not continue because of an internal error.",
         )
     status, user_state, ok, summary = mapped
+    if (
+        internal.status == "refused_before_allocation"
+        and internal.blocking_issues
+        and internal.blocking_issues[0].category == "pure_plan_output_not_creatable"
+    ):
+        summary = _OUTPUT_NOT_CREATABLE_SUMMARY
     completed_candidate = (
         internal.allocated_run_dir
         if status == "wrapper_completed_needs_review_loading"

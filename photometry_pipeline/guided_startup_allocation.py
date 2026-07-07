@@ -254,20 +254,38 @@ def allocate_guided_startup_directory(
             "paths",
             "Startup source and output paths must be absolute.",
         )
-    if not output_input.exists():
-        return _refused(
-            "output_base_missing",
-            "output",
-            "Output base must already exist.",
-        )
-    if not output_input.is_dir():
-        return _refused(
-            "output_base_not_directory",
-            "output",
-            "Output base is not a directory.",
-        )
+    output_base_preexisting = output_input.exists()
+    if output_base_preexisting:
+        if not output_input.is_dir():
+            return _refused(
+                "output_base_not_directory",
+                "output",
+                "Output base is not a directory.",
+            )
+        if output_input.is_symlink():
+            return _refused(
+                "output_base_symlink_prohibited",
+                "output",
+                "Symlink output bases are not supported.",
+            )
+    else:
+        # Output base is intentionally not created before Guided Run is
+        # pressed (see the no_directories_created contract flags asserted
+        # throughout authorization/payload derivation); it is created here,
+        # below, once every safety check has passed. Only the immediate
+        # parent is required to already exist, matching the single-level
+        # "creatable" contract applied when the output destination was
+        # selected (gui/main_window.py _validate_guided_new_analysis_output_
+        # policy_path / validate_output_write_safety).
+        parent_input = output_input.parent
+        if not parent_input.is_dir() or parent_input.is_symlink():
+            return _refused(
+                "output_base_missing",
+                "output",
+                "Output base does not exist and its parent folder is not available.",
+            )
     try:
-        output_base = output_input.resolve(strict=True)
+        output_base = output_input.resolve(strict=False)
         source_root = source_input.resolve(strict=False)
         child = child_input.resolve(strict=False)
     except OSError:
@@ -275,12 +293,6 @@ def allocate_guided_startup_directory(
             "startup_path_resolution_failed",
             "paths",
             "Startup paths could not be safely resolved.",
-        )
-    if output_input.is_symlink():
-        return _refused(
-            "output_base_symlink_prohibited",
-            "output",
-            "Symlink output bases are not supported.",
         )
     if (
         not _same_path(child.parent, output_base)
@@ -329,6 +341,22 @@ def allocate_guided_startup_directory(
         )
 
     transaction_identity = plan.identities.startup_transaction_identity
+    if not output_base_preexisting:
+        try:
+            output_base.mkdir(exist_ok=True)
+        except OSError as exc:
+            return _result(
+                status="allocation_failed",
+                ok=False,
+                allocated=False,
+                startup_status_written=False,
+                issue=GuidedStartupAllocationIssue(
+                    "output_base_creation_failed",
+                    "output",
+                    f"Output base could not be created: {exc}",
+                ),
+                startup_transaction_identity=transaction_identity,
+            )
     try:
         child.mkdir(exist_ok=False)
     except OSError as exc:

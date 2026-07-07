@@ -98,6 +98,33 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
+def _output_base_creatability(output_base: Path) -> tuple[bool, bool]:
+    """Return (exists_or_creatable, is_directory_or_creatable) for output_base.
+
+    output_base is intentionally not created before Guided Run is pressed
+    (see the no_directories_created contract flags asserted throughout
+    authorization/payload derivation), so it will not exist yet for the
+    standard "new analysis" case. A not-yet-created path is creatable if its
+    immediate parent already exists as a writable directory -- matching the
+    single-level contract already enforced when the output destination was
+    selected (gui/main_window.py _validate_guided_new_analysis_output_
+    policy_path / validate_output_write_safety's target_parent_missing
+    check) and the single-level directory creation the startup-allocation
+    layer performs once this check has passed.
+    """
+    if output_base.exists():
+        is_dir = output_base.is_dir()
+        return is_dir, is_dir
+    parent = output_base.parent
+    if not parent.is_dir():
+        return False, False
+    try:
+        writable = os.access(str(parent), os.W_OK)
+    except OSError:
+        writable = False
+    return writable, writable
+
+
 def _is_successful_completed_run_root(path: Path) -> bool:
     def read_object(filename: str) -> dict | None:
         try:
@@ -272,16 +299,18 @@ def build_guided_startup_request_from_validation(
             root / "tools" / "run_full_pipeline_deliverables.py"
         ).resolve(strict=True)
         wrapper_digest = hashlib.sha256(wrapper_path.read_bytes()).hexdigest()
-        output_exists = output_base.exists()
-        output_is_dir = output_base.is_dir() if output_exists else False
+        output_exists_or_creatable, output_is_dir_or_creatable = (
+            _output_base_creatability(output_base)
+        )
+        output_is_dir = output_base.is_dir() if output_base.exists() else False
         overlap = (
             output_base == source_root
             or _is_relative_to(output_base, source_root)
             or _is_relative_to(source_root, output_base)
         )
         filesystem_policy = GuidedStartupFilesystemPolicy(
-            output_base_exists_or_creatable=output_exists,
-            output_base_is_directory_or_creatable=output_is_dir,
+            output_base_exists_or_creatable=output_exists_or_creatable,
+            output_base_is_directory_or_creatable=output_is_dir_or_creatable,
             output_base_overlaps_source=overlap,
             output_base_is_completed_run_root=(
                 _is_successful_completed_run_root(output_base)

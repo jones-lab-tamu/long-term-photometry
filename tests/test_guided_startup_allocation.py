@@ -227,10 +227,39 @@ def test_refused_pure_plan_writes_nothing(allocation_case):
     assert not Path(refused_request.planned_allocated_run_dir).exists()
 
 
-def test_refuses_missing_output_base(tmp_path, monkeypatch):
+def test_creates_missing_but_creatable_output_base(tmp_path, monkeypatch):
+    """4J16k11: output_base is intentionally never created before Guided
+    Run is pressed (the standard "new analysis" case), so it will not
+    exist yet here. Since its immediate parent (tmp_path) already exists,
+    allocation must create it -- once every safety check has passed --
+    rather than refuse, matching the single-level "creatable" contract
+    already enforced when the output destination was selected in the GUI."""
     source = tmp_path / "source"
     source.mkdir()
-    output = tmp_path / "missing-output"
+    output = tmp_path / "not-yet-created-output"
+    request, plan = _request_for_paths(
+        monkeypatch, source_root=source, output_base=output
+    )
+    assert not output.exists()
+    result = allocation.allocate_guided_startup_directory(
+        request=request, pure_plan=plan
+    )
+    assert result.status == "allocated_startup_status_written"
+    assert result.ok and result.allocated and result.startup_status_written
+    assert output.is_dir()
+    run_dir = Path(result.allocated_run_dir)
+    assert run_dir.is_dir()
+    assert run_dir.parent == output
+
+
+def test_refuses_output_base_whose_parent_is_also_missing(tmp_path, monkeypatch):
+    """A not-yet-existing output_base is only creatable one level deep,
+    matching the single-level contract enforced at output-destination
+    selection time; allocation must not silently create multiple missing
+    directory levels."""
+    source = tmp_path / "source"
+    source.mkdir()
+    output = tmp_path / "missing-parent" / "missing-output"
     request, plan = _request_for_paths(
         monkeypatch, source_root=source, output_base=output
     )
@@ -239,6 +268,7 @@ def test_refuses_missing_output_base(tmp_path, monkeypatch):
     )
     assert result.blocking_issues[0].category == "output_base_missing"
     assert not output.exists()
+    assert not (tmp_path / "missing-parent").exists()
 
 
 def test_refuses_output_base_that_is_not_directory(tmp_path, monkeypatch):

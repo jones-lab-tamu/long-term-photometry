@@ -178,6 +178,15 @@ def _validate_plan(
         or command.requires_future_wrapper_preallocated_mode is not True
         or request.payload_result.runner_request is not None
     ):
+        if plan.blocking_issues and plan.blocking_issues[0].category in (
+            "output_base_unavailable",
+            "output_base_not_directory",
+        ):
+            return None, GuidedStartupOrchestrationIssue(
+                "pure_plan_output_not_creatable",
+                "output",
+                "The selected output folder could not be found or created.",
+            )
         return None, GuidedStartupOrchestrationIssue(
             "pure_plan_not_accepted",
             "pure_plan",
