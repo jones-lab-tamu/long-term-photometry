@@ -421,6 +421,41 @@ class _GuidedRoiDiscoveryWorker(QObject):
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
+class _GuidedRunExecutionWorker(QObject):
+    """Runs the existing synchronous Guided backend execution seam off the GUI thread.
+
+    `request` (the immutable retained `GuidedStartupTransactionRequest`) and
+    `runner` (the optional low-level subprocess-runner override) are both
+    captured on the GUI thread before the worker starts and handed in as
+    plain constructor arguments. This worker holds no reference to
+    `MainWindow` and calls only the module-level `execute_guided_backend_run`
+    function; it must never call a MainWindow method or read a MainWindow
+    attribute, since it runs on a separate thread.
+    """
+
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, request, runner):
+        super().__init__()
+        self._request = request
+        self._runner = runner
+
+    def run(self) -> None:
+        from photometry_pipeline.guided_backend_execution import (
+            execute_guided_backend_run,
+        )
+
+        try:
+            result = execute_guided_backend_run(
+                request=self._request, runner=self._runner
+            )
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            return
+        self.succeeded.emit(result)
+
+
 def _open_folder(path: str) -> None:
     """Cross-platform open a folder in the file manager."""
     if sys.platform == "win32":
@@ -1896,6 +1931,8 @@ class MainWindow(QMainWindow):
         self._guided_backend_execution_result = None
         self._guided_backend_execution_active = False
         self._guided_backend_execution_runner = None
+        self._guided_run_execution_thread = None
+        self._guided_run_execution_worker = None
         self._guided_raw_setup_controls = {}
         self._guided_open_results_mode_panels = {}
         self._guided_new_analysis_mode_panels = {}
@@ -3616,6 +3653,15 @@ class MainWindow(QMainWindow):
         self._guided_roi_discovery_diag_start = None
 
     def closeEvent(self, event) -> None:
+        if getattr(self, "_guided_backend_execution_active", False):
+            QMessageBox.information(
+                self,
+                "Guided Run In Progress",
+                "Guided Run is still running. Wait for it to finish before "
+                "closing.",
+            )
+            event.ignore()
+            return
         thread = getattr(self, "_guided_roi_discovery_thread", None)
         if thread is not None and thread.isRunning():
             thread.quit()
@@ -10638,25 +10684,16 @@ class MainWindow(QMainWindow):
             return None
         return request
 
-    def _execute_guided_backend_run_for_gui(self, request):
-        """Call the sole Guided execution adapter through a testable seam."""
-        from photometry_pipeline.guided_backend_execution import (
-            execute_guided_backend_run,
-        )
-
-        runner = getattr(self, "_guided_backend_execution_runner", None)
-        if runner is None:
-            return execute_guided_backend_run(request=request)
-        return execute_guided_backend_run(request=request, runner=runner)
-
     def _on_guided_run_clicked_backend_guarded(self) -> None:
-        """Recheck readiness and invoke only the Guided backend adapter."""
+        """Recheck readiness and start the Guided backend adapter off the GUI thread."""
         self._refresh_guided_run_readiness_display()
         readiness = getattr(self, "_guided_run_readiness", None)
         if not (
             getattr(readiness, "status", None) == "ready_hidden"
             and getattr(readiness, "ready", False) is True
         ):
+            return
+        if getattr(self, "_guided_backend_execution_active", False):
             return
         request = self._current_guided_startup_transaction_request()
         button = getattr(self, "_guided_run_btn", None)
@@ -10673,22 +10710,68 @@ class MainWindow(QMainWindow):
         self._guided_backend_execution_active = True
         if button is not None:
             button.setEnabled(False)
+        validate_btn = getattr(self, "_guided_backend_validate_btn", None)
+        if validate_btn is not None:
+            validate_btn.setEnabled(False)
         if label is not None:
-            label.setText("Starting Guided Run...")
-        try:
-            result = self._execute_guided_backend_run_for_gui(request)
-        except Exception:
-            if label is not None:
-                label.setText(
-                    "Guided Run could not continue because of an internal "
-                    "error."
-                )
-            return
-        finally:
-            self._guided_backend_execution_active = False
+            label.setText(
+                "Guided Run is running. This step will update when "
+                "analysis finishes."
+            )
+        self._start_guided_run_execution_worker(request)
+
+    def _start_guided_run_execution_worker(self, request) -> None:
+        """Run the backend execution adapter on a worker thread.
+
+        The immutable request and the optional low-level runner override
+        are both read here, on the GUI thread, before the worker starts.
+        The worker itself receives only these plain values and never holds
+        a reference to `self` / MainWindow.
+        """
+        runner = getattr(self, "_guided_backend_execution_runner", None)
+        thread = QThread(self)
+        worker = _GuidedRunExecutionWorker(request, runner)
+        worker.moveToThread(thread)
+        self._guided_run_execution_thread = thread
+        self._guided_run_execution_worker = worker
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._on_guided_run_execution_succeeded)
+        worker.failed.connect(self._on_guided_run_execution_failed)
+        worker.succeeded.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.succeeded.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._cleanup_guided_run_execution_worker)
+        thread.start()
+
+    def _on_guided_run_execution_succeeded(self, result) -> None:
+        """GUI-thread slot: worker returned a normal execution result."""
+        self._guided_backend_execution_active = False
+        validate_btn = getattr(self, "_guided_backend_validate_btn", None)
+        if validate_btn is not None:
+            validate_btn.setEnabled(True)
+        self._finish_guided_backend_execution_with_result(result)
+
+    def _on_guided_run_execution_failed(self, _message: str) -> None:
+        """GUI-thread slot: worker raised an unexpected exception."""
+        self._guided_backend_execution_active = False
+        validate_btn = getattr(self, "_guided_backend_validate_btn", None)
+        if validate_btn is not None:
+            validate_btn.setEnabled(True)
+        label = getattr(self, "_guided_run_readiness_label", None)
+        if label is not None:
+            label.setText(
+                "Guided Run could not continue because of an internal "
+                "error."
+            )
+
+    def _finish_guided_backend_execution_with_result(self, result) -> None:
+        """GUI-thread-only: apply the existing post-execution result contract."""
         self._guided_backend_execution_result = result
         self._guided_startup_transaction_request = None
         self._refresh_guided_review_handoff_display()
+        label = getattr(self, "_guided_run_readiness_label", None)
         if label is not None:
             label.setText(
                 "Guided Run has started."
@@ -10702,6 +10785,10 @@ class MainWindow(QMainWindow):
                     )
                 )
             )
+
+    def _cleanup_guided_run_execution_worker(self) -> None:
+        self._guided_run_execution_worker = None
+        self._guided_run_execution_thread = None
 
     def _refresh_guided_review_handoff_display(self) -> None:
         """Expose Review handoff only for a loader-validation candidate."""

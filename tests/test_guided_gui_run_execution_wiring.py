@@ -3,18 +3,21 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 import photometry_pipeline.guided_backend_execution as backend
 import photometry_pipeline.guided_startup_claim as claim
 from photometry_pipeline.guided_startup_transaction import (
     GuidedStartupTransactionRequest,
 )
-from gui.main_window import MainWindow
+from gui.main_window import MainWindow, _GuidedRunExecutionWorker
 from gui.run_report_parser import classify_completed_run_candidate
 from tests.test_gui_guided_backend_validation_context import (
     _accepted_outcome,
@@ -36,8 +39,30 @@ def qapp():
 def window(qapp):
     instance = MainWindow()
     yield instance
+    # Defensive cleanup: a failing test must never leave the close guard
+    # active and block teardown on a real (unmocked) QMessageBox dialog.
+    instance._guided_backend_execution_active = False
+    thread = getattr(instance, "_guided_run_execution_thread", None)
+    if thread is not None and thread.isRunning():
+        thread.quit()
+        thread.wait(2000)
     instance.close()
     instance.deleteLater()
+
+
+def _pump_until(qapp, condition, *, timeout_s: float = 5.0) -> None:
+    """Process GUI-thread events until `condition()` is true.
+
+    Guided Run now executes on a worker thread; its result reaches the GUI
+    thread via a queued signal, which is only delivered when the GUI event
+    loop is pumped. Tests must pump explicitly since pytest does not run
+    `QApplication.exec()`.
+    """
+    deadline = time.monotonic() + timeout_s
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition not met before timeout")
+        qapp.processEvents()
 
 
 def _set_ready(window, request):
@@ -192,17 +217,18 @@ def test_production_derivation_builds_real_exactly_bound_request(
 
 
 def test_production_validation_state_executes_retained_request_once(
-    window, startup_request, monkeypatch
+    window, startup_request, monkeypatch, qapp
 ):
     _run_production_validation_update(window, startup_request, monkeypatch)
     calls = []
     running = _result("wrapper_running", "Guided Run is running.")
     monkeypatch.setattr(
-        window,
-        "_execute_guided_backend_run_for_gui",
-        lambda request: calls.append(request) or running,
+        backend,
+        "execute_guided_backend_run",
+        lambda *, request, runner=None: calls.append(request) or running,
     )
     window._guided_run_btn.click()
+    _pump_until(qapp, lambda: bool(calls))
     assert calls == [startup_request]
     assert isinstance(calls[0], GuidedStartupTransactionRequest)
 
@@ -254,23 +280,117 @@ def test_validation_start_and_refusal_clear_retained_state(
 
 
 def test_ready_click_calls_backend_seam_once_with_real_request(
-    window, startup_request, monkeypatch
+    window, startup_request, monkeypatch, qapp
 ):
     calls = []
     expected = _result("wrapper_running", "Guided Run is running.")
 
-    def execute(request):
+    def execute(*, request, runner=None):
         calls.append(request)
         return expected
 
-    monkeypatch.setattr(window, "_execute_guided_backend_run_for_gui", execute)
+    monkeypatch.setattr(backend, "execute_guided_backend_run", execute)
     _set_ready(window, startup_request)
     window._guided_run_btn.click()
+    # Immediately after click: control has returned, worker is dispatched.
+    assert window._guided_backend_execution_active is True
+    assert window._guided_run_btn.isEnabled() is False
+    _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
     assert calls == [startup_request]
     assert isinstance(calls[0], GuidedStartupTransactionRequest)
     assert window._guided_backend_execution_result is expected
     assert window._guided_run_readiness_label.text() == "Guided Run has started."
     assert window._guided_run_btn.isEnabled() is False
+    assert window._guided_backend_execution_active is False
+
+
+def test_run_click_starts_worker_and_returns_control_before_completion(
+    window, startup_request, monkeypatch, qapp
+):
+    """Proves clicking Run no longer blocks waiting for the backend call.
+
+    A controllable fake backend blocks on a threading.Event until the test
+    releases it. If execution were still synchronous on the GUI thread,
+    `.click()` itself would hang here (and the test would time out via
+    Event.wait). Instead, control returns immediately with the worker still
+    in flight, and only after `release.set()` + pumping does the final
+    result appear.
+    """
+    release = threading.Event()
+    calls = []
+
+    def slow_execute(*, request, runner=None):
+        calls.append(request)
+        assert release.wait(timeout=5), "release was never set"
+        return _result("wrapper_running", "Guided Run is running.")
+
+    monkeypatch.setattr(backend, "execute_guided_backend_run", slow_execute)
+    _set_ready(window, startup_request)
+
+    window._guided_run_btn.click()
+
+    # Control has returned to the caller; the worker is still blocked on
+    # `release`, so no result has been stored yet.
+    assert window._guided_backend_execution_active is True
+    assert window._guided_run_btn.isEnabled() is False
+    assert window._guided_backend_execution_result is None
+    assert "running" in window._guided_run_readiness_label.text().lower()
+
+    release.set()
+    _pump_until(qapp, lambda: window._guided_run_execution_thread is None)
+    assert calls == [startup_request]
+    assert window._guided_backend_execution_active is False
+    assert window._guided_backend_execution_result is not None
+    assert window._guided_run_execution_worker is None
+
+
+def test_double_click_does_not_start_second_worker(
+    window, startup_request, monkeypatch, qapp
+):
+    release = threading.Event()
+    calls = []
+
+    def slow_execute(*, request, runner=None):
+        calls.append(request)
+        assert release.wait(timeout=5), "release was never set"
+        return _result("wrapper_running", "Guided Run is running.")
+
+    monkeypatch.setattr(backend, "execute_guided_backend_run", slow_execute)
+    _set_ready(window, startup_request)
+
+    window._guided_run_btn.click()
+    assert window._guided_run_btn.isEnabled() is False
+    # A second click while disabled must be a no-op (Qt itself refuses to
+    # click a disabled button); also exercise the handler directly in case
+    # something invokes it while active regardless of button state.
+    window._guided_run_btn.click()
+    window._on_guided_run_clicked_backend_guarded()
+
+    release.set()
+    _pump_until(qapp, lambda: window._guided_run_execution_thread is None)
+    assert len(calls) == 1
+
+
+def test_worker_internal_exception_shows_internal_error_and_recovers(
+    window, startup_request, monkeypatch, qapp
+):
+    def raising_execute(*, request, runner=None):
+        raise RuntimeError("simulated unexpected failure")
+
+    monkeypatch.setattr(backend, "execute_guided_backend_run", raising_execute)
+    _set_ready(window, startup_request)
+    validate_btn = window._guided_backend_validate_btn
+
+    window._guided_run_btn.click()
+    assert validate_btn.isEnabled() is False
+
+    _pump_until(qapp, lambda: window._guided_run_execution_thread is None)
+    assert "internal error" in window._guided_run_readiness_label.text().lower()
+    assert window._guided_backend_execution_active is False
+    assert window._guided_backend_execution_result is None
+    assert validate_btn.isEnabled() is True
+    assert window._guided_load_completed_run_for_review_btn.isEnabled() is False
+    assert window._guided_run_execution_worker is None
 
 
 def test_click_refuses_if_readiness_becomes_stale_after_enablement(
@@ -280,14 +400,17 @@ def test_click_refuses_if_readiness_becomes_stale_after_enablement(
     assert window._guided_run_btn.isEnabled()
     window._guided_backend_validation_revision += 1
     monkeypatch.setattr(
-        window,
-        "_execute_guided_backend_run_for_gui",
-        lambda _request: pytest.fail("backend called for stale readiness"),
+        backend,
+        "execute_guided_backend_run",
+        lambda **_kwargs: pytest.fail("backend called for stale readiness"),
     )
     window._guided_run_btn.click()
     assert window._guided_run_readiness.status == "validation_stale"
     assert window._guided_run_btn.isEnabled() is False
     assert "Validate again" in window._guided_run_readiness_label.text()
+    # Stale revision is caught before any worker is launched.
+    assert window._guided_backend_execution_active is False
+    assert window._guided_run_execution_thread is None
 
 
 @pytest.mark.parametrize(
@@ -351,31 +474,38 @@ def test_click_refuses_if_readiness_becomes_stale_after_enablement(
     ),
 )
 def test_backend_result_maps_to_safe_text_and_is_stored(
-    window, startup_request, monkeypatch, result, expected_text
+    window, startup_request, monkeypatch, result, expected_text, qapp
 ):
     monkeypatch.setattr(
-        window,
-        "_execute_guided_backend_run_for_gui",
-        lambda _request: result,
+        backend,
+        "execute_guided_backend_run",
+        lambda *, request, runner=None: result,
     )
     _set_ready(window, startup_request)
     window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
     assert window._guided_backend_execution_result is result
     assert window._guided_run_readiness_label.text() == expected_text
     assert window._guided_run_btn.isEnabled() is False
+    assert window._guided_backend_execution_active is False
+    # A failed/refused status is a real, structured result, not an internal
+    # error, so it must not show the completed-run handoff (no false success).
+    if result.status != "wrapper_completed_needs_review_loading":
+        handoff_btn = window._guided_load_completed_run_for_review_btn
+        assert handoff_btn.isVisible() is False
 
 
 def test_completed_result_does_not_auto_load_or_claim_success(
-    window, startup_request, monkeypatch
+    window, startup_request, monkeypatch, qapp
 ):
     completed = _result(
         "wrapper_completed_needs_review_loading",
         "Guided Run finished. Load the completed run for review.",
     )
     monkeypatch.setattr(
-        window,
-        "_execute_guided_backend_run_for_gui",
-        lambda _request: completed,
+        backend,
+        "execute_guided_backend_run",
+        lambda *, request, runner=None: completed,
     )
     monkeypatch.setattr(
         window,
@@ -384,19 +514,29 @@ def test_completed_result_does_not_auto_load_or_claim_success(
     )
     _set_ready(window, startup_request)
     window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_run_execution_thread is None)
     assert completed.requires_completed_run_loader_validation is True
     assert completed.completed_run_claim is False
     assert window._guided_backend_execution_result is completed
+    assert window._guided_backend_execution_active is False
+    # Async completion must still expose the handoff, unchanged from the
+    # synchronous contract. (isVisible() is not checked here: the top-level
+    # window is never shown in this test, so Qt reports all children as not
+    # visible regardless of setVisible(True); isEnabled() is unaffected by
+    # that and reflects the same "ready" gate.)
+    assert window._guided_load_completed_run_for_review_btn.isEnabled() is True
+    # Thread/worker cleanup must leave no dangling reference.
+    assert window._guided_run_execution_worker is None
 
 
 def test_fake_backend_click_writes_no_files(
-    window, startup_request, tmp_path, monkeypatch
+    window, startup_request, tmp_path, monkeypatch, qapp
 ):
     running = _result("wrapper_running", "Guided Run is running.")
     monkeypatch.setattr(
-        window,
-        "_execute_guided_backend_run_for_gui",
-        lambda _request: running,
+        backend,
+        "execute_guided_backend_run",
+        lambda *, request, runner=None: running,
     )
     _set_ready(window, startup_request)
     before = tuple(tmp_path.iterdir())
@@ -410,23 +550,25 @@ def test_fake_backend_click_writes_no_files(
     monkeypatch.setattr(os, "mkdir", fail)
     monkeypatch.setattr(os, "makedirs", fail)
     window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
     assert tuple(tmp_path.iterdir()) == before
 
 
 def test_execution_text_excludes_internal_terms(
-    window, startup_request, monkeypatch
+    window, startup_request, monkeypatch, qapp
 ):
     result = _result(
         "wrapper_failed",
         "Guided Run started, but the analysis reported an error.",
     )
     monkeypatch.setattr(
-        window,
-        "_execute_guided_backend_run_for_gui",
-        lambda _request: result,
+        backend,
+        "execute_guided_backend_run",
+        lambda *, request, runner=None: result,
     )
     _set_ready(window, startup_request)
     window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
     prohibited = (
         "manifest",
         "preallocated",
@@ -450,7 +592,7 @@ def test_execution_text_excludes_internal_terms(
 
 
 def test_full_control_is_unchanged_by_guided_execution(
-    window, startup_request, monkeypatch
+    window, startup_request, monkeypatch, qapp
 ):
     before = (
         window._run_btn.text(),
@@ -458,12 +600,15 @@ def test_full_control_is_unchanged_by_guided_execution(
         window._run_btn.toolTip(),
     )
     monkeypatch.setattr(
-        window,
-        "_execute_guided_backend_run_for_gui",
-        lambda _request: _result("wrapper_running", "Guided Run is running."),
+        backend,
+        "execute_guided_backend_run",
+        lambda *, request, runner=None: _result(
+            "wrapper_running", "Guided Run is running."
+        ),
     )
     _set_ready(window, startup_request)
     window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
     after = (
         window._run_btn.text(),
         window._run_btn.isEnabled(),
@@ -473,9 +618,11 @@ def test_full_control_is_unchanged_by_guided_execution(
 
 
 def test_gui_execution_methods_use_only_backend_adapter():
-    source = inspect.getsource(
-        MainWindow._execute_guided_backend_run_for_gui
-    ) + inspect.getsource(MainWindow._on_guided_run_clicked_backend_guarded)
+    source = (
+        inspect.getsource(MainWindow._on_guided_run_clicked_backend_guarded)
+        + inspect.getsource(MainWindow._start_guided_run_execution_worker)
+        + inspect.getsource(_GuidedRunExecutionWorker.run)
+    )
     assert "execute_guided_backend_run" in source
     prohibited = (
         "run_guided_startup_to_wrapper",
@@ -486,6 +633,82 @@ def test_gui_execution_methods_use_only_backend_adapter():
         "Pipeline",
     )
     assert not any(name in source for name in prohibited)
+
+
+def test_guided_run_execution_moves_off_gui_thread_via_worker():
+    """Guards the async-threading contract at the source level.
+
+    The GUI click handler must not call the backend seam directly anymore;
+    it must dispatch through a QThread-backed worker so the GUI event loop
+    is never blocked for the run's duration.
+    """
+    handler_source = inspect.getsource(
+        MainWindow._on_guided_run_clicked_backend_guarded
+    )
+    assert "execute_guided_backend_run" not in handler_source
+    assert "_start_guided_run_execution_worker" in handler_source
+    worker_launch_source = inspect.getsource(
+        MainWindow._start_guided_run_execution_worker
+    )
+    assert "QThread" in worker_launch_source
+    assert "moveToThread" in worker_launch_source
+
+
+def test_run_worker_does_not_reference_main_window():
+    """The worker must hold no MainWindow reference and touch no GUI state.
+
+    It receives only plain, already-captured values (`request`, `runner`)
+    and calls only the module-level `execute_guided_backend_run` function.
+    """
+    init_params = list(
+        inspect.signature(_GuidedRunExecutionWorker.__init__).parameters
+    )
+    assert init_params == ["self", "request", "runner"]
+
+    run_source = inspect.getsource(_GuidedRunExecutionWorker.run)
+    assert "execute_guided_backend_run(" in run_source
+    prohibited = (
+        "MainWindow",
+        "self._window",
+        "self.window",
+        "_execute_guided_backend_run_for_gui",
+        "_guided_backend_execution_runner",
+        "_guided_run_btn",
+        "_guided_run_readiness_label",
+        "_guided_backend_execution_active",
+    )
+    assert not any(term in run_source for term in prohibited)
+
+
+def test_runner_override_captured_on_gui_thread_and_used_inside_worker(
+    window, startup_request, monkeypatch, qapp
+):
+    """Proves the runner override crosses the request/runner boundary intact.
+
+    `window._guided_backend_execution_runner` (set here, on the GUI thread)
+    must reach `execute_guided_backend_run`'s `runner=` kwarg exactly, and
+    that call must happen on a thread other than the GUI thread that set it.
+    """
+    marker_runner = object()
+    captured = {}
+    gui_thread_id = threading.get_ident()
+
+    def fake_execute(*, request, runner=None):
+        captured["request"] = request
+        captured["runner"] = runner
+        captured["thread_id"] = threading.get_ident()
+        return _result("wrapper_running", "Guided Run is running.")
+
+    monkeypatch.setattr(backend, "execute_guided_backend_run", fake_execute)
+    window._guided_backend_execution_runner = marker_runner
+    _set_ready(window, startup_request)
+
+    window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_run_execution_thread is None)
+
+    assert captured["request"] is startup_request
+    assert captured["runner"] is marker_runner
+    assert captured["thread_id"] != gui_thread_id
 
 
 def test_gui_validation_derivation_uses_only_backend_builder():
@@ -508,13 +731,14 @@ def test_gui_validation_derivation_uses_only_backend_builder():
 
 
 def test_real_backend_reaches_initial_status_boundary_only(
-    window, allocation_case, monkeypatch
+    window, allocation_case, monkeypatch, qapp
 ):
     request, _plan = allocation_case
     runner, calls = _real_wrapper_runner(monkeypatch)
     _set_ready(window, request)
     window._guided_backend_execution_runner = runner
     window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
 
     result = window._guided_backend_execution_result
     run_dir = Path(request.planned_allocated_run_dir)
@@ -540,3 +764,29 @@ def test_real_backend_reaches_initial_status_boundary_only(
     ):
         assert not (run_dir / prohibited).exists()
     assert classify_completed_run_candidate(str(run_dir))[0] is False
+
+
+def test_close_event_refused_while_guided_run_active(window, monkeypatch):
+    shown = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        staticmethod(lambda *args, **kwargs: shown.append(args)),
+    )
+    window._guided_backend_execution_active = True
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert event.isAccepted() is False
+    assert shown, "expected a plain message to be shown"
+    # Message must be plain and actionable, no cancellation/progress/log
+    # language implied.
+    message_text = str(shown[0][2])
+    assert "still running" in message_text.lower()
+    assert "wait" in message_text.lower()
+
+
+def test_close_event_allowed_when_guided_run_not_active(window):
+    window._guided_backend_execution_active = False
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert event.isAccepted() is True
