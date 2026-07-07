@@ -2703,24 +2703,25 @@ def test_guided_setup_summary_is_read_only_and_tracks_current_state(window, tmp_
     window._guided_sessions_per_hour_edit.setText("8")
 
     text = window._guided_setup_summary_label.text()
-    assert "Status: not validated" in text
+    assert "setup not yet validated" in text
+    assert "Use Full Control for real validation/runs" not in text
     assert str(input_dir) in text
     assert str(output_dir) in text
     assert "custom_tabular" in text
     assert "sessions/hour=8" in text
 
 
-def test_guided_summary_and_planned_sections_are_collapsible(window, tmp_path, monkeypatch):
+def test_guided_summary_section_is_collapsible_and_planned_stages_removed(window, tmp_path, monkeypatch):
     summary_group = window._guided_workflow_tab.findChild(QGroupBox, "guidedSetupSummaryPanel")
-    planned_group = window._guided_workflow_tab.findChild(QGroupBox, "guidedWorkflowPlannedStages")
     assert summary_group is not None
-    assert planned_group is not None
     assert summary_group.isCheckable() is True
-    assert planned_group.isCheckable() is True
     assert summary_group.isChecked() is False
-    assert planned_group.isChecked() is False
     assert window._guided_setup_summary_content.isHidden() is True
-    assert window._guided_planned_stages_content.isHidden() is True
+
+    # The internal "Planned stages / not yet wired" roadmap panel has been
+    # removed from Guided Mode and must not reappear.
+    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedWorkflowPlannedStages") is None
+    assert not hasattr(window, "_guided_planned_stages_content")
 
     state_before = _state_for_equivalence(window)
     calls = {"preview": 0}
@@ -2731,13 +2732,9 @@ def test_guided_summary_and_planned_sections_are_collapsible(window, tmp_path, m
 
     monkeypatch.setattr(main_window_module, "run_guided_correction_preview_comparison", _fake_preview_backend)
     summary_group.setChecked(True)
-    planned_group.setChecked(True)
     assert window._guided_setup_summary_content.isHidden() is False
-    assert window._guided_planned_stages_content.isHidden() is False
     summary_group.setChecked(False)
-    planned_group.setChecked(False)
     assert window._guided_setup_summary_content.isHidden() is True
-    assert window._guided_planned_stages_content.isHidden() is True
     assert _state_for_equivalence(window) == state_before
     assert calls["preview"] == 0
 
@@ -2903,7 +2900,8 @@ def test_guided_setup_summary_reports_correction_state_without_validation_claim(
     window._guided_correction_select_buttons["Adaptive Event-Gated Fit"].click()
     text = window._guided_setup_summary_label.text()
 
-    assert "Status: not validated" in text
+    assert "setup not yet validated" in text
+    assert "Use Full Control for real validation/runs" not in text
     assert "completed-run diagnostics are explicit actions" in text
     assert "Reference correction method:" in text
     assert "adaptive_event_gated_regression" in text
@@ -4375,7 +4373,14 @@ def test_guided_visible_text_does_not_use_stale_shell_or_completed_loader_wordin
     visible_text = "\n".join(labels)
     assert "Stage 1 shell only" not in visible_text
     assert "does not wire a completed-run loader into the Guided Workflow" not in visible_text
-    assert "Production runs and applied-dF/F routing still use Full Control" in visible_text
+    # Stale prototype-era shell wording must be gone: it implied Guided Mode
+    # could not perform real validation/runs at all.
+    assert "Production runs and applied-dF/F routing still use Full Control" not in visible_text
+    assert "not yet wired" not in visible_text
+    # Honest replacement orientation copy: Guided Mode can validate and run
+    # supported setups, while some configurations may still need Full Control.
+    assert "running supported analyses" in visible_text
+    assert "may still need Full Control" in visible_text
 
 
 def test_guided_output_policy_no_policy_by_default(window, tmp_path, monkeypatch):

@@ -1716,7 +1716,6 @@ class MainWindow(QMainWindow):
             }
             QGroupBox#guidedWorkflowStepperGroup,
             QGroupBox#guidedSetupSummaryPanel,
-            QGroupBox#guidedWorkflowPlannedStages,
             QGroupBox[guidedCorrectionCard="true"] {
                 background: #ffffff;
                 border: 1px solid #d7dce2;
@@ -1725,7 +1724,6 @@ class MainWindow(QMainWindow):
             }
             QGroupBox#guidedWorkflowStepperGroup::title,
             QGroupBox#guidedSetupSummaryPanel::title,
-            QGroupBox#guidedWorkflowPlannedStages::title,
             QGroupBox[guidedCorrectionCard="true"]::title {
                 subcontrol-origin: margin;
                 left: 10px;
@@ -1806,8 +1804,9 @@ class MainWindow(QMainWindow):
         stepper_layout.setSpacing(10)
 
         intro = QLabel(
-            "Guided Workflow supports setup review and completed-run diagnostics. "
-            "Production runs and applied-dF/F routing still use Full Control."
+            "Guided Workflow walks you through setup, evidence-backed choices, "
+            "backend validation, and running supported analyses. Some advanced "
+            "or unsupported configurations may still need Full Control."
         )
         intro.setWordWrap(True)
         intro.setObjectName("guidedWorkflowStageNotice")
@@ -1929,7 +1928,6 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(self._guided_mode_banner_label, 0)
         content_layout.addWidget(self._guided_workflow_stack, 1)
         content_layout.addWidget(self._build_guided_setup_summary_panel(), 0)
-        content_layout.addWidget(self._build_guided_planned_stages_panel(), 0)
         self._refresh_guided_mode_display()
 
         outer.addWidget(stepper_group, 0)
@@ -2608,7 +2606,8 @@ class MainWindow(QMainWindow):
             + ", ".join(state["selected_rois"])
         )
         lines = [
-            "Status: not validated. Use Full Control for real validation/runs.",
+            "Status: setup not yet validated. Guided Mode can validate and run "
+            "supported setups; some configurations may still require Full Control.",
             "Correction cards configure setup state only; completed-run diagnostics are explicit actions.",
             f"Input: {state['input_dir'] or '(not set)'}",
             f"Output: {state['output_dir'] or '(not set)'}",
@@ -15191,39 +15190,6 @@ class MainWindow(QMainWindow):
             ]
         )
         return "\n".join(str(line) for line in lines)
-
-    def _build_guided_planned_stages_panel(self) -> QGroupBox:
-        group = QGroupBox("Planned stages / not yet wired")
-        group.setObjectName("guidedWorkflowPlannedStages")
-        group.setCheckable(True)
-        group.setChecked(False)
-        group.setMaximumHeight(170)
-        layout = QVBoxLayout(group)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(3)
-        self._guided_planned_stages_content = QWidget()
-        self._guided_planned_stages_content.setObjectName("guidedWorkflowPlannedStagesContent")
-        content_layout = QVBoxLayout(self._guided_planned_stages_content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(3)
-        planned = [
-            "Stage 2: mirror data/format/ROI/run-spec setup",
-            "Stage 3: map correction cards to existing dynamic-fit modes",
-            "Stage 4: add correction preview/diagnostics",
-            "Stage 5: bridge to explicit applied-dFF strategy confirmation",
-            "Stage 6: add read-only Decision-Support Audit evidence",
-            "Stage 7: validate and consider making Guided Workflow default",
-        ]
-        for idx, text in enumerate(planned):
-            label = QLabel(text)
-            label.setObjectName(f"guidedWorkflowPlannedStage{idx + 2}")
-            label.setProperty("guidedMutedText", True)
-            label.setWordWrap(True)
-            content_layout.addWidget(label)
-        layout.addWidget(self._guided_planned_stages_content)
-        self._guided_planned_stages_content.setVisible(False)
-        group.toggled.connect(self._guided_planned_stages_content.setVisible)
-        return group
 
     def _lock_main_splitter_handle(self) -> None:
         """Keep shell widths mode-controlled; divider is not user-adjustable."""
