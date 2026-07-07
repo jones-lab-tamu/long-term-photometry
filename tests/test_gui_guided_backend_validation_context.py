@@ -313,7 +313,7 @@ def test_refused_and_error_outcome_display(
     assert "Section: test_section" in details
     assert "Message: test message" in details
     assert "Detail code: test_detail" in details
-    assert "Guided Run remains unavailable" in details
+    assert "Guided Run is not available for this configuration yet" in details
 
 
 def test_stale_accepted_outcome_never_displays_current_acceptance(window):

@@ -265,8 +265,8 @@ def test_new_analysis_draft_plan_displays_summary_fields(window, tmp_path, monke
     assert "Feature/event profile status: default_initialized" in summary_text
     assert "Output policy status: missing" in summary_text
     assert "Draft plan completeness: incomplete for future RunSpec handoff" in summary_text
-    assert "Execution: unavailable, Final Guided Run/RunSpec is not implemented in this stage." in summary_text
-    assert "This draft plan is not executable yet. Final Run is not implemented in this stage." in summary_text
+    assert "Execution: not available for this configuration yet" in summary_text
+    assert "This draft plan is not executable yet for this configuration. See blocking issues above." in summary_text
     assert "Plan completeness: Needs attention" in (
         window._guided_review_plan_status_label.text()
     )
@@ -589,9 +589,9 @@ def test_new_analysis_readiness_rendering_separates_planning_complete_from_execu
     checklist = window._guided_draft_run_plan_checklist_label.text()
 
     assert "Draft plan completeness: complete for future RunSpec handoff" in summary
-    assert "Execution: unavailable, Final Guided Run/RunSpec is not implemented in this stage." in summary
+    assert "Execution: not available for this configuration yet" in summary
     assert "Draft plan completeness: complete for future RunSpec handoff" in readiness_summary
-    assert "Execution: unavailable, Final Guided Run/RunSpec is not implemented in this stage." in readiness_summary
+    assert "Execution: not available for this configuration yet" in readiness_summary
     assert "Execution availability: unavailable" in checklist
     assert "Draft plan complete for handoff: true" in checklist
     assert "Execution available: false" in checklist
@@ -1110,7 +1110,7 @@ def test_new_analysis_run_preview_displays_missing_dataset_contract_snapshot(win
     assert "stored status: missing" in preview_text
     assert "current_applied: false" in preview_text
     assert "execution consumption: not enabled in this stage" in preview_text
-    assert "Execution: unavailable" in preview_text
+    assert "Execution: not available for this configuration yet" in preview_text
 
 
 def test_new_analysis_run_preview_displays_applied_dataset_contract_consumed_by_readiness(
@@ -1211,9 +1211,56 @@ def test_new_analysis_run_preview_keeps_existing_sections_with_dataset_contract(
     assert "dynamic_fit_parameter_contract:" in preview_text
     assert "backend_config_mapping_status: label_and_parameters_ready_for_future_mapping" in preview_text
     assert "output: no directories or files created" in preview_text
-    assert "Execution: unavailable" in preview_text
+    assert "Execution: not available for this configuration yet" in preview_text
     assert "No files or directories were created." in preview_text
     assert "This preview is read-only and non-executing." in preview_text
+
+
+def test_new_analysis_first_subset_executable_true_but_spec_preview_unavailable_never_claims_eligible(
+    window, tmp_path, monkeypatch
+):
+    """subset_readiness.first_subset_executable is a shallower signal than
+    execution_spec_preview.spec_preview_available (it does not itself check
+    acquisition mode/format). A continuous-acquisition draft plan can reach
+    first_subset_executable=True while spec_preview_available stays False
+    because the RWD/intermittent dataset-contract mapping is unsupported.
+    No UI surface may claim execution eligibility from the shallow signal
+    alone; all three surfaces must agree with the deeper signal.
+    """
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._guided_dataset_contract_apply_btn.click()
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    from photometry_pipeline.guided_new_analysis_plan import (
+        build_guided_new_analysis_execution_spec_preview,
+        evaluate_guided_new_analysis_execution_subset_readiness,
+    )
+
+    subset_readiness = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    execution_spec_preview = build_guided_new_analysis_execution_spec_preview(plan)
+    assert subset_readiness.first_subset_executable is True
+    assert execution_spec_preview.spec_preview_available is False
+    assert (
+        window._guided_new_analysis_execution_eligible_for_display(
+            subset_readiness, execution_spec_preview
+        )
+        is False
+    )
+
+    draft_summary = window._guided_draft_run_plan_preview_label.text()
+    readiness_summary = window._guided_plan_readiness_summary_label.text()
+    run_preview_text = window._guided_new_analysis_run_preview_label.text()
+
+    for surface in (draft_summary, readiness_summary, run_preview_text):
+        assert "Execution: eligible" not in surface
+        assert "Execution: not available for this configuration yet" in surface
+
+    assert "status: eligible" not in run_preview_text
+    assert "validate and run from the Run step" not in run_preview_text
+    assert (
+        "status: subset prerequisites partly satisfied, but execution spec "
+        "is not available for this configuration"
+    ) in run_preview_text
 
 
 def test_new_analysis_run_preview_displays_execution_intent_and_output_creation_policy(
@@ -1286,7 +1333,7 @@ def test_new_analysis_run_preview_feature_event_consumption_requires_applied_pro
     assert "  feature_extraction_in_scope: true" in preview_text
     assert "  feature_dependent_phasic_summaries_in_scope: true" in preview_text
     assert "  execution consumption: not enabled until feature/event profile is applied and current" in preview_text
-    assert "Execution unavailable" in preview_text
+    assert "Execution: not available for this configuration yet" in preview_text
     assert "ready to run" not in preview_text.lower()
     assert "execution-ready" not in preview_text.lower()
     assert "runnable" not in preview_text.lower()
@@ -1321,7 +1368,7 @@ def test_new_analysis_run_preview_feature_event_invalid_or_stale_blocks_consumpt
     assert "  feature_event_profile_current_applied: false" in preview_text
     assert "  feature_event_values_consumed: false" in preview_text
     assert "  execution consumption: not enabled until feature/event profile is applied and current" in preview_text
-    assert "Execution unavailable" in preview_text
+    assert "Execution: not available for this configuration yet" in preview_text
 
 
 def test_new_analysis_draft_plan_reports_choices_as_current_after_build_and_mark(window, tmp_path, monkeypatch):
@@ -1421,15 +1468,14 @@ def test_new_analysis_run_preview_panel_renders_complete_plan(window, tmp_path, 
 
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
-    assert "Non-executing preview" in preview_text
+    assert "Guided run readiness preview" in preview_text
     assert "Preview schema version: guided_new_analysis_run_preview.v1" in preview_text
     assert "Plan schema version: guided_new_analysis_plan.v1" in preview_text
     assert "Source/input:" in preview_text
     assert "Included ROIs: 3 (CH1, CH2, CH3)" in preview_text
     assert "Output destination:" in preview_text
     assert output_target.name in preview_text
-    assert "Execution unavailable" in preview_text
-    assert "Final Guided Run/RunSpec is not implemented in this stage." in preview_text
+    assert "Execution: not available for this configuration yet" in preview_text
     assert "First execution subset:" in preview_text
     assert "subset: global_dynamic_fit_only.v1" in preview_text
     assert "first_subset_executable: false" in preview_text
@@ -1496,7 +1542,10 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "  feature_event_values_consumed: true" in preview_text
     assert "  feature_extraction_in_scope: true" in preview_text
     assert "  feature_dependent_phasic_summaries_in_scope: true" in preview_text
-    assert "status: complete for future execution-spec preview; actual execution remains unavailable" in preview_text
+    assert (
+        "status: eligible for the supported first execution subset; "
+        "validate and run from the Run step to execute analysis"
+    ) in preview_text
     assert "Guided execution-spec preview:" in preview_text
     assert "spec_preview_available: true" in preview_text
     assert "first_subset_executable: true" in preview_text
@@ -1578,14 +1627,14 @@ def test_new_analysis_run_preview_panel_shows_incomplete_plan_unresolved_items(w
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
-    assert "Non-executing preview" in preview_text
+    assert "Guided run readiness preview" in preview_text
     assert "Draft plan completeness: incomplete for future RunSpec handoff" in preview_text
     assert "Run preview unresolved items:" in preview_text
     assert "missing_diagnostic_cache" in preview_text
     assert "missing_output_policy" in preview_text
     assert "First execution subset:" in preview_text
     assert "incomplete_planning_readiness" in preview_text
-    assert "Execution unavailable" in preview_text
+    assert "Execution: not available for this configuration yet" in preview_text
 
 
 def test_new_analysis_run_preview_complete_plan_keeps_execution_unavailable(window, tmp_path, monkeypatch):
@@ -1601,7 +1650,7 @@ def test_new_analysis_run_preview_complete_plan_keeps_execution_unavailable(wind
     assert "missing_execution_mode" not in preview_text
     assert "missing_run_profile" not in preview_text
     assert "missing_output_creation_policy" not in preview_text
-    assert "Execution unavailable" in preview_text
+    assert "Execution: not available for this configuration yet" in preview_text
     assert "Guided execution-spec preview:" in preview_text
     assert "spec_preview_available: false" in preview_text
     assert "first_subset_executable: false" in preview_text
@@ -1621,7 +1670,7 @@ def test_new_analysis_run_preview_signal_only_f0_unresolved_routing(window, tmp_
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
     assert "CH1: signal_only_f0" in preview_text
-    assert "Execution unavailable" in preview_text
+    assert "Execution: not available for this configuration yet" in preview_text
 
 
 def test_new_analysis_run_preview_mixed_per_roi_strategies_subset_blocked_not_planning_blocked(
@@ -1643,7 +1692,7 @@ def test_new_analysis_run_preview_mixed_per_roi_strategies_subset_blocked_not_pl
     assert "Draft plan completeness: complete" in preview_text
     assert "mixed_dynamic_fit_modes_execution_not_enabled" in preview_text
     assert "status: not executable under global_dynamic_fit_only.v1" in preview_text
-    assert "Execution unavailable" in preview_text
+    assert "Execution: not available for this configuration yet" in preview_text
     assert "ready to run" not in preview_text.lower()
 
 
@@ -1700,7 +1749,7 @@ def test_new_analysis_run_preview_rendering_does_not_call_execution_helpers(
     window._refresh_guided_draft_run_plan_preview()
 
     assert calls == []
-    assert "Non-executing preview" in window._guided_new_analysis_run_preview_label.text()
+    assert "Guided run readiness preview" in window._guided_new_analysis_run_preview_label.text()
 
 
 def test_new_analysis_feature_event_profile_gui_flows(window, tmp_path, monkeypatch):

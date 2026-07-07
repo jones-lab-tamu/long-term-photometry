@@ -9479,12 +9479,20 @@ class MainWindow(QMainWindow):
             self._refresh_guided_review_plan_checkpoint(
                 plan, readiness, subset_readiness
             )
-            label.setText(self._guided_new_analysis_draft_plan_summary_text(plan, readiness))
+            label.setText(
+                self._guided_new_analysis_draft_plan_summary_text(
+                    plan, readiness, subset_readiness, execution_spec_preview
+                )
+            )
             label.setToolTip("")
 
             readiness_label = getattr(self, "_guided_plan_readiness_summary_label", None)
             if readiness_label is not None:
-                readiness_label.setText(self._guided_new_analysis_readiness_summary_text(plan, readiness))
+                readiness_label.setText(
+                    self._guided_new_analysis_readiness_summary_text(
+                        plan, readiness, subset_readiness, execution_spec_preview
+                    )
+                )
                 readiness_label.setToolTip("")
 
             self._refresh_guided_new_analysis_draft_plan_checklist(plan, readiness)
@@ -10428,7 +10436,9 @@ class MainWindow(QMainWindow):
                 "Backend validation has not been run for this Guided setup."
             )
             details_label.setText(
-                "Guided Run remains unavailable."
+                "Validate the current Guided request before running "
+                "analysis. Run is available only for the supported first "
+                "execution subset after validation passes."
             )
             return
 
@@ -10473,9 +10483,19 @@ class MainWindow(QMainWindow):
                 "authorize or start a run."
             )
             identity = str(getattr(outcome, "request_identity", "") or "")
+            run_readiness = getattr(self, "_guided_run_readiness", None)
+            if getattr(run_readiness, "ready", False):
+                run_status_line = (
+                    "Guided Run is ready for the supported first "
+                    "execution subset."
+                )
+            else:
+                run_status_line = (
+                    "Guided Run is not available for this configuration "
+                    "yet. Review the readiness details below."
+                )
             details_label.setText(
-                f"Request identity: {identity}\n"
-                "Guided Run remains unavailable."
+                f"Request identity: {identity}\n{run_status_line}"
             )
             return
 
@@ -10505,7 +10525,9 @@ class MainWindow(QMainWindow):
         )
         issues = tuple(getattr(outcome, "blocking_issues", ()) or ())
         if not issues:
-            details_label.setText("Guided Run remains unavailable.")
+            details_label.setText(
+                "Guided Run is not available for this configuration yet."
+            )
             return
         issue = issues[0]
         detail_code = str(getattr(issue, "detail_code", "") or "")
@@ -10516,7 +10538,7 @@ class MainWindow(QMainWindow):
         ]
         if detail_code:
             lines.append(f"Detail code: {detail_code}")
-        lines.append("Guided Run remains unavailable.")
+        lines.append("Guided Run is not available for this configuration yet.")
         details_label.setText("\n".join(lines))
 
     def _refresh_guided_run_readiness_display(self) -> None:
@@ -11081,7 +11103,25 @@ class MainWindow(QMainWindow):
             ),
         )
 
-    def _guided_new_analysis_draft_plan_summary_text(self, plan, readiness) -> str:
+    @staticmethod
+    def _guided_new_analysis_execution_eligible_for_display(
+        subset_readiness, execution_spec_preview=None
+    ) -> bool:
+        """Single shared truth condition for any 'eligible to run' UI claim."""
+        return bool(
+            subset_readiness is not None
+            and getattr(subset_readiness, "first_subset_executable", False)
+            and execution_spec_preview is not None
+            and getattr(execution_spec_preview, "spec_preview_available", False)
+        )
+
+    def _guided_new_analysis_draft_plan_summary_text(
+        self,
+        plan,
+        readiness,
+        subset_readiness=None,
+        execution_spec_preview=None,
+    ) -> str:
         acq_mode = plan.acquisition_mode
         if acq_mode == "continuous":
             timing_summary = f"continuous (window={plan.continuous_window_sec}s, step={plan.continuous_step_sec}s)"
@@ -11142,7 +11182,15 @@ class MainWindow(QMainWindow):
                 if readiness.plan_complete_for_handoff
                 else "Draft plan completeness: incomplete for future RunSpec handoff"
             ),
-            f"Execution: unavailable, {readiness.execution_blocked_reason}",
+            (
+                "Execution: eligible for the supported first execution "
+                "subset; validate and run from the Run step to execute "
+                "analysis"
+                if self._guided_new_analysis_execution_eligible_for_display(
+                    subset_readiness, execution_spec_preview
+                )
+                else "Execution: not available for this configuration yet"
+            ),
             f"Input/source: {self._display_path(plan.input_source_path or '') if plan.input_source_path else 'none'}",
             f"Format: {plan.input_format}",
             f"Acquisition mode: {acq_mode}",
@@ -11242,10 +11290,28 @@ class MainWindow(QMainWindow):
             lines.append("")
             lines.append(f"Local setup verification failed: {exc}")
 
-        lines.append("This draft plan is not executable yet. Final Run is not implemented in this stage.")
+        if self._guided_new_analysis_execution_eligible_for_display(
+            subset_readiness, execution_spec_preview
+        ):
+            lines.append(
+                "This draft plan is eligible for the supported first "
+                "execution subset. Validate and run from the Run step to "
+                "execute analysis."
+            )
+        else:
+            lines.append(
+                "This draft plan is not executable yet for this "
+                "configuration. See blocking issues above."
+            )
         return "\n".join(lines)
 
-    def _guided_new_analysis_readiness_summary_text(self, plan, readiness) -> str:
+    def _guided_new_analysis_readiness_summary_text(
+        self,
+        plan,
+        readiness,
+        subset_readiness=None,
+        execution_spec_preview=None,
+    ) -> str:
         ready_sections = [section.label for section in readiness.sections if section.status == "ready"]
         not_ready_sections = [
             f"{section.label} ({section.status})"
@@ -11272,12 +11338,22 @@ class MainWindow(QMainWindow):
             lines.append(f"Blocking issues: {'; '.join(issue.message for issue in readiness.blocking_issues)}")
 
         lines.extend([
-            f"Execution: unavailable, {readiness.execution_blocked_reason}",
+            (
+                "Execution: eligible for the supported first execution "
+                "subset; validate and run from the Run step to execute "
+                "analysis"
+                if self._guided_new_analysis_execution_eligible_for_display(
+                    subset_readiness, execution_spec_preview
+                )
+                else "Execution: not available for this configuration yet"
+            ),
             "Files written: none"
         ])
         return "\n".join(lines)
 
-    def _guided_new_analysis_execution_subset_text(self, subset_readiness) -> list[str]:
+    def _guided_new_analysis_execution_subset_text(
+        self, subset_readiness, execution_spec_preview=None
+    ) -> list[str]:
         lines = [
             "First execution subset:",
             f"  subset: {subset_readiness.subset_name}",
@@ -11285,8 +11361,19 @@ class MainWindow(QMainWindow):
             f"  allowed_dynamic_fit_strategy: {subset_readiness.allowed_dynamic_fit_strategy or 'none'}",
             f"  execution_available: {str(bool(subset_readiness.execution_available)).lower()}",
         ]
-        if subset_readiness.first_subset_executable:
-            lines.append("  status: complete for future execution-spec preview; actual execution remains unavailable")
+        if self._guided_new_analysis_execution_eligible_for_display(
+            subset_readiness, execution_spec_preview
+        ):
+            lines.append(
+                "  status: eligible for the supported first execution "
+                "subset; validate and run from the Run step to execute "
+                "analysis"
+            )
+        elif subset_readiness.first_subset_executable:
+            lines.append(
+                "  status: subset prerequisites partly satisfied, but "
+                "execution spec is not available for this configuration"
+            )
         else:
             lines.append(f"  status: not executable under {subset_readiness.subset_name}")
 
@@ -11337,7 +11424,7 @@ class MainWindow(QMainWindow):
         ]
 
         lines = [
-            "Non-executing preview",
+            "Guided run readiness preview",
             f"Preview schema version: {preview.preview_schema_version}",
             f"Plan schema version: {preview.plan_schema_version}",
             (
@@ -11345,9 +11432,15 @@ class MainWindow(QMainWindow):
                 if readiness.get("plan_complete_for_handoff")
                 else "Draft plan completeness: incomplete for future RunSpec handoff"
             ),
-            "Execution: unavailable",
-            f"Execution unavailable: {preview.execution_blocked_reason}",
-            "Final Guided Run/RunSpec is not implemented in this stage.",
+            (
+                "Execution: eligible for the supported first execution "
+                "subset; validate and run from the Run step to execute "
+                "analysis"
+                if self._guided_new_analysis_execution_eligible_for_display(
+                    subset_readiness, execution_spec_preview
+                )
+                else "Execution: not available for this configuration yet"
+            ),
             f"Source/input: {self._display_path(str(source.get('authoritative_input_source_path') or source.get('input_source_path') or '')) if (source.get('authoritative_input_source_path') or source.get('input_source_path')) else 'none'}",
             f"Input format: {source.get('input_format') or 'unknown'}",
             f"Acquisition: {acquisition.get('acquisition_mode') or 'unknown'} ({acquisition.get('acquisition_structure_status') or 'unknown'})",
@@ -11459,7 +11552,11 @@ class MainWindow(QMainWindow):
             lines.append("Warnings: none")
 
         if subset_readiness is not None:
-            lines.extend(self._guided_new_analysis_execution_subset_text(subset_readiness))
+            lines.extend(
+                self._guided_new_analysis_execution_subset_text(
+                    subset_readiness, execution_spec_preview
+                )
+            )
 
         if execution_spec_preview is not None:
             output = execution_spec_preview.output or {}
@@ -14076,7 +14173,7 @@ class MainWindow(QMainWindow):
         draft_layout.addWidget(self._guided_draft_run_plan_preview_label)
         advanced_content_layout.addWidget(draft_group)
 
-        self._guided_new_analysis_run_preview_group = QGroupBox("Non-executing run preview")
+        self._guided_new_analysis_run_preview_group = QGroupBox("Guided run readiness preview")
         self._guided_new_analysis_run_preview_group.setObjectName("guidedNewAnalysisRunPreviewPanel")
         self._guided_new_analysis_run_preview_group.setVisible(False)
         run_preview_layout = QVBoxLayout(self._guided_new_analysis_run_preview_group)
@@ -14198,8 +14295,9 @@ class MainWindow(QMainWindow):
         new_analysis_layout.setContentsMargins(0, 0, 0, 0)
         new_analysis_layout.setSpacing(10)
         normal = QLabel(
-            "Backend validation checks the current Guided request in memory. "
-            "Guided Run remains unavailable and this step does not execute analysis."
+            "Validate the current Guided request before running analysis. "
+            "Guided Run can execute analysis only for the supported first "
+            "execution subset, and only after validation passes."
         )
         normal.setObjectName("guidedRunNewAnalysisContent")
         normal.setProperty("guidedSecondaryText", True)
