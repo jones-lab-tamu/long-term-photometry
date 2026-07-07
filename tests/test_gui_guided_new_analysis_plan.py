@@ -277,13 +277,17 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
     window._format_combo.setCurrentIndex(idx)
 
     rois = ("CH1", "CH2", "CH3")
+    header = "Time(s)," + ",".join(f"{roi}-410,{roi}-470" for roi in rois)
     source_files = []
     for index in range(2):
         session_dir = input_dir / f"session-{index}"
         session_dir.mkdir()
         source_file = session_dir / "fluorescence.csv"
-        rows = ["Time(s),CH1-410,CH1-470"]
-        rows.extend(f"{row_index / 20.0:.2f},1.0,2.0" for row_index in range(400))
+        rows = [header]
+        rows.extend(
+            f"{row_index / 20.0:.2f}," + ",".join("1.0,2.0" for _ in rois)
+            for row_index in range(400)
+        )
         source_file.write_text("\n".join(rows) + "\n", encoding="utf-8")
         source_files.append(source_file)
     discovery = {
@@ -1144,6 +1148,31 @@ def _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatc
     window._guided_review_dataset_contract_action_btn.click()
 
 
+def test_confirm_detected_dataset_settings_resolves_real_target_fs_hz(
+    window, tmp_path, monkeypatch
+):
+    """4J16k10: guided_execution_payloads.derive_guided_execution_payloads
+    requires target_fs_hz in intent.acquisition.semantic_values. The real
+    RWD sampling rate is already computed by
+    _infer_dataset_contract_overrides (the same call already made here for
+    rwd_time_col/uv_suffix/sig_suffix); it must be captured into the
+    dataset-contract snapshot's contract_values rather than silently
+    discarded, and it must come from the real selected input files, not a
+    hard-coded value, stale GUI state, or preview artifacts."""
+    strategy_by_roi = {roi: "Global Linear Regression" for roi in ("CH1", "CH2", "CH3")}
+    _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
+        window, tmp_path, monkeypatch, strategy_by_roi=strategy_by_roi
+    )
+    _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+
+    snapshot = window._guided_new_analysis_dataset_contract_snapshot
+    assert snapshot.status == "applied"
+    assert "target_fs_hz" in snapshot.contract_values
+    target_fs_hz = snapshot.contract_values["target_fs_hz"]
+    assert isinstance(target_fs_hz, float)
+    assert target_fs_hz == pytest.approx(20.0, rel=1e-6)
+
+
 @pytest.mark.parametrize(
     "strategy_label",
     (
@@ -1219,14 +1248,22 @@ def test_review_plan_uniform_dynamic_fit_navigates_to_run_and_validates(
 def test_review_plan_local_preview_without_diagnostic_cache_navigates_to_run_and_validates(
     window, tmp_path, monkeypatch, strategy_label
 ):
-    """4J16k9: proves the standard local-preview path validates without
-    ever building a diagnostic cache, and that acceptance actually reaches
-    Guided Run availability. The diagnostic-cache panel is never touched;
-    local preview comes from run_guided_local_correction_preview
-    (source_type local_raw_segment), and Validate must accept using
-    source/setup-bound currentness instead of diagnostic-cache identity."""
+    """4J16k9/4J16k10: proves the standard local-preview path validates
+    without ever building a diagnostic cache, and that acceptance actually
+    reaches Guided Run availability end to end. The diagnostic-cache panel
+    is never touched; local preview comes from
+    run_guided_local_correction_preview (source_type local_raw_segment),
+    and Validate must accept using source/setup-bound currentness instead
+    of diagnostic-cache identity.
+
+    4J16k10 proves the full transition through real (non-mocked) production
+    mapping and Run authorization: clicking Validate must itself authorize
+    Run and enable the Guided Run button, with no synthetic shortcut."""
     import photometry_pipeline.guided_execution_request_builder as request_builder
     import photometry_pipeline.guided_production_mapping as production_mapping
+    from photometry_pipeline.guided_run_authorization import (
+        GuidedRunAuthorizationResult,
+    )
 
     strategy_by_roi = {roi: strategy_label for roi in ("CH1", "CH2", "CH3")}
     _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
@@ -1274,35 +1311,22 @@ def test_review_plan_local_preview_without_diagnostic_cache_navigates_to_run_and
     assert "cache_pointer_missing" not in issue_codes
     assert outcome.status == "validator_accepted", (outcome.status, issue_codes)
 
-    # Prove the acceptance gate reaches a genuine Run-authorization attempt
-    # (not skipped for context/revision/build-identity reasons) and that
-    # nothing about local-preview/diagnostic-cache evidence blocks it.
-    #
-    # window._guided_run_btn.isEnabled() cannot be asserted True here: a
-    # real (non-mocked) authorization attempt for this GUI-constructed plan
-    # currently fails inside guided_production_mapping.py for reasons that
-    # are pre-existing and unrelated to diagnostic-cache/local-preview
-    # currentness (see report Part 2/6 — production mapping's typed-field
-    # allow-lists and intent-identity canonicalizer do not yet handle every
-    # field a real Guided new-analysis draft plan produces, for cache-backed
-    # plans too). Fixing that is out of scope ("do not change production
-    # mapping"). What this test proves instead: the authorization attempt is
-    # genuinely reached and fails for a category unrelated to this patch.
-    import photometry_pipeline.guided_run_authorization as run_authorization
+    # Clicking Validate itself drives real (non-mocked) production mapping
+    # and Run authorization (gui/main_window.py
+    # _on_guided_backend_validate_clicked ->
+    # _derive_guided_execution_state_from_validation ->
+    # build_guided_startup_request_from_validation), and retains the result
+    # only if authorization was genuinely accepted. No test-only shortcut
+    # (_set_ready(), an injected transaction, or a second manual
+    # authorize_guided_run() call) is used here.
+    authorization_result = window._guided_run_authorization_result
+    assert isinstance(authorization_result, GuidedRunAuthorizationResult)
+    assert authorization_result.status == "authorized", (
+        authorization_result.blocking_issues
+    )
+    assert authorization_result.authorized is True
+    assert authorization_result.run_authorization is True
 
-    context = window._capture_guided_backend_validation_context()
-    mapping_contract = production_mapping.build_guided_production_mapping_contract()
-    authorization_request = run_authorization.build_guided_run_authorization_request(
-        stored_validation_outcome=outcome,
-        stored_validation_outcome_revision=window._guided_backend_validation_revision,
-        current_gui_revision=window._guided_backend_validation_revision,
-        current_validation_context=context,
-        application_build_identity=build_identity,
-        production_mapping_contract=mapping_contract,
-    )
-    authorization_result = run_authorization.authorize_guided_run(
-        authorization_request
-    )
     diagnostic_cache_related_categories = {
         "missing_or_stale_diagnostic_cache",
         "diagnostic_cache_not_completed_run_ineligible",
@@ -1317,6 +1341,8 @@ def test_review_plan_local_preview_without_diagnostic_cache_navigates_to_run_and
     assert not (authorization_categories & diagnostic_cache_related_categories), (
         authorization_result.blocking_issues
     )
+
+    assert window._guided_run_btn.isEnabled() is True
 
 
 def test_local_preview_source_setup_drift_after_confirmation_blocks_validate_and_run(

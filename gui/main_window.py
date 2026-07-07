@@ -10089,6 +10089,7 @@ class MainWindow(QMainWindow):
         validation_issues: list[str] = []
         status = "inferred"
         dataset_semantics: dict[str, object] = {}
+        target_fs_hz_value: float | None = None
 
         if not identity.input_source_path:
             validation_issues.append("input source path is missing")
@@ -10124,6 +10125,13 @@ class MainWindow(QMainWindow):
                         if isinstance(inferred.get(name), str)
                         and str(inferred[name]).strip()
                     }
+                    raw_target_fs_hz = inferred.get("target_fs_hz")
+                    if (
+                        isinstance(raw_target_fs_hz, (int, float))
+                        and not isinstance(raw_target_fs_hz, bool)
+                        and raw_target_fs_hz > 0
+                    ):
+                        target_fs_hz_value = float(raw_target_fs_hz)
                 missing_semantics = [
                     name
                     for name in semantic_names
@@ -10170,6 +10178,11 @@ class MainWindow(QMainWindow):
                 "allow_partial_final_window": identity.allow_partial_final_window,
                 "exclude_incomplete_final_rwd_chunk": identity.exclude_incomplete_final_rwd_chunk,
                 **dataset_semantics,
+                **(
+                    {"target_fs_hz": target_fs_hz_value}
+                    if target_fs_hz_value is not None
+                    else {}
+                ),
             },
             format_specific={
                 "structural_only": False,

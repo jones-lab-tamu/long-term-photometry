@@ -625,6 +625,7 @@ _INTENT_IDENTITY_MODEL_FIELDS = {
     GuidedProductionParser: tuple(item.name for item in fields(GuidedProductionParser)),
     GuidedProductionRoiScope: tuple(item.name for item in fields(GuidedProductionRoiScope)),
     GuidedProductionConfirmedMark: tuple(item.name for item in fields(GuidedProductionConfirmedMark)),
+    GuidedProductionPerRoiStrategy: tuple(item.name for item in fields(GuidedProductionPerRoiStrategy)),
     GuidedProductionCorrection: tuple(item.name for item in fields(GuidedProductionCorrection)),
     GuidedProductionEvidenceReference: tuple(item.name for item in fields(GuidedProductionEvidenceReference)),
     GuidedProductionDiagnosticEvidence: tuple(item.name for item in fields(GuidedProductionDiagnosticEvidence)),
@@ -696,11 +697,15 @@ REQUEST_FIELD_CLASSIFICATIONS = {
 }
 
 ACQUISITION_TYPED_FIELD_CONFIG_MAP = frozenset(
-    {"rwd_time_col", "uv_suffix", "sig_suffix", "target_fs_hz", "sessions_per_hour", "session_duration_sec"}
+    {
+        "rwd_time_col", "uv_suffix", "sig_suffix", "target_fs_hz", "sessions_per_hour", "session_duration_sec",
+        "acquisition_mode", "allow_partial_final_window", "exclude_incomplete_final_rwd_chunk",
+        "input_format", "resolved_input_format", "continuous_window_sec", "continuous_step_sec",
+    }
 )
 CORRECTION_TYPED_FIELD_CONFIG_MAP = frozenset(
     {
-        "dynamic_fit_mode", "dynamic_fit_slope_constraint", "dynamic_fit_min_slope",
+        "dynamic_fit_mode", "slope_constraint", "min_slope",
         "robust_event_reject_max_iters", "robust_event_reject_residual_z_thresh",
         "robust_event_reject_local_var_window_sec",
         "robust_event_reject_local_var_ratio_thresh",

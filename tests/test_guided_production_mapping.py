@@ -430,6 +430,147 @@ def test_unknown_typed_config_field_refuses():
     assert _category(result) == "production_config_field_unmapped"
 
 
+def test_correction_typed_fields_accept_real_dynamic_fit_contract_field_names():
+    """4J16k10: GuidedNewAnalysisDynamicFitParameterContract emits
+    'slope_constraint' and 'min_slope' (not the stale 'dynamic_fit_
+    slope_constraint'/'dynamic_fit_min_slope' names). Production mapping
+    must accept the real field names a Guided GUI plan actually produces."""
+    request = _valid_request()
+    request = _unchecked(
+        request,
+        correction=_unchecked(
+            request.correction,
+            dynamic_fit_parameter_values=(
+                contracts.GuidedBackendTypedFieldValue(
+                    "dynamic_fit_mode", "str", "global_linear_regression"
+                ),
+                contracts.GuidedBackendTypedFieldValue(
+                    "slope_constraint", "str", "unconstrained"
+                ),
+                contracts.GuidedBackendTypedFieldValue(
+                    "min_slope", "float", 0.0
+                ),
+            ),
+        ),
+    )
+    result = _map(
+        request,
+        identity=contracts.compute_guided_backend_validation_request_identity(
+            request
+        ),
+    )
+    assert isinstance(result, mapping.GuidedProductionMappingSuccess)
+    mapped_names = {
+        item.field_name
+        for item in result.intent.correction.dynamic_fit_parameter_values
+    }
+    assert {"slope_constraint", "min_slope"} <= mapped_names
+
+
+def test_acquisition_typed_fields_accept_real_gui_dataset_contract_fields():
+    """4J16k10: the real GUI cache-free dataset-contract snapshot
+    (gui/main_window.py _guided_new_analysis_dataset_contract_candidate)
+    always emits acquisition_mode, allow_partial_final_window,
+    exclude_incomplete_final_rwd_chunk, input_format, resolved_input_format,
+    continuous_window_sec, and continuous_step_sec as typed semantic
+    values, in addition to rwd_time_col/uv_suffix/sig_suffix. These are
+    duplicates of fields already validated elsewhere in the request, not
+    new production capability; production mapping must accept them rather
+    than refuse with production_config_field_unmapped."""
+    request = _valid_request()
+    real_gui_semantic_values = (
+        contracts.GuidedBackendTypedFieldValue(
+            "rwd_time_col", "str", "Time(s)"
+        ),
+        contracts.GuidedBackendTypedFieldValue("uv_suffix", "str", "-410"),
+        contracts.GuidedBackendTypedFieldValue("sig_suffix", "str", "-470"),
+        contracts.GuidedBackendTypedFieldValue(
+            "acquisition_mode", "str", "intermittent"
+        ),
+        contracts.GuidedBackendTypedFieldValue(
+            "allow_partial_final_window", "bool", False
+        ),
+        contracts.GuidedBackendTypedFieldValue(
+            "exclude_incomplete_final_rwd_chunk", "bool", False
+        ),
+        contracts.GuidedBackendTypedFieldValue("input_format", "str", "rwd"),
+        contracts.GuidedBackendTypedFieldValue(
+            "resolved_input_format", "str", "rwd"
+        ),
+        contracts.GuidedBackendTypedFieldValue(
+            "continuous_window_sec", "NoneType", None
+        ),
+        contracts.GuidedBackendTypedFieldValue(
+            "continuous_step_sec", "NoneType", None
+        ),
+    )
+    request = _unchecked(
+        request,
+        acquisition_dataset=_unchecked(
+            request.acquisition_dataset,
+            semantic_values=real_gui_semantic_values,
+        ),
+    )
+    result = _map(
+        request,
+        identity=contracts.compute_guided_backend_validation_request_identity(
+            request
+        ),
+    )
+    assert isinstance(result, mapping.GuidedProductionMappingSuccess)
+    mapped_names = {
+        item.field_name for item in result.intent.acquisition.semantic_values
+    }
+    assert {item.field_name for item in real_gui_semantic_values} <= mapped_names
+
+
+def test_intent_identity_canonicalizes_per_roi_production_strategy_map():
+    """4J16k10: a real Guided GUI plan populates
+    correction.per_roi_production_strategy_map with
+    GuidedBackendPerRoiProductionStrategy entries. The identity
+    canonicalizer (_canonical_value / _INTENT_IDENTITY_MODEL_FIELDS) must
+    know how to encode GuidedProductionPerRoiStrategy, or intent
+    construction fails with ValueError('Unsupported production intent
+    value type.') for every real plan, not just synthetic fixtures that
+    happen to leave this field empty."""
+    request = _valid_request()
+    per_roi_entry = contracts.GuidedBackendPerRoiProductionStrategy(
+        roi_id="ROI0",
+        strategy_family="dynamic_fit",
+        dynamic_fit_mode="global_linear_regression",
+        selected_strategy="global_linear_regression",
+        evidence_source_type="local_correction_preview",
+        evidence_reference_json="{}",
+        explicit_user_mark=True,
+        current_or_stale="current",
+    )
+    request = _unchecked(
+        request,
+        correction=_unchecked(
+            request.correction,
+            production_strategy_map_version="guided_production_strategy_map.v1",
+            per_roi_production_strategy_map=(per_roi_entry,),
+        ),
+    )
+    result = _map(
+        request,
+        identity=contracts.compute_guided_backend_validation_request_identity(
+            request
+        ),
+    )
+    assert isinstance(result, mapping.GuidedProductionMappingSuccess)
+    assert len(result.intent.correction.per_roi_production_strategy_map) == 1
+    mapped_entry = result.intent.correction.per_roi_production_strategy_map[0]
+    assert isinstance(mapped_entry, mapping.GuidedProductionPerRoiStrategy)
+    assert mapped_entry.roi_id == "ROI0"
+    # The identity must be computable (no "Unsupported production intent
+    # value type." ValueError) and must recompute consistently.
+    recomputed = mapping.compute_guided_production_execution_intent_identity(
+        result.intent
+    )
+    assert recomputed == result.canonical_intent_identity
+
+
 def test_mapping_contract_blocking_deferred_capability_refuses():
     request = _valid_request()
     request = _unchecked(
