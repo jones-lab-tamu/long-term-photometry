@@ -13674,6 +13674,7 @@ class MainWindow(QMainWindow):
         explain_label.setProperty("guidedSecondaryText", True)
         explain_label.setWordWrap(True)
         self._make_guided_widget_shrinkable(explain_label)
+        self._guided_draft_plan_export_explanation_label = explain_label
         layout.addWidget(explain_label)
 
         form = QFormLayout()
@@ -13746,6 +13747,10 @@ class MainWindow(QMainWindow):
         return norm_path, None
 
     def _on_guided_export_draft_plan(self) -> None:
+        if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
+            self._on_guided_export_new_analysis_draft_plan()
+            return
+
         run_dir = self._current_guided_completed_run_dir()
         if not run_dir:
             self._guided_export_status_label.setText(
@@ -13790,17 +13795,96 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._guided_export_status_label.setText(f"Export failed: {exc}")
 
+    def _resolve_guided_new_analysis_export_path(
+        self, path: str
+    ) -> tuple[object, str | None]:
+        trimmed = path.strip()
+        if not trimmed:
+            return None, "Export path cannot be empty."
+        if not trimmed.lower().endswith(".json"):
+            return None, "Export path must have a .json suffix."
+
+        try:
+            from pathlib import Path
+            norm_path = Path(trimmed).expanduser().resolve(strict=False)
+        except Exception as exc:
+            return None, f"Invalid path format: {exc}"
+
+        if norm_path.is_dir():
+            return None, "Export path cannot be a directory."
+        if norm_path.exists():
+            return None, "Export path already exists."
+        if not norm_path.parent.exists():
+            return None, "Parent directory of export path does not exist."
+        if not norm_path.parent.is_dir():
+            return None, "Parent of export path is not a directory."
+
+        return norm_path, None
+
+    def _on_guided_export_new_analysis_draft_plan(self) -> None:
+        path = self._guided_export_path_edit.text()
+        export_path, err = self._resolve_guided_new_analysis_export_path(path)
+        if err:
+            self._guided_export_status_label.setText(f"Export failed: {err}")
+            return
+
+        try:
+            plan = self._build_guided_new_analysis_draft_plan()
+        except Exception as exc:
+            self._guided_export_status_label.setText(
+                "Export failed: Could not build the current new-analysis "
+                f"draft plan: {exc}"
+            )
+            return
+
+        try:
+            from photometry_pipeline.guided_new_analysis_plan import (
+                guided_new_analysis_draft_plan_export_json_text,
+            )
+            json_text = guided_new_analysis_draft_plan_export_json_text(plan)
+            with open(export_path, "x", encoding="utf-8") as f:
+                f.write(json_text)
+            self._guided_export_status_label.setText(
+                f"Exported new-analysis draft plan JSON to: {export_path}"
+            )
+        except Exception as exc:
+            self._guided_export_status_label.setText(f"Export failed: {exc}")
+
     def _sync_guided_export_editor_to_current_run(self, *, force: bool = False) -> None:
         if not hasattr(self, "_guided_export_path_edit"):
             return
+        mode = getattr(self, "_guided_workflow_mode", "start")
+        is_completed_run_mode = mode == "open_results"
+        if is_completed_run_mode:
+            self._guided_export_btn.setText("Export completed-run review plan JSON")
+            self._guided_draft_plan_export_explanation_label.setText(
+                "Writes one reviewable GuidedRunPlan JSON file only when Export "
+                "is clicked.\n"
+                "Does not run analysis, create output folders, or generate "
+                "RunSpec.\n"
+                "The export path is separate from the future analysis output "
+                "destination."
+            )
+        else:
+            self._guided_export_btn.setText("Export new-analysis draft plan JSON")
+            self._guided_draft_plan_export_explanation_label.setText(
+                "Writes one reviewable GuidedNewAnalysisDraftPlan JSON file "
+                "only when Export is clicked.\n"
+                "Does not run analysis, validate the request, or create "
+                "output folders.\n"
+                "The export path is separate from the future analysis output "
+                "destination."
+            )
         run_dir = self._current_guided_completed_run_dir()
         synced_run = getattr(self, "_guided_export_editor_synced_run", None)
-        if not force and run_dir == synced_run:
+        synced_mode = getattr(self, "_guided_export_editor_synced_mode", None)
+        if not force and run_dir == synced_run and mode == synced_mode:
             return
         with QSignalBlocker(self._guided_export_path_edit):
             self._guided_export_path_edit.setText("")
         self._guided_export_status_label.setText("No export performed yet.")
         self._guided_export_editor_synced_run = run_dir
+        self._guided_export_editor_synced_mode = mode
 
     def _build_guided_confirm_strategy_step(self) -> QWidget:
         wrapper = QGroupBox("2. Choose correction strategy")

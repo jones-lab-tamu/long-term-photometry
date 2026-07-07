@@ -850,6 +850,47 @@ class GuidedNewAnalysisDraftPlan:
             raise ValueError(f"mode must be 'new_analysis', got {self.mode}")
 
 
+NEW_ANALYSIS_DRAFT_PLAN_EXPORT_SCHEMA_VERSION = (
+    "guided_new_analysis_draft_plan_export.v1"
+)
+
+
+def guided_new_analysis_draft_plan_to_export_dict(
+    plan: GuidedNewAnalysisDraftPlan,
+) -> dict[str, Any]:
+    """Build a deterministic, JSON-safe review export payload for a draft plan.
+
+    This is export/review-only: it carries the plan's own fields (including
+    per-ROI correction-choice evidence metadata such as preview IDs, segment
+    labels, and staleness flags) but never raw preview trace arrays, since
+    the plan dataclass itself never stores those.
+    """
+    if not isinstance(plan, GuidedNewAnalysisDraftPlan):
+        raise TypeError("plan must be a GuidedNewAnalysisDraftPlan")
+    return {
+        "artifact_type": "guided_new_analysis_draft_plan",
+        "artifact_schema_version": NEW_ANALYSIS_DRAFT_PLAN_EXPORT_SCHEMA_VERSION,
+        "export_mode": "review_only",
+        "exported_at_utc": datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "plan": asdict(plan),
+    }
+
+
+def guided_new_analysis_draft_plan_export_json_text(
+    plan: GuidedNewAnalysisDraftPlan,
+) -> str:
+    """Serialize a draft plan to deterministic, review-only JSON text."""
+    import json
+
+    return json.dumps(
+        guided_new_analysis_draft_plan_to_export_dict(plan),
+        indent=2,
+        sort_keys=True,
+    )
+
+
 def _paths_match(p1: str | None, p2: str | None) -> bool:
     if p1 is None or p2 is None:
         return p1 == p2

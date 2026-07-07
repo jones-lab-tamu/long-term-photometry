@@ -2279,3 +2279,192 @@ def test_guided_new_analysis_preview_request_checks_4J11m(window, tmp_path, monk
     # 8. No files or directories are created by preview refresh
     output_dir = tmp_path / "valid_output"
     assert not output_dir.exists()
+
+
+# --- 4J16k5b: new-analysis draft-plan export -------------------------------
+
+
+def test_new_analysis_export_uses_new_analysis_draft_plan(window, tmp_path, monkeypatch):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    assert window._current_run_dir == ""
+
+    export_file = tmp_path / "new_analysis_plan.json"
+    window._guided_export_path_edit.setText(str(export_file))
+    window._guided_export_btn.click()
+
+    assert "Exported new-analysis draft plan JSON to:" in (
+        window._guided_export_status_label.text()
+    )
+    assert export_file.exists()
+    with open(export_file, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    assert payload["artifact_type"] == "guided_new_analysis_draft_plan"
+    assert payload["export_mode"] == "review_only"
+    assert "exported_at_utc" in payload
+    assert payload.get("schema_version") != "guided_run_plan.v1"
+    assert "plan" in payload
+    assert payload["plan"]["mode"] == "new_analysis"
+    assert payload["plan"]["input_format"] == "rwd"
+
+
+def test_new_analysis_export_succeeds_without_completed_run_loaded(
+    window, tmp_path, monkeypatch
+):
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+    _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    assert window._current_run_dir == ""
+    assert window._guided_workflow_mode == "new_analysis"
+
+    export_file = tmp_path / "minimal_plan.json"
+    window._guided_export_path_edit.setText(str(export_file))
+    window._guided_export_btn.click()
+
+    status = window._guided_export_status_label.text()
+    assert "No draft plan is available" not in status
+    assert "Open Results must be used first" not in status
+    assert "Exported new-analysis draft plan JSON to:" in status
+    assert export_file.exists()
+
+
+def test_new_analysis_export_excludes_preview_only_state(window, tmp_path, monkeypatch):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+
+    sentinel = "SENTINEL_PREVIEW_ARRAY_VALUE_4J16k5b"
+    window._guided_feature_preview_on_demand_trace = {
+        "preview_dff": [sentinel, 1.0, 2.0, 3.0],
+        "time_sec": [0.0, 0.05, 0.1, 0.15],
+        "trace_source": "local_correction_preview_dff",
+    }
+    window._guided_feature_preview_last_result = {
+        "sentinel": sentinel,
+        "events": [{"index": 1, "polarity": "positive"}],
+    }
+
+    export_file = tmp_path / "no_leak_plan.json"
+    window._guided_export_path_edit.setText(str(export_file))
+    window._guided_export_btn.click()
+
+    assert export_file.exists()
+    with open(export_file, "r", encoding="utf-8") as f:
+        raw_text = f.read()
+    assert sentinel not in raw_text
+    assert "preview_dff" not in raw_text
+    assert "time_sec" not in raw_text
+
+
+def test_new_analysis_export_includes_configured_settings(window, tmp_path, monkeypatch):
+    _configure_complete_guided_new_analysis_draft(
+        window, tmp_path, monkeypatch, acquisition_mode="intermittent"
+    )
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    window._guided_dataset_contract_apply_btn.click()
+
+    export_file = tmp_path / "configured_plan.json"
+    window._guided_export_path_edit.setText(str(export_file))
+    window._guided_export_btn.click()
+
+    assert export_file.exists()
+    with open(export_file, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    plan = payload["plan"]
+
+    assert plan["input_format"] == "rwd"
+    assert plan["acquisition_mode"] == "intermittent"
+    assert set(plan["included_roi_ids"]) == {"CH1", "CH2", "CH3"}
+    assert len(plan["per_roi_correction_strategy_choices"]) == 3
+    assert plan["feature_event_profile_status"] == "applied"
+    assert plan["output_policy_status"] == "applied"
+    assert plan["output_policy_path"]
+
+
+def test_new_analysis_export_writes_exactly_one_file_and_calls_no_execution_helpers(
+    window, tmp_path, monkeypatch
+):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    before_files = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+
+    def forbidden(name):
+        def _inner(*_args, **_kwargs):
+            raise AssertionError(f"{name} must not be called by export")
+        return _inner
+
+    monkeypatch.setattr(
+        window, "_on_guided_backend_validate_clicked", forbidden("validate")
+    )
+    monkeypatch.setattr(
+        window, "_on_guided_run_clicked_backend_guarded", forbidden("run")
+    )
+    monkeypatch.setattr(window, "_on_validate", forbidden("_on_validate"))
+    monkeypatch.setattr(window, "_on_run", forbidden("_on_run"))
+    monkeypatch.setattr(window, "_build_run_spec", forbidden("_build_run_spec"))
+    monkeypatch.setattr(window, "_build_argv", forbidden("_build_argv"))
+
+    export_file = tmp_path / "single_write_plan.json"
+    window._guided_export_path_edit.setText(str(export_file))
+    window._guided_export_btn.click()
+
+    assert export_file.exists()
+    after_files = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    new_files = set(after_files) - set(before_files)
+    assert new_files == {export_file.name}
+
+
+def test_new_analysis_export_existing_file_rejected(window, tmp_path, monkeypatch):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+
+    existing_file = tmp_path / "already_there.json"
+    with open(existing_file, "w", encoding="utf-8") as f:
+        f.write("original content")
+
+    window._guided_export_path_edit.setText(str(existing_file))
+    window._guided_export_btn.click()
+
+    with open(existing_file, "r", encoding="utf-8") as f:
+        assert f.read() == "original content"
+    assert "Export failed: Export path already exists." in (
+        window._guided_export_status_label.text()
+    )
+
+
+def test_new_analysis_export_ui_label_is_honest_and_differs_by_mode(
+    window, tmp_path, monkeypatch
+):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    new_analysis_label = window._guided_export_btn.text()
+    assert "new-analysis draft plan" in new_analysis_label
+    assert "GuidedRunPlan" not in new_analysis_label
+    assert "completed-run" not in new_analysis_label.lower()
+
+    from tests.test_gui_guided_workflow import (
+        _load_preview_completed_run,
+        _make_preview_completed_run,
+    )
+    run_dir = _make_preview_completed_run(tmp_path / "completed_run_for_label_check")
+    _load_preview_completed_run(window, run_dir, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    completed_run_label = window._guided_export_btn.text()
+    assert "completed-run" in completed_run_label.lower()
