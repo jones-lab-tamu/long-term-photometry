@@ -4941,6 +4941,16 @@ class MainWindow(QMainWindow):
         return diagnostics
 
     def _guided_completed_run_diagnostic_artifacts(self) -> dict[str, object]:
+        # Diagnostics/correction-preview/confirm-strategy panels that
+        # consume this are hidden in new-analysis mode, and the source
+        # fields they derive from it are always overwritten from local
+        # preview / diagnostic-cache state in that mode rather than from
+        # run_dir. So this filesystem scan is unneeded there. Measured to
+        # run repeatedly (about 9x) per "Set up new analysis" click via a
+        # loaded completed run's directory, which is what made that
+        # transition feel frozen on slower/cloud-synced filesystems.
+        if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
+            return {"status": "not_generated", "run_dir": "", "artifacts": []}
         run_dir = os.path.realpath((self._current_run_dir or "").strip())
         has_loaded_results = (
             hasattr(self, "_report_viewer")

@@ -4348,6 +4348,39 @@ def test_guided_diagnostics_scope_loaded_artifacts_as_separate_from_active_setup
     assert str(input_dir) not in text
 
 
+def test_guided_new_analysis_mode_skips_completed_run_diagnostic_scan(window, tmp_path, monkeypatch):
+    """4J16k22: the diagnostics/confirm-strategy panels that consume the
+    completed-run artifact scan are hidden in new-analysis mode, so
+    switching into that mode (e.g. "Set up new analysis") must not
+    re-scan a previously loaded completed run's filesystem. Regression
+    for a hang on that transition when the referenced completed-run
+    directory was large or on a slow/cloud-synced filesystem."""
+    run_dir = tmp_path / "completed"
+    run_dir.mkdir()
+    (run_dir / "run_report.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    (run_dir / "CH1" / "summary").mkdir(parents=True)
+
+    window._current_run_dir = str(run_dir)
+    assert window._report_viewer.load_report(str(run_dir)) is True
+
+    def _fail_if_called(*_args, **_kwargs):
+        raise AssertionError(
+            "completed-run filesystem scan must not run in new-analysis mode"
+        )
+
+    monkeypatch.setattr(
+        main_window_module, "resolve_region_deliverables", _fail_if_called
+    )
+    monkeypatch.setattr(
+        main_window_module, "is_successful_completed_run_dir", _fail_if_called
+    )
+
+    window._guided_workflow_mode = "new_analysis"
+    result = window._guided_completed_run_diagnostic_artifacts()
+
+    assert result == {"status": "not_generated", "run_dir": "", "artifacts": []}
+
+
 @pytest.mark.parametrize("card_title,mode", GUIDED_CARD_TO_DYNAMIC_MODE.items())
 def test_guided_diagnostics_context_tracks_reference_correction_cards(window, card_title, mode):
     window._guided_correction_select_buttons[card_title].click()
