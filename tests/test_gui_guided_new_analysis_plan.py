@@ -408,6 +408,7 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache_via_r
     monkeypatch,
     *,
     strategy_by_roi=None,
+    time_col="Time(s)",
 ):
     """4J16k16: identical standard cache-free local-preview setup to
     _configure_complete_guided_new_analysis_draft_without_diagnostic_cache,
@@ -437,7 +438,7 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache_via_r
     window._format_combo.setCurrentIndex(idx)
 
     rois = ("CH1", "CH2", "CH3")
-    header = "Time(s)," + ",".join(f"{roi}-410,{roi}-470" for roi in rois)
+    header = f"{time_col}," + ",".join(f"{roi}-410,{roi}-470" for roi in rois)
     source_files = []
     for index in range(2):
         session_dir = input_dir / f"session-{index}"
@@ -471,7 +472,7 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache_via_r
         window,
         "_infer_dataset_contract_overrides",
         lambda _fmt: {
-            "rwd_time_col": "Time(s)",
+            "rwd_time_col": time_col,
             "uv_suffix": "-410",
             "sig_suffix": "-470",
         },
@@ -483,7 +484,7 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache_via_r
             "csv_path": path,
             "fs_hz": 20.0,
             "chunk_duration_sec": 600.0,
-            "time_col": "Time(s)",
+            "time_col": time_col,
             "uv_suffix": "-410",
             "sig_suffix": "-470",
         },
@@ -1580,6 +1581,90 @@ def test_real_row_confirm_records_source_setup_signature_and_validates(
     assert "local_preview_signature_missing" not in issue_codes
     assert "local_preview_signature_mismatch" not in issue_codes
     assert outcome.status == "validator_accepted", (outcome.status, issue_codes)
+
+
+def test_roi_preflight_accepts_timestamp_time_column_gui_end_to_end(
+    window, tmp_path, monkeypatch
+):
+    """4J16k18: reproduces and fixes a real manual-GUI-path blocker found by
+    Jeff after 4J16k16/4J16k17: his real RWD fluorescence.csv files have a
+    header row whose time column is named "TimeStamp", not "Time(s)". The
+    Guided RWD parser contract used by ROI execution preflight
+    (gui/main_window.py -> authorize_guided_run ->
+    guided_execution_preflight.run_roi_execution_preflight ->
+    io.rwd_contract.inspect_rwd_header_contract) previously only recognized
+    "Time(s)" as a time-column candidate
+    (guided_backend_validation_workflow.GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES),
+    so backend validation could accept the plan while Run authorization
+    still refused with roi_preflight_refused / roi_discovery_failed, and
+    the GUI collapsed that into "Guided validation succeeded, but Guided
+    Run execution is unavailable in this build." This test builds a real
+    RWD source whose on-disk fluorescence.csv header uses "TimeStamp" and
+    proves backend validation accepts, build identity resolves, and Run
+    authorization now succeeds end to end (Run button enabled)."""
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+    import photometry_pipeline.guided_production_mapping as production_mapping
+    from photometry_pipeline.guided_run_authorization import (
+        GuidedRunAuthorizationResult,
+    )
+
+    strategy_by_roi = {
+        roi: "Robust Global Event-Reject Fit" for roi in ("CH1", "CH2", "CH3")
+    }
+    _configure_complete_guided_new_analysis_draft_without_diagnostic_cache_via_real_row_confirm(
+        window,
+        tmp_path,
+        monkeypatch,
+        strategy_by_roi=strategy_by_roi,
+        time_col="TimeStamp",
+    )
+    _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    assert window._guided_review_go_to_run_btn.isEnabled() is True
+    window._guided_review_go_to_run_btn.click()
+    assert window._guided_workflow_stepper.currentRow() == (
+        list(GUIDED_WORKFLOW_STEPS).index("Run")
+    )
+
+    build_identity = production_mapping.build_application_build_identity(
+        distribution_name="photometry-pipeline",
+        distribution_version="1.0.0",
+        source_revision_kind="git",
+        source_revision="abc123",
+        source_tree_state="clean",
+    )
+    monkeypatch.setattr(
+        request_builder,
+        "resolve_application_build_identity",
+        lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+    )
+    window._guided_backend_validate_btn.click()
+
+    outcome = window._guided_backend_validation_outcome
+    assert outcome.status == "validator_accepted", (
+        outcome.status,
+        {issue.detail_code for issue in outcome.blocking_issues},
+    )
+
+    authorization_result = window._guided_run_authorization_result
+    assert isinstance(authorization_result, GuidedRunAuthorizationResult)
+    authorization_categories = {
+        issue.category for issue in authorization_result.blocking_issues
+    }
+    assert "roi_preflight_refused" not in authorization_categories
+    assert authorization_result.status == "authorized", (
+        authorization_result.blocking_issues
+    )
+    assert authorization_result.authorized is True
+    assert authorization_result.run_authorization is True
+
+    assert window._guided_run_btn.isEnabled() is True
+    assert window._guided_run_readiness_label.text() == (
+        "Guided Run is ready to start."
+    )
 
 
 def test_real_validate_reaches_authorization_and_enables_run_in_source_launch_environment(

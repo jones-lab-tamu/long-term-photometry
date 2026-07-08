@@ -15,6 +15,11 @@ from photometry_pipeline.io.rwd_contract import (
     compute_rwd_header_parsing_contract_digest,
     inspect_rwd_header_contract,
 )
+from photometry_pipeline.guided_backend_validation_workflow import (
+    GUIDED_BACKEND_RWD_SIGNAL_SUFFIX_CANDIDATES,
+    GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES,
+    GUIDED_BACKEND_RWD_UV_SUFFIX_CANDIDATES,
+)
 
 
 def _contract(**overrides: object) -> RwdHeaderParsingContract:
@@ -59,6 +64,54 @@ def test_valid_rwd_header_is_acceptable_and_preserves_exact_columns(tmp_path: Pa
         ("ROI2", "ROI2-415", "ROI2-470"),
     ]
     assert result.blocking_findings == ()
+
+
+def test_rwd_header_contract_accepts_timestamp_time_column(tmp_path: Path):
+    """4J16k18: a real RWD fluorescence.csv can have a non-CSV preamble
+    line followed by a header row whose time column is named "TimeStamp"
+    rather than "Time(s)", with non-contiguous ROI numbering (CH3 absent
+    here). Uses the actual Guided production candidate constants, not a
+    test-local contract, so this test would fail if the fix were
+    reverted."""
+    path = _write(
+        tmp_path / "fluorescence.csv",
+        [
+            "vendor metadata",
+            "TimeStamp,Events,CH1-410,CH1-470,CH2-410,CH2-470,CH4-410,CH4-470",
+            "0.000,,56.605,32.896,46.159,27.513,78.174,38.478",
+        ],
+    )
+    contract = RwdHeaderParsingContract(
+        time_column_candidates=GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES,
+        uv_suffix_candidates=GUIDED_BACKEND_RWD_UV_SUFFIX_CANDIDATES,
+        signal_suffix_candidates=GUIDED_BACKEND_RWD_SIGNAL_SUFFIX_CANDIDATES,
+    )
+    result = inspect_rwd_header_contract(str(path), parsing_contract=contract)
+
+    assert result.header_row_index == 1
+    assert result.selected_time_column == "TimeStamp"
+    assert result.roi_ids == ("CH1", "CH2", "CH4")
+    assert result.acceptable_for_strict_identity is True
+    assert result.blocking_findings == ()
+
+
+def test_rwd_header_contract_still_accepts_time_s_time_column(tmp_path: Path):
+    """4J16k18 companion: the pre-existing "Time(s)" column name must keep
+    working unchanged after adding "TimeStamp" as a second candidate."""
+    path = _write(
+        tmp_path / "fluorescence.csv",
+        ["Time(s),CH1-410,CH1-470"],
+    )
+    contract = RwdHeaderParsingContract(
+        time_column_candidates=GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES,
+        uv_suffix_candidates=GUIDED_BACKEND_RWD_UV_SUFFIX_CANDIDATES,
+        signal_suffix_candidates=GUIDED_BACKEND_RWD_SIGNAL_SUFFIX_CANDIDATES,
+    )
+    result = inspect_rwd_header_contract(str(path), parsing_contract=contract)
+
+    assert result.selected_time_column == "Time(s)"
+    assert result.roi_ids == ("CH1",)
+    assert result.acceptable_for_strict_identity is True
 
 
 def test_raw_duplicate_columns_block_before_pandas_mangling(tmp_path: Path):

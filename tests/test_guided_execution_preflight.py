@@ -10,6 +10,9 @@ import pytest
 import photometry_pipeline.guided_backend_validation_request as contracts
 import photometry_pipeline.guided_execution_preflight as preflight
 import photometry_pipeline.guided_production_mapping as mapping
+from photometry_pipeline.guided_backend_validation_workflow import (
+    GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES,
+)
 from photometry_pipeline.io.rwd_contract import (
     RwdHeaderParsingContract,
     compute_rwd_header_parsing_contract_digest,
@@ -31,10 +34,12 @@ def _unchecked(instance, **changes):
     return result
 
 
-def _write_session(root: Path, name: str, rois=("ROI0", "ROI1")) -> Path:
+def _write_session(
+    root: Path, name: str, rois=("ROI0", "ROI1"), time_col="Time(s)"
+) -> Path:
     path = root / name / "fluorescence.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
-    columns = ["Time(s)"]
+    columns = [time_col]
     row = ["0"]
     for roi in rois:
         columns.extend((f"{roi}-410", f"{roi}-470"))
@@ -43,20 +48,26 @@ def _write_session(root: Path, name: str, rois=("ROI0", "ROI1")) -> Path:
     return path
 
 
-def _parser():
+def _parser(time_column_candidates=("Time(s)",)):
     return RwdHeaderParsingContract(
-        time_column_candidates=("Time(s)",),
+        time_column_candidates=time_column_candidates,
         uv_suffix_candidates=("-410",),
         signal_suffix_candidates=("-470",),
     )
 
 
-def _intent(tmp_path: Path):
+def _intent(
+    tmp_path: Path,
+    *,
+    rois=("ROI0", "ROI1"),
+    time_col="Time(s)",
+    time_column_candidates=("Time(s)",),
+):
     root = tmp_path / "source"
-    _write_session(root, "session_a")
-    _write_session(root, "session_b")
+    _write_session(root, "session_a", rois=rois, time_col=time_col)
+    _write_session(root, "session_b", rois=rois, time_col=time_col)
     snapshot = build_rwd_source_candidate_snapshot(str(root))
-    parser_contract = _parser()
+    parser_contract = _parser(time_column_candidates=time_column_candidates)
     parser_digest = compute_rwd_header_parsing_contract_digest(parser_contract)
     request = _base_request()
     source = _unchecked(
@@ -97,7 +108,24 @@ def _intent(tmp_path: Path):
         request.roi_scope,
         inventory_source_content_digest=snapshot.source_candidate_content_digest,
     )
-    request = _unchecked(request, source=source, parser=parser, roi_scope=roi)
+    acquisition_dataset = _unchecked(
+        request.acquisition_dataset,
+        rwd_time_col=time_col,
+        semantic_values=(
+            contracts.GuidedBackendTypedFieldValue(
+                field_name="rwd_time_col",
+                value_type="str",
+                value=time_col,
+            ),
+        ),
+    )
+    request = _unchecked(
+        request,
+        source=source,
+        parser=parser,
+        roi_scope=roi,
+        acquisition_dataset=acquisition_dataset,
+    )
     identity = contracts.compute_guided_backend_validation_request_identity(request)
     build = mapping.build_application_build_identity(
         distribution_name="photometry-pipeline",
@@ -241,6 +269,26 @@ def test_roi_preflight_accepts_all_candidates(tmp_path):
     assert preflight.compute_guided_roi_preflight_identity(result) == (
         result.canonical_preflight_identity
     )
+
+
+def test_roi_preflight_accepts_timestamp_time_column(tmp_path):
+    """4J16k18: a real RWD source whose fluorescence.csv header uses
+    "TimeStamp" (not "Time(s)") as its time column must not be refused by
+    ROI execution preflight with roi_preflight_refused / roi_discovery_failed.
+    Uses the actual production candidate constants (post-fix) so this test
+    would fail if the fix were reverted."""
+    intent, _ = _intent(
+        tmp_path,
+        time_col="TimeStamp",
+        time_column_candidates=GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES,
+    )
+    _, candidate = _candidate(intent)
+    assert candidate.accepted is True
+    request, result = _roi(intent, candidate)
+    assert result.accepted is True
+    assert result.blocking_issues == ()
+    assert result.actual_discovered_roi_ids == ("ROI0", "ROI1")
+    assert result.actual_included_roi_ids == ("ROI0",)
 
 
 @pytest.mark.parametrize("change", ["same_size_content", "changed_size"])
