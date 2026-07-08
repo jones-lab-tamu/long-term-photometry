@@ -8362,6 +8362,10 @@ class MainWindow(QMainWindow):
         source_key = self._guided_confirm_choice_key(
             LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE, None, roi
         )
+        from photometry_pipeline.guided_new_analysis_plan import (
+            compute_guided_local_preview_source_setup_signature,
+        )
+
         self._guided_strategy_choices[source_key] = {
             "strategy": strategy,
             "strategy_label": self._guided_confirm_strategy_label(strategy),
@@ -8380,6 +8384,11 @@ class MainWindow(QMainWindow):
             "production_analysis": False,
             "local_preview_evidence": reference,
             "setup_signature": self._guided_local_preview_setup_signature(),
+            "source_setup_signature": (
+                compute_guided_local_preview_source_setup_signature(
+                    self._build_guided_new_analysis_draft_plan()
+                )
+            ),
             "current": True,
             "stale": False,
             "completed_run_dir": "",

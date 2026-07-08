@@ -9,7 +9,11 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QWidget
 
 import photometry_pipeline.preview.correction_preview as correction_preview_module
-from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
+from gui.main_window import (
+    GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE,
+    GUIDED_WORKFLOW_STEPS,
+    MainWindow,
+)
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDatasetContractSnapshot,
@@ -384,6 +388,170 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
         window._guided_confirm_ack_cb.setChecked(True)
         assert window._guided_confirm_mark_btn.isEnabled()
         window._guided_confirm_mark_btn.click()
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    window._guided_feature_event_apply_btn.click()
+
+    output_parent = tmp_path / "planned_outputs"
+    output_parent.mkdir()
+    output_target = output_parent / "future_run_outputs"
+    window._guided_output_path_edit.setText(str(output_target))
+    window._guided_output_apply_btn.click()
+    return output_parent, output_target
+
+
+def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache_via_real_row_confirm(
+    window,
+    tmp_path,
+    monkeypatch,
+    *,
+    strategy_by_roi=None,
+):
+    """4J16k16: identical standard cache-free local-preview setup to
+    _configure_complete_guided_new_analysis_draft_without_diagnostic_cache,
+    but confirms each ROI's strategy through the per-ROI "Strategies by
+    included ROI" table row control (_confirm_guided_local_preview_row),
+    which is the ONLY strategy-confirmation control actually visible to a
+    real user on the standard cache-free path.
+
+    gui/main_window.py _on_guided_confirm_selection_changed hides
+    _guided_confirm_choice_group (which contains _guided_confirm_mark_btn,
+    used by the sibling helper above) whenever source_type ==
+    local_correction_preview, and shows
+    _guided_local_preview_confirmation_group (this row table) instead. A
+    real manual walkthrough can only ever click the row table's action
+    button, never _guided_confirm_mark_btn, on this path."""
+    window._guided_workflow_stepper.setCurrentRow(0)
+    window._guided_start_setup_btn.click()
+
+    input_dir = tmp_path / "raw_input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    window._guided_input_dir_edit.setText(str(input_dir))
+    window._guided_output_dir_edit.setText(str(output_dir))
+    window._mode_combo.setCurrentText("both")
+    idx = window._format_combo.findText("rwd")
+    window._format_combo.setCurrentIndex(idx)
+
+    rois = ("CH1", "CH2", "CH3")
+    header = "Time(s)," + ",".join(f"{roi}-410,{roi}-470" for roi in rois)
+    source_files = []
+    for index in range(2):
+        session_dir = input_dir / f"session-{index}"
+        session_dir.mkdir()
+        source_file = session_dir / "fluorescence.csv"
+        rows = [header]
+        rows.extend(
+            f"{row_index / 20.0:.2f}," + ",".join("1.0,2.0" for _ in rois)
+            for row_index in range(400)
+        )
+        source_file.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        source_files.append(source_file)
+    discovery = {
+        "resolved_format": "rwd",
+        "n_total_discovered": len(source_files),
+        "n_preview": len(source_files),
+        "sessions": [
+            {
+                "index": index,
+                "session_id": f"session-{index}",
+                "path": str(source_file),
+                "included_in_preview": True,
+            }
+            for index, source_file in enumerate(source_files)
+        ],
+        "rois": [{"roi_id": roi} for roi in rois],
+    }
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        lambda _fmt: {
+            "rwd_time_col": "Time(s)",
+            "uv_suffix": "-410",
+            "sig_suffix": "-470",
+        },
+    )
+    monkeypatch.setattr(
+        window,
+        "_infer_rwd_chunk_contract",
+        lambda path: {
+            "csv_path": path,
+            "fs_hz": 20.0,
+            "chunk_duration_sec": 600.0,
+            "time_col": "Time(s)",
+            "uv_suffix": "-410",
+            "sig_suffix": "-470",
+        },
+    )
+    time_sec = np.arange(2400, dtype=float) / 20.0
+    uv = 1.0 + 0.03 * np.sin(time_sec * 0.15)
+    sig = 1.25 * uv + 0.04 * np.sin(time_sec * 0.7)
+
+    def fake_load_chunk(path, input_format, _config, chunk_id):
+        return Chunk(
+            chunk_id=chunk_id,
+            source_file=path,
+            format=input_format,
+            time_sec=time_sec,
+            uv_raw=np.column_stack((uv, uv, uv)),
+            sig_raw=np.column_stack((sig, sig * 1.01, sig * 0.99)),
+            fs_hz=20.0,
+            channel_names=list(rois),
+            metadata={},
+        )
+
+    monkeypatch.setattr(correction_preview_module, "load_chunk", fake_load_chunk)
+
+    acquisition_idx = window._guided_acquisition_mode_combo.findData("intermittent")
+    if acquisition_idx >= 0:
+        window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_idx)
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.setText("120")
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    assert window._guided_diagnostic_cache_record is None
+
+    for roi in rois:
+        roi_idx = window._guided_preview_roi_combo.findData(roi)
+        assert roi_idx >= 0
+        window._guided_preview_roi_combo.setCurrentIndex(roi_idx)
+        assert window._guided_preview_generate_btn.isEnabled()
+        window._guided_preview_generate_btn.click()
+        result = window._guided_preview_last_result
+        assert result["status"] in {"success", "partial"}
+        assert result["source_type"] == "local_raw_segment"
+        assert window._guided_diagnostic_cache_record is None
+
+        # This is the real visibility state on the standard cache-free
+        # path: the technical mark-button panel is hidden, only the row
+        # table below is shown and clickable. isHidden() reflects the
+        # explicit setVisible() state set by
+        # _on_guided_confirm_selection_changed regardless of whether the
+        # top-level window itself has been shown (isVisible() would
+        # require window.show() first).
+        assert window._guided_confirm_choice_group.isHidden() is True
+        assert window._guided_local_preview_confirmation_group.isHidden() is False
+
+        strategy_text = "Global Linear Regression"
+        if strategy_by_roi and roi in strategy_by_roi:
+            strategy_text = strategy_by_roi[roi]
+        mode = GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE[strategy_text]
+
+        row = window._guided_local_preview_confirmation_rows[roi]
+        combo = row["strategy_combo"]
+        action_button = row["action_button"]
+        strategy_idx = combo.findData(mode)
+        assert strategy_idx >= 0
+        combo.setCurrentIndex(strategy_idx)
+        assert action_button.isEnabled() is True
+        action_button.click()
 
     window._guided_workflow_stepper.setCurrentRow(
         list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
@@ -1343,6 +1511,129 @@ def test_review_plan_local_preview_without_diagnostic_cache_navigates_to_run_and
     )
 
     assert window._guided_run_btn.isEnabled() is True
+
+
+@pytest.mark.parametrize(
+    "strategy_label",
+    (
+        "Robust Global Event-Reject Fit",
+        "Adaptive Event-Gated Fit",
+        "Global Linear Regression",
+    ),
+)
+def test_real_row_confirm_records_source_setup_signature_and_validates(
+    window, tmp_path, monkeypatch, strategy_label
+):
+    """4J16k16: reproduces and fixes a real manual-GUI-path blocker found by
+    Jeff during manual testing after 4J16k15: confirming a local-preview
+    correction strategy through the ACTUAL visible control on the standard
+    cache-free path -- the per-ROI "Strategies by included ROI" table row
+    (gui/main_window.py _confirm_guided_local_preview_row) -- used to omit
+    source_setup_signature entirely, so backend validation always rejected
+    it with local_preview_setup_signature_missing for every included ROI,
+    no matter how many times the preview was regenerated or the strategy
+    reconfirmed. Every prior automated test (including this file's own
+    _configure_complete_guided_new_analysis_draft_without_diagnostic_cache
+    helper) instead drove _guided_confirm_mark_btn, which is hidden by
+    gui/main_window.py _on_guided_confirm_selection_changed whenever
+    source_type == local_correction_preview (the standard path), so a real
+    user could never click it. This test drives the real, visible row
+    control end to end and proves Validate now accepts."""
+    strategy_by_roi = {roi: strategy_label for roi in ("CH1", "CH2", "CH3")}
+    _configure_complete_guided_new_analysis_draft_without_diagnostic_cache_via_real_row_confirm(
+        window,
+        tmp_path,
+        monkeypatch,
+        strategy_by_roi=strategy_by_roi,
+    )
+    _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.cache_root_path is None
+    assert plan.artifact_record_path is None
+    assert len(plan.per_roi_correction_strategy_choices) == 3
+    for choice in plan.per_roi_correction_strategy_choices:
+        assert choice.source_type == "local_correction_preview"
+        assert choice.source_setup_signature, (
+            f"ROI {choice.roi_id} confirmed via the real row control has no "
+            "source_setup_signature"
+        )
+    subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
+    assert subset.first_subset_executable is True, subset.blocking_issues
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    assert window._guided_review_go_to_run_btn.isEnabled() is True
+    window._guided_review_go_to_run_btn.click()
+    assert window._guided_workflow_stepper.currentRow() == (
+        list(GUIDED_WORKFLOW_STEPS).index("Run")
+    )
+    assert window._guided_backend_validate_btn.isEnabled() is True
+
+    # Validate itself (outcome.status) does not depend on build identity --
+    # that is only consulted afterward, for Run authorization, which is a
+    # separate concern (see 4J16k15) intentionally not touched here.
+    window._guided_backend_validate_btn.click()
+    outcome = window._guided_backend_validation_outcome
+    issue_codes = {issue.detail_code for issue in outcome.blocking_issues}
+    assert "local_preview_signature_missing" not in issue_codes
+    assert "local_preview_signature_mismatch" not in issue_codes
+    assert outcome.status == "validator_accepted", (outcome.status, issue_codes)
+
+
+def test_real_row_confirm_source_setup_drift_after_confirmation_blocks_validate(
+    window, tmp_path, monkeypatch
+):
+    """4J16k16 companion: proves the source/setup signature attached by the
+    real row-confirm control actually detects drift, not merely that it is
+    present. Confirm all included ROIs through the real row control, then
+    change session timing (a field the signature covers) without
+    regenerating/reconfirming, and prove Validate rejects the now-stale
+    evidence rather than silently accepting."""
+    strategy_by_roi = {
+        roi: "Robust Global Event-Reject Fit" for roi in ("CH1", "CH2", "CH3")
+    }
+    _configure_complete_guided_new_analysis_draft_without_diagnostic_cache_via_real_row_confirm(
+        window,
+        tmp_path,
+        monkeypatch,
+        strategy_by_roi=strategy_by_roi,
+    )
+    _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+
+    plan_before = window._build_guided_new_analysis_draft_plan()
+    subset_before = evaluate_guided_new_analysis_execution_subset_readiness(
+        plan_before
+    )
+    assert subset_before.first_subset_executable is True, (
+        subset_before.blocking_issues
+    )
+
+    window._guided_session_duration_edit.setText("180")
+
+    plan_after = window._build_guided_new_analysis_draft_plan()
+    assert plan_after.session_duration_sec == 180.0
+    subset_after = evaluate_guided_new_analysis_execution_subset_readiness(
+        plan_after
+    )
+    assert subset_after.first_subset_executable is False, (
+        subset_after.blocking_issues
+    )
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Run")
+    )
+    window._guided_backend_validate_btn.click()
+    outcome = window._guided_backend_validation_outcome
+    assert outcome.status != "validator_accepted"
+    issue_codes = {issue.detail_code for issue in outcome.blocking_issues}
+    assert issue_codes & {
+        "strategy_mark_stale",
+        "local_preview_signature_mismatch",
+        "local_preview_signature_missing",
+    }, issue_codes
+    assert window._guided_run_btn.isEnabled() is False
 
 
 def test_local_preview_source_setup_drift_after_confirmation_blocks_validate_and_run(
