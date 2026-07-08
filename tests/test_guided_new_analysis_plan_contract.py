@@ -651,7 +651,19 @@ def test_forbidden_strategy_is_reported():
 def test_plan_reports_execution_not_implemented():
     plan = GuidedNewAnalysisDraftPlan()
     issues = evaluate_new_analysis_plan_issues(plan)
-    assert any(iss.category == "execution_not_implemented" and iss.severity == "info" for iss in issues)
+    execution_issues = [
+        iss
+        for iss in issues
+        if iss.category == "execution_not_implemented" and iss.severity == "info"
+    ]
+    assert execution_issues
+    # Guided Run is implemented; the user-visible message must direct to the
+    # Run step instead of falsely claiming Final Run is not implemented.
+    assert execution_issues[0].message == (
+        "This draft plan does not run analysis by itself. "
+        "Use the Run step to validate and start Guided Run."
+    )
+    assert "not implemented" not in execution_issues[0].message
 
 
 def test_readiness_complete_plan_allows_future_handoff_but_not_execution():

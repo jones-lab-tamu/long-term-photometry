@@ -1383,7 +1383,7 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
     # 15. execution_not_implemented
     issues.append(GuidedPlanIssue(
         category="execution_not_implemented",
-        message="This draft plan is not executable yet. Final Run is not implemented in this stage.",
+        message="This draft plan does not run analysis by itself. Use the Run step to validate and start Guided Run.",
         severity="info"
     ))
 
@@ -2028,7 +2028,7 @@ def evaluate_guided_new_analysis_execution_subset_readiness(
     info: list[GuidedNewAnalysisExecutionSubsetIssue] = [
         _execution_subset_issue(
             "execution_not_implemented",
-            "Final Guided Run/RunSpec is not implemented in this stage.",
+            "This draft plan does not run analysis by itself. Use the Run step to validate and start Guided Run.",
             severity="info",
         )
     ]

@@ -136,6 +136,13 @@ def test_checklist_for_none_plan_is_blocked():
     assert items["source"].status == "not_configured"
     assert items["contract"].status == "fail"
     assert items["execution"].status == "blocked"
+    # Guided Run is implemented; the execution message must be scoped to
+    # this review-only draft plan, not claim Guided Run is unwired/planned.
+    assert items["execution"].message == (
+        "Guided Run does not run from this draft plan. "
+        "This draft plan is for review only."
+    )
+    assert "not wired" not in items["execution"].message
     assert checklist.execution_ready is False
 
 
@@ -803,7 +810,7 @@ def test_readiness_summary_empty_incomplete_plan():
     lines = guided_plan_readiness_summary_lines(plan)
     assert "Configured: source" in lines[0]
     assert "Missing: ROI correction strategies; feature/event profile; output destination" in lines[1]
-    assert "Blocked: execution intentionally unavailable until a later Guided Run/RunSpec stage" in lines[2]
+    assert "Blocked: execution intentionally unavailable for this completed-run draft plan" in lines[2]
     assert "Files written: none" in lines[3]
 
 
@@ -911,7 +918,7 @@ def test_readiness_summary_fully_configured_plan():
     lines = guided_plan_readiness_summary_lines(plan)
     assert "Configured: source; 1 ROI correction strategy; feature/event profile; output destination" in lines[0]
     assert "Missing: none" in lines[1]
-    assert "Blocked: execution intentionally unavailable until a later Guided Run/RunSpec stage" in lines[2]
+    assert "Blocked: execution intentionally unavailable for this completed-run draft plan" in lines[2]
 
 
 def test_readiness_summary_contract_errors():

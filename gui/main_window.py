@@ -4308,7 +4308,7 @@ class MainWindow(QMainWindow):
         status_layout = QVBoxLayout(status_group)
         status_layout.setContentsMargins(10, 10, 10, 10)
         status_layout.setSpacing(6)
-        self._guided_diagnostics_status_label = QLabel("Diagnostics: not generated / not wired yet")
+        self._guided_diagnostics_status_label = QLabel("Diagnostics: not generated; no completed run loaded")
         self._guided_diagnostics_status_label.setObjectName("guidedDiagnosticsStatusLabel")
         self._guided_diagnostics_status_label.setProperty("guidedStatusPill", True)
         self._guided_diagnostics_status_label.setWordWrap(True)
@@ -7111,7 +7111,7 @@ class MainWindow(QMainWindow):
             "stale": "Diagnostics: stale",
             "unavailable": "Diagnostics: unavailable; loaded completed run has no recognized diagnostic artifacts",
             "available": "Diagnostics: available from loaded completed-run artifacts",
-        }.get(getattr(self, "_guided_diagnostics_status", "not_generated"), "Diagnostics: not generated / not wired yet")
+        }.get(getattr(self, "_guided_diagnostics_status", "not_generated"), "Diagnostics: not generated; no completed run loaded")
         self._guided_diagnostics_status_label.setText(status_text)
         if hasattr(self, "_guided_diagnostics_context_label"):
             state = self._guided_setup_summary_state()

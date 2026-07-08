@@ -590,7 +590,7 @@ def evaluate_guided_plan_checklist(
                     "execution",
                     "Execution readiness",
                     "blocked",
-                    "Guided Run is not wired yet. This draft plan is for review only.",
+                    "Guided Run does not run from this draft plan. This draft plan is for review only.",
                 ),
             ]
         )
@@ -744,7 +744,7 @@ def evaluate_guided_plan_checklist(
             )
         )
 
-    execution_message = "Guided Run is not wired yet. This draft plan is for review only."
+    execution_message = "Guided Run does not run from this draft plan. This draft plan is for review only."
     items.append(PlanChecklistItem("execution", "Execution readiness", "blocked", execution_message))
     blocking_messages.append(execution_message)
 
@@ -856,7 +856,7 @@ def summarize_guided_plan_readiness(
     checklist = evaluate_guided_plan_checklist(plan, contract_errors)
     configured: list[str] = []
     missing: list[str] = []
-    blocked = ["execution intentionally unavailable until a later Guided Run/RunSpec stage"]
+    blocked = ["execution intentionally unavailable for this completed-run draft plan"]
     warnings: list[str] = []
 
     if plan is None:
@@ -972,7 +972,7 @@ def guided_plan_readiness_summary_lines(
         lines.append(f"Problems: {'; '.join(problems)}")
 
     lines.extend([
-        "Blocked: execution intentionally unavailable until a later Guided Run/RunSpec stage",
+        "Blocked: execution intentionally unavailable for this completed-run draft plan",
         "Files written: none"
     ])
     return lines
