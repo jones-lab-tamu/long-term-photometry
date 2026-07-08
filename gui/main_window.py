@@ -10954,17 +10954,41 @@ class MainWindow(QMainWindow):
                     "Guided Run did not provide a completed-run candidate."
                 )
             return
-        accepted, _reason = self._is_openable_completed_results_dir(candidate)
-        if not accepted or not self._open_completed_results_dir(candidate):
+        # 4J16k20: is_successful_completed_run_dir checks only run
+        # completion metadata (run_report.json/status.json/MANIFEST.json),
+        # independent of whether any region has displayable outputs. A
+        # genuinely-completed run must still be openable for review even
+        # if it happens to have no displayable regions -- that is a
+        # distinct, later condition handled below, not a reason to reject
+        # navigation to Review outright.
+        successful, _success_reason = is_successful_completed_run_dir(candidate)
+        if not successful:
             if label is not None:
                 label.setText(
                     "The completed run could not be loaded for review. "
                     "The output folder may be incomplete."
                 )
             return
+        # Preserve Full Control's existing loader/state exactly as before
+        # whenever it also accepts this run (it always will when regions
+        # are present, since both use the same region-discovery logic).
+        accepted, _reason = self._is_openable_completed_results_dir(candidate)
+        if accepted:
+            self._open_completed_results_dir(candidate)
+        else:
+            self._current_run_dir = candidate
         self._set_guided_workflow_mode("open_results")
         review_index = self._guided_step_index("Review")
         self._guided_workflow_stepper.setCurrentRow(review_index)
+        guided_viewer = getattr(self, "_guided_report_viewer", None)
+        if guided_viewer is not None:
+            if not guided_viewer.load_report(candidate):
+                technical_reason = guided_viewer._status_label.text()
+                guided_viewer._status_label.setText(
+                    "Guided Run finished and the run folder loaded, but no "
+                    f"reviewable outputs were found in:\n{candidate}\n\n"
+                    f"Reason: {technical_reason}"
+                )
         if label is not None:
             label.setText("Completed run loaded for review.")
 
@@ -14763,6 +14787,13 @@ class MainWindow(QMainWindow):
         )
 
     def _build_guided_review_step(self) -> QWidget:
+        # 4J16k20: a separate RunReportViewer instance, independent of Full
+        # Control's self._report_viewer, so a completed Guided Run's
+        # results are visibly shown inside the Guided Workflow tab itself
+        # instead of only inside the unrelated Full Control tab. This is a
+        # second display widget instance, not shared mutable widget state.
+        self._guided_report_viewer = RunReportViewer()
+        self._guided_report_viewer.setObjectName("guidedReviewReportViewer")
         return self._build_guided_step_scroll(
             "guidedStepReview",
             "Review",
@@ -14770,6 +14801,7 @@ class MainWindow(QMainWindow):
                 "Review summarizes completed-run outputs when results are loaded.",
                 "Additional downstream reanalysis and applied-dF/F routing remain future guided stages.",
             ],
+            self._guided_report_viewer,
         )
 
     def _build_guided_open_results_unavailable_panel(

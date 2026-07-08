@@ -1093,6 +1093,30 @@ def test_guided_feature_event_profile_apply_valid_run_level_profile(window, tmp_
     assert "Execution ready: false" in checklist
 
 
+def test_full_control_report_viewer_unaffected_by_guided_review_viewer(
+    window, tmp_path
+):
+    """4J16k20: Full Control's own completed-run loading path
+    (_open_completed_results_dir -> self._report_viewer) must keep working
+    exactly as before the Guided-native review viewer was added, and the
+    two RunReportViewer instances must not share mutable state -- loading
+    a run through Full Control's own entry point must not populate the
+    separate Guided Review viewer."""
+    run_dir = _make_preview_completed_run(tmp_path / "full_control_run")
+
+    loaded = window._open_completed_results_dir(str(run_dir))
+
+    assert loaded is True
+    assert window._report_viewer._region_paths
+    assert set(window._report_viewer._region_paths) == {"CH1"}
+    assert window._report_viewer._region_combo.count() == 1
+    # The Guided Review viewer is a separate instance and must remain in
+    # its untouched idle state -- Full Control loading a run must not
+    # leak into it.
+    assert window._guided_report_viewer._region_paths == {}
+    assert window._guided_report_viewer._current_run_dir == ""
+
+
 def test_guided_feature_event_profiles_are_scoped_to_completed_run(window, tmp_path, monkeypatch):
     run_a = _make_preview_completed_run(tmp_path / "feature_run_a_parent")
     run_b = _make_preview_completed_run(tmp_path / "feature_run_b_parent")

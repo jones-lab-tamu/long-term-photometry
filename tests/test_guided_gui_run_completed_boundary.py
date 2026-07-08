@@ -15,7 +15,10 @@ import photometry_pipeline.guided_startup_claim as claim
 import photometry_pipeline.guided_startup_orchestration as orchestration
 import tools.run_full_pipeline_deliverables as wrapper
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
-from gui.run_report_parser import classify_completed_run_candidate
+from gui.run_report_parser import (
+    classify_completed_run_candidate,
+    is_successful_completed_run_dir,
+)
 from tests.test_guided_gui_run_execution_wiring import (
     _pump_until,
     _run_production_validation_update,
@@ -263,6 +266,70 @@ def test_gui_click_produces_loader_accepted_completed_candidate(
         "The output folder may be incomplete."
     )
     assert result.completed_run_claim is False
+
+
+def test_guided_review_shows_message_when_run_succeeded_but_no_regions(
+    window, allocation_case, monkeypatch, qapp
+):
+    """4J16k20 negative case: a genuinely successful run (real
+    run_report.json/status.json success metadata intact) that happens to
+    have zero displayable regions must still navigate to Review -- it is
+    not garbage/incomplete, it just has nothing to show -- and the Guided
+    Review page must say so clearly, with the run folder path and a
+    concise technical reason, rather than appearing blank or being
+    rejected identically to a non-existent/failed run."""
+    request, _plan = allocation_case
+    _run_production_validation_update(window, request, monkeypatch)
+    runner, _calls = _completion_runner(monkeypatch)
+    window._guided_backend_execution_runner = runner
+
+    window._guided_run_btn.click()
+    _pump_until(
+        qapp,
+        lambda: window._guided_run_execution_thread is None,
+        timeout_s=60.0,
+    )
+
+    result = window._guided_backend_execution_result
+    run_dir = Path(request.planned_allocated_run_dir)
+    assert result.status == "wrapper_completed_needs_review_loading"
+    assert classify_completed_run_candidate(str(run_dir))[0] is True
+
+    # Remove only the displayable region output. run_report.json,
+    # status.json, and MANIFEST.json are left untouched, so the run still
+    # genuinely reports successful completion.
+    shutil.rmtree(run_dir / "Region0")
+    assert is_successful_completed_run_dir(str(run_dir))[0] is True
+    assert classify_completed_run_candidate(str(run_dir))[0] is False
+
+    window._guided_load_completed_run_for_review_btn.click()
+
+    # Navigation must proceed -- this is a real completed run, not a
+    # rejected candidate.
+    assert window._guided_workflow_mode == "open_results"
+    assert window._guided_workflow_stepper.currentRow() == (
+        window._guided_step_index("Review")
+    )
+    assert window._workflow_mode_tabs.currentWidget() is (
+        window._guided_workflow_tab
+    )
+    assert window._current_run_dir == str(run_dir)
+    assert window._guided_run_readiness_label.text() == (
+        "Completed run loaded for review."
+    )
+
+    # The Guided Review page itself must clearly explain there is nothing
+    # to show, including the run folder path and a concise reason -- not
+    # appear blank.
+    guided_viewer = window._guided_report_viewer
+    assert not guided_viewer._region_paths
+    details = guided_viewer._status_label.text()
+    assert str(run_dir) in details
+    assert "no reviewable outputs" in details.lower()
+    assert (
+        "no region deliverables" in details.lower()
+        or "region deliverables" in details.lower()
+    )
 
 
 def _configure_real_analysis_duration_new_analysis_draft(
@@ -522,6 +589,24 @@ def test_real_gui_path_reaches_loadable_completed_run_and_reviews_it(
         window._guided_step_index("Review")
     )
     assert window._current_run_dir == str(run_dir)
+
+    # 4J16k20: the user must stay inside the Guided Workflow tab and
+    # actually see the completed run's real CH1/CH2/CH3 outputs on the
+    # Guided Review page itself, not merely navigate to a step index while
+    # the populated results sit invisibly inside the separate Full
+    # Control tab.
+    assert window._workflow_mode_tabs.currentWidget() is (
+        window._guided_workflow_tab
+    )
+    guided_viewer = window._guided_report_viewer
+    assert guided_viewer._region_paths
+    assert set(guided_viewer._region_paths) == {"CH1", "CH2", "CH3"}
+    assert guided_viewer._region_combo.count() == 3
+    assert any(
+        images
+        for tabs in guided_viewer._region_tab_images.values()
+        for images in tabs.values()
+    )
 
     # A subsequent Run press cannot silently reuse/overwrite the just
     # completed run: the retained startup transaction was consumed, and
