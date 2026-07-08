@@ -412,11 +412,17 @@ def _configure_real_analysis_duration_new_analysis_draft(
         "_infer_rwd_chunk_contract",
         lambda path: {
             "csv_path": path,
-            "fs_hz": fs_hz,
-            "chunk_duration_sec": float(session_duration_sec),
             "time_col": "Time(s)",
             "uv_suffix": "-410",
             "sig_suffix": "-470",
+            "timestamp_unit": "seconds",
+            "fs_hz": fs_hz,
+            "median_dt": 1.0 / fs_hz,
+            "sample_count": n_rows,
+            "chunk_duration_sec": float(session_duration_sec),
+            "timestamp_duration_sec": float(session_duration_sec),
+            "metadata_effective_fs_hz": None,
+            "metadata_continuous_time_sec": None,
         },
     )
     time_sec = np.arange(n_rows, dtype=float) / fs_hz

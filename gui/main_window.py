@@ -3167,6 +3167,17 @@ class MainWindow(QMainWindow):
         """Return one semantic Guided step index."""
         return GUIDED_WORKFLOW_STEPS.index(step_name)
 
+    def _guided_current_step_name(self) -> str | None:
+        """Return the semantic name of the currently selected Guided step,
+        independent of Qt widget visibility (works even before .show())."""
+        stepper = getattr(self, "_guided_workflow_stepper", None)
+        if stepper is None:
+            return None
+        row = stepper.currentRow()
+        if 0 <= row < len(GUIDED_WORKFLOW_STEPS):
+            return GUIDED_WORKFLOW_STEPS[row]
+        return None
+
     def _sync_line_edit_value(self, target: QLineEdit, text: str) -> None:
         if getattr(self, "_guided_setup_syncing", False):
             return
@@ -9626,7 +9637,17 @@ class MainWindow(QMainWindow):
             run_preview_group = getattr(self, "_guided_new_analysis_run_preview_group", None)
             if run_preview_group is not None:
                 run_preview_group.setVisible(True)
-            self._refresh_guided_dataset_contract_panel()
+            # The dataset-contract panel lives on the Draft plan step's
+            # advanced/technical disclosure. Refreshing it can trigger a
+            # real RWD-folder scan (one open+parse per discovered chunk
+            # file), which is expensive for a large real dataset. This
+            # preview refresh runs on every workflow-mode change (e.g.
+            # "Set up new analysis" -> Select data), so only pay that cost
+            # here when the user could actually be looking at the panel;
+            # explicit Apply/Clear actions on it always refresh regardless
+            # of step (4J16k23).
+            if self._guided_current_step_name() == "Draft plan":
+                self._refresh_guided_dataset_contract_panel()
             return
 
         run_preview_group = getattr(self, "_guided_new_analysis_run_preview_group", None)

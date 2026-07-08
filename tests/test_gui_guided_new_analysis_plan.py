@@ -325,11 +325,17 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
         "_infer_rwd_chunk_contract",
         lambda path: {
             "csv_path": path,
-            "fs_hz": 20.0,
-            "chunk_duration_sec": 600.0,
             "time_col": "Time(s)",
             "uv_suffix": "-410",
             "sig_suffix": "-470",
+            "timestamp_unit": "seconds",
+            "fs_hz": 20.0,
+            "median_dt": 0.05,
+            "sample_count": 12000,
+            "chunk_duration_sec": 600.0,
+            "timestamp_duration_sec": 600.0,
+            "metadata_effective_fs_hz": None,
+            "metadata_continuous_time_sec": None,
         },
     )
     time_sec = np.arange(2400, dtype=float) / 20.0
@@ -482,11 +488,17 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache_via_r
         "_infer_rwd_chunk_contract",
         lambda path: {
             "csv_path": path,
-            "fs_hz": 20.0,
-            "chunk_duration_sec": 600.0,
             "time_col": time_col,
             "uv_suffix": "-410",
             "sig_suffix": "-470",
+            "timestamp_unit": "seconds",
+            "fs_hz": 20.0,
+            "median_dt": 0.05,
+            "sample_count": 12000,
+            "chunk_duration_sec": 600.0,
+            "timestamp_duration_sec": 600.0,
+            "metadata_effective_fs_hz": None,
+            "metadata_continuous_time_sec": None,
         },
     )
     time_sec = np.arange(2400, dtype=float) / 20.0
