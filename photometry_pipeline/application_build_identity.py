@@ -33,6 +33,14 @@ APPLICATION_BUILD_IDENTITY_PROVIDER_REFUSAL_CATEGORIES = (
     "build_identity_internal_error",
 )
 
+# Used as `distribution_version` when no explicit override was given and no
+# installed package metadata exists for the distribution (a source checkout
+# launched without a prior `pip install`). Visibly not a real release
+# version (PEP 440 local version segment), so it can never be confused with
+# a packaged release; the real git revision and source-tree state are still
+# resolved normally below and are what actually identifies this build.
+SOURCE_LAUNCH_VERSION_SENTINEL = "0+source"
+
 
 @dataclass(frozen=True)
 class ApplicationBuildIdentityProviderIssue:
@@ -181,8 +189,16 @@ def resolve_application_build_identity(
             try:
                 version = importlib.metadata.version(distribution_name)
             except importlib.metadata.PackageNotFoundError:
-                pass
-        
+                # No installed package metadata is available -- this is a
+                # source checkout launched without a prior `pip install`,
+                # not a broken or missing installation. That is a real,
+                # distinct, legitimate way to run the application, so fall
+                # through into the git/source-identity resolution below
+                # using an honest source-launch sentinel instead of
+                # refusing outright. The sentinel never overrides a version
+                # the caller actually supplied.
+                version = SOURCE_LAUNCH_VERSION_SENTINEL
+
         if not version:
             return _unresolved(
                 "project_version_unavailable",

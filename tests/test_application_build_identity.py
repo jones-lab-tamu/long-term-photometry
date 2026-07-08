@@ -7,9 +7,12 @@ from pathlib import Path
 import subprocess
 import pytest
 
+import importlib.metadata
+
 from photometry_pipeline.application_build_identity import (
     resolve_application_build_identity,
     ApplicationBuildIdentityProviderResult,
+    SOURCE_LAUNCH_VERSION_SENTINEL,
     _check_git_available,
 )
 
@@ -378,3 +381,128 @@ def test_identity_sensitivity(git_repo: Path):
         allow_dirty_content_bound=True,
     )
     assert res_dirty_1.build_identity.canonical_identity != res_dirty_2.build_identity.canonical_identity
+
+
+def _make_package_not_found_version(target_name: str):
+    """A stand-in for importlib.metadata.version that raises
+    PackageNotFoundError only for `target_name`, matching a real machine
+    where that one distribution has no installed metadata (a source
+    checkout with no pyproject.toml/setup.py and no prior `pip install`),
+    without disturbing lookups for any other distribution."""
+    original = importlib.metadata.version
+
+    def fake_version(name, *args, **kwargs):
+        if name == target_name:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return original(name, *args, **kwargs)
+
+    return fake_version
+
+
+# 13. Source launch (no installed package metadata, no explicit override)
+# resolves a real git identity using the source-launch sentinel version.
+def test_source_launch_without_package_metadata_resolves_git_identity(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+):
+    commit_sha = commit_file(git_repo, "file.txt", "initial content")
+    monkeypatch.setattr(
+        importlib.metadata,
+        "version",
+        _make_package_not_found_version("photometry-pipeline"),
+    )
+
+    result = resolve_application_build_identity(project_root=git_repo)
+
+    assert result.status == "resolved"
+    assert result.build_identity is not None
+    assert result.build_identity.distribution_version == (
+        SOURCE_LAUNCH_VERSION_SENTINEL
+    )
+    assert result.build_identity.source_revision_kind == "git"
+    assert result.build_identity.source_revision == commit_sha
+    assert result.build_identity.source_tree_state == "clean"
+    assert len(result.build_identity.canonical_identity) == 64
+
+
+# 14. Source launch with a dirty tree still resolves, with the real dirty
+# state and content digest computed exactly as an installed launch would.
+def test_source_launch_without_package_metadata_resolves_dirty_git_identity(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+):
+    commit_file(git_repo, "file.txt", "initial content")
+    (git_repo / "file.txt").write_text("modified content", encoding="utf-8")
+    monkeypatch.setattr(
+        importlib.metadata,
+        "version",
+        _make_package_not_found_version("photometry-pipeline"),
+    )
+
+    result = resolve_application_build_identity(
+        project_root=git_repo,
+        allow_dirty_content_bound=True,
+    )
+
+    assert result.status == "resolved"
+    assert result.build_identity is not None
+    assert result.build_identity.distribution_version == (
+        SOURCE_LAUNCH_VERSION_SENTINEL
+    )
+    assert result.build_identity.source_revision_kind == "git"
+    assert result.build_identity.source_tree_state == "dirty_content_bound"
+    assert result.build_identity.source_tree_digest is not None
+
+
+# 15. An explicitly supplied distribution_version is completely unaffected
+# by missing package metadata: importlib.metadata.version must not even be
+# consulted, and existing explicit-version behavior is unchanged.
+def test_explicit_distribution_version_bypasses_metadata_lookup_entirely(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+):
+    commit_sha = commit_file(git_repo, "file.txt", "initial content")
+
+    def fail_if_called(name, *args, **kwargs):
+        raise AssertionError(
+            "importlib.metadata.version must not be called when "
+            "distribution_version is explicitly supplied"
+        )
+
+    monkeypatch.setattr(importlib.metadata, "version", fail_if_called)
+
+    result = resolve_application_build_identity(
+        project_root=git_repo,
+        distribution_version="1.0.0",
+    )
+
+    assert result.status == "resolved"
+    assert result.build_identity is not None
+    assert result.build_identity.distribution_version == "1.0.0"
+    assert result.build_identity.source_revision == commit_sha
+
+
+# 16. A source launch with no installed package metadata AND no git
+# identity available (and no packaged-artifact fallback) still refuses,
+# exactly as before -- the sentinel only ever substitutes for the missing
+# *version string*; it never fabricates a source/git identity that
+# genuinely cannot be resolved.
+def test_source_launch_without_package_metadata_and_without_git_still_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    non_git_dir = tmp_path / "nongit"
+    non_git_dir.mkdir()
+    monkeypatch.setattr(
+        importlib.metadata,
+        "version",
+        _make_package_not_found_version("photometry-pipeline"),
+    )
+
+    result = resolve_application_build_identity(
+        project_root=non_git_dir,
+        packaged_artifact_digest=None,
+    )
+
+    assert result.status == "unresolved"
+    assert result.build_identity is None
+    assert result.blocking_issues[0].category in (
+        "repository_root_not_found",
+        "git_unavailable",
+    )

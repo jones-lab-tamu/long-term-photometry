@@ -1582,6 +1582,80 @@ def test_real_row_confirm_records_source_setup_signature_and_validates(
     assert outcome.status == "validator_accepted", (outcome.status, issue_codes)
 
 
+def test_real_validate_reaches_authorization_and_enables_run_in_source_launch_environment(
+    window, tmp_path, monkeypatch
+):
+    """4J16k17: proves the real source-launch build-identity fallback closes
+    the gap between accepted backend validation and Guided Run availability.
+
+    No build identity is mocked here -- unlike every other end-to-end test
+    in this file, which monkeypatches
+    guided_execution_request_builder.resolve_application_build_identity
+    entirely. Instead, only importlib.metadata.version is forced to raise
+    PackageNotFoundError for "photometry-pipeline" (matching this repo's
+    actual, real state: no pyproject.toml/setup.py and no installed
+    distribution metadata anywhere), so the real, unmocked
+    resolve_application_build_identity() must fall through to its
+    git-based source-launch fallback (4J16k17) against the real repository
+    to produce a usable build identity, and the real authorize_guided_run()
+    must accept it, exactly as a genuine `python -m gui.app` source launch
+    does."""
+    import importlib.metadata as importlib_metadata
+    from photometry_pipeline.guided_run_authorization import (
+        GuidedRunAuthorizationResult,
+    )
+
+    original_version = importlib_metadata.version
+
+    def fake_version(name, *args, **kwargs):
+        if name == "photometry-pipeline":
+            raise importlib_metadata.PackageNotFoundError(name)
+        return original_version(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib_metadata, "version", fake_version)
+
+    strategy_by_roi = {
+        roi: "Robust Global Event-Reject Fit" for roi in ("CH1", "CH2", "CH3")
+    }
+    _configure_complete_guided_new_analysis_draft_without_diagnostic_cache_via_real_row_confirm(
+        window,
+        tmp_path,
+        monkeypatch,
+        strategy_by_roi=strategy_by_roi,
+    )
+    _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    window._guided_review_go_to_run_btn.click()
+    assert window._guided_workflow_stepper.currentRow() == (
+        list(GUIDED_WORKFLOW_STEPS).index("Run")
+    )
+    assert window._guided_backend_validate_btn.isEnabled() is True
+
+    # Real click: real (unmocked) resolve_application_build_identity,
+    # real (unmocked) authorize_guided_run, against the real repository.
+    window._guided_backend_validate_btn.click()
+
+    outcome = window._guided_backend_validation_outcome
+    assert outcome.status == "validator_accepted"
+
+    authorization_result = window._guided_run_authorization_result
+    assert isinstance(authorization_result, GuidedRunAuthorizationResult)
+    assert authorization_result.status == "authorized", (
+        authorization_result.blocking_issues
+    )
+    assert authorization_result.authorized is True
+    assert authorization_result.run_authorization is True
+
+    assert window._guided_run_readiness.status == "ready_hidden"
+    assert window._guided_run_readiness_label.text() == (
+        "Guided Run is ready to start."
+    )
+    assert window._guided_run_btn.isEnabled() is True
+
+
 def test_real_row_confirm_source_setup_drift_after_confirmation_blocks_validate(
     window, tmp_path, monkeypatch
 ):
