@@ -1972,7 +1972,14 @@ def main():
                           '--config', args.config,
                           '--mode', 'phasic',
                           '--format', analysis_force_format,
-                          '--recursive', '--overwrite']
+                          '--recursive']
+            # analyze_photometry.py rejects --overwrite together with
+            # --guided-candidate-manifest (its Guided execution state must
+            # match the caller's already-enforced no-overwrite contract).
+            # phasic_out is a freshly allocated subdirectory of the Guided
+            # run directory in that case, so --overwrite is never needed.
+            if not getattr(args, "guided_candidate_manifest", None):
+                cmd_phasic.append('--overwrite')
             if args.include_rois: cmd_phasic.extend(['--include-rois', args.include_rois])
             if args.exclude_rois: cmd_phasic.extend(['--exclude-rois', args.exclude_rois])
             if effective_traces_only: cmd_phasic.append('--traces-only')

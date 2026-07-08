@@ -281,6 +281,50 @@ def test_command_plan_is_future_internal_phasic_full_handoff(startup_request):
     assert "both" not in command.argv
 
 
+def test_command_plan_sessions_per_hour_sourced_from_production_intent(
+    startup_request,
+):
+    """4J16k12: the wrapper's own --sessions-per-hour must be threaded from
+    the already-validated Guided production intent
+    (intent.acquisition.sessions_per_hour), not omitted, hardcoded, or
+    inferred from fixture-specific state. Without this, the real backend
+    wrapper crashes post-analysis with "Cannot infer session stride
+    (duty-cycled acquisition) without sessions_per_hour" for every
+    intermittent Guided run, since neither the wrapper's own CLI default
+    nor its config-YAML fallback (Config has no sessions_per_hour field)
+    can supply it."""
+    intent_sessions_per_hour = (
+        startup_request.authorization_result.production_intent.acquisition.sessions_per_hour
+    )
+    assert intent_sessions_per_hour == 6
+
+    command = startup.build_guided_startup_command_plan(startup_request)
+    assert "--sessions-per-hour" in command.argv
+    assert command.argv[command.argv.index("--sessions-per-hour") + 1] == "6"
+
+    # Prove the value tracks the intent rather than being hardcoded: a
+    # request whose intent carries a different sessions_per_hour must
+    # produce a correspondingly different argv value.
+    changed_auth = replace(
+        startup_request.authorization_result,
+        production_intent=replace(
+            startup_request.authorization_result.production_intent,
+            acquisition=replace(
+                startup_request.authorization_result.production_intent.acquisition,
+                sessions_per_hour=20,
+            ),
+        ),
+    )
+    changed_request = replace(
+        startup_request, authorization_result=changed_auth
+    )
+    changed_command = startup.build_guided_startup_command_plan(changed_request)
+    assert (
+        changed_command.argv[changed_command.argv.index("--sessions-per-hour") + 1]
+        == "20"
+    )
+
+
 def test_command_identity_changes_with_manifest_path(startup_request):
     first = startup.build_guided_startup_command_plan(startup_request)
     second = startup.build_guided_startup_command_plan(

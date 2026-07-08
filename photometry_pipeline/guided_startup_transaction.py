@@ -289,6 +289,9 @@ def build_guided_startup_command_plan(
         run_dir, GUIDED_CANDIDATE_MANIFEST_FILENAME
     )
     wrapper = request.wrapper_entrypoint
+    sessions_per_hour = (
+        request.authorization_result.production_intent.acquisition.sessions_per_hour
+    )
     argv = (
         wrapper.python_executable,
         wrapper.entrypoint_value,
@@ -304,6 +307,8 @@ def build_guided_startup_command_plan(
         "phasic",
         "--run-type",
         "full",
+        "--sessions-per-hour",
+        str(sessions_per_hour),
         "--guided-candidate-manifest",
         manifest_path,
         "--guided-preallocated-run-dir",

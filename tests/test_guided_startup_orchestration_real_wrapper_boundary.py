@@ -196,6 +196,135 @@ def test_real_wrapper_replay_after_claim_is_refused(
     assert classify_completed_run_candidate(str(run_dir))[0] is False
 
 
+class _StopAfterPhasicCommandCapture(RuntimeError):
+    pass
+
+
+def _real_wrapper_runner_capture_phasic_cmd(monkeypatch):
+    """Run the real wrapper far enough to actually construct cmd_phasic (the
+    real argv it would hand to analyze_photometry.py) and capture it, then
+    stop before any subprocess is actually spawned. Unlike
+    _real_wrapper_runner (which forbids run_cmd entirely to stop at the
+    initial-status boundary), this lets validate/config/manifest
+    materialization run for real and only intercepts at the analysis
+    subprocess call itself."""
+    captured = {}
+
+    def runner(command):
+        monkeypatch.setattr(wrapper.sys, "argv", [command[1], *command[2:]])
+        monkeypatch.setattr(
+            wrapper, "verify_guided_manifest_before_output", lambda _args: object()
+        )
+
+        def capture_and_stop(cmd, roi_label=None):
+            captured["cmd_phasic"] = cmd
+            raise _StopAfterPhasicCommandCapture()
+
+        monkeypatch.setattr(wrapper, "run_cmd", capture_and_stop)
+        try:
+            wrapper.main()
+        except _StopAfterPhasicCommandCapture:
+            pass
+        except SystemExit:
+            # The wrapper's own broad exception handling catches the stop
+            # signal (it cannot distinguish it from a real failure),
+            # finalizes an error status, and exits -- cmd_phasic was
+            # already captured above before that unwinding began.
+            pass
+        if "cmd_phasic" not in captured:
+            raise AssertionError("real wrapper never reached run_cmd(cmd_phasic)")
+        return orchestration.GuidedWrapperProcessResult(
+            returncode=None,
+            stdout="stopped after phasic command capture",
+            stderr="",
+            command=command,
+            started=True,
+            completed=False,
+        )
+
+    return runner, captured
+
+
+def test_real_wrapper_phasic_command_excludes_overwrite_and_includes_sessions_per_hour(
+    allocation_case, monkeypatch
+):
+    """4J16k12: proves, against the real (unmocked) wrapper argv-construction
+    logic in tools/run_full_pipeline_deliverables.py, that the actual
+    cmd_phasic handed to analyze_photometry.py for a Guided manifest run:
+
+    1. Does not include --overwrite (analyze_photometry.py explicitly
+       refuses --overwrite together with --guided-candidate-manifest with
+       "Error: unsupported internal Guided manifest execution state.",
+       which made every real Guided run fail before analysis started).
+    2. Does include --sessions-per-hour with the value threaded from the
+       Guided production intent via the wrapper's own top-level
+       --sessions-per-hour flag (guided_startup_transaction.py), proving
+       the wrapper's internal resolved_sessions_per_hour is no longer None.
+    """
+    request, _plan = allocation_case
+    assert (
+        request.authorization_result.production_intent.acquisition.sessions_per_hour
+        == 6
+    )
+    runner, captured = _real_wrapper_runner_capture_phasic_cmd(monkeypatch)
+    result = orchestration.run_guided_startup_to_wrapper(
+        request=request, subprocess_runner=runner
+    )
+    assert result.status == "wrapper_started"
+    cmd_phasic = captured["cmd_phasic"]
+    assert "--overwrite" not in cmd_phasic
+    assert "--guided-candidate-manifest" in cmd_phasic
+    assert "--sessions-per-hour" in cmd_phasic
+    assert (
+        cmd_phasic[cmd_phasic.index("--sessions-per-hour") + 1] == "6"
+    )
+
+
+def test_non_guided_phasic_command_still_includes_overwrite(tmp_path, monkeypatch):
+    """4J16k12: the --overwrite fix must be scoped exactly to the Guided-
+    manifest case. A plain, non-Guided CLI invocation (no
+    --guided-candidate-manifest at all, matching every scenario in
+    tests/test_full_pipeline_deliverables.py and any manual/non-Guided use
+    of this wrapper) must still receive --overwrite in cmd_phasic, exactly
+    as before this patch. This is a fast, direct check of the real
+    (unmocked) argv-construction logic -- no synthetic dataset or Guided
+    orchestration layer involved -- to avoid needing the very slow, heavy
+    real-dataset fixtures used by the legacy full-pipeline suite."""
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    out_dir = tmp_path / "out"
+    config_path = Path(__file__).resolve().parent / "qc_universal_config.yaml"
+
+    captured = {}
+
+    def capture_and_stop(cmd, roi_label=None):
+        captured["cmd_phasic"] = cmd
+        raise _StopAfterPhasicCommandCapture()
+
+    monkeypatch.setattr(wrapper, "run_cmd", capture_and_stop)
+    monkeypatch.setattr(
+        wrapper.sys,
+        "argv",
+        [
+            "run_full_pipeline_deliverables.py",
+            "--input", str(input_dir),
+            "--out", str(out_dir),
+            "--config", str(config_path),
+            "--format", "rwd",
+            "--overwrite",
+            "--sessions-per-hour", "2",
+        ],
+    )
+    try:
+        wrapper.main()
+    except (_StopAfterPhasicCommandCapture, SystemExit):
+        pass
+    assert "cmd_phasic" in captured, "real wrapper never reached run_cmd(cmd_phasic)"
+    cmd_phasic = captured["cmd_phasic"]
+    assert "--overwrite" in cmd_phasic
+    assert "--guided-candidate-manifest" not in cmd_phasic
+
+
 def test_wrapper_stop_hook_is_internal_and_inactive_by_default():
     source = Path(wrapper.__file__).read_text(encoding="utf-8")
     assert wrapper._GUIDED_TEST_STOP_AFTER_INITIAL_STATUS is None
