@@ -281,6 +281,20 @@ def test_command_plan_is_future_internal_phasic_full_handoff(startup_request):
     assert "both" not in command.argv
 
 
+def test_guided_preallocated_run_dir_is_a_bare_boolean_flag(startup_request):
+    """4J16k19: --guided-preallocated-run-dir is action='store_true' in
+    tools/run_full_pipeline_deliverables.py's argparse definition -- it
+    takes no value. The actual run directory is passed separately via
+    --out. This locks that contract explicitly: the flag is the last argv
+    element with nothing following it, which is correct, not malformed."""
+    result = startup.plan_guided_startup_transaction(startup_request)
+    argv = result.command_plan.argv
+    assert argv[-1] == "--guided-preallocated-run-dir"
+    assert argv.count("--guided-preallocated-run-dir") == 1
+    out_index = argv.index("--out")
+    assert argv[out_index + 1] == startup_request.planned_allocated_run_dir
+
+
 def test_command_plan_sessions_per_hour_sourced_from_production_intent(
     startup_request,
 ):

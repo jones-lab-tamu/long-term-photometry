@@ -10807,6 +10807,11 @@ class MainWindow(QMainWindow):
                 "Guided Run is running. This step will update when "
                 "analysis finishes."
             )
+        details_label = getattr(
+            self, "_guided_run_execution_details_label", None
+        )
+        if details_label is not None:
+            details_label.setText("")
         self._start_guided_run_execution_worker(request)
 
     def _start_guided_run_execution_worker(self, request) -> None:
@@ -10874,6 +10879,21 @@ class MainWindow(QMainWindow):
                     )
                 )
             )
+        details_label = getattr(
+            self, "_guided_run_execution_details_label", None
+        )
+        if details_label is not None:
+            blocking_issues = getattr(result, "blocking_issues", None) or ()
+            if (
+                getattr(result, "status", "") in {
+                    "wrapper_failed",
+                    "wrapper_start_failed",
+                }
+                and blocking_issues
+            ):
+                details_label.setText(str(blocking_issues[0].message))
+            else:
+                details_label.setText("")
 
     def _cleanup_guided_run_execution_worker(self) -> None:
         self._guided_run_execution_worker = None
@@ -14695,6 +14715,18 @@ class MainWindow(QMainWindow):
             "guidedSecondaryText", True
         )
         run_layout.addWidget(self._guided_run_readiness_label)
+        self._guided_run_execution_details_label = QLabel("")
+        self._guided_run_execution_details_label.setObjectName(
+            "guidedRunExecutionDetails"
+        )
+        self._guided_run_execution_details_label.setWordWrap(True)
+        self._guided_run_execution_details_label.setProperty(
+            "guidedMutedText", True
+        )
+        self._guided_run_execution_details_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        run_layout.addWidget(self._guided_run_execution_details_label)
         self._guided_load_completed_run_for_review_btn = QPushButton(
             "Load completed run for review"
         )

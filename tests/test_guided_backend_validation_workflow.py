@@ -126,7 +126,9 @@ def _call(**kwargs):
 def test_application_owned_contract_factories_are_explicit_and_resolved():
     parser = workflow.build_guided_backend_validation_parser_contract()
     validator = workflow.build_guided_backend_validator_contract()
-    assert parser.time_column_candidates == ("Time(s)",)
+    # 4J16k18: extended to also recognize "TimeStamp" as a real-world RWD
+    # time-column name, alongside the original "Time(s)".
+    assert parser.time_column_candidates == ("Time(s)", "TimeStamp")
     assert parser.uv_suffix_candidates == ("-410",)
     assert parser.signal_suffix_candidates == ("-470",)
     assert parser.unresolved_inputs == ()
@@ -289,7 +291,10 @@ def test_workflow_forwards_protected_roots_and_contracts(
     roots = (("completed_run", r"c:\completed"),)
     _call(additional_protected_roots=roots)
     assert captured["additional_protected_roots"] == roots
-    assert captured["parser_contract"].time_column_candidates == ("Time(s)",)
+    assert captured["parser_contract"].time_column_candidates == (
+        "Time(s)",
+        "TimeStamp",
+    )
 
 
 def test_workflow_calls_no_write_or_run_api(monkeypatch, successful_stages):

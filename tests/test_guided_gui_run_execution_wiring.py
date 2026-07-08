@@ -495,6 +495,115 @@ def test_backend_result_maps_to_safe_text_and_is_stored(
         assert handoff_btn.isVisible() is False
 
 
+@pytest.mark.parametrize("status", ("wrapper_failed", "wrapper_start_failed"))
+def test_wrapper_failure_surfaces_first_blocking_issue_message(
+    window, startup_request, monkeypatch, qapp, status
+):
+    """4J16k19: a real, specific wrapper failure (e.g. the
+    guided_manifest_parser_contract_mismatch regression) must not be fully
+    hidden behind the generic readiness message -- the first blocking
+    issue's message is shown in the dedicated execution-details label."""
+    issue = backend.GuidedBackendExecutionIssue(
+        category="wrapper_returned_nonzero",
+        section="wrapper",
+        message=(
+            "Guided manifest verification refused: "
+            "guided_manifest_parser_contract_mismatch"
+        ),
+        user_safe_message="Guided Run started, but the analysis reported an error.",
+    )
+    result = backend.GuidedBackendExecutionResult(
+        status=status,
+        ok=False,
+        user_visible_state="failed_during_run",
+        user_summary="Guided Run started, but the analysis reported an error.",
+        run_directory=r"C:\output\guided-run",
+        completed_run_candidate_path=None,
+        requires_completed_run_loader_validation=False,
+        wrapper_started=True,
+        wrapper_completed=True,
+        blocking_issues=(issue,),
+        diagnostics=backend.GuidedBackendExecutionDiagnostics(
+            orchestration_status="test",
+            pure_plan_status=None,
+            allocation_status=None,
+            materialization_status=None,
+            wrapper_started=True,
+            wrapper_completed=True,
+            wrapper_returncode=1,
+            failure_marker_path=None,
+            startup_transaction_identity=None,
+            wrapper_command=None,
+        ),
+    )
+    monkeypatch.setattr(
+        backend,
+        "execute_guided_backend_run",
+        lambda *, request, runner=None: result,
+    )
+    _set_ready(window, startup_request)
+    window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
+    assert window._guided_run_execution_details_label.text() == issue.message
+
+
+def test_execution_details_label_clears_on_next_run_start(
+    window, startup_request, monkeypatch, qapp
+):
+    """A stale error message from a previous failed run must not linger
+    once a new run starts."""
+    issue = backend.GuidedBackendExecutionIssue(
+        category="wrapper_returned_nonzero",
+        section="wrapper",
+        message="stale failure detail",
+        user_safe_message="Guided Run started, but the analysis reported an error.",
+    )
+    failed_result = backend.GuidedBackendExecutionResult(
+        status="wrapper_failed",
+        ok=False,
+        user_visible_state="failed_during_run",
+        user_summary="Guided Run started, but the analysis reported an error.",
+        run_directory=r"C:\output\guided-run",
+        completed_run_candidate_path=None,
+        requires_completed_run_loader_validation=False,
+        wrapper_started=True,
+        wrapper_completed=True,
+        blocking_issues=(issue,),
+        diagnostics=backend.GuidedBackendExecutionDiagnostics(
+            orchestration_status="test",
+            pure_plan_status=None,
+            allocation_status=None,
+            materialization_status=None,
+            wrapper_started=True,
+            wrapper_completed=True,
+            wrapper_returncode=1,
+            failure_marker_path=None,
+            startup_transaction_identity=None,
+            wrapper_command=None,
+        ),
+    )
+    monkeypatch.setattr(
+        backend,
+        "execute_guided_backend_run",
+        lambda *, request, runner=None: failed_result,
+    )
+    _set_ready(window, startup_request)
+    window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
+    assert window._guided_run_execution_details_label.text() == "stale failure detail"
+
+    _set_ready(window, startup_request)
+    monkeypatch.setattr(
+        backend,
+        "execute_guided_backend_run",
+        lambda *, request, runner=None: _result(
+            "wrapper_running", "Guided Run is running."
+        ),
+    )
+    window._guided_run_btn.click()
+    assert window._guided_run_execution_details_label.text() == ""
+
+
 def test_completed_result_does_not_auto_load_or_claim_success(
     window, startup_request, monkeypatch, qapp
 ):

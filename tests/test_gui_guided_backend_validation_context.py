@@ -94,7 +94,12 @@ def test_context_adapter_captures_only_backend_neutral_inputs(
     assert context.parser_contract is (
         window._guided_backend_validation_parser_contract
     )
-    assert context.parser_contract.time_column_candidates == ("Time(s)",)
+    # 4J16k18: extended to also recognize "TimeStamp" as a real-world RWD
+    # time-column name, alongside the original "Time(s)".
+    assert context.parser_contract.time_column_candidates == (
+        "Time(s)",
+        "TimeStamp",
+    )
     assert context.validator_contract is window._guided_backend_validator_contract
     assert context.validator_contract.validator_capability_version
     assert context.additional_protected_roots == (

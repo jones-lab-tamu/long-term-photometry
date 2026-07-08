@@ -8,15 +8,26 @@ import pytest
 
 import photometry_pipeline.guided_manifest_current_facts as current_facts
 from photometry_pipeline.config import Config
+from photometry_pipeline.guided_backend_validation_workflow import (
+    GUIDED_BACKEND_RWD_SIGNAL_SUFFIX_CANDIDATES,
+    GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES,
+    GUIDED_BACKEND_RWD_UV_SUFFIX_CANDIDATES,
+)
 from photometry_pipeline.guided_execution_preflight import (
     compute_guided_strict_roi_inventory_digest,
 )
+from photometry_pipeline.io.rwd_contract import (
+    RwdHeaderParsingContract,
+    compute_rwd_header_parsing_contract_digest,
+)
 
 
-def _write_session(root: Path, name: str, rois=("ROI0", "ROI1")) -> Path:
+def _write_session(
+    root: Path, name: str, rois=("ROI0", "ROI1"), time_col="Time(s)"
+) -> Path:
     path = root / name / "fluorescence.csv"
     path.parent.mkdir(parents=True)
-    columns = ["Time(s)"]
+    columns = [time_col]
     row = ["0"]
     for roi in rois:
         columns.extend((f"{roi}-410", f"{roi}-470"))
@@ -25,13 +36,13 @@ def _write_session(root: Path, name: str, rois=("ROI0", "ROI1")) -> Path:
     return path
 
 
-def _facts(tmp_path, included=("ROI0",)):
+def _facts(tmp_path, included=("ROI0",), time_col="Time(s)"):
     root = tmp_path / "source"
-    _write_session(root, "session_a")
-    _write_session(root, "session_b")
+    _write_session(root, "session_a", time_col=time_col)
+    _write_session(root, "session_b", time_col=time_col)
     return root, current_facts.build_guided_manifest_current_facts(
         source_root=root,
-        config=Config(),
+        config=Config(rwd_time_col=time_col),
         manifest_included_roi_ids=included,
     )
 
@@ -48,6 +59,44 @@ def test_current_facts_builds_ordered_candidates_and_roi_inventory(tmp_path):
     assert inventory.included_roi_ids == ("ROI0",)
     assert inventory.excluded_roi_ids == ("ROI1",)
     assert len(inventory.parser_contract_digest) == 64
+
+
+def test_current_facts_parser_digest_matches_authoritative_multi_candidate_contract(
+    tmp_path,
+):
+    """4J16k19: build_guided_manifest_current_facts must re-verify against
+    the same authoritative, multi-candidate Guided parser contract that
+    validation and manifest materialization already used
+    (GUIDED_BACKEND_RWD_*_CANDIDATES), not a narrower single-value
+    contract reconstructed from config.rwd_time_col -- a single-value
+    contract can never digest-match a multi-candidate one, which is
+    exactly what caused guided_manifest_parser_contract_mismatch to
+    refuse every real Guided Run after the candidate list grew to two
+    entries."""
+    authoritative_digest = compute_rwd_header_parsing_contract_digest(
+        RwdHeaderParsingContract(
+            time_column_candidates=GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES,
+            uv_suffix_candidates=GUIDED_BACKEND_RWD_UV_SUFFIX_CANDIDATES,
+            signal_suffix_candidates=GUIDED_BACKEND_RWD_SIGNAL_SUFFIX_CANDIDATES,
+        )
+    )
+    assert len(GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES) >= 2
+
+    _, time_s_facts = _facts(tmp_path, time_col="Time(s)")
+    assert time_s_facts.current_roi_inventory.parser_contract_digest == (
+        authoritative_digest
+    )
+
+    _, timestamp_facts = _facts(tmp_path / "b", time_col="TimeStamp")
+    assert timestamp_facts.current_roi_inventory.parser_contract_digest == (
+        authoritative_digest
+    )
+    # Same authoritative contract regardless of which resolved column the
+    # real file happens to use -- proves the digest no longer depends on
+    # config.rwd_time_col's single resolved value.
+    assert time_s_facts.current_roi_inventory.parser_contract_digest == (
+        timestamp_facts.current_roi_inventory.parser_contract_digest
+    )
 
 
 def test_strict_roi_digest_uses_first_subset_include_mode(tmp_path):

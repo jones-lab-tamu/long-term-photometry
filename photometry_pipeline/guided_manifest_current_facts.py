@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Sequence
 
 from photometry_pipeline.config import Config
+from photometry_pipeline.guided_backend_validation_workflow import (
+    GUIDED_BACKEND_RWD_SIGNAL_SUFFIX_CANDIDATES,
+    GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES,
+    GUIDED_BACKEND_RWD_UV_SUFFIX_CANDIDATES,
+)
 from photometry_pipeline.guided_execution_preflight import (
     compute_guided_strict_roi_inventory_digest,
 )
@@ -57,10 +62,15 @@ def build_guided_manifest_current_facts(
 
     root = os.fspath(source_root)
     snapshot = build_rwd_source_candidate_snapshot(root)
+    # Re-verify against the same candidate contract that was already
+    # validated and embedded in the manifest's parser_contract_digest, not
+    # a narrower reconstruction from the one resolved config value -- a
+    # single-value contract can never match a multi-candidate one even
+    # when the resolved column is among the candidates (4J16k19).
     parser_contract = RwdHeaderParsingContract(
-        time_column_candidates=(str(config.rwd_time_col),),
-        uv_suffix_candidates=(str(config.uv_suffix),),
-        signal_suffix_candidates=(str(config.sig_suffix),),
+        time_column_candidates=GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES,
+        uv_suffix_candidates=GUIDED_BACKEND_RWD_UV_SUFFIX_CANDIDATES,
+        signal_suffix_candidates=GUIDED_BACKEND_RWD_SIGNAL_SUFFIX_CANDIDATES,
     )
     parser_digest = compute_rwd_header_parsing_contract_digest(parser_contract)
 

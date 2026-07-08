@@ -20,10 +20,10 @@ from photometry_pipeline.io.rwd_source_snapshot import (
 from photometry_pipeline.pipeline import Pipeline
 
 
-def _write_session(root: Path, name: str, rois=("ROI0", "ROI1")):
+def _write_session(root: Path, name: str, rois=("ROI0", "ROI1"), time_col="Time(s)"):
     path = root / name / "fluorescence.csv"
     path.parent.mkdir(parents=True)
-    columns = ["Time(s)"]
+    columns = [time_col]
     row = ["0"]
     for roi in rois:
         columns.extend((f"{roi}-410", f"{roi}-470"))
@@ -31,11 +31,11 @@ def _write_session(root: Path, name: str, rois=("ROI0", "ROI1")):
     path.write_text(",".join(columns) + "\n" + ",".join(row) + "\n")
 
 
-def _manifest(tmp_path):
+def _manifest(tmp_path, time_col="Time(s)"):
     root = tmp_path / "source"
-    _write_session(root, "session_a")
-    _write_session(root, "session_b")
-    config = Config()
+    _write_session(root, "session_a", time_col=time_col)
+    _write_session(root, "session_b", time_col=time_col)
+    config = Config(rwd_time_col=time_col)
     facts = build_guided_manifest_current_facts(
         source_root=root,
         config=config,
@@ -124,6 +124,23 @@ def test_wrapper_verifies_valid_manifest_and_refuses_mismatches(tmp_path):
         wrapper.verify_guided_manifest_before_output(
             _args(root, path, config_path)
         )
+
+
+def test_wrapper_verifies_valid_manifest_for_timestamp_time_column(tmp_path):
+    """4J16k19: a real Guided source whose fluorescence.csv header uses
+    "TimeStamp" must not be refused by the wrapper's live manifest
+    re-verification with guided_manifest_parser_contract_mismatch. Before
+    the fix, build_guided_manifest_current_facts reconstructed a
+    single-value parser contract from config.rwd_time_col, which could
+    never digest-match the multi-candidate contract
+    (GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES) already embedded in the
+    manifest at Guided Run press time."""
+    root, path, config_path, _ = _manifest(tmp_path, time_col="TimeStamp")
+    result = wrapper.verify_guided_manifest_before_output(
+        _args(root, path, config_path)
+    )
+    assert result.accepted is True
+    assert result.blocking_issues == ()
 
 
 def test_wrapper_refuses_malformed_and_roi_mismatched_manifest(tmp_path):
