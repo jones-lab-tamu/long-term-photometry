@@ -267,3 +267,107 @@ def test_run_report_viewer_wheel_zoom_is_incremental_and_pan_is_usable(qapp):
         assert fit_again.height() <= viewer._image_scroll.viewport().height()
 
         viewer.close()
+
+
+def _make_multi_ch_completed_run(tmpdir: str) -> None:
+    """Build a completed-run-style fixture with three CH-style regions."""
+    with open(os.path.join(tmpdir, "run_report.json"), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "run_context": {"run_type": "full"},
+                "status": "success",
+            },
+            f,
+        )
+    for region in ("CH1", "CH2", "CH3"):
+        summary = os.path.join(tmpdir, region, "summary")
+        day_plots = os.path.join(tmpdir, region, "day_plots")
+        tables = os.path.join(tmpdir, region, "tables")
+        os.makedirs(summary)
+        os.makedirs(day_plots)
+        os.makedirs(tables)
+        open(os.path.join(summary, "phasic_correction_impact.png"), "wb").close()
+        open(os.path.join(summary, "phasic_auc_timeseries.png"), "wb").close()
+        open(os.path.join(day_plots, f"phasic_sig_iso_day_000.png"), "wb").close()
+        open(os.path.join(day_plots, f"phasic_dff_day_000.png"), "wb").close()
+        open(os.path.join(tables, f"{region}_phasic_summary.csv"), "wb").close()
+    # Give CH2 a real, decodable image so a region switch can be checked at
+    # the widget-state level (pixmap present / not null), not just file
+    # existence.
+    real_img = os.path.join(tmpdir, "CH2", "day_plots", "phasic_sig_iso_day_000.png")
+    pix = QPixmap(400, 300)
+    pix.fill(Qt.red)
+    assert pix.save(real_img)
+
+
+def test_run_report_viewer_multi_region_load_and_buttons(qapp):
+    """Targeted regression for the completed-run Review workflow: a
+    multi-CH-region run must populate the region selector, repopulate tabs
+    per region, and the quick-open buttons must resolve to the right path
+    for the selected region without launching a real file browser."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _make_multi_ch_completed_run(tmpdir)
+
+        viewer = RunReportViewer()
+        viewer.resize(1000, 700)
+        viewer.show()
+        qapp.processEvents()
+
+        opened_paths = []
+        viewer._open_path = lambda path: opened_paths.append(path)
+
+        try:
+            assert viewer.load_report(tmpdir) is True
+
+            region_names = [
+                viewer._region_combo.itemText(i)
+                for i in range(viewer._region_combo.count())
+            ]
+            assert region_names == ["CH1", "CH2", "CH3"]
+
+            for index, region in enumerate(region_names):
+                viewer._region_combo.setCurrentIndex(index)
+                qapp.processEvents()
+                assert viewer._selected_region() == region
+                assert viewer._tabs.count() > 0
+                tab_images = viewer._region_tab_images[region]
+                assert any(tab_images.values())
+
+                opened_paths.clear()
+                viewer._open_run_report_btn.click()
+                assert opened_paths == [
+                    os.path.join(tmpdir, "run_report.json")
+                ]
+
+                opened_paths.clear()
+                viewer._open_region_summary_btn.click()
+                assert opened_paths == [
+                    os.path.join(tmpdir, region, "summary")
+                ]
+
+                opened_paths.clear()
+                viewer._open_region_day_plots_btn.click()
+                assert opened_paths == [
+                    os.path.join(tmpdir, region, "day_plots")
+                ]
+
+                opened_paths.clear()
+                viewer._open_region_tables_btn.click()
+                assert opened_paths == [
+                    os.path.join(tmpdir, region, "tables")
+                ]
+
+            # CH2 has a real decodable image; switching to it must produce a
+            # usable, non-null pixmap in the viewer (widget-state level
+            # zoom/scroll readiness check).
+            ch2_index = region_names.index("CH2")
+            viewer._region_combo.setCurrentIndex(ch2_index)
+            qapp.processEvents()
+            for tab_index in range(viewer._tabs.count()):
+                viewer._tabs.setCurrentIndex(tab_index)
+                qapp.processEvents()
+            pix = viewer._image_label.pixmap()
+            if viewer._active_image_path:
+                assert pix is not None and not pix.isNull()
+        finally:
+            viewer.close()

@@ -103,6 +103,12 @@ class RunReportViewer(QWidget):
         self._applied_dff_summary_label.setObjectName(
             "completedRunAppliedDffSummary"
         )
+        # Not every run type produces a separate applied-dF/F routing
+        # artifact. That is normal, not a missing result, so this line is
+        # hidden unless the run actually has scientist-facing applied-dF/F
+        # content to show. The underlying text (used internally and in
+        # tests) is unchanged; only visibility is gated here.
+        self._applied_dff_summary_label.setVisible(self._applied_dff_state.present)
         self._applied_dff_summary_label.setWordWrap(True)
         self._applied_dff_summary_label.setTextInteractionFlags(
             Qt.TextSelectableByMouse
@@ -222,6 +228,7 @@ class RunReportViewer(QWidget):
                 self._applied_dff_state
             )
         )
+        self._applied_dff_summary_label.setVisible(self._applied_dff_state.present)
         self._region_paths = {}
         self._region_tab_images = {}
         self._tab_indices = {}
@@ -300,6 +307,7 @@ class RunReportViewer(QWidget):
                 self._applied_dff_state
             )
         )
+        self._applied_dff_summary_label.setVisible(self._applied_dff_state.present)
 
         title = "Results workspace"
         if is_preview:

@@ -1940,6 +1940,9 @@ class MainWindow(QMainWindow):
         self._guided_backend_execution_runner = None
         self._guided_run_execution_thread = None
         self._guided_run_execution_worker = None
+        self._guided_run_status_follower = None
+        self._guided_run_started_monotonic = None
+        self._guided_run_elapsed_timer = None
         self._guided_raw_setup_controls = {}
         self._guided_open_results_mode_panels = {}
         self._guided_new_analysis_mode_panels = {}
@@ -10812,6 +10815,7 @@ class MainWindow(QMainWindow):
         )
         if details_label is not None:
             details_label.setText("")
+        self._start_guided_run_live_status(request.planned_allocated_run_dir)
         self._start_guided_run_execution_worker(request)
 
     def _start_guided_run_execution_worker(self, request) -> None:
@@ -10842,6 +10846,7 @@ class MainWindow(QMainWindow):
     def _on_guided_run_execution_succeeded(self, result) -> None:
         """GUI-thread slot: worker returned a normal execution result."""
         self._guided_backend_execution_active = False
+        self._stop_guided_run_live_status()
         validate_btn = getattr(self, "_guided_backend_validate_btn", None)
         if validate_btn is not None:
             validate_btn.setEnabled(True)
@@ -10850,6 +10855,7 @@ class MainWindow(QMainWindow):
     def _on_guided_run_execution_failed(self, _message: str) -> None:
         """GUI-thread slot: worker raised an unexpected exception."""
         self._guided_backend_execution_active = False
+        self._stop_guided_run_live_status()
         validate_btn = getattr(self, "_guided_backend_validate_btn", None)
         if validate_btn is not None:
             validate_btn.setEnabled(True)
@@ -14751,6 +14757,42 @@ class MainWindow(QMainWindow):
             Qt.TextSelectableByMouse
         )
         run_layout.addWidget(self._guided_run_execution_details_label)
+
+        self._guided_run_live_status_group = QGroupBox("Analysis progress")
+        self._guided_run_live_status_group.setObjectName(
+            "guidedRunLiveStatusPanel"
+        )
+        live_status_layout = QVBoxLayout(self._guided_run_live_status_group)
+        live_status_layout.setContentsMargins(10, 8, 10, 8)
+        live_status_layout.setSpacing(4)
+        self._guided_run_live_status_label = QLabel(
+            "Analysis is running. Do not close this window."
+        )
+        self._guided_run_live_status_label.setObjectName(
+            "guidedRunLiveStatusMessage"
+        )
+        self._guided_run_live_status_label.setWordWrap(True)
+        live_status_layout.addWidget(self._guided_run_live_status_label)
+        self._guided_run_live_phase_label = QLabel("")
+        self._guided_run_live_phase_label.setObjectName(
+            "guidedRunLivePhase"
+        )
+        self._guided_run_live_phase_label.setWordWrap(True)
+        self._guided_run_live_phase_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        live_status_layout.addWidget(self._guided_run_live_phase_label)
+        self._guided_run_live_elapsed_label = QLabel("")
+        self._guided_run_live_elapsed_label.setObjectName(
+            "guidedRunLiveElapsed"
+        )
+        self._guided_run_live_elapsed_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        live_status_layout.addWidget(self._guided_run_live_elapsed_label)
+        self._guided_run_live_status_group.setVisible(False)
+        run_layout.addWidget(self._guided_run_live_status_group)
+
         self._guided_load_completed_run_for_review_btn = QPushButton(
             "Load completed run for review"
         )
@@ -22460,6 +22502,135 @@ class MainWindow(QMainWindow):
                 pass
             self._status_follower.deleteLater()
             self._status_follower = None
+
+    # ==================================================================
+    # Guided Run live status (Guided-scoped; independent of Full
+    # Control's _status_follower/_on_status/_progress_bar machinery).
+    # ==================================================================
+
+    _GUIDED_RUN_PHASE_LABELS = {
+        "initializing": "Starting analysis",
+        "validating": "Checking inputs",
+        "tonic_analysis": "Analyzing tonic signal",
+        "phasic_analysis": "Correcting phasic dF/F traces",
+        "continuous_summary_tables": "Creating summary tables",
+        "continuous_summary_plots": "Creating summary plots",
+        "continuous_trace_overview_plots": "Creating trace overview plots",
+        "plots": "Creating plots",
+        "final": "Finishing run",
+    }
+
+    @classmethod
+    def _guided_friendly_phase_label(cls, phase: str) -> str:
+        """Translate a raw internal status.json phase name into plain language."""
+        phase = str(phase or "")
+        if not phase:
+            return "Starting analysis"
+        if phase in cls._GUIDED_RUN_PHASE_LABELS:
+            return cls._GUIDED_RUN_PHASE_LABELS[phase]
+        if phase.startswith("plot_"):
+            roi = phase[len("plot_"):]
+            return f"Creating plots for {roi}" if roi else "Creating plots"
+        return "Working"
+
+    def _start_guided_run_live_status(self, run_dir: str) -> None:
+        """Show and begin driving the Guided-scoped run progress panel."""
+        self._stop_guided_run_live_status(hide=False)
+        group = getattr(self, "_guided_run_live_status_group", None)
+        if group is None:
+            return
+        self._guided_run_live_status_label.setText(
+            "Analysis is running. Do not close this window."
+        )
+        self._guided_run_live_phase_label.setText(
+            "Currently: Starting Guided Run..."
+        )
+        self._guided_run_live_elapsed_label.setText("Elapsed: 0:00")
+        group.setVisible(True)
+
+        self._guided_run_started_monotonic = time.monotonic()
+        self._guided_run_elapsed_timer = QTimer(self)
+        self._guided_run_elapsed_timer.setInterval(1000)
+        self._guided_run_elapsed_timer.timeout.connect(
+            self._tick_guided_run_elapsed
+        )
+        self._guided_run_elapsed_timer.start()
+
+        status_path = os.path.join(run_dir, "status.json")
+        from gui.status_follower import StatusFollower
+        follower = StatusFollower(status_path, poll_ms=500, parent=self)
+        follower.status_received.connect(
+            self._on_guided_run_live_status_received
+        )
+        follower.parse_error.connect(
+            self._on_guided_run_live_status_parse_error
+        )
+        self._guided_run_status_follower = follower
+        follower.start()
+
+    def _stop_guided_run_live_status(self, hide: bool = True) -> None:
+        """Stop the Guided run progress panel's timer and status polling."""
+        timer = getattr(self, "_guided_run_elapsed_timer", None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+            self._guided_run_elapsed_timer = None
+        follower = getattr(self, "_guided_run_status_follower", None)
+        if follower is not None:
+            follower.stop()
+            try:
+                follower.status_received.disconnect(
+                    self._on_guided_run_live_status_received
+                )
+                follower.parse_error.disconnect(
+                    self._on_guided_run_live_status_parse_error
+                )
+            except (RuntimeError, TypeError):
+                pass
+            follower.deleteLater()
+            self._guided_run_status_follower = None
+        self._guided_run_started_monotonic = None
+        if hide:
+            group = getattr(self, "_guided_run_live_status_group", None)
+            if group is not None:
+                group.setVisible(False)
+
+    def _tick_guided_run_elapsed(self) -> None:
+        """Update the live elapsed-time label. Independent of status.json polling
+        so it keeps advancing through phases that report no intermediate events."""
+        started = getattr(self, "_guided_run_started_monotonic", None)
+        label = getattr(self, "_guided_run_live_elapsed_label", None)
+        if started is None or label is None:
+            return
+        elapsed_sec = int(time.monotonic() - started)
+        minutes, seconds = divmod(elapsed_sec, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            formatted = f"{hours}:{minutes:02d}:{seconds:02d}"
+        else:
+            formatted = f"{minutes}:{seconds:02d}"
+        label.setText(f"Elapsed: {formatted}")
+
+    def _on_guided_run_live_status_received(self, data: dict) -> None:
+        """Translate a status.json update into a scientist-facing phase label."""
+        label = getattr(self, "_guided_run_live_phase_label", None)
+        if label is None:
+            return
+        phase = data.get("phase", "")
+        friendly = self._guided_friendly_phase_label(phase)
+        label.setText(f"Currently: {friendly}")
+
+    def _on_guided_run_live_status_parse_error(self, _message: str) -> None:
+        """Show a calm startup message while status.json does not exist yet.
+
+        Once a real phase has been shown, transient read hiccups (e.g. a
+        partial write mid-poll) do not overwrite the last known good phase.
+        """
+        label = getattr(self, "_guided_run_live_phase_label", None)
+        if label is None:
+            return
+        if label.text() in ("", "Currently: Starting Guided Run..."):
+            label.setText("Currently: Starting Guided Run...")
 
     def _start_log_follower(self, run_dir: str):
         """Create and start a LogFollower for the current run_dir."""
