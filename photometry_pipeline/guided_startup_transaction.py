@@ -58,6 +58,7 @@ GUIDED_CANDIDATE_MANIFEST_FILENAME = "guided_candidate_manifest.json"
 GUIDED_CONFIG_EFFECTIVE_FILENAME = "config_effective.yaml"
 GUIDED_STARTUP_PROVENANCE_FILENAME = "guided_startup_provenance.json"
 GUIDED_COMMAND_RECORD_FILENAME = "command_invoked.txt"
+GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME = "guided_per_roi_feature_config.json"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._~-]{16,256}$")

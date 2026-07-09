@@ -22,6 +22,7 @@ from photometry_pipeline.guided_startup_transaction import (
     GUIDED_CANDIDATE_MANIFEST_FILENAME,
     GUIDED_COMMAND_RECORD_FILENAME,
     GUIDED_CONFIG_EFFECTIVE_FILENAME,
+    GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
     GUIDED_STARTUP_PROVENANCE_FILENAME,
     GUIDED_STARTUP_STATUS_FILENAME,
     GuidedStartupPlanResult,
@@ -45,6 +46,18 @@ _MATERIALIZED_FILENAMES = frozenset(
         GUIDED_CONFIG_EFFECTIVE_FILENAME,
         GUIDED_COMMAND_RECORD_FILENAME,
         GUIDED_STARTUP_PROVENANCE_FILENAME,
+    )
+)
+# Optional artifacts materialize_guided_startup_artifacts writes in addition
+# to the required set above, conditioned on production_intent content (e.g.
+# guided_correction_strategy_map.json for a per-ROI correction strategy map,
+# GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME for a per-ROI feature/event map).
+# Their absence is never required; their presence alone must not refuse
+# materialization.
+_OPTIONAL_MATERIALIZED_FILENAMES = frozenset(
+    (
+        "guided_correction_strategy_map.json",
+        GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
     )
 )
 _PROHIBITED_ARGUMENTS = frozenset(
@@ -325,7 +338,10 @@ def _validate_materialization(
     }
     try:
         names = frozenset(item.name for item in run_dir.iterdir())
-        if names != _MATERIALIZED_FILENAMES:
+        if (
+            not _MATERIALIZED_FILENAMES.issubset(names)
+            or names - _MATERIALIZED_FILENAMES - _OPTIONAL_MATERIALIZED_FILENAMES
+        ):
             raise ValueError
         for filename, content in expected_bytes.items():
             if (run_dir / filename).read_bytes() != content:

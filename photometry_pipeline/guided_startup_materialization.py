@@ -13,6 +13,9 @@ from photometry_pipeline.config import Config
 from photometry_pipeline.guided_manifest_verification import (
     load_guided_candidate_manifest,
 )
+from photometry_pipeline.guided_production_mapping import (
+    build_per_roi_feature_event_backend_shapes,
+)
 from photometry_pipeline.guided_startup_allocation import (
     GuidedStartupAllocationResult,
 )
@@ -20,6 +23,7 @@ from photometry_pipeline.guided_startup_transaction import (
     GUIDED_CANDIDATE_MANIFEST_FILENAME,
     GUIDED_COMMAND_RECORD_FILENAME,
     GUIDED_CONFIG_EFFECTIVE_FILENAME,
+    GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
     GUIDED_STARTUP_PROVENANCE_FILENAME,
     GUIDED_STARTUP_STATUS_FILENAME,
     GuidedStartupPlanResult,
@@ -472,6 +476,56 @@ def materialize_guided_startup_artifacts(
                 issue=GuidedStartupMaterializationIssue(
                     "startup_artifact_materialization_failed",
                     "guided_correction_strategy_map.json",
+                    f"Startup artifact materialization failed: {exc}",
+                ),
+                artifact_hashes=tuple(hashes),
+                startup_transaction_identity=(
+                    pure_plan.identities.startup_transaction_identity
+                ),
+            )
+
+    feature_event = request.authorization_result.production_intent.feature_event
+    if feature_event.per_roi_feature_event_map:
+        shapes = build_per_roi_feature_event_backend_shapes(
+            request.authorization_result.production_intent
+        )
+    else:
+        shapes = None
+    # A resolved per-ROI feature/event map may still be all source="default"
+    # entries (every included ROI resolved to the default profile, nothing
+    # Customized) -- that is default-only/global-only execution and must not
+    # write this artifact, or analyze_photometry.py would load
+    # per_roi_feature_provenance and Pipeline would write
+    # feature_event_provenance.json even though no ROI was customized.
+    if shapes is not None and shapes["per_roi_override_config_fields"]:
+        per_roi_feature_payload = {
+            "schema_name": "guided_per_roi_feature_config",
+            "schema_version": "v1",
+            "per_roi_override_config_fields": shapes["per_roi_override_config_fields"],
+            "per_roi_effective_feature_config_fields_for_overrides": shapes[
+                "per_roi_effective_feature_config_fields_for_overrides"
+            ],
+            "per_roi_feature_provenance": shapes["per_roi_feature_provenance"],
+        }
+        per_roi_feature_bytes = json.dumps(
+            per_roi_feature_payload, indent=2, sort_keys=True
+        ).encode("utf-8")
+        try:
+            _write_exclusive(
+                run_dir / GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
+                per_roi_feature_bytes,
+            )
+            written.append(GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME)
+        except Exception as exc:
+            return _result(
+                status="materialization_failed_partial",
+                ok=False,
+                materialized=False,
+                run_dir=os.fspath(run_dir),
+                files_written=tuple(written),
+                issue=GuidedStartupMaterializationIssue(
+                    "startup_artifact_materialization_failed",
+                    GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
                     f"Startup artifact materialization failed: {exc}",
                 ),
                 artifact_hashes=tuple(hashes),

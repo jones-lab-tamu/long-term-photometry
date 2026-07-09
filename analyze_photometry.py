@@ -1,9 +1,60 @@
 import argparse
 import sys
 import os
+import json
 import logging
+from dataclasses import replace
 from photometry_pipeline.config import Config
+from photometry_pipeline.feature_event_config import FEATURE_EVENT_CONFIG_FIELDS
+from photometry_pipeline.guided_startup_transaction import (
+    GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
+)
 from photometry_pipeline.pipeline import Pipeline
+
+
+def load_guided_per_roi_feature_settings(guided_candidate_manifest_path, base_config):
+    """Load a Guided per-ROI feature-config artifact, if one was materialized.
+
+    The artifact is a sibling of the Guided candidate manifest (both live in
+    the Guided-allocated run directory; see
+    guided_startup_materialization.py). Returns (None, None) when the
+    manifest path is not set or no sibling artifact exists, so a global-only
+    Guided run (or a plain non-Guided CLI invocation) is unaffected.
+
+    Returns (per_roi_feature_config, per_roi_feature_provenance):
+    - per_roi_feature_config: dict[str, Config], one complete effective
+      Config per Custom ROI, built by layering the artifact's sparse
+      per_roi_override_config_fields onto base_config. Suitable for
+      Pipeline(per_roi_feature_config=...).
+    - per_roi_feature_provenance: the artifact's per_roi_feature_provenance
+      dict verbatim (every resolved ROI, default and override), suitable for
+      Pipeline(per_roi_feature_provenance=...).
+    """
+    if not guided_candidate_manifest_path:
+        return None, None
+    guided_run_dir = os.path.dirname(
+        os.path.abspath(guided_candidate_manifest_path)
+    )
+    path = os.path.join(guided_run_dir, GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME)
+    if not os.path.isfile(path):
+        return None, None
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    override_fields_by_roi = payload.get("per_roi_override_config_fields") or {}
+    per_roi_feature_config = {
+        roi_id: replace(
+            base_config,
+            **{
+                key: value
+                for key, value in dict(fields or {}).items()
+                if key in FEATURE_EVENT_CONFIG_FIELDS
+            },
+        )
+        for roi_id, fields in override_fields_by_roi.items()
+    }
+    per_roi_feature_provenance = payload.get("per_roi_feature_provenance") or None
+    return per_roi_feature_config, per_roi_feature_provenance
+
 
 def main():
     parser = argparse.ArgumentParser(description="V1 Lab-Default Photometry Pipeline")
@@ -113,7 +164,17 @@ def main():
             config.allow_partial_final_window = bool(args.allow_partial_final_window)
         
         # Init Pipeline
-        pipeline = Pipeline(config, mode=args.mode)
+        per_roi_feature_config, per_roi_feature_provenance = (
+            load_guided_per_roi_feature_settings(
+                args.guided_candidate_manifest, config
+            )
+        )
+        pipeline = Pipeline(
+            config,
+            mode=args.mode,
+            per_roi_feature_config=per_roi_feature_config,
+            per_roi_feature_provenance=per_roi_feature_provenance,
+        )
         
         inc_rois = [r.strip() for r in args.include_rois.split(',') if r.strip()] if args.include_rois else None
         exc_rois = [r.strip() for r in args.exclude_rois.split(',') if r.strip()] if args.exclude_rois else None

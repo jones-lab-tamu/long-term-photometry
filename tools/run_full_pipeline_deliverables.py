@@ -86,6 +86,9 @@ try:
         claim_guided_preallocated_startup,
         validate_guided_preallocated_startup,
     )
+    from photometry_pipeline.guided_startup_transaction import (
+        GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
+    )
 except ImportError:
     print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.", flush=True)
     raise SystemExit(1)
@@ -923,6 +926,29 @@ def _append_guided_manifest_to_analysis_command(cmd, args, *, mode):
     manifest_path = getattr(args, "guided_candidate_manifest", None)
     if manifest_path and mode == "phasic":
         cmd.extend(["--guided-candidate-manifest", manifest_path])
+
+
+def _load_guided_per_roi_feature_event_overrides(run_dir):
+    """Load complete effective per-ROI feature-config fields for Custom ROIs.
+
+    guided_startup_materialization.py writes GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME
+    into the Guided run directory only when the plan has at least one Custom
+    (source="override") ROI. Returns None when the artifact is absent, so a
+    global-only Guided run (or a plain non-Guided invocation) passes None
+    through to run_guided_applied_dff_orchestration_if_enabled unchanged.
+
+    Returns the artifact's per_roi_effective_feature_config_fields_for_overrides
+    mapping -- COMPLETE effective FEATURE_EVENT_CONFIG_FIELDS dicts, never the
+    sparse per_roi_override_config_fields (see
+    guided_applied_dff_orchestration.write_per_roi_feature_config_files, which
+    fails closed on anything less than complete).
+    """
+    path = os.path.join(run_dir, GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    return payload.get("per_roi_effective_feature_config_fields_for_overrides") or None
 
 
 def _discover_custom_tabular_csv_files(input_dir: str) -> list:
@@ -2863,6 +2889,9 @@ def main():
                 phasic_out,
                 run_cmd_callable=_run_cmd_wrapper,
                 on_enabled=_start_applied_dff_phase,
+                per_roi_feature_event_overrides=(
+                    _load_guided_per_roi_feature_event_overrides(run_dir)
+                ),
             )
             if ran:
                 _phase_done(status_data, manifest, "applied_dff_orchestration", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
