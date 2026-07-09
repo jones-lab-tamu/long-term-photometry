@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QSizePolicy, QListWidget, QListWidgetItem, QToolButton, QStackedWidget,
     QProgressBar, QLayout, QSplitter, QGridLayout, QStyle, QToolTip,
     QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView, QTabWidget,
+    QDialog,
 )
 
 from gui.process_runner import PipelineRunner, RunnerState
@@ -1443,6 +1444,138 @@ def compute_overrides_user_changed(parsed: dict, defaults: dict) -> dict:
     return changed
 
 
+class _GuidedRoiFeatureEventDialog(QDialog):
+    """Customize feature detection settings for one ROI.
+
+    Uses the same field set and validator as the shared default settings
+    editor. Applying here only affects this one ROI; the default settings
+    and every other ROI are unaffected until this dialog's Apply button is
+    used, and nothing here is saved unless Apply succeeds.
+    """
+
+    _HARD_DEFAULTS = {
+        "event_signal": "dff",
+        "signal_excursion_polarity": "positive",
+        "peak_threshold_method": "mean_std",
+        "peak_threshold_k": 2.5,
+        "peak_threshold_percentile": 95.0,
+        "peak_threshold_abs": 0.0,
+        "peak_min_distance_sec": 1.0,
+        "peak_min_prominence_k": 2.0,
+        "peak_min_width_sec": 0.3,
+        "peak_pre_filter": "none",
+        "event_auc_baseline": "zero",
+    }
+
+    def __init__(self, roi_id: str, seed_values: dict, parent=None):
+        super().__init__(parent)
+        self._roi_id = roi_id
+        self._defaults = {**self._HARD_DEFAULTS, **(seed_values or {})}
+        self._result_values: dict | None = None
+        self.setWindowTitle(f"Customize feature detection for {roi_id}")
+
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            f"These settings apply only to {roi_id}. The default settings "
+            "and other ROIs are not changed."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        form = QFormLayout()
+        form.setSpacing(6)
+
+        self._signal_combo = QComboBox()
+        self._signal_combo.addItems(get_allowed_event_signals_from_config())
+        self._signal_combo.setCurrentText(str(self._defaults["event_signal"]))
+        form.addRow("Event signal:", self._signal_combo)
+
+        self._polarity_combo = QComboBox()
+        self._polarity_combo.addItems(get_allowed_signal_excursion_polarities_from_config())
+        self._polarity_combo.setCurrentText(str(self._defaults["signal_excursion_polarity"]))
+        form.addRow("Signal excursion polarity:", self._polarity_combo)
+
+        self._peak_method_combo = QComboBox()
+        self._peak_method_combo.addItems(get_allowed_peak_threshold_methods_from_config())
+        self._peak_method_combo.setCurrentText(str(self._defaults["peak_threshold_method"]))
+        form.addRow("Peak threshold method:", self._peak_method_combo)
+
+        self._peak_k_edit = QLineEdit(str(self._defaults["peak_threshold_k"]))
+        form.addRow("Peak threshold k:", self._peak_k_edit)
+
+        self._peak_pct_edit = QLineEdit(str(self._defaults["peak_threshold_percentile"]))
+        form.addRow("Peak threshold percentile:", self._peak_pct_edit)
+
+        self._peak_abs_edit = QLineEdit(str(self._defaults["peak_threshold_abs"]))
+        form.addRow("Peak threshold absolute:", self._peak_abs_edit)
+
+        self._peak_distance_edit = QLineEdit(str(self._defaults["peak_min_distance_sec"]))
+        form.addRow("Peak min distance (sec):", self._peak_distance_edit)
+
+        self._peak_prominence_edit = QLineEdit(str(self._defaults["peak_min_prominence_k"]))
+        form.addRow("Peak min prominence k:", self._peak_prominence_edit)
+
+        self._peak_width_edit = QLineEdit(str(self._defaults["peak_min_width_sec"]))
+        form.addRow("Peak min width (sec):", self._peak_width_edit)
+
+        self._pre_filter_combo = QComboBox()
+        self._pre_filter_combo.addItems(get_allowed_peak_pre_filters_from_config())
+        self._pre_filter_combo.setCurrentText(str(self._defaults["peak_pre_filter"]))
+        form.addRow("Peak pre-filter:", self._pre_filter_combo)
+
+        self._auc_baseline_combo = QComboBox()
+        self._auc_baseline_combo.addItems(get_allowed_event_auc_baselines_from_config())
+        self._auc_baseline_combo.setCurrentText(str(self._defaults["event_auc_baseline"]))
+        form.addRow("Event AUC baseline:", self._auc_baseline_combo)
+
+        layout.addLayout(form)
+
+        self._error_label = QLabel("")
+        self._error_label.setObjectName("guidedRoiFeatureEventDialogError")
+        self._error_label.setWordWrap(True)
+        self._error_label.setVisible(False)
+        layout.addWidget(self._error_label)
+
+        button_row = QHBoxLayout()
+        apply_btn = QPushButton(f"Apply to {roi_id}")
+        apply_btn.setObjectName("guidedRoiFeatureEventDialogApplyButton")
+        apply_btn.clicked.connect(self._on_apply)
+        button_row.addWidget(apply_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setObjectName("guidedRoiFeatureEventDialogCancelButton")
+        cancel_btn.clicked.connect(self.reject)
+        button_row.addWidget(cancel_btn)
+        layout.addLayout(button_row)
+
+    def _current_values(self) -> tuple[dict | None, str | None]:
+        return parse_and_validate_event_feature_knobs(
+            self._signal_combo.currentText(),
+            self._peak_method_combo.currentText(),
+            self._peak_k_edit.text(),
+            self._peak_pct_edit.text(),
+            self._peak_abs_edit.text(),
+            self._peak_distance_edit.text(),
+            self._auc_baseline_combo.currentText(),
+            defaults=self._defaults,
+            peak_pre_filter_text=self._pre_filter_combo.currentText(),
+            peak_prominence_k_str=self._peak_prominence_edit.text(),
+            peak_width_sec_str=self._peak_width_edit.text(),
+            signal_excursion_polarity_text=self._polarity_combo.currentText(),
+        )
+
+    def _on_apply(self) -> None:
+        values, error = self._current_values()
+        if error:
+            self._error_label.setText(error)
+            self._error_label.setVisible(True)
+            return
+        self._result_values = values
+        self.accept()
+
+    def result_values(self) -> dict | None:
+        return self._result_values
+
+
 _ClickableImageLabel = InteractiveImageLabel
 
 
@@ -1944,6 +2077,10 @@ class MainWindow(QMainWindow):
         self._guided_new_analysis_feature_event_profile_updated_at_utc = None
         self._guided_new_analysis_feature_event_profile_format = None
         self._guided_new_analysis_feature_event_profile_acq_mode = None
+        # Per-ROI feature-detection overrides for new_analysis mode.
+        # {roi_id: {"config_fields": dict, "profile_id": str, "updated_at_utc": str}}
+        # A ROI absent from this dict uses the default settings above.
+        self._guided_per_roi_feature_event_overrides = {}
         self._guided_new_analysis_output_policy_status = "missing"
         self._guided_new_analysis_output_policy_path = None
         self._guided_new_analysis_output_policy_validation_issues = []
@@ -2880,6 +3017,9 @@ class MainWindow(QMainWindow):
             and not errors
             and not stale_reasons
         ):
+            per_roi_problem = self._guided_per_roi_feature_event_consistency_problem()
+            if per_roi_problem:
+                return False, per_roi_problem
             return True, "Feature detection settings are applied and current."
         if status == "stale":
             return (
@@ -2913,6 +3053,7 @@ class MainWindow(QMainWindow):
         status_label.setText(message)
         self._refresh_guided_feature_detection_summary()
         self._refresh_guided_feature_detection_preview_panel()
+        self._refresh_guided_per_roi_feature_event_table()
 
     def _guided_feature_detection_summary_text(self, plan=None) -> str:
         status = (
@@ -4250,6 +4391,7 @@ class MainWindow(QMainWindow):
         intro.setWordWrap(True)
         layout.addWidget(intro)
         layout.addWidget(self._build_guided_feature_event_profile_editor())
+        layout.addWidget(self._build_guided_per_roi_feature_event_panel())
         layout.addWidget(self._build_guided_feature_detection_preview_panel())
 
         self._guided_feature_detection_continue_status = QLabel(
@@ -11376,6 +11518,7 @@ class MainWindow(QMainWindow):
             feature_event_stale_reasons=self._guided_new_analysis_feature_event_profile_stale_reasons,
             feature_event_updated_at_utc=self._guided_new_analysis_feature_event_profile_updated_at_utc,
             feature_event_explicitly_applied=(getattr(self, "_guided_new_analysis_feature_event_profile_status", "missing") == "applied"),
+            per_roi_feature_event_choices=self._guided_new_analysis_per_roi_feature_event_choices(included),
             output_policy_status=getattr(self, "_guided_new_analysis_output_policy_status", "missing"),
             output_policy_path=getattr(self, "_guided_new_analysis_output_policy_path", None),
             output_policy_validation_issues=getattr(self, "_guided_new_analysis_output_policy_validation_issues", []),
@@ -11460,6 +11603,19 @@ class MainWindow(QMainWindow):
             fe_lines.append(f"Feature/event profile validation issues: {'; '.join(plan.feature_event_validation_issues)}")
         if plan.feature_event_profile_status == "stale" and plan.feature_event_stale_reasons:
             fe_lines.append(f"Feature/event profile stale reasons: {'; '.join(plan.feature_event_stale_reasons)}")
+        if plan.per_roi_feature_event_choices:
+            custom_rois = sorted(
+                choice.roi_id for choice in plan.per_roi_feature_event_choices
+            )
+            default_rois = sorted(
+                roi for roi in plan.included_roi_ids if roi not in custom_rois
+            )
+            parts = []
+            if default_rois:
+                parts.append(f"Default for {', '.join(default_rois)}")
+            if custom_rois:
+                parts.append(f"Custom for {', '.join(custom_rois)}")
+            fe_lines.append(f"Feature detection: {'; '.join(parts)}.")
 
         lines = [
             "Status: new_analysis draft plan",
@@ -12402,6 +12558,228 @@ class MainWindow(QMainWindow):
             signal_excursion_polarity_text=self._guided_feature_event_polarity_combo.currentText(),
         )
 
+    def _guided_included_roi_ids_for_feature_detection(self) -> list[str]:
+        if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
+            return []
+        return list(self._guided_selected_roi_ids()[1])
+
+    def _guided_default_feature_event_config_fields_for_seeding(self) -> dict:
+        """A reasonable starting point for a new ROI customization: the
+        currently applied default settings if any, else the live default
+        editor values, else the editor's own defaults."""
+        profile = getattr(self, "_guided_new_analysis_feature_event_profile", None)
+        if isinstance(profile, dict) and profile:
+            seed = {k: v for k, v in profile.items() if k != "profile_id"}
+            if seed:
+                return seed
+        values, err = self._guided_feature_event_current_values()
+        if not err and values:
+            return values
+        return dict(self._guided_feature_event_editor_defaults())
+
+    def _guided_effective_feature_event_config_fields_for_roi(self, roi_id: str) -> dict:
+        """The complete, effective feature-detection settings for one ROI:
+        the current default settings with that ROI's override fields (which
+        may be sparse) layered on top. Used to seed the customization
+        dialog and to summarize a Custom row, so neither ever shows blanks
+        or hard-default-derived values for fields the override didn't set."""
+        default_fields = self._guided_default_feature_event_config_fields_for_seeding()
+        overrides = getattr(self, "_guided_per_roi_feature_event_overrides", {}) or {}
+        override = overrides.get(roi_id)
+        if not override:
+            return dict(default_fields)
+        effective = dict(default_fields)
+        effective.update(override.get("config_fields") or {})
+        return effective
+
+    def _guided_per_roi_feature_event_summary_text(self, config_fields: dict) -> str:
+        method = str(config_fields.get("peak_threshold_method", "mean_std"))
+        if method == "percentile":
+            threshold = config_fields.get("peak_threshold_percentile", "")
+        elif method == "absolute":
+            threshold = config_fields.get("peak_threshold_abs", "")
+        else:
+            threshold = config_fields.get("peak_threshold_k", "")
+        signal = config_fields.get("event_signal", "dff")
+        return f"{method} threshold ({threshold}) · {signal} signal"
+
+    def _refresh_guided_per_roi_feature_event_table(self) -> None:
+        table = getattr(self, "_guided_feature_event_per_roi_table", None)
+        group = getattr(self, "_guided_per_roi_feature_event_group", None)
+        is_new_analysis = getattr(self, "_guided_workflow_mode", "start") == "new_analysis"
+        if group is not None:
+            group.setVisible(is_new_analysis)
+        if table is None or not is_new_analysis:
+            if table is not None:
+                table.setRowCount(0)
+            return
+
+        included = self._guided_included_roi_ids_for_feature_detection()
+        overrides = getattr(self, "_guided_per_roi_feature_event_overrides", {}) or {}
+        default_summary_fields = None
+
+        table.setRowCount(len(included))
+        for row, roi_id in enumerate(included):
+            override = overrides.get(roi_id)
+            if override:
+                status_text = "Custom"
+                summary_text = self._guided_per_roi_feature_event_summary_text(
+                    self._guided_effective_feature_event_config_fields_for_roi(roi_id)
+                )
+            else:
+                status_text = "Default"
+                if default_summary_fields is None:
+                    default_summary_fields = (
+                        self._guided_default_feature_event_config_fields_for_seeding()
+                    )
+                summary_text = self._guided_per_roi_feature_event_summary_text(
+                    default_summary_fields
+                )
+
+            table.setItem(row, 0, QTableWidgetItem(roi_id))
+            table.setItem(row, 1, QTableWidgetItem(status_text))
+            table.setItem(row, 2, QTableWidgetItem(summary_text))
+
+            customize_btn = QPushButton("Edit" if override else "Customize")
+            customize_btn.setObjectName("guidedPerRoiFeatureEventCustomizeButton")
+            customize_btn.clicked.connect(
+                lambda _checked=False, r=roi_id: self._on_guided_customize_roi_feature_event(r)
+            )
+            table.setCellWidget(row, 3, customize_btn)
+
+            reset_btn = QPushButton("Reset to default")
+            reset_btn.setObjectName("guidedPerRoiFeatureEventResetButton")
+            reset_btn.setEnabled(bool(override))
+            reset_btn.clicked.connect(
+                lambda _checked=False, r=roi_id: self._on_guided_reset_roi_feature_event_to_default(r)
+            )
+            table.setCellWidget(row, 4, reset_btn)
+
+    def _on_guided_customize_roi_feature_event(self, roi_id: str) -> None:
+        overrides = getattr(self, "_guided_per_roi_feature_event_overrides", None)
+        if overrides is None:
+            overrides = {}
+        existing = overrides.get(roi_id)
+        # Seed from this ROI's effective settings (default settings with
+        # its own sparse override layered on top), never from the sparse
+        # override alone -- otherwise fields the override didn't set would
+        # silently fall back to hard defaults instead of the actual current
+        # default settings.
+        seed_values = self._guided_effective_feature_event_config_fields_for_roi(roi_id)
+        dialog = _GuidedRoiFeatureEventDialog(roi_id, seed_values, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        config_fields = dialog.result_values() or {}
+        profile_id = existing.get("profile_id") if existing else None
+        if not profile_id:
+            import uuid
+            profile_id = f"roi-profile-{uuid.uuid4().hex[:8]}"
+        overrides[roi_id] = {
+            "config_fields": config_fields,
+            "profile_id": profile_id,
+            "updated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        self._guided_per_roi_feature_event_overrides = overrides
+        self._invalidate_guided_backend_validation(
+            "feature detection settings changed"
+        )
+        self._refresh_guided_per_roi_feature_event_table()
+        self._refresh_guided_feature_detection_continue_state()
+        self._refresh_guided_draft_run_plan_preview()
+
+    def _on_guided_reset_roi_feature_event_to_default(self, roi_id: str) -> None:
+        overrides = getattr(self, "_guided_per_roi_feature_event_overrides", None)
+        if not overrides or roi_id not in overrides:
+            return
+        del overrides[roi_id]
+        self._invalidate_guided_backend_validation(
+            "feature detection settings changed"
+        )
+        self._refresh_guided_per_roi_feature_event_table()
+        self._refresh_guided_feature_detection_continue_state()
+        self._refresh_guided_draft_run_plan_preview()
+
+    def _guided_new_analysis_per_roi_feature_event_choices(
+        self, included: list[str] | tuple[str, ...]
+    ) -> list:
+        """Build GuidedPlanFeatureEventChoice entries for customized ROIs
+        only, filtered to the given included-ROI set so a leftover override
+        for a now-excluded ROI never reaches the plan."""
+        from photometry_pipeline.guided_new_analysis_plan import (
+            GuidedPlanFeatureEventChoice,
+        )
+
+        overrides = getattr(self, "_guided_per_roi_feature_event_overrides", {}) or {}
+        included_set = set(included)
+        choices = []
+        for roi_id, override in overrides.items():
+            if roi_id not in included_set:
+                continue
+            choices.append(
+                GuidedPlanFeatureEventChoice(
+                    roi_id=roi_id,
+                    feature_event_profile_id=str(
+                        override.get("profile_id") or f"roi-profile-{roi_id}"
+                    ),
+                    config_fields=dict(override.get("config_fields") or {}),
+                    current_or_stale="current",
+                    explicit_user_mark=True,
+                )
+            )
+        return choices
+
+    def _guided_per_roi_feature_event_consistency_problem(self) -> str:
+        """Return a plain-language blocking message if per-ROI feature
+        detection settings cannot be resolved cleanly for every included
+        ROI, else an empty string. Uses the same plan resolver the backend
+        validation path uses, so a stale/non-explicit/invalid/unknown-ROI
+        setting blocks here instead of silently falling back to default."""
+        if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
+            return ""
+        included = self._guided_included_roi_ids_for_feature_detection()
+        if not included:
+            return ""
+        from photometry_pipeline.guided_new_analysis_plan import (
+            GuidedNewAnalysisDraftPlan,
+            build_guided_per_roi_feature_event_map,
+        )
+
+        choices = self._guided_new_analysis_per_roi_feature_event_choices(included)
+        profile = getattr(self, "_guided_new_analysis_feature_event_profile", None)
+        status = getattr(
+            self, "_guided_new_analysis_feature_event_profile_status", "missing"
+        )
+        plan = GuidedNewAnalysisDraftPlan(
+            discovered_roi_ids=list(included),
+            included_roi_ids=list(included),
+            feature_event_profile_status=status,
+            feature_event_profile_id=(
+                profile.get("profile_id") if isinstance(profile, dict) else None
+            ),
+            feature_event_values=dict(profile) if isinstance(profile, dict) else {},
+            feature_event_validation_issues=list(
+                getattr(self, "_guided_new_analysis_feature_event_profile_errors", ())
+                or ()
+            ),
+            feature_event_stale_reasons=list(
+                getattr(
+                    self,
+                    "_guided_new_analysis_feature_event_profile_stale_reasons",
+                    (),
+                )
+                or ()
+            ),
+            feature_event_explicitly_applied=(status == "applied"),
+            per_roi_feature_event_choices=choices,
+        )
+        feature_map = build_guided_per_roi_feature_event_map(plan)
+        if feature_map.resolution_supported:
+            return ""
+        return (
+            "Some ROI feature detection settings could not be checked. "
+            "Reset the affected ROI to Default or customize it again."
+        )
+
     def _on_guided_feature_detection_editor_changed(
         self, *_args
     ) -> None:
@@ -13014,8 +13392,23 @@ class MainWindow(QMainWindow):
         source_path = str(segment.get("source_path") or "")
         segment_index = segment.get("discovered_session_index")
 
-        # Build request config from current editor settings
-        config_fields, err = self._guided_feature_event_current_values()
+        # Resolve this ROI's settings: its own effective (default-layered)
+        # custom settings if it has been customized, otherwise the default
+        # settings. Using the effective settings here -- not the possibly
+        # sparse stored override -- keeps preview consistent with the
+        # table/dialog and with what Run will actually use.
+        roi_override = getattr(
+            self, "_guided_per_roi_feature_event_overrides", {}
+        ).get(roi_id)
+        if roi_override:
+            config_fields = self._guided_effective_feature_event_config_fields_for_roi(
+                roi_id
+            )
+            err = None
+            preview_settings_label = "Custom"
+        else:
+            config_fields, err = self._guided_feature_event_current_values()
+            preview_settings_label = "Default"
         if err:
             self._guided_feature_preview_status_label.setText(f"Invalid feature settings: {err}")
             self._guided_feature_preview_result_table.setVisible(False)
@@ -13214,7 +13607,10 @@ class MainWindow(QMainWindow):
         self._guided_feature_preview_source_note.setVisible(True)
         self._guided_feature_preview_details_toggle.setVisible(True)
         self._guided_feature_preview_result_table.setVisible(True)
-        self._guided_feature_preview_status_label.setText("Preview generated successfully.")
+        self._guided_feature_preview_status_label.setText(
+            f"Previewing {roi_id} with {preview_settings_label} settings. "
+            "Preview generated successfully."
+        )
 
     def _on_guided_apply_feature_event_profile(self) -> None:
         if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
@@ -13900,6 +14296,40 @@ class MainWindow(QMainWindow):
             edit.textEdited.connect(
                 self._on_guided_feature_detection_editor_changed
             )
+
+        return group
+
+    def _build_guided_per_roi_feature_event_panel(self) -> QGroupBox:
+        group = QGroupBox("Feature detection per ROI")
+        group.setObjectName("guidedPerRoiFeatureEventPanel")
+        self._guided_per_roi_feature_event_group = group
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+
+        note = QLabel(
+            "Feature detection settings apply to all ROIs by default. "
+            "Customize an individual ROI only if its signal needs "
+            "different detection settings. These settings will be "
+            "checked before Run."
+        )
+        note.setObjectName("guidedPerRoiFeatureEventNote")
+        note.setProperty("guidedSecondaryText", True)
+        note.setWordWrap(True)
+        self._make_guided_widget_shrinkable(note)
+        layout.addWidget(note)
+
+        table = QTableWidget(0, 5)
+        table.setObjectName("guidedPerRoiFeatureEventTable")
+        table.setHorizontalHeaderLabels(
+            ["ROI", "Status", "Summary", "", ""]
+        )
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        self._guided_feature_event_per_roi_table = table
+        layout.addWidget(table)
 
         return group
 

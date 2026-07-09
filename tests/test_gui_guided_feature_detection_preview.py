@@ -310,7 +310,9 @@ def test_manual_regression_success_path(window):
     result_table = window.findChild(QTableWidget, "guidedFeaturePreviewResultTable")
     plot = window.findChild(QWidget, "guidedFeaturePreviewPlot")
 
-    assert status_lbl.text() == "Preview generated successfully."
+    assert status_lbl.text() == (
+        "Previewing CH1 with Default settings. Preview generated successfully."
+    )
     assert not result_table.isHidden()
     assert not plot.isHidden()
     assert np.array_equal(plot.time_sec, t)
@@ -328,6 +330,153 @@ def test_manual_regression_success_path(window):
     assert window._guided_feature_preview_details_content.isHidden()
     details_toggle.click()
     assert not window._guided_feature_preview_details_content.isHidden()
+
+
+def _customize_roi_with_fake_dialog(window, monkeypatch, roi_id, config_fields):
+    """Simulate accepting the per-ROI customization dialog without showing
+    real UI, so tests can drive _on_guided_customize_roi_feature_event
+    directly."""
+    import gui.main_window as main_window_module
+
+    class _FakeRoiDialog:
+        def __init__(self, _roi_id, _seed_values, parent=None):
+            pass
+
+        def exec(self):
+            return main_window_module.QDialog.Accepted
+
+        def result_values(self):
+            return dict(config_fields)
+
+    monkeypatch.setattr(
+        main_window_module, "_GuidedRoiFeatureEventDialog", _FakeRoiDialog
+    )
+    window._on_guided_customize_roi_feature_event(roi_id)
+
+
+def test_preview_uses_custom_roi_settings_when_customized(window, monkeypatch):
+    """Once CH1 is customized, generating CH1's preview must use CH1's own
+    custom settings, not the shared default editor settings, and the status
+    text must say so in plain language."""
+    t = np.arange(100, dtype=float) * 0.1
+    y = np.sin(t)
+    _setup_signal_only_evidence(window, time_sec=t, preview_dff=y)
+    # This test's minimal evidence mock doesn't populate the full draft-plan
+    # currency shape (locked_evidence_candidates), which is unrelated to
+    # what this test verifies; avoid it marking the mocked correction
+    # choice stale as a side effect of customizing a ROI.
+    monkeypatch.setattr(window, "_refresh_guided_draft_run_plan_preview", lambda: None)
+
+    custom_fields = {
+        "event_signal": "dff",
+        "peak_threshold_method": "percentile",
+        "peak_threshold_percentile": 10.0,
+        "peak_min_distance_sec": 0.5,
+        "peak_min_prominence_k": 0.0,
+        "peak_min_width_sec": 0.0,
+        "peak_pre_filter": "none",
+        "event_auc_baseline": "zero",
+        "signal_excursion_polarity": "positive",
+    }
+    _customize_roi_with_fake_dialog(window, monkeypatch, "CH1", custom_fields)
+    assert window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"] == (
+        custom_fields
+    )
+
+    window._on_guided_generate_feature_detection_preview()
+
+    status_lbl = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel")
+    assert status_lbl.text() == (
+        "Previewing CH1 with Custom settings. Preview generated successfully."
+    )
+
+
+def test_preview_roi_switch_does_not_mutate_default_or_custom_settings(
+    window, monkeypatch
+):
+    """Selecting a different preview ROI must never rewrite the default
+    editor settings or an already-saved custom ROI override."""
+    t = np.arange(100, dtype=float) * 0.1
+    y = np.sin(t)
+    _setup_signal_only_evidence(window, time_sec=t, preview_dff=y)
+    monkeypatch.setattr(window, "_refresh_guided_draft_run_plan_preview", lambda: None)
+
+    custom_fields = {
+        "event_signal": "dff",
+        "peak_threshold_method": "percentile",
+        "peak_threshold_percentile": 10.0,
+        "peak_min_distance_sec": 0.5,
+        "peak_min_prominence_k": 0.0,
+        "peak_min_width_sec": 0.0,
+        "peak_pre_filter": "none",
+        "event_auc_baseline": "zero",
+        "signal_excursion_polarity": "positive",
+    }
+    _customize_roi_with_fake_dialog(window, monkeypatch, "CH1", custom_fields)
+
+    default_before, _ = window._guided_feature_event_current_values()
+    window._on_guided_generate_feature_detection_preview()
+    default_after, _ = window._guided_feature_event_current_values()
+
+    assert default_before == default_after
+    assert window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"] == (
+        custom_fields
+    )
+
+
+def test_preview_uses_effective_settings_for_custom_roi_not_sparse_override(
+    window, monkeypatch
+):
+    """Preview for a customized ROI must use the default-layered effective
+    settings (matching the table/dialog), not the possibly-sparse stored
+    override alone."""
+    t = np.arange(100, dtype=float) * 0.1
+    y = np.sin(t)
+    _setup_signal_only_evidence(window, time_sec=t, preview_dff=y)
+    monkeypatch.setattr(window, "_refresh_guided_draft_run_plan_preview", lambda: None)
+
+    # Give the default settings a value that differs from the dialog's own
+    # hard default (peak_min_distance_sec hard default is 1.0).
+    window._guided_feature_event_peak_distance_edit.setText("2.5")
+
+    sparse_override = {"peak_threshold_method": "mean_std"}
+    _customize_roi_with_fake_dialog(window, monkeypatch, "CH1", sparse_override)
+    assert window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"] == (
+        sparse_override
+    )
+
+    import photometry_pipeline.guided_feature_detection_preview as preview_module
+
+    captured = {}
+    original_build = preview_module.build_guided_feature_detection_preview
+
+    def _capturing_build(*, trace_request, available_trace_context):
+        captured["request"] = trace_request
+        return original_build(
+            trace_request=trace_request,
+            available_trace_context=available_trace_context,
+        )
+
+    monkeypatch.setattr(
+        preview_module, "build_guided_feature_detection_preview", _capturing_build
+    )
+
+    window._on_guided_generate_feature_detection_preview()
+
+    status_lbl = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel")
+    assert status_lbl.text() == (
+        "Previewing CH1 with Custom settings. Preview generated successfully."
+    )
+
+    request = captured["request"]
+    assert request.feature_settings["peak_min_distance_sec"] == 2.5
+    assert request.feature_settings["peak_threshold_method"] == "mean_std"
+
+    # The stored override is unchanged (still sparse) after generating the
+    # preview.
+    assert window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"] == (
+        sparse_override
+    )
 
 
 def test_visual_plot_renders_events_and_thresholds(
@@ -489,7 +638,7 @@ def test_generate_preview_computes_selected_nonretained_segment_on_demand(
     window._on_guided_generate_feature_detection_preview()
 
     assert window._guided_feature_preview_status_label.text() == (
-        "Preview generated successfully."
+        "Previewing CH1 with Default settings. Preview generated successfully."
     )
     assert len(calls) == 1
     source_file, kwargs = calls[0]
@@ -654,7 +803,9 @@ def test_generate_preview_dynamic_fit_dff_success(window):
         QLabel, "guidedFeaturePreviewSourceNote"
     )
 
-    assert status_lbl.text() == "Preview generated successfully."
+    assert status_lbl.text() == (
+        "Previewing CH1 with Default settings. Preview generated successfully."
+    )
     assert not window._guided_feature_preview_plot.isHidden()
     assert np.array_equal(window._guided_feature_preview_plot.time_sec, t)
     assert np.array_equal(window._guided_feature_preview_plot.trace, y)
@@ -793,7 +944,9 @@ def test_no_read_or_write_sentinels(window, monkeypatch):
 
     window._on_guided_generate_feature_detection_preview()
     status_lbl = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel")
-    assert status_lbl.text() == "Preview generated successfully."
+    assert status_lbl.text() == (
+        "Previewing CH1 with Default settings. Preview generated successfully."
+    )
 
 
 def test_dynamic_preview_no_read_or_write_sentinels(window, monkeypatch):
@@ -812,5 +965,5 @@ def test_dynamic_preview_no_read_or_write_sentinels(window, monkeypatch):
 
     assert (
         window._guided_feature_preview_status_label.text()
-        == "Preview generated successfully."
+        == "Previewing CH1 with Default settings. Preview generated successfully."
     )

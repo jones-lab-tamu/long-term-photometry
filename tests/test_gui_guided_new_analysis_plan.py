@@ -3735,3 +3735,256 @@ def _is_descendant(widget, ancestor) -> bool:
             return True
         parent = parent.parentWidget()
     return False
+
+
+# Per-ROI feature detection settings (4J16k33)
+
+
+def _customize_roi_via_fake_dialog(window, monkeypatch, roi_id, config_fields):
+    """Simulate accepting the per-ROI customization dialog without showing
+    real UI, so tests can drive _on_guided_customize_roi_feature_event
+    directly with a known result."""
+    import gui.main_window as main_window_module
+
+    class _FakeRoiDialog:
+        def __init__(self, _roi_id, _seed_values, parent=None):
+            pass
+
+        def exec(self):
+            return main_window_module.QDialog.Accepted
+
+        def result_values(self):
+            return dict(config_fields)
+
+    monkeypatch.setattr(
+        main_window_module, "_GuidedRoiFeatureEventDialog", _FakeRoiDialog
+    )
+    window._on_guided_customize_roi_feature_event(roi_id)
+
+
+def _per_roi_feature_table_status_by_roi(window) -> dict:
+    table = window._guided_feature_event_per_roi_table
+    return {
+        table.item(row, 0).text(): table.item(row, 1).text()
+        for row in range(table.rowCount())
+    }
+
+
+def test_new_analysis_no_roi_customized_produces_empty_per_roi_choices(
+    window, tmp_path, monkeypatch
+):
+    """Default-only behavior is unchanged: with no customized ROIs, the
+    plan carries no per-ROI feature/event choices."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    plan = window._build_guided_new_analysis_draft_plan()
+
+    assert plan.per_roi_feature_event_choices == []
+    assert window._guided_per_roi_feature_event_overrides == {}
+
+
+def test_new_analysis_single_roi_customization_creates_one_choice(
+    window, tmp_path, monkeypatch
+):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    custom_fields = {
+        "event_signal": "dff",
+        "peak_threshold_method": "percentile",
+        "peak_threshold_percentile": 80.0,
+        "peak_min_distance_sec": 1.0,
+        "peak_min_prominence_k": 0.0,
+        "peak_min_width_sec": 0.0,
+        "peak_pre_filter": "none",
+        "event_auc_baseline": "zero",
+        "signal_excursion_polarity": "positive",
+    }
+    _customize_roi_via_fake_dialog(window, monkeypatch, "CH1", custom_fields)
+
+    assert _per_roi_feature_table_status_by_roi(window) == {
+        "CH1": "Custom",
+        "CH2": "Default",
+        "CH3": "Default",
+    }
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert len(plan.per_roi_feature_event_choices) == 1
+    choice = plan.per_roi_feature_event_choices[0]
+    assert choice.roi_id == "CH1"
+    assert choice.config_fields == custom_fields
+    assert choice.current_or_stale == "current"
+    assert choice.explicit_user_mark is True
+
+    from photometry_pipeline.guided_new_analysis_plan import (
+        build_guided_per_roi_feature_event_map,
+    )
+
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+    assert feature_map.resolution_supported is True
+    by_roi_source = {entry.roi_id: entry.source for entry in feature_map.entries}
+    assert by_roi_source == {"CH1": "override", "CH2": "default", "CH3": "default"}
+
+
+def test_edit_existing_custom_roi_seeds_from_default_layered_effective_values(
+    window, tmp_path, monkeypatch
+):
+    """Editing an already-customized ROI must seed the dialog (and
+    summarize the Custom row) using the current default settings layered
+    with that ROI's sparse override -- never the dialog's own hard
+    defaults for fields the override never set."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    # Give the default settings a value that differs from the dialog's own
+    # hard default (peak_min_distance_sec hard default is 1.0).
+    window._guided_feature_event_peak_distance_edit.setText("2.5")
+    window._guided_feature_event_apply_btn.click()
+    default_fields, err = window._guided_feature_event_current_values()
+    assert err is None
+    assert default_fields["peak_min_distance_sec"] == 2.5
+
+    # Customize CH1 with a sparse override that never mentions
+    # peak_min_distance_sec.
+    _customize_roi_via_fake_dialog(
+        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+    )
+    assert window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"] == {
+        "peak_threshold_method": "mean_std"
+    }
+
+    # The Custom row summary must reflect CH1's effective settings, not a
+    # blank threshold value for the field the sparse override didn't set.
+    summary_by_roi = {
+        window._guided_feature_event_per_roi_table.item(row, 0).text(): (
+            window._guided_feature_event_per_roi_table.item(row, 2).text()
+        )
+        for row in range(window._guided_feature_event_per_roi_table.rowCount())
+    }
+    assert "threshold ()" not in summary_by_roi["CH1"]
+
+    # Reopen/Edit CH1: the dialog must be seeded with the default-layered
+    # effective value (2.5), not the dialog's own hard default (1.0), and
+    # not blank.
+    captured_seed = {}
+    import gui.main_window as main_window_module
+
+    class _CapturingDialog:
+        def __init__(self, _roi_id, seed_values, parent=None):
+            captured_seed.update(seed_values)
+
+        def exec(self):
+            return main_window_module.QDialog.Accepted
+
+        def result_values(self):
+            # Apply without changing unrelated fields: a real dialog
+            # confirmed without touching anything else submits exactly
+            # what it was seeded with.
+            return dict(captured_seed)
+
+    monkeypatch.setattr(
+        main_window_module, "_GuidedRoiFeatureEventDialog", _CapturingDialog
+    )
+    window._on_guided_customize_roi_feature_event("CH1")
+
+    assert captured_seed["peak_min_distance_sec"] == 2.5
+    assert captured_seed["peak_threshold_method"] == "mean_std"
+
+    # The resulting plan's effective per-ROI map must preserve the
+    # inherited default-layered value, not a hard default.
+    plan = window._build_guided_new_analysis_draft_plan()
+    from photometry_pipeline.guided_new_analysis_plan import (
+        build_guided_per_roi_feature_event_map,
+    )
+
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+    ch1_entry = next(entry for entry in feature_map.entries if entry.roi_id == "CH1")
+    assert ch1_entry.source == "override"
+    assert ch1_entry.config_fields.get("peak_min_distance_sec") == 2.5
+    assert ch1_entry.config_fields.get("peak_threshold_method") == "mean_std"
+
+
+def test_new_analysis_reset_roi_to_default_clears_choice(window, tmp_path, monkeypatch):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    _customize_roi_via_fake_dialog(
+        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+    )
+    plan_with_override = window._build_guided_new_analysis_draft_plan()
+    assert len(plan_with_override.per_roi_feature_event_choices) == 1
+
+    window._on_guided_reset_roi_feature_event_to_default("CH1")
+
+    assert "CH1" not in window._guided_per_roi_feature_event_overrides
+    assert _per_roi_feature_table_status_by_roi(window)["CH1"] == "Default"
+
+    plan_after_reset = window._build_guided_new_analysis_draft_plan()
+    assert plan_after_reset.per_roi_feature_event_choices == []
+
+
+def test_new_analysis_excluded_roi_override_does_not_block_included_set(
+    window, tmp_path, monkeypatch
+):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    _customize_roi_via_fake_dialog(
+        window, monkeypatch, "CH2", {"peak_threshold_method": "mean_std"}
+    )
+
+    for i in range(window._guided_roi_list.count()):
+        item = window._guided_roi_list.item(i)
+        if item.text() == "CH2":
+            item.setCheckState(Qt.Unchecked)
+
+    window._refresh_guided_per_roi_feature_event_table()
+    assert set(_per_roi_feature_table_status_by_roi(window)) == {"CH1", "CH3"}
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert "CH2" not in plan.included_roi_ids
+    # The leftover CH2 override must not reach the plan or block the
+    # current included set.
+    assert plan.per_roi_feature_event_choices == []
+    assert window._guided_per_roi_feature_event_consistency_problem() == ""
+
+
+def test_new_analysis_valid_custom_roi_passes_consistency_check(
+    window, tmp_path, monkeypatch
+):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    _customize_roi_via_fake_dialog(
+        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+    )
+
+    assert window._guided_per_roi_feature_event_consistency_problem() == ""
+    ready, _message = window._guided_feature_detection_readiness()
+    assert ready is True
+
+
+def test_new_analysis_missing_default_with_uncustomized_roi_blocks_readiness(
+    window, tmp_path, monkeypatch
+):
+    """A realistic GUI-reachable inconsistency: a ROI is customized while
+    the default settings were never applied. Check setup must block rather
+    than silently letting the un-customized ROIs fall back to nothing."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    _customize_roi_via_fake_dialog(
+        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+    )
+    window._guided_new_analysis_feature_event_profile_status = "default_initialized"
+
+    assert window._guided_per_roi_feature_event_consistency_problem() != ""
+    ready, _message = window._guided_feature_detection_readiness()
+    assert ready is False
+
+
+def test_new_analysis_review_plan_summarizes_default_and_custom_rois(
+    window, tmp_path, monkeypatch
+):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    _customize_roi_via_fake_dialog(
+        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+    )
+
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    window._refresh_guided_draft_run_plan_preview()
+    summary_text = window._guided_draft_run_plan_preview_label.text()
+
+    assert "Feature detection: Default for CH2, CH3; Custom for CH1." in summary_text
