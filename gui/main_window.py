@@ -1597,6 +1597,7 @@ class MainWindow(QMainWindow):
 
         # Restore persisted settings
         self._load_settings_into_widgets()
+        self._refresh_status_strip_visibility()
 
     # ==================================================================
     # Config Panel
@@ -1712,7 +1713,50 @@ class MainWindow(QMainWindow):
         self._guided_workflow_tab = self._build_guided_workflow_shell()
         tabs.addTab(self._guided_workflow_tab, "Guided Workflow")
         tabs.addTab(self._full_control_tab, "Full Control")
+        tabs.currentChanged.connect(
+            lambda _idx: self._refresh_status_strip_visibility()
+        )
         return tabs
+
+    _STATUS_STRIP_FULL_CONTROL_ONLY_WIDGETS = (
+        "_status_label",
+        "_phase_label",
+        "_elapsed_label",
+        "_left_pane_toggle_btn",
+        "_right_pane_toggle_btn",
+        "_progress_caption_label",
+        "_progress_bar",
+    )
+
+    def _refresh_status_strip_visibility(self) -> None:
+        """Hide the Full-Control-only run status/phase/elapsed labels, the
+        milestone progress bar, and the pane-toggle buttons while the
+        Guided Workflow tab is active and no Full Control run is active.
+
+        Guided Run has its own independent "Analysis progress" panel on the
+        Run step (a separate StatusFollower, untouched by self._ui_state),
+        and Guided has no left/right splitter for the pane-toggle buttons
+        to control, so none of this is meaningful during Guided setup.
+
+        Only these specific Full-Control-only children are toggled -- the
+        status header card itself, and the PREVIEW badge (which can carry
+        meaning for a loaded completed run regardless of which tab is
+        active), are left alone. This keeps the card's own structural
+        presence unchanged for Full Control and avoids hiding a completed
+        Full Control status indicator.
+        """
+        tabs = getattr(self, "_workflow_mode_tabs", None)
+        if tabs is None:
+            return
+        is_guided_tab = tabs.currentWidget() is getattr(
+            self, "_guided_workflow_tab", None
+        )
+        is_idle = getattr(self, "_ui_state", None) == RunnerState.IDLE
+        show = not (is_guided_tab and is_idle)
+        for widget_name in self._STATUS_STRIP_FULL_CONTROL_ONLY_WIDGETS:
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setVisible(show)
 
     def _build_full_control_body(self) -> QWidget:
         """Existing fixed major panes: upper-left controls, lower-left log, right results."""
@@ -1757,7 +1801,6 @@ class MainWindow(QMainWindow):
                 background: #f7f8fa;
             }
             QGroupBox#guidedWorkflowStepperGroup,
-            QGroupBox#guidedSetupSummaryPanel,
             QGroupBox[guidedCorrectionCard="true"] {
                 background: #ffffff;
                 border: 1px solid #d7dce2;
@@ -1765,7 +1808,6 @@ class MainWindow(QMainWindow):
                 margin-top: 12px;
             }
             QGroupBox#guidedWorkflowStepperGroup::title,
-            QGroupBox#guidedSetupSummaryPanel::title,
             QGroupBox[guidedCorrectionCard="true"]::title {
                 subcontrol-origin: margin;
                 left: 10px;
@@ -1974,39 +2016,11 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_mode_banner_label)
         content_layout.addWidget(self._guided_mode_banner_label, 0)
         content_layout.addWidget(self._guided_workflow_stack, 1)
-        content_layout.addWidget(self._build_guided_setup_summary_panel(), 0)
         self._refresh_guided_mode_display()
 
         outer.addWidget(stepper_group, 0)
         outer.addWidget(content_wrap, 1)
         return shell
-
-    def _build_guided_setup_summary_panel(self) -> QGroupBox:
-        """Read-only Stage 2B setup preview; it does not validate, run, or write artifacts."""
-        group = QGroupBox("Current setup summary")
-        group.setObjectName("guidedSetupSummaryPanel")
-        group.setCheckable(True)
-        group.setChecked(False)
-        layout = QVBoxLayout(group)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(4)
-        self._guided_setup_summary_content = QWidget()
-        self._guided_setup_summary_content.setObjectName("guidedSetupSummaryContent")
-        content_layout = QVBoxLayout(self._guided_setup_summary_content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(4)
-        self._guided_setup_summary_label = QLabel("")
-        self._guided_setup_summary_label.setObjectName("guidedSetupSummaryLabel")
-        self._guided_setup_summary_label.setProperty("guidedMutedText", True)
-        self._guided_setup_summary_label.setWordWrap(True)
-        self._guided_setup_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._make_guided_widget_shrinkable(self._guided_setup_summary_label)
-        content_layout.addWidget(self._guided_setup_summary_label)
-        layout.addWidget(self._guided_setup_summary_content)
-        self._guided_setup_summary_content.setVisible(False)
-        group.toggled.connect(self._guided_setup_summary_content.setVisible)
-        self._refresh_guided_setup_summary()
-        return group
 
     def _build_guided_step_scroll(self, object_name: str, title: str, paragraphs: list[str], extra: QWidget | None = None) -> QScrollArea:
         scroll = QScrollArea()
@@ -2647,44 +2661,25 @@ class MainWindow(QMainWindow):
         *,
         lightweight: bool = False,
     ) -> None:
-        if not hasattr(self, "_guided_setup_summary_label"):
+        """Refresh Guided display panels that depend on current setup state.
+
+        4J16k28: the raw-state "Current setup summary" debug panel was
+        removed from the visible shell (Review Plan's scientist-facing
+        summaries and technical-details toggle cover that need). This
+        method is kept -- and still named for its historical role -- as
+        the shared cascade-refresh hook that several setup-state mutation
+        handlers call; `_guided_setup_summary_state()` itself also remains,
+        since it backs the Guided/Full Control setup-equivalence checks and
+        the Correction Approach page's own "Completed-run details" panel.
+        """
+        if lightweight:
             return
-        if not lightweight:
-            if hasattr(self, "_guided_diagnostics_status_label"):
-                self._refresh_guided_diagnostics_panel()
-            if hasattr(self, "_guided_start_status_label"):
-                self._refresh_guided_start_panel()
-            if hasattr(self, "_guided_mode_banner_label"):
-                self._refresh_guided_mode_display()
-        state = self._guided_setup_summary_state()
-        resolved = state["resolved_format"] or "not discovered"
-        roi_text = (
-            "not discovered"
-            if int(state["total_roi_count"]) == 0
-            else f"{state['selected_roi_count']}/{state['total_roi_count']} selected: "
-            + ", ".join(state["selected_rois"])
-        )
-        lines = [
-            "Status: setup not yet validated. Guided Mode can validate and run "
-            "supported setups; some configurations may still require Full Control.",
-            "Correction cards configure setup state only; completed-run diagnostics are explicit actions.",
-            f"Input: {state['input_dir'] or '(not set)'}",
-            f"Output: {state['output_dir'] or '(not set)'}",
-            f"Format: {state['format']} | Resolved: {resolved}",
-            f"Acquisition: {state['acquisition_mode']}",
-            f"Intermittent timing: sessions/hour={state['sessions_per_hour'] or '(blank)'}, "
-            f"session duration={state['session_duration_s'] or '(blank)'}",
-            f"Continuous window: {state['continuous_window_sec']:.1f}s, "
-            f"allow partial final window={'on' if state['allow_partial_final_window'] else 'off'}",
-            "RWD incomplete final chunk exclusion: "
-            f"{'on' if state['exclude_incomplete_final_rwd_chunk'] else 'off'}",
-            f"ROIs: {roi_text}",
-            f"Reference correction method: {state['reference_correction_label']} "
-            f"({state['reference_correction_method']})",
-            f"Guided correction intent: {state['guided_correction_intent']}",
-            f"Diagnostics: {getattr(self, '_guided_diagnostics_status', 'not_generated')}",
-        ]
-        self._guided_setup_summary_label.setText("\n".join(lines))
+        if hasattr(self, "_guided_diagnostics_status_label"):
+            self._refresh_guided_diagnostics_panel()
+        if hasattr(self, "_guided_start_status_label"):
+            self._refresh_guided_start_panel()
+        if hasattr(self, "_guided_mode_banner_label"):
+            self._refresh_guided_mode_display()
 
     def _set_guided_workflow_mode(self, mode: str) -> None:
         if mode not in {"start", "new_analysis", "open_results"}:
@@ -26536,6 +26531,7 @@ class MainWindow(QMainWindow):
             self._progress_bar.setFormat(f"running {pct_i}%")
         else:
             self._progress_bar.setFormat(f"{pct_i}%")
+        self._refresh_status_strip_visibility()
 
     def _on_status(self, data: dict):
         """Handle parsed status.json updates and refresh top-strip progress."""

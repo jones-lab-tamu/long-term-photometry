@@ -2720,7 +2720,11 @@ def test_guided_setup_values_are_run_spec_relevant_state_equivalent(window, tmp_
     assert float(window._continuous_step_sec_spin.value()) == 750.0
 
 
-def test_guided_setup_summary_is_read_only_and_tracks_current_state(window, tmp_path):
+def test_guided_setup_summary_state_is_read_only_and_tracks_current_state(window, tmp_path):
+    """4J16k28: the raw-state debug panel was removed, but the underlying
+    state-collection method it used to render must keep tracking setup
+    changes without writing anything -- it still backs Guided/Full Control
+    equivalence checks and the Correction Approach page's own details panel."""
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     input_dir.mkdir()
@@ -2731,27 +2735,32 @@ def test_guided_setup_summary_is_read_only_and_tracks_current_state(window, tmp_
     window._guided_format_combo.setCurrentText("custom_tabular")
     window._guided_sessions_per_hour_edit.setText("8")
 
-    text = window._guided_setup_summary_label.text()
-    assert "setup not yet validated" in text
-    assert "Use Full Control for real validation/runs" not in text
-    assert str(input_dir) in text
-    assert str(output_dir) in text
-    assert "custom_tabular" in text
-    assert "sessions/hour=8" in text
+    state = window._guided_setup_summary_state()
+    assert state["input_dir"] == str(input_dir)
+    assert state["output_dir"] == str(output_dir)
+    assert state["format"] == "custom_tabular"
+    assert state["sessions_per_hour"] == "8"
+    assert not list(output_dir.rglob("*"))
 
 
-def test_guided_summary_section_is_collapsible_and_planned_stages_removed(window, tmp_path, monkeypatch):
-    summary_group = window._guided_workflow_tab.findChild(QGroupBox, "guidedSetupSummaryPanel")
-    assert summary_group is not None
-    assert summary_group.isCheckable() is True
-    assert summary_group.isChecked() is False
-    assert window._guided_setup_summary_content.isHidden() is True
+def test_guided_setup_summary_panel_removed_from_normal_pages(window, tmp_path, monkeypatch):
+    """4J16k28: the raw internal "Current setup summary" debug panel (which
+    dumped e.g. "RWD incomplete final chunk exclusion: on", "Guided
+    correction intent: ...", "Diagnostics: not_generated") no longer
+    appears anywhere in the Guided shell. Review Plan's scientist-facing
+    summaries and technical-details toggle cover that need instead."""
+    assert window._guided_workflow_tab.findChild(QGroupBox, "guidedSetupSummaryPanel") is None
+    assert not hasattr(window, "_guided_setup_summary_label")
+    assert not hasattr(window, "_guided_setup_summary_content")
 
     # The internal "Planned stages / not yet wired" roadmap panel has been
     # removed from Guided Mode and must not reappear.
     assert window._guided_workflow_tab.findChild(QGroupBox, "guidedWorkflowPlannedStages") is None
     assert not hasattr(window, "_guided_planned_stages_content")
 
+    # Nothing about removing the display panel should touch state tracking
+    # (still used for Guided/Full Control equivalence checks) or trigger
+    # backend preview calls as a side effect of ordinary setup edits.
     state_before = _state_for_equivalence(window)
     calls = {"preview": 0}
 
@@ -2760,12 +2769,6 @@ def test_guided_summary_section_is_collapsible_and_planned_stages_removed(window
         return {}
 
     monkeypatch.setattr(main_window_module, "run_guided_correction_preview_comparison", _fake_preview_backend)
-    summary_group.setChecked(True)
-    assert window._guided_setup_summary_content.isHidden() is False
-    summary_group.setChecked(False)
-    assert window._guided_setup_summary_content.isHidden() is True
-    assert _state_for_equivalence(window) == state_before
-    assert calls["preview"] == 0
 
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
@@ -2774,11 +2777,13 @@ def test_guided_summary_section_is_collapsible_and_planned_stages_removed(window
     window._guided_input_dir_edit.setText(str(input_dir))
     window._guided_output_dir_edit.setText(str(output_dir))
     window._guided_format_combo.setCurrentText("custom_tabular")
-    assert window._guided_setup_summary_content.isHidden() is True
-    text = window._guided_setup_summary_label.text()
-    assert str(input_dir) in text
-    assert str(output_dir) in text
-    assert "custom_tabular" in text
+    assert calls["preview"] == 0
+
+    state_after = _state_for_equivalence(window)
+    assert state_after != state_before
+    assert window._guided_setup_summary_state()["input_dir"] == str(input_dir)
+    assert window._guided_setup_summary_state()["output_dir"] == str(output_dir)
+    assert window._guided_setup_summary_state()["format"] == "custom_tabular"
 
 
 def test_guided_and_full_control_intermittent_setup_summary_equivalence(qapp, tmp_path):
@@ -2925,16 +2930,16 @@ def test_decision_support_audit_does_not_alter_dynamic_fit_mode(window):
     assert window._selected_dynamic_fit_mode() == before_mode
 
 
-def test_guided_setup_summary_reports_correction_state_without_validation_claim(window):
+def test_guided_setup_summary_state_reports_correction_state(window):
+    """4J16k28: the display panel that used to render this as raw text
+    ("Reference correction method: ...", "Guided correction intent: ...")
+    was removed; the underlying state-collection method must still report
+    the correction choice accurately."""
     window._guided_correction_select_buttons["Adaptive Event-Gated Fit"].click()
-    text = window._guided_setup_summary_label.text()
+    state = window._guided_setup_summary_state()
 
-    assert "setup not yet validated" in text
-    assert "Use Full Control for real validation/runs" not in text
-    assert "completed-run diagnostics are explicit actions" in text
-    assert "Reference correction method:" in text
-    assert "adaptive_event_gated_regression" in text
-    assert "Guided correction intent: Adaptive Event-Gated Fit" in text
+    assert state["reference_correction_method"] == "adaptive_event_gated_regression"
+    assert state["guided_correction_intent"] == "Adaptive Event-Gated Fit"
 
 
 def test_guided_diagnostics_step_has_status_context_and_slots(window):
@@ -5864,6 +5869,61 @@ def test_guided_mode_banner_hides_completed_results_during_new_analysis_setup(
     assert window._guided_mode_banner_label.toolTip() == (
         f"New analysis using: {input_dir}"
     )
+
+
+def test_status_strip_hidden_while_guided_idle_visible_in_full_control(window, qapp):
+    """4J16k28: the Full-Control-only run status/phase/elapsed labels, the
+    milestone progress bar, and the pane-toggle buttons should not be
+    visible while the Guided Workflow tab is active and idle -- Guided Run
+    has its own Run-step "Analysis progress" panel and Guided has no
+    left/right splitter for the pane-toggle buttons to control. They must
+    still be fully present and visible in Full Control."""
+    strip_widgets = (
+        window._status_label,
+        window._phase_label,
+        window._elapsed_label,
+        window._left_pane_toggle_btn,
+        window._right_pane_toggle_btn,
+        window._progress_caption_label,
+        window._progress_bar,
+    )
+
+    # Default state: Guided tab active, idle.
+    assert window._workflow_mode_tabs.currentWidget() is window._guided_workflow_tab
+    assert window._ui_state == main_window_module.RunnerState.IDLE
+    window._refresh_status_strip_visibility()
+    qapp.processEvents()
+    for widget in strip_widgets:
+        assert widget.isHidden() is True
+    # The card itself is untouched -- only its Full-Control-only children
+    # are hidden -- so structural checks on the card keep working.
+    assert window._status_header_card.isHidden() is False
+
+    # Switching to Full Control must restore all of them.
+    window._workflow_mode_tabs.setCurrentWidget(window._full_control_tab)
+    qapp.processEvents()
+    for widget in strip_widgets:
+        assert widget.isHidden() is False
+
+
+def test_status_strip_stays_visible_during_active_full_control_run_even_on_guided_tab(
+    window, qapp
+):
+    """4J16k28: an active Full Control run/validation must never be hidden,
+    even if the user is looking at the Guided tab."""
+    assert window._workflow_mode_tabs.currentWidget() is window._guided_workflow_tab
+    window._ui_state = main_window_module.RunnerState.RUNNING
+    window._refresh_status_strip_visibility()
+    qapp.processEvents()
+
+    assert window._status_label.isHidden() is False
+    assert window._progress_bar.isHidden() is False
+    assert window._left_pane_toggle_btn.isHidden() is False
+    assert window._right_pane_toggle_btn.isHidden() is False
+
+    window._ui_state = main_window_module.RunnerState.IDLE
+    window._refresh_status_strip_visibility()
+    assert window._status_label.isHidden() is True
 
 
 def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
