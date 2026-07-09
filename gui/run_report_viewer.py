@@ -36,6 +36,12 @@ from photometry_pipeline.guided_completed_applied_dff_reload import (
     format_guided_completed_applied_dff_summary,
     format_guided_completed_applied_dff_technical_details,
 )
+from photometry_pipeline.guided_completed_feature_event_reload import (
+    load_guided_completed_feature_event_state,
+    GuidedCompletedFeatureEventState,
+    format_guided_completed_feature_event_summary,
+    format_guided_completed_feature_event_technical_details,
+)
 
 
 TAB_VERIFICATION = "Verification"
@@ -69,6 +75,7 @@ class RunReportViewer(QWidget):
         self._current_run_dir = ""
         self._run_summary_path = ""
         self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
+        self._feature_event_state = GuidedCompletedFeatureEventState.absent()
         self._region_paths: Dict[str, str] = {}
         self._region_tab_images: Dict[str, Dict[str, List[str]]] = {}
         self._tab_indices: Dict[Tuple[str, str], int] = {}
@@ -144,6 +151,52 @@ class RunReportViewer(QWidget):
         self._applied_dff_details_label.setContentsMargins(8, 6, 8, 6)
         self._applied_dff_details_label.setVisible(False)
         ws.addWidget(self._applied_dff_details_label)
+
+        self._feature_event_summary_label = QLabel(
+            format_guided_completed_feature_event_summary(self._feature_event_state)
+        )
+        self._feature_event_summary_label.setObjectName(
+            "completedRunFeatureEventSummary"
+        )
+        # A run with no per-ROI feature settings (the common case) writes no
+        # feature-detection settings file at all, so this line is hidden
+        # rather than shown as an empty or reassuring-sounding default state.
+        self._feature_event_summary_label.setVisible(self._feature_event_state.present)
+        self._feature_event_summary_label.setWordWrap(True)
+        self._feature_event_summary_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        self._feature_event_summary_label.setFrameShape(QFrame.StyledPanel)
+        self._feature_event_summary_label.setContentsMargins(8, 6, 8, 6)
+        ws.addWidget(self._feature_event_summary_label)
+
+        self._feature_event_details_toggle = QPushButton("Show technical details")
+        self._feature_event_details_toggle.setObjectName(
+            "completedRunFeatureEventDetailsToggle"
+        )
+        self._feature_event_details_toggle.setCheckable(True)
+        self._feature_event_details_toggle.setVisible(self._feature_event_state.present)
+        self._feature_event_details_toggle.toggled.connect(
+            self._on_feature_event_details_toggled
+        )
+        ws.addWidget(self._feature_event_details_toggle, 0, Qt.AlignLeft)
+
+        self._feature_event_details_label = QLabel(
+            format_guided_completed_feature_event_technical_details(
+                self._feature_event_state
+            )
+        )
+        self._feature_event_details_label.setObjectName(
+            "completedRunFeatureEventTechnicalDetails"
+        )
+        self._feature_event_details_label.setWordWrap(True)
+        self._feature_event_details_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        self._feature_event_details_label.setFrameShape(QFrame.StyledPanel)
+        self._feature_event_details_label.setContentsMargins(8, 6, 8, 6)
+        self._feature_event_details_label.setVisible(False)
+        ws.addWidget(self._feature_event_details_label)
 
         selector_row = QHBoxLayout()
         selector_row.addWidget(QLabel("Region:"))
@@ -267,12 +320,33 @@ class RunReportViewer(QWidget):
         self._applied_dff_details_toggle.setVisible(self._applied_dff_state.present)
         self._applied_dff_details_toggle.setChecked(False)
 
+    def _on_feature_event_details_toggled(self, checked: bool) -> None:
+        self._feature_event_details_label.setVisible(bool(checked))
+        self._feature_event_details_toggle.setText(
+            "Hide technical details" if checked else "Show technical details"
+        )
+
+    def _refresh_feature_event_display(self) -> None:
+        self._feature_event_summary_label.setText(
+            format_guided_completed_feature_event_summary(self._feature_event_state)
+        )
+        self._feature_event_summary_label.setVisible(self._feature_event_state.present)
+        self._feature_event_details_label.setText(
+            format_guided_completed_feature_event_technical_details(
+                self._feature_event_state
+            )
+        )
+        self._feature_event_details_toggle.setVisible(self._feature_event_state.present)
+        self._feature_event_details_toggle.setChecked(False)
+
     def clear(self):
         """Reset to idle/placeholder state."""
         self._current_run_dir = ""
         self._run_summary_path = ""
         self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
         self._refresh_applied_dff_display()
+        self._feature_event_state = GuidedCompletedFeatureEventState.absent()
+        self._refresh_feature_event_display()
         self._region_paths = {}
         self._region_tab_images = {}
         self._tab_indices = {}
@@ -347,6 +421,8 @@ class RunReportViewer(QWidget):
 
         self._applied_dff_state = load_guided_completed_applied_dff_state(out_dir)
         self._refresh_applied_dff_display()
+        self._feature_event_state = load_guided_completed_feature_event_state(out_dir)
+        self._refresh_feature_event_display()
 
         title = "Results workspace"
         if is_preview:
@@ -385,6 +461,21 @@ class RunReportViewer(QWidget):
     def applied_dff_technical_details_text(self) -> str:
         """Return the optional-disclosure applied dF/F technical details text."""
         return self._applied_dff_details_label.text()
+
+    @property
+    def feature_event_state(self) -> GuidedCompletedFeatureEventState:
+        """Return the loaded completed-run per-ROI feature-detection state."""
+        return self._feature_event_state
+
+    @property
+    def feature_event_summary_text(self) -> str:
+        """Return the read-only completed-run feature-detection summary text."""
+        return self._feature_event_summary_label.text()
+
+    @property
+    def feature_event_technical_details_text(self) -> str:
+        """Return the optional-disclosure feature-detection technical details text."""
+        return self._feature_event_details_label.text()
 
     def _discover_region_tab_images(self, region_path: str) -> Dict[str, List[str]]:
         """Discover per-tab image lists for one region directory."""
