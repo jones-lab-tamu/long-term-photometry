@@ -2176,6 +2176,15 @@ class MainWindow(QMainWindow):
         output_row.addWidget(self._guided_output_browse_btn)
         form.addRow("Output folder:", output_row)
 
+        output_help_label = QLabel(
+            "This is where results for this analysis will be saved. You "
+            "can review or adjust this on the Review Plan page before "
+            "running."
+        )
+        output_help_label.setProperty("guidedMutedText", True)
+        output_help_label.setWordWrap(True)
+        form.addRow("", output_help_label)
+
         self._guided_format_combo = QComboBox()
         self._guided_format_combo.setObjectName("guidedFormatCombo")
         self._guided_format_combo.addItems(list(FORMAT_CHOICES))
@@ -2185,11 +2194,13 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_format_combo)
         form.addRow("Format:", self._guided_format_combo)
 
-        self._guided_resolved_format_label = QLabel("Resolved format will appear after discovery/validation.")
-        self._guided_resolved_format_label.setObjectName("guidedResolvedFormatLabel")
-        self._guided_resolved_format_label.setProperty("guidedMutedText", True)
-        self._guided_resolved_format_label.setWordWrap(True)
-        form.addRow("Resolved format:", self._guided_resolved_format_label)
+        format_help_label = QLabel(
+            "The app detected this format automatically. Change it only if "
+            "the detection is wrong."
+        )
+        format_help_label.setProperty("guidedMutedText", True)
+        format_help_label.setWordWrap(True)
+        form.addRow("", format_help_label)
 
         roi_group = QGroupBox("ROI discovery and selection")
         roi_group.setObjectName("guidedRoiDiscoveryGroup")
@@ -2206,7 +2217,8 @@ class MainWindow(QMainWindow):
         roi_layout.addLayout(roi_row)
 
         self._guided_discovery_summary_label = QLabel(
-            "ROI choices use the same discovery state as Full Control."
+            "Select ROIs scans the input folder and lists the channels "
+            "found in the data."
         )
         self._guided_discovery_summary_label.setObjectName("guidedDiscoverySummaryLabel")
         self._guided_discovery_summary_label.setProperty("guidedSecondaryText", True)
@@ -2260,8 +2272,8 @@ class MainWindow(QMainWindow):
             "guidedStepSelectData",
             "Select data",
             [
-                "These controls mirror the existing setup state used by Full Control. They do not run analysis.",
-                "ROI discovery uses the existing discovery path and shared ROI inclusion state.",
+                "Choose the input folder, confirm the detected data format, "
+                "and select the channels/ROIs to include.",
             ],
             wrapper,
         )
@@ -2295,9 +2307,9 @@ class MainWindow(QMainWindow):
         form.addRow("Acquisition mode:", self._guided_acquisition_mode_combo)
 
         self._guided_intermittent_explanation_label = QLabel(
-            "Use intermittent mode when recording occurs in repeated "
-            "acquisition chunks, such as RWD sessions. Enter how many chunks "
-            "occur per hour and the expected duration of each chunk."
+            "Use this mode when your recording is saved as repeated "
+            "sessions. The app can usually detect how many sessions occur "
+            "per hour and how long each session lasts."
         )
         self._guided_intermittent_explanation_label.setProperty(
             "guidedSecondaryText", True
@@ -2333,7 +2345,7 @@ class MainWindow(QMainWindow):
         self._guided_sessions_per_hour_edit.setToolTip(self._sph_edit.toolTip())
         self._make_guided_widget_shrinkable(self._guided_sessions_per_hour_edit)
         self._guided_sessions_per_hour_label = QLabel(
-            "Sessions per hour (required):"
+            "Sessions per hour:"
         )
         form.addRow(
             self._guided_sessions_per_hour_label,
@@ -2382,14 +2394,14 @@ class MainWindow(QMainWindow):
         )
 
         self._guided_incomplete_final_rwd_group = QGroupBox(
-            "Final RWD recording"
+            "Final recording session"
         )
         incomplete_layout = QVBoxLayout(
             self._guided_incomplete_final_rwd_group
         )
         incomplete_layout.setContentsMargins(10, 8, 10, 8)
         self._guided_exclude_incomplete_final_rwd_chunk_cb = QCheckBox(
-            "Allow one incomplete final RWD recording chunk"
+            "Allow one incomplete final recording session"
         )
         self._guided_exclude_incomplete_final_rwd_chunk_cb.setObjectName(
             "guidedExcludeIncompleteFinalRwdChunk"
@@ -2401,10 +2413,10 @@ class MainWindow(QMainWindow):
             self._guided_exclude_incomplete_final_rwd_chunk_cb,
         )
         self._guided_incomplete_final_rwd_help_label = QLabel(
-            "If the last RWD file is shorter than expected, Guided Mode can "
-            "exclude that final incomplete chunk and continue. Earlier "
-            "incomplete chunks still stop validation. Raw files are not "
-            "modified."
+            "If the last recording file is shorter than expected, Guided "
+            "Mode can exclude that final incomplete session and continue. "
+            "Earlier incomplete sessions still stop validation. Raw files "
+            "are not modified."
         )
         self._guided_incomplete_final_rwd_help_label.setProperty(
             "guidedSecondaryText", True
@@ -2452,8 +2464,8 @@ class MainWindow(QMainWindow):
             "guidedStepRecordingStructure",
             "Recording structure",
             [
-                "These controls mirror the acquisition and timing state used by Full Control.",
-                "Guided Workflow uses non-overlapping continuous windows; the continuous step remains derived from the window length.",
+                "Tell the app how your recording is organized so it can "
+                "align sessions correctly.",
             ],
             wrapper,
         )
@@ -3021,16 +3033,16 @@ class MainWindow(QMainWindow):
         )
         if hasattr(self, "_guided_mode_banner_label"):
             if mode == "new_analysis":
-                full_text = (
-                    "Mode: New analysis - "
-                    f"Input: {input_dir or 'not selected'} - "
-                    f"Completed results: {run_dir if has_loaded_results else 'none'}"
-                )
-                text = (
-                    "Mode: New analysis - "
-                    f"Input: {self._display_path(input_dir) if input_dir else 'not selected'} - "
-                    f"Completed results: {self._display_path(run_dir) if has_loaded_results else 'none'}"
-                )
+                if input_dir:
+                    folder_name = (
+                        os.path.basename(os.path.normpath(input_dir))
+                        or input_dir
+                    )
+                    full_text = f"New analysis using: {input_dir}"
+                    text = f"New analysis using: {folder_name}"
+                else:
+                    full_text = "New analysis"
+                    text = "New analysis"
             elif mode == "open_results":
                 full_text = (
                     "Mode: Open Results - "
@@ -3106,10 +3118,20 @@ class MainWindow(QMainWindow):
             lines.append("No input data selected.")
         self._guided_start_status_label.setText("\n".join(lines))
         if hasattr(self, "_guided_start_setup_status_label"):
-            input_display = self._display_path(input_dir) if input_dir else "not selected"
-            self._guided_start_setup_status_label.setText(
-                f"Input folder: {input_display}"
-            )
+            input_display = self._display_path(input_dir) if input_dir else ""
+            if mode == "new_analysis":
+                # This is the folder actively in use for the in-progress
+                # setup, not merely a carried-over value from a prior
+                # session -- safe to present as the current setting.
+                setup_status_text = f"Input folder: {input_display or 'not selected'}"
+            elif input_dir:
+                # Nothing has been configured for a new analysis yet; this
+                # value is only carried over from the last session, so it
+                # must not read as an already-configured analysis.
+                setup_status_text = f"Last input folder used: {input_display}"
+            else:
+                setup_status_text = "Input folder: not selected"
+            self._guided_start_setup_status_label.setText(setup_status_text)
             self._guided_start_setup_status_label.setToolTip(input_dir)
             self._guided_start_setup_btn.setText(
                 "Continue setup" if getattr(self, "_guided_workflow_mode", "start") == "new_analysis" else "Set up new analysis"
@@ -3216,10 +3238,6 @@ class MainWindow(QMainWindow):
             self._guided_discovery_summary_label.setText(
                 "Format changed. Select ROIs to run discovery for the "
                 "selected input."
-            )
-        if hasattr(self, "_guided_resolved_format_label"):
-            self._guided_resolved_format_label.setText(
-                "Resolved format will appear after discovery/validation."
             )
         if hasattr(self, "_format_combo"):
             blocker = QSignalBlocker(self._format_combo)
@@ -3402,7 +3420,7 @@ class MainWindow(QMainWindow):
             return
 
         self._guided_session_duration_label.setText(
-            "Session duration (s) — required:"
+            "Session duration (s):"
         )
         self._guided_session_duration_edit.setPlaceholderText(
             "(required, seconds > 0)"
@@ -3432,11 +3450,10 @@ class MainWindow(QMainWindow):
             and session_duration > 0
             and sessions_per_hour * session_duration <= 3600
         ):
-            self._guided_recording_structure_help_label.setText(
-                "Recording structure complete: intermittent sessions, "
-                f"{sessions_per_hour} sessions/hour, "
-                f"{session_duration:g} s/session."
-            )
+            # Detected settings are already visible in the fields above and
+            # "Recording structure is ready." is shown near Continue; avoid
+            # a third redundant restatement here.
+            self._guided_recording_structure_help_label.setText("")
         else:
             if (
                 sessions_per_hour is not None
@@ -3954,6 +3971,17 @@ class MainWindow(QMainWindow):
             outcome="inferred_applied",
         )
 
+    @staticmethod
+    def _guided_discovery_status_text(disco: dict) -> str:
+        """Plain-language ROI discovery status; independent of Full Control's label."""
+        fmt = str(disco.get("resolved_format", "") or "").strip().upper() or "the detected"
+        n_total = int(disco.get("n_total_discovered", 0) or 0)
+        session_word = "session" if n_total == 1 else "sessions"
+        return (
+            f"Detected {fmt} data with {n_total} recording {session_word}. "
+            "Channels detected below."
+        )
+
     def _sync_guided_discovery_from_full(self) -> None:
         sync_started = time.monotonic()
         self._guided_roi_discovery_diag("guided_sync_start")
@@ -3974,18 +4002,12 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_guided_discovery_summary_label"):
             if self._discovery_cache is None:
                 self._guided_discovery_summary_label.setText(
-                    "ROI choices use the same discovery state as Full Control."
+                    "Select ROIs scans the input folder and lists the "
+                    "channels found in the data."
                 )
             else:
-                self._guided_discovery_summary_label.setText(self._discovery_summary.text())
-        if hasattr(self, "_guided_resolved_format_label"):
-            if self._discovery_cache is None:
-                self._guided_resolved_format_label.setText(
-                    "Resolved format will appear after discovery/validation."
-                )
-            else:
-                self._guided_resolved_format_label.setText(
-                    str(self._discovery_cache.get("resolved_format", "?"))
+                self._guided_discovery_summary_label.setText(
+                    self._guided_discovery_status_text(self._discovery_cache)
                 )
         self._refresh_guided_setup_summary()
         self._sync_guided_recording_visibility()

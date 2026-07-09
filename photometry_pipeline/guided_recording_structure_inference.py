@@ -210,7 +210,7 @@ def infer_guided_recording_structure(
             "duration_display_normalized": duration_normalized,
         },
         message=(
-            f"Detected {rounded_rate} sessions/hour and "
-            f"~{display_duration:g} s/session from RWD files. Please confirm."
+            f"Detected {rounded_rate} sessions/hour and approximately "
+            f"{display_duration:g} s/session. Please confirm."
         ),
     )

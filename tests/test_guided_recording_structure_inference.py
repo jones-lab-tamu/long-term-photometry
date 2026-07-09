@@ -85,12 +85,13 @@ def test_rwd_inferred_duration_normalizes_only_near_whole_seconds():
     )
 
     assert normalized.session_duration_sec == 600.0
-    assert "~600 s/session" in normalized.message
+    assert "approximately 600 s/session" in normalized.message
+    assert "from RWD files" not in normalized.message
     assert normalized.evidence["raw_session_duration_sec"] == 599.988
     assert normalized.evidence["display_session_duration_sec"] == 600.0
     assert normalized.evidence["duration_display_normalized"] is True
     assert fractional.session_duration_sec == 599.4
-    assert "~599.4 s/session" in fractional.message
+    assert "approximately 599.4 s/session" in fractional.message
     assert fractional.evidence["duration_display_normalized"] is False
 
 

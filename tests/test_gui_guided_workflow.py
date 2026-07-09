@@ -409,9 +409,9 @@ def test_guided_start_setup_new_analysis_navigates_without_loading_or_generating
 
     assert window._guided_workflow_mode == "new_analysis"
     assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepSelectData"
-    assert window._guided_mode_banner_label.text().startswith("Mode: New analysis")
-    assert "Input:" in window._guided_mode_banner_label.text()
-    assert "Completed results:" in window._guided_mode_banner_label.text()
+    assert window._guided_mode_banner_label.text().startswith("New analysis using:")
+    assert "Completed results:" not in window._guided_mode_banner_label.text()
+    assert "Mode:" not in window._guided_mode_banner_label.text()
     assert window._guided_input_dir_edit.text() == str(input_dir)
     assert all(banner.isHidden() for banner in window._guided_skipped_setup_banners.values())
     assert all(not controls.isHidden() for controls in window._guided_raw_setup_controls.values())
@@ -1916,7 +1916,7 @@ def test_guided_rwd_intermittent_duration_is_visibly_required(window):
     window._guided_session_duration_edit.clear()
 
     assert window._guided_session_duration_label.text() == (
-        "Session duration (s) — required:"
+        "Session duration (s):"
     )
     assert "required, seconds > 0" in (
         window._guided_session_duration_edit.placeholderText()
@@ -1950,11 +1950,13 @@ def test_guided_rwd_intermittent_valid_duration_completes_step(window):
     window._guided_session_duration_edit.setText("600")
 
     status = window._guided_recording_structure_help_label.text()
-    assert status == (
-        "Recording structure complete: intermittent sessions, "
-        "2 sessions/hour, 600 s/session."
-    )
+    # Redundant restatement of already-visible field values was removed;
+    # "Recording structure is ready." (shown near Continue) now covers this.
+    assert status == ""
     assert "needs attention" not in status
+    assert window._guided_recording_continue_status.text() == (
+        "Recording structure is ready."
+    )
 
 
 def test_guided_recording_continue_reports_missing_and_invalid_intermittent_fields(
@@ -2020,9 +2022,9 @@ def test_guided_recording_continuous_readiness_and_mode_visibility(window):
     assert window._guided_continuous_window_sec_spin.isHidden() is True
     assert window._guided_incomplete_final_rwd_group.isHidden() is False
     assert window._guided_exclude_incomplete_final_rwd_chunk_cb.text() == (
-        "Allow one incomplete final RWD recording chunk"
+        "Allow one incomplete final recording session"
     )
-    assert "Earlier incomplete chunks still stop validation" in (
+    assert "Earlier incomplete sessions still stop validation" in (
         window._guided_incomplete_final_rwd_help_label.text()
     )
     assert "Raw files are not modified" in (
@@ -2123,7 +2125,7 @@ def test_guided_rwd_discovery_autofills_recording_timing(
     assert window._duration_edit.text() == "600"
     assert window._guided_recording_continue_btn.isEnabled() is True
     assert window._guided_recording_timing_inference_label.text() == (
-        "Detected 2 sessions/hour and ~600 s/session from RWD files. "
+        "Detected 2 sessions/hour and approximately 600 s/session. "
         "Please confirm."
     )
 
@@ -2177,7 +2179,7 @@ def test_guided_recording_timing_preserves_manual_edit_until_new_source(
     assert window._guided_recording_continue_btn.isEnabled() is True
     assert window._guided_use_detected_timing_btn.isHidden() is True
     assert window._guided_recording_timing_inference_label.text() == (
-        "Detected 2 sessions/hour and ~600 s/session from RWD files. "
+        "Detected 2 sessions/hour and approximately 600 s/session. "
         "Please confirm."
     )
 
@@ -2386,7 +2388,10 @@ def test_guided_roi_discovery_mirrors_existing_discovery_state(window):
     window._discovery_cache = discovery
     window._populate_discovery_ui(discovery)
 
-    assert window._guided_resolved_format_label.text() == "rwd"
+    assert window._guided_discovery_summary_label.text() == (
+        "Detected RWD data with 2 recording sessions. Channels detected "
+        "below."
+    )
     assert [window._guided_roi_list.item(i).text() for i in range(2)] == ["CH1", "CH2"]
 
     window._guided_roi_list.item(1).setCheckState(Qt.Unchecked)
@@ -2457,9 +2462,7 @@ def test_guided_format_change_is_lightweight_and_clears_stale_discovery(
     assert window._discovery_cache is None
     assert window._roi_list.count() == 0
     assert window._guided_roi_list.count() == 0
-    assert window._guided_resolved_format_label.text() == (
-        "Resolved format will appear after discovery/validation."
-    )
+    assert not hasattr(window, "_guided_resolved_format_label")
     assert window._guided_discovery_summary_label.text() == (
         "Format changed. Select ROIs to run discovery for the selected input."
     )
@@ -2533,8 +2536,10 @@ def test_guided_roi_discovery_button_reuses_existing_discovery_handler(
 
     assert window._guided_roi_discovery_running is False
     assert window._guided_roi_list.item(0).text() == "ROI_A"
-    assert window._guided_resolved_format_label.text() == "rwd"
-    assert "Format: rwd" in window._guided_discovery_summary_label.text()
+    assert window._guided_discovery_summary_label.text() == (
+        "Detected RWD data with 1 recording session. Channels detected "
+        "below."
+    )
     assert window._guided_roi_discovery_progress.isHidden() is True
     assert window._guided_discover_rois_btn.isEnabled() is True
     assert window._guided_discover_rois_btn.text() == "Select ROIs..."
@@ -5716,6 +5721,149 @@ def test_correction_approach_page_avoids_developer_facing_wording(window, qapp):
     # The reference-method cards should read as preview affordances.
     assert "Preview this correction method" in visible_text
     assert "Correction method reference (preview only)" in visible_text
+
+
+def _guided_step_visible_texts(window, step_name: str) -> tuple[str, str]:
+    """Return (raw_joined_text, lowercased_text) for every group title,
+    label, and button (including tooltips) on the given Guided step."""
+    step_widget = window._guided_workflow_stack.widget(
+        list(GUIDED_WORKFLOW_STEPS).index(step_name)
+    )
+    texts = []
+    for widget in step_widget.findChildren(QGroupBox):
+        texts.append(widget.title())
+        texts.append(widget.toolTip())
+    for widget in step_widget.findChildren(QLabel):
+        texts.append(widget.text())
+        texts.append(widget.toolTip())
+    for widget in step_widget.findChildren(QPushButton):
+        texts.append(widget.text())
+        texts.append(widget.toolTip())
+    visible_text = " ".join(t for t in texts if t)
+    return visible_text, visible_text.lower()
+
+
+def test_select_data_page_avoids_developer_facing_wording(window, qapp):
+    """4J16k27: Select Data must read as plain instructions, not as Full
+    Control state-mirroring, and must not show 'Resolved format'/'Preview: N'."""
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Select data")
+    )
+    qapp.processEvents()
+
+    visible_text, lowered = _guided_step_visible_texts(window, "Select data")
+
+    forbidden = (
+        "full control",
+        "shared discovery state",
+        "existing discovery path",
+        "mirror the existing setup state",
+        "resolved format",
+        "preview:",
+    )
+    found = [term for term in forbidden if term in lowered]
+    assert found == []
+
+    assert "Choose the input folder" in visible_text
+    assert "Select ROIs scans the input folder" in visible_text
+    assert "detected this format automatically" in visible_text
+    assert "Review Plan page" in visible_text
+
+
+def test_select_data_roi_discovery_status_is_plain_language(window):
+    discovery = {
+        "resolved_format": "rwd",
+        "n_total_discovered": 581,
+        "n_preview": 581,
+        "sessions": [{"session_id": f"s{i}"} for i in range(3)],
+        "rois": [{"roi_id": "CH1"}],
+    }
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+
+    status = window._guided_discovery_summary_label.text()
+    assert status == (
+        "Detected RWD data with 581 recording sessions. Channels detected "
+        "below."
+    )
+    assert "Preview:" not in status
+    assert "Format:" not in status
+    assert "|" not in status
+
+
+def test_recording_structure_page_avoids_developer_facing_wording(window, qapp):
+    """4J16k27: Recording Structure must read as plain instructions, not as
+    Full Control state-mirroring or continuous-window implementation detail."""
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Recording structure")
+    )
+    qapp.processEvents()
+
+    visible_text, lowered = _guided_step_visible_texts(
+        window, "Recording structure"
+    )
+
+    forbidden = (
+        "full control",
+        "mirror the acquisition and timing state",
+        "non-overlapping continuous windows",
+        "continuous step remains derived",
+        "chunks occur per hour",
+        "final rwd recording",
+    )
+    found = [term for term in forbidden if term in lowered]
+    assert found == []
+
+    assert "align sessions correctly" in visible_text
+    assert "Final recording session" in visible_text
+    assert "Sessions per hour:" in visible_text
+    # QCheckBox text isn't covered by the generic label/button/group scan
+    # above; check it directly.
+    assert window._guided_exclude_incomplete_final_rwd_chunk_cb.text() == (
+        "Allow one incomplete final recording session"
+    )
+    assert "Sessions per hour (required)" not in visible_text
+
+
+def test_start_page_labels_carried_over_input_folder_before_new_analysis(
+    window, tmp_path
+):
+    """4J16k27: a folder restored from a previous session must not look like
+    an already-configured new analysis until the user actually starts one."""
+    prior_dir = tmp_path / "prior_session_input"
+    prior_dir.mkdir()
+    window._input_dir.setText(str(prior_dir))
+    assert window._guided_workflow_mode == "start"
+    window._refresh_guided_start_panel()
+
+    status = window._guided_start_setup_status_label.text()
+    assert status.startswith("Last input folder used:")
+    assert "Input folder: " + str(prior_dir) not in status
+
+    window._on_guided_start_setup_new_analysis()
+    window._refresh_guided_start_panel()
+    status_after = window._guided_start_setup_status_label.text()
+    assert status_after.startswith("Input folder:")
+    assert "Last input folder" not in status_after
+
+
+def test_guided_mode_banner_hides_completed_results_during_new_analysis_setup(
+    window, tmp_path
+):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    window._input_dir.setText(str(input_dir))
+    window._set_guided_workflow_mode("new_analysis")
+
+    banner_text = window._guided_mode_banner_label.text()
+    assert banner_text == f"New analysis using: {input_dir.name}"
+    assert "Completed results:" not in banner_text
+    assert "Mode:" not in banner_text
+    assert window._guided_mode_banner_label.toolTip() == (
+        f"New analysis using: {input_dir}"
+    )
 
 
 def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
