@@ -2962,7 +2962,7 @@ def test_guided_diagnostics_step_has_status_context_and_slots(window):
     assert "No completed run is loaded" in window._guided_diagnostics_completed_run_label.text()
     assert "Load a completed run to generate preview-only correction comparisons" in window._guided_preview_source_status_label.text()
     assert window._guided_preview_generate_btn.text() == (
-        "Generate local correction preview"
+        "Generate correction preview"
     )
     assert window._guided_preview_generate_btn.isEnabled() is False
     assert window._guided_preview_result_label.text() == ""
@@ -4419,7 +4419,7 @@ def test_guided_diagnostics_step_has_no_generation_or_execution_buttons(window):
         if button.text()
     }
     assert button_texts.isdisjoint(forbidden)
-    assert "Generate local correction preview" in button_texts
+    assert "Generate correction preview" in button_texts
 
 
 def test_guided_visible_text_does_not_use_stale_shell_or_completed_loader_wording(window):
@@ -5567,7 +5567,7 @@ def test_gui_merged_correction_page_makes_local_preview_primary_and_user_safe(wi
     assert "Correction evidence: not built" not in visible_text
     assert "reusable full correction evidence" not in visible_text
     assert "Build correction evidence" not in visible_text
-    assert "Generate local correction preview" not in visible_text
+    assert "Generate correction preview" not in visible_text
     assert "Complete Select data, Recording structure" in visible_text
     assert "Locked until a correction preview is generated" in visible_text
     assert "I reviewed" not in visible_text
@@ -5669,9 +5669,53 @@ def test_hidden_method_configuration_never_becomes_top_level(window, qapp):
     assert "Correction approach" not in window._guided_raw_setup_controls
     assert not any(
         isinstance(widget, QGroupBox)
-        and widget.title() == "Method configuration - not evidence selection"
+        and widget.title() == "Correction method reference (preview only)"
         for widget in QApplication.topLevelWidgets()
     )
+
+
+def test_correction_approach_page_avoids_developer_facing_wording(window, qapp):
+    """4J16k26: Correction Approach must read as preview -> compare -> choose,
+    not as internal run-method-configuration/diagnostic-cache staging."""
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    window._refresh_guided_mode_display()
+    qapp.processEvents()
+
+    correction_widget = window._guided_workflow_stack.widget(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+
+    # Scan every group title, label, and button on this step -- including
+    # currently-hidden widgets (e.g. the reference method cards) -- plus
+    # their tooltips, so removed wording cannot quietly reappear later.
+    texts = []
+    for widget in correction_widget.findChildren(QGroupBox):
+        texts.append(widget.title())
+        texts.append(widget.toolTip())
+    for widget in correction_widget.findChildren(QLabel):
+        texts.append(widget.text())
+        texts.append(widget.toolTip())
+    for widget in correction_widget.findChildren(QPushButton):
+        texts.append(widget.text())
+        texts.append(widget.toolTip())
+    visible_text = " ".join(t for t in texts if t)
+    lowered = visible_text.lower()
+
+    forbidden = (
+        "run method configuration",
+        "diagnostic intent",
+        "diagnostic-cache identity",
+        "cache identity",
+    )
+    found = [term for term in forbidden if term in lowered]
+    assert found == []
+
+    # The reference-method cards should read as preview affordances.
+    assert "Preview this correction method" in visible_text
+    assert "Correction method reference (preview only)" in visible_text
 
 
 def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(

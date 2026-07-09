@@ -6,9 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton
 
-from gui.main_window import MainWindow
+from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
 from photometry_pipeline.guided_backend_validation_workflow import (
     GuidedBackendValidationGuiContext,
     GuidedBackendValidationWorkflowIssue,
@@ -225,7 +225,7 @@ def _failure_outcome(status: str):
 
 def test_guided_validate_and_disabled_run_widgets_exist(window):
     assert window._guided_backend_validate_btn.text() == (
-        "Validate Guided request"
+        "Check my setup"
     )
     assert window._guided_backend_validation_status_label is not None
     assert window._guided_backend_validation_details_label is not None
@@ -284,7 +284,7 @@ def test_validate_button_calls_workflow_through_module_namespace(
     assert window._guided_backend_validation_outcome_revision == (
         context.revision
     )
-    assert "accepted the current Guided request" in (
+    assert "passed for the current Guided setup" in (
         window._guided_backend_validation_status_label.text()
     )
     assert "does not authorize or start a run" in (
@@ -297,8 +297,8 @@ def test_validate_button_calls_workflow_through_module_namespace(
     "status,expected",
     [
         ("materialization_failed", "setup is incomplete or stale"),
-        ("compile_failed", "could not be compiled"),
-        ("validator_refused", "Backend validation refused"),
+        ("compile_failed", "could not be processed"),
+        ("validator_refused", "found a problem with the current Guided setup"),
         ("internal_error", "could not complete safely"),
     ],
 )
@@ -328,8 +328,8 @@ def test_stale_accepted_outcome_never_displays_current_acceptance(window):
     )
     window._invalidate_guided_backend_validation("ROI changed")
     status = window._guided_backend_validation_status_label.text()
-    assert "validation is stale" in status
-    assert "accepted the current Guided request" not in status
+    assert "out of date because the setup changed" in status
+    assert "passed for the current Guided setup" not in status
 
 
 def test_context_capture_exception_is_safe(window, monkeypatch):
@@ -423,6 +423,43 @@ def test_revision_change_during_workflow_stores_stale_outcome(
     )
     window._guided_backend_validate_btn.click()
     assert window._guided_backend_validation_outcome.stale is True
-    assert "validation is stale" in (
+    assert "out of date because the setup changed" in (
         window._guided_backend_validation_status_label.text()
     )
+
+
+def test_run_step_avoids_developer_facing_wording(window, qapp):
+    """4J16k26: Run step must read as a plain setup check, not as a backend
+    validation request against an unspecified 'supported subset'."""
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Run")
+    )
+    window._refresh_guided_backend_validation_display()
+    qapp.processEvents()
+
+    run_widget = window._guided_workflow_stack.widget(
+        list(GUIDED_WORKFLOW_STEPS).index("Run")
+    )
+    texts = []
+    for widget in run_widget.findChildren(QGroupBox):
+        texts.append(widget.title())
+    for widget in run_widget.findChildren(QLabel):
+        texts.append(widget.text())
+    for widget in run_widget.findChildren(QPushButton):
+        texts.append(widget.text())
+    visible_text = " ".join(t for t in texts if t)
+    lowered = visible_text.lower()
+
+    forbidden = (
+        "backend",
+        "guided request",
+        "first execution subset",
+        "supported subset",
+    )
+    found = [term for term in forbidden if term in lowered]
+    assert found == []
+
+    assert "Check setup" in visible_text
+    assert "Check my setup" in visible_text
+    assert window._guided_backend_validate_btn.text() == "Check my setup"

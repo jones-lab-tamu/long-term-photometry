@@ -34,6 +34,7 @@ from photometry_pipeline.guided_completed_applied_dff_reload import (
     load_guided_completed_applied_dff_state,
     GuidedCompletedAppliedDffState,
     format_guided_completed_applied_dff_summary,
+    format_guided_completed_applied_dff_technical_details,
 )
 
 
@@ -106,8 +107,7 @@ class RunReportViewer(QWidget):
         # Not every run type produces a separate applied-dF/F routing
         # artifact. That is normal, not a missing result, so this line is
         # hidden unless the run actually has scientist-facing applied-dF/F
-        # content to show. The underlying text (used internally and in
-        # tests) is unchanged; only visibility is gated here.
+        # content to show.
         self._applied_dff_summary_label.setVisible(self._applied_dff_state.present)
         self._applied_dff_summary_label.setWordWrap(True)
         self._applied_dff_summary_label.setTextInteractionFlags(
@@ -116,6 +116,34 @@ class RunReportViewer(QWidget):
         self._applied_dff_summary_label.setFrameShape(QFrame.StyledPanel)
         self._applied_dff_summary_label.setContentsMargins(8, 6, 8, 6)
         ws.addWidget(self._applied_dff_summary_label)
+
+        self._applied_dff_details_toggle = QPushButton("Show technical details")
+        self._applied_dff_details_toggle.setObjectName(
+            "completedRunAppliedDffDetailsToggle"
+        )
+        self._applied_dff_details_toggle.setCheckable(True)
+        self._applied_dff_details_toggle.setVisible(self._applied_dff_state.present)
+        self._applied_dff_details_toggle.toggled.connect(
+            self._on_applied_dff_details_toggled
+        )
+        ws.addWidget(self._applied_dff_details_toggle, 0, Qt.AlignLeft)
+
+        self._applied_dff_details_label = QLabel(
+            format_guided_completed_applied_dff_technical_details(
+                self._applied_dff_state
+            )
+        )
+        self._applied_dff_details_label.setObjectName(
+            "completedRunAppliedDffTechnicalDetails"
+        )
+        self._applied_dff_details_label.setWordWrap(True)
+        self._applied_dff_details_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        self._applied_dff_details_label.setFrameShape(QFrame.StyledPanel)
+        self._applied_dff_details_label.setContentsMargins(8, 6, 8, 6)
+        self._applied_dff_details_label.setVisible(False)
+        ws.addWidget(self._applied_dff_details_label)
 
         selector_row = QHBoxLayout()
         selector_row.addWidget(QLabel("Region:"))
@@ -218,17 +246,33 @@ class RunReportViewer(QWidget):
 
         self.clear()
 
-    def clear(self):
-        """Reset to idle/placeholder state."""
-        self._current_run_dir = ""
-        self._run_summary_path = ""
-        self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
+    def _on_applied_dff_details_toggled(self, checked: bool) -> None:
+        self._applied_dff_details_label.setVisible(bool(checked))
+        self._applied_dff_details_toggle.setText(
+            "Hide technical details" if checked else "Show technical details"
+        )
+
+    def _refresh_applied_dff_display(self) -> None:
         self._applied_dff_summary_label.setText(
             format_guided_completed_applied_dff_summary(
                 self._applied_dff_state
             )
         )
         self._applied_dff_summary_label.setVisible(self._applied_dff_state.present)
+        self._applied_dff_details_label.setText(
+            format_guided_completed_applied_dff_technical_details(
+                self._applied_dff_state
+            )
+        )
+        self._applied_dff_details_toggle.setVisible(self._applied_dff_state.present)
+        self._applied_dff_details_toggle.setChecked(False)
+
+    def clear(self):
+        """Reset to idle/placeholder state."""
+        self._current_run_dir = ""
+        self._run_summary_path = ""
+        self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
+        self._refresh_applied_dff_display()
         self._region_paths = {}
         self._region_tab_images = {}
         self._tab_indices = {}
@@ -302,12 +346,7 @@ class RunReportViewer(QWidget):
             return False
 
         self._applied_dff_state = load_guided_completed_applied_dff_state(out_dir)
-        self._applied_dff_summary_label.setText(
-            format_guided_completed_applied_dff_summary(
-                self._applied_dff_state
-            )
-        )
-        self._applied_dff_summary_label.setVisible(self._applied_dff_state.present)
+        self._refresh_applied_dff_display()
 
         title = "Results workspace"
         if is_preview:
@@ -341,6 +380,11 @@ class RunReportViewer(QWidget):
     def applied_dff_summary_text(self) -> str:
         """Return the read-only completed-run applied dF/F summary text."""
         return self._applied_dff_summary_label.text()
+
+    @property
+    def applied_dff_technical_details_text(self) -> str:
+        """Return the optional-disclosure applied dF/F technical details text."""
+        return self._applied_dff_details_label.text()
 
     def _discover_region_tab_images(self, region_path: str) -> Dict[str, List[str]]:
         """Discover per-tab image lists for one region directory."""

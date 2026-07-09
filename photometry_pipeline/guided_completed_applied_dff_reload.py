@@ -85,15 +85,106 @@ class GuidedCompletedAppliedDffState:
         return [issue for issue in self.issues if issue.severity == "blocking"]
 
 
+_APPLIED_DFF_STRATEGY_LABELS = {
+    "robust_global_event_reject": "Robust Global Event-Reject Fit",
+    "adaptive_event_gated_regression": "Adaptive Event-Gated Fit",
+    "global_linear_regression": "Global Linear Regression",
+    "signal_only_f0": "Signal-Only F0",
+}
+
+
+def _applied_dff_strategy_label(selected_strategy: str) -> str:
+    return _APPLIED_DFF_STRATEGY_LABELS.get(
+        selected_strategy, selected_strategy or "an unrecorded method"
+    )
+
+
 def format_guided_completed_applied_dff_summary(
     state: GuidedCompletedAppliedDffState,
 ) -> str:
-    """Format completed-run applied-dF/F state for read-only review."""
+    """Format completed-run applied-dF/F state as a scientist-facing result statement.
+
+    This is the normal-path summary shown in Review. Use
+    :func:`format_guided_completed_applied_dff_technical_details` for the
+    full provenance breakdown behind an optional technical-details toggle.
+    """
     if not state.present:
+        return "Corrected dF/F has not been generated for this run yet."
+
+    # Applied-dF/F is an optional export/routing feature, separate from the
+    # standard corrected phasic dF/F shown in the Review tabs above. These
+    # messages must not imply the standard Review outputs are missing or
+    # that the main correction failed -- only that this optional export's
+    # own status could not be confirmed.
+    blocking_count = sum(
+        issue.severity == "blocking" for issue in state.issues
+    )
+    if blocking_count:
         return (
-            "Applied dF/F: not present\n"
-            "Guided applied-dF/F provenance was not found."
+            "The optional corrected-trace export could not be verified for "
+            "this run. Review the standard plots and tables below, and "
+            "open technical details if needed."
         )
+
+    if state.overall_status == "running":
+        return (
+            "The optional corrected-trace export is still in progress for "
+            "this run."
+        )
+
+    if state.overall_status == "failed":
+        return (
+            "The optional corrected-trace export did not complete for this "
+            "run. Standard Review outputs may still be available below. "
+            "See technical details if needed."
+        )
+
+    if state.overall_status != "succeeded" or not state.rows:
+        return (
+            "Corrected-trace export status is unknown for this run. "
+            "Review the plots and tables below, and open technical details "
+            "if needed."
+        )
+
+    warning_count = sum(
+        issue.severity == "warning" for issue in state.issues
+    )
+    lines = ["Corrected dF/F results:"]
+    for row in state.rows:
+        method_label = _applied_dff_strategy_label(row.selected_strategy)
+        availability = (
+            "available"
+            if row.status == "succeeded" and row.output_dir_exists
+            else "not available"
+        )
+        lines.append(
+            f"- {row.roi_id}: corrected using {method_label}; outputs "
+            f"{availability}."
+        )
+    lines.append(
+        "Review corrected traces and tables using the Tables and Day Plots "
+        "buttons above."
+    )
+    if warning_count:
+        lines.append(
+            "Some additional details need attention; see technical details "
+            "below."
+        )
+    return "\n".join(lines)
+
+
+def format_guided_completed_applied_dff_technical_details(
+    state: GuidedCompletedAppliedDffState,
+) -> str:
+    """Format the full applied-dF/F provenance breakdown for optional disclosure.
+
+    This preserves the detailed, developer-facing provenance fields (schema
+    status, orchestration flags, per-ROI strategy/batch identifiers) that
+    used to be shown by default. It is intended to sit behind a collapsed
+    "technical details" control, not in the normal-path summary.
+    """
+    if not state.present:
+        return "Applied-dF/F provenance was not found for this run."
 
     blocking_count = sum(
         issue.severity == "blocking" for issue in state.issues

@@ -4045,7 +4045,7 @@ class MainWindow(QMainWindow):
         wrapper_layout.addWidget(self._guided_correction_next_action_label)
 
         candidate_group = QGroupBox(
-            "Method configuration - not evidence selection",
+            "Correction method reference (preview only)",
             wrapper,
         )
         candidate_group.setObjectName("guidedHiddenMethodConfiguration")
@@ -4166,15 +4166,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(helper_label)
         if title == GUIDED_SIGNAL_ONLY_F0_CARD:
             stage_text = (
-                "Diagnostic only in the current Guided Run scope. It is not a "
-                "current production route."
+                "Diagnostic only. Not used to produce the final analysis "
+                "output."
             )
         elif title in GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE:
             stage_text = (
-                "Sets the active dynamic-fit method in the editable run "
-                "configuration. Diagnostic-cache identity and preview method "
-                "inclusion are controlled separately; final strategy "
-                "confirmation happens below."
+                "Selects this method for the local preview below. Choosing "
+                "the correction method for each ROI happens after you "
+                "compare the preview evidence."
             )
         else:
             stage_text = (
@@ -4187,12 +4186,12 @@ class MainWindow(QMainWindow):
         stage_label.setWordWrap(True)
         layout.addWidget(stage_label)
         if title in GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE:
-            select_btn = QPushButton("Set run method configuration")
+            select_btn = QPushButton("Preview this correction method")
             select_btn.setObjectName(f"guidedCorrectionSelect{safe_name}")
             select_btn.setToolTip(
-                "Updates the active dynamic-fit method in the editable run "
-                "configuration. It does not select preview methods or confirm "
-                "a strategy."
+                "Includes this method in the local correction preview "
+                "below. It does not choose the final correction method for "
+                "the ROI."
             )
             select_btn.clicked.connect(
                 lambda _checked=False, card_title=title: self._select_guided_reference_correction_card(card_title)
@@ -4200,11 +4199,12 @@ class MainWindow(QMainWindow):
             self._guided_correction_select_buttons[title] = select_btn
             layout.addWidget(select_btn)
         elif title == GUIDED_SIGNAL_ONLY_F0_CARD:
-            select_btn = QPushButton("Set diagnostic intent")
+            select_btn = QPushButton("Preview this correction method")
             select_btn.setObjectName(f"guidedCorrectionSelect{safe_name}")
             select_btn.setToolTip(
-                "Records diagnostic-only intent. Signal-Only F0 is not a "
-                "current Guided Run production route."
+                "Includes Signal-Only F0 in the local correction preview "
+                "below. It is diagnostic-only and is not used to produce "
+                "the final analysis output."
             )
             select_btn.clicked.connect(self._select_guided_signal_only_f0_intent)
             self._guided_correction_select_buttons[title] = select_btn
@@ -4298,15 +4298,9 @@ class MainWindow(QMainWindow):
             btn = getattr(self, "_guided_correction_select_buttons", {}).get(title)
             if btn is not None:
                 if is_selected:
-                    btn.setText(
-                        "Diagnostic intent active"
-                        if title == GUIDED_SIGNAL_ONLY_F0_CARD
-                        else "Active run method configuration"
-                    )
-                elif title == GUIDED_SIGNAL_ONLY_F0_CARD:
-                    btn.setText("Set diagnostic intent")
+                    btn.setText("Correction method selected for preview")
                 else:
-                    btn.setText("Set run method configuration")
+                    btn.setText("Preview this correction method")
         self._refresh_guided_setup_summary()
 
     def _build_guided_diagnostics_step(self) -> QWidget:
@@ -4583,7 +4577,7 @@ class MainWindow(QMainWindow):
         self._guided_preview_gated_widgets.append(preview_note)
 
         self._guided_preview_generate_btn = QPushButton(
-            "Generate local correction preview"
+            "Generate correction preview"
         )
         self._guided_preview_generate_btn.setObjectName("guidedCorrectionPreviewGenerateButton")
         self._guided_preview_generate_btn.clicked.connect(self._on_generate_guided_correction_preview)
@@ -10616,8 +10610,7 @@ class MainWindow(QMainWindow):
             return
         if getattr(self, "_guided_backend_validation_active", False):
             status_label.setText(
-                "Backend validation is checking the current Guided request "
-                "in memory. No run is being started."
+                "Checking your Guided setup. No run is being started."
             )
             details_label.setText("")
             return
@@ -10625,12 +10618,12 @@ class MainWindow(QMainWindow):
         outcome = getattr(self, "_guided_backend_validation_outcome", None)
         if outcome is None:
             status_label.setText(
-                "Backend validation has not been run for this Guided setup."
+                "Your Guided setup has not been checked yet."
             )
             details_label.setText(
-                "Validate the current Guided request before running "
-                "analysis. Run is available only for the supported first "
-                "execution subset after validation passes."
+                "Check your Guided setup before running analysis. Run "
+                "becomes available once the check passes for the current "
+                "setup."
             )
             return
 
@@ -10645,8 +10638,8 @@ class MainWindow(QMainWindow):
             and same_revision
         ):
             status_label.setText(
-                "Guided backend validation was cancelled. No files were "
-                "written and no run was started."
+                "The setup check was cancelled. No files were written and "
+                "no run was started."
             )
             details_label.setText("")
             return
@@ -10660,8 +10653,8 @@ class MainWindow(QMainWindow):
                 or "the setup changed"
             )
             status_label.setText(
-                "Guided validation is stale because the setup changed. "
-                "Validate again before relying on this result."
+                "This setup check is out of date because the setup "
+                "changed. Check again before relying on this result."
             )
             details_label.setText(f"Stale reason: {reason}")
             return
@@ -10669,50 +10662,45 @@ class MainWindow(QMainWindow):
         status = getattr(outcome, "status", "")
         if status == "validator_accepted":
             status_label.setText(
-                "Backend validation accepted the current Guided request. "
-                "This confirms the request is structurally and semantically "
-                "valid for the first Guided validation subset. It does not "
-                "authorize or start a run."
+                "The setup check passed for the current Guided setup. It "
+                "does not authorize or start a run."
             )
             identity = str(getattr(outcome, "request_identity", "") or "")
             run_readiness = getattr(self, "_guided_run_readiness", None)
             if getattr(run_readiness, "ready", False):
-                run_status_line = (
-                    "Guided Run is ready for the supported first "
-                    "execution subset."
-                )
+                run_status_line = "Guided Run is ready to start."
             else:
                 run_status_line = (
                     "Guided Run is not available for this configuration "
                     "yet. Review the readiness details below."
                 )
             details_label.setText(
-                f"Request identity: {identity}\n{run_status_line}"
+                f"Setup reference: {identity}\n{run_status_line}"
             )
             return
 
         summaries = {
             "materialization_failed": (
                 "Guided setup is incomplete or stale. Fix the issue below "
-                "and validate again."
+                "and check again."
             ),
             "compile_failed": (
-                "The Guided request could not be compiled. Fix the issue "
-                "below and validate again."
+                "The Guided setup could not be processed. Fix the issue "
+                "below and check again."
             ),
             "validator_refused": (
-                "Backend validation refused the current Guided request. Fix "
-                "the issue below and validate again."
+                "The setup check found a problem with the current Guided "
+                "setup. Fix the issue below and check again."
             ),
             "internal_error": (
-                "Guided backend validation could not complete safely. Fix "
-                "any setup issues and validate again."
+                "The Guided setup check could not complete safely. Fix "
+                "any setup issues and check again."
             ),
         }
         status_label.setText(
             summaries.get(
                 status,
-                "Guided backend validation could not complete safely.",
+                "The Guided setup check could not complete safely.",
             )
         )
         issues = tuple(getattr(outcome, "blocking_issues", ()) or ())
@@ -14699,22 +14687,22 @@ class MainWindow(QMainWindow):
         new_analysis_layout.setContentsMargins(0, 0, 0, 0)
         new_analysis_layout.setSpacing(10)
         normal = QLabel(
-            "Validate the current Guided request before running analysis. "
-            "Guided Run can execute analysis only for the supported first "
-            "execution subset, and only after validation passes."
+            "Check your Guided setup before running analysis. Run Guided "
+            "Analysis becomes available once the check passes for the "
+            "current setup."
         )
         normal.setObjectName("guidedRunNewAnalysisContent")
         normal.setProperty("guidedSecondaryText", True)
         normal.setWordWrap(True)
         new_analysis_layout.addWidget(normal)
 
-        validation_group = QGroupBox("Backend validation")
+        validation_group = QGroupBox("Check setup")
         validation_group.setObjectName("guidedBackendValidationPanel")
         validation_layout = QVBoxLayout(validation_group)
         validation_layout.setContentsMargins(10, 8, 10, 8)
         validation_layout.setSpacing(8)
         self._guided_backend_validate_btn = QPushButton(
-            "Validate Guided request"
+            "Check my setup"
         )
         self._guided_backend_validate_btn.setObjectName(
             "guidedBackendValidateButton"

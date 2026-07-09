@@ -9,6 +9,7 @@ import pytest
 from photometry_pipeline.guided_completed_applied_dff_reload import (
     load_guided_completed_applied_dff_state,
     format_guided_completed_applied_dff_summary,
+    format_guided_completed_applied_dff_technical_details,
     GuidedCompletedAppliedDffIssue,
     GuidedCompletedAppliedDffRow,
     GuidedCompletedAppliedDffState,
@@ -136,9 +137,13 @@ def test_format_summary_absent_state():
         GuidedCompletedAppliedDffState.absent()
     )
 
-    assert "Applied dF/F" in text
-    assert "not present" in text
+    assert "has not been generated for this run yet" in text
     assert "blocking" not in text
+
+    details = format_guided_completed_applied_dff_technical_details(
+        GuidedCompletedAppliedDffState.absent()
+    )
+    assert "provenance was not found" in details
 
 
 def test_format_summary_valid_succeeded_state():
@@ -168,11 +173,24 @@ def test_format_summary_valid_succeeded_state():
 
     text = format_guided_completed_applied_dff_summary(state)
 
-    assert "Applied dF/F: succeeded" in text
-    assert "Production analysis: yes" in text
     assert "CH1" in text
-    assert "dynamic_fit" in text
-    assert "output present" in text
+    assert "Robust Global Event-Reject Fit" in text
+    assert "available" in text
+    assert "Tables and Day Plots" in text
+    for term in (
+        "strategy_family",
+        "batch strategy",
+        "orchestration capability",
+        "Production analysis:",
+    ):
+        assert term.lower() not in text.lower()
+
+    details = format_guided_completed_applied_dff_technical_details(state)
+    assert "Applied dF/F: succeeded" in details
+    assert "Production analysis: yes" in details
+    assert "CH1" in details
+    assert "dynamic_fit" in details
+    assert "output present" in details
 
 
 def test_format_summary_invalid_provenance():
@@ -190,9 +208,33 @@ def test_format_summary_invalid_provenance():
 
     text = format_guided_completed_applied_dff_summary(state)
 
-    assert "invalid provenance" in text
-    assert "test_blocker" in text
-    assert "Contract mismatch." in text
+    assert "could not be verified for this run" in text
+    assert "technical details" in text.lower()
+    assert "test_blocker" not in text
+    assert "Contract mismatch." not in text
+    # Must not read as though the main correction failed or that the
+    # standard Review outputs are missing.
+    assert "Corrected dF/F generation failed" not in text
+    assert "No corrected outputs are available" not in text
+
+    details = format_guided_completed_applied_dff_technical_details(state)
+    assert "invalid provenance" in details
+    assert "test_blocker" in details
+    assert "Contract mismatch." in details
+
+
+def test_format_summary_unknown_status_does_not_imply_missing_review_outputs():
+    state = GuidedCompletedAppliedDffState(
+        present=True,
+        overall_status=None,
+    )
+
+    text = format_guided_completed_applied_dff_summary(state)
+
+    assert "status is unknown for this run" in text
+    assert "technical details" in text.lower()
+    assert "Corrected dF/F generation failed" not in text
+    assert "No corrected outputs are available" not in text
 
 
 def test_format_summary_failed_orchestration_warning():
@@ -210,8 +252,17 @@ def test_format_summary_failed_orchestration_warning():
 
     text = format_guided_completed_applied_dff_summary(state)
 
-    assert "Applied dF/F: failed" in text
-    assert "applied_dff_orchestration_failed" in text
+    assert "optional corrected-trace export did not complete" in text
+    assert "Standard Review outputs may still be available below" in text
+    assert "applied_dff_orchestration_failed" not in text
+    # Must not read as though the main correction failed or that the
+    # standard Review outputs are missing.
+    assert "Corrected dF/F generation failed" not in text
+    assert "No corrected outputs are available" not in text
+
+    details = format_guided_completed_applied_dff_technical_details(state)
+    assert "Applied dF/F: failed" in details
+    assert "applied_dff_orchestration_failed" in details
 
 
 def test_malformed_provenance_json(tmp_path):
@@ -673,7 +724,7 @@ def test_integration_valid_completed_run_no_provenance(qapp, tmp_path):
         assert viewer.load_report(str(run_dir)) is True
         assert viewer.applied_dff_state.present is False
         assert len(viewer.applied_dff_state.blocking_issues()) == 0
-        assert "not present" in viewer.applied_dff_summary_text
+        assert "has not been generated for this run yet" in viewer.applied_dff_summary_text
     finally:
         viewer.close()
 
@@ -713,9 +764,10 @@ def test_integration_valid_completed_run_valid_provenance(qapp, tmp_path):
         assert len(viewer.applied_dff_state.rows) == 1
         assert viewer.applied_dff_state.rows[0].roi_id == "CH1"
         assert viewer.applied_dff_state.has_blocking_issues is False
-        assert "succeeded" in viewer.applied_dff_summary_text
         assert "CH1" in viewer.applied_dff_summary_text
-        assert "dynamic_fit" in viewer.applied_dff_summary_text
+        assert "Robust Global Event-Reject Fit" in viewer.applied_dff_summary_text
+        assert "available" in viewer.applied_dff_summary_text
+        assert "dynamic_fit" in viewer.applied_dff_technical_details_text
     finally:
         viewer.close()
 
@@ -730,10 +782,11 @@ def test_integration_valid_completed_run_malformed_provenance(qapp, tmp_path):
         assert viewer.load_report(str(run_dir)) is True
         assert viewer.applied_dff_state.present is True
         assert viewer.applied_dff_state.has_blocking_issues is True
-        assert "invalid provenance" in viewer.applied_dff_summary_text
+        assert "could not be verified for this run" in viewer.applied_dff_summary_text
+        assert "invalid provenance" in viewer.applied_dff_technical_details_text
         assert (
             "applied_dff_provenance_malformed"
-            in viewer.applied_dff_summary_text
+            in viewer.applied_dff_technical_details_text
         )
     finally:
         viewer.close()
