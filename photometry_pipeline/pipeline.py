@@ -175,9 +175,30 @@ def _append_run_report_section(output_dir: str, section: str, payload) -> None:
         logging.warning("Failed to append %s to run_report.json", section, exc_info=True)
 
 class Pipeline:
-    def __init__(self, config: Config, mode: str = 'phasic'):
+    def __init__(
+        self,
+        config: Config,
+        mode: str = 'phasic',
+        per_roi_feature_config: dict | None = None,
+        per_roi_feature_provenance: dict | None = None,
+    ):
         self.config = config
         self.mode = mode
+        # Optional per-ROI feature-detection settings (4J16k32b). When None
+        # (the default), feature extraction uses `self.config` for every ROI,
+        # identical to today's single-config behavior.
+        # per_roi_feature_config: dict[str, Config] | None -- each value is
+        #   already a complete, resolved Config (see
+        #   guided_new_analysis_plan.build_per_roi_feature_backend_config),
+        #   not a sparse override; Pipeline never merges partial settings.
+        # per_roi_feature_provenance: dict[str, dict] | None, written to
+        #   <phasic_out>/features/feature_event_provenance.json only when
+        #   set. Each entry should have "source", "feature_event_profile_id",
+        #   "override_config_fields" (may be sparse), and
+        #   "effective_config_fields" (the complete settings actually used;
+        #   see guided_new_analysis_plan.build_per_roi_feature_event_provenance).
+        self.per_roi_feature_config = per_roi_feature_config
+        self.per_roi_feature_provenance = per_roi_feature_provenance
         self.file_list = []
         self._continuous_window_map = {}
         self._continuous_source_cache = {}
@@ -1693,7 +1714,9 @@ class Pipeline:
                 # per-chunk statistics (peak count, AUC, mean, etc.).
                 if not self.traces_only:
                     t_feats = time.perf_counter()
-                    feats_df = feature_extraction.extract_features(chunk, self.config)
+                    feats_df = feature_extraction.extract_features(
+                        chunk, self.config, per_roi_config=self.per_roi_feature_config
+                    )
                     pass2_feature_extract_sec += (time.perf_counter() - t_feats)
                     all_features.append(feats_df)
                     pass2_features_rows += int(len(feats_df))
@@ -1730,6 +1753,9 @@ class Pipeline:
             
             full_feats.to_csv(os.path.join(feats_dir, 'features.csv'), index=False)
             pass2_features_csv_write_sec += (time.perf_counter() - t_feats_write)
+
+            if self.per_roi_feature_provenance:
+                self._write_feature_event_provenance(feats_dir)
 
         if self.dynamic_fit_qc_records and self.mode != 'tonic':
             qc_rows = []
@@ -1928,6 +1954,38 @@ class Pipeline:
             self._set_phasic_metric("pass2.features_rows", pass2_features_rows)
             self._set_phasic_metric("pass2.peaks_detected_total", pass2_peak_count_total)
                 
+    def _write_feature_event_provenance(self, feats_dir: str) -> None:
+        """Write which feature-detection settings were used per ROI.
+
+        Only called when per_roi_feature_provenance was supplied to this
+        Pipeline; a run with no per-ROI settings writes no such file, so
+        existing global-only runs are unaffected.
+
+        override_config_fields is whatever the source profile's own fields
+        were (possibly a sparse subset of feature-detection fields);
+        effective_config_fields is the complete, resolved set of settings
+        this Pipeline actually used for that ROI. Consumers that want to
+        know "what was used" should read effective_config_fields, not
+        override_config_fields.
+        """
+        rois = []
+        for roi, entry in sorted(dict(self.per_roi_feature_provenance).items()):
+            entry = entry or {}
+            rois.append({
+                "roi": roi,
+                "source": entry.get("source", ""),
+                "feature_event_profile_id": entry.get("feature_event_profile_id", ""),
+                "override_config_fields": dict(entry.get("override_config_fields") or {}),
+                "effective_config_fields": dict(entry.get("effective_config_fields") or {}),
+            })
+        payload = {
+            "schema_version": "guided_feature_event_provenance.v2",
+            "rois": rois,
+        }
+        path = os.path.join(feats_dir, "feature_event_provenance.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
     def _apply_roi_filter(self, chunk):
         """Filter chunk data to only include channels in self._selected_rois."""
         selected = set(self._selected_rois)

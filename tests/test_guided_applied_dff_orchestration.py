@@ -5,11 +5,26 @@ from pathlib import Path
 
 import pytest
 
+from photometry_pipeline.config import Config
+from photometry_pipeline.feature_event_config import FEATURE_EVENT_CONFIG_FIELDS
 from photometry_pipeline.guided_applied_dff_orchestration import (
     GuidedAppliedDffOrchestrationError,
     build_guided_applied_dff_manifest_rows,
     run_guided_applied_dff_orchestration_if_enabled,
+    write_per_roi_feature_config_files,
 )
+
+
+def _complete_feature_config_fields(**overrides):
+    """A complete FEATURE_EVENT_CONFIG_FIELDS dict, shaped like
+    guided_new_analysis_plan.build_per_roi_effective_feature_config_fields_for_overrides'
+    output: every required field present, starting from Config() defaults
+    with the given fields overridden.
+    """
+    cfg = Config()
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+    return {field_name: getattr(cfg, field_name) for field_name in FEATURE_EVENT_CONFIG_FIELDS}
 
 
 def test_build_guided_applied_dff_manifest_rows_happy_path(tmp_path):
@@ -48,11 +63,13 @@ def test_build_guided_applied_dff_manifest_rows_happy_path(tmp_path):
         "roi": "CH1",
         "strategy": "dynamic_fit",
         "output_name": "CH1_dynamic_fit",
+        "feature_config": "",
     }
     assert rows[1] == {
         "roi": "CH2",
         "strategy": "signal_only_f0",
         "output_name": "CH2_signal_only_f0",
+        "feature_config": "",
     }
 
 
@@ -297,6 +314,7 @@ def test_build_guided_applied_dff_manifest_rows_all_signal_only_f0_accepted(tmp_
             "roi": "CH1",
             "strategy": "signal_only_f0",
             "output_name": "CH1_signal_only_f0",
+            "feature_config": "",
         }
     ]
 
@@ -495,3 +513,218 @@ def test_wrapper_behavior_fake_failed_batch(tmp_path):
     assert prov_data["batch_returncode"] == 1
     assert len(prov_data["rows"]) == 1
     assert all(r["status"] == "failed" for r in prov_data["rows"])
+
+
+def test_write_per_roi_feature_config_files_writes_one_file_per_roi(tmp_path):
+    out_dir = tmp_path / "feature_configs"
+    ch1_fields = _complete_feature_config_fields(
+        peak_threshold_method="percentile", peak_threshold_percentile=90.0
+    )
+    ch2_fields = _complete_feature_config_fields(event_signal="delta_f")
+    paths = write_per_roi_feature_config_files(
+        {
+            "CH1": ch1_fields,
+            "CH 2/x": ch2_fields,
+        },
+        out_dir,
+    )
+
+    assert set(paths.keys()) == {"CH1", "CH 2/x"}
+    ch1_payload = json.loads(Path(paths["CH1"]).read_text(encoding="utf-8"))
+    assert ch1_payload == ch1_fields
+    assert set(ch1_payload.keys()) == FEATURE_EVENT_CONFIG_FIELDS
+    # Path components are sanitized the same way ROI output dirs already are.
+    assert Path(paths["CH 2/x"]).name == "CH_2_x_feature_config.json"
+
+
+def test_write_per_roi_feature_config_files_empty_input_writes_nothing(tmp_path):
+    out_dir = tmp_path / "feature_configs"
+    paths = write_per_roi_feature_config_files(None, out_dir)
+
+    assert paths == {}
+    assert not out_dir.exists()
+
+
+def test_write_per_roi_feature_config_files_rejects_sparse_dict_and_writes_nothing(tmp_path):
+    """A sparse override dict must fail closed, not silently write a
+    feature-config file that run_applied_dff_features.py would misread as
+    complete."""
+    out_dir = tmp_path / "feature_configs"
+    sparse = {"peak_threshold_method": "percentile", "peak_threshold_percentile": 90.0}
+
+    with pytest.raises(
+        GuidedAppliedDffOrchestrationError,
+        match="must contain the complete FEATURE_EVENT_CONFIG_FIELDS set",
+    ):
+        write_per_roi_feature_config_files({"CH1": sparse}, out_dir)
+
+    assert not out_dir.exists()
+
+
+def test_write_per_roi_feature_config_files_one_sparse_roi_blocks_all_writes(tmp_path):
+    """A single incomplete ROI blocks writing files for every ROI, not just
+    the incomplete one, so a partial batch never gets to disk."""
+    out_dir = tmp_path / "feature_configs"
+    complete = _complete_feature_config_fields(peak_threshold_method="percentile")
+    sparse = {"event_signal": "delta_f"}
+
+    with pytest.raises(GuidedAppliedDffOrchestrationError):
+        write_per_roi_feature_config_files({"CH1": complete, "CH2": sparse}, out_dir)
+
+    assert not out_dir.exists()
+
+
+def test_build_guided_applied_dff_manifest_rows_per_roi_feature_config_routes_only_overridden_roi(tmp_path):
+    strategy_map_payload = {
+        "production_strategy_map_version": "per_roi_correction_strategy_map.v1",
+        "included_roi_ids": ["CH1", "CH2"],
+        "per_roi_production_strategy_map": [
+            _valid_dynamic_fit_entry("CH1"),
+            _valid_dynamic_fit_entry("CH2"),
+        ],
+    }
+
+    rows = build_guided_applied_dff_manifest_rows(
+        strategy_map_payload,
+        tmp_path,
+        per_roi_feature_config_paths={"CH1": str(tmp_path / "ch1_feature_config.json")},
+    )
+
+    by_roi = {row["roi"]: row for row in rows}
+    assert by_roi["CH1"]["feature_config"] == str(tmp_path / "ch1_feature_config.json")
+    # CH2 has no override: empty cell, same as today's default-only behavior.
+    assert by_roi["CH2"]["feature_config"] == ""
+
+
+def test_run_guided_applied_dff_orchestration_routes_per_roi_feature_config(tmp_path):
+    """Per-ROI feature config paths reach the manifest CSV and provenance."""
+    run_dir = tmp_path / "run"
+    phasic_out = run_dir / "phasic"
+    run_dir.mkdir()
+    phasic_out.mkdir()
+
+    (phasic_out / "phasic_trace_cache.h5").write_bytes(b"fake_h5")
+
+    map_file = run_dir / "guided_correction_strategy_map.json"
+    strategy_map_payload = {
+        "applied_dff_orchestration_enabled": True,
+        "production_strategy_map_version": "per_roi_correction_strategy_map.v1",
+        "included_roi_ids": ["CH1", "CH2"],
+        "per_roi_production_strategy_map": [
+            _valid_dynamic_fit_entry("CH1"),
+            _valid_dynamic_fit_entry("CH2"),
+        ],
+    }
+    map_file.write_text(json.dumps(strategy_map_payload), encoding="utf-8")
+
+    def fake_run(cmd):
+        return 0
+
+    ch1_fields = _complete_feature_config_fields(
+        peak_threshold_method="percentile", peak_threshold_percentile=90.0
+    )
+    ran = run_guided_applied_dff_orchestration_if_enabled(
+        str(run_dir),
+        str(phasic_out),
+        run_cmd_callable=fake_run,
+        per_roi_feature_event_overrides={"CH1": ch1_fields},
+    )
+    assert ran
+
+    manifest_path = run_dir / "applied_dff" / "batch_manifest.csv"
+    content = manifest_path.read_text(encoding="utf-8")
+    assert "roi,strategy,output_name,feature_config" in content
+    lines = {line.split(",")[0]: line for line in content.strip().splitlines()[1:]}
+    assert "CH1_feature_config.json" in lines["CH1"]
+    assert lines["CH2"].endswith(",")  # CH2 has no override: empty trailing cell
+
+    config_path = run_dir / "applied_dff" / "feature_configs" / "CH1_feature_config.json"
+    assert config_path.exists()
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert written == ch1_fields
+    assert set(written.keys()) == FEATURE_EVENT_CONFIG_FIELDS
+
+    prov_path = run_dir / "applied_dff" / "guided_applied_dff_provenance.json"
+    prov_data = json.loads(prov_path.read_text(encoding="utf-8"))
+    assert prov_data["per_roi_feature_config_paths"] == {"CH1": str(config_path)}
+
+
+def test_run_guided_applied_dff_orchestration_rejects_sparse_per_roi_feature_config(tmp_path):
+    """A sparse per-ROI feature config fails the whole orchestration closed:
+    no manifest, no feature-config files, and the failure is recorded in
+    provenance -- it must not silently route an incomplete config to the
+    batch."""
+    run_dir = tmp_path / "run"
+    phasic_out = run_dir / "phasic"
+    run_dir.mkdir()
+    phasic_out.mkdir()
+
+    (phasic_out / "phasic_trace_cache.h5").write_bytes(b"fake_h5")
+
+    map_file = run_dir / "guided_correction_strategy_map.json"
+    strategy_map_payload = {
+        "applied_dff_orchestration_enabled": True,
+        "production_strategy_map_version": "per_roi_correction_strategy_map.v1",
+        "included_roi_ids": ["CH1", "CH2"],
+        "per_roi_production_strategy_map": [
+            _valid_dynamic_fit_entry("CH1"),
+            _valid_dynamic_fit_entry("CH2"),
+        ],
+    }
+    map_file.write_text(json.dumps(strategy_map_payload), encoding="utf-8")
+
+    def fake_run(cmd):
+        return 0
+
+    sparse = {"peak_threshold_method": "percentile", "peak_threshold_percentile": 90.0}
+    with pytest.raises(
+        GuidedAppliedDffOrchestrationError,
+        match="must contain the complete FEATURE_EVENT_CONFIG_FIELDS set",
+    ):
+        run_guided_applied_dff_orchestration_if_enabled(
+            str(run_dir),
+            str(phasic_out),
+            run_cmd_callable=fake_run,
+            per_roi_feature_event_overrides={"CH1": sparse},
+        )
+
+    assert not (run_dir / "applied_dff" / "feature_configs").exists()
+    manifest_path = run_dir / "applied_dff" / "batch_manifest.csv"
+    assert not manifest_path.exists()
+
+    prov_path = run_dir / "applied_dff" / "guided_applied_dff_provenance.json"
+    prov_data = json.loads(prov_path.read_text(encoding="utf-8"))
+    assert prov_data["overall_status"] == "failed"
+    assert "must contain the complete FEATURE_EVENT_CONFIG_FIELDS set" in prov_data["error"]
+
+
+def test_run_guided_applied_dff_orchestration_default_only_unaffected_by_new_param(tmp_path):
+    """Omitting per_roi_feature_event_overrides is identical to today's behavior."""
+    run_dir = tmp_path / "run"
+    phasic_out = run_dir / "phasic"
+    run_dir.mkdir()
+    phasic_out.mkdir()
+
+    (phasic_out / "phasic_trace_cache.h5").write_bytes(b"fake_h5")
+
+    map_file = run_dir / "guided_correction_strategy_map.json"
+    strategy_map_payload = {
+        "applied_dff_orchestration_enabled": True,
+        "production_strategy_map_version": "per_roi_correction_strategy_map.v1",
+        "included_roi_ids": ["CH1"],
+        "per_roi_production_strategy_map": [_valid_dynamic_fit_entry("CH1")],
+    }
+    map_file.write_text(json.dumps(strategy_map_payload), encoding="utf-8")
+
+    def fake_run(cmd):
+        return 0
+
+    ran = run_guided_applied_dff_orchestration_if_enabled(
+        str(run_dir), str(phasic_out), run_cmd_callable=fake_run
+    )
+    assert ran
+    assert not (run_dir / "applied_dff" / "feature_configs").exists()
+
+    prov_path = run_dir / "applied_dff" / "guided_applied_dff_provenance.json"
+    prov_data = json.loads(prov_path.read_text(encoding="utf-8"))
+    assert prov_data["per_roi_feature_config_paths"] == {}

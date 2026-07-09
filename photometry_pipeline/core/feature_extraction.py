@@ -427,30 +427,39 @@ def get_peak_indices_for_trace(
         return peak_idx, pol
     return peak_idx
 
-def extract_features(chunk, config):
+def extract_features(chunk, config, per_roi_config=None):
     """
     Extracts phasic features from a Chunk object.
-    
+
     Implements a NaN-safe segmented iteration over finite runs.
     Peak detection uses the authoritative detector helper with:
     height threshold, minimum distance, and optional prominence/width criteria.
     Supported threshold methods include mean_std, percentile, and median_mad.
-    
+
     Args:
         chunk (Chunk): The data chunk.
-        config (Config): Configuration object.
-    
+        config (Config): Default configuration object, used for any ROI not
+            present in per_roi_config.
+        per_roi_config (dict[str, Any] | None): Optional mapping of ROI name
+            to a config-like object (same attributes as `config`) to use for
+            that ROI instead of `config`. Every feature-detection setting
+            (event_signal, polarity, threshold method/params, min
+            distance/prominence/width, pre-filter, AUC baseline) is resolved
+            per ROI from this object. When None or when a ROI is absent from
+            the mapping, `config` is used, which is identical to today's
+            single-config behavior.
+
     Returns:
         pd.DataFrame: One row per ROI containing the extracted features.
         Columns: chunk_id, source_file, roi, mean, median, std, mad, peak_count, auc.
     """
-    signal_array = get_event_signal_array(chunk, config)
-        
     rows = []
-    n_rois = signal_array.shape[1]
-    
+    n_rois = len(chunk.channel_names)
+
     for i in range(n_rois):
         roi = chunk.channel_names[i]
+        roi_config = per_roi_config.get(roi, config) if per_roi_config else config
+        signal_array = get_event_signal_array(chunk, roi_config)
         trace = signal_array[:, i]
         time = chunk.time_sec
         
@@ -468,16 +477,16 @@ def extract_features(chunk, config):
         total_auc = 0.0 
         
         # Determine signal to use based on pre-filter setting.
-        mode = _normalize_peak_prefilter_mode(getattr(config, "peak_pre_filter", "none"))
-        trace_use, _ = apply_peak_prefilter(trace, chunk.fs_hz, config)
+        mode = _normalize_peak_prefilter_mode(getattr(roi_config, "peak_pre_filter", "none"))
+        trace_use, _ = apply_peak_prefilter(trace, chunk.fs_hz, roi_config)
         use_filter = mode != "none"
-            
+
         is_valid_use = np.isfinite(trace_use)
         clean_trace_use = trace_use[is_valid_use]
         clean_finite = clean_trace_use[np.isfinite(clean_trace_use)]
-        
+
         polarity = normalize_signal_excursion_polarity(
-            getattr(config, "signal_excursion_polarity", "positive")
+            getattr(roi_config, "signal_excursion_polarity", "positive")
         )
         if len(clean_finite) < 2:
              if not hasattr(chunk, 'metadata') or chunk.metadata is None: chunk.metadata = {}
@@ -491,15 +500,15 @@ def extract_features(chunk, config):
              rows.append(row)
              continue
         else:
-            threshold_stats = compute_detection_threshold_bounds(clean_finite, config)
+            threshold_stats = compute_detection_threshold_bounds(clean_finite, roi_config)
             mu = float(threshold_stats["mean"])
             med = float(threshold_stats["median"])
             sigma = float(threshold_stats["std"])
             mad = float(threshold_stats["mad"])
             sigma_robust = float(threshold_stats["sigma_robust"])
-            
+
             # Determine threshold from the same helper used by plotting verification.
-            if config.peak_threshold_method == 'median_mad' and sigma_robust == 0:
+            if roi_config.peak_threshold_method == 'median_mad' and sigma_robust == 0:
                 if not hasattr(chunk, 'metadata') or chunk.metadata is None:
                     chunk.metadata = {}
                 chunk.metadata.setdefault('qc_warnings', []).append(
@@ -509,17 +518,17 @@ def extract_features(chunk, config):
             thresh_lower = float(threshold_stats["lower"])
                 
             # AUC Baseline
-            auc_baseline_method = getattr(config, 'event_auc_baseline', 'zero')
+            auc_baseline_method = getattr(roi_config, 'event_auc_baseline', 'zero')
             if auc_baseline_method == 'median':
                 auc_baseline = med
             else:
                 auc_baseline = 0.0
-                
+
             # Constraints
             peak_indices = get_peak_indices_for_trace(
                 trace,
                 chunk.fs_hz,
-                config,
+                roi_config,
                 trace_use=trace_use,
                 threshold=thresh_upper,
                 threshold_lower=thresh_lower,

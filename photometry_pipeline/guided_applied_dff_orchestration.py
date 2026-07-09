@@ -7,6 +7,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from photometry_pipeline.feature_event_config import FEATURE_EVENT_CONFIG_FIELDS
+
 
 class GuidedAppliedDffOrchestrationError(ValueError):
     """Raised when applied-dF/F orchestration validation fails."""
@@ -16,12 +18,20 @@ class GuidedAppliedDffOrchestrationError(ValueError):
 def build_guided_applied_dff_manifest_rows(
     strategy_map_payload: dict,
     applied_dff_root: Path,
+    per_roi_feature_config_paths: dict | None = None,
 ) -> list[dict]:
     """
     Build the exact batch manifest rows for run_applied_dff_batch.py.
-    
+
     Enforces the exactly-one-ROI rule before returning any rows.
     Raises GuidedAppliedDffOrchestrationError if validation fails.
+
+    per_roi_feature_config_paths, if given, maps roi_id to the path of a
+    feature-config file (as consumed by run_applied_dff_batch.py's
+    `feature_config` manifest column) to use for that ROI instead of the
+    batch's default feature config. A ROI absent from this mapping keeps
+    today's behavior: an empty `feature_config` cell, which
+    run_applied_dff_batch.py resolves to its own default.
     """
     if strategy_map_payload.get("production_strategy_map_version") != "per_roi_correction_strategy_map.v1":
         raise GuidedAppliedDffOrchestrationError("production_strategy_map_version must be exactly per_roi_correction_strategy_map.v1")
@@ -124,6 +134,11 @@ def build_guided_applied_dff_manifest_rows(
             "roi": roi_id,
             "strategy": batch_strategy,
             "output_name": output_name,
+            "feature_config": (
+                str(per_roi_feature_config_paths[roi_id])
+                if per_roi_feature_config_paths and roi_id in per_roi_feature_config_paths
+                else ""
+            ),
         }
         rows.append(row)
 
@@ -137,16 +152,81 @@ def build_guided_applied_dff_manifest_rows(
     return rows
 
 
+def write_per_roi_feature_config_files(
+    per_roi_config_fields: dict,
+    output_dir: Path,
+) -> dict:
+    """Write one feature-config JSON file per ROI override.
+
+    per_roi_config_fields maps roi_id to a dict written as-is to that ROI's
+    JSON file. Each dict must be a COMPLETE, effective Config specification
+    (every feature-detection field the ROI should use), not a sparse
+    override: tools/run_applied_dff_features.py loads this file via
+    `Config(**payload)` with no other base config to layer onto, so any
+    field missing from the dict silently falls back to bare Config()
+    dataclass defaults rather than the Guided plan's actual default profile.
+    Callers should build these dicts with
+    guided_new_analysis_plan.build_per_roi_effective_feature_config_fields_for_overrides,
+    not with a GuidedPerRoiFeatureEventProfile.config_fields dict directly.
+
+    Returns {roi_id: written_path}. Writes nothing and returns {} for an
+    empty/None input, so callers with no per-ROI overrides are unaffected.
+
+    Fails closed: if any ROI's dict is missing one or more
+    FEATURE_EVENT_CONFIG_FIELDS names, raises
+    GuidedAppliedDffOrchestrationError before writing anything (no files for
+    any ROI, not just the incomplete one), rather than silently writing a
+    sparse file that would let run_applied_dff_features.py fall back to bare
+    Config() defaults for the missing fields.
+    """
+    if not per_roi_config_fields:
+        return {}
+    missing_fields_by_roi = {}
+    for roi_id, config_fields in per_roi_config_fields.items():
+        present = set((config_fields or {}).keys())
+        missing = FEATURE_EVENT_CONFIG_FIELDS - present
+        if missing:
+            missing_fields_by_roi[roi_id] = sorted(missing)
+    if missing_fields_by_roi:
+        raise GuidedAppliedDffOrchestrationError(
+            "per_roi_config_fields must contain the complete "
+            "FEATURE_EVENT_CONFIG_FIELDS set for every ROI; sparse override "
+            "fields alone would let run_applied_dff_features.py silently "
+            "fall back to bare Config() defaults for the missing fields. "
+            f"Missing fields by ROI: {missing_fields_by_roi}"
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths: dict = {}
+    for roi_id, config_fields in per_roi_config_fields.items():
+        safe_roi = str(roi_id).replace(" ", "_").replace("/", "_").replace("\\", "_")
+        path = output_dir / f"{safe_roi}_feature_config.json"
+        path.write_text(
+            json.dumps(dict(config_fields or {}), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        paths[roi_id] = str(path)
+    return paths
+
+
 def run_guided_applied_dff_orchestration_if_enabled(
     run_dir: str,
     phasic_out: str,
     run_cmd_callable=None,
     on_enabled=None,
+    per_roi_feature_event_overrides: dict | None = None,
 ) -> bool:
     """
     Orchestrates the applied_dff batch execution if enabled.
     Returns True if orchestration ran, False if skipped safely.
     Raises GuidedAppliedDffOrchestrationError if it fails closed.
+
+    per_roi_feature_event_overrides, if given, maps roi_id to a COMPLETE,
+    effective feature-detection config_fields dict (see
+    write_per_roi_feature_config_files for why this must be complete, not a
+    sparse override) for ROIs that should use their own settings instead of
+    the batch's default feature config. When None (the default), behavior is
+    unchanged: every ROI uses the default feature config, exactly as before
+    this parameter existed.
     """
     run_path = Path(run_dir)
     strategy_map_path = run_path / "guided_correction_strategy_map.json"
@@ -188,6 +268,7 @@ def run_guided_applied_dff_orchestration_if_enabled(
         "phasic_cache_size_bytes": phasic_cache_path.stat().st_size if phasic_cache_exists else None,
         "production_strategy_map_version": strategy_map_payload.get("production_strategy_map_version", ""),
         "requested_strategy_map": strategy_map_payload,
+        "per_roi_feature_config_paths": {},
         "batch_manifest_path": str(manifest_csv_path),
         "applied_output_root": str(applied_dff_root),
         "batch_command": [],
@@ -205,9 +286,18 @@ def run_guided_applied_dff_orchestration_if_enabled(
     try:
         if not phasic_cache_exists:
             raise GuidedAppliedDffOrchestrationError(f"Missing phasic cache file: {phasic_cache_path}")
-            
-        rows = build_guided_applied_dff_manifest_rows(strategy_map_payload, applied_dff_root)
-        
+
+        feature_config_paths = write_per_roi_feature_config_files(
+            per_roi_feature_event_overrides, applied_dff_root / "feature_configs"
+        )
+        prov_payload["per_roi_feature_config_paths"] = dict(feature_config_paths)
+
+        rows = build_guided_applied_dff_manifest_rows(
+            strategy_map_payload,
+            applied_dff_root,
+            per_roi_feature_config_paths=feature_config_paths,
+        )
+
         # Populate provenance rows
         prov_rows = []
         for entry in strategy_map_payload.get("per_roi_production_strategy_map", []):
@@ -233,7 +323,9 @@ def run_guided_applied_dff_orchestration_if_enabled(
             json.dump(prov_payload, f, indent=2)
             
         with manifest_csv_path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["roi", "strategy", "output_name"])
+            writer = csv.DictWriter(
+                f, fieldnames=["roi", "strategy", "output_name", "feature_config"]
+            )
             writer.writeheader()
             writer.writerows(rows)
             

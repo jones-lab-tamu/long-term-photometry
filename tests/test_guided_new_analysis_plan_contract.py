@@ -40,6 +40,9 @@ from photometry_pipeline.guided_new_analysis_plan import (
     build_guided_new_analysis_execution_spec_preview,
     build_guided_per_roi_feature_event_map,
     build_guided_per_roi_production_strategy_map,
+    build_per_roi_effective_feature_config_fields_for_overrides,
+    build_per_roi_feature_backend_config,
+    build_per_roi_feature_event_provenance,
     build_guided_feature_event_effective_values_preview,
     build_guided_first_subset_executable_mapping_preview,
     build_guided_runner_request_preview,
@@ -509,6 +512,141 @@ def test_per_roi_feature_event_map_invalid_override_config_fields_blocks():
     )
     assert feature_map.resolution_supported is False
     assert "CH1" not in {entry.roi_id for entry in feature_map.entries}
+
+
+def test_backend_glue_global_only_plan_materializes_as_before():
+    """No per-ROI choices: backend glue functions carry nothing extra."""
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        excluded_roi_ids=[],
+    )
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+    base_config = Config()
+
+    backend_config = build_per_roi_feature_backend_config(feature_map, base_config)
+    effective_overrides = build_per_roi_effective_feature_config_fields_for_overrides(
+        feature_map, base_config
+    )
+    provenance = build_per_roi_feature_event_provenance(feature_map, base_config)
+
+    # No ROI needs a distinct backend Config or a feature-config file: both
+    # ROIs resolve to the plan's single default profile, exactly like today.
+    assert backend_config == {}
+    assert effective_overrides == {}
+    assert set(provenance.keys()) == {"CH1", "CH2"}
+    assert provenance["CH1"]["source"] == "default"
+    assert provenance["CH2"]["source"] == "default"
+    assert provenance["CH1"]["feature_event_profile_id"] == "feature-profile-1"
+    # Provenance must not under-report: effective_config_fields carries every
+    # feature-detection field actually in effect (base_config's values, since
+    # no override applies), not just whatever sparse fields the default
+    # profile happened to record in override_config_fields.
+    assert set(provenance["CH1"]["effective_config_fields"]) == FEATURE_EVENT_CONFIG_FIELDS
+    assert (
+        provenance["CH1"]["effective_config_fields"]["peak_threshold_method"]
+        == base_config.peak_threshold_method
+    )
+
+
+def test_backend_glue_per_roi_override_carried_through_deterministically():
+    override = GuidedPlanFeatureEventChoice(
+        roi_id="CH1",
+        feature_event_profile_id="custom-ch1",
+        config_fields={
+            "peak_threshold_method": "percentile",
+            "peak_threshold_percentile": 90.0,
+        },
+        current_or_stale="current",
+        explicit_user_mark=True,
+    )
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        excluded_roi_ids=[],
+        per_roi_feature_event_choices=[override],
+    )
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+    base_config = Config()
+    base_config.peak_threshold_method = "mean_std"
+    base_config.peak_min_distance_sec = 2.5  # a field CH1's override never sets
+
+    backend_config = build_per_roi_feature_backend_config(feature_map, base_config)
+    effective_overrides = build_per_roi_effective_feature_config_fields_for_overrides(
+        feature_map, base_config
+    )
+    provenance = build_per_roi_feature_event_provenance(feature_map, base_config)
+
+    # Only CH1 (the overridden ROI) gets its own backend Config; CH2 is
+    # absent so it keeps using base_config unchanged, matching how
+    # extract_features/Pipeline resolve a ROI absent from a per-ROI map.
+    assert set(backend_config.keys()) == {"CH1"}
+    assert backend_config["CH1"].peak_threshold_method == "percentile"
+    assert backend_config["CH1"].peak_threshold_percentile == 90.0
+    # Everything else on the override Config still comes from base_config,
+    # including fields CH1's own override never mentioned.
+    assert backend_config["CH1"].target_fs_hz == base_config.target_fs_hz
+    assert backend_config["CH1"].peak_min_distance_sec == 2.5
+
+    # The applied-dF/F feature-config-file payload must be COMPLETE, not the
+    # sparse override alone: it has to carry peak_min_distance_sec=2.5 too,
+    # because run_applied_dff_features.py has no other base config to fall
+    # back to and would otherwise silently use the bare Config() default.
+    assert effective_overrides.keys() == {"CH1"}
+    ch1_effective = effective_overrides["CH1"]
+    assert set(ch1_effective) == FEATURE_EVENT_CONFIG_FIELDS
+    assert ch1_effective["peak_threshold_method"] == "percentile"
+    assert ch1_effective["peak_threshold_percentile"] == 90.0
+    assert ch1_effective["peak_min_distance_sec"] == 2.5
+
+    assert provenance["CH1"]["source"] == "override"
+    assert provenance["CH1"]["feature_event_profile_id"] == "custom-ch1"
+    # override_config_fields stays sparse (exactly what the profile set)...
+    assert provenance["CH1"]["override_config_fields"] == {
+        "peak_threshold_method": "percentile",
+        "peak_threshold_percentile": 90.0,
+    }
+    # ...but effective_config_fields is always complete and does not
+    # under-report the settings actually used.
+    assert provenance["CH1"]["effective_config_fields"]["peak_min_distance_sec"] == 2.5
+    assert provenance["CH2"]["source"] == "default"
+
+
+def test_backend_glue_omits_rois_blocked_by_invalid_map_does_not_silently_execute():
+    """A stale/duplicate/invalid override must not silently reach backend glue."""
+    stale_override = GuidedPlanFeatureEventChoice(
+        roi_id="CH1",
+        feature_event_profile_id="custom-ch1",
+        config_fields={"peak_threshold_method": "percentile"},
+        current_or_stale="stale",
+        explicit_user_mark=True,
+    )
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        excluded_roi_ids=[],
+        per_roi_feature_event_choices=[stale_override],
+    )
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+    assert feature_map.resolution_supported is False
+    assert "stale_feature_event_override" in feature_map.blocking_categories
+
+    base_config = Config()
+    backend_config = build_per_roi_feature_backend_config(feature_map, base_config)
+    effective_overrides = build_per_roi_effective_feature_config_fields_for_overrides(
+        feature_map, base_config
+    )
+    provenance = build_per_roi_feature_event_provenance(feature_map, base_config)
+
+    # CH1's stale override never reaches any backend glue output: no Config
+    # override, no feature-config file entry, and no provenance row, because
+    # it was never added to feature_map.entries in the first place. A caller
+    # must check feature_map.resolution_supported before executing; nothing
+    # here silently substitutes the stale override or a default for CH1.
+    assert "CH1" not in backend_config
+    assert "CH1" not in effective_overrides
+    assert "CH1" not in provenance
+    assert set(provenance.keys()) == {"CH2"}
 
 
 def test_signal_only_f0_missing_preview_evidence_blocks_without_crash():

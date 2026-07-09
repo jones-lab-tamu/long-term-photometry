@@ -637,6 +637,14 @@ class GuidedPlanFeatureEventChoice:
 
     roi_id: str
     feature_event_profile_id: str
+    # SPARSE override fields only: the Config field names/values this ROI's
+    # profile explicitly customizes, not a complete Config specification.
+    # Any FEATURE_EVENT_CONFIG_FIELDS name absent here is not overridden for
+    # this ROI. Backend glue (build_per_roi_feature_backend_config /
+    # build_per_roi_effective_feature_config_fields_for_overrides) is
+    # responsible for layering these onto the plan's base/default config to
+    # produce the complete, effective settings actually used; nothing should
+    # ever treat this dict alone as a full Config specification.
     config_fields: dict[str, Any] = field(default_factory=dict)
     current_or_stale: str | None = "stale"  # "current" or "stale"
     explicit_user_mark: bool = False
@@ -821,6 +829,19 @@ def build_guided_per_roi_production_strategy_map(
 
 @dataclass(frozen=True)
 class GuidedPerRoiFeatureEventProfile:
+    """One ROI's resolved feature/event profile reference.
+
+    config_fields is carried through verbatim from whichever source resolved
+    (the plan's default profile fields, or one GuidedPlanFeatureEventChoice's
+    override fields) and may be a SPARSE subset of FEATURE_EVENT_CONFIG_FIELDS
+    -- it is not guaranteed to be a complete Config specification. Callers
+    that need the complete, effective settings actually used for a ROI must
+    layer config_fields onto the plan's base/default Config themselves (see
+    build_per_roi_feature_backend_config and
+    build_per_roi_effective_feature_config_fields_for_overrides), not read
+    config_fields alone as if it were complete.
+    """
+
     roi_id: str
     source: str  # "default" or "override"
     feature_event_profile_id: str
@@ -938,6 +959,117 @@ def build_guided_per_roi_feature_event_map(
         ),
         blocking_categories=unique_blockers,
     )
+
+
+def build_per_roi_feature_backend_config(
+    feature_map: GuidedPerRoiFeatureEventMap,
+    base_config: Config,
+) -> dict[str, Config]:
+    """Convert a resolved per-ROI feature/event map into backend Config objects.
+
+    Only ROIs whose resolved entry has source="override" are included; a ROI
+    resolved from the default profile is intentionally omitted so it keeps
+    using `base_config` unchanged, identical to today's single-config
+    behavior (photometry_pipeline.core.feature_extraction.extract_features
+    and Pipeline fall back to the base config for any ROI absent from a
+    per-ROI config map). Each override Config is `base_config` with only its
+    feature-detection fields replaced (entry.config_fields may be a SPARSE
+    subset of FEATURE_EVENT_CONFIG_FIELDS), so every other Config field
+    (input paths, session structure, correction settings, and any
+    feature-detection field the override did not mention) is untouched --
+    the returned Config objects are the complete, effective settings even
+    though the input config_fields is not.
+
+    This function performs no I/O and does not execute or validate anything
+    beyond what build_guided_per_roi_feature_event_map already guaranteed.
+    """
+    result: dict[str, Config] = {}
+    for entry in feature_map.entries:
+        if entry.source != "override":
+            continue
+        fields = {
+            key: value
+            for key, value in dict(entry.config_fields).items()
+            if key in FEATURE_EVENT_CONFIG_FIELDS
+        }
+        result[entry.roi_id] = replace(base_config, **fields)
+    return result
+
+
+def build_per_roi_feature_event_provenance(
+    feature_map: GuidedPerRoiFeatureEventMap,
+    base_config: Config,
+) -> dict[str, dict[str, Any]]:
+    """Build a plain-dict provenance payload for every resolved ROI.
+
+    Suitable for Pipeline(per_roi_feature_provenance=...). For each ROI,
+    records:
+    - source: "default" or "override"
+    - feature_event_profile_id
+    - override_config_fields: entry.config_fields verbatim, which may be a
+      SPARSE subset of FEATURE_EVENT_CONFIG_FIELDS (only the fields that
+      profile explicitly set) -- do not read this alone as the complete
+      settings used.
+    - effective_config_fields: every FEATURE_EVENT_CONFIG_FIELDS value
+      actually in effect for that ROI, computed by layering
+      override_config_fields onto base_config -- i.e. exactly what
+      extract_features used for that ROI. This is what Review/output
+      consumers should show to answer "what settings were actually used."
+
+    Includes every resolved ROI (both "default" and "override" sources), so
+    Review/output work can show the full picture, not only overrides.
+    """
+    result: dict[str, dict[str, Any]] = {}
+    for entry in feature_map.entries:
+        override_fields = dict(entry.config_fields)
+        effective = replace(
+            base_config,
+            **{k: v for k, v in override_fields.items() if k in FEATURE_EVENT_CONFIG_FIELDS},
+        )
+        result[entry.roi_id] = {
+            "source": entry.source,
+            "feature_event_profile_id": entry.feature_event_profile_id,
+            "override_config_fields": override_fields,
+            "effective_config_fields": {
+                field_name: getattr(effective, field_name)
+                for field_name in FEATURE_EVENT_CONFIG_FIELDS
+            },
+        }
+    return result
+
+
+def build_per_roi_effective_feature_config_fields_for_overrides(
+    feature_map: GuidedPerRoiFeatureEventMap,
+    base_config: Config,
+) -> dict[str, dict[str, Any]]:
+    """Build {roi_id: effective_config_fields} for ROIs with an explicit override.
+
+    Suitable for
+    guided_applied_dff_orchestration.run_guided_applied_dff_orchestration_if_enabled's
+    per_roi_feature_event_overrides parameter, and for
+    write_per_roi_feature_config_files. A ROI resolved from the default
+    profile is omitted, so it keeps the applied-dF/F batch's own default
+    feature config, identical to today's behavior.
+
+    Unlike GuidedPerRoiFeatureEventProfile.config_fields (which may be a
+    SPARSE set of fields an override profile explicitly set),
+    this returns the COMPLETE set of FEATURE_EVENT_CONFIG_FIELDS values
+    actually in effect for that ROI, merged from base_config. This
+    completeness matters here specifically because
+    tools/run_applied_dff_features.py loads a --feature-config file as a
+    full Config specification (Config(**payload)) with no base config of its
+    own to layer onto -- writing only the sparse override fields would
+    silently fall back to bare Config() dataclass defaults for every field
+    the override didn't set, which is not necessarily the Guided plan's
+    actual default profile.
+    """
+    backend_config = build_per_roi_feature_backend_config(feature_map, base_config)
+    return {
+        roi_id: {
+            field_name: getattr(cfg, field_name) for field_name in FEATURE_EVENT_CONFIG_FIELDS
+        }
+        for roi_id, cfg in backend_config.items()
+    }
 
 
 @dataclass
