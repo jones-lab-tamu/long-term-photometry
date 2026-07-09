@@ -382,9 +382,16 @@ def test_preview_uses_custom_roi_settings_when_customized(window, monkeypatch):
         "signal_excursion_polarity": "positive",
     }
     _customize_roi_with_fake_dialog(window, monkeypatch, "CH1", custom_fields)
-    assert window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"] == (
-        custom_fields
-    )
+    # Stored override is SPARSE (only fields differing from Default); the
+    # equal-to-default fields (event_signal/peak_pre_filter/event_auc_baseline/
+    # signal_excursion_polarity) are dropped (4J16k37).
+    assert window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"] == {
+        "peak_threshold_method": "percentile",
+        "peak_threshold_percentile": 10.0,
+        "peak_min_distance_sec": 0.5,
+        "peak_min_prominence_k": 0.0,
+        "peak_min_width_sec": 0.0,
+    }
 
     window._on_guided_generate_feature_detection_preview()
 
@@ -416,14 +423,18 @@ def test_preview_roi_switch_does_not_mutate_default_or_custom_settings(
         "signal_excursion_polarity": "positive",
     }
     _customize_roi_with_fake_dialog(window, monkeypatch, "CH1", custom_fields)
+    stored_override = dict(
+        window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"]
+    )
 
     default_before, _ = window._guided_feature_event_current_values()
     window._on_guided_generate_feature_detection_preview()
     default_after, _ = window._guided_feature_event_current_values()
 
     assert default_before == default_after
+    # Generating a preview must not mutate the stored (sparse) override.
     assert window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"] == (
-        custom_fields
+        stored_override
     )
 
 
@@ -442,7 +453,9 @@ def test_preview_uses_effective_settings_for_custom_roi_not_sparse_override(
     # hard default (peak_min_distance_sec hard default is 1.0).
     window._guided_feature_event_peak_distance_edit.setText("2.5")
 
-    sparse_override = {"peak_threshold_method": "mean_std"}
+    # A genuinely-different single-field override (peak_threshold_k 2.5 -> 3.5)
+    # that leaves peak_min_distance_sec to be inherited from the Default (2.5).
+    sparse_override = {"peak_threshold_k": 3.5}
     _customize_roi_with_fake_dialog(window, monkeypatch, "CH1", sparse_override)
     assert window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"] == (
         sparse_override
@@ -480,6 +493,58 @@ def test_preview_uses_effective_settings_for_custom_roi_not_sparse_override(
     assert window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"] == (
         sparse_override
     )
+
+
+def test_preview_inactive_absolute_field_does_not_block(window, monkeypatch):
+    """A dormant peak_threshold_abs=0.0 carried by a Custom ROI's effective
+    config (while the method is mean_std) must NOT block preview with
+    'peak_threshold_abs must be > 0' (4J16k37 issue #3)."""
+    t = np.arange(100, dtype=float) * 0.1
+    y = np.sin(t)
+    _setup_signal_only_evidence(window, time_sec=t, preview_dff=y)
+    monkeypatch.setattr(window, "_refresh_guided_draft_run_plan_preview", lambda: None)
+
+    # Make the Default profile a FULL config that carries a dormant
+    # peak_threshold_abs=0.0 while the method is mean_std, so the Custom ROI's
+    # effective (default-layered) config also carries it.
+    full_default = dict(window._event_feature_defaults_from_active_baseline())
+    assert full_default["peak_threshold_method"] == "mean_std"
+    assert full_default["peak_threshold_abs"] == 0.0
+    window._guided_new_analysis_feature_event_profile = dict(
+        full_default, profile_id="p-1"
+    )
+    window._guided_new_analysis_feature_event_profile_status = "applied"
+
+    _customize_roi_with_fake_dialog(
+        window, monkeypatch, "CH1", {"peak_threshold_k": 3.5}
+    )
+
+    window._on_guided_generate_feature_detection_preview()
+
+    text = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel").text()
+    assert "peak_threshold_abs" not in text
+    assert "must be > 0" not in text
+    assert "Previewing CH1 with Custom settings" in text
+
+
+def test_preview_absolute_method_still_rejects_nonpositive_abs(window, monkeypatch):
+    """Absolute thresholding with a non-positive peak_threshold_abs must still
+    produce a clear validation error -- the fix only ignores INACTIVE absolute
+    fields, not an active invalid one (4J16k37 issue #3 test #5)."""
+    t = np.arange(100, dtype=float) * 0.1
+    y = np.sin(t)
+    _setup_signal_only_evidence(window, time_sec=t, preview_dff=y)
+    monkeypatch.setattr(window, "_refresh_guided_draft_run_plan_preview", lambda: None)
+
+    # CH1 stays Default; set the Default editor to absolute with invalid 0.0.
+    window._guided_feature_event_peak_method_combo.setCurrentText("absolute")
+    window._guided_feature_event_peak_abs_edit.setText("0.0")
+
+    window._on_guided_generate_feature_detection_preview()
+
+    text = window.findChild(QLabel, "guidedFeaturePreviewStatusLabel").text()
+    assert "Invalid feature settings" in text
+    assert "bsolute" in text  # "Absolute"/"absolute" threshold error
 
 
 def test_visual_plot_renders_events_and_thresholds(

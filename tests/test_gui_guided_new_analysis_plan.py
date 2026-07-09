@@ -3811,7 +3811,17 @@ def test_new_analysis_single_roi_customization_creates_one_choice(
     assert len(plan.per_roi_feature_event_choices) == 1
     choice = plan.per_roi_feature_event_choices[0]
     assert choice.roi_id == "CH1"
-    assert choice.config_fields == custom_fields
+    # Stored override is SPARSE: only the fields that actually differ from the
+    # current Default settings, not the full effective config the dialog
+    # returned (4J16k37). event_signal/peak_min_distance_sec/peak_pre_filter/
+    # event_auc_baseline/signal_excursion_polarity all equal the Default and
+    # must be dropped.
+    assert choice.config_fields == {
+        "peak_threshold_method": "percentile",
+        "peak_threshold_percentile": 80.0,
+        "peak_min_prominence_k": 0.0,
+        "peak_min_width_sec": 0.0,
+    }
     assert choice.current_or_stale == "current"
     assert choice.explicit_user_mark is True
 
@@ -3843,12 +3853,14 @@ def test_edit_existing_custom_roi_seeds_from_default_layered_effective_values(
     assert default_fields["peak_min_distance_sec"] == 2.5
 
     # Customize CH1 with a sparse override that never mentions
-    # peak_min_distance_sec.
+    # peak_min_distance_sec. peak_threshold_k=3.5 genuinely differs from the
+    # Default (2.5), so it is a real Custom override, and it leaves
+    # peak_min_distance_sec to be inherited from the Default (2.5).
     _customize_roi_via_fake_dialog(
-        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+        window, monkeypatch, "CH1", {"peak_threshold_k": 3.5}
     )
     assert window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"] == {
-        "peak_threshold_method": "mean_std"
+        "peak_threshold_k": 3.5
     }
 
     # The Custom row summary must reflect CH1's effective settings, not a
@@ -3888,8 +3900,16 @@ def test_edit_existing_custom_roi_seeds_from_default_layered_effective_values(
     assert captured_seed["peak_min_distance_sec"] == 2.5
     assert captured_seed["peak_threshold_method"] == "mean_std"
 
-    # The resulting plan's effective per-ROI map must preserve the
-    # inherited default-layered value, not a hard default.
+    # Re-applying the seed unchanged must keep the override SPARSE: only
+    # peak_threshold_k differs from the Default, so nothing else is stored,
+    # and re-confirming does not spuriously widen the override (4J16k37).
+    assert window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"] == {
+        "peak_threshold_k": 3.5
+    }
+
+    # The stored per-ROI map entry stays sparse, while the ROI's EFFECTIVE
+    # settings still preserve the inherited default-layered value (2.5), not a
+    # hard default (1.0).
     plan = window._build_guided_new_analysis_draft_plan()
     from photometry_pipeline.guided_new_analysis_plan import (
         build_guided_per_roi_feature_event_map,
@@ -3898,14 +3918,18 @@ def test_edit_existing_custom_roi_seeds_from_default_layered_effective_values(
     feature_map = build_guided_per_roi_feature_event_map(plan)
     ch1_entry = next(entry for entry in feature_map.entries if entry.roi_id == "CH1")
     assert ch1_entry.source == "override"
-    assert ch1_entry.config_fields.get("peak_min_distance_sec") == 2.5
-    assert ch1_entry.config_fields.get("peak_threshold_method") == "mean_std"
+    assert ch1_entry.config_fields == {"peak_threshold_k": 3.5}
+
+    effective = window._guided_effective_feature_event_config_fields_for_roi("CH1")
+    assert effective["peak_min_distance_sec"] == 2.5
+    assert effective["peak_threshold_k"] == 3.5
+    assert effective["peak_threshold_method"] == "mean_std"
 
 
 def test_new_analysis_reset_roi_to_default_clears_choice(window, tmp_path, monkeypatch):
     _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
     _customize_roi_via_fake_dialog(
-        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+        window, monkeypatch, "CH1", {"peak_threshold_k": 3.5}
     )
     plan_with_override = window._build_guided_new_analysis_draft_plan()
     assert len(plan_with_override.per_roi_feature_event_choices) == 1
@@ -3924,7 +3948,7 @@ def test_new_analysis_excluded_roi_override_does_not_block_included_set(
 ):
     _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
     _customize_roi_via_fake_dialog(
-        window, monkeypatch, "CH2", {"peak_threshold_method": "mean_std"}
+        window, monkeypatch, "CH2", {"peak_threshold_k": 3.5}
     )
 
     for i in range(window._guided_roi_list.count()):
@@ -3948,7 +3972,7 @@ def test_new_analysis_valid_custom_roi_passes_consistency_check(
 ):
     _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
     _customize_roi_via_fake_dialog(
-        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+        window, monkeypatch, "CH1", {"peak_threshold_k": 3.5}
     )
 
     assert window._guided_per_roi_feature_event_consistency_problem() == ""
@@ -3964,7 +3988,7 @@ def test_new_analysis_missing_default_with_uncustomized_roi_blocks_readiness(
     than silently letting the un-customized ROIs fall back to nothing."""
     _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
     _customize_roi_via_fake_dialog(
-        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+        window, monkeypatch, "CH1", {"peak_threshold_k": 3.5}
     )
     window._guided_new_analysis_feature_event_profile_status = "default_initialized"
 
@@ -3978,7 +4002,7 @@ def test_new_analysis_review_plan_summarizes_default_and_custom_rois(
 ):
     _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
     _customize_roi_via_fake_dialog(
-        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+        window, monkeypatch, "CH1", {"peak_threshold_k": 3.5}
     )
 
     window._guided_workflow_stepper.setCurrentRow(
@@ -4087,7 +4111,7 @@ def test_per_roi_reset_button_enabled_state_and_tooltips(
     tooltips must be scientist-facing."""
     _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
     _customize_roi_via_fake_dialog(
-        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+        window, monkeypatch, "CH1", {"peak_threshold_k": 3.5}
     )
 
     table = _per_roi_table(window)
@@ -4160,7 +4184,7 @@ def test_step5_visible_per_roi_text_has_no_internal_language(
     note) must contain none of the banned developer/internal words."""
     _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
     _customize_roi_via_fake_dialog(
-        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+        window, monkeypatch, "CH1", {"peak_threshold_k": 3.5}
     )
     window._refresh_guided_per_roi_feature_event_table()
 
@@ -4185,3 +4209,160 @@ def test_step5_visible_per_roi_text_has_no_internal_language(
 
     for text in collected:
         _assert_no_internal_words(text)
+
+
+# Step 5 manual-test fixes (4J16k37)
+
+
+def _seed_matching_dialog(window, monkeypatch, roi_id):
+    """Drive _on_guided_customize_roi_feature_event with a dialog that applies
+    exactly the ROI's current effective settings unchanged (a no-op Apply)."""
+    import gui.main_window as main_window_module
+
+    class _NoChangeDialog:
+        def __init__(self, _roi_id, seed_values, parent=None):
+            self._seed = dict(seed_values)
+
+        def exec(self):
+            return main_window_module.QDialog.Accepted
+
+        def result_values(self):
+            return dict(self._seed)
+
+    monkeypatch.setattr(
+        main_window_module, "_GuidedRoiFeatureEventDialog", _NoChangeDialog
+    )
+    window._on_guided_customize_roi_feature_event(roi_id)
+
+
+def test_noop_customize_dialog_does_not_create_custom_override(
+    window, tmp_path, monkeypatch
+):
+    """Applying the Customize dialog with no changes relative to Default must
+    NOT turn a Default ROI into Custom (4J16k37 issue #2)."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    _seed_matching_dialog(window, monkeypatch, "CH1")
+
+    assert "CH1" not in window._guided_per_roi_feature_event_overrides
+    status_by_roi = _per_roi_feature_table_status_by_roi(window)
+    assert status_by_roi["CH1"] == "Default"
+
+    table = _per_roi_table(window)
+    row_by_roi = {table.item(r, 0).text(): r for r in range(table.rowCount())}
+    reset_btn = table.cellWidget(row_by_roi["CH1"], 4)
+    customize_btn = table.cellWidget(row_by_roi["CH1"], 3)
+    assert reset_btn.isEnabled() is False
+    assert customize_btn.text() == "Customize"
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.per_roi_feature_event_choices == []
+
+
+def test_existing_custom_edited_back_to_default_returns_to_default(
+    window, tmp_path, monkeypatch
+):
+    """An existing Custom ROI edited so its settings again match the current
+    Default settings must return to Default and drop the override."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    _customize_roi_via_fake_dialog(
+        window, monkeypatch, "CH1", {"peak_threshold_k": 3.5}
+    )
+    assert _per_roi_feature_table_status_by_roi(window)["CH1"] == "Custom"
+
+    # Now apply a dialog returning exactly the Default settings (k back to the
+    # Default 2.5, everything else default).
+    default_effective = (
+        window._guided_full_effective_default_feature_event_config_fields()
+    )
+    import gui.main_window as main_window_module
+
+    class _BackToDefaultDialog:
+        def __init__(self, _roi_id, _seed_values, parent=None):
+            pass
+
+        def exec(self):
+            return main_window_module.QDialog.Accepted
+
+        def result_values(self):
+            return dict(default_effective)
+
+    monkeypatch.setattr(
+        main_window_module, "_GuidedRoiFeatureEventDialog", _BackToDefaultDialog
+    )
+    window._on_guided_customize_roi_feature_event("CH1")
+
+    assert "CH1" not in window._guided_per_roi_feature_event_overrides
+    assert _per_roi_feature_table_status_by_roi(window)["CH1"] == "Default"
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.per_roi_feature_event_choices == []
+
+
+def test_customize_stores_only_changed_fields_sparse(window, tmp_path, monkeypatch):
+    """Changing a single numeric value stores a sparse override of only that
+    field, never a full effective config (4J16k37 issue #2 / test #3)."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    # The fake dialog returns a FULL effective config with exactly one field
+    # changed from Default (peak_threshold_k 2.5 -> 4.0).
+    full_effective = (
+        window._guided_full_effective_default_feature_event_config_fields()
+    )
+    full_effective["peak_threshold_k"] = 4.0
+    _customize_roi_via_fake_dialog(window, monkeypatch, "CH1", full_effective)
+
+    stored = window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"]
+    assert stored == {"peak_threshold_k": 4.0}
+    assert _per_roi_feature_table_status_by_roi(window)["CH1"] == "Custom"
+
+
+def test_default_block_wording_reads_as_default_settings(window):
+    """The default editor block must read as the Default settings, and
+    explain that ROIs use these settings unless marked Custom (issue #1)."""
+    panel = window.findChild(QGroupBox, "guidedFeatureEventProfileEditorPanel")
+    assert panel is not None
+    assert panel.title() == "Default feature detection settings"
+
+    note = window.findChild(QLabel, "guidedFeatureEventProfileEditorNote")
+    assert note is not None
+    text = note.text()
+    assert "Default feature detection settings" in text
+    assert "unless" in text.lower() and "Custom" in text
+    _assert_no_internal_words(text)
+
+
+def test_normalize_feature_settings_drops_inactive_threshold_fields():
+    """Unit test for the shared preview normalization helper (4J16k37 #3)."""
+    from gui.main_window import (
+        normalize_feature_settings_for_active_threshold_method as _norm,
+    )
+
+    mean_std = _norm(
+        {
+            "peak_threshold_method": "mean_std",
+            "peak_threshold_k": 2.5,
+            "peak_threshold_percentile": 95.0,
+            "peak_threshold_abs": 0.0,
+        }
+    )
+    assert mean_std == {"peak_threshold_method": "mean_std", "peak_threshold_k": 2.5}
+
+    percentile = _norm(
+        {
+            "peak_threshold_method": "percentile",
+            "peak_threshold_k": 2.5,
+            "peak_threshold_percentile": 80.0,
+            "peak_threshold_abs": 0.0,
+        }
+    )
+    assert percentile == {
+        "peak_threshold_method": "percentile",
+        "peak_threshold_percentile": 80.0,
+    }
+
+    # Absolute keeps its (active) abs field so downstream validation still runs.
+    absolute = _norm(
+        {"peak_threshold_method": "absolute", "peak_threshold_abs": 0.0}
+    )
+    assert absolute == {"peak_threshold_method": "absolute", "peak_threshold_abs": 0.0}

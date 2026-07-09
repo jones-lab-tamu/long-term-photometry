@@ -1243,6 +1243,33 @@ def peak_threshold_method_requires_abs(method_str: str) -> bool:
     return method_str == "absolute"
 
 
+def normalize_feature_settings_for_active_threshold_method(config_fields: dict) -> dict:
+    """Return a copy of config_fields with threshold fields that are inactive
+    for the selected peak_threshold_method removed.
+
+    A full/effective feature-detection config can carry a dormant value for a
+    threshold field that the selected method does not use (e.g.
+    peak_threshold_abs=0.0 while the method is mean_std). validate_feature_event_config_fields
+    intentionally validates every present numeric field regardless of the
+    active method, so a dormant peak_threshold_abs=0.0 would otherwise fail as
+    "peak_threshold_abs must be > 0" even though absolute thresholding is not
+    in use. Dropping inactive threshold fields here mirrors what
+    parse_and_validate_event_feature_knobs already does for the Default editor,
+    so Default and Custom-ROI previews validate identically. The active
+    threshold field for the selected method is always kept, so required-field
+    checks downstream still pass.
+    """
+    normalized = dict(config_fields or {})
+    method = str(normalized.get("peak_threshold_method", ""))
+    if not peak_threshold_method_requires_k(method):
+        normalized.pop("peak_threshold_k", None)
+    if not peak_threshold_method_requires_percentile(method):
+        normalized.pop("peak_threshold_percentile", None)
+    if not peak_threshold_method_requires_abs(method):
+        normalized.pop("peak_threshold_abs", None)
+    return normalized
+
+
 def validate_representative_index_preview_compatibility(
     representative_session_index: int | None,
     preview_first_n: int | None,
@@ -12580,6 +12607,24 @@ class MainWindow(QMainWindow):
             return values
         return dict(self._guided_feature_event_editor_defaults())
 
+    def _guided_full_effective_default_feature_event_config_fields(self) -> dict:
+        """The complete Default feature-detection settings (every field
+        present), used as the baseline for detecting which fields a per-ROI
+        customization actually changed.
+
+        _guided_default_feature_event_config_fields_for_seeding may be sparse
+        (the applied default profile omits threshold fields inactive for its
+        method, e.g. no peak_threshold_percentile when the default method is
+        mean_std). Comparing a customization against a sparse baseline with
+        compute_overrides_user_changed would silently drop a genuinely
+        changed field that the sparse baseline lacks (e.g. switching a ROI to
+        percentile with a new percentile value). Layering the sparse default
+        onto the full active-baseline defaults yields a complete baseline so
+        every changed field is detected and stored."""
+        full = dict(self._event_feature_defaults_from_active_baseline())
+        full.update(self._guided_default_feature_event_config_fields_for_seeding())
+        return full
+
     def _guided_effective_feature_event_config_fields_for_roi(self, roi_id: str) -> dict:
         """The complete, effective feature-detection settings for one ROI:
         the current default settings with that ROI's override fields (which
@@ -12692,12 +12737,31 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
         config_fields = dialog.result_values() or {}
+        # Store only the fields the user actually changed relative to the
+        # current Default settings, so a per-ROI override stays sparse and
+        # meaningful. If the dialog result matches the Default settings (a
+        # no-op Apply, or an existing Custom edited back to Default), this
+        # ROI must remain/return to Default: create no override, and drop any
+        # existing one so its row shows Default with Reset disabled.
+        default_fields = self._guided_full_effective_default_feature_event_config_fields()
+        changed = compute_overrides_user_changed(config_fields, default_fields)
+        if not changed:
+            if roi_id in overrides:
+                del overrides[roi_id]
+                self._guided_per_roi_feature_event_overrides = overrides
+                self._invalidate_guided_backend_validation(
+                    "feature detection settings changed"
+                )
+            self._refresh_guided_per_roi_feature_event_table()
+            self._refresh_guided_feature_detection_continue_state()
+            self._refresh_guided_draft_run_plan_preview()
+            return
         profile_id = existing.get("profile_id") if existing else None
         if not profile_id:
             import uuid
             profile_id = f"roi-profile-{uuid.uuid4().hex[:8]}"
         overrides[roi_id] = {
-            "config_fields": config_fields,
+            "config_fields": changed,
             "profile_id": profile_id,
             "updated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
@@ -13436,6 +13500,14 @@ class MainWindow(QMainWindow):
             self._guided_feature_preview_status_label.setText(f"Invalid feature settings: {err}")
             self._guided_feature_preview_result_table.setVisible(False)
             return
+        # Drop threshold fields inactive for the selected method so a dormant
+        # value (e.g. peak_threshold_abs=0.0 carried by a full effective
+        # config while the method is mean_std) cannot block preview
+        # validation. Applied to both the Default and Custom branches above so
+        # both previews validate identically.
+        config_fields = normalize_feature_settings_for_active_threshold_method(
+            config_fields
+        )
 
         from photometry_pipeline.guided_feature_detection_preview import (
             GuidedFeaturePreviewTraceRequest,
@@ -14178,16 +14250,17 @@ class MainWindow(QMainWindow):
         self._refresh_guided_draft_run_plan_preview()
 
     def _build_guided_feature_event_profile_editor(self) -> QGroupBox:
-        group = QGroupBox("Feature detection")
+        group = QGroupBox("Default feature detection settings")
         group.setObjectName("guidedFeatureEventProfileEditorPanel")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
 
         note = QLabel(
-            "These settings define downstream event detection and feature "
-            "extraction. Review and apply them before validation. Applying "
-            "settings updates only this in-memory plan and writes no outputs."
+            "These are the Default feature detection settings. Every included "
+            "ROI uses them unless you mark that ROI Custom in the table below. "
+            "Apply them to add them to this plan — this updates only the "
+            "in-memory plan and writes no outputs."
         )
         note.setObjectName("guidedFeatureEventProfileEditorNote")
         note.setProperty("guidedSecondaryText", True)
