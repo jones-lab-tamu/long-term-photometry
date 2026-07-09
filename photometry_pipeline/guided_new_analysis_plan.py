@@ -35,6 +35,9 @@ FIRST_EXECUTION_SUBSET_NAME = "global_dynamic_fit_only.v1"
 PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION = (
     "per_roi_correction_strategy_map.v1"
 )
+PER_ROI_FEATURE_EVENT_MAP_VERSION = (
+    "per_roi_feature_event_map.v1"
+)
 SUPPORTED_INPUT_FORMATS = {"auto", "rwd", "npm", "custom_tabular"}
 SUPPORTED_ACQUISITION_MODES = {"intermittent", "continuous"}
 DATASET_CONTRACT_SNAPSHOT_STATUSES = {
@@ -620,6 +623,25 @@ class GuidedPlanCorrectionChoice:
     evidence_reference: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class GuidedPlanFeatureEventChoice:
+    """An explicit per-ROI feature/event settings override.
+
+    Mirrors GuidedPlanCorrectionChoice's role for correction strategy: one
+    override choice per ROI, proven explicit and current before it can be
+    resolved into production intent. A ROI with no matching choice resolves
+    to the plan's single default feature/event profile
+    (feature_event_profile_id / feature_event_values), preserving today's
+    global-only behavior when no overrides are present.
+    """
+
+    roi_id: str
+    feature_event_profile_id: str
+    config_fields: dict[str, Any] = field(default_factory=dict)
+    current_or_stale: str | None = "stale"  # "current" or "stale"
+    explicit_user_mark: bool = False
+
+
 LOCAL_PREVIEW_SOURCE_SETUP_CURRENTNESS_RULE_VERSION = (
     "source_setup_bound_currentness.v1"
 )
@@ -797,6 +819,127 @@ def build_guided_per_roi_production_strategy_map(
     )
 
 
+@dataclass(frozen=True)
+class GuidedPerRoiFeatureEventProfile:
+    roi_id: str
+    source: str  # "default" or "override"
+    feature_event_profile_id: str
+    config_fields: dict[str, Any]
+    explicit_user_mark: bool
+    current_or_stale: str
+
+
+@dataclass(frozen=True)
+class GuidedPerRoiFeatureEventMap:
+    version: str
+    entries: tuple[GuidedPerRoiFeatureEventProfile, ...]
+    resolution_supported: bool
+    blocking_categories: tuple[str, ...]
+
+
+def build_guided_per_roi_feature_event_map(
+    plan: "GuidedNewAnalysisDraftPlan",
+) -> GuidedPerRoiFeatureEventMap:
+    """Build the authoritative per-ROI feature/event settings contract without executing.
+
+    Resolution rule, mirroring build_guided_per_roi_production_strategy_map:
+    - A ROI with no explicit override resolves to the plan's single default
+      feature/event profile (feature_event_profile_id / feature_event_values),
+      provided that default is itself current/applied. This preserves
+      today's global-only behavior when no per-ROI choices are present.
+    - A ROI with exactly one current, explicitly-marked, valid override
+      resolves to that override instead of the default.
+    - Duplicate, stale, non-explicit, or semantically invalid overrides block
+      resolution for that ROI (the ROI is omitted from entries and a
+      blocking category is recorded).
+    - A feature/event choice referencing a ROI id that is neither included
+      nor discovered is reported as an unknown-ROI blocker; a choice for a
+      known-but-excluded ROI is ignored, consistent with per-ROI
+      correction-strategy handling of excluded ROIs.
+    """
+    if not isinstance(plan, GuidedNewAnalysisDraftPlan):
+        raise TypeError("plan must be a GuidedNewAnalysisDraftPlan")
+
+    included = tuple(dict.fromkeys(str(roi) for roi in plan.included_roi_ids))
+    known_roi_ids = set(included) | {str(roi) for roi in plan.discovered_roi_ids}
+
+    choices_by_roi: dict[str, list[GuidedPlanFeatureEventChoice]] = {
+        roi: [] for roi in included
+    }
+    blockers: list[str] = []
+    for choice in plan.per_roi_feature_event_choices:
+        roi_id = str(choice.roi_id or "")
+        if roi_id not in known_roi_ids:
+            blockers.append("unknown_roi_feature_event_override")
+            continue
+        if roi_id in choices_by_roi:
+            choices_by_roi[roi_id].append(choice)
+        # Choices for known-but-excluded ROIs are ignored: they are not
+        # relevant to the current included-ROI scope.
+
+    default_current = _feature_event_profile_current_for_first_subset(plan)
+    default_config_fields = {
+        key: value
+        for key, value in dict(plan.feature_event_values).items()
+        if key in FEATURE_EVENT_CONFIG_FIELDS
+    }
+
+    entries: list[GuidedPerRoiFeatureEventProfile] = []
+    for roi in included:
+        choices = choices_by_roi[roi]
+        if not choices:
+            if not default_current:
+                blockers.append(
+                    "missing_default_feature_event_profile_for_included_roi"
+                )
+                continue
+            entries.append(
+                GuidedPerRoiFeatureEventProfile(
+                    roi_id=roi,
+                    source="default",
+                    feature_event_profile_id=str(plan.feature_event_profile_id or ""),
+                    config_fields=dict(default_config_fields),
+                    explicit_user_mark=bool(plan.feature_event_explicitly_applied),
+                    current_or_stale="current",
+                )
+            )
+            continue
+        if len(choices) != 1:
+            blockers.append("duplicate_feature_event_override_for_included_roi")
+            continue
+        choice = choices[0]
+        choice_blockers: list[str] = []
+        if not choice.explicit_user_mark:
+            choice_blockers.append("non_explicit_feature_event_override")
+        if choice.current_or_stale != "current":
+            choice_blockers.append("stale_feature_event_override")
+        if validate_feature_event_config_fields(choice.config_fields):
+            choice_blockers.append("invalid_feature_event_override_config_fields")
+        if choice_blockers:
+            blockers.extend(choice_blockers)
+            continue
+        entries.append(
+            GuidedPerRoiFeatureEventProfile(
+                roi_id=roi,
+                source="override",
+                feature_event_profile_id=str(choice.feature_event_profile_id or ""),
+                config_fields=dict(choice.config_fields),
+                explicit_user_mark=bool(choice.explicit_user_mark),
+                current_or_stale=str(choice.current_or_stale or "stale"),
+            )
+        )
+
+    unique_blockers = tuple(dict.fromkeys(blockers))
+    return GuidedPerRoiFeatureEventMap(
+        version=PER_ROI_FEATURE_EVENT_MAP_VERSION,
+        entries=tuple(entries),
+        resolution_supported=bool(
+            included and len(entries) == len(included) and not unique_blockers
+        ),
+        blocking_categories=unique_blockers,
+    )
+
+
 @dataclass
 class GuidedNewAnalysisDraftPlan:
     schema_version: str = SCHEMA_VERSION
@@ -887,6 +1030,11 @@ class GuidedNewAnalysisDraftPlan:
     feature_event_stale_reasons: list[str] = field(default_factory=list)
     feature_event_updated_at_utc: str | None = None
     feature_event_explicitly_applied: bool = False
+
+    # per-ROI feature/event settings overrides (4J16k32a). Empty by default:
+    # a plan with no overrides resolves every included ROI to the single
+    # default profile above, identical to today's global-only behavior.
+    per_roi_feature_event_choices: list[GuidedPlanFeatureEventChoice] = field(default_factory=list)
 
     # output policy status
     output_policy_status: str = "missing"  # missing / applied / invalid / stale / unavailable

@@ -31,11 +31,14 @@ from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisExecutionIntent,
     GuidedNewAnalysisOutputCreationPolicy,
     GuidedPlanCorrectionChoice,
+    GuidedPlanFeatureEventChoice,
     GuidedPlanIssue,
+    PER_ROI_FEATURE_EVENT_MAP_VERSION,
     PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION,
     NEW_ANALYSIS_ISSUE_CATEGORY_TO_SECTION,
     RUN_PREVIEW_SCHEMA_VERSION,
     build_guided_new_analysis_execution_spec_preview,
+    build_guided_per_roi_feature_event_map,
     build_guided_per_roi_production_strategy_map,
     build_guided_feature_event_effective_values_preview,
     build_guided_first_subset_executable_mapping_preview,
@@ -263,6 +266,249 @@ def test_per_roi_strategy_map_enabled_all_signal_only_is_supported():
     assert strategy_map.execution_routing_supported is True
     assert strategy_map.legacy_global_dynamic_fit_mode is None
     assert strategy_map.blocking_categories == ()
+
+
+def test_per_roi_feature_event_map_no_overrides_resolves_to_default():
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2", "CH3"],
+        included_roi_ids=["CH1", "CH2", "CH3"],
+        excluded_roi_ids=[],
+    )
+
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+
+    assert feature_map.version == PER_ROI_FEATURE_EVENT_MAP_VERSION
+    assert [entry.roi_id for entry in feature_map.entries] == ["CH1", "CH2", "CH3"]
+    assert all(entry.source == "default" for entry in feature_map.entries)
+    assert all(
+        entry.feature_event_profile_id == "feature-profile-1"
+        for entry in feature_map.entries
+    )
+    assert all(
+        entry.config_fields == {"event_signal": "dff"}
+        for entry in feature_map.entries
+    )
+    assert feature_map.resolution_supported is True
+    assert feature_map.blocking_categories == ()
+
+
+def test_per_roi_feature_event_map_single_roi_override_resolves_custom_others_default():
+    override = GuidedPlanFeatureEventChoice(
+        roi_id="CH1",
+        feature_event_profile_id="custom-ch1",
+        config_fields={
+            "peak_threshold_method": "percentile",
+            "peak_threshold_percentile": 90.0,
+        },
+        current_or_stale="current",
+        explicit_user_mark=True,
+    )
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2", "CH3"],
+        included_roi_ids=["CH1", "CH2", "CH3"],
+        excluded_roi_ids=[],
+        per_roi_feature_event_choices=[override],
+    )
+
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+
+    assert feature_map.resolution_supported is True
+    assert feature_map.blocking_categories == ()
+    assert [entry.roi_id for entry in feature_map.entries] == ["CH1", "CH2", "CH3"]
+    by_roi = {entry.roi_id: entry for entry in feature_map.entries}
+    assert by_roi["CH1"].source == "override"
+    assert by_roi["CH1"].feature_event_profile_id == "custom-ch1"
+    assert by_roi["CH1"].config_fields == {
+        "peak_threshold_method": "percentile",
+        "peak_threshold_percentile": 90.0,
+    }
+    assert by_roi["CH2"].source == "default"
+    assert by_roi["CH2"].feature_event_profile_id == "feature-profile-1"
+    assert by_roi["CH3"].source == "default"
+
+
+def test_per_roi_feature_event_map_duplicate_override_for_roi_blocks():
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        excluded_roi_ids=[],
+        per_roi_feature_event_choices=[
+            GuidedPlanFeatureEventChoice(
+                roi_id="CH1",
+                feature_event_profile_id="custom-a",
+                config_fields={"event_signal": "delta_f"},
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+            GuidedPlanFeatureEventChoice(
+                roi_id="CH1",
+                feature_event_profile_id="custom-b",
+                config_fields={"event_signal": "dff"},
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+        ],
+    )
+
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+
+    assert "duplicate_feature_event_override_for_included_roi" in (
+        feature_map.blocking_categories
+    )
+    assert feature_map.resolution_supported is False
+    assert "CH1" not in {entry.roi_id for entry in feature_map.entries}
+
+
+def test_per_roi_feature_event_map_stale_override_blocks():
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        excluded_roi_ids=[],
+        per_roi_feature_event_choices=[
+            GuidedPlanFeatureEventChoice(
+                roi_id="CH1",
+                feature_event_profile_id="custom-ch1",
+                config_fields={"event_signal": "dff"},
+                current_or_stale="stale",
+                explicit_user_mark=True,
+            ),
+        ],
+    )
+
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+
+    assert "stale_feature_event_override" in feature_map.blocking_categories
+    assert feature_map.resolution_supported is False
+    assert "CH1" not in {entry.roi_id for entry in feature_map.entries}
+
+
+def test_per_roi_feature_event_map_non_explicit_override_blocks():
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        excluded_roi_ids=[],
+        per_roi_feature_event_choices=[
+            GuidedPlanFeatureEventChoice(
+                roi_id="CH1",
+                feature_event_profile_id="custom-ch1",
+                config_fields={"event_signal": "dff"},
+                current_or_stale="current",
+                explicit_user_mark=False,
+            ),
+        ],
+    )
+
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+
+    assert "non_explicit_feature_event_override" in feature_map.blocking_categories
+    assert feature_map.resolution_supported is False
+    assert "CH1" not in {entry.roi_id for entry in feature_map.entries}
+
+
+def test_per_roi_feature_event_map_unknown_roi_override_blocks_and_is_dropped():
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        excluded_roi_ids=[],
+        per_roi_feature_event_choices=[
+            GuidedPlanFeatureEventChoice(
+                roi_id="CH99",
+                feature_event_profile_id="custom-ghost",
+                config_fields={"event_signal": "dff"},
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+        ],
+    )
+
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+
+    assert "unknown_roi_feature_event_override" in feature_map.blocking_categories
+    # Known included ROIs still resolve to default despite the unrelated
+    # unknown-ROI override.
+    assert [entry.roi_id for entry in feature_map.entries] == ["CH1", "CH2"]
+    assert all(entry.source == "default" for entry in feature_map.entries)
+    assert feature_map.resolution_supported is False
+
+
+def test_per_roi_feature_event_map_excluded_roi_override_is_ignored_not_blocking():
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1"],
+        excluded_roi_ids=["CH2"],
+        per_roi_feature_event_choices=[
+            GuidedPlanFeatureEventChoice(
+                roi_id="CH2",
+                feature_event_profile_id="custom-excluded",
+                config_fields={"event_signal": "dff"},
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+        ],
+    )
+
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+
+    assert feature_map.blocking_categories == ()
+    assert feature_map.resolution_supported is True
+    assert [entry.roi_id for entry in feature_map.entries] == ["CH1"]
+    assert feature_map.entries[0].source == "default"
+
+
+def test_per_roi_feature_event_map_missing_default_blocks_rois_without_override():
+    override = GuidedPlanFeatureEventChoice(
+        roi_id="CH1",
+        feature_event_profile_id="custom-ch1",
+        config_fields={"event_signal": "dff"},
+        current_or_stale="current",
+        explicit_user_mark=True,
+    )
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        excluded_roi_ids=[],
+        per_roi_feature_event_choices=[override],
+        feature_event_profile_status="missing",
+        feature_event_explicitly_applied=False,
+        feature_event_values={},
+    )
+
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+
+    assert "missing_default_feature_event_profile_for_included_roi" in (
+        feature_map.blocking_categories
+    )
+    assert feature_map.resolution_supported is False
+    by_roi = {entry.roi_id: entry for entry in feature_map.entries}
+    # CH1 still resolves via its own explicit, current override even though
+    # the plan has no valid default profile.
+    assert by_roi["CH1"].source == "override"
+    assert "CH2" not in by_roi
+
+
+def test_per_roi_feature_event_map_invalid_override_config_fields_blocks():
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2"],
+        included_roi_ids=["CH1", "CH2"],
+        excluded_roi_ids=[],
+        per_roi_feature_event_choices=[
+            GuidedPlanFeatureEventChoice(
+                roi_id="CH1",
+                feature_event_profile_id="custom-ch1",
+                config_fields={"event_signal": "not_a_real_signal"},
+                current_or_stale="current",
+                explicit_user_mark=True,
+            ),
+        ],
+    )
+
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+
+    assert "invalid_feature_event_override_config_fields" in (
+        feature_map.blocking_categories
+    )
+    assert feature_map.resolution_supported is False
+    assert "CH1" not in {entry.roi_id for entry in feature_map.entries}
 
 
 def test_signal_only_f0_missing_preview_evidence_blocks_without_crash():
