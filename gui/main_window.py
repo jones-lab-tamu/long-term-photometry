@@ -1476,9 +1476,12 @@ class _GuidedRoiFeatureEventDialog(QDialog):
 
         layout = QVBoxLayout(self)
         note = QLabel(
-            f"These settings apply only to {roi_id}. The default settings "
-            "and other ROIs are not changed."
+            f"You are editing feature detection for {roi_id} only. These "
+            "fields start from the settings currently in effect for this "
+            f"ROI. What you apply here changes {roi_id} alone — the Default "
+            "settings and every other ROI stay the same."
         )
+        note.setObjectName("guidedRoiFeatureEventDialogNote")
         note.setWordWrap(True)
         layout.addWidget(note)
 
@@ -12618,6 +12621,13 @@ class MainWindow(QMainWindow):
         overrides = getattr(self, "_guided_per_roi_feature_event_overrides", {}) or {}
         default_summary_fields = None
 
+        empty_label = getattr(
+            self, "_guided_per_roi_feature_event_empty_label", None
+        )
+        if empty_label is not None:
+            empty_label.setVisible(not included)
+        table.setVisible(bool(included))
+
         table.setRowCount(len(included))
         for row, roi_id in enumerate(included):
             override = overrides.get(roi_id)
@@ -12642,6 +12652,12 @@ class MainWindow(QMainWindow):
 
             customize_btn = QPushButton("Edit" if override else "Customize")
             customize_btn.setObjectName("guidedPerRoiFeatureEventCustomizeButton")
+            customize_btn.setToolTip(
+                f"Change {roi_id}'s own feature-detection settings."
+                if override
+                else f"Give {roi_id} its own feature-detection settings, "
+                "separate from the Default settings."
+            )
             customize_btn.clicked.connect(
                 lambda _checked=False, r=roi_id: self._on_guided_customize_roi_feature_event(r)
             )
@@ -12650,6 +12666,12 @@ class MainWindow(QMainWindow):
             reset_btn = QPushButton("Reset to default")
             reset_btn.setObjectName("guidedPerRoiFeatureEventResetButton")
             reset_btn.setEnabled(bool(override))
+            reset_btn.setToolTip(
+                f"Remove {roi_id}'s Custom settings and use the Default "
+                "settings again."
+                if override
+                else f"{roi_id} already uses the Default settings."
+            )
             reset_btn.clicked.connect(
                 lambda _checked=False, r=roi_id: self._on_guided_reset_roi_feature_event_to_default(r)
             )
@@ -12837,9 +12859,10 @@ class MainWindow(QMainWindow):
 
         # 1. Plain-language note
         note = QLabel(
-            "These settings currently apply to all included ROIs. Preview one "
-            "ROI at a time to see how the shared settings behave before "
-            "applying or continuing."
+            "Preview one ROI at a time to see how its feature detection "
+            "behaves before continuing. Each ROI is previewed with the exact "
+            "settings it will use during Run — its Custom settings if you "
+            "customized it, otherwise the Default settings."
         )
         note.setObjectName("guidedFeatureDetectionPreviewNote")
         note.setProperty("guidedSecondaryText", True)
@@ -14308,10 +14331,12 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
 
         note = QLabel(
-            "Feature detection settings apply to all ROIs by default. "
-            "Customize an individual ROI only if its signal needs "
-            "different detection settings. These settings will be "
-            "checked before Run."
+            "The Default settings above are used for every ROI. Give one ROI "
+            "its own settings only if its signal needs different feature "
+            "detection — this changes that ROI alone and leaves the Default "
+            "settings and every other ROI unchanged. Use “Reset to "
+            "default” to remove an ROI's Custom settings. The table below "
+            "shows the settings each ROI will actually use during Run."
         )
         note.setObjectName("guidedPerRoiFeatureEventNote")
         note.setProperty("guidedSecondaryText", True)
@@ -14322,14 +14347,36 @@ class MainWindow(QMainWindow):
         table = QTableWidget(0, 5)
         table.setObjectName("guidedPerRoiFeatureEventTable")
         table.setHorizontalHeaderLabels(
-            ["ROI", "Status", "Summary", "", ""]
+            ["ROI", "Default / Custom", "Settings used", "", ""]
         )
-        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionMode(QAbstractItemView.NoSelection)
         self._guided_feature_event_per_roi_table = table
         layout.addWidget(table)
+
+        self._guided_per_roi_feature_event_empty_label = QLabel(
+            "No ROIs are included yet. Include at least one ROI to set its "
+            "feature detection."
+        )
+        self._guided_per_roi_feature_event_empty_label.setObjectName(
+            "guidedPerRoiFeatureEventEmptyLabel"
+        )
+        self._guided_per_roi_feature_event_empty_label.setProperty(
+            "guidedSecondaryText", True
+        )
+        self._guided_per_roi_feature_event_empty_label.setWordWrap(True)
+        self._guided_per_roi_feature_event_empty_label.setVisible(False)
+        self._make_guided_widget_shrinkable(
+            self._guided_per_roi_feature_event_empty_label
+        )
+        layout.addWidget(self._guided_per_roi_feature_event_empty_label)
 
         return group
 

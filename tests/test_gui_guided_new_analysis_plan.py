@@ -3988,3 +3988,200 @@ def test_new_analysis_review_plan_summarizes_default_and_custom_rois(
     summary_text = window._guided_draft_run_plan_preview_label.text()
 
     assert "Feature detection: Default for CH2, CH3; Custom for CH1." in summary_text
+
+
+# Per-ROI feature detection Step 5 usability pass (4J16k36)
+
+
+# Developer/internal vocabulary that must never surface in the scientist-facing
+# Step 5 per-ROI feature-detection UI text.
+_STEP5_INTERNAL_WORDS = (
+    "backend",
+    "manifest",
+    "artifact",
+    "schema",
+    "resolver",
+    "materialization",
+    "provenance",
+    "dataclass",
+    "typed field",
+    "json",
+)
+
+
+def _assert_no_internal_words(text: str) -> None:
+    lowered = text.lower()
+    for word in _STEP5_INTERNAL_WORDS:
+        assert word not in lowered, f"internal word {word!r} leaked into: {text!r}"
+
+
+def _per_roi_table(window):
+    return window._guided_feature_event_per_roi_table
+
+
+def test_per_roi_panel_note_explains_default_custom_and_reset(
+    window, tmp_path, monkeypatch
+):
+    """The panel note must teach the three core ideas a scientist needs:
+    Default applies to all ROIs, Custom overrides one ROI only, and Reset
+    removes an ROI's Custom settings."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    note = window.findChild(QLabel, "guidedPerRoiFeatureEventNote")
+    assert note is not None
+    text = note.text()
+
+    assert "Default" in text
+    assert "every ROI" in text or "every other ROI" in text
+    assert "own settings" in text.lower()  # Custom overrides one ROI only
+    assert "Reset to default" in text
+    _assert_no_internal_words(text)
+
+
+def test_per_roi_table_headers_are_scientist_facing(window, tmp_path, monkeypatch):
+    """Column headers must name what each column contains -- not an ambiguous
+    'Status' -- so a scientist can read the table at a glance."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._refresh_guided_per_roi_feature_event_table()
+
+    table = _per_roi_table(window)
+    headers = [
+        table.horizontalHeaderItem(col).text()
+        for col in range(table.columnCount())
+    ]
+    assert headers[0] == "ROI"
+    assert headers[1] == "Default / Custom"
+    assert headers[2] == "Settings used"
+    for header in headers:
+        _assert_no_internal_words(header)
+
+
+def test_per_roi_table_cell_values_and_summary_still_populate(
+    window, tmp_path, monkeypatch
+):
+    """Default-only rows still populate, and customizing one ROI still flips
+    only that row to Custom with a non-blank settings summary."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._refresh_guided_per_roi_feature_event_table()
+
+    table = _per_roi_table(window)
+    # Default-only: every row reads Default with a non-empty summary.
+    for row in range(table.rowCount()):
+        assert table.item(row, 1).text() == "Default"
+        assert table.item(row, 2).text().strip() != ""
+
+    _customize_roi_via_fake_dialog(
+        window, monkeypatch, "CH1", {"peak_threshold_method": "percentile",
+                                     "peak_threshold_percentile": 80.0}
+    )
+    status_by_roi = _per_roi_feature_table_status_by_roi(window)
+    assert status_by_roi["CH1"] == "Custom"
+    assert status_by_roi["CH2"] == "Default"
+
+
+def test_per_roi_reset_button_enabled_state_and_tooltips(
+    window, tmp_path, monkeypatch
+):
+    """Reset-to-default is disabled (with an explanatory tooltip) for a
+    Default ROI and enabled for a Custom ROI. Customize/Edit and Reset
+    tooltips must be scientist-facing."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    _customize_roi_via_fake_dialog(
+        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+    )
+
+    table = _per_roi_table(window)
+    row_by_roi = {
+        table.item(row, 0).text(): row for row in range(table.rowCount())
+    }
+
+    ch1_reset = table.cellWidget(row_by_roi["CH1"], 4)
+    ch2_reset = table.cellWidget(row_by_roi["CH2"], 4)
+    assert ch1_reset.isEnabled() is True
+    assert ch2_reset.isEnabled() is False
+    # The disabled reset button explains why it is inactive.
+    assert "already uses the Default settings" in ch2_reset.toolTip()
+    assert "Remove" in ch1_reset.toolTip()
+
+    ch1_customize = table.cellWidget(row_by_roi["CH1"], 3)
+    ch2_customize = table.cellWidget(row_by_roi["CH2"], 3)
+    assert ch1_customize.text() == "Edit"
+    assert ch2_customize.text() == "Customize"
+    for widget in (ch1_reset, ch2_reset, ch1_customize, ch2_customize):
+        _assert_no_internal_words(widget.toolTip())
+
+
+def test_per_roi_empty_state_shows_helper_and_hides_table(
+    window, tmp_path, monkeypatch
+):
+    """When no ROI is included, the table is hidden and a plain-language
+    helper line explains what to do -- no bare empty grid."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    # Exclude every ROI.
+    for i in range(window._guided_roi_list.count()):
+        window._guided_roi_list.item(i).setCheckState(Qt.Unchecked)
+    window._refresh_guided_per_roi_feature_event_table()
+
+    empty_label = window.findChild(QLabel, "guidedPerRoiFeatureEventEmptyLabel")
+    assert empty_label is not None
+    # isHidden() reflects the widget's own visibility flag regardless of
+    # whether the offscreen test window is shown.
+    assert empty_label.isHidden() is False
+    assert _per_roi_table(window).isHidden() is True
+    assert "Include at least one ROI" in empty_label.text()
+    _assert_no_internal_words(empty_label.text())
+
+
+def test_per_roi_customize_dialog_note_is_scientist_facing(window):
+    """The Customize dialog must state clearly that edits affect only the one
+    ROI and leave the Default settings and other ROIs unchanged."""
+    from gui.main_window import _GuidedRoiFeatureEventDialog
+
+    dialog = _GuidedRoiFeatureEventDialog("CH1", {"event_signal": "dff"}, parent=window)
+    try:
+        assert dialog.windowTitle() == "Customize feature detection for CH1"
+        note = dialog.findChild(QLabel, "guidedRoiFeatureEventDialogNote")
+        assert note is not None
+        text = note.text()
+        assert "CH1" in text
+        assert "only" in text.lower()
+        assert "Default settings" in text
+        _assert_no_internal_words(text)
+    finally:
+        dialog.deleteLater()
+
+
+def test_step5_visible_per_roi_text_has_no_internal_language(
+    window, tmp_path, monkeypatch
+):
+    """A sweep over the visible Step 5 per-ROI surfaces (panel note, table
+    headers, cell text, action buttons + tooltips, empty label, preview
+    note) must contain none of the banned developer/internal words."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    _customize_roi_via_fake_dialog(
+        window, monkeypatch, "CH1", {"peak_threshold_method": "mean_std"}
+    )
+    window._refresh_guided_per_roi_feature_event_table()
+
+    collected = []
+
+    note = window.findChild(QLabel, "guidedPerRoiFeatureEventNote")
+    collected.append(note.text())
+
+    preview_note = window.findChild(QLabel, "guidedFeatureDetectionPreviewNote")
+    collected.append(preview_note.text())
+
+    table = _per_roi_table(window)
+    for col in range(table.columnCount()):
+        collected.append(table.horizontalHeaderItem(col).text())
+    for row in range(table.rowCount()):
+        for col in (0, 1, 2):
+            collected.append(table.item(row, col).text())
+        for col in (3, 4):
+            widget = table.cellWidget(row, col)
+            collected.append(widget.text())
+            collected.append(widget.toolTip())
+
+    for text in collected:
+        _assert_no_internal_words(text)

@@ -57,10 +57,13 @@ def test_preview_panel_layout_and_elements(window):
     assert panel is not None
     assert panel.title() == "Preview feature detection"
 
-    # Explanation text
+    # Explanation text: the note must make clear each ROI is previewed with
+    # the settings it will actually use during Run (its Custom settings if
+    # customized, otherwise the Default settings).
     note = panel.findChild(QLabel, "guidedFeatureDetectionPreviewNote")
     assert note is not None
-    assert "shared settings" in note.text()
+    assert "Custom settings" in note.text()
+    assert "Default settings" in note.text()
 
     # ROI selector
     roi_combo = panel.findChild(QComboBox, "guidedFeaturePreviewRoiCombo")
