@@ -24,6 +24,7 @@ from photometry_pipeline.guided_backend_validation_request import (
     GuidedBackendRoiScopeFacts,
     GuidedBackendConfirmedStrategyMarkFacts,
     GuidedBackendPerRoiProductionStrategy,
+    GuidedBackendPerRoiFeatureEvent,
     GuidedBackendCorrectionFacts,
     GuidedBackendFeatureEventFacts,
     GuidedBackendEvidenceReferenceFacts,
@@ -41,6 +42,7 @@ from photometry_pipeline.guided_new_analysis_plan import (
     FORBIDDEN_CORRECTION_STRATEGIES,
     LOCAL_PREVIEW_SOURCE_SETUP_CURRENTNESS_RULE_VERSION,
     build_guided_per_roi_production_strategy_map,
+    build_guided_per_roi_feature_event_map,
     build_guided_feature_event_effective_values_preview,
     classify_output_base_safety_ownership,
     compute_guided_local_preview_source_setup_signature,
@@ -167,6 +169,7 @@ STAGE_2C_VALID_ISSUES = {
     "dynamic_fit_parameter_contract_mismatch",
     "feature_event_profile_identity_unavailable",
     "feature_event_activity_unavailable",
+    "per_roi_feature_event_map_unresolved",
     "source_path_style_unavailable",
 }
 
@@ -1962,6 +1965,68 @@ def materialize_guided_backend_validation_facts(
             "Feature/event active and inactive field classifications are incomplete.",
             detail_code="feature_activity_incomplete",
         )
+
+    # Per-ROI feature/event resolution (4J16k32c). Reuses the same
+    # 32a resolver that gates global-only plans: a plan with no per-ROI
+    # choices resolves every included ROI to the default profile above and
+    # is always resolution_supported, so this block is a no-op extension for
+    # the global-only path. A plan with an unresolved per-ROI choice
+    # (stale/non-explicit/duplicate/invalid/unknown-ROI) blocks here instead
+    # of silently falling back to the default for that ROI.
+    per_roi_feature_map = build_guided_per_roi_feature_event_map(draft)
+    if not per_roi_feature_map.resolution_supported:
+        return _failure(
+            "per_roi_feature_event_map_unresolved",
+            "feature_event",
+            "Per-ROI feature/event settings could not be resolved for every included ROI.",
+            detail_code="per_roi_feature_event_map_blocked",
+        )
+
+    # Effective values are computed from effective_values_list (already
+    # resolved without instantiating Config, matching this module's
+    # no-Config-instantiation design), not by building a Config object.
+    base_effective_by_field = {
+        item["field_name"]: item["effective_value"] for item in effective_values_list
+    }
+
+    def _typed_from_fields(
+        payload: dict[str, Any], source_classification: str
+    ) -> tuple[GuidedBackendTypedFieldValue, ...]:
+        return tuple(
+            GuidedBackendTypedFieldValue(
+                field_name=field_name,
+                value_type=type(value).__name__ if value is not None else "NoneType",
+                value=value,
+                source_classification=source_classification,
+            )
+            for field_name, value in sorted(payload.items())
+        )
+
+    per_roi_feature_event_entries: list[GuidedBackendPerRoiFeatureEvent] = []
+    for entry in per_roi_feature_map.entries:
+        override_fields = {
+            key: value
+            for key, value in dict(entry.config_fields).items()
+            if key in FEATURE_EVENT_CONFIG_FIELDS
+        }
+        effective_fields = dict(base_effective_by_field)
+        effective_fields.update(override_fields)
+        per_roi_feature_event_entries.append(
+            GuidedBackendPerRoiFeatureEvent(
+                roi_id=entry.roi_id,
+                source=entry.source,
+                feature_event_profile_id=entry.feature_event_profile_id,
+                override_config_fields=_typed_from_fields(
+                    override_fields, "explicit"
+                ),
+                effective_config_fields=_typed_from_fields(
+                    effective_fields, "resolved"
+                ),
+                explicit_user_mark=entry.explicit_user_mark,
+                current_or_stale=entry.current_or_stale,
+            )
+        )
+
     feature_event_facts = GuidedBackendFeatureEventFacts(
         available=True,
         profile_schema_version=(
@@ -1979,6 +2044,8 @@ def materialize_guided_backend_validation_facts(
             draft.feature_event_validation_issues
         ),
         stale_reason_categories=tuple(draft.feature_event_stale_reasons),
+        per_roi_feature_event_map_version=per_roi_feature_map.version,
+        per_roi_feature_event_map=tuple(per_roi_feature_event_entries),
     )
 
     # 11. Cancellation check after feature/event work

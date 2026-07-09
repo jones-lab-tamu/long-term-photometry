@@ -756,6 +756,30 @@ class GuidedBackendDiagnosticEvidenceRequest:
 
 
 @dataclass(frozen=True)
+class GuidedBackendPerRoiFeatureEvent:
+    """One ROI's resolved feature/event settings, mirroring
+    GuidedBackendPerRoiProductionStrategy's role for correction strategy.
+
+    override_config_fields is whatever fields the resolved source (the
+    plan's default profile, or one explicit per-ROI override) set, which may
+    be a SPARSE subset of feature-detection fields. effective_config_fields
+    is always the COMPLETE, resolved set of feature-detection fields
+    actually in effect for this ROI (override_config_fields layered onto the
+    plan's default profile). Backend execution and applied-dF/F feature
+    config files must use effective_config_fields, never
+    override_config_fields alone.
+    """
+
+    roi_id: str
+    source: str  # "default" or "override"
+    feature_event_profile_id: str
+    override_config_fields: tuple[GuidedBackendTypedFieldValue, ...]
+    effective_config_fields: tuple[GuidedBackendTypedFieldValue, ...]
+    explicit_user_mark: bool
+    current_or_stale: str
+
+
+@dataclass(frozen=True)
 class GuidedBackendFeatureEventRequest:
     profile_schema_version: str
     profile_id: str
@@ -768,6 +792,8 @@ class GuidedBackendFeatureEventRequest:
     visible_unapplied_changes: bool
     validation_issue_categories: tuple[str, ...] = ()
     stale_reason_categories: tuple[str, ...] = ()
+    per_roi_feature_event_map_version: str = ""
+    per_roi_feature_event_map: tuple[GuidedBackendPerRoiFeatureEvent, ...] = ()
 
     def __post_init__(self) -> None:
         _require_non_empty(self.profile_schema_version, "profile_schema_version")
@@ -778,6 +804,7 @@ class GuidedBackendFeatureEventRequest:
             "inactive_fields",
             "validation_issue_categories",
             "stale_reason_categories",
+            "per_roi_feature_event_map",
         ):
             _require_tuple(getattr(self, name), name)
         if (
@@ -1099,6 +1126,8 @@ class GuidedBackendFeatureEventFacts:
     visible_unapplied_changes: bool = False
     validation_issue_categories: tuple[str, ...] = ()
     stale_reason_categories: tuple[str, ...] = ()
+    per_roi_feature_event_map_version: str = ""
+    per_roi_feature_event_map: tuple[GuidedBackendPerRoiFeatureEvent, ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -1107,6 +1136,7 @@ class GuidedBackendFeatureEventFacts:
             "inactive_fields",
             "validation_issue_categories",
             "stale_reason_categories",
+            "per_roi_feature_event_map",
         ):
             _require_tuple(getattr(self, name), name)
 
@@ -2044,6 +2074,10 @@ def compile_guided_backend_validation_request(
             visible_unapplied_changes=feature_facts.visible_unapplied_changes,
             validation_issue_categories=feature_facts.validation_issue_categories,
             stale_reason_categories=feature_facts.stale_reason_categories,
+            per_roi_feature_event_map_version=(
+                feature_facts.per_roi_feature_event_map_version
+            ),
+            per_roi_feature_event_map=feature_facts.per_roi_feature_event_map,
         )
         output_request = GuidedBackendOutputRequest(
             output_base_canonical=output_facts.output_base_canonical,
@@ -2271,6 +2305,15 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "unresolved_inputs",
         "available",
     ),
+    GuidedBackendPerRoiFeatureEvent: (
+        "roi_id",
+        "source",
+        "feature_event_profile_id",
+        "override_config_fields",
+        "effective_config_fields",
+        "explicit_user_mark",
+        "current_or_stale",
+    ),
     GuidedBackendFeatureEventRequest: (
         "profile_schema_version",
         "profile_id",
@@ -2283,6 +2326,8 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "visible_unapplied_changes",
         "validation_issue_categories",
         "stale_reason_categories",
+        "per_roi_feature_event_map_version",
+        "per_roi_feature_event_map",
     ),
     GuidedBackendOutputRelationship: (
         "relationship",

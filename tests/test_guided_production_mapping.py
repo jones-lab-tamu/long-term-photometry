@@ -731,3 +731,117 @@ def test_module_has_no_gui_runner_or_mapping_side_effect_imports():
         or any(item in imported for item in prohibited)
         for imported in imports
     )
+
+
+# Per-ROI feature/event map wiring (4J16k32c)
+
+
+def _typed_contract(name, value):
+    return contracts.GuidedBackendTypedFieldValue(
+        field_name=name, value_type=type(value).__name__, value=value
+    )
+
+
+def test_map_carries_per_roi_feature_event_map_and_backend_shapes_are_complete():
+    override_entry = contracts.GuidedBackendPerRoiFeatureEvent(
+        roi_id="ROI0",
+        source="override",
+        feature_event_profile_id="custom-roi0",
+        override_config_fields=(
+            _typed_contract("peak_threshold_method", "percentile"),
+        ),
+        effective_config_fields=(
+            _typed_contract("event_signal", "dff"),
+            _typed_contract("signal_excursion_polarity", "positive"),
+            _typed_contract("peak_threshold_method", "percentile"),
+            _typed_contract("peak_threshold_k", 2.5),
+            _typed_contract("peak_threshold_percentile", 95.0),
+            _typed_contract("peak_threshold_abs", 0.0),
+            _typed_contract("peak_min_distance_sec", 1.0),
+            _typed_contract("peak_min_prominence_k", 2.0),
+            _typed_contract("peak_min_width_sec", 0.3),
+            _typed_contract("peak_pre_filter", "none"),
+            _typed_contract("event_auc_baseline", "zero"),
+        ),
+        explicit_user_mark=True,
+        current_or_stale="current",
+    )
+    default_entry = contracts.GuidedBackendPerRoiFeatureEvent(
+        roi_id="ROI1",
+        source="default",
+        feature_event_profile_id="profile-001",
+        override_config_fields=(),
+        effective_config_fields=(_typed_contract("event_signal", "dff"),),
+        explicit_user_mark=True,
+        current_or_stale="current",
+    )
+    base_request = _valid_request()
+    request = replace(
+        base_request,
+        feature_event=replace(
+            base_request.feature_event,
+            per_roi_feature_event_map_version="per_roi_feature_event_map.v1",
+            per_roi_feature_event_map=(override_entry, default_entry),
+        ),
+    )
+
+    result = _map(request=request)
+
+    assert isinstance(result, mapping.GuidedProductionMappingSuccess)
+    intent = result.intent
+    by_roi = {
+        entry.roi_id: entry
+        for entry in intent.feature_event.per_roi_feature_event_map
+    }
+    assert set(by_roi) == {"ROI0", "ROI1"}
+    assert by_roi["ROI0"].source == "override"
+    assert by_roi["ROI1"].source == "default"
+    assert (
+        intent.feature_event.per_roi_feature_event_map_version
+        == "per_roi_feature_event_map.v1"
+    )
+
+    shapes = mapping.build_per_roi_feature_event_backend_shapes(intent)
+
+    assert set(shapes["per_roi_override_config_fields"]) == {"ROI0"}
+    assert shapes["per_roi_override_config_fields"]["ROI0"] == {
+        "peak_threshold_method": "percentile"
+    }
+
+    # Applied-dF/F must receive complete effective fields, never the sparse
+    # override alone (guided_applied_dff_orchestration.py fails closed on
+    # anything less).
+    from photometry_pipeline.feature_event_config import FEATURE_EVENT_CONFIG_FIELDS
+
+    effective_for_overrides = shapes[
+        "per_roi_effective_feature_config_fields_for_overrides"
+    ]
+    assert set(effective_for_overrides) == {"ROI0"}
+    assert set(effective_for_overrides["ROI0"]) == FEATURE_EVENT_CONFIG_FIELDS
+    assert effective_for_overrides["ROI0"]["peak_threshold_method"] == "percentile"
+
+    provenance = shapes["per_roi_feature_provenance"]
+    assert set(provenance) == {"ROI0", "ROI1"}
+    assert provenance["ROI0"]["source"] == "override"
+    assert provenance["ROI0"]["feature_event_profile_id"] == "custom-roi0"
+    assert provenance["ROI1"]["source"] == "default"
+
+
+def test_backend_shapes_empty_for_global_only_request_with_no_per_roi_map():
+    request = _valid_request()
+    assert request.feature_event.per_roi_feature_event_map == ()
+
+    result = _map(request=request)
+    assert isinstance(result, mapping.GuidedProductionMappingSuccess)
+
+    shapes = mapping.build_per_roi_feature_event_backend_shapes(result.intent)
+    assert shapes == {
+        "per_roi_override_config_fields": {},
+        "per_roi_effective_feature_config_fields_for_overrides": {},
+        "per_roi_feature_provenance": {},
+    }
+
+
+def test_backend_shapes_rejects_non_intent_argument():
+    with pytest.raises(TypeError):
+        mapping.build_per_roi_feature_event_backend_shapes(object())

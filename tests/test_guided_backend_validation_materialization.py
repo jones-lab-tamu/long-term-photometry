@@ -15,6 +15,7 @@ from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDatasetContractSnapshot,
     GuidedNewAnalysisDatasetContractSourceIdentity,
     GuidedPlanCorrectionChoice,
+    GuidedPlanFeatureEventChoice,
 )
 from photometry_pipeline.guided_backend_validation_request import (
     compile_guided_backend_validation_request,
@@ -2024,3 +2025,191 @@ def test_fallback_correction_preview_source_cache_id_mismatch(tmp_path: Path):
     result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
     assert isinstance(result, GuidedBackendValidationMaterializationFailure)
     assert result.blocking_issues[0].detail_code == "correction_preview_source_cache_mismatch"
+
+
+# N. Per-ROI feature/event map materialization (4J16k32c)
+
+
+def _valid_two_roi_stage2c_draft(tmp_path: Path) -> GuidedNewAnalysisDraftPlan:
+    """Extends _valid_stage2c_draft with a second included ROI (CH2) that
+    has valid, unanimous correction evidence, so materialization succeeds
+    end-to-end with two included ROIs and no feature/event overrides."""
+    draft = _valid_stage2c_draft(tmp_path)
+    base = draft.per_roi_correction_strategy_choices[0]
+    draft.included_roi_ids.append("CH2")
+    draft.discovered_roi_ids.append("CH2")
+    draft.per_roi_correction_strategy_choices.append(
+        GuidedPlanCorrectionChoice(**{**base.__dict__, "roi_id": "CH2"})
+    )
+    artifact, provenance = _cache_payloads(draft)
+    artifact["session_chunk_inventory_summary"]["evidence_references"].append(
+        {
+            "evidence_reference_id": draft.correction_preview_result_id,
+            "diagnostic_cache_id": draft.cache_id,
+            "roi_id": "CH2",
+            "selected_strategy": base.selected_strategy,
+        }
+    )
+    provenance["artifact"] = dict(artifact)
+    _write_cache_payloads(draft, artifact, provenance)
+    draft.dataset_contract_snapshot = replace(
+        draft.dataset_contract_snapshot,
+        source_identity=replace(
+            draft.dataset_contract_snapshot.source_identity,
+            discovered_roi_ids=("CH1", "CH2"),
+            included_roi_ids=("CH1", "CH2"),
+        ),
+    )
+    return draft
+
+
+def test_per_roi_feature_event_map_global_only_produces_default_entries_for_all_rois(
+    tmp_path: Path,
+):
+    """No per-ROI feature/event choices: both ROIs resolve to the default
+    profile, and materialization succeeds exactly as before this stage."""
+    draft = _valid_two_roi_stage2c_draft(tmp_path)
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    feature_facts = result.facts.feature_event
+    assert feature_facts.per_roi_feature_event_map_version == "per_roi_feature_event_map.v1"
+    by_roi = {entry.roi_id: entry for entry in feature_facts.per_roi_feature_event_map}
+    assert set(by_roi) == {"CH1", "CH2"}
+    assert by_roi["CH1"].source == "default"
+    assert by_roi["CH2"].source == "default"
+
+
+def test_per_roi_feature_event_map_override_carries_sparse_and_complete_effective_fields(
+    tmp_path: Path,
+):
+    draft = _valid_two_roi_stage2c_draft(tmp_path)
+    draft.per_roi_feature_event_choices = [
+        GuidedPlanFeatureEventChoice(
+            roi_id="CH1",
+            feature_event_profile_id="custom-ch1",
+            config_fields={"peak_threshold_method": "mean_std"},
+            current_or_stale="current",
+            explicit_user_mark=True,
+        )
+    ]
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    by_roi = {
+        entry.roi_id: entry
+        for entry in result.facts.feature_event.per_roi_feature_event_map
+    }
+
+    ch1 = by_roi["CH1"]
+    assert ch1.source == "override"
+    assert ch1.feature_event_profile_id == "custom-ch1"
+    override_fields = {item.field_name: item.value for item in ch1.override_config_fields}
+    assert override_fields == {"peak_threshold_method": "mean_std"}
+    effective_fields = {item.field_name: item.value for item in ch1.effective_config_fields}
+    # Effective fields must not under-report: every feature-detection field
+    # is present, not just the one the override changed.
+    from photometry_pipeline.guided_new_analysis_plan import FEATURE_EVENT_CONFIG_FIELDS
+    assert set(effective_fields) == FEATURE_EVENT_CONFIG_FIELDS
+    assert effective_fields["peak_threshold_method"] == "mean_std"
+    # Fields CH1's override never mentioned still carry the default
+    # profile's resolved values (draft.feature_event_values sets this).
+    assert effective_fields["peak_threshold_percentile"] == 90.0
+
+    ch2 = by_roi["CH2"]
+    assert ch2.source == "default"
+    ch2_effective = {item.field_name: item.value for item in ch2.effective_config_fields}
+    # CH2 is unaffected by CH1's override: its threshold method remains the
+    # plan default (percentile), not CH1's mean_std.
+    assert ch2_effective["peak_threshold_method"] == "percentile"
+
+
+def test_per_roi_feature_event_map_stale_override_blocks_materialization(tmp_path: Path):
+    draft = _valid_two_roi_stage2c_draft(tmp_path)
+    draft.per_roi_feature_event_choices = [
+        GuidedPlanFeatureEventChoice(
+            roi_id="CH1",
+            feature_event_profile_id="custom-ch1",
+            config_fields={"peak_threshold_method": "mean_std"},
+            current_or_stale="stale",
+            explicit_user_mark=True,
+        )
+    ]
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "per_roi_feature_event_map_unresolved"
+    assert result.blocking_issues[0].section == "feature_event"
+
+
+def test_per_roi_feature_event_map_non_explicit_override_blocks_materialization(
+    tmp_path: Path,
+):
+    draft = _valid_two_roi_stage2c_draft(tmp_path)
+    draft.per_roi_feature_event_choices = [
+        GuidedPlanFeatureEventChoice(
+            roi_id="CH1",
+            feature_event_profile_id="custom-ch1",
+            config_fields={"peak_threshold_method": "mean_std"},
+            current_or_stale="current",
+            explicit_user_mark=False,
+        )
+    ]
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "per_roi_feature_event_map_unresolved"
+
+
+def test_per_roi_feature_event_map_carried_through_compile(tmp_path: Path):
+    """The resolved per-ROI map survives materialize -> compile unchanged,
+    proving it reaches the validated GuidedBackendValidationRequest."""
+    draft = _valid_two_roi_stage2c_draft(tmp_path)
+    draft.per_roi_feature_event_choices = [
+        GuidedPlanFeatureEventChoice(
+            roi_id="CH1",
+            feature_event_profile_id="custom-ch1",
+            config_fields={"peak_threshold_method": "mean_std"},
+            current_or_stale="current",
+            explicit_user_mark=True,
+        )
+    ]
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+
+    validator_contract = GuidedBackendValidatorContract(
+        validation_scope="guided_rwd_intermittent_phasic_full_validate",
+        validation_contract_version="guided_backend_validation_contract.v1",
+        validator_capability_version="test_validator_capability.v1",
+        supported_subset_rule_version="global_dynamic_fit_only.v1",
+    )
+    compile_result = compile_guided_backend_validation_request(
+        draft,
+        facts=result.facts,
+        validator_contract=validator_contract,
+    )
+
+    assert isinstance(compile_result, GuidedBackendValidationCompileSuccess)
+    request_map = compile_result.request.feature_event.per_roi_feature_event_map
+    by_roi = {entry.roi_id: entry for entry in request_map}
+    assert set(by_roi) == {"CH1", "CH2"}
+    assert by_roi["CH1"].source == "override"
+    assert by_roi["CH2"].source == "default"
+    assert (
+        compile_result.request.feature_event.per_roi_feature_event_map_version
+        == result.facts.feature_event.per_roi_feature_event_map_version
+    )

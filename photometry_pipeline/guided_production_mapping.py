@@ -20,6 +20,7 @@ from photometry_pipeline.guided_backend_validation_request import (
     GuidedBackendDiagnosticEvidenceRequest,
     GuidedBackendEvidenceReference,
     GuidedBackendFeatureEventRequest,
+    GuidedBackendPerRoiFeatureEvent,
     GuidedBackendLocalContractState,
     GuidedBackendOutputRelationship,
     GuidedBackendOutputRequest,
@@ -460,6 +461,17 @@ class GuidedProductionDiagnosticEvidence:
 
 
 @dataclass(frozen=True)
+class GuidedProductionPerRoiFeatureEvent:
+    roi_id: str
+    source: str  # "default" or "override"
+    feature_event_profile_id: str
+    override_config_fields: tuple[GuidedProductionTypedValue, ...]
+    effective_config_fields: tuple[GuidedProductionTypedValue, ...]
+    explicit_user_mark: bool
+    current_or_stale: str
+
+
+@dataclass(frozen=True)
 class GuidedProductionFeatureEvent:
     profile_schema_version: str
     profile_id: str
@@ -470,6 +482,8 @@ class GuidedProductionFeatureEvent:
     explicitly_applied: bool
     current: bool
     visible_unapplied_changes: bool
+    per_roi_feature_event_map_version: str = ""
+    per_roi_feature_event_map: tuple[GuidedProductionPerRoiFeatureEvent, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -629,6 +643,7 @@ _INTENT_IDENTITY_MODEL_FIELDS = {
     GuidedProductionCorrection: tuple(item.name for item in fields(GuidedProductionCorrection)),
     GuidedProductionEvidenceReference: tuple(item.name for item in fields(GuidedProductionEvidenceReference)),
     GuidedProductionDiagnosticEvidence: tuple(item.name for item in fields(GuidedProductionDiagnosticEvidence)),
+    GuidedProductionPerRoiFeatureEvent: tuple(item.name for item in fields(GuidedProductionPerRoiFeatureEvent)),
     GuidedProductionFeatureEvent: tuple(item.name for item in fields(GuidedProductionFeatureEvent)),
     GuidedProductionOutputRelationship: tuple(item.name for item in fields(GuidedProductionOutputRelationship)),
     GuidedProductionOutputPolicy: tuple(item.name for item in fields(GuidedProductionOutputPolicy)),
@@ -872,6 +887,12 @@ def map_guided_validation_request_to_execution_intent(
         return _failure("deferred_capability_blocks_mapping", "local_contract", "An unknown deferred capability blocks mapping.", "unknown_deferred_capability")
     if _unknown_typed(request.acquisition_dataset.semantic_values, ACQUISITION_TYPED_FIELD_CONFIG_MAP) or _unknown_typed(correction.dynamic_fit_parameter_values, CORRECTION_TYPED_FIELD_CONFIG_MAP) or _unknown_typed(request.feature_event.effective_values, FEATURE_EVENT_TYPED_FIELD_CONFIG_MAP):
         return _failure("production_config_field_unmapped", "typed_values", "A typed production field is unmapped.", "typed_field_unmapped")
+    if any(
+        _unknown_typed(entry.override_config_fields, FEATURE_EVENT_TYPED_FIELD_CONFIG_MAP)
+        or _unknown_typed(entry.effective_config_fields, FEATURE_EVENT_TYPED_FIELD_CONFIG_MAP)
+        for entry in request.feature_event.per_roi_feature_event_map
+    ):
+        return _failure("production_config_field_unmapped", "typed_values", "A per-ROI typed feature/event field is unmapped.", "per_roi_typed_field_unmapped")
 
     try:
         intent = GuidedProductionExecutionIntent(
@@ -969,6 +990,19 @@ def map_guided_validation_request_to_execution_intent(
                 request.feature_event.inactive_fields, request.feature_event.profile_status,
                 request.feature_event.explicitly_applied, request.feature_event.current,
                 request.feature_event.visible_unapplied_changes,
+                request.feature_event.per_roi_feature_event_map_version,
+                tuple(
+                    GuidedProductionPerRoiFeatureEvent(
+                        roi_id=entry.roi_id,
+                        source=entry.source,
+                        feature_event_profile_id=entry.feature_event_profile_id,
+                        override_config_fields=_typed(entry.override_config_fields),
+                        effective_config_fields=_typed(entry.effective_config_fields),
+                        explicit_user_mark=entry.explicit_user_mark,
+                        current_or_stale=entry.current_or_stale,
+                    )
+                    for entry in request.feature_event.per_roi_feature_event_map
+                ),
             ),
             output_policy=GuidedProductionOutputPolicy(
                 output.output_base_canonical, output.output_base_path_style, output.path_role,
@@ -998,3 +1032,68 @@ def map_guided_validation_request_to_execution_intent(
         return GuidedProductionMappingSuccess(intent, digest, recomputed)
     except Exception:
         return _failure("mapping_internal_error", "mapping", "Production intent mapping failed.", "intent_construction_failed")
+
+
+def build_per_roi_feature_event_backend_shapes(
+    intent: GuidedProductionExecutionIntent,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Reshape a mapped intent's per-ROI feature/event map into plain-dict
+    shapes for 32b's backend (Pipeline, applied-dF/F orchestration).
+
+    This function is pure and does not execute anything: it does not
+    construct Pipeline, call feature extraction, or invoke applied-dF/F
+    orchestration. No caller in this codebase constructs Pipeline (or any
+    applied-dF/F orchestration) from a GuidedProductionExecutionIntent today
+    -- the same is true for correction strategy's
+    per_roi_production_strategy_map, which also stops at this mapping layer.
+    Building that execution call here would invent an execution route this
+    codebase does not otherwise have, so this function stops at producing
+    the ready-to-use data a future runner would need.
+
+    Returns a dict with three keys:
+    - "per_roi_override_config_fields": {roi_id: sparse override fields}
+      for source="override" ROIs only. A future runner builds Pipeline's
+      per_roi_feature_config from this via
+      {roi: dataclasses.replace(base_config, **fields) for roi, fields in
+      ...items()}, mirroring
+      guided_new_analysis_plan.build_per_roi_feature_backend_config.
+    - "per_roi_effective_feature_config_fields_for_overrides": {roi_id:
+      COMPLETE effective fields} for source="override" ROIs only. Already
+      complete (every FEATURE_EVENT_CONFIG_FIELDS name present) -- ready to
+      pass directly as
+      guided_applied_dff_orchestration.run_guided_applied_dff_orchestration_if_enabled's
+      per_roi_feature_event_overrides argument or to
+      write_per_roi_feature_config_files, with no further merging. Never
+      the sparse override_config_fields.
+    - "per_roi_feature_provenance": {roi_id: {"source", "feature_event_profile_id",
+      "override_config_fields", "effective_config_fields"}} for every
+      resolved ROI (both "default" and "override"). Ready to pass directly
+      as Pipeline(per_roi_feature_provenance=...).
+    """
+    if not isinstance(intent, GuidedProductionExecutionIntent):
+        raise TypeError("intent must be a GuidedProductionExecutionIntent")
+
+    override_config_fields_by_roi: dict[str, dict[str, Any]] = {}
+    effective_config_fields_for_overrides_by_roi: dict[str, dict[str, Any]] = {}
+    provenance_by_roi: dict[str, dict[str, Any]] = {}
+
+    for entry in intent.feature_event.per_roi_feature_event_map:
+        override_fields = {item.field_name: item.value for item in entry.override_config_fields}
+        effective_fields = {item.field_name: item.value for item in entry.effective_config_fields}
+        provenance_by_roi[entry.roi_id] = {
+            "source": entry.source,
+            "feature_event_profile_id": entry.feature_event_profile_id,
+            "override_config_fields": override_fields,
+            "effective_config_fields": effective_fields,
+        }
+        if entry.source == "override":
+            override_config_fields_by_roi[entry.roi_id] = override_fields
+            effective_config_fields_for_overrides_by_roi[entry.roi_id] = effective_fields
+
+    return {
+        "per_roi_override_config_fields": override_config_fields_by_roi,
+        "per_roi_effective_feature_config_fields_for_overrides": (
+            effective_config_fields_for_overrides_by_roi
+        ),
+        "per_roi_feature_provenance": provenance_by_roi,
+    }

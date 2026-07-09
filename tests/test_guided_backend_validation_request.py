@@ -1102,7 +1102,7 @@ def test_identity_is_deterministic_digest_with_pinned_vector():
     first = contracts.compute_guided_backend_validation_request_identity(request)
 
     assert first == (
-        "2245f3c7e1045aa3d372791bf6d27db0aa25364fe5b7596626190f7d0aaa231c"
+        "9f630e641ccbef67b04f1cc7b282e8a93aced224f0933d6f3da631adac636eac"
     )
     assert first == contracts.compute_guided_backend_validation_request_identity(
         request
@@ -1146,6 +1146,7 @@ def test_identity_mapper_covers_every_request_dataclass_field():
         contracts.GuidedBackendSourceCandidateFile,
         contracts.GuidedBackendConfirmedStrategyMark,
         contracts.GuidedBackendPerRoiProductionStrategy,
+        contracts.GuidedBackendPerRoiFeatureEvent,
         contracts.GuidedBackendEvidenceReference,
         contracts.GuidedBackendOutputRelationship,
     }
