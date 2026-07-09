@@ -1732,18 +1732,14 @@ class MainWindow(QMainWindow):
         """Hide the Full-Control-only run status/phase/elapsed labels, the
         milestone progress bar, and the pane-toggle buttons while the
         Guided Workflow tab is active and no Full Control run is active.
+        Also hide the status header card itself in that same state, unless
+        it still has visible useful content (currently: the PREVIEW badge),
+        so idle Guided setup does not show an empty rounded rectangle.
 
         Guided Run has its own independent "Analysis progress" panel on the
         Run step (a separate StatusFollower, untouched by self._ui_state),
         and Guided has no left/right splitter for the pane-toggle buttons
         to control, so none of this is meaningful during Guided setup.
-
-        Only these specific Full-Control-only children are toggled -- the
-        status header card itself, and the PREVIEW badge (which can carry
-        meaning for a loaded completed run regardless of which tab is
-        active), are left alone. This keeps the card's own structural
-        presence unchanged for Full Control and avoids hiding a completed
-        Full Control status indicator.
         """
         tabs = getattr(self, "_workflow_mode_tabs", None)
         if tabs is None:
@@ -1752,11 +1748,20 @@ class MainWindow(QMainWindow):
             self, "_guided_workflow_tab", None
         )
         is_idle = getattr(self, "_ui_state", None) == RunnerState.IDLE
-        show = not (is_guided_tab and is_idle)
+        idle_guided = is_guided_tab and is_idle
+        show_children = not idle_guided
         for widget_name in self._STATUS_STRIP_FULL_CONTROL_ONLY_WIDGETS:
             widget = getattr(self, widget_name, None)
             if widget is not None:
-                widget.setVisible(show)
+                widget.setVisible(show_children)
+
+        preview_badge = getattr(self, "_preview_badge", None)
+        preview_badge_visible = bool(
+            preview_badge is not None and not preview_badge.isHidden()
+        )
+        card = getattr(self, "_status_header_card", None)
+        if card is not None:
+            card.setVisible(not (idle_guided and not preview_badge_visible))
 
     def _build_full_control_body(self) -> QWidget:
         """Existing fixed major panes: upper-left controls, lower-left log, right results."""
@@ -22935,28 +22940,35 @@ class MainWindow(QMainWindow):
         """Source run type from run_report.json and update window/badge."""
         # Preview controls are demoted from idle layout, but preview mode may still
         # be active via compatibility state; keep explicit top-strip indication.
-        self.setWindowTitle(self.WINDOW_TITLE_BASE)
-        self._preview_badge.hide()
-        
-        if not self._current_run_dir:
-            return
-            
-        report_path = os.path.join(self._current_run_dir, "run_report.json")
-        if not os.path.exists(report_path):
-            return
-            
         try:
-            with open(report_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            self.setWindowTitle(self.WINDOW_TITLE_BASE)
+            self._preview_badge.hide()
 
-            run_type = get_run_type(data)
-            if run_type == "preview":
-                self.setWindowTitle(f"{self.WINDOW_TITLE_BASE} [PREVIEW]")
-                self._preview_badge.show()
-            elif run_type == "tuning_prep":
-                self.setWindowTitle(f"{self.WINDOW_TITLE_BASE} [TUNING PREP]")
-        except Exception:
-            pass
+            if not self._current_run_dir:
+                return
+
+            report_path = os.path.join(self._current_run_dir, "run_report.json")
+            if not os.path.exists(report_path):
+                return
+
+            try:
+                with open(report_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                run_type = get_run_type(data)
+                if run_type == "preview":
+                    self.setWindowTitle(f"{self.WINDOW_TITLE_BASE} [PREVIEW]")
+                    self._preview_badge.show()
+                elif run_type == "tuning_prep":
+                    self.setWindowTitle(f"{self.WINDOW_TITLE_BASE} [TUNING PREP]")
+            except Exception:
+                pass
+        finally:
+            # The status card's own visibility depends on whether the
+            # PREVIEW badge is showing (see _refresh_status_strip_visibility),
+            # so re-evaluate it whenever the badge's state may have changed,
+            # regardless of which branch/early-return above was taken.
+            self._refresh_status_strip_visibility()
 
     def _update_complete_state_summary(self) -> None:
         """Populate compact completion-state summary card from current GUI/run context."""

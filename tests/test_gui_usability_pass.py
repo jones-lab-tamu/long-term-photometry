@@ -911,7 +911,19 @@ def test_m1_shell_sections_and_header_structure(window, qapp):
     assert window._status_header_card.objectName() == "statusHeaderCard"
     assert window._status_label.parentWidget() is not None
     assert window._progress_bar.parentWidget() is not None
-    assert window._status_header_card.isVisibleTo(window)
+    # 4J16k30: a fresh window opens on the idle Guided Workflow tab with no
+    # PREVIEW badge, so the whole status header card -- not just its
+    # Full-Control-only children -- is hidden. Otherwise it renders as an
+    # empty rounded rectangle under the Tools menu.
+    assert window._preview_badge.isHidden() is True
+    assert window._status_header_card.isVisibleTo(window) is False
+
+    # It reappears in full on Full Control, where it remains meaningful.
+    window._workflow_mode_tabs.setCurrentWidget(window._full_control_tab)
+    qapp.processEvents()
+    assert window._status_header_card.isVisibleTo(window) is True
+    assert window._status_label.isVisibleTo(window) is True
+    assert window._progress_bar.isVisibleTo(window) is True
 
 
 def test_sessions_per_hour_warning_is_contextual_and_wrapped(window, qapp):

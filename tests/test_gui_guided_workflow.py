@@ -5872,12 +5872,15 @@ def test_guided_mode_banner_hides_completed_results_during_new_analysis_setup(
 
 
 def test_status_strip_hidden_while_guided_idle_visible_in_full_control(window, qapp):
-    """4J16k28: the Full-Control-only run status/phase/elapsed labels, the
-    milestone progress bar, and the pane-toggle buttons should not be
-    visible while the Guided Workflow tab is active and idle -- Guided Run
-    has its own Run-step "Analysis progress" panel and Guided has no
-    left/right splitter for the pane-toggle buttons to control. They must
-    still be fully present and visible in Full Control."""
+    """4J16k28/4J16k30: the Full-Control-only run status/phase/elapsed
+    labels, the milestone progress bar, the pane-toggle buttons, and (as of
+    4J16k30) the status header card itself should not be visible while the
+    Guided Workflow tab is active and idle with no PREVIEW badge showing --
+    Guided Run has its own Run-step "Analysis progress" panel, Guided has
+    no left/right splitter for the pane-toggle buttons to control, and an
+    empty rounded card with no content is a visual artifact, not useful
+    chrome. Everything must still be fully present and visible in Full
+    Control."""
     strip_widgets = (
         window._status_label,
         window._phase_label,
@@ -5888,20 +5891,23 @@ def test_status_strip_hidden_while_guided_idle_visible_in_full_control(window, q
         window._progress_bar,
     )
 
-    # Default state: Guided tab active, idle.
+    # Default state: Guided tab active, idle, no PREVIEW badge.
     assert window._workflow_mode_tabs.currentWidget() is window._guided_workflow_tab
     assert window._ui_state == main_window_module.RunnerState.IDLE
+    assert window._preview_badge.isHidden() is True
     window._refresh_status_strip_visibility()
     qapp.processEvents()
     for widget in strip_widgets:
         assert widget.isHidden() is True
-    # The card itself is untouched -- only its Full-Control-only children
-    # are hidden -- so structural checks on the card keep working.
-    assert window._status_header_card.isHidden() is False
+    # 4J16k30: with no useful content left inside it, the card itself is
+    # now hidden too -- not just its children -- so no empty rounded
+    # rectangle remains under the Tools menu.
+    assert window._status_header_card.isHidden() is True
 
-    # Switching to Full Control must restore all of them.
+    # Switching to Full Control must restore all of them, including the card.
     window._workflow_mode_tabs.setCurrentWidget(window._full_control_tab)
     qapp.processEvents()
+    assert window._status_header_card.isHidden() is False
     for widget in strip_widgets:
         assert widget.isHidden() is False
 
@@ -5909,13 +5915,15 @@ def test_status_strip_hidden_while_guided_idle_visible_in_full_control(window, q
 def test_status_strip_stays_visible_during_active_full_control_run_even_on_guided_tab(
     window, qapp
 ):
-    """4J16k28: an active Full Control run/validation must never be hidden,
-    even if the user is looking at the Guided tab."""
+    """4J16k28/4J16k30: an active Full Control run/validation must never be
+    hidden -- including the card itself -- even if the user is looking at
+    the Guided tab."""
     assert window._workflow_mode_tabs.currentWidget() is window._guided_workflow_tab
     window._ui_state = main_window_module.RunnerState.RUNNING
     window._refresh_status_strip_visibility()
     qapp.processEvents()
 
+    assert window._status_header_card.isHidden() is False
     assert window._status_label.isHidden() is False
     assert window._progress_bar.isHidden() is False
     assert window._left_pane_toggle_btn.isHidden() is False
@@ -5923,7 +5931,68 @@ def test_status_strip_stays_visible_during_active_full_control_run_even_on_guide
 
     window._ui_state = main_window_module.RunnerState.IDLE
     window._refresh_status_strip_visibility()
+    assert window._status_header_card.isHidden() is True
     assert window._status_label.isHidden() is True
+
+
+def test_status_strip_card_stays_visible_for_preview_badge_during_idle_guided(
+    window, qapp
+):
+    """4J16k30: if the PREVIEW badge is showing (a loaded completed run was
+    a preview-type run), the card must not be hidden out from under it,
+    even while the Guided tab is idle -- that badge is information the
+    user still needs. The other Full-Control-only children (run status,
+    progress bar, pane-toggle buttons) remain hidden since they are still
+    not meaningful in Guided setup."""
+    assert window._workflow_mode_tabs.currentWidget() is window._guided_workflow_tab
+    assert window._ui_state == main_window_module.RunnerState.IDLE
+
+    window._preview_badge.show()
+    window._refresh_status_strip_visibility()
+    qapp.processEvents()
+
+    assert window._status_header_card.isHidden() is False
+    assert window._preview_badge.isHidden() is False
+    assert window._status_label.isHidden() is True
+    assert window._progress_bar.isHidden() is True
+    assert window._left_pane_toggle_btn.isHidden() is True
+
+    # Once the badge goes away again, the card goes back to fully hidden.
+    window._preview_badge.hide()
+    window._refresh_status_strip_visibility()
+    assert window._status_header_card.isHidden() is True
+
+
+def test_guided_run_live_status_panel_unaffected_by_status_strip_visibility(
+    window, qapp
+):
+    """4J16k30: the Guided Run step's own "Analysis progress" panel is a
+    separate widget tree driven by a separate StatusFollower, not by
+    self._ui_state, so hiding/showing the top status card and its children
+    must never touch it."""
+    assert window._workflow_mode_tabs.currentWidget() is window._guided_workflow_tab
+    window._guided_run_live_status_group.setVisible(True)
+    window._guided_run_live_status_label.setText(
+        "Analysis is running. Do not close this window."
+    )
+
+    for ui_state in (
+        main_window_module.RunnerState.IDLE,
+        main_window_module.RunnerState.RUNNING,
+        main_window_module.RunnerState.SUCCESS,
+    ):
+        window._ui_state = ui_state
+        window._refresh_status_strip_visibility()
+        qapp.processEvents()
+        assert window._guided_run_live_status_group.isHidden() is False
+        assert window._guided_run_live_status_label.text() == (
+            "Analysis is running. Do not close this window."
+        )
+
+    window._workflow_mode_tabs.setCurrentWidget(window._full_control_tab)
+    qapp.processEvents()
+    assert window._guided_run_live_status_group.isHidden() is False
+    window._workflow_mode_tabs.setCurrentWidget(window._guided_workflow_tab)
 
 
 def _setup_guided_local_raw_preview_ready(
