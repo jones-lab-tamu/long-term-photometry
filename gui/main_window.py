@@ -4478,9 +4478,9 @@ class MainWindow(QMainWindow):
         preview_layout.setContentsMargins(10, 10, 10, 10)
         preview_layout.setSpacing(8)
         preview_intro = QLabel(
-            "This local preview compares the selected correction methods for "
-            "the chosen ROI and segment. Final analysis recomputes correction "
-            "using the full selected recordings."
+            "Preview compares the selected methods on one recording segment. "
+            "The final run will recompute correction using all selected "
+            "recordings."
         )
         preview_intro.setObjectName("guidedCorrectionPreviewIntro")
         preview_intro.setProperty("guidedSecondaryText", True)
@@ -4638,12 +4638,7 @@ class MainWindow(QMainWindow):
             QSizePolicy.Expanding, QSizePolicy.Preferred
         )
         preview_layout.addWidget(self._guided_preview_visual_label)
-        self._guided_local_signal_f0_preview_label = QLabel(
-            "Signal-Only F0 preview\n"
-            "Preview evidence only. Select Signal-Only F0 above and generate "
-            "a local preview to evaluate this strategy for the ROI. "
-            "This preview does not write production outputs."
-        )
+        self._guided_local_signal_f0_preview_label = QLabel("")
         self._guided_local_signal_f0_preview_label.setObjectName(
             "guidedLocalSignalOnlyF0PreviewEvidence"
         )
@@ -4654,12 +4649,16 @@ class MainWindow(QMainWindow):
         self._guided_local_signal_f0_preview_label.setTextInteractionFlags(
             Qt.TextSelectableByMouse
         )
+        self._guided_local_signal_f0_preview_label.setVisible(False)
         preview_layout.addWidget(
             self._guided_local_signal_f0_preview_label
         )
-        self._guided_preview_gated_widgets.append(
-            self._guided_local_signal_f0_preview_label
-        )
+        # 4J16k29: deliberately not added to _guided_preview_gated_widgets --
+        # its own content logic (in _populate_guided_preview_result_widgets /
+        # _clear_guided_preview_result_widgets / _guided_preview_mark_stale)
+        # decides visibility (only shown for the "not included"/"failed"
+        # notes), and the blanket preview-unlocked gating must not override
+        # that back to visible.
         self._guided_preview_open_btn = QPushButton("Open exported report")
         self._guided_preview_open_btn.setObjectName(
             "guidedCorrectionPreviewOpenButton"
@@ -4894,7 +4893,14 @@ class MainWindow(QMainWindow):
         signal_layout.addWidget(signal_artifacts_group)
         preview_layout.addWidget(signal_group)
         self._guided_signal_f0_group = signal_group
-        self._guided_preview_gated_widgets.append(signal_group)
+        # 4J16k29: Signal-Only F0 is one of the checkboxes in "1. Preview
+        # correction methods" above and is included in that unified
+        # preview/plot. This separate legacy diagnostic-cache-only panel
+        # (own generate button, ROI/segment selection, and a technical
+        # sample-count table) predates that and is permanently hidden from
+        # the normal page; it is not part of _guided_preview_gated_widgets
+        # so normal preview-readiness changes cannot re-show it.
+        signal_group.setVisible(False)
         self._guided_preview_locked_label = QLabel(
             "Complete Select data, Recording structure, and ROI selection to "
             "generate a local correction preview."
@@ -5332,18 +5338,29 @@ class MainWindow(QMainWindow):
         except Exception:
             return None
 
-    def _guided_preview_mark_stale(self, reason: str = "Displayed preview is stale because the preview selection changed.") -> None:
+    def _guided_preview_mark_stale(
+        self,
+        reason: str = (
+            "Preview needs to be regenerated because the ROI, segment, or "
+            "selected methods changed."
+        ),
+    ) -> None:
         if not getattr(self, "_guided_preview_has_result", False):
             return
         self._guided_preview_result_stale = True
         if hasattr(self, "_guided_preview_status_label"):
             self._guided_preview_status_label.setText(reason)
         if hasattr(self, "_guided_local_signal_f0_preview_label"):
-            self._guided_local_signal_f0_preview_label.setText(
-                "Signal-Only F0 preview\n"
-                "Preview evidence is stale; generate the local preview again. "
-                "Signal-Only F0 cannot be selected from stale evidence."
+            self._guided_local_signal_f0_preview_label.setText("")
+            self._guided_local_signal_f0_preview_label.setVisible(False)
+        if hasattr(self, "_guided_preview_artifacts_label"):
+            current = self._guided_preview_artifacts_label.text()
+            prefix = (
+                "Technical details below are for the last generated "
+                "preview; the current selection has changed since.\n"
             )
+            if current and not current.startswith(prefix):
+                self._guided_preview_artifacts_label.setText(prefix + current)
         self._refresh_guided_preview_review_affordances()
         self._refresh_guided_generated_outputs_summary()
         self._refresh_guided_confirm_strategy_panel()
@@ -5404,7 +5421,7 @@ class MainWindow(QMainWindow):
             elif not methods and not signal_f0_selected:
                 message = "Select at least one preview method."
             else:
-                message = "Preview comparison ready."
+                message = "No preview generated yet."
             self._guided_preview_status_label.setText(message)
         self._refresh_guided_generated_outputs_summary()
 
@@ -5599,9 +5616,7 @@ class MainWindow(QMainWindow):
                         "Local correction preview is ready."
                     )
                     self._guided_preview_source_status_label.setText(
-                        "Local preview uses only the selected ROI and preview "
-                        "segment. Final analysis recomputes correction using "
-                        "the full selected recordings."
+                        "Ready to preview the selected ROI and segment."
                     )
                     self._guided_preview_source_status_label.setToolTip("")
                     self._refresh_guided_preview_enablement()
@@ -5629,7 +5644,7 @@ class MainWindow(QMainWindow):
             self._guided_preview_loaded_run_dir = source_id
             if previous_source and source_id != previous_source:
                 self._guided_preview_mark_stale(
-                    "Displayed preview is stale because the diagnostic cache source changed."
+                    "Preview needs to be regenerated because the diagnostic cache source changed."
                 )
             try:
                 with open_phasic_cache(source.phasic_trace_cache_path) as cache:
@@ -5662,11 +5677,11 @@ class MainWindow(QMainWindow):
             if getattr(self, "_guided_preview_has_result", False) and source_id == previous_source:
                 if previous_roi and not restored_roi:
                     self._guided_preview_mark_stale(
-                        "Displayed preview is stale because the previous preview ROI is no longer available."
+                        "Preview needs to be regenerated because the previous preview ROI is no longer available."
                     )
                 elif previous_chunk is not None and not restored_chunk:
                     self._guided_preview_mark_stale(
-                        "Displayed preview is stale because the previous preview chunk is no longer available."
+                        "Preview needs to be regenerated because the previous preview chunk is no longer available."
                     )
             self._guided_preview_source_ok = bool(rois and chunk_ids)
             self._guided_preview_source_type = "diagnostic_cache"
@@ -5687,7 +5702,7 @@ class MainWindow(QMainWindow):
         self._guided_preview_source_reason = "Load a completed run to generate preview-only correction comparisons."
         self._guided_preview_loaded_run_dir = run_dir
         if previous_source and run_dir != previous_source:
-            self._guided_preview_mark_stale("Displayed preview is stale because the loaded completed run changed.")
+            self._guided_preview_mark_stale("Preview needs to be regenerated because the loaded completed run changed.")
 
         if artifact_state.get("status") == "not_generated" or not run_dir:
             self._guided_preview_source_status_label.setText(
@@ -5739,11 +5754,11 @@ class MainWindow(QMainWindow):
         if getattr(self, "_guided_preview_has_result", False) and run_dir == previous_source:
             if previous_roi and not restored_roi:
                 self._guided_preview_mark_stale(
-                    "Displayed preview is stale because the previous preview ROI is no longer available."
+                    "Preview needs to be regenerated because the previous preview ROI is no longer available."
                 )
             elif previous_chunk is not None and not restored_chunk:
                 self._guided_preview_mark_stale(
-                    "Displayed preview is stale because the previous preview chunk is no longer available."
+                    "Preview needs to be regenerated because the previous preview chunk is no longer available."
                 )
         self._guided_preview_source_ok = bool(rois and chunk_ids)
         self._guided_preview_source_type = "completed_run"
@@ -5761,7 +5776,7 @@ class MainWindow(QMainWindow):
         self._refresh_guided_preview_enablement()
 
     def _format_guided_preview_result(self, result: dict[str, object]) -> str:
-        lines = ["Preview-only correction comparison. Strategy recommendation: none."]
+        lines = ["Preview-only correction comparison."]
         summary_path = str(result.get("preview_summary_path", "") or "")
         if summary_path and os.path.isfile(summary_path):
             try:
@@ -6281,24 +6296,38 @@ class MainWindow(QMainWindow):
         preview_stale = bool(
             getattr(self, "_guided_preview_result_stale", False)
         )
+        # Only show the summary/plot for a preview that is both ready and
+        # current -- a stale preview must not be presented as though it
+        # still describes the current ROI/segment/method selection.
+        show_summary = preview_ready and not preview_stale
         if hasattr(self, "_guided_preview_review_label"):
-            if preview_ready:
+            if show_summary:
                 methods = preview.get("method_statuses", {})
                 method_ids = (
                     list(methods)
                     if isinstance(methods, dict) and methods
                     else self._selected_guided_preview_methods()
                 )
-                method_text = ", ".join(
+                method_labels = [
                     self._guided_preview_method_label(str(method))
                     for method in method_ids
+                ]
+                signal_f0_evidence = preview.get(
+                    "signal_only_f0_preview_evidence"
                 )
-                state = "stale" if preview_stale else "ready"
+                if (
+                    isinstance(signal_f0_evidence, dict)
+                    and signal_f0_evidence.get("valid") is True
+                ):
+                    method_labels.append("Signal-Only F0")
+                method_text = ", ".join(method_labels)
+                segment_label = str(
+                    preview.get("preview_segment_label")
+                    or preview.get("chunk_index", "")
+                )
                 self._guided_preview_review_label.setText(
-                    f"Correction preview: {state}.\n"
-                    f"ROI: {preview.get('roi', '')}\n"
-                    f"Preview segment: {preview.get('chunk_index', '')}\n"
-                    f"Methods compared: {method_text}"
+                    f"Preview for {preview.get('roi', '')}, segment "
+                    f"{segment_label}. Methods compared: {method_text}."
                     + (
                         ""
                         if preview.get("user_report_path")
@@ -6306,15 +6335,7 @@ class MainWindow(QMainWindow):
                         "generated. Open preview folder."
                     )
                 )
-                if preview.get("preview_segment_label"):
-                    self._guided_preview_review_label.setText(
-                        self._guided_preview_review_label.text().replace(
-                            f"Preview segment: {preview.get('chunk_index', '')}",
-                            "Preview segment: "
-                            f"{preview.get('preview_segment_label', '')}",
-                        )
-                    )
-            self._guided_preview_review_label.setVisible(preview_ready)
+            self._guided_preview_review_label.setVisible(show_summary)
             self._guided_preview_open_btn.setVisible(preview_ready)
             self._guided_preview_open_btn.setText(
                 "Open exported report"
@@ -6328,8 +6349,7 @@ class MainWindow(QMainWindow):
                 preview.get("visual_preview_path") or ""
             )
             visual_ready = bool(
-                preview_ready
-                and not preview_stale
+                show_summary
                 and visual_path
                 and os.path.isfile(visual_path)
             )
@@ -6339,26 +6359,25 @@ class MainWindow(QMainWindow):
                     self._guided_preview_visual_source_pixmap = pixmap
                     self._fit_guided_preview_visual_to_page()
                     self._guided_preview_visual_status_label.setText(
-                        "Preview for ROI "
-                        f"{preview.get('roi', '')}, segment "
-                        f"{preview.get('preview_segment_label') or preview.get('chunk_index', '')}. "
-                        "Review the preview "
-                        "below, then choose a strategy for this ROI. The plot "
-                        "shows the Raw "
-                        "signal, Reference/control signal, Corrected signal, "
-                        "and Fitted reference before confirming a strategy."
+                        "Use the plot below to choose the correction "
+                        f"method for {preview.get('roi', '')}."
                     )
                 else:
                     visual_ready = False
-            if preview_ready and not visual_ready:
+            if not visual_ready:
                 self._guided_preview_visual_source_pixmap = QPixmap()
                 self._guided_preview_visual_label.setPixmap(QPixmap())
+                # Only show a plot-load error when the preview is genuinely
+                # ready and current but the image itself failed to load --
+                # not when the preview is simply stale/not generated yet,
+                # which is already explained by the status line above.
                 self._guided_preview_visual_status_label.setText(
-                    "Correction preview was generated, but the visual preview "
-                    "could not be displayed. You can open the preview folder "
-                    "from Technical details."
+                    "The preview plot could not be loaded. Try generating "
+                    "the preview again."
+                    if show_summary
+                    else ""
                 )
-            self._guided_preview_visual_status_label.setVisible(preview_ready)
+            self._guided_preview_visual_status_label.setVisible(show_summary)
             self._guided_preview_visual_label.setVisible(visual_ready)
 
         signal = getattr(self, "_guided_signal_f0_last_result", {}) or {}
@@ -6477,6 +6496,28 @@ class MainWindow(QMainWindow):
                         f"Load error: {diagnostics.get('adapter_error', '') or 'none'}",
                     ]
                 )
+            signal_f0_evidence = result.get("signal_only_f0_preview_evidence")
+            if isinstance(signal_f0_evidence, dict) and signal_f0_evidence:
+                metrics = signal_f0_evidence.get("metrics", {})
+                if not isinstance(metrics, dict):
+                    metrics = {}
+                issues = "; ".join(
+                    str(value) for value in signal_f0_evidence.get("issues", [])
+                )
+                lines.append("Signal-Only F0 evidence:")
+                lines.append(
+                    "Valid: "
+                    + ("yes" if signal_f0_evidence.get("valid") is True else "no")
+                )
+                if metrics:
+                    lines.append(f"Samples: {metrics.get('sample_count', '')}")
+                    lines.append(f"Minimum dF/F: {metrics.get('dff_min', '')}")
+                    lines.append(
+                        "Negative dF/F samples: "
+                        f"{metrics.get('negative_dff_count', '')}"
+                    )
+                if issues:
+                    lines.append(f"Issues: {issues}")
             if not lines:
                 lines.append("Errors/warnings: none reported by preview backend.")
             self._guided_preview_messages_label.setText("\n".join(lines))
@@ -6484,56 +6525,30 @@ class MainWindow(QMainWindow):
             self._guided_preview_result_label.setText(self._format_guided_preview_result(result))
         if hasattr(self, "_guided_local_signal_f0_preview_label"):
             evidence = result.get("signal_only_f0_preview_evidence")
-            if (
-                result.get("source_type") == "local_raw_segment"
-                and isinstance(evidence, dict)
-            ):
-                metrics = evidence.get("metrics", {})
-                if not isinstance(metrics, dict):
-                    metrics = {}
-                issues = "; ".join(
-                    str(value) for value in evidence.get("issues", [])
-                )
-                if evidence.get("valid") is True:
-                    details = (
-                        f"Status: ready; ROI {evidence.get('roi_id', '')}; "
-                        f"samples {metrics.get('sample_count', '')}; "
-                        f"minimum dF/F {metrics.get('dff_min', '')}; "
-                        "negative dF/F samples "
-                        f"{metrics.get('negative_dff_count', '')}. Current "
-                        "preview evidence is available. Signal-Only F0 can "
-                        "now be selected for this ROI. Final production "
-                        "recomputes applied dF/F during Run."
-                    )
-                else:
-                    details = (
-                        "Status: unavailable for this segment"
-                        + (f"; {issues}" if issues else ".")
-                    )
+            valid = isinstance(evidence, dict) and evidence.get("valid") is True
+            is_local = result.get("source_type") == "local_raw_segment"
+            not_requested = bool(
+                is_local
+                and result.get("signal_only_f0_preview_requested") is False
+            )
+            if is_local and not_requested:
+                # Signal-Only F0 is one of the candidate methods; only call
+                # it out separately when it wasn't part of this preview.
                 self._guided_local_signal_f0_preview_label.setText(
-                    "Signal-Only F0 preview\n"
-                    "Preview evidence only. Selection requires current valid "
-                    "evidence. This preview does not write production "
-                    f"outputs.\n{details}"
+                    "Signal-Only F0 was not included in this preview."
                 )
+                self._guided_local_signal_f0_preview_label.setVisible(True)
+            elif is_local and not valid:
+                self._guided_local_signal_f0_preview_label.setText(
+                    "Signal-Only F0 preview could not be generated for this "
+                    "segment. See technical details."
+                )
+                self._guided_local_signal_f0_preview_label.setVisible(True)
             else:
-                self._guided_local_signal_f0_preview_label.setText(
-                    "Signal-Only F0 preview\n"
-                    + (
-                        "Signal-Only F0 was not included in the latest "
-                        "preview for this ROI."
-                        if (
-                            result.get("source_type")
-                            == "local_raw_segment"
-                            and result.get(
-                                "signal_only_f0_preview_requested"
-                            )
-                            is False
-                        )
-                        else "Select Signal-Only F0 above and generate a "
-                        "local preview to evaluate this strategy for the ROI."
-                    )
-                )
+                # Included and valid: shown in the plot/summary above like
+                # any other method -- no separate callout needed.
+                self._guided_local_signal_f0_preview_label.setText("")
+                self._guided_local_signal_f0_preview_label.setVisible(False)
         self._refresh_guided_preview_review_affordances()
         self._refresh_guided_generated_outputs_summary()
 
@@ -6547,12 +6562,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_guided_preview_result_label"):
             self._guided_preview_result_label.setText("")
         if hasattr(self, "_guided_local_signal_f0_preview_label"):
-            self._guided_local_signal_f0_preview_label.setText(
-                "Signal-Only F0 preview\n"
-                "Preview evidence only. Select Signal-Only F0 above and "
-                "generate a local preview to evaluate this strategy for the "
-                "ROI. This preview does not write production outputs."
-            )
+            self._guided_local_signal_f0_preview_label.setText("")
+            self._guided_local_signal_f0_preview_label.setVisible(False)
         self._refresh_guided_generated_outputs_summary()
 
     def _refresh_guided_signal_f0_panel(self, artifact_state: dict[str, object]) -> None:
@@ -6946,6 +6957,9 @@ class MainWindow(QMainWindow):
         ):
             self._refresh_guided_preview_enablement()
             return
+        if hasattr(self, "_guided_preview_status_label"):
+            self._guided_preview_status_label.setText("Generating preview...")
+            QApplication.processEvents()
         try:
             if source_type == "local_raw_segment":
                 segment = self._resolve_guided_local_preview_segment()
@@ -7097,10 +7111,9 @@ class MainWindow(QMainWindow):
             status = str(result.get("status", "failed"))
             if status in {"success", "partial"}:
                 self._guided_preview_status_label.setText(
-                    "Correction preview: ready."
+                    "Preview ready."
                     if result.get("visual_preview_path")
-                    else "Correction preview generated, but visual preview "
-                    "unavailable."
+                    else "Preview ready, but the plot could not be generated."
                 )
             else:
                 self._guided_preview_status_label.setText(
@@ -8756,28 +8769,24 @@ class MainWindow(QMainWindow):
                     f"Local preview, segment {segment}"
                 )
             elif any_evidence is not None:
-                evidence_label.setText("Evidence stale; preview again")
+                evidence_label.setText("Needs a new preview")
             else:
                 evidence_label.setText("Preview first")
             status_label = QLabel(
                 "Confirmed"
                 if confirmed
-                else "Selection changed, confirm again"
+                else "Selection changed. Confirm this method."
                 if selection_changed
-                else "Stale, confirm again"
+                else "The preview changed. Confirm this method again."
                 if stale
                 else "Needs confirmation"
                 if evidence is not None
                 else "Preview first"
             )
             action = QPushButton(
-                "Confirm changed strategy for this ROI"
-                if selection_changed
-                else "Confirmed"
+                "Confirmed"
                 if confirmed
-                else "Reconfirm strategy for this ROI"
-                if stale
-                else "Confirm strategy for this ROI"
+                else "Confirm method"
             )
             action.setEnabled(
                 bool(
@@ -8810,13 +8819,6 @@ class MainWindow(QMainWindow):
                 "action_button": action,
             }
 
-        note = QLabel(
-            "Final analysis recomputes correction using the full selected "
-            "recordings."
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note, len(included) + 1, 0, 1, 5)
-
     def _guided_confirm_strategy_progress_text(
         self,
         *,
@@ -8830,18 +8832,17 @@ class MainWindow(QMainWindow):
         if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
             return ""
         if not source_ok:
-            return "0/0 included ROIs confirmed."
+            return "0 of 0 ROIs confirmed."
 
         included = tuple(dict.fromkeys(str(roi) for roi in included_rois if roi))
         if not preview_evidence_ready:
             if preview_evidence_stale:
                 return (
-                    "Correction preview is stale. Generate a new preview before "
-                    f"confirming strategies. 0/{len(included)} included ROIs "
-                    "confirmed."
+                    "The preview needs to be regenerated before confirming "
+                    f"strategies. 0 of {len(included)} ROIs confirmed."
                 )
             return (
-                f"0/{len(included)} included ROIs confirmed."
+                f"0 of {len(included)} ROIs confirmed."
             )
 
         confirmed: set[str] = set()
@@ -8900,11 +8901,11 @@ class MainWindow(QMainWindow):
 
         count = len(confirmed)
         total = len(included)
-        progress = f"{count}/{total} included ROIs confirmed."
+        progress = f"{count} of {total} ROIs confirmed."
         if stale - confirmed:
             return (
-                "Some correction strategy choices are stale. "
-                f"Reconfirm before Run. {progress}"
+                "Some correction method choices need to be reconfirmed "
+                f"before Run. {progress}"
             )
         if total > 0 and count == total:
             if len(confirmed_dynamic_modes) > 1:
@@ -9008,9 +9009,9 @@ class MainWindow(QMainWindow):
             )
         else:
             self._guided_local_preview_confirmation_group.setVisible(False)
-        signal_group = getattr(self, "_guided_signal_f0_group", None)
-        if signal_group is not None and new_analysis:
-            signal_group.setVisible(preview_unlocked and evidence_ready)
+        # 4J16k29: the legacy separate Signal-Only F0 diagnostic panel stays
+        # permanently hidden from the normal page; see its construction
+        # site for why.
         if new_analysis and local_preview_ready and not strategy_unlocked:
             self._guided_confirm_locked_label.setText(
                 "Generate and review a successful local correction preview "
@@ -9067,9 +9068,9 @@ class MainWindow(QMainWindow):
                     )
                 else:
                     label.setText(
-                        "Local correction preview is ready. Confirm a strategy "
-                        f"for this ROI. {len(confirmed)}/{len(included)} "
-                        "included ROIs confirmed."
+                        "Preview ready. Choose the correction method for this "
+                        f"ROI. {len(confirmed)} of {len(included)} ROIs "
+                        "confirmed."
                     )
                 return
             if (
@@ -9116,7 +9117,7 @@ class MainWindow(QMainWindow):
             cache_current = False
         if not cache_current:
             label.setText(
-                "Correction evidence is stale. Rebuild it before continuing."
+                "Correction evidence needs to be rebuilt before continuing."
             )
             return
         preview_exists = bool(
@@ -9127,8 +9128,8 @@ class MainWindow(QMainWindow):
         )
         if preview_exists and preview_stale:
             label.setText(
-                "Correction preview is stale. Generate a new preview before "
-                "confirming strategies."
+                "The preview needs to be regenerated before confirming "
+                "strategies."
             )
             return
         preview_result = getattr(
@@ -9145,8 +9146,8 @@ class MainWindow(QMainWindow):
             )
         ):
             label.setText(
-                "Correction preview generated, but visual preview unavailable. "
-                "Generate a new preview before confirming strategies."
+                "The preview needs to be regenerated before confirming "
+                "strategies."
             )
             return
         preview_ready = preview_exists and not preview_stale
@@ -9170,19 +9171,19 @@ class MainWindow(QMainWindow):
         total = len(included)
         if total and count == total:
             label.setText(
-                f"Correction strategy complete for {count}/{total} included "
-                "ROIs. Next step: Draft plan."
+                f"Correction method confirmed for {count} of {total} ROIs. "
+                "Next step: Draft plan."
             )
         else:
             if count:
                 label.setText(
-                    "Correction preview is ready. Continue confirming "
-                    f"strategies. {count}/{total} included ROIs confirmed."
+                    "Preview ready. Continue confirming methods. "
+                    f"{count} of {total} ROIs confirmed."
                 )
             else:
                 label.setText(
-                    "Correction preview is ready. Next step: confirm a "
-                    "strategy for each included ROI."
+                    "Preview ready. Next step: confirm a method for each "
+                    "included ROI."
                 )
 
     def _refresh_guided_confirm_strategy_panel(self, *_args) -> None:
@@ -9244,9 +9245,8 @@ class MainWindow(QMainWindow):
                 )
                 self._guided_confirm_source = local
                 reason = (
-                    "Review the local preview above, then choose the correction "
-                    "strategy for this ROI. The final analysis will recompute "
-                    "correction using the full selected recordings."
+                    "Review the local preview above, then choose the "
+                    "correction method for this ROI."
                 )
             else:
                 source_type = "diagnostic_cache"
@@ -9475,11 +9475,7 @@ class MainWindow(QMainWindow):
                 or local_reference is not None
             )
         )
-        self._guided_confirm_mark_btn.setText(
-            "Confirm strategy for this ROI"
-            if source_type == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
-            else "Confirm selected strategy for this ROI"
-        )
+        self._guided_confirm_mark_btn.setText("Confirm method")
         self._guided_confirm_mark_btn.setEnabled(can_mark)
         self._refresh_guided_correction_next_action()
         self._refresh_guided_correction_continue_state()
@@ -14291,9 +14287,8 @@ class MainWindow(QMainWindow):
             self._guided_confirm_local_preview_evidence_label,
         )
         self._guided_confirm_local_preview_explanation_label = QLabel(
-            "This choice will be recorded as confirmed from the local preview "
-            "above. Final analysis will recompute correction using the full "
-            "selected recordings."
+            "This choice will be recorded as confirmed from the local "
+            "preview above."
         )
         self._guided_confirm_local_preview_explanation_label.setObjectName(
             "guidedConfirmLocalPreviewExplanation"
@@ -14313,7 +14308,7 @@ class MainWindow(QMainWindow):
         self._guided_confirm_ack_cb.stateChanged.connect(self._refresh_guided_confirm_strategy_panel)
         self._guided_confirm_ack_cb.setVisible(False)
         self._guided_confirm_mark_btn = QPushButton(
-            "Confirm selected strategy for this ROI"
+            "Confirm method"
         )
         self._guided_confirm_mark_btn.setObjectName("guidedConfirmStrategyMarkButton")
         self._guided_confirm_mark_btn.clicked.connect(self._on_guided_mark_strategy_choice)

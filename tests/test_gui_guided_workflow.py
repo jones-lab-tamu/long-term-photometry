@@ -3327,7 +3327,7 @@ def test_guided_confirm_strategy_new_analysis_blocks_without_diagnostic_cache(wi
     )
     assert "Build a diagnostic cache" not in window._guided_confirm_context_label.text()
     progress = window._guided_confirm_strategy_progress_label.text()
-    assert progress == "0/0 included ROIs confirmed."
+    assert progress == "0 of 0 ROIs confirmed."
     assert "Open Results must be used first" not in progress
     assert window._current_run_dir == ""
     assert calls == {"preview": 0, "signal": 0}
@@ -3343,7 +3343,7 @@ def test_guided_confirm_strategy_progress_none_confirmed(
     window._refresh_guided_confirm_strategy_panel()
 
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "0/3 included ROIs confirmed."
+        "0 of 3 ROIs confirmed."
     )
     assert window._guided_confirm_mark_btn.isEnabled() is False
 
@@ -3367,7 +3367,7 @@ def test_guided_confirm_strategy_cannot_reach_complete_without_preview_evidence(
 
     assert window._guided_strategy_choices == {}
     progress = window._guided_confirm_strategy_progress_label.text()
-    assert "0/3 included ROIs confirmed" in progress
+    assert "0 of 3 ROIs confirmed" in progress
     assert "Correction strategies confirmed for all included ROIs" not in progress
     assert "Open Results must be used first" not in progress
 
@@ -3389,12 +3389,11 @@ def test_guided_confirm_strategy_stale_preview_evidence_blocks_marks(
 
     assert window._guided_confirm_mark_btn.isEnabled() is False
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "Correction preview is stale. Generate a new preview before confirming "
-        "strategies. 0/3 included ROIs confirmed."
+        "The preview needs to be regenerated before confirming strategies. "
+        "0 of 3 ROIs confirmed."
     )
     assert window._guided_correction_next_action_label.text() == (
-        "Correction preview is stale. Generate a new preview before confirming "
-        "strategies."
+        "The preview needs to be regenerated before confirming strategies."
     )
 
 
@@ -3419,9 +3418,9 @@ def test_guided_preview_evidence_populates_new_analysis_draft_fields(
     assert preview_dir.parent == cache_path / "_guided_workflow" / "previews"
     assert (preview_dir / "preview_provenance.json").is_file()
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "0/3 included ROIs confirmed."
+        "0 of 3 ROIs confirmed."
     )
-    assert "Correction preview is ready" in (
+    assert "Preview ready" in (
         window._guided_correction_next_action_label.text()
     )
 
@@ -3442,11 +3441,11 @@ def test_guided_confirm_strategy_progress_partial_confirmation(
     window._guided_confirm_mark_btn.click()
 
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "1/3 included ROIs confirmed."
+        "1 of 3 ROIs confirmed."
     )
     assert window._guided_correction_next_action_label.text() == (
-        "Correction preview is ready. Continue confirming strategies. "
-        "1/3 included ROIs confirmed."
+        "Preview ready. Continue confirming methods. "
+        "1 of 3 ROIs confirmed."
     )
 
 
@@ -3468,10 +3467,10 @@ def test_guided_confirm_strategy_progress_all_confirmed(
         window._guided_confirm_mark_btn.click()
 
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "3/3 included ROIs confirmed."
+        "3 of 3 ROIs confirmed."
     )
     assert window._guided_correction_next_action_label.text() == (
-        "Correction strategy complete for 3/3 included ROIs. Next step: "
+        "Correction method confirmed for 3 of 3 ROIs. Next step: "
         "Draft plan."
     )
 
@@ -3497,8 +3496,8 @@ def test_guided_confirm_strategy_progress_stale_choice_does_not_count(
     window._refresh_guided_confirm_strategy_panel()
 
     assert window._guided_confirm_strategy_progress_label.text() == (
-        "Some correction strategy choices are stale. Reconfirm before Run. "
-        "0/3 included ROIs confirmed."
+        "Some correction method choices need to be reconfirmed before Run. "
+        "0 of 3 ROIs confirmed."
     )
 
 
@@ -3520,7 +3519,7 @@ def test_guided_confirm_strategy_progress_uses_included_rois_only(
     )
 
     assert window._guided_confirm_strategy_progress_label.text().endswith(
-        "0/2 included ROIs confirmed."
+        "0 of 2 ROIs confirmed."
     )
 
 
@@ -3991,7 +3990,7 @@ def test_guided_correction_preview_button_generates_backend_preview_read_only(wi
     window._guided_preview_generate_btn.click()
 
     assert window._guided_preview_status_label.text() == (
-        "Correction preview: ready."
+        "Preview ready."
     )
     artifacts_text = window._guided_preview_artifacts_label.text()
     assert "Preview directory:" in artifacts_text
@@ -4017,7 +4016,8 @@ def test_guided_correction_preview_button_generates_backend_preview_read_only(wi
     assert "needs_review" not in table_text
     assert "Errors/warnings: none reported" in window._guided_preview_messages_label.text()
     text = window._guided_preview_result_label.text()
-    assert "Strategy recommendation: none" in text
+    assert "Preview-only correction comparison." in text
+    assert "Strategy recommendation" not in text
     preview_dir = run_dir / "_guided_workflow" / "previews"
     assert preview_dir.exists()
     assert list(preview_dir.glob("*/preview_summary.json"))
@@ -4173,12 +4173,12 @@ def test_guided_correction_preview_result_marks_stale_on_selection_change(window
 
     window._guided_preview_generate_btn.click()
     assert window._guided_preview_status_label.text() == (
-        "Correction preview: ready."
+        "Preview ready."
     )
 
     window._guided_preview_chunk_combo.setCurrentIndex(1)
 
-    assert "Displayed preview is stale because the preview selection changed" in window._guided_preview_status_label.text()
+    assert "Preview needs to be regenerated" in window._guided_preview_status_label.text()
     output_summary = window._guided_generated_outputs_summary_label.text()
     assert "Correction preview: success stale" in output_summary
     assert "Displayed preview is stale" not in output_summary
@@ -5637,7 +5637,7 @@ def test_compact_correction_sections_unlock_in_order(
     assert window._guided_confirm_locked_label.isHidden() is True
     assert window._guided_confirm_roi_combo.parentWidget().isHidden() is False
     assert window._guided_confirm_strategy_combo.parentWidget().isHidden() is False
-    assert "Next step: confirm a strategy" in (
+    assert "Next step: confirm a method" in (
         window._guided_correction_next_action_label.text()
     )
 
@@ -5926,6 +5926,88 @@ def test_status_strip_stays_visible_during_active_full_control_run_even_on_guide
     assert window._status_label.isHidden() is True
 
 
+def _setup_guided_local_raw_preview_ready(
+    window, tmp_path, monkeypatch, *, n_rois: int = 3
+) -> list[Path]:
+    """Reach the reachable new-analysis local-raw-segment preview state
+    (ROI/segment selected, "Generate correction preview" enabled but not
+    yet clicked) without going through the diagnostic-cache path -- this
+    is the flow a real Guided user actually exercises."""
+    input_dir = tmp_path / "raw"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    source_files = []
+    for index in range(3):
+        session_dir = input_dir / f"session-{index}"
+        session_dir.mkdir()
+        source_file = session_dir / "fluorescence.csv"
+        source_file.write_text(
+            f"local preview source {index}", encoding="utf-8"
+        )
+        source_files.append(source_file)
+    window._guided_input_dir_edit.setText(str(input_dir))
+    window._guided_output_dir_edit.setText(str(output_dir))
+    window._format_combo.setCurrentText("rwd")
+    discovery = {
+        "resolved_format": "rwd",
+        "n_total_discovered": 3,
+        "n_preview": 3,
+        "sessions": [
+            {
+                "index": index,
+                "session_id": f"session-{index}",
+                "path": str(source_file),
+                "included_in_preview": True,
+            }
+            for index, source_file in enumerate(source_files)
+        ],
+        "rois": [{"roi_id": f"CH{i + 1}"} for i in range(n_rois)],
+    }
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+    time_sec = np.arange(2400, dtype=float) / 20.0
+    uv = 1.0 + 0.03 * np.sin(time_sec * 0.15)
+    sig = 1.25 * uv + 0.04 * np.sin(time_sec * 0.7)
+
+    def fake_load_chunk(path, input_format, _config, chunk_id):
+        return Chunk(
+            chunk_id=chunk_id,
+            source_file=path,
+            format=input_format,
+            time_sec=time_sec,
+            uv_raw=np.column_stack([uv] * n_rois),
+            sig_raw=np.column_stack([sig] * n_rois),
+            fs_hz=20.0,
+            channel_names=[f"CH{i + 1}" for i in range(n_rois)],
+            metadata={},
+        )
+
+    monkeypatch.setattr(
+        correction_preview_module, "load_chunk", fake_load_chunk
+    )
+    monkeypatch.setattr(
+        window,
+        "_infer_rwd_chunk_contract",
+        lambda path: {
+            "csv_path": path,
+            "fs_hz": 20.0,
+            "chunk_duration_sec": 600.0,
+            "time_col": "Time(s)",
+            "uv_suffix": "-410",
+            "sig_suffix": "-470",
+        },
+    )
+    window._set_guided_workflow_mode("new_analysis")
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    window._refresh_guided_diagnostics_panel()
+    assert window._guided_preview_source_type == "local_raw_segment"
+    assert window._guided_preview_generate_btn.isEnabled() is True
+    return source_files
+
+
 def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     window, tmp_path, monkeypatch
 ):
@@ -6064,18 +6146,13 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert signal_f0_evidence["preview_only"] is True
     assert signal_f0_evidence["production_analysis"] is False
     assert signal_f0_evidence["explicit_user_mark"] is False
-    assert "Signal-Only F0 preview" in (
-        window._guided_local_signal_f0_preview_label.text()
-    )
-    assert "Preview evidence only" in (
-        window._guided_local_signal_f0_preview_label.text()
-    )
-    assert "Signal-Only F0 can now be selected for this ROI" in (
-        window._guided_local_signal_f0_preview_label.text()
-    )
-    assert "Preview segment: session-2" in (
-        window._guided_preview_review_label.text()
-    )
+    # 4J16k29: Signal-Only F0 is included and valid, so it is shown like
+    # any other method in the summary above -- no separate callout.
+    assert window._guided_local_signal_f0_preview_label.text() == ""
+    assert window._guided_local_signal_f0_preview_label.isHidden() is True
+    review_text = window._guided_preview_review_label.text()
+    assert "segment session-2" in review_text
+    assert "Signal-Only F0" in review_text
     preview_dir = Path(result["preview_output_dir"])
     assert not (preview_dir / "status.json").exists()
     assert not (preview_dir / "run_report.json").exists()
@@ -6133,7 +6210,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert window._guided_local_preview_confirmation_rows["CH1"][
         "strategy_combo"
     ].findData("signal_only_f0") == -1
-    assert "0/3 included ROIs confirmed" in (
+    assert "0 of 3 ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
     locked_signal_f0.update(
@@ -6157,9 +6234,10 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         window._guided_preview_roi_combo.findData("CH2")
     )
     assert window._guided_preview_result_stale is True
-    assert "Preview evidence is stale" in (
-        window._guided_local_signal_f0_preview_label.text()
-    )
+    # 4J16k29: no separate "stale" callout for Signal-Only F0 -- the label
+    # is simply cleared, consistent with the rest of the stale preview.
+    assert window._guided_local_signal_f0_preview_label.text() == ""
+    assert window._guided_local_signal_f0_preview_label.isHidden() is True
     window._guided_preview_generate_btn.click()
     ch2_result = window._guided_preview_last_result
     assert ch2_result["roi"] == "CH2"
@@ -6190,7 +6268,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert window._guided_strategy_choices == {}
     assert rows["CH1"]["action_button"].isEnabled() is True
     assert rows["CH1"]["action_button"].text() == (
-        "Confirm strategy for this ROI"
+        "Confirm method"
     )
     rows["CH1"]["action_button"].click()
     rows = window._guided_local_preview_confirmation_rows
@@ -6200,7 +6278,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert rows["CH1"]["strategy_combo"].currentData() == (
         "robust_global_event_reject"
     )
-    assert "1/3 included ROIs confirmed" in (
+    assert "1 of 3 ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
     ch1_choice = window._guided_strategy_choices[
@@ -6220,14 +6298,14 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     ch1_combo.setCurrentIndex(ch1_combo.findData("signal_only_f0"))
     rows = window._guided_local_preview_confirmation_rows
     assert rows["CH1"]["status_label"].text() == (
-        "Selection changed, confirm again"
+        "Selection changed. Confirm this method."
     )
     assert rows["CH1"]["action_button"].text() == (
-        "Confirm changed strategy for this ROI"
+        "Confirm method"
     )
     assert rows["CH1"]["action_button"].isEnabled() is True
     assert rows["CH1"]["strategy_combo"].currentData() == "signal_only_f0"
-    assert "0/3 included ROIs confirmed" in (
+    assert "0 of 3 ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
     rows["CH1"]["action_button"].click()
@@ -6235,7 +6313,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert rows["CH1"]["status_label"].text() == "Confirmed"
     assert rows["CH1"]["action_button"].text() == "Confirmed"
     assert rows["CH1"]["action_button"].isEnabled() is False
-    assert "1/3 included ROIs confirmed" in (
+    assert "1 of 3 ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
 
@@ -6245,13 +6323,13 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     )
     rows = window._guided_local_preview_confirmation_rows
     assert rows["CH1"]["status_label"].text() == (
-        "Selection changed, confirm again"
+        "Selection changed. Confirm this method."
     )
     assert rows["CH1"]["action_button"].text() == (
-        "Confirm changed strategy for this ROI"
+        "Confirm method"
     )
     assert rows["CH1"]["action_button"].isEnabled() is True
-    assert "0/3 included ROIs confirmed" in (
+    assert "0 of 3 ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
     rows["CH1"]["action_button"].click()
@@ -6259,7 +6337,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert rows["CH1"]["status_label"].text() == "Confirmed"
     assert rows["CH1"]["action_button"].text() == "Confirmed"
     assert rows["CH1"]["action_button"].isEnabled() is False
-    assert "1/3 included ROIs confirmed" in (
+    assert "1 of 3 ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
 
@@ -6269,13 +6347,13 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     )
     rows = window._guided_local_preview_confirmation_rows
     assert rows["CH1"]["status_label"].text() == (
-        "Selection changed, confirm again"
+        "Selection changed. Confirm this method."
     )
     assert rows["CH1"]["action_button"].text() == (
-        "Confirm changed strategy for this ROI"
+        "Confirm method"
     )
     assert rows["CH1"]["action_button"].isEnabled() is True
-    assert "0/3 included ROIs confirmed" in (
+    assert "0 of 3 ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
     rows["CH1"]["action_button"].click()
@@ -6283,7 +6361,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert rows["CH1"]["status_label"].text() == "Confirmed"
     assert rows["CH1"]["action_button"].text() == "Confirmed"
     assert rows["CH1"]["action_button"].isEnabled() is False
-    assert "1/3 included ROIs confirmed" in (
+    assert "1 of 3 ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
 
@@ -6299,14 +6377,14 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert rows["CH2"]["action_button"].text() == "Confirmed"
     assert rows["CH2"]["action_button"].isEnabled() is False
     assert rows["CH2"]["strategy_combo"].currentData() == "signal_only_f0"
-    assert "2/3 included ROIs confirmed" in (
+    assert "2 of 3 ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
     window._rebuild_guided_local_preview_confirmation_rows()
     rows = window._guided_local_preview_confirmation_rows
     assert rows["CH2"]["status_label"].text() == "Confirmed"
     assert rows["CH2"]["strategy_combo"].currentData() == "signal_only_f0"
-    assert "2/3 included ROIs confirmed" in (
+    assert "2 of 3 ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
     assert len(window._guided_strategy_choices) == 2
@@ -6338,7 +6416,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         ch3_combo.findData("robust_global_event_reject")
     )
     rows["CH3"]["action_button"].click()
-    assert "3/3 included ROIs confirmed" in (
+    assert "3 of 3 ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
     assert window._guided_correction_continue_btn.isEnabled() is True
@@ -6423,7 +6501,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         "CH3": "current",
     }
     rows = window._guided_local_preview_confirmation_rows
-    assert rows["CH1"]["status_label"].text() == "Stale, confirm again"
+    assert rows["CH1"]["status_label"].text() == "The preview changed. Confirm this method again."
     assert rows["CH2"]["status_label"].text() == "Confirmed"
     replacement_signal_f0 = (
         window._guided_local_preview_locked_evidence_for_roi(
@@ -6521,23 +6599,24 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     rows = window._guided_local_preview_confirmation_rows
     assert rows["CH2"]["strategy_combo"].findData("signal_only_f0") == -1
     assert rows["CH2"]["status_label"].text() != "Confirmed"
-    assert "not included in the latest preview" in (
-        window._guided_local_signal_f0_preview_label.text()
+    assert window._guided_local_signal_f0_preview_label.text() == (
+        "Signal-Only F0 was not included in this preview."
     )
+    assert window._guided_local_signal_f0_preview_label.isHidden() is False
     assert runner.argv is None
     assert all(
         choice["stale"] is True
         for choice in window._guided_strategy_choices.values()
     )
     window._refresh_guided_confirm_strategy_panel()
-    assert "0/3 included ROIs confirmed" in (
+    assert "0 of 3 ROIs confirmed" in (
         window._guided_confirm_strategy_progress_label.text()
     )
     assert any(
         choice.selected_strategy == "signal_only_f0"
         for choice in changed_plan.per_roi_correction_strategy_choices
     )
-    assert "Final analysis recomputes correction" in " ".join(
+    assert "final run will recompute correction" in " ".join(
         _label_texts(
             window._guided_workflow_stack.widget(
                 list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
@@ -6680,10 +6759,9 @@ def test_correction_preview_ready_has_openable_review_summary(
     assert opened == []
 
     text = window._guided_preview_review_label.text()
-    assert "Correction preview: ready." in text
-    assert "ROI: CH1" in text
-    assert "Preview segment: 0" in text
+    assert "Preview for CH1, segment 0." in text
     assert "Methods compared:" in text
+    assert "Robust Global Event-Reject Fit" in text
     assert window._guided_preview_open_btn.text() == "Open exported report"
     assert window._guided_preview_technical_details_group.isHidden() is True
     assert window._guided_preview_technical_toggle_btn.text() == (
@@ -6728,9 +6806,9 @@ def test_correction_preview_ready_has_openable_review_summary(
         320, window._guided_preview_visual_viewport_width - 72
     )
     visual_text = window._guided_preview_visual_status_label.text()
-    assert "Reference/control signal" in visual_text
-    assert "Corrected signal" in visual_text
-    assert "Fitted reference" in visual_text
+    assert "Use the plot below to choose the correction method for CH1." == (
+        visual_text
+    )
 
     assert opened == []
     window._guided_preview_technical_toggle_btn.click()
@@ -6835,17 +6913,197 @@ def test_visual_preview_failure_is_plain_and_keeps_strategy_locked(
     window._guided_preview_generate_btn.click()
 
     assert window._guided_preview_status_label.text() == (
-        "Correction preview generated, but visual preview unavailable."
+        "Preview ready, but the plot could not be generated."
     )
-    assert "visual preview could not be displayed" in (
+    assert "preview plot could not be loaded" in (
         window._guided_preview_visual_status_label.text()
     )
     assert window._guided_preview_visual_label.isHidden() is True
     assert window._guided_confirm_locked_label.isHidden() is False
     assert window._guided_confirm_strategy_combo.parentWidget().isHidden()
-    assert "visual preview unavailable" in (
+    assert "needs to be regenerated" in (
         window._guided_correction_next_action_label.text()
     )
+
+
+def _guided_correction_approach_normal_text(window) -> str:
+    """Group titles, labels, and buttons (with tooltips) on the Correction
+    Approach step, excluding technical-details/legacy panels that are
+    permanently hidden or collapsed behind an explicit toggle."""
+    step_widget = window._guided_workflow_stack.widget(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    excluded_roots = [
+        getattr(window, "_guided_preview_technical_details_group", None),
+        getattr(window, "_guided_signal_f0_group", None),
+        getattr(window, "_guided_full_evidence_group", None),
+        getattr(window, "_guided_diagnostics_slots_group", None),
+        getattr(window, "_guided_generated_outputs_group", None),
+        getattr(window, "_guided_confirm_evidence_group", None),
+    ]
+    excluded_roots = [w for w in excluded_roots if w is not None]
+
+    def is_excluded(widget) -> bool:
+        parent = widget
+        while parent is not None:
+            if parent in excluded_roots:
+                return True
+            parent = parent.parentWidget()
+        return False
+
+    texts = []
+    for widget in step_widget.findChildren(QGroupBox):
+        if is_excluded(widget):
+            continue
+        texts.append(widget.title())
+        texts.append(widget.toolTip())
+    for widget in step_widget.findChildren(QLabel):
+        if is_excluded(widget):
+            continue
+        texts.append(widget.text())
+        texts.append(widget.toolTip())
+    for widget in step_widget.findChildren(QPushButton):
+        if is_excluded(widget):
+            continue
+        texts.append(widget.text())
+        texts.append(widget.toolTip())
+    return " ".join(t for t in texts if t)
+
+
+def test_correction_approach_before_generate_has_no_premature_or_stale_text(
+    window, tmp_path, monkeypatch
+):
+    """4J16k29 (H.1): before the user presses "Generate correction preview",
+    the page must not claim the preview is ready, must not say "stale", and
+    must not show a misleading visual-display error."""
+    _setup_guided_local_raw_preview_ready(window, tmp_path, monkeypatch)
+
+    assert getattr(window, "_guided_preview_has_result", False) is False
+    assert window._guided_preview_status_label.text() == "No preview generated yet."
+
+    normal_text = _guided_correction_approach_normal_text(window)
+    lowered = normal_text.lower()
+    assert "preview ready" not in lowered
+    assert "preview comparison ready" not in lowered
+    assert "stale" not in lowered
+    assert "could not be displayed" not in lowered
+
+
+def test_correction_approach_selection_change_requests_regeneration_not_stale(
+    window, tmp_path, monkeypatch
+):
+    """4J16k29 (H.2): after the ROI/segment/method selection changes on an
+    existing preview, the page must say the preview needs to be
+    regenerated, must not say "stale", and must not show the "visual
+    preview could not be displayed" error (the preview simply is not
+    current, not broken)."""
+    _setup_guided_local_raw_preview_ready(window, tmp_path, monkeypatch)
+    window._guided_preview_generate_btn.click()
+    assert window._guided_preview_status_label.text() == "Preview ready."
+
+    window._guided_preview_chunk_combo.setCurrentIndex(
+        1 if window._guided_preview_chunk_combo.count() > 1 else 0
+    )
+
+    assert window._guided_preview_result_stale is True
+    assert window._guided_preview_status_label.text() == (
+        "Preview needs to be regenerated because the ROI, segment, or "
+        "selected methods changed."
+    )
+    assert window._guided_preview_review_label.isHidden() is True
+    assert window._guided_preview_visual_status_label.isHidden() is True
+
+    normal_text = _guided_correction_approach_normal_text(window)
+    lowered = normal_text.lower()
+    assert "stale" not in lowered
+    assert "could not be displayed" not in lowered
+
+
+def test_correction_approach_signal_only_f0_not_selected_has_one_plain_note(
+    window, tmp_path, monkeypatch
+):
+    """4J16k29 (H.3): when Signal-Only F0 is left unselected, the page shows
+    at most one plain note about it -- no separate debug block with sample
+    counts, dF/F metrics, or "production output" language."""
+    _setup_guided_local_raw_preview_ready(window, tmp_path, monkeypatch)
+    window._guided_preview_signal_f0_cb.setChecked(False)
+    window._guided_preview_generate_btn.click()
+
+    assert window._guided_local_signal_f0_preview_label.text() == (
+        "Signal-Only F0 was not included in this preview."
+    )
+    assert window._guided_local_signal_f0_preview_label.isHidden() is False
+
+    normal_text = _guided_correction_approach_normal_text(window)
+    lowered = normal_text.lower()
+    for forbidden in (
+        "sample count",
+        "minimum df/f",
+        "negative df/f",
+        "production output",
+        "does not write production",
+    ):
+        assert forbidden not in lowered
+
+
+def test_confirm_strategy_table_has_no_stale_wording_and_short_button(
+    window, tmp_path, monkeypatch
+):
+    """4J16k29 (H.4): the per-ROI confirm table must not use "stale"
+    wording, and its action button must be short enough not to force the
+    table wider than a normal button (the original wide label -- "Confirm
+    changed strategy for this ROI" -- was the reported cause of layout
+    stretching)."""
+    _setup_guided_local_raw_preview_ready(window, tmp_path, monkeypatch)
+    window._guided_preview_generate_btn.click()
+    rows = window._guided_local_preview_confirmation_rows
+    roi = next(iter(rows))
+    combo = rows[roi]["strategy_combo"]
+    combo.setCurrentIndex(combo.findData("global_linear_regression"))
+    rows[roi]["action_button"].click()
+
+    rows = window._guided_local_preview_confirmation_rows
+    assert rows[roi]["status_label"].text() == "Confirmed"
+
+    other_strategy = combo.findData("robust_global_event_reject")
+    combo.setCurrentIndex(other_strategy)
+    rows = window._guided_local_preview_confirmation_rows
+    status_text = rows[roi]["status_label"].text()
+    button_text = rows[roi]["action_button"].text()
+
+    assert "stale" not in status_text.lower()
+    assert status_text == "Selection changed. Confirm this method."
+    assert button_text == "Confirm method"
+    # The reported layout-stretch cause was specifically an overly wide
+    # button label; a short fixed phrase avoids it regardless of window size.
+    assert len(button_text) <= len("Confirm method")
+
+
+def test_correction_approach_technical_details_hide_raw_internals(
+    window, tmp_path, monkeypatch
+):
+    """4J16k29 (H.5): raw paths, adapter-local chunk ID, provenance, load
+    error, sample counts, and "strategy recommendation" must not appear in
+    the normal visible Correction Approach text -- only behind "Show
+    technical details"."""
+    _setup_guided_local_raw_preview_ready(window, tmp_path, monkeypatch)
+    window._guided_preview_generate_btn.click()
+
+    assert window._guided_preview_technical_details_group.isHidden() is True
+    normal_text = _guided_correction_approach_normal_text(window)
+    lowered = normal_text.lower()
+    for forbidden in (
+        "preview directory:",
+        "provenance:",
+        "adapter-local chunk id",
+        "load error:",
+        "strategy recommendation",
+    ):
+        assert forbidden not in lowered
+
+    # The same details remain reachable behind the toggle.
+    assert "Preview directory:" in window._guided_preview_artifacts_label.text()
+    assert "Provenance:" in window._guided_preview_artifacts_label.text()
 
 
 def test_correction_preview_report_failure_falls_back_to_folder(
