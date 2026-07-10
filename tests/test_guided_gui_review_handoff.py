@@ -8,6 +8,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
+from tests.terminal_run_fixtures import write_current_run
 from tests.test_guided_gui_run_execution_wiring import _result
 
 
@@ -25,15 +26,9 @@ def window(qapp):
 
 
 def _completed_candidate(tmp_path: Path) -> Path:
-    run_dir = tmp_path / "completed"
-    (run_dir / "Region0" / "summary").mkdir(parents=True)
-    (run_dir / "status.json").write_text(
-        json.dumps(
-            {"schema_version": 1, "phase": "final", "status": "success"}
-        ),
-        encoding="utf-8",
-    )
-    return run_dir
+    # A candidate the loader accepts must present the whole verified terminal
+    # set, not merely a success status.
+    return write_current_run(tmp_path / "completed", region="Region0")
 
 
 def _set_result(window, result) -> None:

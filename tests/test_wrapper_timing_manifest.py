@@ -13,6 +13,11 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from tools.run_full_pipeline_deliverables import main
+from tests.terminal_run_fixtures import (
+    BASE_CONFIG_PATH,
+    seed_wrapper_analysis_outputs,
+    seed_wrapper_deliverables,
+)
 
 @pytest.fixture
 def mock_run_dir(tmp_path):
@@ -28,37 +33,16 @@ def test_wrapper_timing_manifest_full_run_mocked(mock_run_dir, tmp_path):
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     config_file = tmp_path / "config.yaml"
-    config_file.write_text("sessions_per_hour: 1")
-    
-    # Mock data for session compute
-    phasic_out = mock_run_dir / "_analysis" / "phasic_out"
-    traces_dir = phasic_out / "traces"
-    traces_dir.mkdir(parents=True)
-    (traces_dir / "chunk_0000.csv").write_text("time_sec,Region0_deltaF\n0.0,0.0\n3600.0,1.0")
-    
-    # Mock phasic out so has_features is true
-    (phasic_out / "features").mkdir(parents=True)
-    (phasic_out / "features" / "features.csv").write_text("roi,chunk_id\nRegion0,0")
-    with h5py.File(phasic_out / "phasic_trace_cache.h5", "w") as f:
-        meta = f.create_group("meta")
-        meta.attrs["mode"] = "phasic"
-        meta.attrs["schema_version"] = "1"
-        meta.create_dataset("rois", data=np.array([b"Region0"]))
-        meta.create_dataset("chunk_ids", data=np.array([0], dtype=np.int64))
-        meta.create_dataset("source_files", data=np.array([b"chunk_0000.csv"]))
-        grp = f.create_group("roi/Region0/chunk_0")
-        t = np.array([0.0, 3600.0], dtype=float)
-        grp.create_dataset("time_sec", data=t)
-        grp.create_dataset("sig_raw", data=np.array([1.0, 1.1], dtype=float))
-        grp.create_dataset("uv_raw", data=np.array([0.5, 0.6], dtype=float))
-        grp.create_dataset("fit_ref", data=np.array([0.9, 1.0], dtype=float))
-        grp.create_dataset("delta_f", data=np.array([0.1, 0.1], dtype=float))
-        grp.create_dataset("dff", data=np.array([0.0, 0.1], dtype=float))
-    
-    # Also need tonic_out for plots
-    tonic_out = mock_run_dir / "_analysis" / "tonic_out"
-    tonic_out.mkdir(parents=True)
-    
+    config_file.write_text(BASE_CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # Seed the artifacts the mocked analysis subprocesses would really produce.
+    # The wrapper now refuses to finalize a run whose mandatory outputs are absent,
+    # so a mocked run must leave behind a real terminal artifact set.
+    seed_wrapper_analysis_outputs(mock_run_dir)
+    # The plot/table subprocesses are mocked too, so stand in for the per-ROI
+    # deliverables a real full run would have written.
+    seed_wrapper_deliverables(mock_run_dir, ["Region0"])
+
     args = [
         "tools/run_full_pipeline_deliverables.py",
         "--input", str(input_dir),
@@ -66,30 +50,21 @@ def test_wrapper_timing_manifest_full_run_mocked(mock_run_dir, tmp_path):
         "--config", str(config_file),
         "--format", "rwd",
         "--mode", "both",
+        "--sessions-per-hour", "1",
         "--overwrite"
     ]
-    
-    # Mock Config
-    mock_cfg = MagicMock()
-    mock_cfg.sessions_per_hour = 1
-    mock_cfg.event_signal = "dff"
-    mock_cfg.representative_session_index = 0
-    mock_cfg.preview_first_n = None
-    mock_cfg.smooth_window_s = 1.0
     
     # Mock discovery results
     mock_discovery = {
         "sessions": [{"id": "chunk_0000"}],
         "rois": ["Region0"]
     }
-    
+
     with patch("sys.argv", args), \
          patch("subprocess.check_call") as mock_run, \
-         patch("photometry_pipeline.config.Config.from_yaml", return_value=mock_cfg), \
          patch("photometry_pipeline.discovery.discover_inputs", return_value=mock_discovery), \
          patch("tools.run_full_pipeline_deliverables.validate_inputs"), \
-         patch("tools.run_full_pipeline_deliverables._cleanup_run_outputs_in_place"), \
-         patch("tools.run_full_pipeline_deliverables._ensure_root_run_report", return_value=True):
+         patch("tools.run_full_pipeline_deliverables._cleanup_run_outputs_in_place"):
         
         # Suppress EventEmitter real files if needed, but here we let it write to tmp
         try:

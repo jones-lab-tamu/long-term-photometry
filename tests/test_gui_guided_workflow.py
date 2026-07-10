@@ -26,6 +26,9 @@ from photometry_pipeline.guided_run_plan import (
     plan_export_json_text,
 )
 
+# An unstubbed modal blocks an unattended run on a dialog nobody can dismiss.
+pytestmark = pytest.mark.usefixtures("no_real_modals")
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -166,7 +169,10 @@ def _make_preview_completed_run(tmp_path):
     run_dir = tmp_path / "completed_preview"
     phasic_out = run_dir / "_analysis" / "phasic_out"
     phasic_out.mkdir(parents=True)
-    (run_dir / "run_report.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    (run_dir / "run_report.json").write_text(
+        json.dumps({"status": "success", "configuration": {}, "analytical_contract": {}}),
+        encoding="utf-8",
+    )
     (run_dir / "status.json").write_text(
         json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
         encoding="utf-8",
@@ -4303,7 +4309,10 @@ def test_guided_correction_preview_refresh_preserves_non_default_selection_with_
 def test_guided_diagnostics_reports_existing_completed_run_artifacts_read_only(window, tmp_path):
     run_dir = tmp_path / "completed"
     run_dir.mkdir()
-    (run_dir / "run_report.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    (run_dir / "run_report.json").write_text(
+        json.dumps({"status": "success", "configuration": {}, "analytical_contract": {}}),
+        encoding="utf-8",
+    )
     (run_dir / "status.json").write_text(
         json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
         encoding="utf-8",
@@ -4353,7 +4362,10 @@ def test_guided_diagnostics_loaded_run_without_recognized_artifacts_is_unavailab
 def test_guided_diagnostics_scope_loaded_artifacts_as_separate_from_active_setup(window, tmp_path):
     run_dir = tmp_path / "completed"
     run_dir.mkdir()
-    (run_dir / "run_report.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    (run_dir / "run_report.json").write_text(
+        json.dumps({"status": "success", "configuration": {}, "analytical_contract": {}}),
+        encoding="utf-8",
+    )
     input_dir = tmp_path / "active_input"
     input_dir.mkdir()
 
@@ -4379,7 +4391,10 @@ def test_guided_new_analysis_mode_skips_completed_run_diagnostic_scan(window, tm
     directory was large or on a slow/cloud-synced filesystem."""
     run_dir = tmp_path / "completed"
     run_dir.mkdir()
-    (run_dir / "run_report.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    (run_dir / "run_report.json").write_text(
+        json.dumps({"status": "success", "configuration": {}, "analytical_contract": {}}),
+        encoding="utf-8",
+    )
     (run_dir / "CH1" / "summary").mkdir(parents=True)
 
     window._current_run_dir = str(run_dir)

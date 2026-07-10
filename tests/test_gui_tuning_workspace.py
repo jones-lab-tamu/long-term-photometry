@@ -20,6 +20,9 @@ from photometry_pipeline.config import Config
 from photometry_pipeline.core.types import Chunk
 from photometry_pipeline.io.hdf5_cache import Hdf5TraceCacheWriter
 
+# An unstubbed modal blocks an unattended run on a dialog nobody can dismiss.
+pytestmark = pytest.mark.usefixtures("no_real_modals")
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -32,6 +35,23 @@ def window(qapp):
     yield w
     w.close()
     w.deleteLater()
+
+
+def _write_legacy_run_report(run_dir) -> None:
+    """The historical run-report shape that positively identifies a legacy run.
+
+    Status and manifest markers alone no longer establish that a run finished.
+    """
+    import os as _os
+    with open(_os.path.join(_os.fspath(run_dir), "run_report.json"), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "run_context": {"status": "success", "phase": "final"},
+                "configuration": {},
+                "analytical_contract": {},
+            },
+            f,
+        )
 
 
 def _make_completed_run_with_cache(
@@ -50,6 +70,8 @@ def _make_completed_run_with_cache(
         encoding="utf-8",
     )
     (run_dir / "MANIFEST.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    _write_legacy_run_report(run_dir)
+    _write_legacy_run_report(run_dir)
 
     cfg = Config()
     if with_config:
@@ -113,6 +135,8 @@ def _make_completed_run_with_quantized_preview_cache(tmp_path, *, lowpass_hz: fl
         encoding="utf-8",
     )
     (run_dir / "MANIFEST.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    _write_legacy_run_report(run_dir)
+    _write_legacy_run_report(run_dir)
 
     cfg = Config(
         target_fs_hz=20.0,
@@ -195,6 +219,8 @@ def _add_results_workspace_artifacts(run_dir) -> None:
                 "status": "success",
                 "phase": "final",
                 "run_context": {"status": "success", "phase": "final"},
+                "configuration": {},
+                "analytical_contract": {},
             },
             f,
         )
@@ -242,6 +268,7 @@ def test_tuning_workspace_availability_requires_prerequisites(window, tmp_path):
         json.dumps({"status": "success"}),
         encoding="utf-8",
     )
+    _write_legacy_run_report(run_dir_missing_phasic)
     window._current_run_dir = str(run_dir_missing_phasic)
     window._refresh_tuning_workspace_availability()
     assert not window._tuning_workspace_available
@@ -258,6 +285,7 @@ def test_tuning_workspace_availability_requires_prerequisites(window, tmp_path):
         json.dumps({"status": "success"}),
         encoding="utf-8",
     )
+    _write_legacy_run_report(run_dir_missing_cache)
     window._current_run_dir = str(run_dir_missing_cache)
     window._refresh_tuning_workspace_availability()
     assert not window._tuning_workspace_available
@@ -328,6 +356,7 @@ def test_open_results_missing_tuning_artifacts_reports_honest_reason(window, tmp
         json.dumps({"status": "success"}),
         encoding="utf-8",
     )
+    _write_legacy_run_report(run_dir)
     _add_results_workspace_artifacts(run_dir)
     monkeypatch.setattr(
         "gui.main_window.QFileDialog.getExistingDirectory",
@@ -359,7 +388,11 @@ def test_completed_run_dff_rerender_marker_off_uses_display_only_bundle(window, 
                     "run_profile": "full",
                     "sessions_per_hour": 1,
                     "timeline_anchor_mode": "civil",
-                }
+                    "status": "success",
+                    "phase": "final",
+                },
+                "configuration": {},
+                "analytical_contract": {},
             },
             f,
         )
@@ -446,7 +479,11 @@ def test_completed_run_dff_rerender_marker_on_copies_existing_dayplots(window, t
                     "run_profile": "full",
                     "sessions_per_hour": 1,
                     "timeline_anchor_mode": "civil",
-                }
+                    "status": "success",
+                    "phase": "final",
+                },
+                "configuration": {},
+                "analytical_contract": {},
             },
             f,
         )
@@ -515,7 +552,11 @@ def test_completed_run_dff_rerender_failure_keeps_critical_popup(window, tmp_pat
                     "run_profile": "full",
                     "sessions_per_hour": 1,
                     "timeline_anchor_mode": "civil",
-                }
+                    "status": "success",
+                    "phase": "final",
+                },
+                "configuration": {},
+                "analytical_contract": {},
             },
             f,
         )

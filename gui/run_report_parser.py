@@ -16,6 +16,10 @@ from photometry_pipeline.guided_completed_run_rejection_policy import (
     MALFORMED_GUIDED_DIAGNOSTIC_CACHE_METADATA,
     detect_guided_diagnostic_cache_candidate,
 )
+from photometry_pipeline.run_completion_contract import (
+    TERMINAL_SUCCESS_LEGACY,
+    classify_run_terminal_state,
+)
 
 
 def parse_run_report(report_path: str) -> Tuple[Dict[str, Any], str | None]:
@@ -159,10 +163,13 @@ def is_successful_completed_run_dir(run_dir: str) -> Tuple[bool, str]:
     """
     Determine whether run_dir represents a completed successful run.
 
-    Evidence precedence:
-      1) run_report.json explicitly indicates success/completion
-      2) status.json indicates schema_version=1, phase=final, status=success
-      3) MANIFEST.json status indicates success/completion
+    Acceptance is decided by the single terminal-completion contract in
+    photometry_pipeline.run_completion_contract: a current run must present one
+    coherent, verified terminal set (final success status, mandatory run report,
+    final manifest, all mandatory artifacts, matching run identity, verified
+    artifact identities). A run from an earlier version of the app is accepted
+    only when its historical run report positively identifies it; missing or
+    malformed metadata is corrupt, never legacy.
     """
     run_dir = os.path.realpath(run_dir)
     if not os.path.isdir(run_dir):
@@ -180,66 +187,21 @@ def is_successful_completed_run_dir(run_dir: str) -> Tuple[bool, str]:
     if has_conflict:
         return False, f"Directory contains conflicting metadata: {conflict_reason}"
 
-    # 1) run_report.json explicit success/completion metadata
-    report_path = os.path.join(run_dir, "run_report.json")
-    report, report_err = parse_run_report(report_path)
-    if report_err is None:
-        status_tokens = [
-            str(report.get("status", "")).strip().lower(),
-            str(report.get("run_status", "")).strip().lower(),
-            str(report.get("final_status", "")).strip().lower(),
-            str(report.get("result", "")).strip().lower(),
-        ]
-        phase_tokens = [
-            str(report.get("phase", "")).strip().lower(),
-            str(report.get("run_phase", "")).strip().lower(),
-            str(report.get("final_phase", "")).strip().lower(),
-        ]
-        success_tokens = {"success", "complete", "completed", "done"}
-        if any(tok in success_tokens for tok in status_tokens if tok):
-            if not any(phase_tokens) or any(tok in {"final", "complete", "completed", "done"} for tok in phase_tokens if tok):
-                return True, "run_report.json indicates a successful completed run."
+    classification = classify_run_terminal_state(run_dir)
+    if not classification.is_success:
+        return False, classification.reason
+    return True, classification.reason
 
-        run_ctx = report.get("run_context", {})
-        if isinstance(run_ctx, dict):
-            ctx_status = str(run_ctx.get("status", "")).strip().lower()
-            ctx_phase = str(run_ctx.get("phase", "")).strip().lower()
-            if ctx_status in success_tokens and (not ctx_phase or ctx_phase in {"final", "complete", "completed", "done"}):
-                return True, "run_report.json run_context indicates a successful completed run."
 
-    # 2) status.json terminal success contract
-    status_path = os.path.join(run_dir, "status.json")
-    status_data, status_err = _read_json_dict(status_path)
-    if status_err is None:
-        schema_ok = (status_data.get("schema_version") == 1)
-        phase_ok = str(status_data.get("phase", "")).strip().lower() == "final"
-        status_ok = str(status_data.get("status", "")).strip().lower() == "success"
-        if schema_ok and phase_ok and status_ok:
-            return True, "status.json indicates final success."
+def classify_completed_run_terminal_state(run_dir: str):
+    """Expose the full terminal classification (successful / failed / interrupted /
+    corrupted / legacy) for callers that must distinguish them."""
+    return classify_run_terminal_state(run_dir)
 
-    # 3) MANIFEST.json success/completion status
-    manifest_path = os.path.join(run_dir, "MANIFEST.json")
-    manifest, manifest_err = _read_json_dict(manifest_path)
-    if manifest_err is None:
-        manifest_status = str(manifest.get("status", "")).strip().lower()
-        if manifest_status in {"success", "complete", "completed"}:
-            return True, "MANIFEST.json indicates successful completion."
 
-    reasons = []
-    if report_err:
-        reasons.append(f"run_report.json: {report_err}")
-    else:
-        reasons.append("run_report.json present but does not explicitly report successful completion.")
-    if status_err:
-        reasons.append(f"status.json: {status_err}")
-    else:
-        reasons.append("status.json present but does not match terminal success contract (schema_version=1, phase=final, status=success).")
-    if manifest_err:
-        reasons.append(f"MANIFEST.json: {manifest_err}")
-    else:
-        reasons.append("MANIFEST.json present but status is not success/completed.")
-    reasons.append("Select a run directory that contains final-success metadata.")
-    return False, " | ".join(reasons)
+def completed_run_verification_is_unavailable(run_dir: str) -> bool:
+    """True when the run loads successfully but predates current verification."""
+    return classify_run_terminal_state(run_dir).state == TERMINAL_SUCCESS_LEGACY
 
 
 def get_preview_mode(report_data: Dict[str, Any]) -> bool:

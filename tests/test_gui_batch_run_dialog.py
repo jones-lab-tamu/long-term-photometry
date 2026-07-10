@@ -11,6 +11,7 @@ from gui.batch_run_dialog import BatchRunDialog, BatchRunWorker
 from gui.batch_spec import BatchDatasetRow
 from gui.main_window import MainWindow, RunnerState
 from gui.run_spec import RunSpec
+from tests.terminal_run_fixtures import write_current_run
 
 
 @pytest.fixture(scope="module")
@@ -61,12 +62,9 @@ def _detect_two_datasets(dialog: BatchRunDialog, tmp_path: Path) -> tuple[Path, 
 
 
 def _make_openable_run(run_dir: Path) -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "status.json").write_text(
-        json.dumps({"schema_version": 1, "phase": "final", "status": "success"}),
-        encoding="utf-8",
-    )
-    (run_dir / "Region0" / "summary").mkdir(parents=True)
+    # An openable run must present the whole verified terminal set, not merely a
+    # success status.
+    write_current_run(run_dir, region="Region0")
 
 
 def _wait_until(qapp, predicate, timeout_sec: float = 3.0) -> None:

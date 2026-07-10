@@ -5,6 +5,8 @@ Tests for RunReportViewer and run_report_parser dynamic discovery.
 import os
 import json
 import tempfile
+from pathlib import Path
+
 import pytest
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QPixmap
@@ -17,6 +19,7 @@ from gui.run_report_parser import (
 
 from PySide6.QtWidgets import QApplication
 from gui.run_report_viewer import RunReportViewer
+from tests.terminal_run_fixtures import write_current_run
 
 
 @pytest.fixture(scope="module")
@@ -114,17 +117,25 @@ def test_successful_completed_run_dir_rejects_artifacts_only():
             json.dump({"run_context": {"run_type": "full"}}, f)
         ok, reason = is_successful_completed_run_dir(tmpdir)
         assert ok is False
-        assert "does not explicitly report successful completion" in reason.lower()
+        assert "complete record of a finished run" in reason.lower()
 
 
-def test_successful_completed_run_dir_accepts_status_success():
-    """status.json final success should allow complete-state entry."""
+def test_successful_completed_run_dir_accepts_verified_terminal_set():
+    """A coherent current terminal set allows complete-state entry."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        write_current_run(Path(tmpdir) / "run")
+        ok, reason = is_successful_completed_run_dir(os.path.join(tmpdir, "run"))
+        assert ok is True
+        assert "verified" in reason
+
+
+def test_successful_completed_run_dir_rejects_status_success_alone():
+    """A success status with no report and no manifest verifies nothing."""
     with tempfile.TemporaryDirectory() as tmpdir:
         with open(os.path.join(tmpdir, "status.json"), "w", encoding="utf-8") as f:
             json.dump({"schema_version": 1, "phase": "final", "status": "success"}, f)
-        ok, reason = is_successful_completed_run_dir(tmpdir)
-        assert ok is True
-        assert "status.json" in reason
+        ok, _reason = is_successful_completed_run_dir(tmpdir)
+        assert ok is False
 
 
 def test_run_report_viewer_tab_discovery_is_explicit(qapp):

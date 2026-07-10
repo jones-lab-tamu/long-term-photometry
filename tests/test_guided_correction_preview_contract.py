@@ -17,7 +17,10 @@ def _make_completed_run(tmp_path: Path) -> Path:
     run_dir = tmp_path / "run"
     phasic_out = run_dir / "_analysis" / "phasic_out"
     phasic_out.mkdir(parents=True)
-    (run_dir / "run_report.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    (run_dir / "run_report.json").write_text(
+        json.dumps({"status": "success", "configuration": {}, "analytical_contract": {}}),
+        encoding="utf-8",
+    )
     (phasic_out / "phasic_trace_cache.h5").write_bytes(b"cache")
     (phasic_out / "config_used.yaml").write_text("dynamic_fit_mode: robust_global_event_reject\n", encoding="utf-8")
     return run_dir
@@ -242,7 +245,10 @@ def test_resolve_completed_run_preview_source_success(tmp_path):
 
 def test_resolve_completed_run_preview_source_fails_without_success_metadata(tmp_path):
     run_dir = _make_completed_run(tmp_path)
-    (run_dir / "run_report.json").write_text(json.dumps({"status": "failed"}), encoding="utf-8")
+    (run_dir / "run_report.json").write_text(
+        json.dumps({"status": "failed", "configuration": {}, "analytical_contract": {}}),
+        encoding="utf-8",
+    )
 
     result = resolve_completed_run_preview_source(run_dir)
 

@@ -15,6 +15,12 @@ import photometry_pipeline.guided_startup_claim as claim
 import photometry_pipeline.guided_startup_orchestration as orchestration
 import tools.run_full_pipeline_deliverables as wrapper
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
+from tests.terminal_run_fixtures import (
+    BASE_CONFIG_PATH,
+    seed_wrapper_deliverables,
+    write_current_run,
+    write_phasic_feature_outputs,
+)
 from gui.run_report_parser import (
     classify_completed_run_candidate,
     is_successful_completed_run_dir,
@@ -74,6 +80,19 @@ def _write_minimal_successful_phasic_output(output_dir: Path) -> None:
         ),
         encoding="utf-8",
     )
+    # A real phasic analysis always snapshots the configuration it ran with and
+    # always writes its feature outputs plus the per-ROI settings record beside
+    # them. The wrapper will not finalize a run whose mandatory outputs are
+    # missing, so the stub must leave behind what a real analysis leaves behind.
+    (output_dir / "config_used.yaml").write_text(
+        BASE_CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    write_phasic_feature_outputs(output_dir)
+
+    # The per-ROI plot and table subprocesses are stubbed too, so stand in for
+    # the deliverables a real full phasic run would have produced.
+    run_dir = output_dir.parents[1]
+    seed_wrapper_deliverables(run_dir, ["Region0"], tonic=False)
 
 
 def _completion_runner(monkeypatch):
@@ -295,10 +314,20 @@ def test_guided_review_shows_message_when_run_succeeded_but_no_regions(
     assert result.status == "wrapper_completed_needs_review_loading"
     assert classify_completed_run_candidate(str(run_dir))[0] is True
 
-    # Remove only the displayable region output. run_report.json,
-    # status.json, and MANIFEST.json are left untouched, so the run still
-    # genuinely reports successful completion.
+    # Rebuild the same folder as a coherent run whose profile promises no
+    # per-ROI deliverables. That, not a mutilated full run, is the real case for
+    # "successful but nothing to display": a full production run that lost its
+    # region outputs is corrupt, and must not reload as successful.
     shutil.rmtree(run_dir / "Region0")
+    write_current_run(
+        run_dir,
+        run_id=run_dir.name,
+        run_profile="tuning_prep",
+        run_type="tuning_prep",
+        traces_only=True,
+        features=False,
+        region="",
+    )
     assert is_successful_completed_run_dir(str(run_dir))[0] is True
     assert classify_completed_run_candidate(str(run_dir))[0] is False
 
@@ -619,3 +648,24 @@ def test_real_gui_path_reaches_loadable_completed_run_and_reviews_it(
     # Guided Run stays disabled until a fresh Validate/authorize cycle.
     assert window._guided_startup_transaction_request is None
     assert window._guided_run_btn.isEnabled() is False
+
+
+def test_full_run_that_lost_a_region_directory_no_longer_loads_as_successful(
+    window, allocation_case, monkeypatch, qapp
+):
+    """A full production run owes per-ROI deliverables. Losing them is corruption."""
+    request, _plan = allocation_case
+    _run_production_validation_update(window, request, monkeypatch)
+    runner, _calls = _completion_runner(monkeypatch)
+    window._guided_backend_execution_runner = runner
+
+    window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_run_execution_thread is None, timeout_s=60.0)
+
+    run_dir = Path(request.planned_allocated_run_dir)
+    assert is_successful_completed_run_dir(str(run_dir))[0] is True
+
+    shutil.rmtree(run_dir / "Region0")
+    ok, reason = is_successful_completed_run_dir(str(run_dir))
+    assert ok is False, reason
+    assert classify_completed_run_candidate(str(run_dir))[0] is False

@@ -89,6 +89,24 @@ try:
     from photometry_pipeline.guided_startup_transaction import (
         GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
     )
+    from photometry_pipeline.run_completion_contract import (
+        COMPLETION_KEY,
+        FAMILY_PHASIC_DAY_PLOTS,
+        FAMILY_PHASIC_TIMESERIES,
+        FAMILY_TONIC_OVERVIEW,
+        FAMILY_TONIC_TIMESERIES,
+        PROFILE_CONTINUOUS,
+        PROFILE_FULL_INTERMITTENT,
+        PROFILE_TUNING_PREP,
+        RunCompletionError,
+        build_continuous_window_index,
+        build_manifest_completion_block,
+        build_report_completion_block,
+        build_status_completion_block,
+        normalize_run_mode,
+        sha256_file,
+        verify_terminal_set_before_status,
+    )
 except ImportError:
     print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.", flush=True)
     raise SystemExit(1)
@@ -101,6 +119,26 @@ except ImportError:
 # Test-only in-process seam. It is not configurable from CLI and is inactive
 # in production. Tests use it to stop after initial status, before analysis.
 _GUIDED_TEST_STOP_AFTER_INITIAL_STATUS = None
+
+# Test-only in-process seam. Inactive in production. Failure-injection tests
+# call it at each named finalization checkpoint to assert that a crash there
+# can never leave a directory that reloads as a successful run.
+_TEST_FINALIZATION_HOOK = None
+
+
+def _finalization_checkpoint(name):
+    if _TEST_FINALIZATION_HOOK is not None:
+        _TEST_FINALIZATION_HOOK(name)
+
+
+# Optional artifacts recorded in the final manifest when present. Their absence
+# never blocks completion; they are listed so the manifest describes the whole
+# output package rather than only its mandatory core.
+OPTIONAL_MANIFEST_ARTIFACTS = [
+    "events.ndjson",
+    "config_effective.yaml",
+    "gui_run_spec.json",
+]
 
 
 def _utc_now_iso():
@@ -465,6 +503,53 @@ def _skip_plan_for_profile(run_profile: str, *, run_tonic_mode: bool, run_phasic
     }
 
 
+def _continuous_row_counts_from_writer(summary_result):
+    """Per-family, per-ROI window-row counts, as continuous_outputs reported them.
+
+    Read from the writer's own return value, never by re-scanning the output
+    directory, so the index describes what was written rather than what survived.
+    """
+    from photometry_pipeline.run_completion_contract import (
+        FAMILY_CONTINUOUS_PHASIC_WINDOW_SUMMARY,
+        FAMILY_CONTINUOUS_TONIC_WINDOW_SUMMARY,
+    )
+
+    counts = {}
+    for kind, family in (
+        ("phasic", FAMILY_CONTINUOUS_PHASIC_WINDOW_SUMMARY),
+        ("tonic", FAMILY_CONTINUOUS_TONIC_WINDOW_SUMMARY),
+    ):
+        sub = (summary_result or {}).get(kind) or {}
+        row_counts = sub.get("row_counts") or {}
+        counts[family] = {
+            str(roi): int(count)
+            for roi, count in row_counts.items()
+            if roi != "all_rois"
+        }
+    return counts
+
+
+def _regions_from_run_report(report_path):
+    """The ROI set an analysis declared it selected, as recorded in its run report.
+
+    This is the analysis's own statement of what it processed. It is never the
+    set of region directories that happen to exist, so it cannot be changed by
+    deleting a deliverable.
+    """
+    if not report_path or not os.path.exists(report_path):
+        return None
+    try:
+        rr = json.load(open(report_path, 'r'))
+        roi_sel = rr.get('roi_selection', {})
+        if roi_sel.get('selected_rois'):
+            return list(roi_sel['selected_rois'])
+        if roi_sel.get('discovered_rois'):
+            return list(roi_sel['discovered_rois'])
+    except Exception as e:
+        print(f"WARNING: Failed to read roi_selection from {report_path}: {e}", flush=True)
+    return None
+
+
 def _ensure_root_run_report(
     run_dir,
     phasic_out,
@@ -483,17 +568,23 @@ def _ensure_root_run_report(
     acquisition_mode_source=None,
     timeline_anchor_mode="civil",
     fixed_daily_anchor_clock=None,
+    run_id=None,
 ):
     """
     Ensure <run_dir>/run_report.json exists at root before terminal status.
     Ordered requirement for Step 8: Strict Ordering Gate.
+
+    When run_id is supplied the report is stamped with the completion contract it
+    satisfies, so a reader can tell a run produced by this build (which MUST have
+    a coherent terminal set) from a positively-identified historical run.
+
     Returns: bool (True if root run_report.json exists after check/copy).
     """
     if not run_dir or not os.path.isdir(run_dir):
         return False
-        
+
     report_path = os.path.join(run_dir, "run_report.json")
-    
+
     # Try to find a source if not at root
     if not os.path.exists(report_path):
         search_paths = []
@@ -501,11 +592,15 @@ def _ensure_root_run_report(
             search_paths.append(os.path.join(phasic_out, "run_report.json"))
         if tonic_out:
             search_paths.append(os.path.join(tonic_out, "run_report.json"))
-        
+
         for src in search_paths:
             if os.path.exists(src):
                 try:
-                    shutil.copy2(src, report_path)
+                    # Stage then replace: an interrupted copy must never leave a
+                    # truncated report where a complete one is expected.
+                    staged = report_path + ".tmp"
+                    shutil.copy2(src, staged)
+                    os.replace(staged, report_path)
                     if emitter:
                         emitter.emit("package", "done", f"Hardened copy: {os.path.basename(src)} -> root")
                     break
@@ -562,10 +657,15 @@ def _ensure_root_run_report(
                  repo.setdefault("run_mode_contract", {})
                  if isinstance(repo["run_mode_contract"], dict):
                      repo["run_mode_contract"]["intentional_skips"] = intentional_skips
-                 
-             with open(report_path, 'w') as f:
-                 json.dump(repo, f, indent=2)
-             
+
+             # Declare the completion contract this run is held to. Present on
+             # every terminal path (success, error, cancel) so a damaged current
+             # run is never silently downgraded to "legacy" on reload.
+             if run_id:
+                 repo["completion_contract"] = build_report_completion_block(run_id=run_id)
+
+             _atomic_write_json(report_path, repo)
+
              if emitter and sessions_per_hour_source:
                  emitter.emit(
                      "package",
@@ -1529,6 +1629,14 @@ def main():
     continuous_mode = bool(effective_acquisition_mode == "continuous")
     analysis_force_format = str(args.format)
     effective_traces_only = bool(args.traces_only or args.run_type == "tuning_prep")
+    # The ROIs this run actually processes. Populated once the analysis outputs
+    # declare them, and read at finalization to decide which per-ROI deliverables
+    # were owed. Never derived from the region directories on disk.
+    expected_rois = []
+    # Set when the continuous writer has run, together with the per-family window
+    # row counts it reported writing.
+    continuous_outputs_ran = False
+    continuous_row_counts = {}
     effective_skip_plan = _skip_plan_for_profile(
         args.run_type,
         run_tonic_mode=selected_tonic_mode,
@@ -1875,15 +1983,27 @@ def main():
     t0_status = time.time()
     status_path = os.path.join(run_dir, "status.json")
 
-    def _finalize_status(state="success", error_msg=None):
+    # Set the first time any terminal status is written, so a later handler
+    # cannot relabel an already-recorded outcome (an injected finalization
+    # failure must stay "error", not become "cancelled").
+    terminal_flags = {"written": False}
+
+    def _finalize_status(state="success", error_msg=None, completion=None):
         """Update and write status.json atomically with final state."""
         status_data["phase"] = "final"
         status_data["finished_utc"] = datetime.now(timezone.utc).isoformat()
         status_data["duration_sec"] = time.time() - t0_status
-        
+
         if error_msg:
             status_data["errors"].append(str(error_msg))
-            
+
+        # Only a verified terminal set carries the completion block. Its absence
+        # on a "success" status is itself a contradiction the loader rejects.
+        if completion is not None:
+            status_data[COMPLETION_KEY] = completion
+        else:
+            status_data.pop(COMPLETION_KEY, None)
+
         # Discover region dirs (any child dir except _analysis and hidden)
         if os.path.isdir(run_dir):
             try:
@@ -1898,6 +2018,7 @@ def main():
 
         status_data["status"] = state
         _write_status_json(status_path, status_data)
+        terminal_flags["written"] = True
 
     def _write_status_update(phase):
         """Perform a non-terminal status update with current duration."""
@@ -1905,6 +2026,182 @@ def main():
         status_data["status"] = "running"
         status_data["duration_sec"] = time.time() - t0_status
         _write_status_json(status_path, status_data)
+
+    def _skipped_deliverable_families():
+        """Deliverable families this run deliberately did not produce."""
+        families = set()
+        if effective_skip_plan:
+            for skipped in effective_skip_plan.get("skipped_outputs", []) or []:
+                path = str(skipped)
+                if "tonic_overview" in path:
+                    families.add(FAMILY_TONIC_OVERVIEW)
+                elif "tonic_df_timeseries" in path:
+                    families.add(FAMILY_TONIC_TIMESERIES)
+                elif "phasic_peak_rate_timeseries" in path or "phasic_auc_timeseries" in path:
+                    families.add(FAMILY_PHASIC_TIMESERIES)
+                elif "day_plots/" in path:
+                    families.add(FAMILY_PHASIC_DAY_PLOTS)
+        return sorted(families)
+
+    def _produced_deliverable_files():
+        """Per-ROI files this run wrote, recorded so the manifest describes the whole
+        package. Mandatory members are promoted to required by the contract itself;
+        the rest (extra day plots, session CSVs) stay optional."""
+        produced = []
+        for roi, record in (manifest.get("deliverables") or {}).items():
+            if not isinstance(record, dict):
+                continue
+            for rel in record.get("files", []) or []:
+                produced.append(f"{roi}/{rel}")
+        return produced
+
+    def _produced_continuous_files():
+        """Continuous outputs the writer reported producing, recorded as optional.
+
+        The mandatory window tables are promoted to required by the contract; the
+        plots are skippable when a column has no finite values, so they stay
+        optional.
+        """
+        outputs = status_data.get("continuous_outputs") or {}
+        produced = []
+        for key in ("summary_tables", "summary_plots", "trace_overview_plots"):
+            produced.extend(str(rel) for rel in outputs.get(key, []) or [])
+        return produced
+
+    def _execution_run_mode():
+        """What this run was asked to do and which phases it executed.
+
+        Nothing here is read back from an output file. Feature extraction runs
+        whenever a phasic analysis runs without --traces-only, and it always
+        writes features.csv plus the per-ROI settings record beside it, so its
+        absence is a real failure and can never excuse itself. The expected ROI
+        set is the set the wrapper actually processed, not whichever region
+        directories happen to exist at finalization.
+        """
+        if continuous_mode:
+            deliverable_profile = PROFILE_CONTINUOUS
+        elif tune_prep_light_mode:
+            deliverable_profile = PROFILE_TUNING_PREP
+        else:
+            deliverable_profile = PROFILE_FULL_INTERMITTENT
+
+        return normalize_run_mode(
+            run_profile=args.run_type,
+            run_type=effective_run_type,
+            acquisition_mode=effective_acquisition_mode,
+            traces_only=effective_traces_only,
+            phasic_analysis=bool(run_phasic_mode),
+            tonic_analysis=bool(run_tonic_mode),
+            feature_extraction_ran=bool(run_phasic_mode and not effective_traces_only),
+            deliverable_profile=deliverable_profile,
+            expected_rois=list(expected_rois),
+            skipped_deliverable_families=_skipped_deliverable_families(),
+            continuous_outputs_ran=bool(continuous_outputs_ran),
+        )
+
+    def _finalize_terminal_success():
+        """Write the terminal set in the only order that cannot lie.
+
+        1. mandatory artifacts are already on disk (analysis + deliverables done)
+        2. the run report is placed at the root and stamped with its contract
+        3. the final manifest is generated from the files that actually exist
+        4. the whole terminal set is validated
+        5. only then is the success status written, pinning the manifest
+
+        Any failure writes an error status and exits non-zero. The directory is
+        never left reloadable as a successful run.
+        """
+        emitter.emit("package", "start", "Finalizing run outputs")
+        _finalization_checkpoint("before_report_finalize")
+
+        report_ok = _ensure_root_run_report(
+            run_dir, phasic_out, tonic_out, emitter,
+            run_type=effective_run_type,
+            run_profile=args.run_type,
+            artifact_contract=effective_artifact_contract,
+            intentional_skips=effective_skip_plan,
+            sessions_per_hour=resolved_sessions_per_hour,
+            sessions_per_hour_source=sessions_per_hour_source,
+            acquisition_mode=effective_acquisition_mode,
+            continuous_window_sec=effective_continuous_window_sec,
+            continuous_step_sec=effective_continuous_step_sec,
+            allow_partial_final_window=effective_allow_partial_final_window,
+            acquisition_mode_source=acquisition_mode_source,
+            timeline_anchor_mode=args.timeline_anchor_mode,
+            fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
+            run_id=run_id,
+        )
+
+        terminal_error = ""
+        if not report_ok:
+            terminal_error = "mandatory run_report.json is missing at terminal finalize"
+        else:
+            try:
+                run_mode = _execution_run_mode()
+
+                t_mw, started_mw = _phase_start(status_data, "manifest_write", emitter=emitter)
+                emitter.emit("package", "start", "Writing final manifest")
+                manifest["timing"]["total_runtime_sec"] = time.perf_counter() - t0_total
+                # Raises if a mandatory output for this run mode is absent, so a
+                # final manifest can never be minted for an incomplete run.
+                continuous_index = (
+                    build_continuous_window_index(
+                        run_dir,
+                        run_mode=run_mode,
+                        row_counts_by_family=continuous_row_counts,
+                    )
+                    if continuous_outputs_ran
+                    else None
+                )
+                manifest[COMPLETION_KEY] = build_manifest_completion_block(
+                    run_dir,
+                    run_id=run_id,
+                    run_mode=run_mode,
+                    finalized_utc=_utc_now_iso(),
+                    optional_artifacts=(
+                        OPTIONAL_MANIFEST_ARTIFACTS
+                        + _produced_deliverable_files()
+                        + _produced_continuous_files()
+                    ),
+                    continuous_index=continuous_index,
+                )
+                _phase_done(status_data, manifest, "manifest_write", t_mw, started_mw, emitter=emitter)
+
+                t_fa, started_fa = _phase_start(status_data, "finalize_artifacts", emitter=emitter)
+                _phase_done(status_data, manifest, "finalize_artifacts", t_fa, started_fa, emitter=emitter)
+
+                _finalization_checkpoint("before_manifest_write")
+                _atomic_write_json(manifest_path, manifest)
+                _finalization_checkpoint("after_manifest_write")
+                emitter.emit("package", "done", "Manifest written")
+                _write_status_json(status_path, status_data)
+
+                terminal_error = verify_terminal_set_before_status(
+                    run_dir, run_id=run_id, run_mode=run_mode
+                )
+            except RunCompletionError as exc:
+                terminal_error = str(exc)
+
+        if terminal_error:
+            emitter.emit(
+                "package",
+                "error",
+                f"Run outputs are incomplete, so this run was not marked successful: {terminal_error}",
+                error_code="TERMINAL_VALIDATION_FAILED",
+            )
+            _finalize_status("error", error_msg=f"TERMINAL_VALIDATION_FAILED: {terminal_error}")
+            raise SystemExit(1)
+
+        _finalization_checkpoint("before_success_status")
+        _finalize_status(
+            "success",
+            completion=build_status_completion_block(
+                run_id=run_id,
+                manifest_sha256=sha256_file(manifest_path),
+            ),
+        )
+        _finalization_checkpoint("after_success_status")
+        emitter.emit("package", "done", "Run outputs finalized and verified")
 
     # Update status_data with resolved preview info before initial write
     status_data["run_type"] = effective_run_type
@@ -2136,6 +2433,17 @@ def main():
                 generate_continuous_trace_overview_plots,
             )
 
+            # The analyzed ROI set, as each analysis declared it. Frozen here,
+            # before any continuous deliverable is written, so a deleted table
+            # can never shrink what this run is held to.
+            expected_rois = (
+                (_regions_from_run_report(os.path.join(phasic_out, 'run_report.json'))
+                 if run_phasic_mode else None)
+                or (_regions_from_run_report(os.path.join(tonic_out, 'run_report.json'))
+                    if run_tonic_mode else None)
+                or []
+            )
+
             summary_result = generate_continuous_summary_tables(
                 run_dir,
                 tonic_out_dir=tonic_out if run_tonic_mode else None,
@@ -2143,6 +2451,8 @@ def main():
                 mode=str(args.mode),
                 logger=lambda msg: emitter.emit("continuous_outputs", "notice", str(msg)),
             )
+            continuous_outputs_ran = True
+            continuous_row_counts = _continuous_row_counts_from_writer(summary_result)
             status_data["continuous_outputs"] = {
                 "summary_tables_generated": bool(summary_result.get("summary_tables_generated", False)),
                 "summary_tables": list(summary_result.get("summary_tables", [])),
@@ -2282,61 +2592,8 @@ def main():
                 payload={"intermittent_only_outputs": INTERMITTENT_ONLY_OUTPUT_KEYS},
             )
 
-            t_phase, started_utc_phase = _phase_start(status_data, "manifest_write", emitter=emitter)
-            emitter.emit("package", "start", "Writing final manifest")
-            manifest["timing"]["total_runtime_sec"] = time.perf_counter() - t0_total
-            _atomic_write_json(manifest_path, manifest)
-            emitter.emit("package", "done", "Manifest written")
-            _phase_done(
-                status_data,
-                manifest,
-                "manifest_write",
-                t_phase,
-                started_utc_phase,
-                status_path=status_path,
-                emitter=emitter,
-            )
-
-            t_phase, started_utc_phase = _phase_start(status_data, "finalize_artifacts", emitter=emitter)
-            ok = _ensure_root_run_report(
-                run_dir,
-                phasic_out,
-                tonic_out,
-                emitter,
-                run_type=effective_run_type,
-                run_profile=args.run_type,
-                artifact_contract=effective_artifact_contract,
-                intentional_skips=effective_skip_plan,
-                sessions_per_hour=resolved_sessions_per_hour,
-                sessions_per_hour_source=sessions_per_hour_source,
-                acquisition_mode=effective_acquisition_mode,
-                continuous_window_sec=effective_continuous_window_sec,
-                continuous_step_sec=effective_continuous_step_sec,
-                allow_partial_final_window=effective_allow_partial_final_window,
-                acquisition_mode_source=acquisition_mode_source,
-                timeline_anchor_mode=args.timeline_anchor_mode,
-                fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
-            )
-            err_payload = None
-            if not ok:
-                err_payload = (
-                    "STRICT ORDERING VIOLATION: root run_report.json missing at terminal finalize"
-                )
-                emitter.emit("package", "error", err_payload)
-            _phase_done(
-                status_data,
-                manifest,
-                "finalize_artifacts",
-                t_phase,
-                started_utc_phase,
-                status_path=status_path,
-                emitter=emitter,
-            )
-
-            manifest["timing"]["total_runtime_sec"] = time.perf_counter() - t0_total
-            _atomic_write_json(manifest_path, manifest)
             substantive_work_completed = True
-            _finalize_status("success", error_msg=err_payload)
+            _finalize_terminal_success()
             emitter.emit("engine", "done", "Execution complete")
             emitter.close()
             return
@@ -2447,6 +2704,33 @@ def main():
         _write_status_update("plots")
         emitter.emit("plots", "start", "Generating per-ROI deliverables")
 
+        # Resolve the ROI set before it is used to classify per-ROI feature
+        # provenance below.
+        has_features = False
+        df_feat = None
+        regions = None
+        if run_phasic_mode:
+            feats_csv = os.path.join(phasic_out, 'features', 'features.csv')
+            has_features = os.path.exists(feats_csv)
+            if run_phasic_mode and has_features and not tune_prep_light_mode:
+                df_feat = pd.read_csv(feats_csv)
+                regions = sorted(df_feat['roi'].unique())
+            else:
+                regions = _regions_from_run_report(os.path.join(phasic_out, 'run_report.json'))
+
+        # Fallback to tonic report only when tonic mode ran.
+        if regions is None and run_tonic_mode:
+            regions = _regions_from_run_report(os.path.join(tonic_out, 'run_report.json'))
+
+        if regions is None:
+            regions = []
+            print("WARNING: Could not determine ROIs for packaging", flush=True)
+
+        manifest['regions'] = regions
+        # Freeze the analyzed ROI set now, while it is still derived from what the
+        # analysis reported, not from the deliverable directories it will fill.
+        expected_rois = list(regions)
+
         # Classify the run ONCE, before any ROI plot process is launched. A
         # current-contract run must carry a complete per-ROI record of the
         # settings actually consumed; a missing/invalid record fails the run
@@ -2481,42 +2765,6 @@ def main():
                 "Tuning-prep selective skipping enabled for nonessential outputs.",
                 payload=effective_skip_plan,
             )
-
-        def _regions_from_run_report(report_path):
-            if not report_path or not os.path.exists(report_path):
-                return None
-            try:
-                rr = json.load(open(report_path, 'r'))
-                roi_sel = rr.get('roi_selection', {})
-                if roi_sel.get('selected_rois'):
-                    return list(roi_sel['selected_rois'])
-                if roi_sel.get('discovered_rois'):
-                    return list(roi_sel['discovered_rois'])
-            except Exception as e:
-                print(f"WARNING: Failed to read roi_selection from {report_path}: {e}", flush=True)
-            return None
-
-        has_features = False
-        df_feat = None
-        regions = None
-        if run_phasic_mode:
-            feats_csv = os.path.join(phasic_out, 'features', 'features.csv')
-            has_features = os.path.exists(feats_csv)
-            if run_phasic_mode and has_features and not tune_prep_light_mode:
-                df_feat = pd.read_csv(feats_csv)
-                regions = sorted(df_feat['roi'].unique())
-            else:
-                regions = _regions_from_run_report(os.path.join(phasic_out, 'run_report.json'))
-
-        # Fallback to tonic report only when tonic mode ran.
-        if regions is None and run_tonic_mode:
-            regions = _regions_from_run_report(os.path.join(tonic_out, 'run_report.json'))
-
-        if regions is None:
-            regions = []
-            print("WARNING: Could not determine ROIs for packaging", flush=True)
-
-        manifest['regions'] = regions
 
         for roi in regions:
             t_roi = time.perf_counter()
@@ -3042,59 +3290,23 @@ def main():
             raise SystemExit(1)
 
         # ============================================================
-        # 8. Write Manifest (LAST, atomic)
+        # 8. Ordered, fail-closed finalization
+        #    (report -> final manifest -> terminal validation -> success)
         # ============================================================
-        t_phase, started_utc_phase = _phase_start(status_data, "manifest_write", emitter=emitter)
-        emitter.emit("package", "start", "Writing final manifest")
-        
-        # Add authoritative total runtime to manifest timing
-        manifest["timing"]["total_runtime_sec"] = time.perf_counter() - t0_total
-        
-        _atomic_write_json(manifest_path, manifest)
-        emitter.emit("package", "done", "Manifest written")
-        _phase_done(status_data, manifest, "manifest_write", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
-
-        # ============================================================
-        # 9. Finalize Artifacts (Strict Ordering Gate)
-        # ============================================================
-        t_phase, started_utc_phase = _phase_start(status_data, "finalize_artifacts", emitter=emitter)
-        # ============================================================
-        # Finalize Status (Success)
-        # ============================================================
-        ok = _ensure_root_run_report(run_dir, phasic_out, tonic_out, emitter,
-                                     run_type=effective_run_type,
-                                     run_profile=args.run_type,
-                                     artifact_contract=effective_artifact_contract,
-                                     intentional_skips=effective_skip_plan,
-                                     sessions_per_hour=resolved_sessions_per_hour,
-                                     sessions_per_hour_source=sessions_per_hour_source,
-                                     acquisition_mode=effective_acquisition_mode,
-                                     continuous_window_sec=effective_continuous_window_sec,
-                                     continuous_step_sec=effective_continuous_step_sec,
-                                     allow_partial_final_window=effective_allow_partial_final_window,
-                                     acquisition_mode_source=acquisition_mode_source,
-                                     timeline_anchor_mode=args.timeline_anchor_mode,
-                                     fixed_daily_anchor_clock=args.fixed_daily_anchor_clock)
-        err_payload = None
-        if not ok:
-            msg = "STRICT ORDERING VIOLATION: root run_report.json missing at terminal finalize"
-            emitter.emit("package", "error", msg)
-            err_payload = msg
-            
-        _phase_done(status_data, manifest, "finalize_artifacts", t_phase, started_utc_phase, status_path=status_path, emitter=emitter)
-
-        # Final manifest update for end-to-end timing
-        manifest["timing"]["total_runtime_sec"] = time.perf_counter() - t0_total
-        _atomic_write_json(manifest_path, manifest)
-
         substantive_work_completed = True
-        _finalize_status("success", error_msg=err_payload)
+        _finalize_terminal_success()
         emitter.emit("engine", "done", "Execution complete")
         emitter.close()
-    
+
     except SystemExit as se:
-        # Re-raise sys.exit calls (from check_cancel) WITHOUT catching them
-        # BUT ensure the ordering gate holds for cancellation too.
+        # A terminal state already on disk is the truth. Never relabel it: an
+        # injected finalization failure stays an error, and an applied-dF/F
+        # failure is not reported to the scientist as a cancellation.
+        if terminal_flags["written"]:
+            if emitter:
+                emitter.close()
+            raise se
+
         ok = False
         try:
              # Pass explicit variables as requested (not locals())
@@ -3111,10 +3323,11 @@ def main():
                                           allow_partial_final_window=effective_allow_partial_final_window,
                                           acquisition_mode_source=acquisition_mode_source,
                                           timeline_anchor_mode=args.timeline_anchor_mode,
-                                          fixed_daily_anchor_clock=args.fixed_daily_anchor_clock)
+                                          fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
+                                          run_id=run_id)
         except Exception:
              pass
-             
+
         err_payload = "CANCELLED"
         if not ok:
             msg = "STRICT ORDERING VIOLATION: root run_report.json missing at terminal finalize"
@@ -3130,6 +3343,20 @@ def main():
         # --- Catch-all Error Handling ---
         import traceback
         traceback.print_exc()
+
+        # A terminal status is only ever written after the whole terminal set has
+        # been validated. A later failure is post-run bookkeeping: report it, but
+        # never contradict an outcome already recorded on disk.
+        if terminal_flags["written"]:
+            if emitter:
+                emitter.emit(
+                    "engine",
+                    "error",
+                    f"Failure after the run's outcome was recorded: {e}",
+                    error_code="POST_TERMINAL_FAILURE",
+                )
+                emitter.close()
+            raise SystemExit(0 if status_data.get("status") == "success" else 1)
 
         # If substantive work already completed, avoid rewriting terminal status as
         # generic pipeline failure when the remaining error is status-write bookkeeping.
@@ -3166,7 +3393,8 @@ def main():
                                           allow_partial_final_window=effective_allow_partial_final_window,
                                           acquisition_mode_source=acquisition_mode_source,
                                           timeline_anchor_mode=args.timeline_anchor_mode,
-                                          fixed_daily_anchor_clock=args.fixed_daily_anchor_clock)
+                                          fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
+                                          run_id=run_id)
         except Exception:
              pass
 

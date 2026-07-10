@@ -8,6 +8,10 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from gui.main_window import MainWindow, RunnerState
 
+# An unstubbed modal blocks an unattended run on a dialog nobody can dismiss.
+pytestmark = pytest.mark.usefixtures("no_real_modals")
+
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -39,8 +43,17 @@ def _write_completed_markers(run_dir: Path) -> None:
         json.dumps({"schema_version": 1, "status": "success"}),
         encoding="utf-8",
     )
+    # The historical run-report shape positively identifies a run from an earlier
+    # version of the app. Status and manifest markers alone no longer establish
+    # that a run finished.
     (run_dir / "run_report.json").write_text(
-        json.dumps({"run_context": {"run_type": "full"}}),
+        json.dumps(
+            {
+                "run_context": {"run_type": "full", "status": "success", "phase": "final"},
+                "configuration": {},
+                "analytical_contract": {},
+            }
+        ),
         encoding="utf-8",
     )
 

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from photometry_pipeline.guided_diagnostic_cache import resolve_diagnostic_cache_source
+from photometry_pipeline.run_completion_contract import classify_run_terminal_state
 
 
 GUIDED_WORKFLOW_DIR_NAME = "_guided_workflow"
@@ -119,89 +120,14 @@ def _safe_id_component(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", text))
 
 
-def _read_json_dict(path: str) -> tuple[dict[str, Any] | None, str | None]:
-    if not os.path.exists(path):
-        return None, f"not found: {path}"
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except Exception as exc:
-        return None, f"unreadable JSON: {exc}"
-    if not isinstance(data, dict):
-        return None, "JSON root is not an object"
-    return data, None
-
-
 def _is_successful_completed_run_dir(run_dir: str) -> tuple[bool, str]:
-    """Backend-local completed-run success check; no GUI imports."""
-    if not os.path.isdir(run_dir):
-        return False, f"Directory does not exist: {run_dir}"
+    """Backend-local completed-run success check; no GUI imports.
 
-    success_tokens = {"success", "complete", "completed", "done"}
-
-    report_path = os.path.join(run_dir, "run_report.json")
-    report, report_err = _read_json_dict(report_path)
-    if report_err is None and report is not None:
-        status_tokens = [
-            str(report.get("status", "")).strip().lower(),
-            str(report.get("run_status", "")).strip().lower(),
-            str(report.get("final_status", "")).strip().lower(),
-            str(report.get("result", "")).strip().lower(),
-        ]
-        phase_tokens = [
-            str(report.get("phase", "")).strip().lower(),
-            str(report.get("run_phase", "")).strip().lower(),
-            str(report.get("final_phase", "")).strip().lower(),
-        ]
-        if any(token in success_tokens for token in status_tokens) and (
-            not any(phase_tokens)
-            or any(token in {"final", "complete", "completed", "done"} for token in phase_tokens)
-        ):
-            return True, "run_report.json indicates a successful completed run."
-
-        run_ctx = report.get("run_context", {})
-        if isinstance(run_ctx, dict):
-            ctx_status = str(run_ctx.get("status", "")).strip().lower()
-            ctx_phase = str(run_ctx.get("phase", "")).strip().lower()
-            if ctx_status in success_tokens and (
-                not ctx_phase or ctx_phase in {"final", "complete", "completed", "done"}
-            ):
-                return True, "run_report.json run_context indicates a successful completed run."
-
-    status_path = os.path.join(run_dir, "status.json")
-    status_data, status_err = _read_json_dict(status_path)
-    if status_err is None and status_data is not None:
-        schema_ok = status_data.get("schema_version") == 1
-        phase_ok = str(status_data.get("phase", "")).strip().lower() == "final"
-        status_ok = str(status_data.get("status", "")).strip().lower() == "success"
-        if schema_ok and phase_ok and status_ok:
-            return True, "status.json indicates final success."
-
-    manifest_path = os.path.join(run_dir, "MANIFEST.json")
-    manifest, manifest_err = _read_json_dict(manifest_path)
-    if manifest_err is None and manifest is not None:
-        manifest_status = str(manifest.get("status", "")).strip().lower()
-        if manifest_status in {"success", "complete", "completed"}:
-            return True, "MANIFEST.json indicates successful completion."
-
-    reasons = []
-    if report_err:
-        reasons.append(f"run_report.json: {report_err}")
-    else:
-        reasons.append("run_report.json present but does not explicitly report successful completion.")
-    if status_err:
-        reasons.append(f"status.json: {status_err}")
-    else:
-        reasons.append(
-            "status.json present but does not match terminal success contract "
-            "(schema_version=1, phase=final, status=success)."
-        )
-    if manifest_err:
-        reasons.append(f"MANIFEST.json: {manifest_err}")
-    else:
-        reasons.append("MANIFEST.json present but status is not success/completed.")
-    reasons.append("Select a run directory that contains final-success metadata.")
-    return False, " | ".join(reasons)
+    Delegates to the single terminal-completion contract so this gate cannot
+    drift from the completed-run loader and admit a run the loader would reject.
+    """
+    classification = classify_run_terminal_state(run_dir)
+    return classification.is_success, classification.reason
 
 
 def make_signal_only_f0_diagnostic_id(

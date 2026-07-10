@@ -13,13 +13,16 @@ from gui.run_report_parser import (
     is_successful_completed_run_dir,
     is_preflight_or_ineligible,
     classify_completed_run_candidate,
+    classify_completed_run_terminal_state,
 )
+from photometry_pipeline.run_completion_contract import TERMINAL_CORRUPTED
 from photometry_pipeline.guided_diagnostic_cache import (
     DIAGNOSTIC_CACHE_ARTIFACT_FILENAME,
     DIAGNOSTIC_CACHE_PROVENANCE_FILENAME,
     DIAGNOSTIC_CACHE_PURPOSE,
     DIAGNOSTIC_CACHE_SCHEMA_VERSION,
 )
+from tests.terminal_run_fixtures import legacy_run_report, write_current_run
 
 # Call-chain testing for the actual completed-run acceptance path
 class MockMainWindow:
@@ -33,6 +36,24 @@ def _write_json(path: Path, data: dict) -> None:
 def _write_region_deliverable(run_dir: Path, region_name: str, subfolder: str = "summary") -> None:
     sub = run_dir / region_name / subfolder
     sub.mkdir(parents=True, exist_ok=True)
+
+
+def _write_legacy_report(run_dir: Path, run_context: dict | None = None, **extra: object) -> None:
+    """A run report with the historical shape that positively identifies a legacy run.
+
+    Bare metadata is no longer enough: a directory that cannot be positively
+    identified as either a current or a historical run is corrupt, not legacy.
+    """
+    report = legacy_run_report(**extra)
+    if run_context:
+        report["run_context"].update(run_context)
+    _write_json(run_dir / "run_report.json", report)
+
+
+def _write_legacy_success(run_dir: Path, region: str = "Region0") -> None:
+    _write_legacy_report(run_dir, {"status": "success", "phase": "final"})
+    _write_json(run_dir / "status.json", {"schema_version": 1, "phase": "final", "status": "success"})
+    _write_region_deliverable(run_dir, region, "summary")
 
 
 def _diagnostic_cache_artifact(run_dir: Path, **overrides: object) -> dict:
@@ -77,37 +98,48 @@ def _write_diagnostic_cache_metadata(
 
 # 1. Positive Acceptance Tests (protecting Full Control compatibility)
 
-def test_positive_run_report_success(tmp_path: Path):
-    run_dir = tmp_path / "run_report_success"
-    # Positive run_report.json fixture includes explicit phase final
-    _write_json(run_dir / "run_report.json", {"run_context": {"status": "success", "phase": "final"}})
-    _write_region_deliverable(run_dir, "Region0", "summary")
-    
+def test_positive_current_terminal_set(tmp_path: Path):
+    """A run from this build is accepted only as one coherent, verified terminal set."""
+    run_dir = write_current_run(tmp_path / "current_run", region="Region0")
+
     ok, reason = classify_completed_run_candidate(str(run_dir))
     assert ok is True
-    assert "run_report.json" in reason
+    assert "verified" in reason
 
-def test_positive_status_json_success(tmp_path: Path):
+
+def test_positive_legacy_run_report_success(tmp_path: Path):
+    run_dir = tmp_path / "run_report_success"
+    _write_legacy_report(run_dir, {"status": "success", "phase": "final"})
+    _write_region_deliverable(run_dir, "Region0", "summary")
+
+    ok, reason = classify_completed_run_candidate(str(run_dir))
+    assert ok is True
+    assert "earlier version" in reason
+
+
+def test_status_json_success_alone_is_not_a_completed_run(tmp_path: Path):
+    """status.json alone cannot establish success: no report, no manifest, nothing verified."""
     run_dir = tmp_path / "status_json_success"
     _write_json(run_dir / "status.json", {"schema_version": 1, "phase": "final", "status": "success"})
     _write_region_deliverable(run_dir, "Region0", "day_plots")
-    
-    ok, reason = classify_completed_run_candidate(str(run_dir))
-    assert ok is True
-    assert "status.json" in reason
 
-def test_positive_manifest_json_success(tmp_path: Path):
+    ok, reason = classify_completed_run_candidate(str(run_dir))
+    assert ok is False
+    assert classify_completed_run_terminal_state(str(run_dir)).state == TERMINAL_CORRUPTED
+
+
+def test_manifest_json_success_alone_is_not_a_completed_run(tmp_path: Path):
     run_dir = tmp_path / "manifest_json_success"
     _write_json(run_dir / "MANIFEST.json", {"status": "success"})
     _write_region_deliverable(run_dir, "Region0", "tables")
-    
+
     ok, reason = classify_completed_run_candidate(str(run_dir))
-    assert ok is True
-    assert "MANIFEST.json" in reason
+    assert ok is False
+
 
 def test_positive_supplemental_metadata_allowed(tmp_path: Path):
     run_dir = tmp_path / "supplemental_metadata"
-    _write_json(run_dir / "run_report.json", {"run_context": {"status": "success"}})
+    _write_legacy_report(run_dir, {"status": "success"})
     _write_region_deliverable(run_dir, "Region0", "summary")
     
     # Supplemental metadata files
@@ -120,7 +152,7 @@ def test_positive_supplemental_metadata_allowed(tmp_path: Path):
 
 def test_positive_multiple_regions(tmp_path: Path):
     run_dir = tmp_path / "multiple_regions"
-    _write_json(run_dir / "run_report.json", {"run_context": {"status": "success"}})
+    _write_legacy_report(run_dir, {"status": "success"})
     _write_region_deliverable(run_dir, "Region0", "summary")
     _write_region_deliverable(run_dir, "Region1", "tables")
     
@@ -129,7 +161,7 @@ def test_positive_multiple_regions(tmp_path: Path):
 
 def test_positive_minimally_acceptable_region(tmp_path: Path):
     run_dir = tmp_path / "minimal_region"
-    _write_json(run_dir / "run_report.json", {"run_context": {"status": "success"}})
+    _write_legacy_report(run_dir, {"status": "success"})
     _write_region_deliverable(run_dir, "Region0", "tables")
     
     ok, reason = classify_completed_run_candidate(str(run_dir))
@@ -170,7 +202,7 @@ def test_negative_regions_without_success_metadata(tmp_path: Path):
 
 def test_negative_success_metadata_without_regions(tmp_path: Path):
     run_dir = tmp_path / "metadata_no_regions"
-    _write_json(run_dir / "run_report.json", {"run_context": {"status": "success"}})
+    _write_legacy_report(run_dir, {"status": "success"})
     
     ok, reason = classify_completed_run_candidate(str(run_dir))
     assert ok is False
@@ -214,7 +246,7 @@ def test_negative_unsupported_schema_version(tmp_path: Path):
 def test_preflight_marker_file_rejection(tmp_path: Path):
     run_dir = tmp_path / "preflight_file_marker"
     # Even with successful production-looking metadata and region deliverables
-    _write_json(run_dir / "run_report.json", {"run_context": {"status": "success"}})
+    _write_legacy_report(run_dir, {"status": "success"})
     _write_region_deliverable(run_dir, "Region0", "summary")
     
     # Create marker file
@@ -256,21 +288,20 @@ def test_run_report_preflight_rejection(tmp_path: Path):
 
 def test_actual_loader_path_rejection_of_preflight(tmp_path: Path):
     run_dir = tmp_path / "actual_path_preflight_rejection"
-    # Valid output structure
-    _write_json(run_dir / "status.json", {"schema_version": 1, "phase": "final", "status": "success"})
-    _write_region_deliverable(run_dir, "Region0", "summary")
-    
+    _write_legacy_success(run_dir)
+
     # Assert accepted normally
     ok, reason = MockMainWindow()._is_openable_completed_results_dir(str(run_dir))
     assert ok is True
-    
+
     # Add preflight file marker
     (run_dir / "preflight.manifest").write_text("{}", encoding="utf-8")
-    
+
     # Assert rejected by actual loader path
     ok, reason = MockMainWindow()._is_openable_completed_results_dir(str(run_dir))
     assert ok is False
     assert "non-production/completed-run-ineligible" in reason
+
 
 def test_reserved_rejection_markers_never_cause_acceptance(tmp_path: Path):
     run_dir = tmp_path / "rejection_markers_only"
@@ -285,12 +316,12 @@ def test_reserved_rejection_markers_never_cause_acceptance(tmp_path: Path):
 
 def test_existing_valid_full_control_outputs_remain_accepted(tmp_path: Path):
     run_dir = tmp_path / "valid_full_control_output"
-    _write_json(run_dir / "status.json", {"schema_version": 1, "phase": "final", "status": "success"})
-    _write_region_deliverable(run_dir, "Region0", "summary")
-    
+    _write_legacy_success(run_dir)
+
     # No Guided preflight tags. Must load successfully.
     ok, reason = MockMainWindow()._is_openable_completed_results_dir(str(run_dir))
     assert ok is True
+
 
 # 5. Read-Only / No-Side-Effect Tests
 
@@ -304,7 +335,7 @@ def _get_dir_snapshot(path: Path) -> dict:
 
 def test_loader_has_no_side_effects(tmp_path: Path):
     run_dir = tmp_path / "side_effects_test"
-    _write_json(run_dir / "run_report.json", {"run_context": {"status": "success"}})
+    _write_legacy_report(run_dir, {"status": "success"})
     _write_region_deliverable(run_dir, "Region0", "summary")
     
     # Capture snapshot before running classification
@@ -324,7 +355,7 @@ def test_loader_has_no_side_effects(tmp_path: Path):
 
 def test_conflict_run_report_success_status_failed(tmp_path: Path):
     run_dir = tmp_path / "conflict_1"
-    _write_json(run_dir / "run_report.json", {"run_context": {"status": "success"}})
+    _write_legacy_report(run_dir, {"status": "success"})
     _write_json(run_dir / "status.json", {"schema_version": 1, "phase": "final", "status": "failed"})
     _write_region_deliverable(run_dir, "Region0", "summary")
     
@@ -334,7 +365,7 @@ def test_conflict_run_report_success_status_failed(tmp_path: Path):
 
 def test_conflict_run_report_success_status_active(tmp_path: Path):
     run_dir = tmp_path / "conflict_2"
-    _write_json(run_dir / "run_report.json", {"run_context": {"status": "success"}})
+    _write_legacy_report(run_dir, {"status": "success"})
     _write_json(run_dir / "status.json", {"schema_version": 1, "phase": "active", "status": "success"})
     _write_region_deliverable(run_dir, "Region0", "summary")
     
@@ -354,7 +385,7 @@ def test_conflict_status_success_manifest_failed(tmp_path: Path):
 
 def test_conflict_run_report_success_manifest_failed(tmp_path: Path):
     run_dir = tmp_path / "conflict_4"
-    _write_json(run_dir / "run_report.json", {"run_context": {"status": "success"}})
+    _write_legacy_report(run_dir, {"status": "success"})
     _write_json(run_dir / "MANIFEST.json", {"status": "failed"})
     _write_region_deliverable(run_dir, "Region0", "summary")
     
@@ -363,36 +394,40 @@ def test_conflict_run_report_success_manifest_failed(tmp_path: Path):
     assert "conflicting metadata" in reason
 
 def test_status_success_missing_others(tmp_path: Path):
+    """A success status with no run report and no manifest verifies nothing."""
     run_dir = tmp_path / "missing_others_1"
     _write_json(run_dir / "status.json", {"schema_version": 1, "phase": "final", "status": "success"})
     _write_region_deliverable(run_dir, "Region0", "summary")
-    
+
     ok, reason = classify_completed_run_candidate(str(run_dir))
-    assert ok is True
+    assert ok is False
+
 
 def test_run_report_success_missing_others(tmp_path: Path):
     run_dir = tmp_path / "missing_others_2"
-    _write_json(run_dir / "run_report.json", {"run_context": {"status": "success"}})
+    _write_legacy_report(run_dir, {"status": "success"})
     _write_region_deliverable(run_dir, "Region0", "summary")
-    
+
     ok, reason = classify_completed_run_candidate(str(run_dir))
     assert ok is True
 
+
 def test_corrupted_run_report_status_success(tmp_path: Path):
+    """A damaged run report is corruption, never a reason to fall back on status.json."""
     run_dir = tmp_path / "corrupt_report"
     run_dir.mkdir()
     (run_dir / "run_report.json").write_text("{corrupt json}", encoding="utf-8")
     _write_json(run_dir / "status.json", {"schema_version": 1, "phase": "final", "status": "success"})
     _write_region_deliverable(run_dir, "Region0", "summary")
-    
-    # Intended compatibility: skips corrupt run_report and succeeds based on status.json
+
     ok, reason = classify_completed_run_candidate(str(run_dir))
-    assert ok is True
-    assert "status.json" in reason
+    assert ok is False
+    assert classify_completed_run_terminal_state(str(run_dir)).state == TERMINAL_CORRUPTED
+
 
 def test_preflight_marker_with_successful_metadata_replaces_all(tmp_path: Path):
     run_dir = tmp_path / "preflight_vs_success"
-    _write_json(run_dir / "run_report.json", {"run_context": {"status": "success"}})
+    _write_legacy_report(run_dir, {"status": "success"})
     _write_region_deliverable(run_dir, "Region0", "summary")
     # Preflight marker tag
     (run_dir / "preflight.manifest").write_text("{}", encoding="utf-8")
@@ -404,7 +439,7 @@ def test_preflight_marker_with_successful_metadata_replaces_all(tmp_path: Path):
 
 def test_actual_open_results_path_rejects_conflict(tmp_path: Path):
     run_dir = tmp_path / "actual_path_conflict"
-    _write_json(run_dir / "run_report.json", {"run_context": {"status": "success"}})
+    _write_legacy_report(run_dir, {"status": "success"})
     _write_json(run_dir / "status.json", {"schema_version": 1, "phase": "final", "status": "failed"})
     _write_region_deliverable(run_dir, "Region0", "summary")
     

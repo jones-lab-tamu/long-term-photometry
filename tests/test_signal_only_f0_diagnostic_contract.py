@@ -23,8 +23,17 @@ def _make_completed_run(tmp_path: Path, *, successful: bool = True) -> Path:
     (phasic / "phasic_trace_cache.h5").write_bytes(b"cache")
     (phasic / "config_used.yaml").write_text("sample_rate_hz: 20\n", encoding="utf-8")
     status = "success" if successful else "failed"
+    # The historical run-report shape positively identifies a legacy run; a bare
+    # status marker is no longer accepted as evidence a run finished.
     (run_dir / "run_report.json").write_text(
-        json.dumps({"status": status, "phase": "final"}),
+        json.dumps(
+            {
+                "status": status,
+                "phase": "final",
+                "configuration": {},
+                "analytical_contract": {},
+            }
+        ),
         encoding="utf-8",
     )
     return run_dir
@@ -136,7 +145,7 @@ def test_completed_run_source_resolver_rejects_unsuccessful_run(tmp_path):
 
     assert result.ok is False
     assert result.code == "completed_run_not_successful"
-    assert "successful" in result.reason or "success" in result.reason
+    assert "finished with an error" in result.reason
 
 
 def test_completed_run_source_resolver_reports_missing_cache(tmp_path):

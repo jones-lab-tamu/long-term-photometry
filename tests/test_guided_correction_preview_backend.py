@@ -160,7 +160,12 @@ def _make_completed_run(tmp_path: Path, *, missing_field: str | None = None) -> 
     run_dir = tmp_path / "run"
     phasic_out = run_dir / "_analysis" / "phasic_out"
     phasic_out.mkdir(parents=True)
-    (run_dir / "run_report.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+    (run_dir / "run_report.json").write_text(
+        json.dumps(
+            {"status": "success", "configuration": {}, "analytical_contract": {}}
+        ),
+        encoding="utf-8",
+    )
     (phasic_out / "config_used.yaml").write_text(
         "\n".join(
             [
