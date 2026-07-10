@@ -9,12 +9,14 @@ feature-detection settings, not from different input data.
 import json
 import os
 import shutil
+import time
 import unittest
 
 import numpy as np
 import pandas as pd
 
 from photometry_pipeline.config import Config
+from photometry_pipeline.feature_event_config import FEATURE_EVENT_CONFIG_FIELDS
 from photometry_pipeline.pipeline import Pipeline
 
 
@@ -56,8 +58,18 @@ class TestPipelinePerRoiFeatureSettings(unittest.TestCase):
         self.config.allow_partial_final_chunk = True
 
     def tearDown(self):
-        if os.path.exists(self.test_dir):
-            shutil.rmtree(self.test_dir)
+        # On Windows a freshly written output file can still be held briefly by
+        # an external scanner, making rmtree raise WinError 32. Retry rather
+        # than fail an otherwise-passing test on a filesystem race.
+        for attempt in range(5):
+            if not os.path.exists(self.test_dir):
+                return
+            try:
+                shutil.rmtree(self.test_dir)
+                return
+            except PermissionError:
+                time.sleep(0.2 * (attempt + 1))
+        shutil.rmtree(self.test_dir, ignore_errors=True)
 
     def _run(self, out_name, **pipeline_kwargs):
         pipe = Pipeline(self.config, **pipeline_kwargs)
@@ -98,36 +110,72 @@ class TestPipelinePerRoiFeatureSettings(unittest.TestCase):
             feats_global.loc["Region1", "peak_count"],
         )
 
-    def test_no_provenance_file_written_when_not_supplied(self):
+    def test_default_only_run_still_writes_complete_per_roi_provenance(self):
+        """4J16k39b contract change: EVERY feature-extracting run records the
+        settings actually consumed for every analyzed ROI, including a
+        Default-only run. Previously no file was written, which made absence
+        ambiguous between 'Default-only' and 'legacy run' -- the defect this
+        task fixes. Absence must now mean only 'legacy'."""
         out, _ = self._run("out_no_provenance")
 
         provenance_path = os.path.join(out, "features", "feature_event_provenance.json")
-        self.assertFalse(os.path.exists(provenance_path))
+        self.assertTrue(os.path.exists(provenance_path))
+        with open(provenance_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
 
-    def test_provenance_file_written_when_per_roi_provenance_supplied(self):
+        self.assertEqual(payload["schema_version"], "guided_feature_event_provenance.v3")
+        by_roi = {entry["roi"]: entry for entry in payload["rois"]}
+        self.assertEqual(set(by_roi), {"Region1", "Region2"})
+        for entry in by_roi.values():
+            self.assertEqual(entry["source"], "default")
+            # No fake Custom entries are invented for a Default-only run.
+            self.assertEqual(entry["override_config_fields"], {})
+            # Complete effective settings, taken from the Config actually used.
+            self.assertEqual(
+                set(entry["effective_config_fields"]), FEATURE_EVENT_CONFIG_FIELDS
+            )
+            self.assertEqual(
+                entry["effective_config_fields"]["peak_threshold_k"],
+                self.config.peak_threshold_k,
+            )
+            self.assertTrue(entry["effective_config_digest"])
+
+        # The explicit contract signal is stamped into run_report.json, so a
+        # consumer never has to infer the contract from file presence.
+        with open(os.path.join(out, "run_report.json"), "r", encoding="utf-8") as f:
+            report = json.load(f)
+        self.assertEqual(
+            report["feature_event_provenance"]["contract_version"],
+            "feature_event_provenance.v3",
+        )
+
+    def test_provenance_is_generated_from_the_configs_actually_used(self):
+        """4J16k39b: effective_config_fields must be read off the Config objects
+        Pipeline actually used, NOT copied from the descriptive dict a caller
+        passed in. Here the caller's dict deliberately claims settings that
+        disagree with the real per-ROI Config; the real Config must win."""
+        custom_cfg = Config()
+        custom_cfg.peak_threshold_method = "percentile"
+        custom_cfg.peak_threshold_percentile = 1.0
+        custom_cfg.peak_min_prominence_k = 0.0
+        custom_cfg.peak_min_width_sec = 0.0
+
         out, _ = self._run(
             "out_with_provenance",
+            per_roi_feature_config={"Region1": custom_cfg},
             per_roi_feature_provenance={
                 "Region1": {
                     "source": "override",
                     "feature_event_profile_id": "custom-region1",
-                    # override_config_fields may be sparse (only what the
-                    # profile explicitly set); effective_config_fields must
-                    # be the complete settings actually used.
                     "override_config_fields": {"peak_threshold_method": "percentile"},
-                    "effective_config_fields": {
-                        "peak_threshold_method": "percentile",
-                        "peak_min_distance_sec": 1.0,
-                    },
+                    # Deliberately wrong/misleading: must be ignored.
+                    "effective_config_fields": {"peak_threshold_k": 999.0},
                 },
                 "Region2": {
                     "source": "default",
                     "feature_event_profile_id": "feature-profile-1",
-                    "override_config_fields": {"peak_threshold_method": "mean_std"},
-                    "effective_config_fields": {
-                        "peak_threshold_method": "mean_std",
-                        "peak_min_distance_sec": 1.0,
-                    },
+                    "override_config_fields": {},
+                    "effective_config_fields": {"peak_threshold_k": 999.0},
                 },
             },
         )
@@ -137,21 +185,44 @@ class TestPipelinePerRoiFeatureSettings(unittest.TestCase):
         with open(provenance_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
 
-        self.assertEqual(payload["schema_version"], "guided_feature_event_provenance.v2")
+        self.assertEqual(payload["schema_version"], "guided_feature_event_provenance.v3")
         by_roi = {entry["roi"]: entry for entry in payload["rois"]}
+
+        # Source is derived from per_roi_feature_config membership, not the dict.
         self.assertEqual(by_roi["Region1"]["source"], "override")
+        self.assertEqual(by_roi["Region2"]["source"], "default")
         self.assertEqual(by_roi["Region1"]["feature_event_profile_id"], "custom-region1")
+
+        # The sparse user override is carried through descriptively.
         self.assertEqual(
             by_roi["Region1"]["override_config_fields"],
             {"peak_threshold_method": "percentile"},
         )
-        # Provenance must not under-report: effective_config_fields carries
-        # the complete settings used, including fields the sparse override
-        # never mentioned (peak_min_distance_sec here).
-        self.assertEqual(
-            by_roi["Region1"]["effective_config_fields"]["peak_min_distance_sec"], 1.0
+
+        # Effective settings come from the real Config objects, so the caller's
+        # bogus peak_threshold_k=999.0 never appears.
+        r1 = by_roi["Region1"]["effective_config_fields"]
+        r2 = by_roi["Region2"]["effective_config_fields"]
+        self.assertEqual(set(r1), FEATURE_EVENT_CONFIG_FIELDS)
+        self.assertEqual(r1["peak_threshold_method"], "percentile")
+        self.assertEqual(r1["peak_threshold_percentile"], 1.0)
+        self.assertNotEqual(r1["peak_threshold_k"], 999.0)
+        self.assertEqual(r2["peak_threshold_method"], self.config.peak_threshold_method)
+        self.assertNotEqual(r2["peak_threshold_k"], 999.0)
+
+        # Digests are deterministic and reflect the recorded settings.
+        from photometry_pipeline.feature_event_provenance import (
+            compute_feature_config_digest,
         )
-        self.assertEqual(by_roi["Region2"]["source"], "default")
+
+        self.assertEqual(
+            by_roi["Region1"]["effective_config_digest"],
+            compute_feature_config_digest(r1),
+        )
+        self.assertNotEqual(
+            by_roi["Region1"]["effective_config_digest"],
+            by_roi["Region2"]["effective_config_digest"],
+        )
 
 
 if __name__ == "__main__":

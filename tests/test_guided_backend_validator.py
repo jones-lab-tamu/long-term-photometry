@@ -17,6 +17,23 @@ _B = "b" * 64
 _C = "c" * 64
 _CAPABILITY = "guided_backend_validator.test.v1"
 
+# The complete set of feature-detection settings a confirmed Guided Step 5
+# profile carries. 4J16k39a serializes exactly these into the production base
+# Config, so tests must model a complete profile.
+CONFIRMED_FEATURE_PROFILE_VALUES = {
+    "event_signal": "dff",
+    "signal_excursion_polarity": "positive",
+    "peak_threshold_method": "mean_std",
+    "peak_threshold_k": 2.5,
+    "peak_threshold_percentile": 95.0,
+    "peak_threshold_abs": 0.0,
+    "peak_min_distance_sec": 1.0,
+    "peak_min_prominence_k": 2.0,
+    "peak_min_width_sec": 0.3,
+    "peak_pre_filter": "none",
+    "event_auc_baseline": "zero",
+}
+
 
 def _typed(name: str, value: object):
     return contracts.GuidedBackendTypedFieldValue(
@@ -171,13 +188,19 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         preliminary_cache=True,
         production_analysis=False,
     )
+    # A real confirmed Guided feature/event profile carries the COMPLETE
+    # feature-detection field set. 4J16k39a makes these the production base
+    # configuration, so an incomplete profile now correctly fails closed.
     feature = contracts.GuidedBackendFeatureEventRequest(
         profile_schema_version=(
             contracts.GUIDED_BACKEND_FEATURE_EVENT_PROFILE_SCHEMA_VERSION
         ),
         profile_id="profile-001",
-        effective_values=(_typed("event_signal", "dff"),),
-        active_fields=("event_signal",),
+        effective_values=tuple(
+            _typed(name, value)
+            for name, value in CONFIRMED_FEATURE_PROFILE_VALUES.items()
+        ),
+        active_fields=tuple(sorted(CONFIRMED_FEATURE_PROFILE_VALUES)),
         inactive_fields=(),
         profile_status="applied",
         explicitly_applied=True,

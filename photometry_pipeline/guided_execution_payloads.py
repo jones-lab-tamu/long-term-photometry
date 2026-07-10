@@ -6,7 +6,13 @@ from dataclasses import dataclass
 import hashlib
 from typing import Any, Mapping
 
+import math
+
 from photometry_pipeline.config import Config
+from photometry_pipeline.feature_event_config import (
+    FEATURE_EVENT_CONFIG_FIELDS,
+    validate_feature_event_config_fields,
+)
 from photometry_pipeline.guided_identity import encode_canonical_value
 from photometry_pipeline.guided_run_authorization import (
     GuidedRunAuthorizationResult,
@@ -177,6 +183,12 @@ CONFIG_DISPOSITION_FIXED_FALSE_EMPTY = "fixed_false_or_empty"
 CONFIG_DISPOSITION_UNSUPPORTED_FUTURE = "unsupported_future"
 CONFIG_DISPOSITION_PROHIBITED_FIRST_SUBSET = "prohibited_first_subset"
 CONFIG_DISPOSITION_NOT_APPLICABLE_FIXED = "not_applicable_serialized_fixed"
+# 4J16k39a: feature-detection fields are sourced from the feature/event
+# settings the user explicitly confirmed in Guided Step 5
+# (intent.feature_event.effective_values), never from a baked contract
+# override. They are therefore neither "mapped_from_intent" (which covers the
+# acquisition/correction intent fields) nor "fixed_by_contract".
+CONFIG_DISPOSITION_CONFIRMED_FEATURE = "confirmed_feature_settings"
 
 GUIDED_CONFIG_FIELD_DISPOSITIONS = {
     "chunk_duration_sec": CONFIG_DISPOSITION_FIXED,
@@ -274,17 +286,17 @@ GUIDED_CONFIG_FIELD_DISPOSITIONS = {
     "timestamp_cv_max": CONFIG_DISPOSITION_FIXED,
     "duration_tolerance_frac": CONFIG_DISPOSITION_FIXED,
     "qc_max_chunk_fail_fraction": CONFIG_DISPOSITION_FIXED,
-    "peak_threshold_method": CONFIG_DISPOSITION_FIXED,
-    "peak_threshold_k": CONFIG_DISPOSITION_FIXED,
-    "peak_threshold_percentile": CONFIG_DISPOSITION_FIXED,
-    "peak_threshold_abs": CONFIG_DISPOSITION_FIXED,
-    "peak_min_distance_sec": CONFIG_DISPOSITION_FIXED,
-    "peak_min_prominence_k": CONFIG_DISPOSITION_FIXED,
-    "peak_min_width_sec": CONFIG_DISPOSITION_FIXED,
-    "peak_pre_filter": CONFIG_DISPOSITION_FIXED,
-    "event_auc_baseline": CONFIG_DISPOSITION_FIXED,
-    "event_signal": CONFIG_DISPOSITION_FIXED,
-    "signal_excursion_polarity": CONFIG_DISPOSITION_FIXED,
+    "peak_threshold_method": CONFIG_DISPOSITION_CONFIRMED_FEATURE,
+    "peak_threshold_k": CONFIG_DISPOSITION_CONFIRMED_FEATURE,
+    "peak_threshold_percentile": CONFIG_DISPOSITION_CONFIRMED_FEATURE,
+    "peak_threshold_abs": CONFIG_DISPOSITION_CONFIRMED_FEATURE,
+    "peak_min_distance_sec": CONFIG_DISPOSITION_CONFIRMED_FEATURE,
+    "peak_min_prominence_k": CONFIG_DISPOSITION_CONFIRMED_FEATURE,
+    "peak_min_width_sec": CONFIG_DISPOSITION_CONFIRMED_FEATURE,
+    "peak_pre_filter": CONFIG_DISPOSITION_CONFIRMED_FEATURE,
+    "event_auc_baseline": CONFIG_DISPOSITION_CONFIRMED_FEATURE,
+    "event_signal": CONFIG_DISPOSITION_CONFIRMED_FEATURE,
+    "signal_excursion_polarity": CONFIG_DISPOSITION_CONFIRMED_FEATURE,
     "representative_session_index": CONFIG_DISPOSITION_PROHIBITED_FIRST_SUBSET,
     "preview_first_n": CONFIG_DISPOSITION_PROHIBITED_FIRST_SUBSET,
     "adapter_value_nan_policy": CONFIG_DISPOSITION_FIXED,
@@ -402,17 +414,10 @@ GUIDED_CONFIG_DEFAULT_OVERRIDES = {
     "timestamp_cv_max": 0.02,
     "duration_tolerance_frac": 0.02,
     "qc_max_chunk_fail_fraction": 0.20,
-    "peak_threshold_method": "mean_std",
-    "peak_threshold_k": 2.5,
-    "peak_threshold_percentile": 95.0,
-    "peak_threshold_abs": 0.0,
-    "peak_min_distance_sec": 1.0,
-    "peak_min_prominence_k": 2.0,
-    "peak_min_width_sec": 0.3,
-    "peak_pre_filter": "none",
-    "event_auc_baseline": "zero",
-    "event_signal": "dff",
-    "signal_excursion_polarity": "positive",
+    # Feature-detection fields are intentionally ABSENT here (4J16k39a):
+    # they carry CONFIG_DISPOSITION_CONFIRMED_FEATURE and are serialized from
+    # the settings the user confirmed in Guided Step 5, never from a baked
+    # default. Adding them back would silently override the confirmed values.
     "representative_session_index": None,
     "preview_first_n": None,
     "adapter_value_nan_policy": "strict",
@@ -645,6 +650,70 @@ def _find_semantic_value(semantic_values: tuple[Any, ...], name: str) -> Any:
     return None
 
 
+def resolve_confirmed_feature_config_fields(
+    intent: GuidedProductionExecutionIntent,
+) -> tuple[dict[str, Any] | None, str]:
+    """Extract the COMPLETE feature-detection settings the user confirmed in
+    Guided Step 5 from a mapped production intent (4J16k39a).
+
+    These become the production base configuration consumed by Pipeline. They
+    are never reconstructed from GUIDED_CONFIG_DEFAULT_OVERRIDES, which no
+    longer carries feature-detection fields at all.
+
+    Returns (fields, "") when the confirmed settings are complete and valid, or
+    (None, reason) when they are missing, incomplete, non-finite, or
+    semantically invalid. Fails closed: a Guided plan that claims settings were
+    confirmed must produce a complete, valid base configuration.
+    """
+    feature_event = getattr(intent, "feature_event", None)
+    if feature_event is None:
+        return None, "Intent carries no confirmed feature/event settings."
+    if not getattr(feature_event, "explicitly_applied", False):
+        return None, "Feature-detection settings were never confirmed."
+    if not getattr(feature_event, "current", False):
+        return None, "Confirmed feature-detection settings are stale."
+
+    fields: dict[str, Any] = {}
+    for item in getattr(feature_event, "effective_values", ()) or ():
+        name = getattr(item, "field_name", None)
+        if name in FEATURE_EVENT_CONFIG_FIELDS:
+            fields[name] = getattr(item, "value", None)
+
+    missing = set(FEATURE_EVENT_CONFIG_FIELDS) - set(fields)
+    if missing:
+        return None, f"Confirmed feature settings are incomplete: {sorted(missing)}"
+
+    for name, value in fields.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)) and not math.isfinite(float(value)):
+            return None, f"Confirmed feature setting {name} is not finite."
+
+    # Validate only the fields ACTIVE for the confirmed threshold method, using
+    # the same activity rule the Guided effective-value preview already applies.
+    # A complete profile legitimately carries a dormant value for the threshold
+    # fields the selected method does not use (e.g. peak_threshold_abs=0.0 under
+    # mean_std); those must be serialized into Config but never validated as if
+    # they were in use.
+    from photometry_pipeline.guided_new_analysis_plan import (
+        _feature_event_field_activity,
+    )
+
+    method = str(fields.get("peak_threshold_method", ""))
+    active_fields = {
+        name: value
+        for name, value in fields.items()
+        if _feature_event_field_activity(name, method) == "active"
+    }
+    # peak_threshold_method itself is always "active", so an unrecognized method
+    # is still rejected below by validate_feature_event_config_fields.
+    semantic_errors = validate_feature_event_config_fields(active_fields)
+    if semantic_errors:
+        return None, f"Confirmed feature settings are invalid: {semantic_errors[0]}"
+
+    return fields, ""
+
+
 def derive_guided_execution_payloads(
     authorized_result: GuidedRunAuthorizationResult,
     *,
@@ -709,16 +778,40 @@ def derive_guided_execution_payloads(
         if config_fields != disposition_keys:
             return _unresolved("config_mapping_incomplete", "Disposition map fields do not match Config fields.")
         
-        # Non-intent fields must be explicitly specified in startup mapping contract overrides
+        # Non-intent fields must be explicitly specified in startup mapping contract overrides.
+        # Confirmed-feature fields are excluded from that requirement: they come from
+        # intent.feature_event.effective_values, not from the contract overrides.
         intent_keys = {k for k, v in GUIDED_CONFIG_FIELD_DISPOSITIONS.items() if v == CONFIG_DISPOSITION_INTENT}
-        non_intent_keys = {k for k, v in GUIDED_CONFIG_FIELD_DISPOSITIONS.items() if v != CONFIG_DISPOSITION_INTENT}
+        confirmed_feature_keys = {
+            k for k, v in GUIDED_CONFIG_FIELD_DISPOSITIONS.items()
+            if v == CONFIG_DISPOSITION_CONFIRMED_FEATURE
+        }
+        non_intent_keys = {
+            k for k, v in GUIDED_CONFIG_FIELD_DISPOSITIONS.items()
+            if v not in (CONFIG_DISPOSITION_INTENT, CONFIG_DISPOSITION_CONFIRMED_FEATURE)
+        }
         serialized_non_intent_keys = {k for k, v in GUIDED_CONFIG_FIELD_DISPOSITIONS.items() if v in (
             CONFIG_DISPOSITION_FIXED,
             CONFIG_DISPOSITION_FIXED_FALSE_EMPTY,
             CONFIG_DISPOSITION_NOT_APPLICABLE_FIXED,
         )}
-        
+
+        # The confirmed-feature key set must exactly equal the shared
+        # feature-detection field set: a drift in either direction would mean
+        # some feature field silently keeps a baked default.
+        if confirmed_feature_keys != set(FEATURE_EVENT_CONFIG_FIELDS):
+            return _unresolved(
+                "config_mapping_incomplete",
+                "Confirmed feature-setting fields do not match FEATURE_EVENT_CONFIG_FIELDS.",
+            )
+
         overrides_dict = {item.name: item.value for item in startup_mapping_contract.fixed_config_overrides}
+        if overrides_keys_overlap := (set(overrides_dict) & confirmed_feature_keys):
+            return _unresolved(
+                "config_field_unsupported",
+                "Contract overrides must not bake confirmed feature settings: "
+                f"{sorted(overrides_keys_overlap)}",
+            )
         overrides_keys = set(overrides_dict.keys())
         missing_overrides = non_intent_keys - overrides_keys
         extra_overrides = overrides_keys - non_intent_keys
@@ -794,12 +887,24 @@ def derive_guided_execution_payloads(
         for name in sorted(serialized_non_intent_keys):
             payload_values.append(GuidedConfigFieldValue(name, overrides_dict[name]))
 
+        # Populate the confirmed Step 5 feature-detection settings. These are the
+        # production base feature configuration; a Default-only run analyzes with
+        # exactly these values, and a Custom ROI's sparse override is layered on
+        # top of them (never on a baked default).
+        confirmed_feature_fields, feature_reason = resolve_confirmed_feature_config_fields(intent)
+        if confirmed_feature_fields is None:
+            return _unresolved("config_field_unsupported", feature_reason)
+        for name in sorted(confirmed_feature_keys):
+            payload_values.append(
+                GuidedConfigFieldValue(name, confirmed_feature_fields[name])
+            )
+
         # Sort values canonical
         sorted_values = tuple(sorted(payload_values, key=lambda x: x.name))
-        
+
         # Invariant check: ensure config payload keys equal the full set of intended serialized fields
         config_payload_keys = {v.name for v in sorted_values}
-        expected_keys = intent_keys | serialized_non_intent_keys
+        expected_keys = intent_keys | serialized_non_intent_keys | confirmed_feature_keys
         if config_payload_keys != expected_keys:
             return _unresolved("config_mapping_incomplete", "Config payload fields mismatch.")
 

@@ -16,6 +16,14 @@ from typing import Any
 
 
 FEATURE_EVENT_PROVENANCE_SCHEMA_VERSION = "guided_feature_event_provenance.v2"
+# 4J16k39b: current runs record the settings actually consumed for every ROI.
+# v2 runs predate that contract and only ever recorded per-ROI entries when a
+# Custom ROI existed, so they are read but never treated as a complete record.
+FEATURE_EVENT_PROVENANCE_SCHEMA_VERSION_V3 = "guided_feature_event_provenance.v3"
+_SUPPORTED_PROVENANCE_SCHEMA_VERSIONS = (
+    FEATURE_EVENT_PROVENANCE_SCHEMA_VERSION,
+    FEATURE_EVENT_PROVENANCE_SCHEMA_VERSION_V3,
+)
 
 
 @dataclass(frozen=True)
@@ -86,7 +94,7 @@ def load_guided_completed_feature_event_state(
             ),
         )
 
-    if payload.get("schema_version") != FEATURE_EVENT_PROVENANCE_SCHEMA_VERSION:
+    if payload.get("schema_version") not in _SUPPORTED_PROVENANCE_SCHEMA_VERSIONS:
         return GuidedCompletedFeatureEventState(
             present=True,
             valid=False,

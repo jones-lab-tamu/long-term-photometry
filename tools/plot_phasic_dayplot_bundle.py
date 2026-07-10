@@ -19,6 +19,7 @@ This drastically reduces I/O by preventing 3x redundant reads of the heavy trace
 import os
 import sys
 import argparse
+import json
 import logging
 import math
 import time
@@ -112,6 +113,25 @@ def parse_args():
     parser.add_argument('--analysis-out', required=True, help="Path to analysis output directory")
     parser.add_argument('--roi', required=True, help="Specific ROI to plot")
     parser.add_argument('--output-dir', required=True, help="Output directory for the day plots")
+    # 4J16k39b: the caller (run_full_pipeline_deliverables.py) classifies the run
+    # ONCE and tells this process which contract applies. This process must never
+    # infer from a missing provenance file that the run was Default-only.
+    parser.add_argument(
+        '--provenance-mode',
+        choices=['current', 'legacy'],
+        default='legacy',
+        help=(
+            "Internal: 'current' requires --feature-event-provenance and uses this "
+            "ROI's recorded effective feature configuration for marker replay and "
+            "strict peak-count verification. 'legacy' is only for runs predating "
+            "the per-ROI consumed-settings contract and uses config_used.yaml."
+        ),
+    )
+    parser.add_argument(
+        '--feature-event-provenance',
+        default=None,
+        help="Internal: path to features/feature_event_provenance.json.",
+    )
     parser.add_argument('--sessions-per-hour', type=int, required=True, help="Grid columns")
     parser.add_argument(
         '--timeline-anchor-mode',
@@ -198,11 +218,103 @@ def parse_args():
 # ======================================================================
 
 def load_config_obj(out_dir):
+    """Load the GLOBAL confirmed Default configuration.
+
+    config_used.yaml describes the global Default settings only. It does NOT
+    describe ROIs that used Custom settings; see resolve_roi_feature_config.
+    """
     path = os.path.join(out_dir, "config_used.yaml")
     if not os.path.exists(path):
         print(f"CRITICAL: config_used.yaml not found in {out_dir}.")
         sys.exit(1)
     return Config.from_yaml(path)
+
+
+def resolve_roi_feature_config(global_config, roi, provenance_mode, provenance_path):
+    """Resolve the exact feature configuration this ROI was analyzed with.
+
+    For a current-contract run the ROI's complete effective feature settings are
+    read from feature_event_provenance.json -- the authoritative record of what
+    Pipeline actually consumed -- and applied on top of the global config. The
+    detector replay used for markers and strict peak-count verification then
+    matches the settings that produced features.csv for this ROI.
+
+    Fails closed on a missing file, a missing ROI entry, an incomplete entry, or
+    a digest mismatch. Never silently substitutes the global configuration.
+
+    Returns (config, identity) where identity describes the configuration used.
+    """
+    from dataclasses import replace as _dc_replace
+
+    from photometry_pipeline.feature_event_provenance import (
+        FeatureEventProvenanceError,
+        PROVENANCE_MODE_CURRENT,
+        PROVENANCE_MODE_LEGACY,
+        compute_feature_config_digest,
+        feature_fields_from_config,
+        load_feature_event_provenance,
+        resolve_roi_entry,
+        verify_global_default_identity,
+    )
+
+    if provenance_mode not in (PROVENANCE_MODE_CURRENT, PROVENANCE_MODE_LEGACY):
+        print(
+            f"CRITICAL: unknown feature-provenance mode {provenance_mode!r}; "
+            "refusing to guess which settings this ROI was analyzed with."
+        )
+        sys.exit(1)
+
+    if provenance_mode != PROVENANCE_MODE_CURRENT:
+        # Explicitly recognized legacy run: no per-ROI record ever existed, so
+        # the global configuration is all that can be claimed. Label it as such.
+        fields = feature_fields_from_config(global_config)
+        return global_config, {
+            "roi": roi,
+            "provenance_mode": "legacy",
+            "source": "unknown_legacy",
+            "effective_config_digest": compute_feature_config_digest(fields),
+            "verified_against_roi_provenance": False,
+        }
+
+    if not provenance_path:
+        print(
+            "CRITICAL: current-contract run did not supply "
+            "--feature-event-provenance; refusing to verify against global settings."
+        )
+        sys.exit(1)
+
+    try:
+        payload = load_feature_event_provenance(provenance_path)
+        # Bind the record to the global configuration it claims to describe:
+        # config_used.yaml must hash to the recorded global Default digest, and
+        # every Default ROI must carry exactly that digest.
+        global_digest = verify_global_default_identity(payload, global_config)
+        entry = resolve_roi_entry(payload, roi)
+    except FeatureEventProvenanceError as exc:
+        print(f"CRITICAL: {exc}")
+        sys.exit(1)
+
+    effective = dict(entry["effective_config_fields"])
+    roi_config = _dc_replace(global_config, **effective)
+
+    # The replayed config must reproduce the recorded identity exactly.
+    replayed_digest = compute_feature_config_digest(feature_fields_from_config(roi_config))
+    if replayed_digest != entry["effective_config_digest"]:
+        print(
+            f"CRITICAL: ROI {roi} replay configuration digest {replayed_digest} does "
+            f"not match recorded {entry['effective_config_digest']}."
+        )
+        sys.exit(1)
+
+    return roi_config, {
+        "roi": roi,
+        "provenance_mode": "current",
+        "source": entry.get("source", ""),
+        "effective_config_digest": replayed_digest,
+        "global_default_config_digest": global_digest,
+        "verified_against_roi_provenance": True,
+        "verified_against_config_used": True,
+    }
 
 def determine_signal_column(cols, roi, requested='auto'):
     if requested != 'auto':
@@ -1944,8 +2056,20 @@ def main():
     args = parse_args()
     
     os.makedirs(args.output_dir, exist_ok=True)
-    
-    config = load_config_obj(args.analysis_out)
+
+    global_config = load_config_obj(args.analysis_out)
+    # Every downstream use (marker replay AND strict peak-count verification)
+    # must use the settings THIS ROI was analyzed with, not the global Defaults.
+    config, feature_config_identity = resolve_roi_feature_config(
+        global_config,
+        args.roi,
+        args.provenance_mode,
+        args.feature_event_provenance,
+    )
+    with open(
+        os.path.join(args.output_dir, "dayplot_feature_config.json"), "w", encoding="utf-8"
+    ) as _fh:
+        json.dump(feature_config_identity, _fh, indent=2)
     feats_path = os.path.join(args.analysis_out, 'features', 'features.csv')
     
     needs_dff_trace = args.write_dff_grid or args.write_stacked

@@ -928,6 +928,104 @@ def _append_guided_manifest_to_analysis_command(cmd, args, *, mode):
         cmd.extend(["--guided-candidate-manifest", manifest_path])
 
 
+def _dayplot_provenance_args(feature_provenance_mode, feature_provenance_path):
+    """Exact provenance flags handed to every per-ROI day-plot process.
+
+    The classification is made once by this wrapper; the child never infers it.
+    A current run always carries the record path alongside the mode.
+    """
+    args = ['--provenance-mode', str(feature_provenance_mode)]
+    if feature_provenance_path:
+        args.extend(['--feature-event-provenance', str(feature_provenance_path)])
+    return args
+
+
+def _resolve_feature_provenance_for_plots(
+    phasic_out, plotted_rois, *, require_current=True, emitter=None
+):
+    """Classify the analysis output once and validate its per-ROI settings record.
+
+    Returns (mode, provenance_path).
+
+    This wrapper just invoked the current analysis build, so `require_current` is
+    True on the production path: the run MUST declare the exact supported contract
+    version and MUST carry a complete, digest-consistent record. A missing or
+    malformed run_report.json, an absent or unsupported contract version, a
+    missing provenance file, a missing ROI entry, or any digest mismatch fails the
+    run here -- it is never downgraded to "legacy" and never verified against the
+    global config_used.yaml.
+
+    `require_current=False` is only for intentionally processing a run that is
+    POSITIVELY recognized as predating the contract. Even then an unknown
+    classification fails closed; absence of metadata is not a legacy signal.
+
+    The record is additionally bound to config_used.yaml: the recorded global
+    Default digest must match the loaded global configuration, and every Default
+    ROI must carry exactly that digest.
+    """
+    from photometry_pipeline.feature_event_provenance import (
+        FeatureEventProvenanceError,
+        PROVENANCE_MODE_CURRENT,
+        PROVENANCE_MODE_LEGACY,
+        PROVENANCE_MODE_UNKNOWN,
+        classify_provenance_contract,
+        load_feature_event_provenance,
+        resolve_roi_entry,
+        verify_global_default_identity,
+    )
+
+    mode, provenance_path, reason = classify_provenance_contract(phasic_out)
+
+    if mode == PROVENANCE_MODE_UNKNOWN:
+        raise RuntimeError(
+            "Detector-aware day plotting refused: the analysis output does not "
+            f"positively identify its feature-settings contract ({reason}). "
+            "Refusing to fall back to the global configuration."
+        )
+
+    if mode == PROVENANCE_MODE_LEGACY:
+        if require_current:
+            raise RuntimeError(
+                "Detector-aware day plotting refused: this run was produced by the "
+                "current analysis build but its report does not declare the current "
+                "per-ROI feature-settings contract."
+            )
+        if emitter is not None:
+            emitter.emit(
+                "plots",
+                "audit",
+                "Legacy analysis output: no per-ROI feature-settings record exists. "
+                "Day plots use the global configuration and make no ROI-specific "
+                "verification claim.",
+                payload={"feature_provenance_mode": PROVENANCE_MODE_LEGACY},
+            )
+        return PROVENANCE_MODE_LEGACY, None
+
+    try:
+        payload = load_feature_event_provenance(provenance_path)
+        global_config = Config.from_yaml(os.path.join(phasic_out, "config_used.yaml"))
+        verify_global_default_identity(payload, global_config)
+        for roi in plotted_rois:
+            resolve_roi_entry(payload, roi)
+    except FeatureEventProvenanceError as exc:
+        raise RuntimeError(
+            "Detector-aware day plotting refused: this run declares the current "
+            f"per-ROI feature-settings contract but its record is unusable: {exc}"
+        ) from exc
+
+    if emitter is not None:
+        emitter.emit(
+            "plots",
+            "audit",
+            "Per-ROI feature-settings record verified for all plotted ROIs.",
+            payload={
+                "feature_provenance_mode": PROVENANCE_MODE_CURRENT,
+                "roi_count": len(payload.get("rois", [])),
+            },
+        )
+    return PROVENANCE_MODE_CURRENT, provenance_path
+
+
 def _load_guided_per_roi_feature_event_overrides(run_dir):
     """Load complete effective per-ROI feature-config fields for Custom ROIs.
 
@@ -2348,6 +2446,34 @@ def main():
         t_phase, started_utc_phase = _phase_start(status_data, "plots_total", emitter=emitter)
         _write_status_update("plots")
         emitter.emit("plots", "start", "Generating per-ROI deliverables")
+
+        # Classify the run ONCE, before any ROI plot process is launched. A
+        # current-contract run must carry a complete per-ROI record of the
+        # settings actually consumed; a missing/invalid record fails the run
+        # here rather than letting each child silently verify against the
+        # global config_used.yaml (4J16k39b).
+        # Detector-aware verification only happens when this run produced
+        # features. When it did, this wrapper knows it just invoked the current
+        # analysis build, so the current contract is REQUIRED: damaged metadata
+        # fails the run instead of silently degrading to global settings.
+        _will_verify_detectors = (
+            run_phasic_mode
+            and not tune_prep_light_mode
+            and os.path.isfile(os.path.join(phasic_out, "features", "features.csv"))
+        )
+        if _will_verify_detectors:
+            feature_provenance_mode, feature_provenance_path = (
+                _resolve_feature_provenance_for_plots(
+                    phasic_out,
+                    regions,
+                    require_current=True,
+                    emitter=emitter,
+                )
+            )
+        else:
+            # No features were extracted, so no strict peak-count verification and
+            # no per-ROI detector replay occurs for this run.
+            feature_provenance_mode, feature_provenance_path = "legacy", None
         if tune_prep_light_mode and effective_skip_plan is not None:
             emitter.emit(
                 "plots",
@@ -2760,7 +2886,15 @@ def main():
                               '--smooth-window-s', str(args.smooth_window_s),
                               '--sig-iso-render-mode', str(args.sig_iso_render_mode),
                               '--dff-render-mode', str(args.dff_render_mode),
-                              '--stacked-render-mode', str(args.stacked_render_mode)]
+                              '--stacked-render-mode', str(args.stacked_render_mode),
+                              ]
+                # The run was classified once, before any ROI plot was launched.
+                # Child processes never infer the contract from file presence.
+                cmd_bundle.extend(
+                    _dayplot_provenance_args(
+                        feature_provenance_mode, feature_provenance_path
+                    )
+                )
                 if effective_export_display_series_csv:
                     cmd_bundle.append('--export-display-series-csv')
                     cmd_bundle.extend(['--source-run-profile', str(args.run_type)])

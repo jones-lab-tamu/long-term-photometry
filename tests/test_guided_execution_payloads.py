@@ -293,9 +293,24 @@ def test_config_field_dispositions_coverage():
         payloads.CONFIG_DISPOSITION_UNSUPPORTED_FUTURE,
         payloads.CONFIG_DISPOSITION_PROHIBITED_FIRST_SUBSET,
         payloads.CONFIG_DISPOSITION_NOT_APPLICABLE_FIXED,
+        # 4J16k39a: feature-detection fields are sourced from the settings the
+        # user confirmed in Guided Step 5, not from baked contract overrides.
+        payloads.CONFIG_DISPOSITION_CONFIRMED_FEATURE,
     }
     for disp in payloads.GUIDED_CONFIG_FIELD_DISPOSITIONS.values():
         assert disp in valid_dispositions
+
+    # The confirmed-feature disposition must cover exactly the shared
+    # feature-detection field set, and none of those may be baked into the
+    # contract's fixed overrides (that was the C1 defect).
+    from photometry_pipeline.feature_event_config import FEATURE_EVENT_CONFIG_FIELDS
+
+    confirmed = {
+        k for k, v in payloads.GUIDED_CONFIG_FIELD_DISPOSITIONS.items()
+        if v == payloads.CONFIG_DISPOSITION_CONFIRMED_FEATURE
+    }
+    assert confirmed == set(FEATURE_EVENT_CONFIG_FIELDS)
+    assert not (confirmed & set(payloads.GUIDED_CONFIG_DEFAULT_OVERRIDES))
 
 
 def test_config_mapping_contract_completeness_refusal(auth_result):

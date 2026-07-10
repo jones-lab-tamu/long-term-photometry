@@ -168,6 +168,16 @@ def generate_run_report(config: Config, output_dir: str, roi_selection: Dict = N
     with open(os.path.join(output_dir, "run_report.json"), "w") as f:
         json.dump(report, f, indent=2)
         
+    # config_used.yaml contract (4J16k39b):
+    # This is the complete GLOBAL configuration the run was launched with -- for
+    # a Guided run, the feature-detection settings confirmed in Step 5. It
+    # describes the settings used by ROIs that ran with the Default settings. It
+    # does NOT describe ROIs that used Custom feature-detection settings.
+    # The authoritative record of the complete effective feature configuration
+    # actually consumed for EACH analyzed ROI is
+    # features/feature_event_provenance.json, written by Pipeline from the Config
+    # objects it actually used. Consumers needing per-ROI settings (detector-aware
+    # day plots, strict peak-count verification) must read that file, not this one.
     with open(os.path.join(output_dir, "config_used.yaml"), "w") as f:
         yaml.safe_dump(config_snapshot, f)
 

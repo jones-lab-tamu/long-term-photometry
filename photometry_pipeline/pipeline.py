@@ -1754,8 +1754,12 @@ class Pipeline:
             full_feats.to_csv(os.path.join(feats_dir, 'features.csv'), index=False)
             pass2_features_csv_write_sec += (time.perf_counter() - t_feats_write)
 
-            if self.per_roi_feature_provenance:
-                self._write_feature_event_provenance(feats_dir)
+            # Every feature-extracting run records the settings actually
+            # consumed for every analyzed ROI, so a missing file can never be
+            # misread as "this run had no per-ROI settings" (4J16k39b).
+            analyzed_rois = sorted(set(full_feats['roi'].astype(str)))
+            self._write_feature_event_provenance(feats_dir, analyzed_rois)
+            self._stamp_feature_event_provenance_contract(output_dir)
 
         if self.dynamic_fit_qc_records and self.mode != 'tonic':
             qc_rows = []
@@ -1954,37 +1958,66 @@ class Pipeline:
             self._set_phasic_metric("pass2.features_rows", pass2_features_rows)
             self._set_phasic_metric("pass2.peaks_detected_total", pass2_peak_count_total)
                 
-    def _write_feature_event_provenance(self, feats_dir: str) -> None:
-        """Write which feature-detection settings were used per ROI.
+    def _write_feature_event_provenance(self, feats_dir: str, analyzed_rois) -> None:
+        """Write the feature-detection settings actually consumed per ROI.
 
-        Only called when per_roi_feature_provenance was supplied to this
-        Pipeline; a run with no per-ROI settings writes no such file, so
-        existing global-only runs are unaffected.
+        Written by EVERY run that extracts features, including runs with no
+        per-ROI override: a Default-only run records one Default entry per
+        analyzed ROI (4J16k39b). Absence of this file therefore never means
+        "Default-only" -- it means the run predates this contract.
 
-        override_config_fields is whatever the source profile's own fields
-        were (possibly a sparse subset of feature-detection fields);
-        effective_config_fields is the complete, resolved set of settings
-        this Pipeline actually used for that ROI. Consumers that want to
-        know "what was used" should read effective_config_fields, not
-        override_config_fields.
+        The payload is built from the Config objects this Pipeline actually
+        used (`self.config` and `self.per_roi_feature_config`), never
+        reconstructed from the Guided plan or startup artifact, so Default-only
+        and Custom runs follow the same evidence path. `override_config_fields`
+        and the profile id are carried through from
+        `self.per_roi_feature_provenance` for description only; they never
+        determine the effective settings.
         """
-        rois = []
-        for roi, entry in sorted(dict(self.per_roi_feature_provenance).items()):
-            entry = entry or {}
-            rois.append({
-                "roi": roi,
-                "source": entry.get("source", ""),
-                "feature_event_profile_id": entry.get("feature_event_profile_id", ""),
-                "override_config_fields": dict(entry.get("override_config_fields") or {}),
-                "effective_config_fields": dict(entry.get("effective_config_fields") or {}),
-            })
-        payload = {
-            "schema_version": "guided_feature_event_provenance.v2",
-            "rois": rois,
-        }
-        path = os.path.join(feats_dir, "feature_event_provenance.json")
+        from photometry_pipeline.feature_event_provenance import (
+            FEATURE_EVENT_PROVENANCE_FILENAME,
+            build_feature_event_provenance_payload,
+        )
+
+        payload = build_feature_event_provenance_payload(
+            base_config=self.config,
+            analyzed_rois=list(analyzed_rois),
+            per_roi_feature_config=self.per_roi_feature_config or {},
+            per_roi_source_details=dict(self.per_roi_feature_provenance or {}),
+        )
+        path = os.path.join(feats_dir, FEATURE_EVENT_PROVENANCE_FILENAME)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
+        self._feature_event_provenance_payload = payload
+
+    def _stamp_feature_event_provenance_contract(self, output_dir: str) -> None:
+        """Record the explicit contract-version signal in run_report.json.
+
+        Consumers classify a run as current-or-legacy from THIS signal, never
+        from whether the provenance file happens to exist. Failing to stamp it
+        would let a current run be misclassified as legacy and silently verified
+        against global settings, so this raises rather than degrading.
+        """
+        from photometry_pipeline.feature_event_provenance import (
+            FEATURE_EVENT_PROVENANCE_CONTRACT_VERSION,
+            FEATURE_EVENT_PROVENANCE_FILENAME,
+        )
+
+        payload = getattr(self, "_feature_event_provenance_payload", None) or {}
+        report_path = os.path.join(output_dir, "run_report.json")
+        with open(report_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["feature_event_provenance"] = {
+            "contract_version": FEATURE_EVENT_PROVENANCE_CONTRACT_VERSION,
+            "schema_version": payload.get("schema_version", ""),
+            "relative_path": os.path.join("features", FEATURE_EVENT_PROVENANCE_FILENAME),
+            "global_default_config_digest": payload.get(
+                "global_default_config_digest", ""
+            ),
+            "roi_count": len(payload.get("rois", [])),
+        }
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
 
     def _apply_roi_filter(self, chunk):
         """Filter chunk data to only include channels in self._selected_rois."""

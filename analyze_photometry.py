@@ -12,23 +12,41 @@ from photometry_pipeline.guided_startup_transaction import (
 from photometry_pipeline.pipeline import Pipeline
 
 
+class GuidedFeatureSettingsError(RuntimeError):
+    """A Guided per-ROI feature-settings artifact is missing, incomplete, or
+    inconsistent with the confirmed base configuration. Never fall back to
+    baked defaults or to the global settings for a Custom ROI."""
+
+
+def _feature_fields_of(config):
+    return {name: getattr(config, name) for name in sorted(FEATURE_EVENT_CONFIG_FIELDS)}
+
+
 def load_guided_per_roi_feature_settings(guided_candidate_manifest_path, base_config):
     """Load a Guided per-ROI feature-config artifact, if one was materialized.
 
     The artifact is a sibling of the Guided candidate manifest (both live in
-    the Guided-allocated run directory; see
-    guided_startup_materialization.py). Returns (None, None) when the
-    manifest path is not set or no sibling artifact exists, so a global-only
-    Guided run (or a plain non-Guided CLI invocation) is unaffected.
+    the Guided-allocated run directory; see guided_startup_materialization.py).
+    Returns (None, None) when the manifest path is not set or no sibling
+    artifact exists -- a Default-only Guided run (or a plain non-Guided CLI
+    invocation) writes no artifact and analyzes every ROI with base_config.
+
+    base_config already carries the feature-detection settings the user
+    confirmed in Guided Step 5 (4J16k39a: they are serialized into
+    config_effective.yaml from intent.feature_event.effective_values, not from
+    baked contract defaults). Each Custom ROI's Config is therefore built from
+    that same confirmed base, so unchanged fields are inherited from the
+    confirmed Defaults rather than from execution defaults.
 
     Returns (per_roi_feature_config, per_roi_feature_provenance):
-    - per_roi_feature_config: dict[str, Config], one complete effective
-      Config per Custom ROI, built by layering the artifact's sparse
-      per_roi_override_config_fields onto base_config. Suitable for
-      Pipeline(per_roi_feature_config=...).
+    - per_roi_feature_config: dict[str, Config] for Custom ROIs only. Each is
+      base_config with that ROI's COMPLETE effective feature fields applied.
     - per_roi_feature_provenance: the artifact's per_roi_feature_provenance
-      dict verbatim (every resolved ROI, default and override), suitable for
-      Pipeline(per_roi_feature_provenance=...).
+      dict (every resolved ROI, Default and Custom).
+
+    Fails closed (GuidedFeatureSettingsError) on an unknown override field, an
+    incomplete effective configuration, or a Default entry whose effective
+    settings disagree with the confirmed base configuration.
     """
     if not guided_candidate_manifest_path:
         return None, None
@@ -40,20 +58,75 @@ def load_guided_per_roi_feature_settings(guided_candidate_manifest_path, base_co
         return None, None
     with open(path, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
+
+    effective_by_roi = payload.get(
+        "per_roi_effective_feature_config_fields_for_overrides"
+    ) or {}
     override_fields_by_roi = payload.get("per_roi_override_config_fields") or {}
-    per_roi_feature_config = {
-        roi_id: replace(
-            base_config,
-            **{
-                key: value
-                for key, value in dict(fields or {}).items()
-                if key in FEATURE_EVENT_CONFIG_FIELDS
-            },
+    provenance = payload.get("per_roi_feature_provenance") or {}
+
+    if set(override_fields_by_roi) != set(effective_by_roi):
+        raise GuidedFeatureSettingsError(
+            "Per-ROI feature settings are inconsistent: Custom ROIs with a "
+            f"sparse override {sorted(override_fields_by_roi)} do not match "
+            f"those with a complete effective configuration {sorted(effective_by_roi)}."
         )
-        for roi_id, fields in override_fields_by_roi.items()
-    }
-    per_roi_feature_provenance = payload.get("per_roi_feature_provenance") or None
-    return per_roi_feature_config, per_roi_feature_provenance
+
+    base_feature_fields = _feature_fields_of(base_config)
+
+    per_roi_feature_config = {}
+    for roi_id, effective_fields in effective_by_roi.items():
+        fields = dict(effective_fields or {})
+        unknown = set(fields) - set(FEATURE_EVENT_CONFIG_FIELDS)
+        if unknown:
+            raise GuidedFeatureSettingsError(
+                f"ROI {roi_id} effective feature settings contain unknown "
+                f"fields: {sorted(unknown)}"
+            )
+        missing = set(FEATURE_EVENT_CONFIG_FIELDS) - set(fields)
+        if missing:
+            raise GuidedFeatureSettingsError(
+                f"ROI {roi_id} effective feature settings are incomplete; "
+                f"missing: {sorted(missing)}"
+            )
+        sparse = dict(override_fields_by_roi.get(roi_id) or {})
+        unknown_override = set(sparse) - set(FEATURE_EVENT_CONFIG_FIELDS)
+        if unknown_override:
+            raise GuidedFeatureSettingsError(
+                f"ROI {roi_id} override references unknown feature fields: "
+                f"{sorted(unknown_override)}"
+            )
+        # The complete effective configuration must equal the confirmed base
+        # with only the sparse override applied. Anything else means the ROI
+        # was resolved against a different base than the one Pipeline will use.
+        expected = dict(base_feature_fields)
+        expected.update(sparse)
+        if fields != expected:
+            differing = sorted(k for k in expected if fields.get(k) != expected[k])
+            raise GuidedFeatureSettingsError(
+                f"ROI {roi_id} effective feature settings were not derived from "
+                f"the confirmed base configuration; fields differ: {differing}"
+            )
+        per_roi_feature_config[roi_id] = replace(base_config, **fields)
+
+    # A Default ROI must analyze with exactly the confirmed base settings.
+    for roi_id, entry in provenance.items():
+        if (entry or {}).get("source") != "default":
+            continue
+        default_effective = dict((entry or {}).get("effective_config_fields") or {})
+        if not default_effective:
+            continue
+        differing = sorted(
+            k for k, v in default_effective.items()
+            if k in base_feature_fields and base_feature_fields[k] != v
+        )
+        if differing:
+            raise GuidedFeatureSettingsError(
+                f"Default ROI {roi_id} settings disagree with the confirmed "
+                f"base configuration; fields differ: {differing}"
+            )
+
+    return per_roi_feature_config, (provenance or None)
 
 
 def main():
