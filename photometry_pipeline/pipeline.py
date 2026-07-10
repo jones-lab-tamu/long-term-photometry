@@ -41,6 +41,11 @@ from .core.correction_policy_proposal import (
 from .core.reference_candidate_comparison import classify_reference_candidates
 from .core.utils import natural_sort_key
 from .core.reporting import generate_run_report, append_run_report_warnings
+from .input_processing_completeness import (
+    InputProcessingAccountant,
+    InputProcessingError,
+    POLICY_INCOMPLETE_FINAL_RWD_CHUNK,
+)
 from .guided_manifest_current_facts import build_guided_manifest_current_facts
 from .guided_manifest_verification import (
     GuidedManifestCliContext,
@@ -200,6 +205,11 @@ class Pipeline:
         self.per_roi_feature_config = per_roi_feature_config
         self.per_roi_feature_provenance = per_roi_feature_provenance
         self.file_list = []
+        # The single authorized final-chunk exclusion (if any) and the frozen
+        # per-chunk accountant, so every admitted chunk reaches exactly one
+        # terminal disposition and none is silently omitted (4J16k41 / C8).
+        self._authorized_exclusion = None
+        self._admitted_accountant = None
         self._continuous_window_map = {}
         self._continuous_source_cache = {}
         self._continuous_plan_summary = None
@@ -968,6 +978,8 @@ class Pipeline:
                 self._rwd_contract_validation
             )
 
+        self._authorized_exclusion = None
+
         if excluded_source_files:
             if len(raw_excluded_source_files) != 1 or len(excluded_source_files) != 1:
                 raise ValueError(
@@ -977,6 +989,17 @@ class Pipeline:
                 )
             before_count = len(self.file_list)
             before_files = list(self.file_list)
+            # The incomplete-final-chunk policy may exclude ONLY the final
+            # chronological chunk. A recorded exclusion pointing anywhere else is
+            # not this policy and must not silently drop a mid-recording chunk.
+            final_discovered = _normalized_abs_path(before_files[-1]) if before_files else None
+            if final_discovered not in excluded_source_files:
+                raise ValueError(
+                    "Recorded RWD final-chunk exclusion does not name the final "
+                    "chronological chunk; only the incomplete final chunk may be "
+                    "excluded. Recorded exclusions: "
+                    f"{raw_excluded_source_files}. Final discovered chunk: {before_files[-1] if before_files else None}."
+                )
             self.file_list = [
                 path
                 for path in self.file_list
@@ -996,6 +1019,7 @@ class Pipeline:
                     "RWD final-chunk exclusion removed all discovered source files; "
                     "no validated chunks remain for analysis."
                 )
+            self._authorized_exclusion = before_files[-1]
             print(
                 "WARNING: Excluded incomplete final RWD chunk by explicit policy. "
                 f"Analysis used {len(self.file_list)} valid chunks. "
@@ -1065,6 +1089,142 @@ class Pipeline:
             raise ValueError(f"Could not automatically detect format for {path}. Use --format to specify.")
         return fmt
 
+    def _build_admitted_accountant(self, force_format: str) -> None:
+        """Freeze the admitted intermittent input set into a per-chunk accountant.
+
+        Skipped for continuous runs (they carry a window index) and for preview
+        runs (an explicit user subset). For a full intermittent run the ordered
+        admitted set is the frozen expected set; the one authorized final-chunk
+        exclusion is appended last so it is verifiably the final chronological
+        chunk.
+        """
+        self._admitted_accountant = None
+        if self._is_continuous_mode_enabled():
+            return
+        if getattr(self, "run_type", "full") != "full":
+            return
+        if not self.file_list:
+            return
+
+        from .input_processing_completeness import (
+            InputProcessingError,
+            build_session_index,
+            load_frozen_input_manifest,
+        )
+
+        try:
+            input_format = self._get_format(self.file_list[0], force_format)
+        except Exception:
+            input_format = str(force_format)
+
+        def _norm(path):
+            return os.path.normcase(os.path.abspath(os.path.normpath(str(path))))
+
+        excluded = self._authorized_exclusion
+
+        # Scientist-approved corrupted/missing sessions stay in the ordered set as
+        # explicit missing intervals; they are not loaded (removed from the
+        # processing list) but keep their chronological slot in the session index.
+        raw_missing = [
+            str(p)
+            for p in (getattr(self.config, "authorized_missing_sessions", []) or [])
+            if str(p).strip()
+        ]
+        missing_norm = {_norm(p) for p in raw_missing}
+        discovered_norm = {_norm(p) for p in self.file_list}
+        unknown = missing_norm - discovered_norm
+        if unknown:
+            raise ValueError(
+                "Approved missing sessions were not found among the discovered "
+                f"sources: {sorted(unknown)}. Only identity-bound discovered "
+                "sessions may be authorized missing."
+            )
+
+        # Full chronological set = admitted-for-processing (file_list) plus the
+        # single final exclusion appended last. Approved-missing sources are
+        # inside file_list and are marked (not removed from the index).
+        full_ordered = list(self.file_list) + ([excluded] if excluded is not None else [])
+        expected_duration = float(getattr(self.config, "chunk_duration_sec", 0.0)) or None
+
+        local_index = build_session_index(
+            acquisition_mode="intermittent",
+            input_format=str(input_format),
+            ordered_sources=full_ordered,
+            missing_sources=sorted(missing_norm),
+            excluded_source=excluded,
+            exclusion_policy=(POLICY_INCOMPLETE_FINAL_RWD_CHUNK if excluded is not None else ""),
+            expected_duration_sec=expected_duration,
+        )
+
+        # The approved-missing sessions are never opened.
+        self.file_list = [p for p in self.file_list if _norm(p) not in missing_norm]
+
+        frozen_path = getattr(self, "_frozen_input_manifest_path", None)
+        if frozen_path:
+            # This process independently computed the session index above; require
+            # it to be byte-identical (by digest) to the one the wrapper froze, so
+            # phasic and tonic are provably held to the same expected sessions.
+            manifest, error = load_frozen_input_manifest(frozen_path)
+            if manifest is None:
+                raise ValueError(
+                    f"Run-wide frozen input manifest could not be consumed: {error}"
+                )
+            if manifest["digest"] != local_index["digest"]:
+                raise InputProcessingError(
+                    chunk_index=None,
+                    source=self.file_list[0] if self.file_list else "",
+                    phase="frozen_manifest_verification",
+                    category="frozen_manifest_mismatch",
+                    reason=(
+                        "this analysis resolved a different session index than the "
+                        "run-wide frozen manifest"
+                    ),
+                )
+            self._admitted_accountant = InputProcessingAccountant.from_frozen_manifest(manifest)
+        else:
+            self._admitted_accountant = InputProcessingAccountant.from_frozen_manifest(local_index)
+
+    def _session_index_for_feature_rows(self, feats_df):
+        """Authoritative chronological session index per features row, by source."""
+        if self._admitted_accountant is None:
+            return feats_df.get('chunk_id')
+        src_to_index = self._admitted_accountant.session_index_by_source()
+
+        def _norm(path):
+            return os.path.normcase(os.path.abspath(os.path.normpath(str(path))))
+
+        return feats_df['source_file'].map(lambda s: src_to_index.get(_norm(s)))
+
+    def _missing_session_feature_rows(self, analyzed_rois) -> list:
+        """NaN ROI-session summary rows for each approved missing session.
+
+        One row per analyzed ROI, at the missing session's chronological index and
+        source, with every analytical value NaN (never zero) and an explicit
+        status -- so a missing session is never coerced into a valid zero-event
+        session downstream.
+        """
+        if self._admitted_accountant is None:
+            return []
+        rows = []
+        for entry in self._admitted_accountant.missing_sessions():
+            for roi in analyzed_rois:
+                rows.append({
+                    # No cache/storage contribution; the session number and timing
+                    # come from the authoritative session_index.
+                    "chunk_id": float("nan"),
+                    "session_index": int(entry["index"]),
+                    "source_file": str(entry.get("source", "")),
+                    "roi": str(roi),
+                    "mean": float("nan"),
+                    "median": float("nan"),
+                    "std": float("nan"),
+                    "mad": float("nan"),
+                    "peak_count": float("nan"),
+                    "auc": float("nan"),
+                    "status": "missing_corrupted",
+                })
+        return rows
+
     def _entry_source_file(self, entry: str) -> str:
         record = self._continuous_window_map.get(entry)
         if record is not None:
@@ -1093,6 +1253,10 @@ class Pipeline:
                 continuous_window=rec,
                 source_cache=self._continuous_source_cache,
             )
+        # Fail closed if an admitted source drifted from its frozen identity
+        # (disappeared, resized, or replaced) since it was validated.
+        if self._admitted_accountant is not None:
+            self._admitted_accountant.before_load(entry, phase="load")
         fmt = self._get_format(entry, force_format)
         return load_chunk(
             entry,
@@ -1232,6 +1396,28 @@ class Pipeline:
             seen_sources.add(src)
         return channels_seen or None
 
+    def _handle_pass_chunk_exception(self, fpath, phase: str, exc: Exception) -> None:
+        """React to an exception while processing an admitted chunk.
+
+        Fail closed for a frozen admitted intermittent run: any processing
+        exception for an admitted, non-excluded chunk terminates the run, so a
+        chunk can never be silently omitted from the outputs. When no admitted
+        accountant is active (continuous or preview), preserve the prior
+        record-and-continue behavior unchanged.
+        """
+        if isinstance(exc, InputProcessingError):
+            raise exc
+        if self._admitted_accountant is not None:
+            raise self._admitted_accountant.fail(
+                source=self._entry_source_file(fpath),
+                phase=phase,
+                category="processing_exception",
+                reason=str(exc),
+            ) from exc
+        logging.warning(f"{phase}: Skipping {fpath} due to error: {exc}")
+        if not any(x['file'] == fpath for x in self.qc_summary['failed_chunks']):
+            self.qc_summary['failed_chunks'].append({'file': fpath, 'error': str(exc)})
+
     def run_pass_1(self, force_format: str = 'auto'):
         """
         Baseline Computation.
@@ -1268,18 +1454,16 @@ class Pipeline:
                         self._pass1_manifest.append(fpath)
                         
                 except Exception as e:
-                    logging.warning(f"Pass 1: Skipping {fpath} due to error: {e}")
-                    if not any(x['file'] == fpath for x in self.qc_summary['failed_chunks']):
-                        self.qc_summary['failed_chunks'].append({'file': fpath, 'error': str(e)})
+                    self._handle_pass_chunk_exception(fpath, "pass1", e)
                     continue
-            
+
             self.stats.method_used = method
             t_f0 = time.perf_counter()
             for ch in reservoir.buffer.keys():
                 f0 = reservoir.get_percentile(ch, self.config.baseline_percentile)
                 self.stats.f0_values[ch] = f0
             pass1_f0_compute_sec += (time.perf_counter() - t_f0)
-                
+
         elif method == 'uv_globalfit_percentile_session':
             accumulator = baseline.GlobalFitAccumulator()
             
@@ -1305,11 +1489,9 @@ class Pipeline:
                     pass1_accumulate_sec += (time.perf_counter() - t_acc)
                         
                 except Exception as e:
-                    logging.warning(f"Pass 1a: Skipping {fpath}: {e}")
-                    if not any(x['file'] == fpath for x in self.qc_summary['failed_chunks']):
-                        self.qc_summary['failed_chunks'].append({'file': fpath, 'error': str(e)})
+                    self._handle_pass_chunk_exception(fpath, "pass1a", e)
                     continue
-            
+
             t_solve = time.perf_counter()
             self.stats.global_fit_params = accumulator.solve()
             pass1_solve_sec += (time.perf_counter() - t_solve)
@@ -1333,8 +1515,9 @@ class Pipeline:
                     if fpath not in self._pass1_manifest:
                         self._pass1_manifest.append(fpath)
                 except Exception as e:
+                    self._handle_pass_chunk_exception(fpath, "pass1b", e)
                     continue
-            
+
             self.stats.method_used = method
             t_f0 = time.perf_counter()
             for ch in reservoir.buffer.keys():
@@ -1401,7 +1584,8 @@ class Pipeline:
 
                         if fpath not in self._pass1_manifest:
                             self._pass1_manifest.append(fpath)
-                    except Exception:
+                    except Exception as e:
+                        self._handle_pass_chunk_exception(fpath, "tonic_pass1c", e)
                         continue
 
                 for ch in tonic_fit_sampler.channels():
@@ -1449,7 +1633,8 @@ class Pipeline:
 
                         if fpath not in self._pass1_manifest:
                             self._pass1_manifest.append(fpath)
-                    except Exception:
+                    except Exception as e:
+                        self._handle_pass_chunk_exception(fpath, "tonic_pass1c", e)
                         continue
 
                 for ch in acc_uv.keys():
@@ -1677,7 +1862,17 @@ class Pipeline:
                 
         if new_files:
              logging.warning(f"Pass 2: Found {len(new_files)} new or skipped files not in Pass 1 manifest. First few: {new_files[:3]}. They will be ignored.")
-        
+             # For a frozen admitted intermittent run, an admitted chunk absent
+             # from the Pass 1 manifest means it never processed. That is a silent
+             # omission, so fail closed rather than "ignore" it.
+             if self._admitted_accountant is not None:
+                 raise self._admitted_accountant.fail(
+                     source=self._entry_source_file(new_files[0]),
+                     phase="pass2_manifest_check",
+                     category="unprocessed_admitted_chunk",
+                     reason="an admitted chunk was not processed in Pass 1",
+                 )
+
         print("Pass 2 (Analysis)...")
         # Ensure we only iterate over files successfully processed in Pass 1
         for i, fpath, chunk, load_elapsed in self._iter_entry_chunks_for_pass(frozen_manifest, force_format, "pass2"):
@@ -1738,26 +1933,65 @@ class Pipeline:
                             self.qc_summary['failed_chunks'].append({'file': fpath, 'error': 'QC: Degenerate data detected'})
                 pass2_qc_scan_sec += (time.perf_counter() - t_scan)
 
+                # This admitted chunk reached a successful terminal disposition:
+                # its per-ROI features and its trace-cache contribution are done.
+                if self._admitted_accountant is not None:
+                    self._admitted_accountant.mark_processed(
+                        self._entry_source_file(fpath), cache_chunk_id=i
+                    )
 
                 # Legacy VIZ was here, now moved out of loop for strict resolution/loading
-                
+
+            except InputProcessingError:
+                # Already identity-bound (e.g. source drift at load); fail closed.
+                raise
             except Exception as e:
-                # Requirement B4: Fail fast if a file in the manifest cannot be loaded in Pass 2
+                # Fail fast: an admitted chunk that cannot be processed in Pass 2
+                # terminates the run rather than being omitted from the outputs.
+                if self._admitted_accountant is not None:
+                    raise self._admitted_accountant.fail(
+                        source=self._entry_source_file(fpath),
+                        phase="pass2",
+                        category="processing_exception",
+                        reason=str(e),
+                    ) from e
                 raise RuntimeError(f"Pass 2: Cannot reliably read manifest file {fpath} successfully processed in Pass 1. Error: {e}")
-                
+
+        # Write the input-processing completeness record fail-closed: finalize()
+        # raises if any admitted, non-excluded chunk lacks a processing record, so
+        # a record on disk means the admitted set was fully accounted for.
+        if self._admitted_accountant is not None:
+            self._admitted_accountant.write(output_dir)
+
         if all_features and self.mode != 'tonic':
             t_feats_write = time.perf_counter()
             full_feats = pd.concat(all_features, ignore_index=True)
+            # A processed session is valid even with zero detected events; the
+            # status column keeps that distinct from an approved missing session.
+            full_feats['status'] = 'valid'
+            # chunk_id is a cache/storage position, not the session number. The
+            # authoritative chronological session number comes from the session
+            # index; carry it so consumers never treat a storage id as a session.
+            full_feats['session_index'] = self._session_index_for_feature_rows(full_feats)
             feats_dir = os.path.join(output_dir, 'features')
             os.makedirs(feats_dir, exist_ok=True)
-            
-            full_feats.to_csv(os.path.join(feats_dir, 'features.csv'), index=False)
-            pass2_features_csv_write_sec += (time.perf_counter() - t_feats_write)
 
             # Every feature-extracting run records the settings actually
             # consumed for every analyzed ROI, so a missing file can never be
             # misread as "this run had no per-ROI settings" (4J16k39b).
             analyzed_rois = sorted(set(full_feats['roi'].astype(str)))
+
+            # Approved missing sessions keep a chronological row per analyzed ROI
+            # with NaN analytical values (never zero) and an explicit status, so a
+            # missing session is never read as a valid zero-event session.
+            missing_rows = self._missing_session_feature_rows(analyzed_rois)
+            if missing_rows:
+                full_feats = pd.concat(
+                    [full_feats, pd.DataFrame(missing_rows)], ignore_index=True
+                )
+
+            full_feats.to_csv(os.path.join(feats_dir, 'features.csv'), index=False)
+            pass2_features_csv_write_sec += (time.perf_counter() - t_feats_write)
             self._write_feature_event_provenance(feats_dir, analyzed_rois)
             self._stamp_feature_event_provenance_contract(output_dir)
 
@@ -2050,9 +2284,11 @@ class Pipeline:
         emitter=None,
         sessions_per_hour: int = None,
         guided_manifest_path: str | None = None,
+        frozen_input_manifest_path: str | None = None,
     ):
         # Lazy import to avoid GUI side effects at module level
         from .viz import plots
+        self._frozen_input_manifest_path = frozen_input_manifest_path
         run_started = time.perf_counter()
         if self._is_phasic_timing_enabled():
             self._phasic_started_at = run_started
@@ -2145,11 +2381,17 @@ class Pipeline:
             self.preview_info = None
         self._add_phasic_phase_bucket("phase.preview_selection", time.perf_counter() - t_preview)
         self._set_phasic_metric("files_after_preview", len(self.file_list))
-        
+
         # Emit inputs:preview audit event if emitter provided
         if emitter and self.preview_info is not None:
             emitter.emit("inputs", "preview", "Preview selection resolved",
                          payload=self.preview_info)
+
+        # Freeze the admitted intermittent input set with per-chunk identity, so
+        # every admitted chunk must reach one terminal disposition and no chunk
+        # can be silently omitted (4J16k41 / C8). Continuous runs carry their own
+        # window index (4J16k40); preview runs are an explicit subset selection.
+        self._build_admitted_accountant(force_format)
         
         t_roi_resolve = time.perf_counter()
         if guided_verification is not None:

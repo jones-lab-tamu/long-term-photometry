@@ -24,6 +24,12 @@ class Config:
     exclude_incomplete_final_rwd_chunk: bool = False
     rwd_excluded_source_files: List[str] = field(default_factory=list)
     rwd_contract_validation: Dict[str, object] = field(default_factory=dict)
+    # Scientist-approved corrupted/missing sessions (4J16k41c). Each listed source
+    # stays in its chronological slot as an explicit missing interval -- it is not
+    # loaded or analyzed, contributes NaN (never zero) session summaries, and is
+    # never removed from the time axis. This is the ONLY way a corrupted middle
+    # session may be tolerated, and only when explicitly approved.
+    authorized_missing_sessions: List[str] = field(default_factory=list)
     # chunk_duration_sec : Defines strict grid length
     # target_fs_hz       : Defines strict grid spacing
     # npm_*              : Used for strict time axis parsing

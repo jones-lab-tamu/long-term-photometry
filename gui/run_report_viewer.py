@@ -28,6 +28,8 @@ from gui.run_report_parser import (
     get_preview_mode,
     get_run_type,
     resolve_region_deliverables,
+    classify_completed_run_terminal_state,
+    get_scientist_completion_summary,
 )
 from gui.interactive_image import InteractiveImageLabel, InteractiveImageController
 from photometry_pipeline.guided_completed_applied_dff_reload import (
@@ -424,12 +426,17 @@ class RunReportViewer(QWidget):
         self._feature_event_state = load_guided_completed_feature_event_state(out_dir)
         self._refresh_feature_event_display()
 
+        classification = classify_completed_run_terminal_state(out_dir)
+        completion_summary = get_scientist_completion_summary(out_dir, classification)
         title = "Results workspace"
         if is_preview:
             title += " [PREVIEW]"
         elif run_type == "tuning_prep":
             title += " [TUNING PREP]"
-        self._set_status_message(title, level="ready")
+        if classification.completed_with_missing:
+            self._set_status_message(completion_summary, level="ready")
+        else:
+            self._set_status_message(title, level="ready")
         self._workspace.show()
 
         region_names = sorted(self._region_paths.keys(), key=lambda s: s.lower())

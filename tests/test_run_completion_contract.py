@@ -745,3 +745,112 @@ def test_continuous_final_manifest_cannot_be_built_without_an_index(tmp_path: Pa
             str(run_dir), run_id=DEFAULT_RUN_ID, run_mode=_continuous_run_mode(tonic_analysis=False),
             finalized_utc="2026-07-09T00:00:00+00:00",
         )
+
+
+# Input-processing completeness binding (4J16k41 / C8) -------------------------
+
+from photometry_pipeline.input_processing_completeness import (  # noqa: E402
+    INPUT_COMPLETENESS_FILENAME,
+)
+
+
+def test_intermittent_run_requires_and_accepts_completeness_record(tmp_path: Path):
+    run_dir = write_current_run(tmp_path / "run", tonic=True)
+    assert (run_dir / "_analysis" / "phasic_out" / INPUT_COMPLETENESS_FILENAME).is_file()
+    assert (run_dir / "_analysis" / "tonic_out" / INPUT_COMPLETENESS_FILENAME).is_file()
+
+    manifest = json.loads((run_dir / "MANIFEST.json").read_text(encoding="utf-8"))
+    required = {a["relative_path"] for a in manifest[COMPLETION_KEY]["artifacts"] if a["required"]}
+    assert f"_analysis/phasic_out/{INPUT_COMPLETENESS_FILENAME}" in required
+    assert f"_analysis/tonic_out/{INPUT_COMPLETENESS_FILENAME}" in required
+    assert _state(run_dir) == TERMINAL_SUCCESS_CURRENT
+
+
+def test_missing_completeness_record_is_rejected(tmp_path: Path):
+    run_dir = write_current_run(tmp_path / "run")
+    (run_dir / "_analysis" / "phasic_out" / INPUT_COMPLETENESS_FILENAME).unlink()
+    assert _state(run_dir) == TERMINAL_CORRUPTED
+
+
+def test_missing_tonic_completeness_record_is_rejected(tmp_path: Path):
+    run_dir = write_current_run(tmp_path / "run", tonic=True)
+    (run_dir / "_analysis" / "tonic_out" / INPUT_COMPLETENESS_FILENAME).unlink()
+    assert _state(run_dir) == TERMINAL_CORRUPTED
+
+
+def test_malformed_completeness_record_is_rejected(tmp_path: Path):
+    run_dir = write_current_run(tmp_path / "run")
+    (run_dir / "_analysis" / "phasic_out" / INPUT_COMPLETENESS_FILENAME).write_text(
+        "{not valid", encoding="utf-8"
+    )
+    # Rewrite so the manifest digest still matches the tampered file, proving the
+    # reader validates content, not just the digest pin.
+    repin_status_to_manifest(run_dir)
+    assert _state(run_dir) == TERMINAL_CORRUPTED
+
+
+def test_completeness_accounting_mismatch_is_rejected(tmp_path: Path):
+    run_dir = write_current_run(tmp_path / "run")
+    rec_path = run_dir / "_analysis" / "phasic_out" / INPUT_COMPLETENESS_FILENAME
+    rec = json.loads(rec_path.read_text(encoding="utf-8"))
+    rec["processed"] = rec["processed"][:-1]  # processed < admitted
+    rec_path.write_text(json.dumps(rec), encoding="utf-8")
+    repin_status_to_manifest(run_dir)
+    assert _state(run_dir) == TERMINAL_CORRUPTED
+
+
+def test_completeness_duplicate_processed_record_is_rejected(tmp_path: Path):
+    run_dir = write_current_run(tmp_path / "run")
+    rec_path = run_dir / "_analysis" / "phasic_out" / INPUT_COMPLETENESS_FILENAME
+    rec = json.loads(rec_path.read_text(encoding="utf-8"))
+    rec["processed"].append(dict(rec["processed"][0]))
+    rec_path.write_text(json.dumps(rec), encoding="utf-8")
+    repin_status_to_manifest(run_dir)
+    assert _state(run_dir) == TERMINAL_CORRUPTED
+
+
+def test_continuous_run_does_not_require_a_completeness_record(tmp_path: Path):
+    run_dir = write_current_run(tmp_path / "run", acquisition_mode="continuous")
+    assert not (run_dir / "_analysis" / "phasic_out" / INPUT_COMPLETENESS_FILENAME).exists()
+    assert _state(run_dir) == TERMINAL_SUCCESS_CURRENT
+
+
+def test_legacy_run_without_completeness_record_still_loads_as_legacy(tmp_path: Path):
+    # A positively-identified historical run predates the record and must remain
+    # loadable as legacy, without claiming current input-completeness verification.
+    run_dir = write_legacy_run(tmp_path / "legacy")
+    classification = classify_run_terminal_state(str(run_dir))
+    assert classification.state == TERMINAL_SUCCESS_LEGACY
+    assert "cannot be verified" in classification.reason
+
+
+# Completed-with-missing-sessions is a distinct terminal outcome (4J16k41c) -----
+
+from photometry_pipeline.run_completion_contract import TERMINAL_SUCCESS_WITH_MISSING  # noqa: E402
+
+
+def test_run_with_approved_missing_session_is_completed_with_missing(tmp_path: Path):
+    run_dir = write_current_run(tmp_path / "run", missing_session_indices=(1,))
+    classification = classify_run_terminal_state(str(run_dir))
+
+    assert classification.state == TERMINAL_SUCCESS_WITH_MISSING
+    assert classification.is_success is True
+    assert classification.missing_session_count == 1
+    assert "missing session" in classification.reason
+
+
+def test_clean_run_is_not_completed_with_missing(tmp_path: Path):
+    run_dir = write_current_run(tmp_path / "run")
+    assert classify_run_terminal_state(str(run_dir)).state == TERMINAL_SUCCESS_CURRENT
+
+
+def test_missing_session_without_timestamp_is_rejected(tmp_path: Path):
+    run_dir = write_current_run(tmp_path / "run", missing_session_indices=(1,))
+    rec_path = run_dir / "_analysis" / "phasic_out" / INPUT_COMPLETENESS_FILENAME
+    rec = json.loads(rec_path.read_text(encoding="utf-8"))
+    for entry in rec["expected"]:
+        if entry.get("disposition") == "authorized_missing_corrupted":
+            entry["expected_start_time"] = ""
+    rec_path.write_text(json.dumps(rec), encoding="utf-8")
+    repin_status_to_manifest(run_dir)
+    assert _state(run_dir) == TERMINAL_CORRUPTED

@@ -13,6 +13,17 @@ import json
 import os
 from pathlib import Path
 
+from photometry_pipeline.input_processing_completeness import (
+    DISPOSITION_AUTHORIZED_EXCLUSION,
+    DISPOSITION_AUTHORIZED_MISSING,
+    DISPOSITION_PROCESS,
+    FROZEN_INPUT_MANIFEST_CONTRACT_VERSION,
+    FROZEN_INPUT_MANIFEST_FILENAME,
+    INPUT_COMPLETENESS_CONTRACT_VERSION,
+    INPUT_COMPLETENESS_FILENAME,
+    POLICY_INCOMPLETE_FINAL_RWD_CHUNK,
+    expected_entries_digest,
+)
 from photometry_pipeline.run_completion_contract import (
     COMPLETION_KEY,
     PROFILE_CONTINUOUS,
@@ -78,6 +89,75 @@ def write_legacy_run(
     return run_dir
 
 
+def valid_completeness_record(
+    *,
+    n_chunks: int = 2,
+    excluded_final: bool = False,
+    missing_indices: tuple[int, ...] = (),
+    acquisition_mode: str = "intermittent",
+) -> dict:
+    """A coherent input-processing completeness record for fixtures.
+
+    ``n_chunks`` admitted chunks, all processed; ``excluded_final`` makes the last
+    an authorized incomplete-final exclusion; ``missing_indices`` marks those
+    chronological slots as authorized missing/corrupted sessions.
+    """
+    cache_slot = 0
+    expected = []
+    processed = []
+    missing = []
+    for index in range(n_chunks):
+        entry = {
+            "source": f"/frozen/chunk_{index:04d}",
+            "size_bytes": 100 + index,
+            "sha256": f"digest{index}",
+            "index": index,
+            "disposition": DISPOSITION_PROCESS,
+            "expected_start_time": f"2024-01-01T{index:02d}:00:00",
+            "expected_duration_sec": 60.0,
+        }
+        if excluded_final and index == n_chunks - 1:
+            entry["disposition"] = DISPOSITION_AUTHORIZED_EXCLUSION
+            entry["policy"] = POLICY_INCOMPLETE_FINAL_RWD_CHUNK
+        elif index in missing_indices:
+            entry["disposition"] = DISPOSITION_AUTHORIZED_MISSING
+            entry["failure_category"] = "corrupted_session"
+            entry["reason"] = "approved corrupted session"
+            entry["authorization_source"] = "run_config"
+            missing.append(dict(entry))
+        else:
+            processed.append(
+                {"index": index, "source": entry["source"], "cache_chunk_id": cache_slot}
+            )
+            cache_slot += 1
+        expected.append(entry)
+    return {
+        "contract_version": INPUT_COMPLETENESS_CONTRACT_VERSION,
+        "acquisition_mode": acquisition_mode,
+        "input_format": "rwd",
+        "frozen_manifest_digest": expected_entries_digest(expected),
+        "expected": expected,
+        "processed": processed,
+        "missing": missing,
+    }
+
+
+def valid_frozen_input_manifest(
+    *, n_chunks: int = 2, excluded_final: bool = False, missing_indices: tuple[int, ...] = ()
+) -> dict:
+    """The run-wide frozen manifest matching valid_completeness_record()."""
+    expected = valid_completeness_record(
+        n_chunks=n_chunks, excluded_final=excluded_final, missing_indices=missing_indices
+    )["expected"]
+    return {
+        "contract_version": FROZEN_INPUT_MANIFEST_CONTRACT_VERSION,
+        "acquisition_mode": "intermittent",
+        "input_format": "rwd",
+        "expected": expected,
+        "digest": expected_entries_digest(expected),
+    }
+
+
 def write_mandatory_artifacts(
     run_dir: Path,
     *,
@@ -85,8 +165,22 @@ def write_mandatory_artifacts(
     phasic: bool,
     tonic: bool,
     features: bool,
+    chunked: bool = False,
+    shared_input_manifest: bool = False,
+    missing_indices: tuple[int, ...] = (),
 ) -> None:
-    """Write the analysis outputs implied by the run mode."""
+    """Write the analysis outputs implied by the run mode.
+
+    When ``shared_input_manifest`` is set, one run-wide frozen manifest is written
+    and every analysis record carries its matching digest, so the terminal
+    contract's shared-identity check is satisfied. ``missing_indices`` marks
+    approved missing sessions in the session index.
+    """
+    n_chunks = max(2, (max(missing_indices) + 2) if missing_indices else 2)
+
+    def _record():
+        return valid_completeness_record(n_chunks=n_chunks, missing_indices=missing_indices)
+
     if phasic:
         phasic_out = run_dir / "_analysis" / "phasic_out"
         _write_json(phasic_out / "run_report.json", legacy_run_report())
@@ -98,11 +192,20 @@ def write_mandatory_artifacts(
                 phasic_out / "features" / "feature_event_provenance.json",
                 {"schema_version": "guided_feature_event_provenance.v3", "rois": []},
             )
+        if chunked:
+            _write_json(phasic_out / INPUT_COMPLETENESS_FILENAME, _record())
     if tonic:
         tonic_out = run_dir / "_analysis" / "tonic_out"
         _write_json(tonic_out / "run_report.json", legacy_run_report())
         _write_text(tonic_out / "config_used.yaml", "target_fs_hz: 30.0\n")
         _write_text(tonic_out / "tonic_trace_cache.h5", f"tonic-cache-for-{run_id}")
+        if chunked:
+            _write_json(tonic_out / INPUT_COMPLETENESS_FILENAME, _record())
+    if shared_input_manifest:
+        _write_json(
+            run_dir / FROZEN_INPUT_MANIFEST_FILENAME,
+            valid_frozen_input_manifest(n_chunks=n_chunks, missing_indices=missing_indices),
+        )
 
 
 def write_required_deliverables(run_dir: Path, run_mode: dict) -> None:
@@ -132,6 +235,7 @@ def full_intermittent_run_mode(
         feature_extraction_ran=bool(phasic and features),
         deliverable_profile=PROFILE_FULL_INTERMITTENT,
         expected_rois=expected_rois,
+        chunked_input_processing=bool(phasic or tonic),
     )
 
 
@@ -172,6 +276,9 @@ def write_current_run(
     report_run_id: str | None = None,
     status_run_id: str | None = None,
     manifest_final: bool = True,
+    chunked_input_processing: bool | None = None,
+    shared_input_manifest: bool | None = None,
+    missing_session_indices: tuple[int, ...] = (),
 ) -> Path:
     """Build a run directory that satisfies the current completion contract.
 
@@ -180,8 +287,6 @@ def write_current_run(
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-
-    write_mandatory_artifacts(run_dir, run_id=run_id, phasic=phasic, tonic=tonic, features=features)
 
     if deliverable_profile is None:
         if acquisition_mode == "continuous":
@@ -194,6 +299,21 @@ def write_current_run(
         expected_rois = [region] if region else []
     if continuous_outputs_ran is None:
         continuous_outputs_ran = deliverable_profile == PROFILE_CONTINUOUS
+    if chunked_input_processing is None:
+        chunked_input_processing = (
+            acquisition_mode != "continuous"
+            and run_type != "preview"
+            and (phasic or tonic)
+        )
+    if shared_input_manifest is None:
+        shared_input_manifest = bool(chunked_input_processing)
+
+    write_mandatory_artifacts(
+        run_dir, run_id=run_id, phasic=phasic, tonic=tonic, features=features,
+        shared_input_manifest=shared_input_manifest,
+        chunked=chunked_input_processing,
+        missing_indices=missing_session_indices,
+    )
 
     report = legacy_run_report()
     report[REPORT_COMPLETION_KEY] = build_report_completion_block(run_id=report_run_id or run_id)
@@ -214,6 +334,8 @@ def write_current_run(
         expected_rois=expected_rois,
         skipped_deliverable_families=skipped_deliverable_families or [],
         continuous_outputs_ran=continuous_outputs_ran,
+        chunked_input_processing=chunked_input_processing,
+        shared_input_manifest=shared_input_manifest,
     )
     write_required_deliverables(run_dir, run_mode)
     if region:
@@ -340,15 +462,85 @@ def write_phasic_feature_outputs(
     _write_json(report_path, report)
 
 
-def seed_wrapper_analysis_outputs(run_dir: Path | str) -> None:
+def seed_wrapper_rwd_input(input_dir: Path | str, *, folder: str = "2024_01_01-00_00_00") -> str:
+    """Write one real single-chunk RWD input so the wrapper's freeze can discover it."""
+    input_dir = Path(input_dir)
+    chunk = input_dir / folder
+    chunk.mkdir(parents=True, exist_ok=True)
+    import numpy as np
+
+    n = 60
+    t = np.arange(n) / 10.0
+    _write_text(
+        chunk / "fluorescence.csv",
+        "TimeStamp,Region0-470,Region0-410\n"
+        + "\n".join(f"{tt},{1.2 + 0.01 * i},{1.0 + 0.01 * i}" for i, tt in enumerate(t)),
+    )
+    return str(chunk / "fluorescence.csv")
+
+
+def frozen_manifest_for_sources(sources: list[str], *, expected_duration_sec: float | None = None) -> dict:
+    """Build the run-wide frozen manifest from real source files (matches the wrapper)."""
+    from photometry_pipeline.config import Config
+    from photometry_pipeline.input_processing_completeness import build_session_index
+
+    if expected_duration_sec is None:
+        expected_duration_sec = float(Config.from_yaml(str(BASE_CONFIG_PATH)).chunk_duration_sec) or None
+
+    return build_session_index(
+        acquisition_mode="intermittent",
+        input_format="rwd",
+        ordered_sources=list(sources),
+        expected_duration_sec=expected_duration_sec,
+    )
+
+
+def completeness_record_from_manifest(manifest: dict) -> dict:
+    """A processed completeness record consistent with a frozen manifest."""
+    from photometry_pipeline.input_processing_completeness import (
+        DISPOSITION_PROCESS,
+        INPUT_COMPLETENESS_CONTRACT_VERSION,
+    )
+
+    processed = []
+    cache_slot = 0
+    for entry in manifest["expected"]:
+        if entry.get("disposition") == DISPOSITION_PROCESS:
+            processed.append(
+                {"index": entry["index"], "source": entry["source"], "cache_chunk_id": cache_slot}
+            )
+            cache_slot += 1
+    return {
+        "contract_version": INPUT_COMPLETENESS_CONTRACT_VERSION,
+        "acquisition_mode": manifest["acquisition_mode"],
+        "input_format": manifest["input_format"],
+        "frozen_manifest_digest": manifest["digest"],
+        "expected": manifest["expected"],
+        "processed": processed,
+        "missing": [],
+    }
+
+
+def seed_wrapper_analysis_outputs(run_dir: Path | str, input_dir: Path | str | None = None) -> None:
     """Write exactly what the analysis subprocesses produce, for wrapper tests.
 
     Tests that mock the analysis subprocesses must still leave behind the
     artifacts a real run leaves behind, otherwise they are asserting against a
-    run the wrapper would rightly refuse to call successful.
+    run the wrapper would rightly refuse to call successful. When ``input_dir`` is
+    given, the run-wide frozen manifest and each analysis completeness record are
+    built consistently from the real discovered source, matching the wrapper's own
+    freeze so the shared-identity check passes.
     """
     run_dir = Path(run_dir)
     config_text = BASE_CONFIG_PATH.read_text(encoding="utf-8")
+
+    shared_record = None
+    shared_manifest = None
+    if input_dir is not None:
+        source = seed_wrapper_rwd_input(input_dir)
+        shared_manifest = frozen_manifest_for_sources([source])
+        shared_record = completeness_record_from_manifest(shared_manifest)
+        _write_json(run_dir / FROZEN_INPUT_MANIFEST_FILENAME, shared_manifest)
 
     phasic_out = run_dir / "_analysis" / "phasic_out"
     (phasic_out / "traces").mkdir(parents=True, exist_ok=True)
@@ -360,6 +552,10 @@ def seed_wrapper_analysis_outputs(run_dir: Path | str) -> None:
     _write_json(phasic_out / "run_report.json", legacy_run_report())
     write_phasic_feature_outputs(phasic_out)
     _write_trace_cache(phasic_out / "phasic_trace_cache.h5", "phasic")
+    _write_json(
+        phasic_out / INPUT_COMPLETENESS_FILENAME,
+        shared_record if shared_record is not None else valid_completeness_record(),
+    )
 
     tonic_out = run_dir / "_analysis" / "tonic_out"
     tonic_out.mkdir(parents=True, exist_ok=True)
@@ -368,6 +564,10 @@ def seed_wrapper_analysis_outputs(run_dir: Path | str) -> None:
     _write_json(tonic_out / "run_report.json", tonic_report)
     _write_text(tonic_out / "config_used.yaml", config_text)
     _write_trace_cache(tonic_out / "tonic_trace_cache.h5", "tonic")
+    _write_json(
+        tonic_out / INPUT_COMPLETENESS_FILENAME,
+        shared_record if shared_record is not None else valid_completeness_record(),
+    )
 
 
 def repin_status_to_manifest(run_dir: Path | str, *, run_id: str = DEFAULT_RUN_ID) -> None:

@@ -529,6 +529,73 @@ def _continuous_row_counts_from_writer(summary_result):
     return counts
 
 
+def _freeze_run_input_manifest(*, input_dir, config_path, run_dir, force_format):
+    """Freeze one ordered production input manifest for the whole run.
+
+    Uses the Pipeline's own discovery so the frozen ordered set and authorized
+    exclusion are identical to what each analysis subprocess resolves; each
+    subprocess additionally re-verifies its discovery against this manifest.
+    Returns the written manifest path.
+    """
+    import os as _os
+
+    from photometry_pipeline.config import Config as _Config
+    from photometry_pipeline.pipeline import Pipeline as _Pipeline
+    from photometry_pipeline.input_processing_completeness import (
+        POLICY_INCOMPLETE_FINAL_RWD_CHUNK as _POLICY,
+        build_session_index as _build,
+        write_frozen_input_manifest as _write,
+    )
+
+    def _norm(path):
+        return _os.path.normcase(_os.path.abspath(_os.path.normpath(str(path))))
+
+    cfg = _Config.from_yaml(config_path)
+    probe = _Pipeline(cfg, mode="phasic")
+    try:
+        probe.discover_files(input_dir, recursive=True, force_format=force_format)
+    except ValueError:
+        # An empty/non-RWD input is still rejected by the analysis subprocess;
+        # there is no admitted set to freeze here.  Defer that clear failure so
+        # command construction and diagnostics retain their historical order.
+        # Never defer when the user requested an authorized omission, because
+        # that request itself requires a discovered, timestamped source.
+        if getattr(cfg, "authorized_missing_sessions", None):
+            raise
+        return None
+    # Continuous inputs carry their own window index; do not freeze here.
+    if probe._is_continuous_mode_enabled():
+        return None
+
+    ordered_admitted = list(probe.file_list)
+    excluded = probe._authorized_exclusion
+    ordered_sources = ordered_admitted + ([excluded] if excluded is not None else [])
+
+    # Resolve ``auto`` before writing the shared index.  Missing-session
+    # authorization is deliberately supported only for validated timestamped
+    # RWD folders; passing the literal ``auto`` here would weaken that gate.
+    try:
+        resolved_input_format = probe._get_format(ordered_admitted[0], force_format)
+    except Exception:
+        resolved_input_format = str(force_format)
+
+    missing_norm = sorted(
+        {_norm(p) for p in (getattr(cfg, "authorized_missing_sessions", []) or []) if str(p).strip()}
+    )
+    expected_duration = float(getattr(cfg, "chunk_duration_sec", 0.0)) or None
+
+    manifest = _build(
+        acquisition_mode="intermittent",
+        input_format=str(resolved_input_format),
+        ordered_sources=ordered_sources,
+        missing_sources=missing_norm,
+        excluded_source=excluded,
+        exclusion_policy=(_POLICY if excluded is not None else ""),
+        expected_duration_sec=expected_duration,
+    )
+    return _write(run_dir, manifest)
+
+
 def _regions_from_run_report(report_path):
     """The ROI set an analysis declared it selected, as recorded in its run report.
 
@@ -1637,6 +1704,10 @@ def main():
     # row counts it reported writing.
     continuous_outputs_ran = False
     continuous_row_counts = {}
+    # Set when the wrapper froze one run-wide input manifest shared by every
+    # analysis subprocess (4J16k41b).
+    frozen_input_manifest_path = None
+    shared_input_manifest = False
     effective_skip_plan = _skip_plan_for_profile(
         args.run_type,
         run_tonic_mode=selected_tonic_mode,
@@ -2097,6 +2168,16 @@ def main():
             expected_rois=list(expected_rois),
             skipped_deliverable_families=_skipped_deliverable_families(),
             continuous_outputs_ran=bool(continuous_outputs_ran),
+            # Intermittent, non-preview analyses process source data chunk by
+            # chunk and must account for every admitted chunk (4J16k41 / C8). The
+            # Pipeline writes the completeness record for every non-preview
+            # intermittent run (including traces-only tuning-prep).
+            chunked_input_processing=bool(
+                not continuous_mode
+                and effective_run_type != "preview"
+                and (run_phasic_mode or run_tonic_mode)
+            ),
+            shared_input_manifest=bool(shared_input_manifest),
         )
 
     def _finalize_terminal_success():
@@ -2343,7 +2424,31 @@ def main():
                 if effective_allow_partial_final_window
                 else "--no-allow-partial-final-window"
             )
-        
+
+        # Freeze ONE run-wide production input manifest before launching any
+        # analysis subprocess, so phasic and tonic are held to the same admitted
+        # chunk set (4J16k41b). Guided runs resolve their inputs from a verified
+        # candidate manifest, not by discovery, and are phasic-only, so they keep
+        # their single self-frozen record.
+        frozen_input_manifest_path = None
+        shared_input_manifest = bool(
+            not continuous_mode
+            and effective_run_type != "preview"
+            and (run_phasic_mode or run_tonic_mode)
+            and not getattr(args, "guided_candidate_manifest", None)
+        )
+        if shared_input_manifest:
+            frozen_input_manifest_path = _freeze_run_input_manifest(
+                input_dir=args.input,
+                config_path=args.config,
+                run_dir=run_dir,
+                force_format=analysis_force_format,
+            )
+
+        def _append_frozen_manifest_arg(cmd):
+            if frozen_input_manifest_path:
+                cmd.extend(["--frozen-input-manifest", frozen_input_manifest_path])
+
         if run_tonic_mode:
             t_phase, started_utc_phase = _phase_start(status_data, "tonic_analysis", emitter=emitter)
             _write_status_update("tonic_analysis")
@@ -2366,6 +2471,7 @@ def main():
             if resolved_sessions_per_hour is not None:
                 cmd_tonic.extend(['--sessions-per-hour', str(resolved_sessions_per_hour)])
             _append_continuous_analysis_args(cmd_tonic)
+            _append_frozen_manifest_arg(cmd_tonic)
             _append_guided_manifest_to_analysis_command(
                 cmd_tonic, args, mode="tonic"
             )
@@ -2410,6 +2516,7 @@ def main():
             if resolved_sessions_per_hour is not None:
                 cmd_phasic.extend(['--sessions-per-hour', str(resolved_sessions_per_hour)])
             _append_continuous_analysis_args(cmd_phasic)
+            _append_frozen_manifest_arg(cmd_phasic)
             _append_guided_manifest_to_analysis_command(
                 cmd_phasic, args, mode="phasic"
             )
@@ -2904,6 +3011,10 @@ def main():
                 t_secs_mode = []
                 t_secs_real = []
                 d_vals = []
+                session_indices = []
+                session_statuses = []
+                session_sources = []
+                missing_tonic_sessions = []
                 use_streaming_csv = (
                     HAS_PYARROW_CSV
                     and effective_tonic_timeline_mode == TONIC_TIMELINE_MODE_REAL_ELAPSED
@@ -2926,14 +3037,37 @@ def main():
                         cids = list_cache_chunk_ids(cache)
                         
                         from photometry_pipeline.utils.timeline import map_cached_sources_to_schedule_positions
+                        from photometry_pipeline.viz.phasic_data_prep import build_authoritative_plot_sessions
                                 
                         source_files = []
                         if "meta" in cache and "source_files" in cache["meta"]:
                             source_files = [f.decode('utf-8') if isinstance(f, bytes) else f for f in cache["meta"]["source_files"][:]]
 
+                        authoritative_tonic_sessions = build_authoritative_plot_sessions(
+                            tonic_out, cids, source_files
+                        )
+                        cache_to_session = {
+                            int(item["cache_chunk_id"]): int(item["session_index"])
+                            for item in (authoritative_tonic_sessions or [])
+                            if item.get("cache_chunk_id") is not None
+                        }
+                        missing_tonic_sessions = [
+                            item for item in (authoritative_tonic_sessions or [])
+                            if item.get("status") != "valid"
+                        ]
+                        if missing_tonic_sessions:
+                            # Current missing-session rows carry explicit session
+                            # metadata and markers; use the bounded fallback
+                            # writer rather than a two-column streaming shortcut.
+                            use_streaming_csv = False
+
                         # Rescale timeline offsets using exactly matched position
-                        actual_positions = map_cached_sources_to_schedule_positions(
-                            args.input, args.format, source_files, cids
+                        actual_positions = (
+                            [cache_to_session.get(int(cid), int(cid)) for cid in cids]
+                            if authoritative_tonic_sessions is not None
+                            else map_cached_sources_to_schedule_positions(
+                                args.input, args.format, source_files, cids
+                            )
                         )
                         prev_chunk_end_sec = None
                         prev_dt_sec = None
@@ -3015,6 +3149,11 @@ def main():
                                 t_secs_mode.append(np.asarray(t_abs, dtype=float))
                                 t_secs_real.append(np.asarray(t_abs_real, dtype=float))
                                 d_vals.append(np.asarray(df_arr, dtype=float))
+                                session_indices.append(
+                                    np.full(len(t_abs), int(actual_schedule_idx if actual_schedule_idx is not None else cid), dtype=int)
+                                )
+                                session_statuses.append(np.full(len(t_abs), "valid", dtype=object))
+                                session_sources.append(np.full(len(t_abs), str(source_files[i] if i < len(source_files) else ""), dtype=object))
                                 tonic_subbucket_totals["row_accumulation"] += time.perf_counter() - t_sub
                     finally:
                         if csv_file_handle is not None:
@@ -3041,8 +3180,44 @@ def main():
                         {
                             'time_hours': full_t_mode / 3600.0,
                             'tonic_df': np.concatenate(d_vals),
+                            'session_index': np.concatenate(session_indices),
+                            'status': np.concatenate(session_statuses),
+                            'source_file': np.concatenate(session_sources),
+                            'row_kind': 'sample',
                         }
                     )
+                    if missing_tonic_sessions:
+                        marker_rows = []
+                        base_start = min(
+                            (
+                                item.get("expected_start_time")
+                                for item in (authoritative_tonic_sessions or missing_tonic_sessions)
+                                if item.get("expected_start_time") is not None
+                            ),
+                            default=None,
+                        )
+                        for item in missing_tonic_sessions:
+                            start = item.get("expected_start_time")
+                            if base_start is not None and start is not None:
+                                marker_time = (start - base_start).total_seconds() / 3600.0
+                            else:
+                                marker_time = float(item.get("session_index", 0)) * (
+                                    1.0 / float(resolved_sessions_per_hour or 1.0)
+                                )
+                            marker_rows.append(
+                                {
+                                    "time_hours": marker_time,
+                                    "tonic_df": np.nan,
+                                    "session_index": int(item["session_index"]),
+                                    "status": str(item.get("status", "missing_corrupted")),
+                                    "source_file": str(item.get("source_file", "")),
+                                    "row_kind": "missing_session_marker",
+                                }
+                            )
+                        full_tonic = pd.concat(
+                            [full_tonic, pd.DataFrame(marker_rows)],
+                            ignore_index=True,
+                        ).sort_values(["time_hours", "session_index"], kind="stable")
                     tonic_subbucket_totals["dataframe_concat"] += time.perf_counter() - t_sub
 
                     t_sub = time.perf_counter()

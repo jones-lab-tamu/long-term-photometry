@@ -15,9 +15,11 @@ import photometry_pipeline.guided_startup_claim as claim
 import photometry_pipeline.guided_startup_orchestration as orchestration
 import tools.run_full_pipeline_deliverables as wrapper
 from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
+from photometry_pipeline.input_processing_completeness import INPUT_COMPLETENESS_FILENAME
 from tests.terminal_run_fixtures import (
     BASE_CONFIG_PATH,
     seed_wrapper_deliverables,
+    valid_completeness_record,
     write_current_run,
     write_phasic_feature_outputs,
 )
@@ -88,6 +90,10 @@ def _write_minimal_successful_phasic_output(output_dir: Path) -> None:
         BASE_CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8"
     )
     write_phasic_feature_outputs(output_dir)
+    # A real intermittent analysis accounts for every admitted input chunk.
+    (output_dir / INPUT_COMPLETENESS_FILENAME).write_text(
+        json.dumps(valid_completeness_record()), encoding="utf-8"
+    )
 
     # The per-ROI plot and table subprocesses are stubbed too, so stand in for
     # the deliverables a real full phasic run would have produced.

@@ -37,8 +37,9 @@ def test_wrapper_timing_manifest_full_run_mocked(mock_run_dir, tmp_path):
 
     # Seed the artifacts the mocked analysis subprocesses would really produce.
     # The wrapper now refuses to finalize a run whose mandatory outputs are absent,
-    # so a mocked run must leave behind a real terminal artifact set.
-    seed_wrapper_analysis_outputs(mock_run_dir)
+    # so a mocked run must leave behind a real terminal artifact set, and a real
+    # discoverable input so the run-wide freeze succeeds.
+    seed_wrapper_analysis_outputs(mock_run_dir, input_dir)
     # The plot/table subprocesses are mocked too, so stand in for the per-ROI
     # deliverables a real full run would have written.
     seed_wrapper_deliverables(mock_run_dir, ["Region0"])

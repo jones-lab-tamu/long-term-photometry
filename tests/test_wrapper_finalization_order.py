@@ -27,6 +27,7 @@ from tests.terminal_run_fixtures import (
     BASE_CONFIG_PATH,
     seed_wrapper_analysis_outputs,
     seed_wrapper_deliverables,
+    seed_wrapper_rwd_input,
 )
 
 def _run_wrapper(
@@ -49,8 +50,12 @@ def _run_wrapper(
     config_file = tmp_path / "config.yaml"
     config_file.write_text(BASE_CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8")
 
+    # A real single-chunk RWD input so the wrapper's run-wide freeze can discover
+    # it (idempotent; the analysis records are seeded to match).
+    seed_wrapper_rwd_input(input_dir)
+
     if seed:
-        seed_wrapper_analysis_outputs(run_dir)
+        seed_wrapper_analysis_outputs(run_dir, input_dir)
         # The plot/table subprocesses are mocked, so stand in for the per-ROI
         # deliverables a real full run would have written.
         seed_wrapper_deliverables(run_dir, ["Region0"])
@@ -172,7 +177,7 @@ def test_missing_feature_provenance_blocks_success(tmp_path: Path):
     """A run whose per-ROI settings record never landed must not finalize as successful."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    seed_wrapper_analysis_outputs(run_dir)
+    seed_wrapper_analysis_outputs(run_dir, tmp_path / "input")
     (run_dir / "_analysis" / "phasic_out" / "features" / "feature_event_provenance.json").unlink()
 
     code = _run_wrapper(run_dir, tmp_path, seed=False)
@@ -186,7 +191,7 @@ def test_missing_mandatory_artifact_blocks_finalization(tmp_path: Path):
     """An output missing only at finalize time still cannot produce a final manifest."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    seed_wrapper_analysis_outputs(run_dir)
+    seed_wrapper_analysis_outputs(run_dir, tmp_path / "input")
     (run_dir / "_analysis" / "tonic_out" / "config_used.yaml").unlink()
 
     code = _run_wrapper(run_dir, tmp_path, seed=False)
@@ -257,7 +262,7 @@ def test_output_deleted_just_before_finalization_cannot_excuse_itself(tmp_path: 
 def test_missing_per_roi_deliverable_blocks_success(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    seed_wrapper_analysis_outputs(run_dir)
+    seed_wrapper_analysis_outputs(run_dir, tmp_path / "input")
     seed_wrapper_deliverables(run_dir, ["Region0"])
     (run_dir / "Region0" / "tables" / "phasic_auc_timeseries.csv").unlink()
 

@@ -15,11 +15,13 @@ from gui.run_report_parser import (
     resolve_internal_artifacts,
     resolve_primary_artifacts,
     is_successful_completed_run_dir,
+    get_scientist_completion_summary,
 )
 
 from PySide6.QtWidgets import QApplication
 from gui.run_report_viewer import RunReportViewer
 from tests.terminal_run_fixtures import write_current_run
+from types import SimpleNamespace
 
 
 @pytest.fixture(scope="module")
@@ -382,3 +384,36 @@ def test_run_report_viewer_multi_region_load_and_buttons(qapp):
                 assert pix is not None and not pix.isNull()
         finally:
             viewer.close()
+
+
+def test_scientist_completion_summary_names_missing_session_without_internal_terms(tmp_path):
+    (tmp_path / "input_manifest.json").write_text(
+        json.dumps(
+            {
+                "expected": [
+                    {"index": 0, "disposition": "process"},
+                    {
+                        "index": 1,
+                        "disposition": "authorized_missing_corrupted",
+                        "expected_start_time": "2024-01-01T01:00:00",
+                        "expected_duration_sec": 60.0,
+                        "reason": "approved damaged session",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    classification = SimpleNamespace(
+        completed_with_missing=True,
+        is_success=True,
+        missing_session_count=1,
+        reason="internal reason",
+    )
+    text = get_scientist_completion_summary(str(tmp_path), classification)
+    assert "Completed with missing sessions" in text
+    assert "Session 2" in text
+    assert "2024-01-01 01:00:00" in text
+    assert "expected duration 60s" in text
+    for forbidden in ("manifest", "schema", "cache", "digest", "contract", "JSON"):
+        assert forbidden.lower() not in text.lower()

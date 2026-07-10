@@ -7,6 +7,7 @@ and resolving quick-links safely within <run_dir>.
 
 import json
 import os
+from datetime import datetime
 from typing import Dict, Any, List, Tuple
 
 from photometry_pipeline.guided_completed_run_rejection_policy import (
@@ -197,6 +198,81 @@ def classify_completed_run_terminal_state(run_dir: str):
     """Expose the full terminal classification (successful / failed / interrupted /
     corrupted / legacy) for callers that must distinguish them."""
     return classify_run_terminal_state(run_dir)
+
+
+def get_scientist_completion_summary(run_dir: str, classification=None) -> str:
+    """Return plain-language completion text for the existing Review surface.
+
+    This deliberately reads the shared session-index record only to translate
+    approved gaps into scientist-facing terms.  It does not expose internal
+    implementation vocabulary in the normal summary.
+    """
+    if classification is None:
+        classification = classify_run_terminal_state(run_dir)
+    if not getattr(classification, "completed_with_missing", False):
+        if getattr(classification, "is_success", False):
+            return "Completed successfully."
+        return str(getattr(classification, "reason", "Run could not be loaded."))
+
+    expected = None
+    candidates = [
+        os.path.join(run_dir, "input_manifest.json"),
+        os.path.join(run_dir, "_analysis", "phasic_out", "input_processing_completeness.json"),
+        os.path.join(run_dir, "_analysis", "tonic_out", "input_processing_completeness.json"),
+    ]
+    for path in candidates:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, dict) and isinstance(payload.get("expected"), list):
+                expected = payload["expected"]
+                break
+        except (OSError, ValueError, TypeError):
+            continue
+
+    missing_count = int(getattr(classification, "missing_session_count", 0))
+    exclusion_count = int(getattr(classification, "final_exclusion_count", 0))
+    if missing_count and exclusion_count:
+        headline = "Completed with missing sessions and an incomplete final session excluded."
+    elif exclusion_count:
+        headline = "Completed with an incomplete final session excluded."
+    else:
+        headline = "Completed with missing sessions."
+    lines = [headline]
+    if missing_count:
+        lines.append(
+            f"{missing_count} missing session(s) were approved and kept in their original time positions."
+        )
+    if exclusion_count:
+        lines.append(
+            f"{exclusion_count} incomplete final session(s) were excluded from analysis."
+        )
+    affected = []
+    for entry in expected or []:
+        disposition = str(entry.get("disposition", ""))
+        if disposition not in {"authorized_missing_corrupted", "authorized_exclusion"}:
+            continue
+        number = int(entry.get("index", 0)) + 1
+        timestamp = str(entry.get("expected_start_time", "")).strip()
+        duration = entry.get("expected_duration_sec")
+        reason = str(entry.get("reason", "")).strip()
+        label = f"Session {number}"
+        if timestamp:
+            try:
+                label += f" ({datetime.fromisoformat(timestamp).isoformat(sep=' ')})"
+            except ValueError:
+                label += f" ({timestamp})"
+        if duration is not None:
+            label += f", expected duration {float(duration):g}s"
+        if disposition == "authorized_exclusion":
+            reason_text = "final incomplete session excluded"
+        else:
+            reason_text = reason or "approved missing/corrupted session"
+        affected.append(f"{label}: {reason_text}")
+    if affected:
+        lines.append("Affected sessions:")
+        lines.extend(f"• {item}" for item in affected)
+    return "\n".join(lines)
 
 
 def completed_run_verification_is_unavailable(run_dir: str) -> bool:

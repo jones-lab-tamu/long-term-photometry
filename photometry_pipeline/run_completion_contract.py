@@ -31,6 +31,14 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from photometry_pipeline.input_processing_completeness import (
+    FROZEN_INPUT_MANIFEST_FILENAME,
+    INPUT_COMPLETENESS_FILENAME,
+    expected_entries_digest,
+    load_frozen_input_manifest,
+    read_input_completeness,
+)
+
 # Bumped whenever the terminal set's meaning changes. A run declaring any other
 # value is not something this build knows how to verify, so it fails closed.
 COMPLETION_CONTRACT_VERSION = "run_completion.v1"
@@ -52,12 +60,20 @@ DIGEST_OMITTED_LARGE = "large_binary_size_verified_only"
 # Terminal classifications.
 TERMINAL_SUCCESS_CURRENT = "success_current"
 TERMINAL_SUCCESS_LEGACY = "success_legacy"
+# A run that finished successfully but contains scientist-approved missing
+# sessions and/or an authorized final exclusion -- a distinct outcome, never
+# indistinguishable clean success (4J16k41c).
+TERMINAL_SUCCESS_WITH_MISSING = "success_with_missing"
 TERMINAL_FAILED = "failed"
 TERMINAL_INTERRUPTED = "interrupted"
 TERMINAL_CORRUPTED = "corrupted"
 TERMINAL_NOT_A_RUN = "not_a_run"
 
-SUCCESS_STATES = (TERMINAL_SUCCESS_CURRENT, TERMINAL_SUCCESS_LEGACY)
+SUCCESS_STATES = (
+    TERMINAL_SUCCESS_CURRENT,
+    TERMINAL_SUCCESS_WITH_MISSING,
+    TERMINAL_SUCCESS_LEGACY,
+)
 
 _FAILED_STATUS_TOKENS = {"failed", "error", "failure"}
 _INTERRUPTED_STATUS_TOKENS = {"cancelled", "canceled", "aborted", "running", "in-progress", "active"}
@@ -79,6 +95,8 @@ class TerminalClassification:
     run_id: str = ""
     contract_version: str = ""
     run_mode: dict[str, Any] = field(default_factory=dict)
+    missing_session_count: int = 0
+    final_exclusion_count: int = 0
 
     @property
     def is_success(self) -> bool:
@@ -86,7 +104,11 @@ class TerminalClassification:
 
     @property
     def is_current(self) -> bool:
-        return self.state == TERMINAL_SUCCESS_CURRENT
+        return self.state in (TERMINAL_SUCCESS_CURRENT, TERMINAL_SUCCESS_WITH_MISSING)
+
+    @property
+    def completed_with_missing(self) -> bool:
+        return self.state == TERMINAL_SUCCESS_WITH_MISSING
 
     @property
     def is_legacy(self) -> bool:
@@ -189,6 +211,8 @@ def normalize_run_mode(
     expected_rois: list[str] | tuple[str, ...] = (),
     skipped_deliverable_families: list[str] | tuple[str, ...] = (),
     continuous_outputs_ran: bool = False,
+    chunked_input_processing: bool = False,
+    shared_input_manifest: bool = False,
 ) -> dict[str, Any]:
     """The execution facts that decide the mandatory artifact set.
 
@@ -208,6 +232,8 @@ def normalize_run_mode(
         "expected_rois": [str(roi) for roi in expected_rois],
         "skipped_deliverable_families": sorted({str(f) for f in skipped_deliverable_families}),
         "continuous_outputs_ran": bool(continuous_outputs_ran),
+        "chunked_input_processing": bool(chunked_input_processing),
+        "shared_input_manifest": bool(shared_input_manifest),
     }
 
 
@@ -259,6 +285,17 @@ def required_core_artifacts_for_run_mode(run_mode: dict[str, Any]) -> list[str]:
             "_analysis/phasic_out/features/features.csv",
             "_analysis/phasic_out/features/feature_event_provenance.json",
         ]
+    # Chunked intermittent analyses must account for every admitted input chunk
+    # (4J16k41 / C8): the record proves nothing was silently omitted.
+    if run_mode.get("chunked_input_processing"):
+        if run_mode.get("phasic_analysis"):
+            required.append(f"_analysis/phasic_out/{INPUT_COMPLETENESS_FILENAME}")
+        if run_mode.get("tonic_analysis"):
+            required.append(f"_analysis/tonic_out/{INPUT_COMPLETENESS_FILENAME}")
+    # The one run-wide frozen input manifest binds every analysis to the same
+    # admitted chunk set (4J16k41b).
+    if run_mode.get("shared_input_manifest"):
+        required.append(FROZEN_INPUT_MANIFEST_FILENAME)
     return required
 
 
@@ -333,6 +370,8 @@ def run_mode_structural_error(run_mode: dict[str, Any]) -> str:
         return "a full production run analyzed no ROIs, so it produced no deliverables"
     if run_mode.get("continuous_outputs_ran") and profile != PROFILE_CONTINUOUS:
         return "continuous outputs are recorded as having run outside continuous mode"
+    if run_mode.get("shared_input_manifest") and not run_mode.get("chunked_input_processing"):
+        return "a shared input manifest is recorded for a run that processes no chunks"
     if expected_continuous_families(run_mode) and not run_mode.get("expected_rois"):
         return "a continuous run promised window summaries but analyzed no ROIs"
     return ""
@@ -365,6 +404,53 @@ def build_continuous_window_index(
         "families": families,
         "skipped_families": list(run_mode.get("skipped_deliverable_families") or []),
     }
+
+
+def input_completeness_error(run_dir: str, run_mode: dict[str, Any]) -> str:
+    """Validate the input-processing completeness records this run mode requires.
+
+    For each chunked intermittent analysis that ran, the record must exist and
+    reconcile: every admitted, non-excluded chunk processed exactly once, the one
+    authorized exclusion is the final chronological chunk, and no chunk is missing
+    or duplicated. "" when sound.
+    """
+    if not run_mode.get("chunked_input_processing"):
+        return ""
+
+    checks = []
+    if run_mode.get("phasic_analysis"):
+        checks.append(("phasic", os.path.join(run_dir, "_analysis", "phasic_out")))
+    if run_mode.get("tonic_analysis"):
+        checks.append(("tonic", os.path.join(run_dir, "_analysis", "tonic_out")))
+
+    payloads: dict[str, Any] = {}
+    for label, analysis_dir in checks:
+        payload, error = read_input_completeness(analysis_dir)
+        if payload is None:
+            return f"the {label} analysis input-completeness record is {error}"
+        payloads[label] = payload
+
+    # When the wrapper froze one run-wide input manifest, every analysis must be
+    # bound to it: same admitted chunks, order, sizes/identities, dispositions,
+    # and authorized exclusion -- proven by a shared digest, not a chunk count.
+    if run_mode.get("shared_input_manifest"):
+        manifest, error = load_frozen_input_manifest(
+            os.path.join(run_dir, FROZEN_INPUT_MANIFEST_FILENAME)
+        )
+        if manifest is None:
+            return f"the run-wide frozen input manifest is {error}"
+        run_digest = manifest["digest"]
+        for label, payload in payloads.items():
+            recorded = str(payload.get("frozen_manifest_digest", ""))
+            if not recorded:
+                return f"the {label} analysis does not record the frozen input identity"
+            # The record's own admitted set must hash to the digest it claims,
+            # so a tampered expected set cannot ride a copied digest field.
+            if expected_entries_digest(payload.get("expected", [])) != recorded:
+                return f"the {label} analysis record does not match its own frozen identity"
+            if recorded != run_digest:
+                return f"the {label} analysis used a different input set than the run manifest"
+    return ""
 
 
 def continuous_index_error(run_mode: dict[str, Any], deliverables: Any) -> str:
@@ -560,6 +646,9 @@ def verify_terminal_set_before_status(
     index_error = continuous_index_error(run_mode, manifest_block.get("deliverables"))
     if index_error:
         return f"continuous window outputs are incomplete: {index_error}"
+    completeness_error = input_completeness_error(run_dir, run_mode)
+    if completeness_error:
+        return f"input chunks are not fully accounted for: {completeness_error}"
 
     artifacts = manifest_block.get("artifacts")
     if not isinstance(artifacts, list):
@@ -806,6 +895,13 @@ def _classify_current(
             run_id=run_id,
         )
 
+    completeness_error = input_completeness_error(run_dir, run_mode)
+    if completeness_error:
+        return corrupted(
+            f"This run's input chunks are not fully accounted for: {completeness_error}.",
+            run_id=run_id,
+        )
+
     mismatch = _run_mode_disagreement(run_mode, status)
     if mismatch:
         return corrupted(
@@ -835,6 +931,28 @@ def _classify_current(
     if verification_error:
         return corrupted(verification_error, run_id=run_id)
 
+    # A run with scientist-approved missing sessions or an authorized final
+    # exclusion completes as a distinct outcome, never indistinguishable clean
+    # success.
+    missing_count, exclusion_count = _authorized_gap_counts(run_dir, run_mode)
+    if missing_count or exclusion_count:
+        pieces = []
+        if missing_count:
+            pieces.append(f"{missing_count} approved missing session(s)")
+        if exclusion_count:
+            pieces.append("an incomplete final chunk excluded")
+        return TerminalClassification(
+            TERMINAL_SUCCESS_WITH_MISSING,
+            "This run finished successfully but is completed with "
+            + " and ".join(pieces)
+            + "; those intervals are preserved as explicit gaps.",
+            run_id=run_id,
+            contract_version=version,
+            run_mode=dict(run_mode),
+            missing_session_count=missing_count,
+            final_exclusion_count=exclusion_count,
+        )
+
     return TerminalClassification(
         TERMINAL_SUCCESS_CURRENT,
         "This run finished successfully and all of its outputs were verified.",
@@ -842,6 +960,42 @@ def _classify_current(
         contract_version=version,
         run_mode=dict(run_mode),
     )
+
+
+def _authorized_gap_counts(run_dir: str, run_mode: dict[str, Any]) -> tuple[int, int]:
+    """Count approved missing sessions and authorized final exclusions in the run.
+
+    Read from the run-wide session index (the frozen manifest) when present, else
+    from an analysis completeness record. Counts are per-session, run-wide.
+    """
+    from photometry_pipeline.input_processing_completeness import (
+        DISPOSITION_AUTHORIZED_EXCLUSION,
+        DISPOSITION_AUTHORIZED_MISSING,
+        load_frozen_input_manifest,
+    )
+
+    expected = None
+    if run_mode.get("shared_input_manifest"):
+        manifest, _err = load_frozen_input_manifest(
+            os.path.join(run_dir, FROZEN_INPUT_MANIFEST_FILENAME)
+        )
+        if manifest is not None:
+            expected = manifest.get("expected")
+    if expected is None:
+        for analysis in ("phasic_out", "tonic_out"):
+            payload, _err = read_input_completeness(
+                os.path.join(run_dir, "_analysis", analysis)
+            )
+            if payload is not None:
+                expected = payload.get("expected")
+                break
+    if not isinstance(expected, list):
+        return 0, 0
+    missing = sum(1 for e in expected if e.get("disposition") == DISPOSITION_AUTHORIZED_MISSING)
+    exclusions = sum(
+        1 for e in expected if e.get("disposition") == DISPOSITION_AUTHORIZED_EXCLUSION
+    )
+    return missing, exclusions
 
 
 def _run_mode_disagreement(run_mode: dict[str, Any], status: dict[str, Any]) -> str:

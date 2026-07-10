@@ -15,9 +15,14 @@ if _repo_root not in sys.path:
 
 try:
     from photometry_pipeline.io.hdf5_cache_reader import (
-        open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields, list_cache_chunk_ids
+        open_phasic_cache, resolve_cache_roi, load_cache_chunk_fields,
+        list_cache_chunk_ids, list_cache_source_files
     )
     from photometry_pipeline.viz.phasic_data_prep import compute_day_layout
+    from photometry_pipeline.viz.phasic_data_prep import (
+        build_authoritative_plot_sessions,
+        build_feature_map,
+    )
 except ImportError:
     print("ERROR: Could not import photometry_pipeline. Ensure script is in tools/ and repo root is accessible.")
     sys.exit(1)
@@ -45,6 +50,45 @@ def _summary_x_axis_label(anchor_mode: str, fixed_daily_anchor_clock: str | None
             clock = f"{clock}:00"
         return f"Anchored time (hours from daily anchor {clock})"
     return "Civil-clock time (hours from day-0 midnight)"
+
+
+def _annotate_missing_sessions(ax, timeline, *, duration_hours: float, y_top: float):
+    """Mark approved missing/excluded session slots without creating data."""
+    for chunk in timeline.chunks:
+        if chunk.status == "valid":
+            continue
+        if timeline.timeline_anchor_mode == "elapsed":
+            x_hours = float(chunk.elapsed_from_start_sec) / 3600.0
+        else:
+            x_hours = (
+                float(chunk.day_idx) * 24.0
+                + float(chunk.hour_idx)
+                + float(chunk.within_hour_offset_sec) / 3600.0
+            )
+        width = max(float(duration_hours), 1.0 / max(1, timeline.sessions_per_hour))
+        label = (
+            "Final incomplete session excluded"
+            if chunk.status == "authorized_final_exclusion"
+            else "Missing/corrupted session"
+        )
+        ax.axvspan(
+            x_hours - 0.5 * width,
+            x_hours + 0.5 * width,
+            color="#e9a06d",
+            alpha=0.28,
+            zorder=0,
+        )
+        ax.text(
+            x_hours,
+            y_top,
+            f"Session {int(chunk.session_index or chunk.chunk_id) + 1}\n{label}",
+            rotation=90,
+            ha="right",
+            va="top",
+            fontsize=7,
+            color="#963014",
+            clip_on=True,
+        )
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Plot phasic event frequency and AUC over time.")
@@ -97,15 +141,38 @@ def main():
             raise RuntimeError(f"Error reading features.csv: {e}")
             
         # 3. Validate Columns
-        required_cols = ['chunk_id', 'roi', 'peak_count', 'auc']
+        required_cols = ['roi', 'peak_count', 'auc']
+        current_cache = None
+        authoritative_sessions = None
+        cache_path = os.path.join(args.analysis_out, 'phasic_trace_cache.h5')
+        if os.path.exists(cache_path):
+            current_cache = open_phasic_cache(cache_path)
+            try:
+                cache_cids = list_cache_chunk_ids(current_cache)
+                cache_sfs = list_cache_source_files(current_cache)
+                authoritative_sessions = build_authoritative_plot_sessions(
+                    args.analysis_out, cache_cids, cache_sfs
+                )
+            finally:
+                current_cache.close()
+        required_cols.append(
+            'session_index' if authoritative_sessions is not None else 'chunk_id'
+        )
         missing = [c for c in required_cols if c not in df.columns]
         if missing:
             raise RuntimeError(f"Missing required columns in features.csv: {missing}")
             
-        # Enforce numeric chunk_id
-        df['chunk_id'] = pd.to_numeric(df['chunk_id'], errors='coerce')
-        if df['chunk_id'].isna().any():
-            raise RuntimeError("chunk_id contains non-numeric values after coercion")
+        if authoritative_sessions is not None:
+            df['session_index'] = pd.to_numeric(df['session_index'], errors='coerce')
+            if df['session_index'].isna().any():
+                raise RuntimeError("session_index contains non-numeric values after coercion")
+            df['session_index'] = df['session_index'].astype(int)
+        else:
+            # Enforce numeric chunk_id for legacy outputs.
+            df['chunk_id'] = pd.to_numeric(df['chunk_id'], errors='coerce')
+            if df['chunk_id'].isna().any():
+                raise RuntimeError("chunk_id contains non-numeric values after coercion")
+            df['chunk_id'] = df['chunk_id'].astype(int)
             
         # Optional source_file
         if 'source_file' not in df.columns:
@@ -126,32 +193,80 @@ def main():
         roi_df = df[df['roi'] == selected_roi].copy()
         if roi_df.empty:
             raise RuntimeError(f"No data found for ROI: {selected_roi}")
+
+        if authoritative_sessions is not None:
+            existing_indices = {
+                int(value) for value in roi_df['session_index'].dropna().tolist()
+            }
+            synthetic_rows = []
+            for session in authoritative_sessions:
+                idx = int(session["session_index"])
+                if idx in existing_indices:
+                    continue
+                if session.get("status") == "valid":
+                    raise RuntimeError(
+                        f"features.csv omitted valid session index {idx}"
+                    )
+                synthetic_rows.append(
+                    {
+                        "chunk_id": np.nan,
+                        "session_index": idx,
+                        "source_file": session.get("source_file", ""),
+                        "roi": selected_roi,
+                        "peak_count": np.nan,
+                        "auc": np.nan,
+                        "status": session.get("status", "missing_corrupted"),
+                        "expected_start_time": session.get("expected_start_time_text", ""),
+                        "expected_duration_sec": session.get("expected_duration_sec"),
+                        "missing_reason": session.get("missing_reason", ""),
+                    }
+                )
+            if synthetic_rows:
+                roi_df = pd.concat([roi_df, pd.DataFrame(synthetic_rows)], ignore_index=True)
             
-        # 6. Determine canonical session timeline (authoritative for phasic/dayplot).
-        roi_df['chunk_id'] = roi_df['chunk_id'].astype(int)
-        chunk_rows = (
-            roi_df[['chunk_id', 'source_file']]
-            .drop_duplicates(subset=['chunk_id'], keep='first')
-            .sort_values('chunk_id')
-        )
-        chunk_entries = []
-        for row in chunk_rows.itertuples(index=False):
-            source_val = row.source_file
-            if isinstance(source_val, str) and source_val.strip():
-                source = source_val
-            else:
-                source = f"chunk_{int(row.chunk_id)}.csv"
-            chunk_entries.append((int(row.chunk_id), source))
+        # 6. Determine canonical session timeline. Current runs enumerate every
+        # expected session, while legacy outputs retain cache/chunk behavior.
+        if authoritative_sessions is not None:
+            chunk_entries = [
+                (int(item["cache_chunk_id"]), str(item["cache_source_file"]))
+                for item in authoritative_sessions
+                if item.get("cache_chunk_id") is not None
+            ]
+            session_entries = authoritative_sessions
+            feature_map = build_feature_map(
+                features_path, roi=selected_roi, key_column="session_index"
+            )
+        else:
+            roi_df['chunk_id'] = roi_df['chunk_id'].astype(int)
+            chunk_rows = (
+                roi_df[['chunk_id', 'source_file']]
+                .drop_duplicates(subset=['chunk_id'], keep='first')
+                .sort_values('chunk_id')
+            )
+            chunk_entries = []
+            for row in chunk_rows.itertuples(index=False):
+                source_val = row.source_file
+                if isinstance(source_val, str) and source_val.strip():
+                    source = source_val
+                else:
+                    source = f"chunk_{int(row.chunk_id)}.csv"
+                chunk_entries.append((int(row.chunk_id), source))
+            session_entries = None
+            feature_map = None
 
         timeline = compute_day_layout(
             chunk_entries=chunk_entries,
-            feature_map=None,
+            feature_map=feature_map,
             roi=selected_roi,
             sessions_per_hour=args.sessions_per_hour,
             timeline_anchor_mode=args.timeline_anchor_mode,
             fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
+            session_index_entries=session_entries,
         )
-        timeline_by_cid = {int(c.chunk_id): c for c in timeline.chunks}
+        timeline_key = 'session_index' if authoritative_sessions is not None else 'chunk_id'
+        timeline_by_key = {
+            int(getattr(c, timeline_key)): c for c in timeline.chunks
+        }
         anchor_label = _timeline_anchor_label(
             timeline.timeline_anchor_mode,
             timeline.fixed_daily_anchor_clock,
@@ -160,7 +275,7 @@ def main():
             timeline.timeline_anchor_mode,
             timeline.fixed_daily_anchor_clock,
         )
-        missing_ids = sorted(set(roi_df['chunk_id']) - set(timeline_by_cid.keys()))
+        missing_ids = sorted(set(roi_df[timeline_key]) - set(timeline_by_key.keys()))
         if missing_ids:
             raise RuntimeError(
                 "Canonical timeline mapping missing chunk IDs: "
@@ -207,25 +322,38 @@ def main():
             session_duration_s = 3600.0 / float(args.sessions_per_hour)
             print(f"Warning: --session-duration-s not provided. inferred {session_duration_s}s from rate.")
 
-        roi_df['elapsed_hours'] = roi_df['chunk_id'].map(
-            lambda cid: float(timeline_by_cid[int(cid)].elapsed_from_start_sec) / 3600.0
+        roi_df['elapsed_hours'] = roi_df[timeline_key].map(
+            lambda key: float(timeline_by_key[int(key)].elapsed_from_start_sec) / 3600.0
         )
         if timeline.timeline_anchor_mode == "elapsed":
             roi_df['time_hours'] = roi_df['elapsed_hours']
         else:
-            roi_df['time_hours'] = roi_df['chunk_id'].map(
+            roi_df['time_hours'] = roi_df[timeline_key].map(
                 lambda cid: (
-                    float(timeline_by_cid[int(cid)].day_idx) * 24.0
-                    + float(timeline_by_cid[int(cid)].hour_idx)
-                    + float(timeline_by_cid[int(cid)].within_hour_offset_sec) / 3600.0
+                    float(timeline_by_key[int(cid)].day_idx) * 24.0
+                    + float(timeline_by_key[int(cid)].hour_idx)
+                    + float(timeline_by_key[int(cid)].within_hour_offset_sec) / 3600.0
                 )
             )
-        roi_df['day'] = roi_df['chunk_id'].map(lambda cid: int(timeline_by_cid[int(cid)].day_idx))
-        roi_df['hour'] = roi_df['chunk_id'].map(lambda cid: int(timeline_by_cid[int(cid)].hour_idx))
-        roi_df['session_in_hour'] = roi_df['chunk_id'].map(
-            lambda cid: int(timeline_by_cid[int(cid)].hour_rank)
+        roi_df['day'] = roi_df[timeline_key].map(lambda cid: int(timeline_by_key[int(cid)].day_idx))
+        roi_df['hour'] = roi_df[timeline_key].map(lambda cid: int(timeline_by_key[int(cid)].hour_idx))
+        roi_df['session_in_hour'] = roi_df[timeline_key].map(
+            lambda cid: int(timeline_by_key[int(cid)].hour_rank)
         )
-        roi_df = roi_df.sort_values(['time_hours', 'chunk_id'])
+        if authoritative_sessions is not None:
+            session_meta = {
+                int(item["session_index"]): item for item in authoritative_sessions
+            }
+            roi_df['expected_start_time'] = roi_df['session_index'].map(
+                lambda idx: session_meta[int(idx)].get("expected_start_time_text", "")
+            )
+            roi_df['expected_duration_sec'] = roi_df['session_index'].map(
+                lambda idx: session_meta[int(idx)].get("expected_duration_sec")
+            )
+            roi_df['missing_reason'] = roi_df['session_index'].map(
+                lambda idx: session_meta[int(idx)].get("missing_reason", "")
+            )
+        roi_df = roi_df.sort_values(['time_hours', timeline_key])
 
         if use_datetime:
             time_mode = "Datetime-derived session timeline"
@@ -250,6 +378,12 @@ def main():
 
         fig1, ax1 = plt.subplots(figsize=(10, 6), dpi=args.dpi)
         ax1.plot(x, y_rate, marker='o', linestyle='-', label=f'Peak Rate (ROI: {selected_roi})')
+        _annotate_missing_sessions(
+            ax1,
+            timeline,
+            duration_hours=float(session_duration_s) / 3600.0,
+            y_top=ax1.get_ylim()[1],
+        )
         ax1.set_xlabel(x_axis_label)
         ax1.set_ylabel("Peaks per minute")
         ax1.set_title(
@@ -277,6 +411,13 @@ def main():
         else:
              ax2.plot(x, y_auc, marker='o', linestyle='-', label=f'AUC (ROI: {selected_roi})')
 
+        _annotate_missing_sessions(
+            ax2,
+            timeline,
+            duration_hours=float(session_duration_s) / 3600.0,
+            y_top=ax2.get_ylim()[1],
+        )
+
         ax2.set_xlabel(x_axis_label)
         ax2.set_ylabel("AUC above threshold (dFF·s)")
         ax2.set_title(
@@ -298,6 +439,13 @@ def main():
             
             # Common
             csv_df = pd.DataFrame()
+            csv_df['roi'] = roi_df['roi'].astype(str)
+            csv_df['source_file'] = roi_df['source_file']
+            csv_df['session_index'] = roi_df['session_index'] if authoritative_sessions is not None else roi_df['chunk_id']
+            csv_df['status'] = roi_df['status'] if 'status' in roi_df.columns else 'valid'
+            csv_df['expected_start_time'] = roi_df.get('expected_start_time', pd.Series(index=roi_df.index, dtype=object))
+            csv_df['expected_duration_sec'] = roi_df.get('expected_duration_sec', session_duration_s)
+            csv_df['missing_reason'] = roi_df.get('missing_reason', '')
             csv_df['time_hours'] = x
             csv_df['day'] = roi_df['day']
             csv_df['hour'] = roi_df['hour']
@@ -311,8 +459,10 @@ def main():
             # Peak Rate CSV
             df_peak = csv_df.copy()
             df_peak['peak_rate_per_min'] = y_rate
-            # Enforce integer type for peak_count
-            df_peak['peak_count'] = roi_df['peak_count'].fillna(0).astype(int)
+            # Missing sessions remain NaN.  A valid zero-event session is the
+            # only case that carries a real zero count.
+            df_peak['peak_count'] = pd.to_numeric(roi_df['peak_count'], errors='coerce')
+            df_peak['n_peaks'] = df_peak['peak_count']
             
             p_path = args.out_rate_csv if args.out_rate_csv else os.path.join(out_dir, "phasic_peak_rate_timeseries.csv")
             if os.path.dirname(p_path): os.makedirs(os.path.dirname(p_path), exist_ok=True)

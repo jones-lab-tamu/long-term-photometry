@@ -153,6 +153,7 @@ def main():
     parser.add_argument('--representative-session-index', type=int, default=None, help="Force a specific session index for representative artifacts (0-based)")
     parser.add_argument('--preview-first-n', type=int, default=None, help="Preview mode: process only the first N discovered sessions (after discovery/sort).")
     parser.add_argument('--sessions-per-hour', type=int, default=None, help="Force sessions per hour for timing inference (overrides inference/defaults)")
+    parser.add_argument('--frozen-input-manifest', dest='frozen_input_manifest', type=str, default=None, help="Internal: path to the run-wide frozen input manifest shared across analysis subprocesses.")
     parser.add_argument(
         '--guided-candidate-manifest',
         default=None,
@@ -275,6 +276,7 @@ def main():
             emitter=emitter,
             sessions_per_hour=args.sessions_per_hour,
             guided_manifest_path=args.guided_candidate_manifest,
+            frozen_input_manifest_path=args.frozen_input_manifest,
         )
         
         # Emit post-run audit events

@@ -40,6 +40,7 @@ if repo_root not in sys.path:
 from photometry_pipeline.config import Config
 from photometry_pipeline.viz.phasic_data_prep import (
     discover_chunks, build_feature_map, resolve_roi, compute_day_layout,
+    build_authoritative_plot_sessions,
 )
 from photometry_pipeline.viz.display_prep import prepare_centered_common_gain
 from photometry_pipeline.io.hdf5_cache_reader import (
@@ -76,6 +77,10 @@ DISPLAY_SERIES_COLUMNS = [
     "session_in_hour",
     "chunk_id",
     "session_id",
+    "session_status",
+    "expected_start_time",
+    "expected_duration_sec",
+    "missing_reason",
     "is_placeholder",
     "display_marker_shape",
 ]
@@ -85,6 +90,33 @@ PEAK_INDEX_FIELD_CANDIDATES = (
     "peak_index",
     "peak_sample",
 )
+
+
+def _missing_status_label(panel: dict) -> str:
+    status = str(panel.get("status", "missing_corrupted"))
+    if status == "authorized_final_exclusion":
+        return "Final incomplete session excluded"
+    if status == "missing_corrupted":
+        return "Missing/corrupted session"
+    return "Unavailable session"
+
+
+def _annotate_missing_tile(tile, panel: dict, font):
+    """Make an expected missing slot visibly different from an unscheduled blank."""
+    draw = ImageDraw.Draw(tile)
+    width, height = tile.size
+    draw.rectangle((2, 2, width - 3, height - 3), outline=(190, 80, 40), width=2)
+    session_number = int(panel.get("session_index", panel.get("chunk_id", 0))) + 1
+    label = f"Session {session_number}\n{_missing_status_label(panel)}"
+    draw.multiline_text(
+        (width // 2, height // 2),
+        label,
+        fill=(150, 45, 20),
+        font=font,
+        anchor="mm",
+        align="center",
+    )
+    return tile
 
 
 def _timeline_anchor_label(anchor_mode: str, fixed_daily_anchor_clock: str | None) -> str:
@@ -632,6 +664,9 @@ def _sig_iso_panel_ranges_with_day_min_span(slot_map):
     local_spans = []
 
     for slot, panel in slot_map.items():
+        if panel.get("is_missing"):
+            local_ranges[slot] = (-1.0, 1.0)
+            continue
         x0, x1 = _trace_domain(panel['t'], panel.get('xlim_600', False))
         y0, y1 = _yrange_from_panel(panel, x0, x1)
         if not np.isfinite(y0) or not np.isfinite(y1) or y1 <= y0:
@@ -675,6 +710,9 @@ def _dynamic_fit_panel_ranges_with_day_min_span(slot_map):
     local_spans = []
 
     for slot, panel in slot_map.items():
+        if panel.get("is_missing"):
+            local_ranges[slot] = (-1.0, 1.0)
+            continue
         x0, x1 = _trace_domain(panel['t'], panel.get('xlim_600', False))
         y0, y1 = _yrange_from_dynamic_panel(panel, x0, x1)
         if not np.isfinite(y0) or not np.isfinite(y1) or y1 <= y0:
@@ -760,6 +798,9 @@ def _render_sig_iso_panel_tile_lightweight(panel, layout, title_font, panel_y_ra
     arr[plot_y0:plot_y1 + 1, plot_x0, :] = (220, 220, 220)
     arr[plot_y0:plot_y1 + 1, plot_x1, :] = (220, 220, 220)
 
+    if panel.get("is_missing"):
+        return _annotate_missing_tile(Image.fromarray(arr, mode='RGB'), panel, title_font)
+
     t = panel['t']
     x0, x1 = _trace_domain(t, panel.get('xlim_600', False))
     if panel_y_range is None:
@@ -828,6 +869,9 @@ def _render_dynamic_fit_panel_tile_lightweight(panel, layout, title_font, panel_
     arr[plot_y1, plot_x0:plot_x1 + 1, :] = (220, 220, 220)
     arr[plot_y0:plot_y1 + 1, plot_x0, :] = (220, 220, 220)
     arr[plot_y0:plot_y1 + 1, plot_x1, :] = (220, 220, 220)
+
+    if panel.get("is_missing"):
+        return _annotate_missing_tile(Image.fromarray(arr, mode='RGB'), panel, title_font)
 
     t = panel['t']
     x0, x1 = _trace_domain(t, panel.get('xlim_600', False))
@@ -1093,6 +1137,14 @@ def _render_dff_panel_tile_lightweight(
     arr[plot_y0:plot_y1 + 1, plot_x0, :] = (220, 220, 220)
     arr[plot_y0:plot_y1 + 1, plot_x1, :] = (220, 220, 220)
 
+    if panel.get("is_missing"):
+        return _annotate_missing_tile(Image.fromarray(arr, mode='RGB'), panel, title_font), {
+            "trace_sec": 0.0,
+            "marker_sec": 0.0,
+            "title_text_sec": 0.0,
+            "skipped_marker_values": 0,
+        }
+
     t = panel['t']
     y = panel['dff']
     x0, x1 = _trace_domain(t, False)
@@ -1250,6 +1302,8 @@ def _render_stacked_day_canvas_lightweight(
     smooth_window_s,
     dpi,
     timeline_anchor_label: str = "",
+    slot_map: dict | None = None,
+    sph: int | None = None,
 ):
     n_slots = len(slot_traces)
     occupied_traces = [tr for tr in slot_traces if tr is not None]
@@ -1273,8 +1327,13 @@ def _render_stacked_day_canvas_lightweight(
     step, _, _, y0, y1 = _compute_stacked_slot_layout(slot_traces)
 
     xmins, xmaxs = [], []
+    missing_slots = []
     for i, tr in enumerate(slot_traces):
         if tr is None:
+            if slot_map is not None and sph:
+                panel = slot_map.get((i // int(sph), i % int(sph)))
+                if panel is not None and panel.get("is_missing"):
+                    missing_slots.append((i, panel))
             continue
         t, y = tr
         mask = np.isfinite(t) & np.isfinite(y)
@@ -1351,6 +1410,17 @@ def _render_stacked_day_canvas_lightweight(
 
     draw.text((plot_x0 + (plot_w // 2), canvas_h - max(12, bottom_pad // 3)), "Time (s)", fill='black', anchor='ma', font=label_font)
 
+    for i, panel in missing_slots:
+        row_y = plot_y0 + int(((i + 0.5) / max(1, n_slots)) * plot_h)
+        session_number = int(panel.get("session_index", panel.get("chunk_id", 0))) + 1
+        draw.text(
+            (plot_x0 + max(8, plot_w // 2), row_y),
+            f"Session {session_number}: {_missing_status_label(panel)}",
+            fill=(150, 45, 20),
+            anchor='mm',
+            font=label_font,
+        )
+
     # Draw rotated y-axis label for closer visual alignment with full Matplotlib output.
     y_label = f"Slots ({n_traces}/{n_slots})"
     tmp = Image.new('RGBA', (1, 1), (0, 0, 0, 0))
@@ -1383,6 +1453,9 @@ def _build_stacked_slot_traces(slot_map, smoothed_data, sph):
                 slot_traces.append(None)
                 continue
             cid = panel.get('chunk_id')
+            if panel.get("is_missing"):
+                slot_traces.append(None)
+                continue
             slot_traces.append(smoothed_data.get(cid))
     return slot_traces
 
@@ -1460,6 +1533,14 @@ def _slot_metadata(day: int, hour_idx: int, col_idx: int, sph: int, panel: dict 
         "session_in_hour": int(col_idx),
         "chunk_id": chunk_norm,
         "session_id": chunk_norm,
+        "session_status": "" if panel is None else str(panel.get("status", "")),
+        "expected_start_time": (
+            "" if panel is None else str(panel.get("expected_start_time_text", ""))
+        ),
+        "expected_duration_sec": (
+            np.nan if panel is None else panel.get("expected_duration_sec", np.nan)
+        ),
+        "missing_reason": "" if panel is None else str(panel.get("missing_reason", "")),
     }
 
 
@@ -1498,6 +1579,10 @@ def _base_display_row(
         "session_in_hour": int(slot_meta["session_in_hour"]),
         "chunk_id": str(slot_meta["chunk_id"]),
         "session_id": str(slot_meta["session_id"]),
+        "session_status": str(slot_meta.get("session_status", "")),
+        "expected_start_time": str(slot_meta.get("expected_start_time", "")),
+        "expected_duration_sec": slot_meta.get("expected_duration_sec", np.nan),
+        "missing_reason": str(slot_meta.get("missing_reason", "")),
         "is_placeholder": bool(is_placeholder),
         "display_marker_shape": str(display_marker_shape),
     }
@@ -1705,7 +1790,7 @@ def _export_sig_iso_day_display_series_csv(
         for c in range(sph):
             panel = slot_map.get((h, c))
             slot_meta = _slot_metadata(day, h, c, sph, panel)
-            if panel is None:
+            if panel is None or panel.get("is_missing"):
                 _append_placeholder_row(rows, common=common, slot_meta=slot_meta)
                 continue
 
@@ -1793,7 +1878,7 @@ def _export_dynamic_fit_day_display_series_csv(
         for c in range(sph):
             panel = slot_map.get((h, c))
             slot_meta = _slot_metadata(day, h, c, sph, panel)
-            if panel is None:
+            if panel is None or panel.get("is_missing"):
                 _append_placeholder_row(rows, common=common, slot_meta=slot_meta)
                 continue
 
@@ -1891,7 +1976,7 @@ def _export_dff_day_display_series_csv(
         for c in range(sph):
             panel = slot_map.get((h, c))
             slot_meta = _slot_metadata(day, h, c, sph, panel)
-            if panel is None:
+            if panel is None or panel.get("is_missing"):
                 _append_placeholder_row(rows, common=common, slot_meta=slot_meta)
                 continue
 
@@ -2012,7 +2097,7 @@ def _export_stacked_day_display_series_csv(
         col = slot_index % sph
         panel = slot_map.get((hour, col))
         slot_meta = _slot_metadata(day, hour, col, sph, panel)
-        if tr is None:
+        if tr is None or (panel is not None and panel.get("is_missing")):
             _append_placeholder_row(rows, common=common, slot_meta=slot_meta)
             continue
         t, y = tr
@@ -2105,6 +2190,10 @@ def main():
     if len(cids) != len(sfs):
         print(f"CRITICAL: Cache metadata mismatch: {len(cids)} IDs vs {len(sfs)} source files.")
         sys.exit(1)
+
+    authoritative_sessions = build_authoritative_plot_sessions(
+        args.analysis_out, cids, sfs
+    )
         
     # Build discovery entries for layout engine. 
     # The layout engine uses the 2nd element (source_file) for datetime inference.
@@ -2126,7 +2215,13 @@ def main():
         if not os.path.exists(feats_path):
              print(f"CRITICAL: features.csv not found but dFF outputs enabled.")
              sys.exit(1)
-        feat_map = build_feature_map(feats_path, roi=plot_roi)
+        feat_map = build_feature_map(
+            feats_path,
+            roi=plot_roi,
+            key_column=(
+                "session_index" if authoritative_sessions is not None else "chunk_id"
+            ),
+        )
     else:
         feat_map = {}
         
@@ -2137,6 +2232,7 @@ def main():
         args.sessions_per_hour,
         timeline_anchor_mode=args.timeline_anchor_mode,
         fixed_daily_anchor_clock=args.fixed_daily_anchor_clock,
+        session_index_entries=authoritative_sessions,
     )
     sph = pds.sessions_per_hour
     timeline_anchor_label = _timeline_anchor_label(
@@ -2178,9 +2274,30 @@ def main():
     raw_chunks = []
     
     for cr in pds.chunks:
+        if cr.status != "valid":
+            raw_chunks.append(
+                {
+                    "cr": cr,
+                    "is_missing": True,
+                    "status": cr.status,
+                    "x": None,
+                    "y_sig": None,
+                    "y_uv": None,
+                    "y_fit": None,
+                    "y_dff": None,
+                    "y_detect": None,
+                    "N": 0,
+                }
+            )
+            continue
         try:
             # Shared reader returns tuple matching the order of fields_to_load
-            arrays = load_cache_chunk_fields(cache, plot_roi, cr.chunk_id, fields_to_load)
+            arrays = load_cache_chunk_fields(
+                cache,
+                plot_roi,
+                cr.cache_chunk_id if cr.cache_chunk_id is not None else cr.chunk_id,
+                fields_to_load,
+            )
             
             # Map back to exactly what downstream expects
             arr_map = dict(zip(fields_to_load, arrays))
@@ -2214,6 +2331,8 @@ def main():
     chunk_durations_s = []
     for rec in raw_chunks:
         cr = rec['cr']
+        if rec.get("is_missing"):
+            continue
         x = rec['x']
         
         fs_plot = infer_fs(x, config, context=f"Chunk {cr.chunk_id}") if x is not None else float(getattr(config, 'target_fs_hz', 0.0))
@@ -2259,6 +2378,11 @@ def main():
 
     for rec in raw_chunks:
         cr = rec['cr']
+        if rec.get("is_missing"):
+            # Approved missing/corrupted sessions are explicit timeline slots,
+            # not trace data.  They have no duration or peak-count invariant to
+            # verify; the renderers label the slot instead.
+            continue
         duration = float(rec.get('duration_s', np.nan))
         if not np.isfinite(duration):
             print(f"CRITICAL: Non-finite duration in chunk {cr.chunk_id}")
@@ -2293,6 +2417,26 @@ def main():
     
     for rec in raw_chunks:
         cr = rec['cr']
+        if rec.get("is_missing"):
+            missing_panel = {
+                "day": cr.day_idx,
+                "hour": cr.hour_idx,
+                "col": cr.hour_rank,
+                "chunk_id": cr.chunk_id,
+                "session_index": cr.session_index,
+                "status": cr.status,
+                "is_missing": True,
+                "expected_start_time": cr.expected_start_time,
+                "expected_start_time_text": (
+                    cr.expected_start_time.isoformat()
+                    if cr.expected_start_time is not None else ""
+                ),
+                "expected_duration_sec": cr.expected_duration_sec,
+                "missing_reason": cr.missing_reason,
+            }
+            cached_data.append(missing_panel)
+            cached_by_day.setdefault(cr.day_idx, []).append(missing_panel)
+            continue
         x = rec['x']
         t_norm = x - x[0]
         
@@ -2301,6 +2445,16 @@ def main():
             'hour': cr.hour_idx,
             'col': cr.hour_rank,
             'chunk_id': cr.chunk_id,
+            'session_index': cr.session_index,
+            'status': cr.status,
+            'is_missing': False,
+            'expected_start_time': cr.expected_start_time,
+            'expected_start_time_text': (
+                cr.expected_start_time.isoformat()
+                if cr.expected_start_time is not None else ""
+            ),
+            'expected_duration_sec': cr.expected_duration_sec,
+            'missing_reason': cr.missing_reason,
             't': t_norm
         }
         if args.write_sig_iso_grid:
@@ -2379,6 +2533,20 @@ def main():
                         ax.cla()
                         if p is None:
                             ax.axis('off')
+                            continue
+                        if p.get("is_missing"):
+                            ax.axis('on')
+                            ax.set_xticks([])
+                            ax.set_yticks([])
+                            ax.set_title(
+                                f"Session {int(p.get('session_index', p.get('chunk_id', 0))) + 1}",
+                                fontsize=6,
+                            )
+                            ax.text(
+                                0.5, 0.5, _missing_status_label(p),
+                                transform=ax.transAxes, ha='center', va='center',
+                                color='#963014', fontsize=8, wrap=True,
+                            )
                             continue
                         ax.axis('on')
                         ax.set_ylim(global_ymin, global_ymax)
@@ -2534,6 +2702,20 @@ def main():
                         if p is None:
                             ax.axis('off')
                             continue
+                        if p.get("is_missing"):
+                            ax.axis('on')
+                            ax.set_xticks([])
+                            ax.set_yticks([])
+                            ax.set_title(
+                                f"Session {int(p.get('session_index', p.get('chunk_id', 0))) + 1}",
+                                fontsize=6,
+                            )
+                            ax.text(
+                                0.5, 0.5, _missing_status_label(p),
+                                transform=ax.transAxes, ha='center', va='center',
+                                color='#963014', fontsize=8, wrap=True,
+                            )
+                            continue
                         ax.axis('on')
                         panel_y = panel_y_ranges.get((h, c))
                         if panel_y is None:
@@ -2636,6 +2818,20 @@ def main():
                         if p is None:
                             ax.axis('off')
                             continue
+                        if p.get("is_missing"):
+                            ax.axis('on')
+                            ax.set_xticks([])
+                            ax.set_yticks([])
+                            ax.set_title(
+                                f"Session {int(p.get('session_index', p.get('chunk_id', 0))) + 1}",
+                                fontsize=6,
+                            )
+                            ax.text(
+                                0.5, 0.5, _missing_status_label(p),
+                                transform=ax.transAxes, ha='center', va='center',
+                                color='#963014', fontsize=8, wrap=True,
+                            )
+                            continue
                         ax.axis('on')
                         panel_y = panel_y_ranges.get((h, c))
                         if panel_y is None:
@@ -2718,6 +2914,8 @@ def main():
         # Pre-smooth the dFF for all chunks
         smoothed_data = {}
         for c in cached_data:
+            if c.get("is_missing"):
+                continue
             mask = np.isfinite(c['dff'])
             y = c['dff'][mask]
             t = c['t'][mask]
@@ -2744,6 +2942,15 @@ def main():
 
                 for i, tr in enumerate(slot_traces):
                     if tr is None:
+                        panel = slot_map.get((i // sph, i % sph))
+                        if panel is not None and panel.get("is_missing"):
+                            session_number = int(panel.get("session_index", panel.get("chunk_id", 0))) + 1
+                            ax.text(
+                                0.5,
+                                (n_slots - 1 - i) * step,
+                                f"Session {session_number}: {_missing_status_label(panel)}",
+                                ha='center', va='center', color='#963014', fontsize=8,
+                            )
                         continue
                     t, y = tr
                     offset = (n_slots - 1 - i) * step
@@ -2789,6 +2996,8 @@ def main():
                     smooth_window_s=args.smooth_window_s,
                     dpi=args.dpi,
                     timeline_anchor_label=timeline_anchor_label,
+                    slot_map=slot_map,
+                    sph=sph,
                 )
                 canvas.save(out_path, compress_level=1)
                 print(f"PLOT_TIMING STEP script=plot_phasic_dayplot_bundle.py step=figure_save family=stacked_qc day={d} elapsed_sec={time.perf_counter() - t_start:.3f}", flush=True)
