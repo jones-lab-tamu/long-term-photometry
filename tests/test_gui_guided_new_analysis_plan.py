@@ -2989,7 +2989,7 @@ event_auc_baseline: median
     window._sync_guided_feature_event_editor_to_current_run()
     
     assert window._guided_new_analysis_feature_event_profile_status == "stale"
-    assert "active baseline config source path changed" in window._guided_new_analysis_feature_event_profile_stale_reasons
+    assert "the starting settings file changed" in window._guided_new_analysis_feature_event_profile_stale_reasons
     # Values are preserved, not overwritten with defaults
     assert window._guided_new_analysis_feature_event_profile["peak_threshold_abs"] == 0.123
     
@@ -3000,7 +3000,9 @@ event_auc_baseline: median
     
     # Sync in open_results mode should reset or load for current run (which is empty, so should reset to defaults)
     window._sync_guided_feature_event_editor_to_current_run(force=True)
-    assert window._guided_feature_event_status_label.text() == "No draft feature/event profile applied."
+    assert window._guided_feature_event_status_label.text() == (
+        "Default settings have not been confirmed."
+    )
 
 
 def test_new_analysis_feature_event_forced_refresh_and_clear_rules(window, tmp_path, monkeypatch):
@@ -4318,8 +4320,8 @@ def test_customize_stores_only_changed_fields_sparse(window, tmp_path, monkeypat
 
 
 def test_default_block_wording_reads_as_default_settings(window):
-    """The default editor block must read as the Default settings, and
-    explain that ROIs use these settings unless marked Custom (issue #1)."""
+    """The default editor block must read as the Default settings and be
+    framed as the baseline for Default ROIs (4J16k37 issue #1 / 4J16k38)."""
     panel = window.findChild(QGroupBox, "guidedFeatureEventProfileEditorPanel")
     assert panel is not None
     assert panel.title() == "Default feature detection settings"
@@ -4327,8 +4329,11 @@ def test_default_block_wording_reads_as_default_settings(window):
     note = window.findChild(QLabel, "guidedFeatureEventProfileEditorNote")
     assert note is not None
     text = note.text()
-    assert "Default feature detection settings" in text
-    assert "unless" in text.lower() and "Custom" in text
+    assert "Default" in text
+    assert "Expand this section" in text
+    # The note must not tell the user they can simply leave the section alone:
+    # confirmation via "Use these as Default settings" is still mandatory.
+    assert "Use these as Default settings" in text
     _assert_no_internal_words(text)
 
 
@@ -4366,3 +4371,470 @@ def test_normalize_feature_settings_drops_inactive_threshold_fields():
         {"peak_threshold_method": "absolute", "peak_threshold_abs": 0.0}
     )
     assert absolute == {"peak_threshold_method": "absolute", "peak_threshold_abs": 0.0}
+
+
+# Step 5 Default-editor simplification (4J16k38)
+
+
+# Implementation-facing vocabulary that must not appear in the Step 5 Default
+# editor's buttons or the scientist-facing explanatory text.
+_STEP5_IMPLEMENTATION_WORDS = (
+    "profile",
+    "draft",
+    "in-memory",
+    "feature/event",
+)
+
+
+def _assert_no_implementation_words(text: str) -> None:
+    lowered = text.lower()
+    for word in _STEP5_IMPLEMENTATION_WORDS:
+        assert word not in lowered, f"implementation word {word!r} leaked into: {text!r}"
+    _assert_no_internal_words(text)
+
+
+def test_default_editor_form_is_collapsed_by_default(window, tmp_path, monkeypatch):
+    """The full Default settings form must be collapsed on arrival so it does
+    not dominate Step 5, while the per-ROI table stays reachable."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._refresh_guided_per_roi_feature_event_table()
+
+    toggle = window.findChild(QPushButton, "guidedFeatureEventEditorExpandToggle")
+    assert toggle is not None
+    assert toggle.isChecked() is False
+    assert toggle.text() == "Edit Default settings"
+
+    form_container = window.findChild(QWidget, "guidedFeatureEventEditorFormContainer")
+    assert form_container is not None
+    assert form_container.isHidden() is True
+
+    # The per-ROI table is present and NOT hidden behind the collapsed form.
+    assert _per_roi_table(window).isHidden() is False
+
+    # Apply/Reset stay reachable so the existing Apply/readiness model works
+    # without expanding the form.
+    assert window._guided_feature_event_apply_btn.isHidden() is False
+    assert window._guided_feature_event_clear_btn.isHidden() is False
+
+
+def test_default_editor_expands_and_edits_update_default_rows(
+    window, tmp_path, monkeypatch
+):
+    """Expanding the Default editor, changing a Default setting and using the
+    renamed Apply button must update the Default ROI row summaries."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    toggle = window.findChild(QPushButton, "guidedFeatureEventEditorExpandToggle")
+    form_container = window.findChild(QWidget, "guidedFeatureEventEditorFormContainer")
+
+    toggle.setChecked(True)
+    assert form_container.isHidden() is False
+    assert toggle.text() == "Hide Default settings"
+
+    # Change the Default threshold k, then use the renamed Apply button.
+    window._guided_feature_event_peak_k_edit.setText("3.5")
+    window._guided_feature_event_apply_btn.click()
+    assert window._guided_new_analysis_feature_event_profile_status == "applied"
+    assert window._guided_new_analysis_feature_event_profile["peak_threshold_k"] == 3.5
+
+    # Every ROI is still Default, and its row summary reflects the new baseline.
+    status_by_roi = _per_roi_feature_table_status_by_roi(window)
+    assert set(status_by_roi.values()) == {"Default"}
+    table = _per_roi_table(window)
+    summaries = {
+        table.item(r, 0).text(): table.item(r, 2).text()
+        for r in range(table.rowCount())
+    }
+    assert "3.5" in summaries["CH1"]
+
+    # Collapsing again keeps the applied Default settings.
+    toggle.setChecked(False)
+    assert form_container.isHidden() is True
+    assert window._guided_new_analysis_feature_event_profile_status == "applied"
+
+
+def test_default_editor_button_labels_are_scientist_facing(window):
+    """The Apply/Reset buttons must not use implementation language."""
+    apply_btn = window.findChild(QPushButton, "guidedFeatureEventApplyButton")
+    clear_btn = window.findChild(QPushButton, "guidedFeatureEventClearButton")
+    toggle = window.findChild(QPushButton, "guidedFeatureEventEditorExpandToggle")
+
+    assert apply_btn.text() == "Use these as Default settings"
+    assert clear_btn.text() == "Reset Default settings"
+    for btn in (apply_btn, clear_btn, toggle):
+        _assert_no_implementation_words(btn.text())
+
+
+def test_step5_intro_text_is_scientist_facing(window):
+    """The top Step 5 explanation must teach Default vs Custom in plain
+    language and carry no implementation vocabulary."""
+    intro = window.findChild(QLabel, "guidedFeatureDetectionStepExplanation")
+    assert intro is not None
+    text = intro.text()
+    assert "Default settings" in text
+    assert "Custom settings" in text
+    _assert_no_implementation_words(text)
+
+
+def test_default_block_note_is_scientist_facing(window):
+    """The Default-block note must frame the settings as the baseline for
+    Default ROIs, in plain language."""
+    note = window.findChild(QLabel, "guidedFeatureEventProfileEditorNote")
+    assert note is not None
+    _assert_no_implementation_words(note.text())
+
+
+def test_collapsed_default_editor_preserves_per_roi_behavior(
+    window, tmp_path, monkeypatch
+):
+    """Regression: collapsing the Default editor must not change the per-ROI
+    model -- no-op Customize stays Default, a real Custom stores a sparse
+    override, and Continue/readiness still behaves."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    # Readiness is satisfied by the already-applied Default settings, without
+    # ever expanding the form.
+    ready, _message = window._guided_feature_detection_readiness()
+    assert ready is True
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
+
+    # No-op Customize leaves CH1 Default.
+    _seed_matching_dialog(window, monkeypatch, "CH1")
+    assert "CH1" not in window._guided_per_roi_feature_event_overrides
+    assert _per_roi_feature_table_status_by_roi(window)["CH1"] == "Default"
+
+    # A real Customize stores only the changed field.
+    _customize_roi_via_fake_dialog(
+        window, monkeypatch, "CH1", {"peak_threshold_k": 3.5}
+    )
+    assert window._guided_per_roi_feature_event_overrides["CH1"]["config_fields"] == {
+        "peak_threshold_k": 3.5
+    }
+    assert _per_roi_feature_table_status_by_roi(window)["CH1"] == "Custom"
+
+    ready_after, _msg = window._guided_feature_detection_readiness()
+    assert ready_after is True
+
+
+# Step 5 status-language alignment (4J16k38 follow-up)
+
+
+def _step5_visible_texts(window) -> list[str]:
+    """Every scientist-visible Step 5 feature-detection string."""
+    texts = [
+        window.findChild(QLabel, "guidedFeatureDetectionStepExplanation").text(),
+        window.findChild(QLabel, "guidedFeatureEventProfileEditorNote").text(),
+        window.findChild(QLabel, "guidedFeatureDetectionSummary").text(),
+        window.findChild(QLabel, "guidedFeatureEventProfileStatus").text(),
+        window.findChild(QPushButton, "guidedFeatureEventEditorExpandToggle").text(),
+        window.findChild(QPushButton, "guidedFeatureEventApplyButton").text(),
+        window.findChild(QPushButton, "guidedFeatureEventClearButton").text(),
+        window._guided_feature_detection_continue_status.text(),
+        window._guided_feature_detection_continue_btn.text(),
+        window.findChild(QLabel, "guidedPerRoiFeatureEventNote").text(),
+        window.findChild(QLabel, "guidedFeatureDetectionPreviewNote").text(),
+    ]
+    table = _per_roi_table(window)
+    for col in range(table.columnCount()):
+        texts.append(table.horizontalHeaderItem(col).text())
+    for row in range(table.rowCount()):
+        for col in (0, 1, 2):
+            texts.append(table.item(row, col).text())
+        for col in (3, 4):
+            widget = table.cellWidget(row, col)
+            texts.append(widget.text())
+            texts.append(widget.toolTip())
+    return texts
+
+
+# Loader/diagnostic vocabulary that must never reach the Step 5 surface. Note
+# that a bare "baseline" is NOT banned globally: "AUC baseline" is a legitimate
+# scientific field name shown in the Default-settings summary.
+_STEP5_LOADER_WORDS = (
+    "active baseline",
+    "baseline config",
+    "config",
+    "yaml",
+    "traceback",
+    "exception",
+)
+
+
+def _assert_step5_surface_is_scientist_facing(window) -> None:
+    for text in _step5_visible_texts(window):
+        _assert_no_implementation_words(text)
+        lowered = text.lower()
+        for word in _STEP5_LOADER_WORDS:
+            assert word not in lowered, f"loader word {word!r} leaked into: {text!r}"
+
+
+def test_step5_visible_text_sweep_across_all_states(window, tmp_path, monkeypatch):
+    """The complete visible Step 5 surface must stay scientist-facing in the
+    unconfirmed, confirmed, changed-after-confirmation and reset states."""
+    from gui.main_window import (
+        GUIDED_DEFAULT_SETTINGS_CHANGED_AFTER_CONFIRMATION,
+        GUIDED_DEFAULT_SETTINGS_CONFIRM_BEFORE_CONTINUING,
+        GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED,
+        GUIDED_DEFAULT_SETTINGS_READY,
+    )
+
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    # --- State 1: unconfirmed ------------------------------------------------
+    window._guided_feature_event_clear_btn.click()
+    assert window._guided_new_analysis_feature_event_profile_status == (
+        "default_initialized"
+    )
+    window._refresh_guided_feature_detection_continue_state()
+    assert window._guided_feature_event_status_label.text() == (
+        GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED
+    )
+    assert window._guided_feature_detection_continue_status.text() == (
+        GUIDED_DEFAULT_SETTINGS_CONFIRM_BEFORE_CONTINUING
+    )
+    assert window._guided_feature_detection_continue_btn.isEnabled() is False
+    assert "Status: Not confirmed" in (
+        window._guided_feature_detection_summary_label.text()
+    )
+    _assert_step5_surface_is_scientist_facing(window)
+
+    # --- State 2: confirmed --------------------------------------------------
+    window._guided_feature_event_apply_btn.click()
+    assert window._guided_feature_event_status_label.text() == (
+        GUIDED_DEFAULT_SETTINGS_READY
+    )
+    assert window._guided_feature_detection_continue_status.text() == (
+        GUIDED_DEFAULT_SETTINGS_READY
+    )
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
+    assert "Status: Confirmed" in (
+        window._guided_feature_detection_summary_label.text()
+    )
+    _assert_step5_surface_is_scientist_facing(window)
+
+    # --- State 3: changed after confirmation ---------------------------------
+    window._guided_feature_event_peak_k_edit.setText("4.25")
+    window._on_guided_feature_detection_editor_changed()
+    assert window._guided_new_analysis_feature_event_profile_status == "stale"
+    assert window._guided_feature_detection_continue_status.text() == (
+        GUIDED_DEFAULT_SETTINGS_CHANGED_AFTER_CONFIRMATION
+    )
+    assert window._guided_feature_detection_continue_btn.isEnabled() is False
+    _assert_step5_surface_is_scientist_facing(window)
+
+    # The stale explanation shown beneath the buttons is also plain language.
+    window._sync_guided_feature_event_editor_to_current_run()
+    assert window._guided_feature_event_status_label.text().startswith(
+        GUIDED_DEFAULT_SETTINGS_CHANGED_AFTER_CONFIRMATION
+    )
+    _assert_step5_surface_is_scientist_facing(window)
+
+    # --- State 4: reset ------------------------------------------------------
+    window._guided_feature_event_clear_btn.click()
+    assert window._guided_new_analysis_feature_event_profile_status == (
+        "default_initialized"
+    )
+    window._refresh_guided_feature_detection_continue_state()
+    assert window._guided_feature_event_status_label.text() == (
+        GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED
+    )
+    assert window._guided_feature_detection_continue_btn.isEnabled() is False
+    _assert_step5_surface_is_scientist_facing(window)
+
+
+def test_unconfirmed_status_tells_user_to_confirm_without_editing(window):
+    """The unconfirmed status text must name the confirmation action, so the
+    user is not told to simply leave the section alone."""
+    from gui.main_window import GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED
+
+    assert "Use these as Default settings" in GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED
+    assert "starting Default settings" in GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED
+    _assert_no_implementation_words(GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED)
+
+    note = window.findChild(QLabel, "guidedFeatureEventProfileEditorNote")
+    note_text = note.text()
+    assert "leave the values unchanged" in note_text
+    assert "Use these as Default settings" in note_text
+
+
+def test_readiness_blocks_before_confirmation_and_permits_after(
+    window, tmp_path, monkeypatch
+):
+    """Behavior preserved: the explicit confirmation model still gates
+    Continue, regardless of the reworded status language."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    window._guided_feature_event_clear_btn.click()
+    ready_before, message_before = window._guided_feature_detection_readiness()
+    assert ready_before is False
+    assert "Confirm the Default settings" in message_before
+
+    window._guided_feature_event_apply_btn.click()
+    ready_after, message_after = window._guided_feature_detection_readiness()
+    assert ready_after is True
+    assert message_after == "Default settings are ready."
+
+
+# Unavailable / load-failure sanitization (4J16k38 final follow-up)
+
+
+_RAW_FALLBACK_REASON = (
+    "Unable to load baseline config from C:\\internal\\settings.yaml"
+)
+_RAW_FALLBACK_PATH = "C:\\internal\\settings.yaml"
+
+
+def _force_defaults_load_failure(window, monkeypatch, reason=_RAW_FALLBACK_REASON):
+    """Make the shared Default-settings loader report a raw failure diagnostic."""
+    from photometry_pipeline.workflow_safety import FeatureEventDefaultsResult
+
+    real_defaults = dict(window._event_feature_defaults_from_active_baseline())
+    failing = FeatureEventDefaultsResult(
+        defaults=real_defaults,
+        baseline_source_path=_RAW_FALLBACK_PATH,
+        baseline_source_kind="fallback",
+        warnings=(),
+        fallback_reason=reason,
+    )
+    monkeypatch.setattr(
+        window, "_active_feature_event_defaults_result", lambda: failing
+    )
+    return failing
+
+
+def _assert_no_raw_loader_text(text: str) -> None:
+    lowered = text.lower()
+    for banned in ("config", "baseline", "yaml", "internal", "unable to load"):
+        assert banned not in lowered, f"{banned!r} leaked into: {text!r}"
+    assert _RAW_FALLBACK_PATH.lower() not in lowered
+    assert _RAW_FALLBACK_REASON.lower() not in lowered
+
+
+def test_sanitize_default_settings_load_failure_maps_known_reasons():
+    """Pure sanitizer: never echoes raw loader text, maps to a known set."""
+    from gui.main_window import (
+        GUIDED_DEFAULT_SETTINGS_COULD_NOT_LOAD,
+        GUIDED_DEFAULT_SETTINGS_FILE_NOT_FOUND,
+        GUIDED_DEFAULT_SETTINGS_FILE_UNREADABLE,
+        sanitize_guided_default_settings_load_failure as _sanitize,
+    )
+
+    assert _sanitize(_RAW_FALLBACK_REASON) == GUIDED_DEFAULT_SETTINGS_FILE_UNREADABLE
+    assert (
+        _sanitize("Baseline config path does not exist: C:/x/y.yaml")
+        == GUIDED_DEFAULT_SETTINGS_FILE_NOT_FOUND
+    )
+    assert _sanitize("") == GUIDED_DEFAULT_SETTINGS_COULD_NOT_LOAD
+    assert _sanitize(None) == GUIDED_DEFAULT_SETTINGS_COULD_NOT_LOAD
+    assert _sanitize("something unrecognized") == GUIDED_DEFAULT_SETTINGS_COULD_NOT_LOAD
+
+    for message in (
+        GUIDED_DEFAULT_SETTINGS_COULD_NOT_LOAD,
+        GUIDED_DEFAULT_SETTINGS_FILE_NOT_FOUND,
+        GUIDED_DEFAULT_SETTINGS_FILE_UNREADABLE,
+    ):
+        _assert_no_raw_loader_text(message)
+        assert "Check the selected data and recording settings" in message
+
+
+def test_initial_load_failure_hides_raw_reason_but_keeps_it_internally(
+    window, tmp_path, monkeypatch
+):
+    """Initial sync load-failure: visible labels are sanitized, while the raw
+    diagnostic is preserved in the internal error field."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    _force_defaults_load_failure(window, monkeypatch)
+
+    window._guided_new_analysis_feature_event_profile_status = "missing"
+    window._sync_guided_feature_event_editor_to_current_run()
+
+    assert window._guided_new_analysis_feature_event_profile_status == "unavailable"
+    # Raw diagnostic retained internally.
+    assert window._guided_new_analysis_feature_event_profile_errors == [
+        _RAW_FALLBACK_REASON
+    ]
+
+    status_text = window._guided_feature_event_status_label.text()
+    _assert_no_raw_loader_text(status_text)
+    assert "starting settings file could not be read" in status_text
+
+    window._refresh_guided_feature_detection_continue_state()
+    _assert_no_raw_loader_text(
+        window._guided_feature_detection_continue_status.text()
+    )
+    assert window._guided_feature_detection_continue_btn.isEnabled() is False
+    _assert_step5_surface_is_scientist_facing(window)
+
+
+def test_reset_default_settings_load_failure_is_sanitized(
+    window, tmp_path, monkeypatch
+):
+    """Reset Default settings with a failing loader must show only the stable
+    plain-language message."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    _force_defaults_load_failure(
+        window, monkeypatch, reason="Baseline config path does not exist: " + _RAW_FALLBACK_PATH
+    )
+
+    window._guided_feature_event_clear_btn.click()
+
+    assert window._guided_new_analysis_feature_event_profile_status == "unavailable"
+    status_text = window._guided_feature_event_status_label.text()
+    _assert_no_raw_loader_text(status_text)
+    assert "starting settings file was not found" in status_text
+    _assert_step5_surface_is_scientist_facing(window)
+
+
+def test_readiness_in_unavailable_state_never_appends_raw_reason(
+    window, tmp_path, monkeypatch
+):
+    """_guided_feature_detection_readiness must not append the raw loader
+    diagnostic for the unavailable state."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    window._guided_new_analysis_feature_event_profile_status = "unavailable"
+    window._guided_new_analysis_feature_event_profile_errors = [_RAW_FALLBACK_REASON]
+
+    ready, message = window._guided_feature_detection_readiness()
+    assert ready is False
+    _assert_no_raw_loader_text(message)
+    assert "Check the selected data and recording settings" in message
+
+
+def test_invalid_state_still_shows_actionable_field_validation_detail(
+    window, tmp_path, monkeypatch
+):
+    """Sanitizing the unavailable state must not suppress the scientist-actionable
+    field validation detail shown for the invalid state."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+
+    window._guided_new_analysis_feature_event_profile_status = "invalid"
+    window._guided_new_analysis_feature_event_profile_errors = [
+        "peak_threshold_abs must be > 0"
+    ]
+
+    ready, message = window._guided_feature_detection_readiness()
+    assert ready is False
+    assert "peak_threshold_abs must be > 0" in message
+
+
+def test_step5_sweep_includes_unavailable_state(window, tmp_path, monkeypatch):
+    """The complete Step 5 visible-text sweep must also pass in the
+    unavailable/load-failure state."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    _force_defaults_load_failure(window, monkeypatch)
+
+    window._guided_new_analysis_feature_event_profile_status = "missing"
+    window._sync_guided_feature_event_editor_to_current_run()
+    window._refresh_guided_feature_detection_continue_state()
+
+    assert window._guided_new_analysis_feature_event_profile_status == "unavailable"
+    _assert_step5_surface_is_scientist_facing(window)
+    # No visible text anywhere on Step 5 echoes the raw path or raw reason.
+    # (Bare "baseline" is checked per-message, not here: the Default-settings
+    # summary legitimately shows the "AUC baseline" field.)
+    for text in _step5_visible_texts(window):
+        lowered = text.lower()
+        assert _RAW_FALLBACK_PATH.lower() not in lowered
+        assert _RAW_FALLBACK_REASON.lower() not in lowered
+        assert "unable to load" not in lowered

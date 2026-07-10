@@ -825,12 +825,19 @@ def test_guided_feature_event_profile_editor_creates_no_profile_by_default(windo
     assert plan.feature_event_profiles == []
     assert "Feature/event profiles: none configured" in window._guided_draft_run_plan_preview_label.text()
     assert "Feature/event settings: not_configured" in window._guided_draft_run_plan_checklist_label.text()
-    assert window._guided_feature_event_status_label.text() == "No draft feature/event profile applied."
+    assert window._guided_feature_event_status_label.text() == (
+        "Default settings have not been confirmed."
+    )
 
 
 def test_guided_new_analysis_feature_event_profile_requires_apply_without_open_results(
     window,
 ):
+    from gui.main_window import (
+        GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED,
+        GUIDED_DEFAULT_SETTINGS_READY,
+    )
+
     window._set_guided_workflow_mode("new_analysis")
     window._guided_workflow_stepper.setCurrentRow(
         list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
@@ -838,8 +845,7 @@ def test_guided_new_analysis_feature_event_profile_requires_apply_without_open_r
 
     assert window._current_run_dir == ""
     assert window._guided_feature_event_status_label.text() == (
-        "Required before Run: apply or configure the feature/event profile. "
-        "Defaults from the active baseline are shown."
+        GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED
     )
     plan = window._build_guided_new_analysis_draft_plan()
     assert plan.feature_event_profile_status == "default_initialized"
@@ -848,7 +854,7 @@ def test_guided_new_analysis_feature_event_profile_requires_apply_without_open_r
     window._guided_feature_event_apply_btn.click()
 
     assert window._guided_feature_event_status_label.text() == (
-        "Feature/event profile is configured."
+        GUIDED_DEFAULT_SETTINGS_READY
     )
     assert "Open Results must be used first" not in (
         window._guided_feature_event_status_label.text()
@@ -894,19 +900,22 @@ def test_guided_feature_detection_step_gates_review_and_writes_nothing(
     intro = feature_widget.findChild(
         QWidget, "guidedFeatureDetectionStepExplanation"
     )
-    assert "no outputs are written" in intro.text()
+    # Scientist-facing Step 5 intro: names Default and Custom, no "outputs"
+    # jargon (4J16k38).
+    assert "Default settings" in intro.text()
+    assert "Custom settings" in intro.text()
     assert feature_widget.findChild(
         QWidget, "guidedFeatureEventProfileEditorPanel"
     ) is not None
     assert window._guided_feature_detection_continue_btn.isEnabled() is False
     assert window._guided_feature_detection_continue_status.text() == (
-        "Review and apply feature detection settings before continuing."
+        "Confirm the Default settings before continuing."
     )
     assert list(tmp_path.iterdir()) == []
 
     window._guided_feature_event_apply_btn.click()
     assert window._guided_feature_detection_continue_btn.isEnabled() is True
-    assert "Status: Applied" in (
+    assert "Status: Confirmed" in (
         window._guided_feature_detection_summary_label.text()
     )
     assert list(tmp_path.iterdir()) == []
@@ -920,8 +929,7 @@ def test_guided_feature_detection_step_gates_review_and_writes_nothing(
     QTest.keyClicks(window._guided_feature_event_peak_k_edit, "4")
     assert window._guided_feature_detection_continue_btn.isEnabled() is False
     assert window._guided_feature_detection_continue_status.text() == (
-        "Feature detection settings changed after they were applied. "
-        "Review and apply them again."
+        "Default settings changed. Confirm them again before continuing."
     )
 
     window._guided_feature_event_peak_k_edit.selectAll()
@@ -929,7 +937,7 @@ def test_guided_feature_detection_step_gates_review_and_writes_nothing(
     window._guided_feature_event_apply_btn.click()
     assert window._guided_feature_detection_continue_btn.isEnabled() is False
     assert window._guided_feature_detection_continue_status.text().startswith(
-        "Feature detection settings need attention before continuing."
+        "Default settings need attention before continuing."
     )
 
 
@@ -945,9 +953,13 @@ def test_guided_new_analysis_feature_event_profile_invalid_status_is_actionable(
 
     window._guided_feature_event_apply_btn.click()
 
-    assert window._guided_feature_event_status_label.text().startswith(
-        "Feature/event profile settings need attention before Run:"
+    status_text = window._guided_feature_event_status_label.text()
+    assert status_text.startswith(
+        "Default settings need attention before continuing."
     )
+    # The invalid state must stay actionable: the field-level validation detail
+    # is still shown (only the raw loader diagnostic is sanitized away).
+    assert "peak_threshold_k" in status_text.lower() or "k must be" in status_text.lower()
     assert (
         window._build_guided_new_analysis_draft_plan().feature_event_profile_status
         == "invalid"

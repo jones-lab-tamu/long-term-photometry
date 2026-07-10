@@ -1243,6 +1243,62 @@ def peak_threshold_method_requires_abs(method_str: str) -> bool:
     return method_str == "absolute"
 
 
+# Scientist-facing Step 5 Default-settings status language. The readiness model
+# requires an explicit confirmation ("Use these as Default settings") even when
+# the displayed values are unchanged, so the not-yet-confirmed text must say so
+# rather than implying the user can simply leave the section alone.
+GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED = (
+    "These values are the starting Default settings. Select "
+    "“Use these as Default settings” to confirm them before continuing."
+)
+GUIDED_DEFAULT_SETTINGS_READY = "Default settings are ready."
+GUIDED_DEFAULT_SETTINGS_CONFIRM_BEFORE_CONTINUING = (
+    "Confirm the Default settings before continuing."
+)
+GUIDED_DEFAULT_SETTINGS_CHANGED_AFTER_CONFIRMATION = (
+    "Default settings changed. Confirm them again before continuing."
+)
+GUIDED_DEFAULT_SETTINGS_NEED_ATTENTION = (
+    "Default settings need attention before continuing."
+)
+GUIDED_DEFAULT_SETTINGS_LOAD_FAILURE_ADVICE = (
+    "Check the selected data and recording settings, then try again."
+)
+GUIDED_DEFAULT_SETTINGS_COULD_NOT_LOAD = (
+    "The starting Default settings could not be loaded. "
+    + GUIDED_DEFAULT_SETTINGS_LOAD_FAILURE_ADVICE
+)
+GUIDED_DEFAULT_SETTINGS_FILE_NOT_FOUND = (
+    "The starting settings file was not found. "
+    + GUIDED_DEFAULT_SETTINGS_LOAD_FAILURE_ADVICE
+)
+GUIDED_DEFAULT_SETTINGS_FILE_UNREADABLE = (
+    "The starting settings file could not be read. "
+    + GUIDED_DEFAULT_SETTINGS_LOAD_FAILURE_ADVICE
+)
+
+
+def sanitize_guided_default_settings_load_failure(fallback_reason: object) -> str:
+    """Map a raw Default-settings loader diagnostic to a stable, scientist-facing
+    message.
+
+    resolve_feature_event_defaults' fallback_reason is a shared loader
+    diagnostic that can contain file paths, the word "config", parser names and
+    raw exception text. None of that may reach the visible Step 5 labels, so
+    this returns only one of a small known set of plain-language messages and
+    never echoes any part of the raw reason. Callers keep the raw reason in
+    _guided_new_analysis_feature_event_profile_errors for internal diagnostics.
+    """
+    reason = str(fallback_reason or "").strip().lower()
+    if not reason:
+        return GUIDED_DEFAULT_SETTINGS_COULD_NOT_LOAD
+    if "does not exist" in reason or "not found" in reason:
+        return GUIDED_DEFAULT_SETTINGS_FILE_NOT_FOUND
+    if "unable to load" in reason or "could not" in reason or "parse" in reason:
+        return GUIDED_DEFAULT_SETTINGS_FILE_UNREADABLE
+    return GUIDED_DEFAULT_SETTINGS_COULD_NOT_LOAD
+
+
 def normalize_feature_settings_for_active_threshold_method(config_fields: dict) -> dict:
     """Return a copy of config_fields with threshold fields that are inactive
     for the selected peak_threshold_method removed.
@@ -3050,23 +3106,34 @@ class MainWindow(QMainWindow):
             per_roi_problem = self._guided_per_roi_feature_event_consistency_problem()
             if per_roi_problem:
                 return False, per_roi_problem
-            return True, "Feature detection settings are applied and current."
+            return True, GUIDED_DEFAULT_SETTINGS_READY
         if status == "stale":
             return (
                 False,
-                "Feature detection settings changed after they were applied. "
-                "Review and apply them again.",
+                GUIDED_DEFAULT_SETTINGS_CHANGED_AFTER_CONFIRMATION,
             )
-        if status in {"invalid", "unavailable"}:
+        if status == "unavailable":
+            # errors[0] is the raw loader diagnostic (paths, "config", parser
+            # and exception text). Never surface it here -- map it to a stable
+            # plain-language message instead.
+            return (
+                False,
+                sanitize_guided_default_settings_load_failure(
+                    errors[0] if errors else ""
+                ),
+            )
+        if status == "invalid":
+            # These are field-level validation messages (e.g. "peak_threshold_abs
+            # must be > 0"), which are scientist-actionable and safe to show.
             detail = str(errors[0]).strip() if errors else ""
             return (
                 False,
-                "Feature detection settings need attention before continuing."
+                GUIDED_DEFAULT_SETTINGS_NEED_ATTENTION
                 + (f" {detail}" if detail else ""),
             )
         return (
             False,
-            "Review and apply feature detection settings before continuing.",
+            GUIDED_DEFAULT_SETTINGS_CONFIRM_BEFORE_CONTINUING,
         )
 
     def _refresh_guided_feature_detection_continue_state(self) -> None:
@@ -3104,18 +3171,14 @@ class MainWindow(QMainWindow):
             else status == "applied"
         )
         if status == "applied" and explicitly_applied:
-            display = "Applied"
-            action = "Feature detection settings are part of this plan."
+            display = "Confirmed"
+            action = GUIDED_DEFAULT_SETTINGS_READY
         elif status == "default_initialized":
-            display = "Not applied"
-            action = (
-                "Review and apply feature detection settings before continuing."
-            )
+            display = "Not confirmed"
+            action = GUIDED_DEFAULT_SETTINGS_CONFIRM_BEFORE_CONTINUING
         else:
             display = "Needs attention"
-            action = (
-                "Review and apply feature detection settings before continuing."
-            )
+            action = GUIDED_DEFAULT_SETTINGS_NEED_ATTENTION
         threshold_method = (
             self._guided_feature_event_peak_method_combo.currentText()
         )
@@ -4412,10 +4475,10 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
 
         intro = QLabel(
-            "These settings define how events and features will be extracted "
-            "from corrected traces. Review and apply them before reviewing "
-            "the full plan. Applying settings updates only the in-memory "
-            "Guided plan; no feature extraction runs and no outputs are written."
+            "Choose how events will be detected in each ROI. Most ROIs can "
+            "use the Default settings; use Custom settings only for ROIs that "
+            "need different detection rules. Nothing here runs analysis or "
+            "writes any files."
         )
         intro.setObjectName("guidedFeatureDetectionStepExplanation")
         intro.setWordWrap(True)
@@ -12430,7 +12493,7 @@ class MainWindow(QMainWindow):
     def _reset_guided_feature_event_editor_to_defaults(self, *, status_text: str | None = None) -> None:
         self._set_guided_feature_event_editor_values(
             self._guided_feature_event_editor_defaults(),
-            status_text=status_text or "No draft feature/event profile applied.",
+            status_text=status_text or "Default settings have not been confirmed.",
         )
 
     def _sync_guided_feature_event_editor_to_current_run(self, *, force: bool = False) -> None:
@@ -12468,9 +12531,9 @@ class MainWindow(QMainWindow):
         if self._guided_new_analysis_feature_event_profile_status in ("applied", "stale", "invalid"):
             from photometry_pipeline.guided_new_analysis_plan import _paths_match
             if not _paths_match(self._guided_new_analysis_feature_event_profile_baseline_source, baseline_path):
-                stale_reasons.append("active baseline config source path changed")
+                stale_reasons.append("the starting settings file changed")
             if self._guided_new_analysis_feature_event_profile_baseline_kind != baseline_kind:
-                stale_reasons.append("active baseline config source kind changed")
+                stale_reasons.append("the starting settings source changed")
             if self._guided_new_analysis_feature_event_profile_format != current_format:
                 stale_reasons.append("acquisition format changed")
             if self._guided_new_analysis_feature_event_profile_acq_mode != current_acq_mode:
@@ -12508,15 +12571,16 @@ class MainWindow(QMainWindow):
                 self._guided_new_analysis_feature_event_profile_baseline_kind = baseline_kind
                 self._guided_new_analysis_feature_event_profile_format = current_format
                 self._guided_new_analysis_feature_event_profile_acq_mode = current_acq_mode
+                # Keep the raw loader diagnostic internally; show only the
+                # sanitized plain-language message.
                 self._guided_new_analysis_feature_event_profile_errors = [defaults_res.fallback_reason]
                 self._reset_guided_feature_event_editor_to_defaults(
-                    status_text=(
-                        "Feature/event profile settings need attention before "
-                        f"Run: {defaults_res.fallback_reason}"
+                    status_text=sanitize_guided_default_settings_load_failure(
+                        defaults_res.fallback_reason
                     )
                 )
                 return
-            
+
             defaults = self._event_feature_defaults_from_active_baseline()
             self._guided_new_analysis_feature_event_profile = dict(defaults)
             self._guided_new_analysis_feature_event_profile_status = "default_initialized"
@@ -12524,44 +12588,38 @@ class MainWindow(QMainWindow):
             self._guided_new_analysis_feature_event_profile_baseline_kind = baseline_kind
             self._guided_new_analysis_feature_event_profile_format = current_format
             self._guided_new_analysis_feature_event_profile_acq_mode = current_acq_mode
-            
+
             self._set_guided_feature_event_editor_values(
                 self._guided_new_analysis_feature_event_profile,
-                status_text=(
-                    "Required before Run: apply or configure the feature/event "
-                    "profile. Defaults from the active baseline are shown."
-                ),
+                status_text=GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED,
             )
             return
 
         if self._guided_new_analysis_feature_event_profile_status == "unavailable":
+            errors = self._guided_new_analysis_feature_event_profile_errors or []
             self._guided_feature_event_status_label.setText(
-                "Feature/event profile settings need attention before Run: "
-                + "; ".join(
-                    self._guided_new_analysis_feature_event_profile_errors
-                    or ["active baseline defaults are unavailable"]
+                sanitize_guided_default_settings_load_failure(
+                    errors[0] if errors else ""
                 )
             )
         elif self._guided_new_analysis_feature_event_profile_status == "default_initialized":
             self._guided_feature_event_status_label.setText(
-                "Required before Run: apply or configure the feature/event "
-                "profile. Defaults from the active baseline are shown."
+                GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED
             )
         elif self._guided_new_analysis_feature_event_profile_status == "applied":
             self._guided_feature_event_status_label.setText(
-                "Feature/event profile is configured."
+                GUIDED_DEFAULT_SETTINGS_READY
             )
         elif self._guided_new_analysis_feature_event_profile_status == "stale":
             reasons_str = "; ".join(self._guided_new_analysis_feature_event_profile_stale_reasons)
             self._guided_feature_event_status_label.setText(
-                "Feature/event profile settings need attention before Run: "
-                f"{reasons_str}. Re-apply or reset the profile."
+                f"{GUIDED_DEFAULT_SETTINGS_CHANGED_AFTER_CONFIRMATION} "
+                f"({reasons_str})"
             )
         elif self._guided_new_analysis_feature_event_profile_status == "invalid":
             errors_str = "; ".join(self._guided_new_analysis_feature_event_profile_errors)
             self._guided_feature_event_status_label.setText(
-                "Feature/event profile settings need attention before Run: "
-                f"{errors_str}"
+                f"{GUIDED_DEFAULT_SETTINGS_NEED_ATTENTION} {errors_str}"
             )
 
         if self._guided_new_analysis_feature_event_profile_status in ("applied", "stale", "invalid") and self._guided_new_analysis_feature_event_profile:
@@ -12885,7 +12943,7 @@ class MainWindow(QMainWindow):
                     "stale"
                 )
                 self._guided_new_analysis_feature_event_profile_stale_reasons = [
-                    "feature detection settings changed after application"
+                    "the Default settings were edited after being confirmed"
                 ]
                 self._invalidate_guided_backend_validation(
                     "feature detection settings changed"
@@ -13775,8 +13833,7 @@ class MainWindow(QMainWindow):
             self._guided_new_analysis_feature_event_profile_status = "invalid"
             self._guided_new_analysis_feature_event_profile_errors = [err]
             self._guided_feature_event_status_label.setText(
-                "Feature/event profile settings need attention before Run: "
-                f"{err}"
+                f"{GUIDED_DEFAULT_SETTINGS_NEED_ATTENTION} {err}"
             )
             self._refresh_guided_draft_run_plan_preview()
             return
@@ -13786,7 +13843,7 @@ class MainWindow(QMainWindow):
             self._guided_new_analysis_feature_event_profile_status = "invalid"
             self._guided_new_analysis_feature_event_profile_errors = semantic_errors
             self._guided_feature_event_status_label.setText(
-                "Feature/event profile settings need attention before Run: "
+                f"{GUIDED_DEFAULT_SETTINGS_NEED_ATTENTION} "
                 + "; ".join(semantic_errors)
             )
             self._refresh_guided_draft_run_plan_preview()
@@ -13809,10 +13866,10 @@ class MainWindow(QMainWindow):
         self._guided_new_analysis_feature_event_profile_updated_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         
         self._guided_feature_event_status_label.setText(
-            "Feature/event profile is configured."
+            GUIDED_DEFAULT_SETTINGS_READY
         )
         self._invalidate_guided_backend_validation(
-            "feature/event profile applied"
+            "Default feature detection settings were confirmed"
         )
         self._refresh_guided_draft_run_plan_preview()
 
@@ -13833,7 +13890,7 @@ class MainWindow(QMainWindow):
 
     def _on_guided_clear_feature_event_profile_new_analysis(self) -> None:
         self._invalidate_guided_backend_validation(
-            "feature/event profile cleared"
+            "Default feature detection settings were reset"
         )
         defaults_res = self._active_feature_event_defaults_result()
         baseline_path = defaults_res.baseline_source_path
@@ -13856,16 +13913,17 @@ class MainWindow(QMainWindow):
             self._guided_new_analysis_feature_event_profile_baseline_kind = baseline_kind
             self._guided_new_analysis_feature_event_profile_format = current_format
             self._guided_new_analysis_feature_event_profile_acq_mode = current_acq_mode
+            # Keep the raw loader diagnostic internally; show only the
+            # sanitized plain-language message.
             self._guided_new_analysis_feature_event_profile_errors = [defaults_res.fallback_reason]
             self._reset_guided_feature_event_editor_to_defaults(
-                status_text=(
-                    "Feature/event profile settings need attention before Run: "
-                    f"{defaults_res.fallback_reason}"
+                status_text=sanitize_guided_default_settings_load_failure(
+                    defaults_res.fallback_reason
                 )
             )
             self._refresh_guided_draft_run_plan_preview()
             return
-            
+
         defaults = self._event_feature_defaults_from_active_baseline()
         self._guided_new_analysis_feature_event_profile = dict(defaults)
         self._guided_new_analysis_feature_event_profile_status = "default_initialized"
@@ -13877,10 +13935,7 @@ class MainWindow(QMainWindow):
         
         self._set_guided_feature_event_editor_values(
             self._guided_new_analysis_feature_event_profile,
-            status_text=(
-                "Required before Run: apply or configure the feature/event "
-                "profile. Defaults from the active baseline are shown."
-            ),
+            status_text=GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED,
         )
         self._refresh_guided_draft_run_plan_preview()
 
@@ -14257,10 +14312,10 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
 
         note = QLabel(
-            "These are the Default feature detection settings. Every included "
-            "ROI uses them unless you mark that ROI Custom in the table below. "
-            "Apply them to add them to this plan — this updates only the "
-            "in-memory plan and writes no outputs."
+            "These settings are used by ROIs marked Default in the table "
+            "below. Most users can leave the values unchanged and select "
+            "“Use these as Default settings.” Expand this section only if the "
+            "Default settings need to be adjusted."
         )
         note.setObjectName("guidedFeatureEventProfileEditorNote")
         note.setProperty("guidedSecondaryText", True)
@@ -14279,6 +14334,32 @@ class MainWindow(QMainWindow):
         layout.addWidget(
             self._guided_feature_detection_summary_label
         )
+
+        # The full settings form is collapsed by default so it does not
+        # visually dominate Step 5 and the per-ROI table below stays reachable
+        # without scrolling. Most users leave the Default settings as they are;
+        # only those who need to change the baseline expand this.
+        self._guided_feature_event_editor_expand_toggle = QPushButton(
+            "Edit Default settings"
+        )
+        self._guided_feature_event_editor_expand_toggle.setObjectName(
+            "guidedFeatureEventEditorExpandToggle"
+        )
+        self._guided_feature_event_editor_expand_toggle.setCheckable(True)
+        layout.addWidget(
+            self._guided_feature_event_editor_expand_toggle,
+            alignment=Qt.AlignLeft,
+        )
+
+        self._guided_feature_event_editor_form_container = QWidget()
+        self._guided_feature_event_editor_form_container.setObjectName(
+            "guidedFeatureEventEditorFormContainer"
+        )
+        form_container_layout = QVBoxLayout(
+            self._guided_feature_event_editor_form_container
+        )
+        form_container_layout.setContentsMargins(0, 0, 0, 0)
+        form_container_layout.setSpacing(8)
 
         defaults = self._guided_feature_event_editor_defaults()
         form = QFormLayout()
@@ -14350,21 +14431,31 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_feature_event_auc_baseline_combo)
         form.addRow("Event AUC baseline:", self._guided_feature_event_auc_baseline_combo)
 
-        layout.addLayout(form)
+        form_container_layout.addLayout(form)
+        self._guided_feature_event_editor_form_container.setVisible(False)
+        layout.addWidget(self._guided_feature_event_editor_form_container)
+        self._guided_feature_event_editor_expand_toggle.toggled.connect(
+            self._guided_feature_event_editor_form_container.setVisible
+        )
+        self._guided_feature_event_editor_expand_toggle.toggled.connect(
+            lambda checked: self._guided_feature_event_editor_expand_toggle.setText(
+                "Hide Default settings" if checked else "Edit Default settings"
+            )
+        )
 
         button_row = QHBoxLayout()
-        self._guided_feature_event_apply_btn = QPushButton("Apply feature/event profile to draft plan")
+        self._guided_feature_event_apply_btn = QPushButton("Use these as Default settings")
         self._guided_feature_event_apply_btn.setObjectName("guidedFeatureEventApplyButton")
         self._guided_feature_event_apply_btn.clicked.connect(self._on_guided_apply_feature_event_profile)
         button_row.addWidget(self._guided_feature_event_apply_btn)
-        self._guided_feature_event_clear_btn = QPushButton("Clear draft feature/event profile")
+        self._guided_feature_event_clear_btn = QPushButton("Reset Default settings")
         self._guided_feature_event_clear_btn.setObjectName("guidedFeatureEventClearButton")
         self._guided_feature_event_clear_btn.clicked.connect(self._on_guided_clear_feature_event_profile)
         button_row.addWidget(self._guided_feature_event_clear_btn)
         button_row.addStretch(1)
         layout.addLayout(button_row)
 
-        self._guided_feature_event_status_label = QLabel("No draft feature/event profile applied.")
+        self._guided_feature_event_status_label = QLabel("Default settings have not been confirmed.")
         self._guided_feature_event_status_label.setObjectName("guidedFeatureEventProfileStatus")
         self._guided_feature_event_status_label.setProperty("guidedSecondaryText", True)
         self._guided_feature_event_status_label.setWordWrap(True)
