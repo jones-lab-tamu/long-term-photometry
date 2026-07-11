@@ -11,6 +11,7 @@ import h5py
 import numpy as np
 
 from ..core.regression import classify_per_roi_dynamic_fit_mode_contract
+from ..core.types import CORRECTION_STRATEGY_FAMILIES, RESOLVED_DYNAMIC_FIT_MODES
 
 class Hdf5TraceCacheWriter:
     """
@@ -50,12 +51,220 @@ class Hdf5TraceCacheWriter:
             # measured phasic cache-write hotspot.
             self._dataset_create_kwargs['compression_opts'] = 1
 
+    def _validate_native_signal_only_evidence(
+        self, chunk, chunk_id: int, source_file: str
+    ) -> None:
+        """Fail closed for native Signal-Only F0 cache evidence.
+
+        The key is deliberately optional for legacy chunks. Once a producer
+        writes the native consumed-strategy contract, however, a selected
+        Signal-Only ROI must carry its complete aligned production evidence;
+        the writer must never turn missing evidence into a silently incomplete
+        cache.
+        """
+        if self.mode != 'phasic' or not hasattr(chunk, 'metadata'):
+            return
+        metadata = chunk.metadata
+        if not isinstance(metadata, dict) or 'correction_strategy_consumed_by_roi' not in metadata:
+            return
+
+        consumed_by_roi = metadata['correction_strategy_consumed_by_roi']
+        if not isinstance(consumed_by_roi, dict):
+            raise ValueError(
+                "Native correction_strategy_consumed_by_roi must be a dict "
+                f"(chunk_id={chunk_id}, source_file={source_file!r})"
+            )
+        channel_names = [str(roi) for roi in getattr(chunk, 'channel_names', [])]
+        if len(channel_names) != len(set(channel_names)):
+            raise ValueError(
+                "Native correction strategy contains duplicate ROI identities "
+                f"(chunk_id={chunk_id}, source_file={source_file!r})"
+            )
+        sig_raw = np.asarray(getattr(chunk, 'sig_raw', np.empty((0, 0))))
+        time_sec = np.asarray(getattr(chunk, 'time_sec', np.empty(0)))
+        if sig_raw.ndim != 2 or sig_raw.shape[1] != len(channel_names):
+            raise ValueError(
+                "Native Signal-Only cache evidence has inconsistent signal/ROI shape "
+                f"(sig_raw={sig_raw.shape}, rois={len(channel_names)}, "
+                f"chunk_id={chunk_id}, source_file={source_file!r})"
+            )
+        if time_sec.ndim != 1 or time_sec.shape[0] != sig_raw.shape[0]:
+            raise ValueError(
+                "Native Signal-Only cache evidence has inconsistent time length "
+                f"(time={time_sec.shape}, samples={sig_raw.shape[0]}, "
+                f"chunk_id={chunk_id}, source_file={source_file!r})"
+            )
+        if not np.all(np.isfinite(time_sec)):
+            raise ValueError(
+                "Native Signal-Only cache evidence contains non-finite time values "
+                f"(chunk_id={chunk_id}, source_file={source_file!r})"
+            )
+        baseline_by_roi = metadata.get('signal_only_f0_production_baseline')
+        production_qc_by_roi = metadata.get('signal_only_f0_production_qc')
+        expected_count = int(sig_raw.shape[0])
+        coverage_fraction = float(
+            getattr(self.config, 'signal_only_f0_min_coverage_fraction', 0.80)
+        ) if self.config is not None else 0.80
+        if not np.isfinite(coverage_fraction) or not 0.0 < coverage_fraction <= 1.0:
+            raise ValueError(
+                "Invalid native Signal-Only coverage policy "
+                f"{coverage_fraction!r} (chunk_id={chunk_id}, source_file={source_file!r})"
+            )
+        min_required = max(10, int(np.ceil(coverage_fraction * expected_count)))
+
+        expected_roi_keys = set(channel_names)
+        actual_roi_keys = set(consumed_by_roi.keys())
+        if actual_roi_keys != expected_roi_keys:
+            missing = sorted(expected_roi_keys - actual_roi_keys)
+            extra = sorted(actual_roi_keys - expected_roi_keys)
+            raise ValueError(
+                "Native correction_strategy_consumed_by_roi must cover exactly "
+                f"chunk.channel_names; missing={missing}, extra={extra} "
+                f"(chunk_id={chunk_id}, source_file={source_file!r})"
+            )
+
+        signal_only_rois = set()
+        for roi in channel_names:
+            consumed = consumed_by_roi[roi]
+            if not isinstance(consumed, dict):
+                raise ValueError(
+                    f"Native correction strategy entry for ROI {roi!r} is malformed "
+                    f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            if consumed.get('roi_id') != roi:
+                raise ValueError(
+                    f"Native correction strategy ROI identity mismatch for {roi!r} "
+                    f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            if consumed.get('execution_status') != 'consumed':
+                raise ValueError(
+                    f"Native correction strategy for ROI {roi!r} was not consumed "
+                    f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            family = consumed.get('strategy_family')
+            if not isinstance(family, str) or family not in CORRECTION_STRATEGY_FAMILIES:
+                raise ValueError(
+                    f"Native correction strategy for ROI {roi!r} has unknown strategy_family "
+                    f"{family!r} (chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            selected_strategy = consumed.get('selected_strategy')
+            dynamic_fit_mode = consumed.get('dynamic_fit_mode')
+            if family == 'dynamic_fit':
+                if not isinstance(dynamic_fit_mode, str) or dynamic_fit_mode not in RESOLVED_DYNAMIC_FIT_MODES:
+                    raise ValueError(
+                        f"Native dynamic_fit strategy for ROI {roi!r} has unsupported dynamic_fit_mode "
+                        f"{dynamic_fit_mode!r} (chunk_id={chunk_id}, source_file={source_file!r})"
+                    )
+                if selected_strategy != dynamic_fit_mode:
+                    raise ValueError(
+                        f"Native dynamic_fit strategy for ROI {roi!r} has selected_strategy="
+                        f"{selected_strategy!r}, expected {dynamic_fit_mode!r} "
+                        f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                    )
+                continue
+
+            signal_only_rois.add(roi)
+            if selected_strategy != 'signal_only_f0':
+                raise ValueError(
+                    f"Native Signal-Only strategy for ROI {roi!r} has an invalid selected_strategy "
+                    f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            if dynamic_fit_mode is not None:
+                raise ValueError(
+                    f"Native Signal-Only strategy for ROI {roi!r} must not carry dynamic_fit_mode "
+                    f"{dynamic_fit_mode!r} (chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+
+        for evidence_name, evidence_by_roi in (
+            ('signal_only_f0_production_baseline', baseline_by_roi),
+            ('signal_only_f0_production_qc', production_qc_by_roi),
+        ):
+            if evidence_by_roi is None:
+                continue
+            if not isinstance(evidence_by_roi, dict):
+                raise ValueError(
+                    f"Native {evidence_name} must be a dict when present "
+                    f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            orphan_rois = sorted(set(evidence_by_roi.keys()) - signal_only_rois)
+            if orphan_rois:
+                raise ValueError(
+                    f"Native {evidence_name} contains evidence for non-Signal-Only ROI(s) "
+                    f"{orphan_rois} (chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+
+        for roi in sorted(signal_only_rois):
+            dff = getattr(chunk, 'dff', None)
+            if dff is None:
+                raise ValueError(
+                    f"Native correction contract requires canonical dF/F for ROI {roi!r} "
+                    f"before cache writing (chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            dff_arr = np.asarray(dff)
+            if dff_arr.ndim != 2 or dff_arr.shape != sig_raw.shape:
+                raise ValueError(
+                    "Native correction contract has malformed canonical dF/F shape "
+                    f"{dff_arr.shape}; expected {sig_raw.shape} "
+                    f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            if not isinstance(production_qc_by_roi, dict):
+                raise ValueError(
+                    f"Native Signal-Only production QC is missing for ROI {roi!r} "
+                    f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            production_qc = production_qc_by_roi.get(roi)
+            if not isinstance(production_qc, dict):
+                raise ValueError(
+                    f"Native Signal-Only production QC entry is missing or malformed for ROI {roi!r} "
+                    f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            production_available = production_qc.get(
+                'signal_only_f0_production_available',
+                production_qc.get('production_available', False),
+            )
+            if not isinstance(production_available, (bool, np.bool_)) or not bool(
+                production_available
+            ):
+                raise ValueError(
+                    f"Native Signal-Only production QC is not available for ROI {roi!r} "
+                    f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            if not isinstance(baseline_by_roi, dict) or roi not in baseline_by_roi:
+                raise ValueError(
+                    f"Native Signal-Only production F0 baseline is missing for ROI {roi!r} "
+                    f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            baseline = np.asarray(baseline_by_roi[roi])
+            if baseline.ndim != 1 or baseline.shape[0] != expected_count:
+                raise ValueError(
+                    f"Native Signal-Only production F0 baseline for ROI {roi!r} has shape "
+                    f"{baseline.shape}; expected ({expected_count},) "
+                    f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            baseline_finite_count = int(np.sum(np.isfinite(baseline)))
+            if baseline_finite_count < min_required:
+                raise ValueError(
+                    f"Native Signal-Only production F0 baseline for ROI {roi!r} has insufficient "
+                    f"finite coverage ({baseline_finite_count}/{expected_count}; {min_required} required) "
+                    f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+            roi_index = channel_names.index(roi)
+            dff_finite_count = int(np.sum(np.isfinite(dff_arr[:, roi_index])))
+            if dff_finite_count < min_required:
+                raise ValueError(
+                    f"Native Signal-Only canonical dF/F for ROI {roi!r} has insufficient finite coverage "
+                    f"({dff_finite_count}/{expected_count}; {min_required} required) "
+                    f"(chunk_id={chunk_id}, source_file={source_file!r})"
+                )
+
     def add_chunk(self, chunk, chunk_id: int, source_file: str):
         """
         Extract chunk arrays into the HDF5 structure.
         """
         if self._is_aborted:
             return
+
+        self._validate_native_signal_only_evidence(chunk, chunk_id, source_file)
 
         # Fail closed before writing anything for this chunk: a present but
         # non-dict dynamic_fit_mode_resolved_by_roi is malformed current
@@ -128,6 +337,28 @@ class Hdf5TraceCacheWriter:
                     hasattr(chunk, 'metadata')
                     and isinstance(chunk.metadata, dict)
                 ):
+                    consumed_by_roi = chunk.metadata.get(
+                        'correction_strategy_consumed_by_roi', {}
+                    )
+                    consumed_meta = (
+                        consumed_by_roi.get(str(roi), {})
+                        if isinstance(consumed_by_roi, dict)
+                        else {}
+                    )
+                    if isinstance(consumed_meta, dict) and consumed_meta:
+                        for attr_name, key in (
+                            ('correction_strategy_family', 'strategy_family'),
+                            ('correction_selected_strategy', 'selected_strategy'),
+                            ('correction_dynamic_fit_mode', 'dynamic_fit_mode'),
+                            ('correction_parameter_identity', 'parameter_identity'),
+                            ('correction_evidence_identity', 'evidence_identity'),
+                            ('correction_execution_status', 'execution_status'),
+                            ('correction_production_baseline_dataset', 'production_baseline_dataset'),
+                            ('correction_production_baseline_source', 'production_baseline_source'),
+                        ):
+                            value = consumed_meta.get(key)
+                            if value is not None and str(value):
+                                grp.attrs[attr_name] = str(value)
                     roi_bleach = (
                         chunk.metadata.get('bleach_correction', {})
                         if isinstance(chunk.metadata.get('bleach_correction', {}), dict)
@@ -525,6 +756,96 @@ class Hdf5TraceCacheWriter:
                         ):
                             grp.create_dataset(
                                 'signal_only_f0_candidate',
+                                data=trace_arr,
+                                **self._dataset_create_kwargs,
+                            )
+                    production_qc_by_roi = chunk.metadata.get(
+                        'signal_only_f0_production_qc', {}
+                    )
+                    production_qc = (
+                        production_qc_by_roi.get(str(roi), {})
+                        if isinstance(production_qc_by_roi, dict)
+                        else {}
+                    )
+                    production_baseline_by_roi = chunk.metadata.get(
+                        'signal_only_f0_production_baseline', {}
+                    )
+                    production_baseline = (
+                        production_baseline_by_roi.get(str(roi))
+                        if isinstance(production_baseline_by_roi, dict)
+                        else None
+                    )
+                    if isinstance(production_qc, dict) and production_qc:
+                        grp.attrs['signal_only_f0_production_available'] = bool(
+                            production_qc.get('signal_only_f0_production_available', False)
+                        )
+                        grp.attrs['signal_only_f0_production_baseline_source'] = str(
+                            production_qc.get(
+                                'signal_only_f0_production_baseline_source',
+                                'signal_only_f0_candidate_uncapped',
+                            )
+                        )
+                        grp.attrs['signal_only_f0_production_formula'] = str(
+                            production_qc.get(
+                                'signal_only_f0_production_formula',
+                                '100 * (signal - f0) / f0',
+                            )
+                        )
+                        for attr_name, key in (
+                            (
+                                'signal_only_f0_production_baseline_p05',
+                                'signal_only_f0_production_baseline_p05',
+                            ),
+                            (
+                                'signal_only_f0_production_baseline_p50',
+                                'signal_only_f0_production_baseline_p50',
+                            ),
+                            (
+                                'signal_only_f0_production_baseline_p95',
+                                'signal_only_f0_production_baseline_p95',
+                            ),
+                            (
+                                'signal_only_f0_production_valid_sample_count',
+                                'signal_only_f0_production_valid_sample_count',
+                            ),
+                            (
+                                'signal_only_f0_production_expected_sample_count',
+                                'signal_only_f0_production_expected_sample_count',
+                            ),
+                            (
+                                'signal_only_f0_production_baseline_finite_count',
+                                'signal_only_f0_production_baseline_finite_count',
+                            ),
+                            (
+                                'signal_only_f0_production_dff_finite_count',
+                                'signal_only_f0_production_dff_finite_count',
+                            ),
+                            (
+                                'signal_only_f0_production_min_required_samples',
+                                'signal_only_f0_production_min_required_samples',
+                            ),
+                            (
+                                'signal_only_f0_production_valid_fraction',
+                                'signal_only_f0_production_valid_fraction',
+                            ),
+                        ):
+                            value = production_qc.get(key)
+                            if value is None:
+                                continue
+                            try:
+                                numeric = float(value)
+                            except Exception:
+                                continue
+                            if np.isfinite(numeric):
+                                grp.attrs[attr_name] = numeric
+                    if production_baseline is not None:
+                        trace_arr = np.asarray(production_baseline, dtype=np.float64).reshape(-1)
+                        if (
+                            trace_arr.shape == np.asarray(chunk.sig_raw[:, r_idx]).reshape(-1).shape
+                            and np.any(np.isfinite(trace_arr))
+                        ):
+                            grp.create_dataset(
+                                'signal_only_f0_baseline',
                                 data=trace_arr,
                                 **self._dataset_create_kwargs,
                             )

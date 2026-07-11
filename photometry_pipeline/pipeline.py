@@ -9,9 +9,10 @@ import time
 import pandas as pd
 import numpy as np
 from typing import List, Optional
+from types import MappingProxyType
 
 from .config import Config
-from .core.types import Chunk, SessionStats
+from .core.types import Chunk, SessionStats, PerRoiCorrectionSpec
 from .io.adapters import (
     load_chunk,
     sniff_format,
@@ -55,6 +56,85 @@ from .guided_manifest_verification import (
 # from .viz import plots # Moved to run() to avoid side effects
 
 TONIC_GLOBAL_FIT_SAMPLE_CAPACITY = 200_000
+
+
+class CorrectionProcessingError(RuntimeError):
+    """Typed failure raised when a selected correction cannot produce a trace."""
+
+    def __init__(
+        self,
+        *,
+        roi_id: str,
+        chunk_id: int,
+        source_file: str,
+        selected_strategy: str,
+        reason: str,
+    ) -> None:
+        self.roi_id = str(roi_id)
+        self.chunk_id = int(chunk_id)
+        self.source_file = str(source_file)
+        self.selected_strategy = str(selected_strategy)
+        self.reason = str(reason)
+        super().__init__(
+            "Correction failed for "
+            f"ROI {self.roi_id!r}, chunk {self.chunk_id}, source {self.source_file!r}, "
+            f"strategy {self.selected_strategy!r}: {self.reason}"
+        )
+
+
+_SIGNAL_STATE_CONFIG_KEYS = (
+    "signal_state_smoothing_window_fraction",
+    "signal_state_smoothing_window_sec",
+    "signal_state_high_quantile",
+    "signal_state_low_quantile",
+    "signal_state_min_episode_fraction",
+    "signal_state_min_episode_sec",
+    "signal_state_edge_fraction",
+    "signal_state_variability_window_fraction",
+    "signal_state_variability_window_sec",
+    "signal_state_low_variability_quantile",
+    "signal_state_low_variability_ratio_threshold",
+    "signal_state_partial_min_high_fraction",
+    "signal_state_partial_min_longest_fraction",
+    "signal_state_partial_max_variability_ratio",
+    "signal_state_partial_min_variability_suppression",
+    "signal_state_partial_requires_low_variability",
+    "signal_state_step_window_fraction",
+    "signal_state_step_window_sec",
+    "signal_state_step_threshold_robust_z",
+    "signal_state_min_robust_range",
+)
+
+_SIGNAL_ONLY_F0_CONFIG_KEYS = (
+    "signal_only_f0_window_fraction",
+    "signal_only_f0_window_sec",
+    "signal_only_f0_low_quantile",
+    "signal_only_f0_smoothing_window_fraction",
+    "signal_only_f0_smoothing_window_sec",
+    "signal_only_f0_min_window_samples",
+    "signal_only_f0_max_window_fraction",
+    "signal_only_f0_min_robust_range",
+    "signal_only_f0_max_above_signal_fraction",
+    "signal_only_f0_max_tracking_fraction",
+    "signal_only_f0_min_coverage_fraction",
+    "signal_only_f0_high_state_context_mode",
+    "signal_only_f0_state_aware_enabled",
+    "signal_only_f0_low_support_quantile",
+    "signal_only_f0_low_support_buffer_fraction",
+    "signal_only_f0_low_support_buffer_sec",
+    "signal_only_f0_min_low_support_fraction",
+    "signal_only_f0_min_anchor_count",
+    "signal_only_f0_max_anchor_gap_fraction",
+    "signal_only_f0_max_anchor_gap_sec",
+    "signal_only_f0_edge_extrapolation_mode",
+    "signal_only_f0_max_edge_extrapolation_fraction",
+    "signal_only_f0_max_edge_extrapolation_sec",
+    "signal_only_f0_medium_extrapolation_fraction",
+    "signal_only_f0_high_extrapolation_fraction",
+    "signal_only_f0_low_anchor_support_fraction",
+    "signal_only_f0_low_anchor_count",
+    "signal_only_f0_confidence_cap_on_large_gap",
+)
 
 class _PairedDeterministicReservoir:
     """Bounded deterministic sampler for paired UV/SIG samples used by tonic fit."""
@@ -186,9 +266,28 @@ class Pipeline:
         mode: str = 'phasic',
         per_roi_feature_config: dict | None = None,
         per_roi_feature_provenance: dict | None = None,
+        per_roi_correction: dict[str, PerRoiCorrectionSpec] | None = None,
     ):
         self.config = config
-        self.mode = mode
+        self.mode = str(mode)
+        # The correction map is an execution input, not a live reference to
+        # mutable caller state. PerRoiCorrectionSpec is frozen; copying the
+        # mapping here ensures the same resolved selection is used for every
+        # chunk and prevents external dict mutation during a run.
+        if per_roi_correction is None:
+            self.per_roi_correction = None
+        else:
+            if not isinstance(per_roi_correction, dict):
+                raise TypeError("per_roi_correction must be a dict or None")
+            self.per_roi_correction = MappingProxyType(dict(per_roi_correction))
+            if self.mode.strip().lower() in {"tonic", "both"} and any(
+                getattr(spec, "strategy_family", None) == "signal_only_f0"
+                for spec in self.per_roi_correction.values()
+            ):
+                raise ValueError(
+                    "Signal-Only F0 is supported only for phasic Pipeline execution; "
+                    f"mode={self.mode!r} cannot consume a signal_only_f0 correction entry"
+                )
         # Optional per-ROI feature-detection settings (4J16k32b). When None
         # (the default), feature extraction uses `self.config` for every ROI,
         # identical to today's single-config behavior.
@@ -204,6 +303,9 @@ class Pipeline:
         #   see guided_new_analysis_plan.build_per_roi_feature_event_provenance).
         self.per_roi_feature_config = per_roi_feature_config
         self.per_roi_feature_provenance = per_roi_feature_provenance
+        # Optional authoritative production correction selection. A missing
+        # map intentionally preserves the legacy uniform dynamic-fit path;
+        # an explicit map is copied above and passed to every phasic chunk.
         self.file_list = []
         # The single authorized final-chunk exclusion (if any) and the frozen
         # per-chunk accountant, so every admitted chunk reaches exactly one
@@ -404,68 +506,18 @@ class Pipeline:
         dynamic_qc_by_roi = chunk.metadata.get("dynamic_fit_validity_qc", {})
         if not isinstance(dynamic_qc_by_roi, dict):
             dynamic_qc_by_roi = {}
-        signal_state_config_keys = (
-            "signal_state_smoothing_window_fraction",
-            "signal_state_smoothing_window_sec",
-            "signal_state_high_quantile",
-            "signal_state_low_quantile",
-            "signal_state_min_episode_fraction",
-            "signal_state_min_episode_sec",
-            "signal_state_edge_fraction",
-            "signal_state_variability_window_fraction",
-            "signal_state_variability_window_sec",
-            "signal_state_low_variability_quantile",
-            "signal_state_low_variability_ratio_threshold",
-            "signal_state_partial_min_high_fraction",
-            "signal_state_partial_min_longest_fraction",
-            "signal_state_partial_max_variability_ratio",
-            "signal_state_partial_min_variability_suppression",
-            "signal_state_partial_requires_low_variability",
-            "signal_state_step_window_fraction",
-            "signal_state_step_window_sec",
-            "signal_state_step_threshold_robust_z",
-            "signal_state_min_robust_range",
+        signal_state_config = self._signal_state_config()
+        signal_only_f0_config = self._signal_only_f0_config()
+        production_qc_by_roi = chunk.metadata.get(
+            "signal_only_f0_production_qc", {}
         )
-        signal_state_config = {
-            key: getattr(self.config, key)
-            for key in signal_state_config_keys
-            if hasattr(self.config, key)
-        }
-        signal_only_f0_config_keys = (
-            "signal_only_f0_window_fraction",
-            "signal_only_f0_window_sec",
-            "signal_only_f0_low_quantile",
-            "signal_only_f0_smoothing_window_fraction",
-            "signal_only_f0_smoothing_window_sec",
-            "signal_only_f0_min_window_samples",
-            "signal_only_f0_max_window_fraction",
-            "signal_only_f0_min_robust_range",
-            "signal_only_f0_max_above_signal_fraction",
-            "signal_only_f0_max_tracking_fraction",
-            "signal_only_f0_min_coverage_fraction",
-            "signal_only_f0_high_state_context_mode",
-            "signal_only_f0_state_aware_enabled",
-            "signal_only_f0_low_support_quantile",
-            "signal_only_f0_low_support_buffer_fraction",
-            "signal_only_f0_low_support_buffer_sec",
-            "signal_only_f0_min_low_support_fraction",
-            "signal_only_f0_min_anchor_count",
-            "signal_only_f0_max_anchor_gap_fraction",
-            "signal_only_f0_max_anchor_gap_sec",
-            "signal_only_f0_edge_extrapolation_mode",
-            "signal_only_f0_max_edge_extrapolation_fraction",
-            "signal_only_f0_max_edge_extrapolation_sec",
-            "signal_only_f0_medium_extrapolation_fraction",
-            "signal_only_f0_high_extrapolation_fraction",
-            "signal_only_f0_low_anchor_support_fraction",
-            "signal_only_f0_low_anchor_count",
-            "signal_only_f0_confidence_cap_on_large_gap",
+        if not isinstance(production_qc_by_roi, dict):
+            production_qc_by_roi = {}
+        production_baseline_by_roi = chunk.metadata.get(
+            "signal_only_f0_production_baseline", {}
         )
-        signal_only_f0_config = {
-            key: getattr(self.config, key)
-            for key in signal_only_f0_config_keys
-            if hasattr(self.config, key)
-        }
+        if not isinstance(production_baseline_by_roi, dict):
+            production_baseline_by_roi = {}
 
         records_by_roi: dict[str, dict] = {}
         for r_idx, roi in enumerate(chunk.channel_names):
@@ -541,25 +593,38 @@ class Pipeline:
                 "dynamic_fit_qc_soft_flags": dynamic_qc.get("dynamic_fit_qc_soft_flags", []),
                 "dynamic_fit_qc_flags": dynamic_qc.get("dynamic_fit_qc_flags", []),
             }
-            record.update(
-                compute_signal_state_diagnostics(
+            production_qc = production_qc_by_roi.get(roi_name)
+            if isinstance(production_qc, dict):
+                signal_state = production_qc.get("signal_state", {})
+                if not isinstance(signal_state, dict):
+                    signal_state = {}
+                record.update(signal_state)
+                signal_only_f0_meta = {
+                    key: value
+                    for key, value in production_qc.items()
+                    if key != "signal_state"
+                }
+                signal_only_f0_trace = production_baseline_by_roi.get(roi_name)
+            else:
+                record.update(
+                    compute_signal_state_diagnostics(
+                        signal=chunk.sig_raw[:, r_idx],
+                        time=chunk.time_sec,
+                        config=signal_state_config,
+                    )
+                )
+                signal_only_f0 = compute_signal_only_f0_candidate(
                     signal=chunk.sig_raw[:, r_idx],
                     time=chunk.time_sec,
-                    config=signal_state_config,
+                    signal_state=record,
+                    config=signal_only_f0_config,
                 )
-            )
-            signal_only_f0 = compute_signal_only_f0_candidate(
-                signal=chunk.sig_raw[:, r_idx],
-                time=chunk.time_sec,
-                signal_state=record,
-                config=signal_only_f0_config,
-            )
-            signal_only_f0_trace = signal_only_f0.get("signal_only_f0_candidate")
-            signal_only_f0_meta = {
-                key: value
-                for key, value in signal_only_f0.items()
-                if key != "signal_only_f0_candidate"
-            }
+                signal_only_f0_trace = signal_only_f0.get("signal_only_f0_candidate")
+                signal_only_f0_meta = {
+                    key: value
+                    for key, value in signal_only_f0.items()
+                    if key != "signal_only_f0_candidate"
+                }
             record.update(signal_only_f0_meta)
             record.update(
                 classify_reference_candidates(
@@ -1777,8 +1842,16 @@ class Pipeline:
              self._process_chunk_tonic(chunk, chunk_id)
         else:
              # PHASIC MODE (Dynamic)
+             strategy_map, dispatch_map = self._resolve_correction_map_for_chunk(
+                 chunk.channel_names
+             )
              t_reg = time.perf_counter()
-             uv_fit, delta_f = regression.fit_chunk_dynamic(chunk, self.config, mode=self.mode)
+             uv_fit, delta_f = regression.fit_chunk_dynamic(
+                 chunk,
+                 self.config,
+                 mode=self.mode,
+                 per_roi_correction=dispatch_map,
+             )
              if self._is_phasic_timing_enabled():
                  self._add_phasic_detail_bucket("pass2.dynamic_regression", time.perf_counter() - t_reg)
                  dyn_timing = None
@@ -1799,6 +1872,67 @@ class Pipeline:
              chunk.delta_f = delta_f
              t_dff = time.perf_counter()
              chunk.dff = normalization.compute_dff(chunk, self.stats, self.config)
+             if chunk.dff is None:
+                 chunk.dff = np.full_like(chunk.sig_raw, np.nan, dtype=float)
+
+             # Assemble both correction families into one canonical, stable
+             # original-column-order result before feature extraction. A
+             # Signal-Only ROI never enters regression and never uses UV data.
+             consumed_by_roi = {}
+             production_baselines = {}
+             production_qc_by_roi = {}
+             for roi_index, roi_name_raw in enumerate(chunk.channel_names):
+                 roi_name = str(roi_name_raw)
+                 spec = strategy_map[roi_name]
+                 consumed = {
+                     "roi_id": roi_name,
+                     "strategy_family": str(spec.strategy_family),
+                     "selected_strategy": str(spec.selected_strategy),
+                     "dynamic_fit_mode": (
+                         str(spec.dynamic_fit_mode)
+                         if spec.dynamic_fit_mode is not None
+                         else None
+                     ),
+                     "parameter_identity": str(spec.parameter_identity),
+                     "evidence_identity": str(spec.evidence_identity),
+                     "execution_status": "consumed",
+                 }
+                 if spec.strategy_family == "signal_only_f0":
+                     (
+                         canonical_delta_f,
+                         canonical_dff,
+                         production_baseline,
+                         state,
+                         production_qc,
+                     ) = (
+                         self._compute_signal_only_f0_production(
+                             chunk,
+                             roi_index=roi_index,
+                             roi_id=roi_name,
+                             chunk_id=chunk_id,
+                         )
+                     )
+                     chunk.delta_f[:, roi_index] = canonical_delta_f
+                     chunk.dff[:, roi_index] = canonical_dff
+                     # Keep the exact production baseline out of the JSON-like
+                     # QC record; it is persisted as an aligned dataset below.
+                     production_baselines[roi_name] = np.asarray(
+                         production_baseline, dtype=float
+                     )
+                     production_qc_by_roi[roi_name] = dict(production_qc)
+                     production_qc_by_roi[roi_name]["signal_state"] = dict(state)
+                     consumed.update(
+                         {
+                             "production_baseline_dataset": "signal_only_f0_baseline",
+                             "production_baseline_source": "signal_only_f0_candidate_uncapped",
+                             "production_qc_key": "signal_only_f0_production_qc",
+                         }
+                     )
+                 consumed_by_roi[roi_name] = consumed
+
+             chunk.metadata["correction_strategy_consumed_by_roi"] = consumed_by_roi
+             chunk.metadata["signal_only_f0_production_baseline"] = production_baselines
+             chunk.metadata["signal_only_f0_production_qc"] = production_qc_by_roi
              if self._is_phasic_timing_enabled():
                  self._add_phasic_detail_bucket("pass2.dff_compute", time.perf_counter() - t_dff)
         
@@ -1847,6 +1981,241 @@ class Pipeline:
         if emitter:
             emitter.emit("inputs", "representative_session", "Representative session resolved",
                          payload=self.representative_session_info)
+
+
+    def _resolve_correction_map_for_chunk(
+        self, channel_names: list[str]
+    ) -> tuple[dict[str, PerRoiCorrectionSpec], dict[str, PerRoiCorrectionSpec] | None]:
+        """Resolve the immutable Pipeline correction selection for one chunk.
+
+        The returned second value is the argument passed to grouped regression:
+        ``None`` deliberately preserves the accepted legacy translation path;
+        an explicit map is passed unchanged so Config.dynamic_fit_mode cannot
+        override it.
+        """
+        names = [str(name) for name in channel_names]
+        if self.per_roi_correction is None:
+            strategy_map = regression.build_uniform_per_roi_correction_map(
+                names,
+                getattr(self.config, "dynamic_fit_mode", "rolling_local_regression"),
+            )
+            return strategy_map, None
+
+        strategy_map = dict(self.per_roi_correction)
+        regression.validate_per_roi_correction_map(names, strategy_map)
+        if self.mode.strip().lower() in {"tonic", "both"} and any(
+            spec.strategy_family == "signal_only_f0"
+            for spec in strategy_map.values()
+        ):
+            raise ValueError(
+                "Signal-Only F0 is supported only for phasic Pipeline execution; "
+                f"mode={self.mode!r} cannot consume a signal_only_f0 correction entry"
+            )
+        return strategy_map, strategy_map
+
+    def _signal_state_config(self) -> dict:
+        return {
+            key: getattr(self.config, key)
+            for key in _SIGNAL_STATE_CONFIG_KEYS
+            if hasattr(self.config, key)
+        }
+
+    def _signal_only_f0_config(self) -> dict:
+        return {
+            key: getattr(self.config, key)
+            for key in _SIGNAL_ONLY_F0_CONFIG_KEYS
+            if hasattr(self.config, key)
+        }
+
+    def _compute_signal_only_f0_production(
+        self,
+        chunk: Chunk,
+        *,
+        roi_index: int,
+        roi_id: str,
+        chunk_id: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict, dict]:
+        """Compute and validate one canonical native Signal-Only F0 trace.
+
+        The production baseline is the exact uncapped candidate used by the
+        accepted standalone Signal-Only F0 formula. The candidate is computed
+        once here; the diagnostic recorder reuses the returned metadata and
+        baseline rather than invoking the candidate a second time.
+        """
+        signal = np.asarray(chunk.sig_raw[:, roi_index], dtype=float).reshape(-1)
+        state = compute_signal_state_diagnostics(
+            signal=signal,
+            time=chunk.time_sec,
+            config=self._signal_state_config(),
+        )
+        result = compute_signal_only_f0_candidate(
+            signal=signal,
+            time=chunk.time_sec,
+            signal_state=state,
+            config=self._signal_only_f0_config(),
+            return_uncapped_candidate=True,
+        )
+
+        baseline_raw = result.get("signal_only_f0_candidate_uncapped")
+        expected_sample_count = int(signal.size)
+        finite_signal = np.isfinite(signal)
+        n_finite_signal = int(np.sum(finite_signal))
+        coverage_fraction = float(
+            getattr(self.config, "signal_only_f0_min_coverage_fraction", 0.80)
+        )
+        if not np.isfinite(coverage_fraction) or not 0.0 < coverage_fraction <= 1.0:
+            raise CorrectionProcessingError(
+                roi_id=roi_id,
+                chunk_id=chunk_id,
+                source_file=chunk.source_file,
+                selected_strategy="signal_only_f0",
+                reason=(
+                    "invalid signal-only coverage policy: "
+                    f"signal_only_f0_min_coverage_fraction={coverage_fraction!r}"
+                ),
+            )
+        # Coverage is measured against the expected processed trace length,
+        # never only against samples that happened to be finite. The explicit
+        # policy allows up to (1 - coverage_fraction) missing samples,
+        # including ordinary edge NaNs; there is no additional hidden edge
+        # allowance.
+        min_required = max(
+            10, int(np.ceil(coverage_fraction * expected_sample_count))
+        )
+        if n_finite_signal < min_required:
+            raise CorrectionProcessingError(
+                roi_id=roi_id,
+                chunk_id=chunk_id,
+                source_file=chunk.source_file,
+                selected_strategy="signal_only_f0",
+                reason=(
+                    "raw signal finite coverage is insufficient: "
+                    f"{n_finite_signal}/{expected_sample_count} valid samples, "
+                    f"{min_required} required"
+                ),
+            )
+        if str(result.get("signal_only_f0_status", "")) != "ok":
+            reason = str(
+                result.get("signal_only_f0_warning")
+                or result.get("signal_only_f0_status")
+                or "candidate_unavailable"
+            )
+            raise CorrectionProcessingError(
+                roi_id=roi_id,
+                chunk_id=chunk_id,
+                source_file=chunk.source_file,
+                selected_strategy="signal_only_f0",
+                reason=reason,
+            )
+        if baseline_raw is None:
+            raise CorrectionProcessingError(
+                roi_id=roi_id,
+                chunk_id=chunk_id,
+                source_file=chunk.source_file,
+                selected_strategy="signal_only_f0",
+                reason="candidate did not return the production F0 baseline",
+            )
+
+        baseline = np.asarray(baseline_raw, dtype=float).reshape(-1)
+        if baseline.shape != signal.shape:
+            raise CorrectionProcessingError(
+                roi_id=roi_id,
+                chunk_id=chunk_id,
+                source_file=chunk.source_file,
+                selected_strategy="signal_only_f0",
+                reason=(
+                    "production F0 baseline shape mismatch: "
+                    f"{baseline.shape} versus signal {signal.shape}"
+                ),
+            )
+        valid = finite_signal & np.isfinite(baseline)
+        baseline_finite_count = int(np.sum(np.isfinite(baseline)))
+        valid_count = int(np.sum(valid))
+        if baseline_finite_count < min_required:
+            raise CorrectionProcessingError(
+                roi_id=roi_id,
+                chunk_id=chunk_id,
+                source_file=chunk.source_file,
+                selected_strategy="signal_only_f0",
+                reason=(
+                    "production F0 finite coverage is insufficient: "
+                    f"{baseline_finite_count}/{expected_sample_count} finite samples, "
+                    f"{min_required} required"
+                ),
+            )
+        if valid_count < min_required:
+            raise CorrectionProcessingError(
+                roi_id=roi_id,
+                chunk_id=chunk_id,
+                source_file=chunk.source_file,
+                selected_strategy="signal_only_f0",
+                reason=(
+                    "production F0 coverage is insufficient: "
+                    f"{valid_count} valid samples, {min_required} required"
+                ),
+            )
+        min_f0 = float(getattr(self.config, "f0_min_value", 1e-9))
+        if np.any(baseline[valid] <= min_f0):
+            raise CorrectionProcessingError(
+                roi_id=roi_id,
+                chunk_id=chunk_id,
+                source_file=chunk.source_file,
+                selected_strategy="signal_only_f0",
+                reason=(
+                    "production F0 baseline contains non-positive or too-small "
+                    f"values (minimum allowed {min_f0})"
+                ),
+            )
+
+        canonical_delta_f = np.full_like(signal, np.nan, dtype=float)
+        canonical_dff = np.full_like(signal, np.nan, dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            canonical_delta_f[valid] = signal[valid] - baseline[valid]
+            canonical_dff[valid] = 100.0 * canonical_delta_f[valid] / baseline[valid]
+        if int(np.sum(np.isfinite(canonical_dff))) < min_required:
+            raise CorrectionProcessingError(
+                roi_id=roi_id,
+                chunk_id=chunk_id,
+                source_file=chunk.source_file,
+                selected_strategy="signal_only_f0",
+                reason="canonical dF/F has insufficient finite coverage",
+            )
+
+        qc = {
+            key: value
+            for key, value in result.items()
+            if key not in {
+                "signal_only_f0_candidate",
+                "signal_only_f0_candidate_uncapped",
+            }
+        }
+        qc.update(
+            {
+                "signal_only_f0_production_available": True,
+                "signal_only_f0_production_baseline_source": "signal_only_f0_candidate_uncapped",
+                "signal_only_f0_production_formula": "100 * (signal - f0) / f0",
+                "signal_only_f0_production_baseline_p05": float(
+                    np.percentile(baseline[valid], 5.0)
+                ),
+                "signal_only_f0_production_baseline_p50": float(
+                    np.percentile(baseline[valid], 50.0)
+                ),
+                "signal_only_f0_production_baseline_p95": float(
+                    np.percentile(baseline[valid], 95.0)
+                ),
+                "signal_only_f0_production_valid_sample_count": valid_count,
+                "signal_only_f0_production_expected_sample_count": expected_sample_count,
+                "signal_only_f0_production_baseline_finite_count": baseline_finite_count,
+                "signal_only_f0_production_dff_finite_count": int(
+                    np.sum(np.isfinite(canonical_dff))
+                ),
+                "signal_only_f0_production_min_required_samples": min_required,
+                "signal_only_f0_production_valid_fraction": float(
+                    valid_count / max(1, expected_sample_count)
+                ),
+            }
+        )
+        return canonical_delta_f, canonical_dff, baseline, state, qc
 
 
     # Helper for Unit Testing / Invariant Enforcement

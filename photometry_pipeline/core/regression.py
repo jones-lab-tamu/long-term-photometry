@@ -2829,20 +2829,13 @@ def fit_chunk_dynamic(
     uv_filt bleach-corrected swap below is scoped strictly to dynamic-fit
     dispatch and is always undone (see `finally`) before this function
     returns. Signal-Only F0 is NOT dispatched from inside this function or
-    this swapped window, by design -- a future Signal-Only F0 dispatch call
-    must make its own explicit choice of input trace, not inherit whatever
-    chunk.sig_raw happens to hold while this function is mid-call. The
-    existing precedent (the always-on diagnostic Signal-Only F0 candidate,
-    Pipeline._record_baseline_reference_candidate_metrics -> pipeline.py
-    calling compute_signal_only_f0_candidate(signal=chunk.sig_raw[:, r_idx],
-    ...)) runs strictly AFTER _apply_standard_analysis's call into this
-    function returns and chunk.sig_raw/uv_raw have already been restored to
-    their original, non-bleach-corrected values -- i.e. Signal-Only F0 today
-    consumes genuinely raw, unmutated signal, never filtered and never
-    bleach-corrected. Any future canonical Signal-Only F0 dispatch should
-    preserve that same input choice unless a scientific decision changes it;
-    it must not be silently decided by this function's bleach-mutation
-    timing.
+    this swapped window, by design. Pipeline's native Signal-Only F0 assembly
+    runs strictly AFTER this function returns and chunk.sig_raw/uv_raw have
+    already been restored to their original, non-bleach-corrected values --
+    i.e. Signal-Only F0 consumes genuinely raw, unmutated signal, never
+    filtered and never bleach-corrected. That input boundary is explicit in
+    Pipeline._compute_signal_only_f0_production and must not be changed by
+    this regression helper's temporary bleach mutation.
     """
     channel_names = _resolve_full_channel_names(chunk)
     fit_mode_requested = getattr(config, "dynamic_fit_mode", "rolling_local_regression")
