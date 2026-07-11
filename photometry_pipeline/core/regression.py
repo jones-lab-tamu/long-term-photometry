@@ -2,7 +2,7 @@ import numpy as np
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from ..config import Config
-from .types import Chunk
+from .types import Chunk, PerRoiCorrectionSpec, RESOLVED_DYNAMIC_FIT_MODES
 from .slope_qc import _negative_span_stats, apply_slope_constraint, summarize_slope
 
 def _get_window_indices(center: int, window_samples: int, n_samples: int) -> Optional[Tuple[int, int]]:
@@ -2520,13 +2520,340 @@ def _compute_dynamic_fit_ref(
     return uv_fit_all
 
 
-def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+# The four per-ROI-keyed metadata dicts each dynamic-fit engine populates
+# (roi_name -> payload dict). Merging a group's sub-chunk metadata back into
+# the parent chunk is safe by construction: every ROI belongs to exactly one
+# group, so these dicts never collide across groups.
+_PER_ROI_KEYED_METADATA_DICT_NAMES = (
+    "dynamic_fit_global_linear",
+    "dynamic_fit_event_reject",
+    "dynamic_fit_adaptive_event_gated",
+    "dynamic_fit_rolling_local",
+)
+
+
+def build_uniform_per_roi_correction_map(
+    channel_names: List[str],
+    dynamic_fit_mode: str,
+) -> Dict[str, PerRoiCorrectionSpec]:
+    """Synthesize one uniform dynamic-fit map from a legacy global mode.
+
+    This is the single, explicit translation point for legacy/non-Guided runs
+    (Config.dynamic_fit_mode with no per-ROI map supplied). Pipeline dispatch
+    never reads the global field independently of this map.
     """
-    Orchestrates dynamic fit generation and canonical numerator assembly.
-    Returns: (uv_fit, delta_f)
+    resolved = _DYNAMIC_FIT_MODE_ALIASES.get(dynamic_fit_mode, dynamic_fit_mode)
+    if resolved not in RESOLVED_DYNAMIC_FIT_MODES:
+        allowed = sorted(RESOLVED_DYNAMIC_FIT_MODES)
+        raise ValueError(f"Invalid dynamic_fit_mode: {dynamic_fit_mode}. Allowed: {allowed}")
+    return {
+        str(roi): PerRoiCorrectionSpec(
+            roi_id=str(roi),
+            strategy_family="dynamic_fit",
+            selected_strategy=resolved,
+            dynamic_fit_mode=resolved,
+        )
+        for roi in channel_names
+    }
+
+
+def validate_per_roi_correction_map(
+    channel_names: List[str],
+    strategy_map: Dict[str, PerRoiCorrectionSpec],
+) -> None:
+    """Fail closed on any unknown, duplicate, incomplete, or mismatched map.
+
+    A "duplicate" here means a channel_names entry appearing more than once
+    (channel_names itself is malformed); the map is keyed by roi_id so it
+    cannot carry a duplicate roi_id by construction.
     """
+    expected = [str(roi) for roi in channel_names]
+    if len(expected) != len(set(expected)):
+        raise ValueError(f"channel_names contains duplicate ROI ids: {expected}")
+    expected_set = set(expected)
+    got_set = set(strategy_map.keys())
+    missing = expected_set - got_set
+    if missing:
+        raise ValueError(f"per-ROI correction map is missing ROIs: {sorted(missing)}")
+    extra = got_set - expected_set
+    if extra:
+        raise ValueError(f"per-ROI correction map has unknown ROIs: {sorted(extra)}")
+    for roi_id, spec in strategy_map.items():
+        if not isinstance(spec, PerRoiCorrectionSpec):
+            raise ValueError(f"per-ROI correction map entry for {roi_id!r} is not a PerRoiCorrectionSpec")
+        if spec.roi_id != roi_id:
+            raise ValueError(
+                f"per-ROI correction map key {roi_id!r} does not match spec.roi_id {spec.roi_id!r}"
+            )
+
+
+DYNAMIC_FIT_MODE_RESOLVED_BY_ROI_KEY = "dynamic_fit_mode_resolved_by_roi"
+
+
+def classify_per_roi_dynamic_fit_mode_contract(chunk_metadata: dict) -> str:
+    """Classify chunk.metadata's dynamic_fit_mode_resolved_by_roi contract
+    state. Every reader of this key (Hdf5TraceCacheWriter.add_chunk,
+    Pipeline._record_dynamic_fit_validity_metrics, Pipeline.
+    _record_dynamic_fit_slope_summaries, Pipeline._record_baseline_reference_
+    candidate_metrics) must use this exact three-way classification -- never
+    plain truthiness -- to decide whether the flat dynamic_fit_mode_resolved
+    fallback is permitted.
+
+    Returns exactly one of:
+      "absent"        -- the key is missing entirely. This may be legacy/
+                          pre-grouping metadata that never went through
+                          fit_chunk_dynamic's grouped dispatch; the flat
+                          dynamic_fit_mode_resolved fallback is allowed for
+                          every ROI.
+      "authoritative"  -- the key is present and its value is a dict, even
+                          an empty one (e.g. an all-non-dynamic chunk). This
+                          is the sole source of truth: a ROI absent from it
+                          did not undergo dynamic fitting and must receive
+                          no dynamic-fit attribution at all, never the flat
+                          fallback.
+      "malformed"      -- the key is present but its value is not a dict
+                          (e.g. a list, a string, None). This is corrupt or
+                          inconsistent current metadata, not legacy data --
+                          it must never silently fall back to the flat
+                          value, since fit_chunk_dynamic always writes a
+                          dict here and something else must have overwritten
+                          it. Readers must fail closed for this state.
+    """
+    if DYNAMIC_FIT_MODE_RESOLVED_BY_ROI_KEY not in chunk_metadata:
+        return "absent"
+    if isinstance(chunk_metadata[DYNAMIC_FIT_MODE_RESOLVED_BY_ROI_KEY], dict):
+        return "authoritative"
+    return "malformed"
+
+
+def _resolve_full_channel_names(chunk: Chunk) -> List[str]:
+    """The per-ROI dispatch layer's source of truth for "how many ROIs and
+    what are they named" must match every existing per-mode function's own
+    convention exactly: ROI count comes from the array width
+    (chunk.uv_raw.shape[1]), not len(chunk.channel_names); a missing or
+    shorter channel_names falls back to "roi_{index}" per column, exactly as
+    _compute_dynamic_fit_ref_global_linear et al. already do internally."""
+    n_rois = int(chunk.uv_raw.shape[1])
+    names = chunk.channel_names or []
+    return [
+        str(names[r_idx]) if r_idx < len(names) else f"roi_{r_idx}"
+        for r_idx in range(n_rois)
+    ]
+
+
+def _partition_rois_by_dynamic_fit_mode(
+    channel_names: List[str],
+    strategy_map: Dict[str, PerRoiCorrectionSpec],
+) -> Dict[str, List[int]]:
+    """Group ROI column indices by resolved dynamic_fit_mode, preserving
+    each group's original relative column order. ROIs whose strategy_family
+    is not "dynamic_fit" (e.g. signal_only_f0) are excluded -- callers must
+    handle those separately."""
+    groups: Dict[str, List[int]] = {}
+    for r_idx, roi in enumerate(channel_names):
+        spec = strategy_map[str(roi)]
+        if spec.strategy_family != "dynamic_fit":
+            continue
+        groups.setdefault(spec.dynamic_fit_mode, []).append(r_idx)
+    return groups
+
+
+def _build_roi_group_subchunk(
+    chunk: Chunk, roi_indices: List[int], full_channel_names: List[str]
+) -> Chunk:
+    """Column-subset view of `chunk` for exactly one dispatch group.
+
+    Arrays are subset (not copied element-wise beyond numpy's own fancy-index
+    copy) in the given index order; channel_names is subset from the already
+    length-resolved `full_channel_names` (see _resolve_full_channel_names),
+    never re-derived from chunk.channel_names directly, so a missing/short
+    channel_names on the parent chunk cannot raise or silently rename ROIs
+    here. metadata starts fresh and empty: the per-mode functions only ever
+    write to chunk.metadata, never read pre-existing keys from it, so no
+    input is lost.
+    """
+    idx = np.asarray(roi_indices, dtype=int)
+
+    def _sub(arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        return None if arr is None else arr[:, idx]
+
+    return Chunk(
+        chunk_id=chunk.chunk_id,
+        source_file=chunk.source_file,
+        format=chunk.format,
+        time_sec=chunk.time_sec,
+        uv_raw=_sub(chunk.uv_raw),
+        sig_raw=_sub(chunk.sig_raw),
+        uv_filt=_sub(chunk.uv_filt),
+        sig_filt=_sub(chunk.sig_filt),
+        uv_fit=None,
+        delta_f=None,
+        dff=None,
+        fs_hz=chunk.fs_hz,
+        channel_names=[full_channel_names[i] for i in roi_indices],
+        metadata={},
+    )
+
+
+def _merge_group_metadata_into_chunk(
+    chunk: Chunk,
+    sub_chunk: Chunk,
+    roi_indices: List[int],
+    resolved_mode: str,
+    full_channel_names: List[str],
+) -> None:
+    """Fold one dispatch group's sub-chunk metadata back into the parent.
+
+    Per-ROI-keyed dicts are updated (safe: disjoint ROI sets per group).
+    qc_warnings is extended (each message already embeds its own ROI name,
+    so concatenation across groups is safe). Every other metadata key any
+    per-mode function writes describes only THIS one group's call, never the
+    whole chunk, and is namespaced under a "_by_mode" dict so a second group
+    can never silently overwrite it. fit_chunk_dynamic decides afterwards,
+    once all groups are known, what (if anything) a flat chunk-wide mirror
+    of each of these should say -- see its own docstring/comments.
+    """
+    _ensure_chunk_metadata(chunk)
+    sub_meta = sub_chunk.metadata or {}
+
+    for key in _PER_ROI_KEYED_METADATA_DICT_NAMES:
+        sub_dict = sub_meta.get(key)
+        if isinstance(sub_dict, dict) and sub_dict:
+            chunk.metadata.setdefault(key, {}).update(sub_dict)
+
+    for warning in sub_meta.get("qc_warnings", []) or []:
+        chunk.metadata.setdefault("qc_warnings", []).append(warning)
+
+    engine_by_mode = chunk.metadata.setdefault("dynamic_fit_engine_by_mode", {})
+    engine_by_mode[resolved_mode] = {
+        "engine": sub_meta.get("dynamic_fit_engine"),
+        "engine_info": sub_meta.get("dynamic_fit_engine_info"),
+    }
+
+    timing = sub_meta.get("dynamic_regression_timing")
+    if timing is not None:
+        chunk.metadata.setdefault("dynamic_regression_timing_by_mode", {})[resolved_mode] = timing
+
+    # Rolling-mode-only fallback signal. Namespaced per mode rather than
+    # OR'd into one flat bool: a flat True on a mixed chunk cannot say which
+    # ROI(s)/mode triggered it, which is exactly the kind of chunk-wide
+    # value that misrepresents a single group's state (correction item 3).
+    window_fallback = bool(sub_meta.get("window_fallback_global", False))
+    chunk.metadata.setdefault("window_fallback_global_by_mode", {})[resolved_mode] = window_fallback
+
+    mode_resolved_by_roi = chunk.metadata.setdefault("dynamic_fit_mode_resolved_by_roi", {})
+    for r_idx in roi_indices:
+        mode_resolved_by_roi[full_channel_names[r_idx]] = resolved_mode
+
+
+def _dispatch_one_dynamic_fit_group(
+    sub_chunk: Chunk, config: Config, mode: str, resolved_mode: str
+) -> Optional[np.ndarray]:
+    """Call the one per-mode function matching `resolved_mode` on `sub_chunk`."""
+    if resolved_mode == "global_linear_regression":
+        return _compute_dynamic_fit_ref_global_linear(sub_chunk, config, mode)
+    if resolved_mode == "robust_global_event_reject":
+        return _compute_dynamic_fit_ref_robust_global_event_reject(sub_chunk, config, mode)
+    if resolved_mode == "adaptive_event_gated_regression":
+        return _compute_dynamic_fit_ref_adaptive_event_gated_regression(sub_chunk, config, mode)
+    return _compute_dynamic_fit_ref(sub_chunk, config, mode, fit_mode=resolved_mode)
+
+
+def _validate_group_dispatch_result(
+    sub_uv_fit: Optional[np.ndarray],
+    *,
+    resolved_mode: str,
+    expected_n_samples: int,
+    expected_n_rois: int,
+) -> np.ndarray:
+    """Fail loudly, before scatter-back, if a per-mode function's return
+    value violates its own contract -- rather than let a malformed result
+    silently corrupt other groups' columns via a mismatched scatter-back
+    index, or a mocked/future dispatch target's bug go unnoticed.
+
+    This is distinct from the intentional zero-dynamic-groups case (which
+    never calls this at all -- there is no group to dispatch) and from a
+    per-mode function raising (which propagates on its own, unchanged).
+    This function only guards the third, previously-unchecked case: a group
+    dispatch that returns *something*, but not a valid full array for its
+    own group.
+    """
+    if sub_uv_fit is None:
+        raise RuntimeError(
+            f"dynamic-fit dispatch for resolved_mode={resolved_mode!r} returned None; "
+            "every per-mode function must return a full array or raise, never None"
+        )
+    arr = np.asarray(sub_uv_fit)
+    if arr.ndim != 2:
+        raise RuntimeError(
+            f"dynamic-fit dispatch for resolved_mode={resolved_mode!r} returned a "
+            f"{arr.ndim}-dimensional array; expected 2D "
+            f"({expected_n_samples}, {expected_n_rois})"
+        )
+    expected_shape = (expected_n_samples, expected_n_rois)
+    if arr.shape != expected_shape:
+        raise RuntimeError(
+            f"dynamic-fit dispatch for resolved_mode={resolved_mode!r} returned shape "
+            f"{arr.shape}; expected {expected_shape} (chunk sample count, "
+            "ROI count in this group)"
+        )
+    return arr
+
+
+def fit_chunk_dynamic(
+    chunk: Chunk,
+    config: Config,
+    mode: str,
+    per_roi_correction: Optional[Dict[str, PerRoiCorrectionSpec]] = None,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Orchestrates per-ROI dynamic fit dispatch and canonical numerator assembly.
+    Returns: (uv_fit, delta_f) as full-width, original-column-order arrays.
+
+    ROIs are grouped by their resolved dynamic_fit_mode and each group is
+    dispatched to the one matching per-mode function on a column-subset
+    sub-chunk; results are scattered back into full-width arrays by stable
+    original column index (see _build_roi_group_subchunk /
+    _merge_group_metadata_into_chunk). Signal-Only F0 ROIs (strategy_family
+    != "dynamic_fit") are excluded from every group -- no regression call is
+    ever made for them; their uv_fit columns stay NaN in the returned array,
+    to be filled by the caller from the Signal-Only F0 computation.
+
+    per_roi_correction=None reproduces today's global-config behavior exactly
+    (a single uniform map is synthesized from config.dynamic_fit_mode), going
+    through the same grouped-dispatch/merge code path with exactly one group
+    covering every ROI.
+
+    Preprocessing-ownership boundary (this function owns bleach correction
+    for dynamic-fit ROIs only): the temporary chunk.sig_raw/uv_raw/sig_filt/
+    uv_filt bleach-corrected swap below is scoped strictly to dynamic-fit
+    dispatch and is always undone (see `finally`) before this function
+    returns. Signal-Only F0 is NOT dispatched from inside this function or
+    this swapped window, by design -- a future Signal-Only F0 dispatch call
+    must make its own explicit choice of input trace, not inherit whatever
+    chunk.sig_raw happens to hold while this function is mid-call. The
+    existing precedent (the always-on diagnostic Signal-Only F0 candidate,
+    Pipeline._record_baseline_reference_candidate_metrics -> pipeline.py
+    calling compute_signal_only_f0_candidate(signal=chunk.sig_raw[:, r_idx],
+    ...)) runs strictly AFTER _apply_standard_analysis's call into this
+    function returns and chunk.sig_raw/uv_raw have already been restored to
+    their original, non-bleach-corrected values -- i.e. Signal-Only F0 today
+    consumes genuinely raw, unmutated signal, never filtered and never
+    bleach-corrected. Any future canonical Signal-Only F0 dispatch should
+    preserve that same input choice unless a scientific decision changes it;
+    it must not be silently decided by this function's bleach-mutation
+    timing.
+    """
+    channel_names = _resolve_full_channel_names(chunk)
     fit_mode_requested = getattr(config, "dynamic_fit_mode", "rolling_local_regression")
-    fit_mode = _resolve_dynamic_fit_mode(config)
+    legacy_global_mode = _resolve_dynamic_fit_mode(config)
+
+    if per_roi_correction is None:
+        strategy_map = build_uniform_per_roi_correction_map(channel_names, legacy_global_mode)
+    else:
+        strategy_map = per_roi_correction
+    validate_per_roi_correction_map(channel_names, strategy_map)
+
     baseline_toggle = bool(getattr(config, "baseline_subtract_before_fit", False))
     bleach_info = _apply_bleach_correction_to_chunk_inputs(chunk, config)
     bleach_mode_resolved = str(bleach_info.get("mode_resolved", "none"))
@@ -2550,24 +2877,51 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
             else np.asarray(bleach_info["uv_filt_corrected"], dtype=float)
         )
 
+    n_samples = int(chunk.uv_raw.shape[0])
     try:
-        if fit_mode == "global_linear_regression":
-            uv_fit = _compute_dynamic_fit_ref_global_linear(chunk, config, mode)
-        elif fit_mode == "robust_global_event_reject":
-            uv_fit = _compute_dynamic_fit_ref_robust_global_event_reject(chunk, config, mode)
-        elif fit_mode == "adaptive_event_gated_regression":
-            uv_fit = _compute_dynamic_fit_ref_adaptive_event_gated_regression(chunk, config, mode)
-        else:
-            uv_fit = _compute_dynamic_fit_ref(chunk, config, mode, fit_mode=fit_mode)
+        groups = _partition_rois_by_dynamic_fit_mode(channel_names, strategy_map)
+        uv_fit = np.full_like(chunk.uv_raw, np.nan, dtype=float)
+        for resolved_mode, roi_indices in groups.items():
+            sub_chunk = _build_roi_group_subchunk(chunk, roi_indices, channel_names)
+            # A per-mode function is contractually expected to return a
+            # (possibly per-ROI-NaN) full array for its own group or raise;
+            # it never returns None on a normal path (see
+            # _dispatch_one_dynamic_fit_group / per-mode docstrings). A raise
+            # here propagates straight out of this try block and out of
+            # fit_chunk_dynamic uncaught -- catastrophic dynamic-fit failure
+            # is an exception, never confusable with the intentional
+            # zero-dynamic-groups return below (correction item 4).
+            # _validate_group_dispatch_result enforces that contract
+            # explicitly rather than trusting it silently: a None, wrong-
+            # dimensionality, or wrong-shape return (e.g. from a bug in a
+            # future dispatch target, or a mocked/monkeypatched one in a
+            # test) fails loudly here, before it can corrupt another group's
+            # columns via a mismatched scatter-back index.
+            sub_uv_fit = _dispatch_one_dynamic_fit_group(sub_chunk, config, mode, resolved_mode)
+            sub_uv_fit = _validate_group_dispatch_result(
+                sub_uv_fit,
+                resolved_mode=resolved_mode,
+                expected_n_samples=n_samples,
+                expected_n_rois=len(roi_indices),
+            )
+            for local_i, r_idx in enumerate(roi_indices):
+                uv_fit[:, r_idx] = sub_uv_fit[:, local_i]
+            _merge_group_metadata_into_chunk(chunk, sub_chunk, roi_indices, resolved_mode, channel_names)
     finally:
         chunk.sig_raw = orig_sig_raw
         chunk.uv_raw = orig_uv_raw
         chunk.sig_filt = orig_sig_filt
         chunk.uv_filt = orig_uv_filt
 
-    if uv_fit is None:
-        return None, None
-
+    # Intentional "no ROI requested dynamic fitting" (today only reachable
+    # with an explicit per_roi_correction map that is 100% non-dynamic-fit,
+    # e.g. a future all-Signal-Only-F0 chunk) returns the SAME full-width,
+    # original-column-order, all-NaN representation as any other chunk --
+    # never None. A canonical correction assembler built on top of this
+    # never has to special-case "no groups" as a different array shape than
+    # "some groups"; chunk.metadata["dynamic_fit_group_count"] (below) is
+    # the explicit, unambiguous signal for "were there zero dynamic groups",
+    # not an inferred-from-None convention.
     if bleach_mode_resolved != "none":
         uv_fit = np.asarray(uv_fit, dtype=float) + np.asarray(
             bleach_info.get("sig_decay_removed", np.zeros_like(uv_fit)),
@@ -2575,19 +2929,54 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
         )
 
     _ensure_chunk_metadata(chunk)
+    # Always present (possibly empty), even with zero dynamic groups: callers
+    # must never need a .get(..., {}) fallback to distinguish "no per-ROI
+    # mode data was ever produced" from "the key was never written".
+    chunk.metadata.setdefault("dynamic_fit_mode_resolved_by_roi", {})
+    resolved_modes_used = sorted(set(groups.keys()))
+    if len(resolved_modes_used) == 0:
+        mode_sentinel = "none"
+    elif len(resolved_modes_used) == 1:
+        mode_sentinel = resolved_modes_used[0]
+    else:
+        mode_sentinel = "mixed"
+    single_mode = resolved_modes_used[0] if len(resolved_modes_used) == 1 else None
+
+    chunk.metadata["dynamic_fit_group_count"] = len(resolved_modes_used)
     chunk.metadata["dynamic_fit_mode_requested"] = (
-        "rolling_local_regression" if fit_mode_requested is None else str(fit_mode_requested)
+        ("rolling_local_regression" if fit_mode_requested is None else str(fit_mode_requested))
+        if per_roi_correction is None
+        else (single_mode or mode_sentinel)
     )
-    chunk.metadata["dynamic_fit_mode_resolved"] = str(fit_mode)
+    chunk.metadata["dynamic_fit_mode_resolved"] = mode_sentinel
     chunk.metadata["dynamic_fit_mode_alias_applied"] = (
-        str(fit_mode_requested).strip().lower() in _DYNAMIC_FIT_MODE_ALIASES
-        if fit_mode_requested is not None
-        else True
+        (
+            str(fit_mode_requested).strip().lower() in _DYNAMIC_FIT_MODE_ALIASES
+            if fit_mode_requested is not None
+            else True
+        )
+        if per_roi_correction is None
+        else False
     )
     chunk.metadata["baseline_subtract_before_fit_requested"] = baseline_toggle
-    chunk.metadata["baseline_subtract_before_fit_applied"] = (
-        baseline_toggle and fit_mode in {"rolling_filtered_to_raw", "rolling_filtered_to_filtered"}
-    )
+    # Per correction item 3: "applied" describes what actually happened for
+    # each resolved mode (only the two rolling modes ever apply it), never a
+    # single value borrowed from whichever mode happens to be present. The
+    # flat field is only ever a concrete bool for a homogeneous run; a
+    # mixed run gets the same "mixed" string sentinel used everywhere else
+    # in this function, never a bool copied from one group.
+    baseline_applied_by_mode = {
+        m: bool(baseline_toggle and m in {"rolling_filtered_to_raw", "rolling_filtered_to_filtered"})
+        for m in resolved_modes_used
+    }
+    chunk.metadata["baseline_subtract_before_fit_applied_by_mode"] = baseline_applied_by_mode
+    distinct_applied_values = set(baseline_applied_by_mode.values())
+    if len(distinct_applied_values) <= 1:
+        chunk.metadata["baseline_subtract_before_fit_applied"] = (
+            next(iter(distinct_applied_values)) if distinct_applied_values else False
+        )
+    else:
+        chunk.metadata["baseline_subtract_before_fit_applied"] = "mixed"
     chunk.metadata["bleach_correction_mode_requested"] = str(
         bleach_info.get("mode_requested", getattr(config, "bleach_correction_mode", "none"))
     )
@@ -2597,13 +2986,34 @@ def fit_chunk_dynamic(chunk: Chunk, config: Config, mode: str) -> Tuple[Optional
     )
     chunk.metadata["bleach_correction_applied"] = bleach_applied
     chunk.metadata["bleach_correction"] = dict(bleach_info.get("per_roi", {}))
-    engine_info = chunk.metadata.get("dynamic_fit_engine_info", {})
-    if isinstance(engine_info, dict):
-        engine_info["bleach_correction_mode"] = bleach_mode_resolved
-        engine_info["bleach_correction_applied"] = bleach_applied
-        engine_info["bleach_correction_target"] = str(
-            bleach_info.get("target", "signal_and_isosbestic_independent")
-        )
+
+    # Bleach info is legitimately chunk-wide (bleach correction runs once for
+    # the whole chunk regardless of per-ROI dispatch grouping, see
+    # _apply_bleach_correction_to_chunk_inputs), so it is folded into EVERY
+    # mode's own engine_info -- that part is correct for a mixed run too.
+    # The flat dynamic_fit_engine / dynamic_fit_engine_info mirror, however,
+    # only ever holds one concrete value: set it for the homogeneous (or
+    # zero-group) case exactly as before; a genuinely mixed chunk has no
+    # single truthful engine, so the flat keys are left unset (None) rather
+    # than silently mirroring whichever mode was merged last. Any reader
+    # needing per-mode engine info reads dynamic_fit_engine_by_mode.
+    engine_by_mode = chunk.metadata.get("dynamic_fit_engine_by_mode", {})
+    for resolved_mode in resolved_modes_used:
+        entry = engine_by_mode.get(resolved_mode, {})
+        engine_info = entry.get("engine_info")
+        if isinstance(engine_info, dict):
+            engine_info["bleach_correction_mode"] = bleach_mode_resolved
+            engine_info["bleach_correction_applied"] = bleach_applied
+            engine_info["bleach_correction_target"] = str(
+                bleach_info.get("target", "signal_and_isosbestic_independent")
+            )
+    if single_mode is not None:
+        entry = engine_by_mode.get(single_mode, {})
+        chunk.metadata["dynamic_fit_engine"] = entry.get("engine")
+        chunk.metadata["dynamic_fit_engine_info"] = entry.get("engine_info")
+    else:
+        chunk.metadata["dynamic_fit_engine"] = None
+        chunk.metadata["dynamic_fit_engine_info"] = None
 
     delta_f = _assemble_delta_f_from_fit(chunk.sig_raw, uv_fit)
     return uv_fit, delta_f

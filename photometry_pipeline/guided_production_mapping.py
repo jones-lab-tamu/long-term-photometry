@@ -40,6 +40,10 @@ from photometry_pipeline.guided_identity import (
 from photometry_pipeline.guided_new_analysis_plan import (
     FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
 )
+from photometry_pipeline.core.types import (
+    CORRECTION_STRATEGY_FAMILIES,
+    PerRoiCorrectionSpec,
+)
 
 
 APPLICATION_BUILD_IDENTITY_SCHEMA_NAME = "photometry_application_build_identity"
@@ -1106,3 +1110,105 @@ def build_per_roi_feature_event_backend_shapes(
         ),
         "per_roi_feature_provenance": provenance_by_roi,
     }
+
+
+def guided_production_per_roi_strategy_to_correction_spec(
+    entry: GuidedProductionPerRoiStrategy,
+) -> PerRoiCorrectionSpec:
+    """Fail-closed conversion from the one authorized production per-ROI
+    strategy record (GuidedProductionPerRoiStrategy) into Pipeline's
+    dispatch-facing PerRoiCorrectionSpec (photometry_pipeline.core.types).
+
+    This is the sole conversion point between the Guided production layer's
+    strategy representation and Pipeline's; nothing else in this codebase
+    may build a second, independently authoritative interpretation of a
+    GuidedProductionPerRoiStrategy.
+
+    Field-by-field mapping, confirmed against build_guided_per_roi_production
+    _strategy_map (guided_new_analysis_plan.py) and its GuidedProductionPerRoiStrategy
+    construction site above:
+
+    - roi_id: direct passthrough.
+    - strategy_family: direct passthrough, but validated against
+      CORRECTION_STRATEGY_FAMILIES here (fail-closed) because the draft-plan
+      layer's own strategy_family can also be "unsupported" (an included ROI
+      whose selected_strategy matched neither FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+      nor "signal_only_f0") -- that state must never reach Pipeline dispatch.
+    - selected_strategy / dynamic_fit_mode: both already hold the same
+      internal dispatch identifier (e.g. "global_linear_regression"), not a
+      scientist-facing label -- confirmed at the construction site, where
+      `selected = str(choice.selected_strategy or "")` is used verbatim for
+      both fields when strategy_family == "dynamic_fit". No alias/label
+      translation happens at this layer, so none is performed here either;
+      PerRoiCorrectionSpec.__post_init__ independently re-validates that
+      dynamic_fit_mode is one of RESOLVED_DYNAMIC_FIT_MODES and that
+      selected_strategy == dynamic_fit_mode, which is this adapter's actual
+      fit-mode-mapping fail-closed check.
+    - parameter_identity: left as "" (not mapped). GuidedProductionPerRoiStrategy
+      carries no per-ROI parameter data -- dynamic-fit tunable parameters are
+      a separate, run-wide field (GuidedProductionCorrection.dynamic_fit_parameter_values),
+      not yet per-ROI in the authoritative production representation. Mapping
+      a per-ROI field to a run-wide value would misrepresent it as ROI-specific;
+      left unmapped rather than guessed.
+    - evidence_identity: evidence_source_type and evidence_reference_json
+      combined ("{source_type}::{reference_json}"), since either alone could
+      collide across genuinely different evidence (e.g. the same JSON payload
+      shape produced by two different evidence_source_type values).
+    - explicit_user_mark / current_or_stale: not carried into PerRoiCorrectionSpec
+      as fields (it has none for them); instead enforced as fail-closed
+      preconditions below -- a non-explicit or stale entry must never reach
+      Pipeline dispatch, so conversion refuses rather than silently accepting.
+
+    Raises ValueError (fail closed) for a non-explicit mark, a stale entry,
+    an unsupported strategy_family, or (via PerRoiCorrectionSpec's own
+    validation) an inconsistent/invalid strategy/mode pairing.
+    """
+    if not entry.explicit_user_mark:
+        raise ValueError(
+            f"ROI {entry.roi_id!r} strategy is not an explicit user mark; "
+            "refusing to convert a non-explicit selection into a production dispatch spec"
+        )
+    if entry.current_or_stale != "current":
+        raise ValueError(
+            f"ROI {entry.roi_id!r} strategy is {entry.current_or_stale!r}, not 'current'; "
+            "refusing to convert a stale selection into a production dispatch spec"
+        )
+    if entry.strategy_family not in CORRECTION_STRATEGY_FAMILIES:
+        raise ValueError(
+            f"ROI {entry.roi_id!r} has unsupported strategy_family: {entry.strategy_family!r}"
+        )
+    evidence_identity = f"{entry.evidence_source_type}::{entry.evidence_reference_json}"
+    return PerRoiCorrectionSpec(
+        roi_id=entry.roi_id,
+        strategy_family=entry.strategy_family,
+        selected_strategy=entry.selected_strategy,
+        dynamic_fit_mode=entry.dynamic_fit_mode,
+        parameter_identity="",
+        evidence_identity=evidence_identity,
+    )
+
+
+def guided_production_strategy_map_to_correction_specs(
+    entries: tuple[GuidedProductionPerRoiStrategy, ...],
+) -> dict[str, PerRoiCorrectionSpec]:
+    """Convert a full production per-ROI strategy map into the
+    {roi_id: PerRoiCorrectionSpec} shape Pipeline dispatch (regression.
+    fit_chunk_dynamic's per_roi_correction argument) expects.
+
+    Fails closed (ValueError) on any entry that fails
+    guided_production_per_roi_strategy_to_correction_spec, or on a duplicate
+    roi_id across entries.
+
+    Unused by the GUI/Guided Run in this staging patch (see the module-level
+    note on build_per_roi_feature_event_backend_shapes: no caller in this
+    codebase constructs Pipeline from a GuidedProductionExecutionIntent yet).
+    This function only prepares the ready-to-use, already-validated mapping
+    a future runner would pass to Pipeline.
+    """
+    result: dict[str, PerRoiCorrectionSpec] = {}
+    for entry in entries:
+        spec = guided_production_per_roi_strategy_to_correction_spec(entry)
+        if spec.roi_id in result:
+            raise ValueError(f"duplicate roi_id in production strategy map: {spec.roi_id!r}")
+        result[spec.roi_id] = spec
+    return result

@@ -2,6 +2,20 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 import numpy as np
 
+# Resolved (post-alias) dynamic-fit modes Pipeline can dispatch a ROI to.
+# "rolling_local_regression" is a Config-level input alias for
+# "rolling_filtered_to_raw" (see regression._DYNAMIC_FIT_MODE_ALIASES) and is
+# resolved to it before reaching a PerRoiCorrectionSpec, so it is not listed
+# here as a distinct dispatch target.
+RESOLVED_DYNAMIC_FIT_MODES = (
+    "global_linear_regression",
+    "robust_global_event_reject",
+    "adaptive_event_gated_regression",
+    "rolling_filtered_to_raw",
+    "rolling_filtered_to_filtered",
+)
+CORRECTION_STRATEGY_FAMILIES = ("dynamic_fit", "signal_only_f0")
+
 @dataclass
 class SessionStats:
     """
@@ -96,3 +110,48 @@ class Chunk:
         
         if self.uv_filt is not None and self.uv_filt.shape[0] != T:
              raise ValueError("UV Filt shape mismatch")
+
+
+@dataclass(frozen=True)
+class PerRoiCorrectionSpec:
+    """One ROI's authoritative, scientist-selected production correction strategy.
+
+    This is the sole per-ROI correction authority Pipeline dispatches from.
+    The global Config.dynamic_fit_mode field is never consulted directly by
+    dispatch; for legacy/non-Guided runs a uniform map is synthesized from it
+    exactly once (see regression.build_uniform_per_roi_correction_map), so the
+    two never compete as independent authorities.
+
+    parameter_identity/evidence_identity are opaque identity strings (not yet
+    consumed by dispatch) reserved for the later provenance-integration stage.
+    """
+    roi_id: str
+    strategy_family: str  # one of CORRECTION_STRATEGY_FAMILIES
+    selected_strategy: str
+    dynamic_fit_mode: Optional[str] = None
+    parameter_identity: str = ""
+    evidence_identity: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.roi_id, str) or not self.roi_id:
+            raise ValueError("PerRoiCorrectionSpec requires a non-empty roi_id")
+        if self.strategy_family not in CORRECTION_STRATEGY_FAMILIES:
+            raise ValueError(f"Unsupported strategy_family: {self.strategy_family!r}")
+        if self.strategy_family == "dynamic_fit":
+            if self.dynamic_fit_mode not in RESOLVED_DYNAMIC_FIT_MODES:
+                raise ValueError(f"Unsupported dynamic_fit_mode: {self.dynamic_fit_mode!r}")
+            if self.selected_strategy != self.dynamic_fit_mode:
+                raise ValueError(
+                    f"selected_strategy ({self.selected_strategy!r}) must equal "
+                    f"dynamic_fit_mode ({self.dynamic_fit_mode!r}) when "
+                    "strategy_family='dynamic_fit'"
+                )
+        elif self.strategy_family == "signal_only_f0":
+            if self.selected_strategy != "signal_only_f0":
+                raise ValueError(
+                    f"Unsupported signal_only_f0 selected_strategy: {self.selected_strategy!r}"
+                )
+            if self.dynamic_fit_mode is not None:
+                raise ValueError(
+                    "signal_only_f0 entries must have dynamic_fit_mode=None"
+                )

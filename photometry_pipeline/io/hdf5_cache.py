@@ -10,6 +10,8 @@ import os
 import h5py
 import numpy as np
 
+from ..core.regression import classify_per_roi_dynamic_fit_mode_contract
+
 class Hdf5TraceCacheWriter:
     """
     Writes trace data iteratively into an HDF5 schema defined by Phase 0 contract.
@@ -55,11 +57,30 @@ class Hdf5TraceCacheWriter:
         if self._is_aborted:
             return
 
+        # Fail closed before writing anything for this chunk: a present but
+        # non-dict dynamic_fit_mode_resolved_by_roi is malformed current
+        # metadata (fit_chunk_dynamic always writes a dict there), not
+        # legacy/pre-grouping data, and must never fall back to the flat
+        # dynamic_fit_mode_resolved value -- that would silently mislabel
+        # every ROI in this chunk with a single borrowed mode.
+        if (
+            self.mode == 'phasic'
+            and hasattr(chunk, 'metadata')
+            and isinstance(chunk.metadata, dict)
+            and classify_per_roi_dynamic_fit_mode_contract(chunk.metadata) == 'malformed'
+        ):
+            raise ValueError(
+                "chunk.metadata['dynamic_fit_mode_resolved_by_roi'] is present but not a "
+                f"dict (got {type(chunk.metadata['dynamic_fit_mode_resolved_by_roi'])!r}); "
+                "refusing to write dynamic-fit cache attributes that could mislabel any ROI "
+                f"(chunk_id={chunk_id}, source_file={source_file!r})"
+            )
+
         self._chunk_ids.append(chunk_id)
         self._source_files.append(source_file)
-        
+
         chunk_group_name = f"chunk_{chunk_id}"
-        
+
         for r_idx, roi in enumerate(chunk.channel_names):
             self._rois.add(roi)
             
@@ -146,12 +167,33 @@ class Hdf5TraceCacheWriter:
                         _write_bleach_fit_attrs('bleach_signal', sig_meta)
                         _write_bleach_fit_attrs('bleach_iso', uv_meta)
 
-                    fit_mode = str(chunk.metadata.get('dynamic_fit_mode_resolved', '')).strip()
+                    # Per-ROI, not chunk-wide: a mixed-strategy chunk resolves a
+                    # different dynamic_fit_mode per ROI (grouped dispatch).
+                    # Three-state contract (see classify_per_roi_dynamic_fit_
+                    # mode_contract): "authoritative" (key present, dict, even
+                    # empty) -- a ROI absent from it did not undergo dynamic
+                    # fitting and gets no mode/engine attribution at all, never
+                    # the chunk-wide flat value; "absent" (key missing --
+                    # legacy/pre-grouping) -- falls back to the flat value for
+                    # every ROI. "malformed" already raised above, before this
+                    # loop started.
+                    contract_state = classify_per_roi_dynamic_fit_mode_contract(chunk.metadata)
+                    if contract_state == 'authoritative':
+                        mode_by_roi = chunk.metadata['dynamic_fit_mode_resolved_by_roi']
+                        fit_mode = str(mode_by_roi.get(str(roi), '')).strip()
+                    else:
+                        fit_mode = str(chunk.metadata.get('dynamic_fit_mode_resolved', '')).strip()
+                    has_per_roi_contract = contract_state == 'authoritative'
                     if fit_mode:
                         grp.attrs['dynamic_fit_mode_resolved'] = fit_mode
-                    engine = str(chunk.metadata.get('dynamic_fit_engine', '')).strip()
-                    if engine:
-                        grp.attrs['dynamic_fit_engine'] = engine
+                        engine_by_mode = chunk.metadata.get('dynamic_fit_engine_by_mode', {})
+                        engine = ''
+                        if isinstance(engine_by_mode, dict) and fit_mode in engine_by_mode:
+                            engine = str(engine_by_mode[fit_mode].get('engine', '') or '').strip()
+                        if not engine and not has_per_roi_contract:
+                            engine = str(chunk.metadata.get('dynamic_fit_engine', '')).strip()
+                        if engine:
+                            grp.attrs['dynamic_fit_engine'] = engine
 
                     def _roi_fit_meta() -> dict:
                         if fit_mode == 'global_linear_regression':

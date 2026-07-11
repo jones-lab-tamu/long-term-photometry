@@ -290,7 +290,35 @@ class Pipeline:
             return
         if not hasattr(chunk, "metadata") or not isinstance(chunk.metadata, dict):
             return
-        fit_mode = str(chunk.metadata.get("dynamic_fit_mode_resolved", "") or "")
+        # fit_chunk_dynamic always returns a full-width array now, even when
+        # zero ROIs requested dynamic fitting (e.g. a future all-Signal-Only-F0
+        # chunk); dynamic_fit_group_count, not uv_fit-is-None, is the explicit
+        # signal for "no dynamic-fit computation actually happened here".
+        if int(chunk.metadata.get("dynamic_fit_group_count", 1)) == 0:
+            return
+        # Per-ROI, not chunk-wide: a mixed-strategy chunk can have a
+        # different resolved dynamic_fit_mode per ROI (grouped dispatch).
+        # Three-state contract (regression.classify_per_roi_dynamic_fit_mode_
+        # contract): "authoritative" -- a ROI absent from it did not undergo
+        # dynamic fitting and must not get a fabricated validity record via
+        # the chunk-wide fallback, even though that flat value is a real,
+        # valid mode string for the ROI(s) that DID; "absent" -- legacy/pre-
+        # grouping metadata, flat fallback allowed for every ROI; "malformed"
+        # -- present but not a dict is corrupt current metadata, not legacy
+        # data, and must fail closed rather than silently fall back. This
+        # method runs in the production per-chunk processing path, so it
+        # raises rather than quietly dropping records.
+        contract_state = regression.classify_per_roi_dynamic_fit_mode_contract(chunk.metadata)
+        if contract_state == "malformed":
+            raise RuntimeError(
+                "chunk.metadata['dynamic_fit_mode_resolved_by_roi'] is present but not a "
+                f"dict (got {type(chunk.metadata['dynamic_fit_mode_resolved_by_roi'])!r}); "
+                "refusing to record dynamic-fit validity metrics that could mislabel any ROI "
+                f"(chunk_id={chunk_id}, source_file={source_file!r})"
+            )
+        has_per_roi_contract = contract_state == "authoritative"
+        mode_by_roi = chunk.metadata.get("dynamic_fit_mode_resolved_by_roi", {}) if has_per_roi_contract else {}
+        chunk_wide_fallback = str(chunk.metadata.get("dynamic_fit_mode_resolved", "") or "")
         slope_constraint = str(getattr(self.config, "dynamic_fit_slope_constraint", "unconstrained"))
         min_slope = float(getattr(self.config, "dynamic_fit_min_slope", 0.0))
         acquisition_mode = str(getattr(self.config, "acquisition_mode", "intermittent"))
@@ -298,6 +326,13 @@ class Pipeline:
 
         for r_idx, roi in enumerate(chunk.channel_names):
             roi_name = str(roi)
+            if has_per_roi_contract:
+                if roi_name not in mode_by_roi:
+                    # Authoritative: this ROI never underwent dynamic fitting.
+                    continue
+                fit_mode = str(mode_by_roi[roi_name])
+            else:
+                fit_mode = chunk_wide_fallback
             payload = self._dynamic_fit_roi_metadata(chunk, fit_mode, roi_name)
             slope = payload.get("coef_slope")
             if slope is None:
@@ -339,7 +374,31 @@ class Pipeline:
             return
         if not hasattr(chunk, "metadata") or not isinstance(chunk.metadata, dict):
             return
-        fit_mode = str(chunk.metadata.get("dynamic_fit_mode_resolved", "") or "")
+        # Per-ROI, not chunk-wide: this function runs for every ROI
+        # regardless of strategy (it always computes the Signal-Only F0
+        # diagnostic candidate too), so a single chunk-wide fit_mode would
+        # mislabel a non-dynamic-fit ROI's record with a mode it never used.
+        # Three-state contract (regression.classify_per_roi_dynamic_fit_mode_
+        # contract), matching every other reader -- except this function's
+        # chosen policy for "malformed": unlike the QC/slope recorders (which
+        # raise), this record must still be produced for every ROI, since it
+        # is also where the Signal-Only F0 diagnostic candidate is computed
+        # and that computation does not depend on dynamic-fit metadata at
+        # all. Raising here would kill an unrelated, unaffected diagnostic
+        # for the whole chunk over a mislabeled string field. So: on
+        # "malformed", leave every ROI's dynamic_fit_mode label empty (never
+        # borrow the flat value) and record an explicit, inspectable
+        # contract-error field instead of silently mislabeling anything.
+        contract_state = regression.classify_per_roi_dynamic_fit_mode_contract(chunk.metadata)
+        dynamic_fit_mode_contract_error = None
+        has_per_roi_contract = contract_state == "authoritative"
+        if contract_state == "malformed":
+            dynamic_fit_mode_contract_error = (
+                "dynamic_fit_mode_resolved_by_roi is present but not a dict (got "
+                f"{type(chunk.metadata['dynamic_fit_mode_resolved_by_roi'])!r})"
+            )
+        mode_by_roi = chunk.metadata.get("dynamic_fit_mode_resolved_by_roi", {}) if has_per_roi_contract else {}
+        chunk_wide_fallback = str(chunk.metadata.get("dynamic_fit_mode_resolved", "") or "")
         slope_constraint = str(getattr(self.config, "dynamic_fit_slope_constraint", "unconstrained"))
         acquisition_mode = str(getattr(self.config, "acquisition_mode", "intermittent"))
         dynamic_qc_by_roi = chunk.metadata.get("dynamic_fit_validity_qc", {})
@@ -411,6 +470,21 @@ class Pipeline:
         records_by_roi: dict[str, dict] = {}
         for r_idx, roi in enumerate(chunk.channel_names):
             roi_name = str(roi)
+            # "" (not the chunk-wide value) when this exact ROI is absent
+            # from a present, authoritative per-ROI contract, OR when the
+            # contract is malformed: this ROI either never underwent dynamic
+            # fitting, or its true dynamic-fit status cannot be determined,
+            # so no mode string truthfully describes it. The record is still
+            # produced (baseline-reference and Signal-Only F0 diagnostic
+            # candidates are always computed for every ROI regardless of
+            # strategy) -- only the label is corrected, not the record's
+            # existence. Only genuine key absence gets the flat fallback.
+            if has_per_roi_contract:
+                fit_mode = str(mode_by_roi.get(roi_name, ""))
+            elif contract_state == "malformed":
+                fit_mode = ""
+            else:
+                fit_mode = chunk_wide_fallback
             dynamic_qc = dynamic_qc_by_roi.get(roi_name, {})
             if not isinstance(dynamic_qc, dict):
                 dynamic_qc = {}
@@ -458,6 +532,7 @@ class Pipeline:
                 "source_file": str(source_file),
                 "recording_mode": acquisition_mode,
                 "dynamic_fit_mode": fit_mode,
+                "dynamic_fit_mode_contract_error": dynamic_fit_mode_contract_error,
                 "slope_constraint": slope_constraint,
                 **candidate_meta,
                 **metrics,
@@ -660,27 +735,41 @@ class Pipeline:
     def _record_dynamic_fit_slope_summaries(self, chunk: Chunk, chunk_id: int, source_file: str) -> None:
         if self.mode == "tonic" or not hasattr(chunk, "metadata") or not isinstance(chunk.metadata, dict):
             return
-        fit_mode = str(chunk.metadata.get("dynamic_fit_mode_resolved", "") or "")
-        if fit_mode == "global_linear_regression":
-            by_roi = chunk.metadata.get("dynamic_fit_global_linear", {})
-        elif fit_mode == "robust_global_event_reject":
-            by_roi = chunk.metadata.get("dynamic_fit_event_reject", {})
-        elif fit_mode == "adaptive_event_gated_regression":
-            by_roi = chunk.metadata.get("dynamic_fit_adaptive_event_gated", {})
+        # Per-ROI, not chunk-wide: a mixed-strategy chunk populates multiple
+        # of the four per-mode dicts at once (grouped dispatch), one per
+        # resolved mode actually used -- each ROI's own resolved mode decides
+        # which dict (and which recorded dynamic_fit_mode tag) applies to it.
+        # Three-state contract (regression.classify_per_roi_dynamic_fit_mode_
+        # contract): "authoritative" -- an all-non-dynamic chunk's
+        # dynamic_fit_mode_resolved_by_roi is present but intentionally
+        # EMPTY, and that empty dict is still authoritative, never treated
+        # the same as the key being entirely absent; "absent" -- the only
+        # case allowed to fall back to synthesizing chunk-wide entries for
+        # every channel name; "malformed" -- present but not a dict is
+        # corrupt current metadata, not legacy data, and must fail closed.
+        # This method runs in the production per-chunk processing path.
+        contract_state = regression.classify_per_roi_dynamic_fit_mode_contract(chunk.metadata)
+        if contract_state == "malformed":
+            raise RuntimeError(
+                "chunk.metadata['dynamic_fit_mode_resolved_by_roi'] is present but not a "
+                f"dict (got {type(chunk.metadata['dynamic_fit_mode_resolved_by_roi'])!r}); "
+                "refusing to record dynamic-fit slope summaries that could mislabel any ROI "
+                f"(chunk_id={chunk_id}, source_file={source_file!r})"
+            )
+        if contract_state == "authoritative":
+            effective_mode_by_roi = dict(chunk.metadata["dynamic_fit_mode_resolved_by_roi"])
         else:
-            by_roi = chunk.metadata.get("dynamic_fit_rolling_local", {})
-        if not isinstance(by_roi, dict):
-            return
+            chunk_wide_fallback = str(chunk.metadata.get("dynamic_fit_mode_resolved", "") or "")
+            effective_mode_by_roi = {str(roi): chunk_wide_fallback for roi in chunk.channel_names}
 
         acquisition_mode = str(getattr(self.config, "acquisition_mode", "intermittent"))
-        for roi, payload in by_roi.items():
-            if not isinstance(payload, dict):
-                continue
-            summary = payload.get("slope_summary", {})
+        for roi_name, fit_mode in effective_mode_by_roi.items():
+            payload = self._dynamic_fit_roi_metadata(chunk, fit_mode, roi_name)
+            summary = payload.get("slope_summary", {}) if isinstance(payload, dict) else {}
             if not isinstance(summary, dict) or not summary:
                 continue
             record = {
-                "roi": str(roi),
+                "roi": str(roi_name),
                 "chunk_id": int(chunk_id),
                 "source_file": str(source_file),
                 "dynamic_fit_mode": fit_mode,
@@ -698,7 +787,7 @@ class Pipeline:
             constraint_summary = payload.get("slope_constraint_summary", {})
             if isinstance(constraint_summary, dict) and constraint_summary:
                 constraint_record = {
-                    "roi": str(roi),
+                    "roi": str(roi_name),
                     "chunk_id": int(chunk_id),
                     "source_file": str(source_file),
                     "dynamic_fit_mode": fit_mode,
