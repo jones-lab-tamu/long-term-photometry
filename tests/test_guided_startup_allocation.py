@@ -511,3 +511,150 @@ def test_allocation_module_import_boundary():
         for name in imported
         for marker in prohibited
     )
+
+
+# ---------------------------------------------------------------------------
+# classify_output_base_reuse_eligibility: shared structural classifier used
+# by the GUI output-policy staleness check to distinguish "this app's own
+# prior allocation" from a genuinely suspicious pre-existing directory.
+# ---------------------------------------------------------------------------
+
+
+def _write_recognized_run_dir(parent: Path, run_id: str) -> Path:
+    child = parent / run_id
+    child.mkdir()
+    status = {
+        "schema_name": "guided_startup_status",
+        "schema_version": "v1",
+        "run_id": run_id,
+        "allocated_run_dir": str(child.resolve()),
+    }
+    (child / startup.GUIDED_STARTUP_STATUS_FILENAME).write_text(
+        json.dumps(status), encoding="utf-8"
+    )
+    return child
+
+
+def test_reuse_eligibility_nonexistent_output_base_is_not_reusable(tmp_path):
+    missing = tmp_path / "not-yet-created"
+    reusable, reason = allocation.classify_output_base_reuse_eligibility(missing)
+    assert reusable is False
+    assert reason == "output_base_not_directory"
+
+
+def test_reuse_eligibility_existing_empty_output_base_matches_allocator_contract(
+    tmp_path,
+):
+    """An appeared-but-empty directory carries no proof of prior Guided
+    ownership, so the classifier keeps it non-reusable -- matching
+    test_new_analysis_output_policy_marks_stale_when_target_appears, which
+    requires an empty appeared directory to remain stale/blocked. This is
+    deliberately stricter than allocate_guided_startup_directory itself,
+    which already tolerates an empty pre-existing output base unconditionally
+    (see test_allocates_and_writes_exactly_first_startup_status); the
+    classifier only relaxes the GUI's advisory staleness check for bases it
+    can prove this app previously allocated into."""
+    output_base = tmp_path / "output"
+    output_base.mkdir()
+    reusable, reason = allocation.classify_output_base_reuse_eligibility(output_base)
+    assert reusable is False
+    assert reason == "output_base_empty"
+
+
+def test_reuse_eligibility_one_valid_failed_run_is_reusable(tmp_path):
+    output_base = tmp_path / "output"
+    output_base.mkdir()
+    _write_recognized_run_dir(output_base, "guided_run_20260101T000000Z_aaaaaa")
+    reusable, reason = allocation.classify_output_base_reuse_eligibility(output_base)
+    assert reusable is True
+    assert reason is None
+
+
+def test_reuse_eligibility_failed_and_successful_runs_are_reusable(tmp_path):
+    output_base = tmp_path / "output"
+    output_base.mkdir()
+    _write_recognized_run_dir(output_base, "guided_run_20260101T000000Z_aaaaaa")
+    succeeded = _write_recognized_run_dir(
+        output_base, "guided_run_20260101T010000Z_bbbbbb"
+    )
+    # A completed run carries real deliverables alongside its allocation-time
+    # ownership evidence; extra files inside an owned run dir must not
+    # disqualify it.
+    (succeeded / "run_report.json").write_text(
+        json.dumps({"status": "success", "phase": "final"}), encoding="utf-8"
+    )
+    reusable, reason = allocation.classify_output_base_reuse_eligibility(output_base)
+    assert reusable is True
+    assert reason is None
+
+
+def test_reuse_eligibility_loose_file_blocks_reuse(tmp_path):
+    output_base = tmp_path / "output"
+    output_base.mkdir()
+    _write_recognized_run_dir(output_base, "guided_run_20260101T000000Z_aaaaaa")
+    (output_base / "notes.txt").write_text("unexpected", encoding="utf-8")
+    reusable, reason = allocation.classify_output_base_reuse_eligibility(output_base)
+    assert reusable is False
+    assert reason == "output_base_contains_unrecognized_entry"
+
+
+def test_reuse_eligibility_foreign_directory_blocks_reuse(tmp_path):
+    output_base = tmp_path / "output"
+    output_base.mkdir()
+    _write_recognized_run_dir(output_base, "guided_run_20260101T000000Z_aaaaaa")
+    (output_base / "unrelated_project").mkdir()
+    reusable, reason = allocation.classify_output_base_reuse_eligibility(output_base)
+    assert reusable is False
+    assert reason == "output_base_contains_unrecognized_entry"
+
+
+def test_reuse_eligibility_name_matching_directory_without_evidence_blocks_reuse(
+    tmp_path,
+):
+    output_base = tmp_path / "output"
+    output_base.mkdir()
+    # Looks like a run id, but was never allocated by this app: no
+    # guided_startup_status.json at all. Ownership must not be inferred
+    # from the name alone.
+    (output_base / "guided_run_20260101T020000Z_cccccc").mkdir()
+    reusable, reason = allocation.classify_output_base_reuse_eligibility(output_base)
+    assert reusable is False
+    assert reason == "output_base_contains_unrecognized_entry"
+
+
+def test_reuse_eligibility_malformed_run_directory_blocks_reuse(tmp_path):
+    output_base = tmp_path / "output"
+    output_base.mkdir()
+    child = output_base / "guided_run_20260101T030000Z_dddddd"
+    child.mkdir()
+    # Present but wrong: run_id does not match the directory's own name.
+    (child / startup.GUIDED_STARTUP_STATUS_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_name": "guided_startup_status",
+                "schema_version": "v1",
+                "run_id": "some_other_run_id",
+                "allocated_run_dir": str(child.resolve()),
+            }
+        ),
+        encoding="utf-8",
+    )
+    reusable, reason = allocation.classify_output_base_reuse_eligibility(output_base)
+    assert reusable is False
+    assert reason == "output_base_contains_unrecognized_entry"
+
+
+def test_reuse_eligibility_symlink_child_blocks_reuse(tmp_path):
+    output_base = tmp_path / "output"
+    output_base.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    real = _write_recognized_run_dir(elsewhere, "guided_run_20260101T040000Z_eeeeee")
+    try:
+        link = output_base / "guided_run_20260101T040000Z_eeeeee"
+        os.symlink(str(real), str(link), target_is_directory=True)
+    except (OSError, NotImplementedError, AttributeError) as exc:
+        pytest.skip(f"Symlinks are not fully supported on this platform: {exc}")
+    reusable, reason = allocation.classify_output_base_reuse_eligibility(output_base)
+    assert reusable is False
+    assert reason == "output_base_contains_unrecognized_entry"

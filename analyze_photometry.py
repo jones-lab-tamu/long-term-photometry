@@ -289,7 +289,21 @@ def main():
         
     except Exception as e:
         print(f"CRITICAL FAILURE: {e}")
-        # traceback?
+        from photometry_pipeline.input_processing_completeness import InputProcessingError
+        if isinstance(e, InputProcessingError):
+            try:
+                os.makedirs(args.out, exist_ok=True)
+                error_file = os.path.join(args.out, "input_processing_error.json")
+                with open(error_file, "w", encoding="utf-8") as handle:
+                    json.dump({
+                        "category": e.category,
+                        "phase": e.phase,
+                        "source": os.path.normpath(str(e.source)).replace("\\", "/"),
+                        "session_index": e.chunk_index,
+                        "reason": str(e.reason),
+                    }, handle, indent=2)
+            except Exception as write_err:
+                print(f"ERROR: Could not write input_processing_error.json: {write_err}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

@@ -627,6 +627,7 @@ class GuidedRoiExecutionPreflightRequest:
     expected_inventory_source_content_digest: str
     expected_strict_roi_inventory_digest: str
     roi_execution_contract_version: str
+    approved_missing_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -789,6 +790,10 @@ def derive_roi_execution_preflight_request_from_intent(
         ),
         expected_strict_roi_inventory_digest=strict_digest,
         roi_execution_contract_version=roi.roi_execution_contract_version,
+        approved_missing_paths=tuple(
+            item.canonical_relative_path
+            for item in source.approved_missing_candidates
+        ),
     )
 
 
@@ -1001,6 +1006,8 @@ def run_roi_execution_preflight(
         )
     inspections = []
     for candidate in request.candidate_files:
+        if candidate.canonical_relative_path in getattr(request, "approved_missing_paths", ()):
+            continue
         if cancellation_check is not None and cancellation_check():
             return _roi_refused(
                 request,

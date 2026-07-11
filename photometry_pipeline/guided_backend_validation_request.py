@@ -274,6 +274,7 @@ class GuidedBackendSourceRequest:
     source_candidate_set_digest: str
     source_candidate_content_digest: str
     candidate_files: tuple[GuidedBackendSourceCandidateFile, ...]
+    approved_missing_candidates: tuple[GuidedBackendSourceCandidateFile, ...] = ()
     unresolved_source_identity_inputs: tuple[str, ...] = ()
     source_identity_level: str = "content_bound_candidate_snapshot"
 
@@ -308,13 +309,21 @@ class GuidedBackendSourceRequest:
             raise GuidedBackendValidationRequestContractError(
                 "candidate_files must not be empty."
             )
-        _require_tuple(
-            self.unresolved_source_identity_inputs,
-            "unresolved_source_identity_inputs",
-        )
+        _require_tuple(self.approved_missing_candidates, "approved_missing_candidates")
+        _require_tuple(self.unresolved_source_identity_inputs, "unresolved_source_identity_inputs")
         if self.unresolved_source_identity_inputs:
             raise GuidedBackendValidationRequestContractError(
                 "Source request cannot contain unresolved identity inputs."
+            )
+        all_by_path = {item.canonical_relative_path: item for item in self.candidate_files}
+        approved_paths = [item.canonical_relative_path for item in self.approved_missing_candidates]
+        if len(approved_paths) != len(set(approved_paths)):
+            raise GuidedBackendValidationRequestContractError(
+                "Approved missing source entries must be unique."
+            )
+        if any(all_by_path.get(item.canonical_relative_path) != item for item in self.approved_missing_candidates):
+            raise GuidedBackendValidationRequestContractError(
+                "Approved missing sources must be exact members of the source candidate set."
             )
 
 
@@ -980,10 +989,12 @@ class GuidedBackendSourceSnapshotFacts:
     source_candidate_set_digest: str = ""
     source_candidate_content_digest: str = ""
     candidate_files: tuple[GuidedBackendSourceCandidateFile, ...] = ()
+    approved_missing_candidates: tuple[GuidedBackendSourceCandidateFile, ...] = ()
     stale: bool = False
 
     def __post_init__(self) -> None:
         _require_tuple(self.candidate_files, "candidate_files")
+        _require_tuple(self.approved_missing_candidates, "approved_missing_candidates")
 
 
 @dataclass(frozen=True)
@@ -1913,6 +1924,7 @@ def compile_guided_backend_validation_request(
                 source_facts.source_candidate_content_digest
             ),
             candidate_files=source_facts.candidate_files,
+            approved_missing_candidates=source_facts.approved_missing_candidates,
             unresolved_source_identity_inputs=(),
             source_identity_level="content_bound_candidate_snapshot",
         )
@@ -2188,6 +2200,7 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "source_candidate_set_digest",
         "source_candidate_content_digest",
         "candidate_files",
+        "approved_missing_candidates",
         "unresolved_source_identity_inputs",
         "source_identity_level",
     ),

@@ -102,6 +102,9 @@ from photometry_pipeline.workflow_safety import (
     validate_format_mode_compatibility,
     validate_output_write_safety,
 )
+from photometry_pipeline.guided_startup_allocation import (
+    classify_output_base_reuse_eligibility,
+)
 from photometry_pipeline.guided_diagnostic_cache import (
     DIAGNOSTIC_CACHE_PURPOSE,
     DIAGNOSTIC_CACHE_SCOPE_FULL,
@@ -303,6 +306,16 @@ GUIDED_WORKFLOW_STEP_DISPLAY_LABELS = {
     "Feature detection": "Feature Detection",
     "Draft plan": "Review Plan",
 }
+# Real Pipeline session-processing phases (photometry_pipeline/pipeline.py
+# _iter_entry_chunks_for_pass call sites) eligible for missing-session
+# authorization. Checked independently of the producer's own eligibility
+# flag: validation, cancellation, plotting, finalization, allocation, source
+# drift, and manifest/frozen-set verification phases (e.g.
+# "pass2_manifest_check", "frozen_manifest_verification") are deliberately
+# excluded.
+GUIDED_ELIGIBLE_MISSING_SESSION_PROCESSING_PHASES = frozenset(
+    {"pass1", "pass1a", "pass1b", "tonic_pass1c", "pass2"}
+)
 GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE = {
     "Robust Global Event-Reject Fit": "robust_global_event_reject",
     "Adaptive Event-Gated Fit": "adaptive_event_gated_regression",
@@ -2178,6 +2191,10 @@ class MainWindow(QMainWindow):
         self._guided_new_analysis_output_policy_build_request_signature = None
         self._guided_new_analysis_dataset_contract_snapshot = None
         self._guided_new_analysis_dataset_contract_candidate_snapshot = None
+        # Current-plan-only approvals. They are intentionally never persisted in
+        # QSettings and are cleared when the recording source changes.
+        self._guided_approved_missing_sessions = []
+        self._guided_missing_session_failure_reminder = ""
         self._guided_draft_output_policy_by_run = {}
         self._guided_output_policy_editor_synced_run = None
         self._guided_export_editor_synced_run = None
@@ -2747,6 +2764,9 @@ class MainWindow(QMainWindow):
         self._guided_format_combo.currentIndexChanged.connect(
             self._on_guided_format_changed
         )
+        self._guided_format_combo.currentIndexChanged.connect(
+            self._clear_guided_missing_session_approvals_for_source_change
+        )
         self._guided_acquisition_mode_combo.currentIndexChanged.connect(
             lambda _idx: self._sync_combo_data_value(
                 self._acquisition_mode_combo,
@@ -2755,6 +2775,9 @@ class MainWindow(QMainWindow):
         )
         self._guided_acquisition_mode_combo.currentIndexChanged.connect(
             lambda _idx: self._refresh_guided_navigation_state()
+        )
+        self._guided_acquisition_mode_combo.currentIndexChanged.connect(
+            self._clear_guided_missing_session_approvals_for_source_change
         )
         self._guided_sessions_per_hour_edit.textChanged.connect(
             lambda text: self._sync_line_edit_value(self._sph_edit, text)
@@ -2796,6 +2819,9 @@ class MainWindow(QMainWindow):
             lambda _text: self._invalidate_guided_backend_validation(
                 "input source changed"
             )
+        )
+        self._guided_input_dir_edit.textChanged.connect(
+            self._clear_guided_missing_session_approvals_for_source_change
         )
         self._guided_acquisition_mode_combo.currentIndexChanged.connect(
             lambda _idx: self._invalidate_guided_backend_validation(
@@ -10065,6 +10091,7 @@ class MainWindow(QMainWindow):
                 "highlighted choices."
             )
         status_label.setText(f"{completeness}\n{availability}")
+        self._refresh_guided_missing_sessions_review(plan)
         if readiness.plan_complete_for_handoff:
             self._guided_review_attention_group.setVisible(False)
             self._guided_review_attention_label.setText("")
@@ -10250,6 +10277,40 @@ class MainWindow(QMainWindow):
                     and subset_readiness.first_subset_executable
                 )
             )
+
+    def _refresh_guided_missing_sessions_review(self, plan) -> None:
+        """Render the complete current-plan approval set with per-session removal."""
+        group = getattr(self, "_guided_missing_sessions_group", None)
+        rows_layout = getattr(self, "_guided_missing_sessions_rows_layout", None)
+        if group is None or rows_layout is None:
+            return
+        while rows_layout.count():
+            item = rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        approvals = list(getattr(plan, "approved_missing_sessions", ()) or ())
+        group.setVisible(bool(approvals))
+        for approval in sorted(approvals, key=lambda item: item.session_index):
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            text = QLabel(
+                f"Session {approval.session_index + 1} "
+                f"({approval.expected_start_time.replace('T', ' ')}) — "
+                f"expected duration {float(approval.expected_duration_sec):g}s\n"
+                f"Reason: {approval.reason or 'could not be processed'}"
+            )
+            text.setWordWrap(True)
+            row_layout.addWidget(text, 1)
+            remove = QPushButton("Remove")
+            remove.setObjectName("guidedRemoveApprovedMissingSession")
+            remove.setToolTip("The next run will attempt to process this session normally.")
+            remove.clicked.connect(
+                lambda _checked=False, path=approval.canonical_relative_path: self._remove_guided_missing_session_approval(path)
+            )
+            row_layout.addWidget(remove, alignment=Qt.AlignTop)
+            rows_layout.addWidget(row)
 
     def _guided_dataset_contract_now_utc(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -10652,6 +10713,40 @@ class MainWindow(QMainWindow):
                 self._guided_backend_validation_outcome = None
         self._guided_backend_validation_outcome_revision = None
         self._refresh_guided_backend_validation_display()
+
+    def _clear_guided_missing_session_approvals_for_source_change(self, _text: str = "") -> None:
+        """Never carry a session approval into a different recording."""
+        if not getattr(self, "_guided_approved_missing_sessions", []):
+            return
+        self._guided_approved_missing_sessions = []
+        self._guided_missing_session_failure_reminder = ""
+        self._refresh_guided_draft_run_plan_preview()
+
+    def _add_guided_missing_session_approval(self, approval) -> bool:
+        """Add one explicit, identity-bound approval to the current plan only."""
+        current = list(getattr(self, "_guided_approved_missing_sessions", []))
+        if any(
+            item.canonical_relative_path == approval.canonical_relative_path
+            for item in current
+        ):
+            return False
+        current.append(approval)
+        self._guided_approved_missing_sessions = current
+        self._invalidate_guided_backend_validation("missing-session approval changed")
+        self._refresh_guided_draft_run_plan_preview()
+        return True
+
+    def _remove_guided_missing_session_approval(self, canonical_relative_path: str) -> None:
+        current = list(getattr(self, "_guided_approved_missing_sessions", []))
+        retained = [
+            item for item in current
+            if item.canonical_relative_path != canonical_relative_path
+        ]
+        if len(retained) == len(current):
+            return
+        self._guided_approved_missing_sessions = retained
+        self._invalidate_guided_backend_validation("missing-session approval removed")
+        self._refresh_guided_draft_run_plan_preview()
 
     def _clear_guided_execution_readiness_state(self) -> None:
         """Atomically discard state that could authorize Guided execution."""
@@ -11138,14 +11233,160 @@ class MainWindow(QMainWindow):
                 "error."
             )
 
+    def _guided_missing_session_approval_from_failed_run(self, result):
+        """Return one eligible, identity-bound approval candidate or ``None``.
+
+        This deliberately recognizes only the C8 processing-failure form from a
+        fresh intermittent RWD attempt. Output, cancellation, drift, and unknown
+        failures have no authorization path.
+        """
+        if getattr(result, "status", "") != "wrapper_failed":
+            return None
+        details = getattr(result, "failure_details", ()) or ()
+        if not details:
+            return None
+        detail = None
+        for item in details:
+            if getattr(item, "failure_type", None) != "input_processing_failure":
+                continue
+            if not getattr(item, "eligible_for_missing_session_authorization", False):
+                continue
+            # Independently re-verify category/phase rather than trusting the
+            # producer's eligibility flag alone.
+            if getattr(item, "category", None) != "processing_exception":
+                continue
+            if (
+                getattr(item, "phase", None)
+                not in GUIDED_ELIGIBLE_MISSING_SESSION_PROCESSING_PHASES
+            ):
+                continue
+            detail = item
+            break
+        if detail is None:
+            return None
+
+        plan = self._build_guided_new_analysis_draft_plan()
+        if (
+            plan.input_format != "rwd"
+            or plan.acquisition_mode != "intermittent"
+            or not plan.input_source_path
+        ):
+            return None
+
+        if not isinstance(detail.source, str) or not detail.source:
+            return None
+
+        source = os.path.normcase(os.path.abspath(detail.source))
+        root = os.path.normcase(os.path.abspath(plan.input_source_path))
+        try:
+            relative = os.path.relpath(source, root).replace("\\", "/")
+        except ValueError:
+            return None
+        if relative.startswith("../") or relative == "..":
+            return None
+
+        from photometry_pipeline.io.rwd_source_snapshot import (
+            build_rwd_source_candidate_snapshot,
+        )
+        from photometry_pipeline.input_processing_completeness import (
+            resolve_session_start_time,
+        )
+        from photometry_pipeline.guided_new_analysis_plan import (
+            GuidedApprovedMissingSession,
+        )
+
+        try:
+            snapshot = build_rwd_source_candidate_snapshot(plan.input_source_path)
+        except Exception:
+            return None
+
+        matching_idx = None
+        matching_candidate = None
+        for i, item in enumerate(snapshot.candidates):
+            if item.canonical_relative_path == relative:
+                matching_idx = i
+                matching_candidate = item
+                break
+
+        session_index = getattr(detail, "session_index", None)
+        if matching_candidate is None or matching_idx != session_index:
+            return None
+
+        timestamp = resolve_session_start_time(source)
+        if timestamp is None:
+            return None
+
+        if any(
+            item.canonical_relative_path == relative
+            for item in getattr(self, "_guided_approved_missing_sessions", [])
+        ):
+            return None
+
+        return GuidedApprovedMissingSession(
+            canonical_relative_path=relative,
+            size_bytes=matching_candidate.size_bytes,
+            sha256_content_digest=matching_candidate.sha256_content_digest,
+            session_index=session_index,
+            expected_start_time=timestamp.isoformat(),
+            expected_duration_sec=float(plan.session_duration_sec or 0.0),
+            reason="could not be processed",
+        )
+
+    def _offer_guided_missing_session_recovery(self, result) -> bool:
+        approval = self._guided_missing_session_approval_from_failed_run(result)
+        if approval is None:
+            return False
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Part of the recording could not be processed")
+        box.setText(
+            f"Analysis stopped at Session {approval.session_index + 1} "
+            f"({approval.expected_start_time.replace('T', ' ')})."
+        )
+        box.setInformativeText(
+            "No results were completed for this run, and the affected session was not omitted.\n\n"
+            "You can return to the recording files to investigate the problem, or continue with this session marked as missing. "
+            "If you continue, the session will remain at its original time as a visible gap in the analysis."
+        )
+        return_setup = box.addButton("Return to setup", QMessageBox.RejectRole)
+        continue_missing = box.addButton(
+            "Continue with this session missing", QMessageBox.AcceptRole
+        )
+        box.exec()
+        if box.clickedButton() is continue_missing:
+            self._add_guided_missing_session_approval(approval)
+            self._guided_missing_session_failure_reminder = (
+                f"Session {approval.session_index + 1} is approved as missing. Check the setup again before rerunning."
+            )
+            draft_index = self._guided_step_index("Draft plan")
+            self._guided_workflow_stepper.setCurrentRow(draft_index)
+            label = getattr(self, "_guided_run_readiness_label", None)
+            if label is not None:
+                label.setText(self._guided_missing_session_failure_reminder)
+            return True
+        if box.clickedButton() is return_setup:
+            self._guided_missing_session_failure_reminder = (
+                f"Session {approval.session_index + 1} could not be processed."
+            )
+            self._guided_workflow_stepper.setCurrentRow(
+                self._guided_step_index("Recording structure")
+            )
+        return False
+
     def _finish_guided_backend_execution_with_result(self, result) -> None:
         """GUI-thread-only: apply the existing post-execution result contract."""
         self._guided_backend_execution_result = result
         self._guided_startup_transaction_request = None
+        recovered = self._offer_guided_missing_session_recovery(result)
+        if recovered:
+            self._guided_backend_execution_result = result
         self._refresh_guided_review_handoff_display()
         label = getattr(self, "_guided_run_readiness_label", None)
         if label is not None:
             label.setText(
+                "Check the revised setup before rerunning."
+                if recovered
+                else
                 "Guided Run has started."
                 if getattr(result, "status", "") == "wrapper_running"
                 else str(
@@ -11163,6 +11404,8 @@ class MainWindow(QMainWindow):
         if details_label is not None:
             blocking_issues = getattr(result, "blocking_issues", None) or ()
             if (
+                not recovered
+                and
                 getattr(result, "status", "") in {
                     "wrapper_failed",
                     "wrapper_start_failed",
@@ -11272,6 +11515,7 @@ class MainWindow(QMainWindow):
 
     def _build_guided_new_analysis_draft_plan(self):
         from photometry_pipeline.guided_new_analysis_plan import (
+            GuidedApprovedMissingSession,
             GuidedNewAnalysisDynamicFitParameterContract,
             GuidedNewAnalysisDraftPlan,
             GuidedPlanCorrectionChoice
@@ -11623,6 +11867,7 @@ class MainWindow(QMainWindow):
                 if getattr(self, "_guided_new_analysis_output_policy_status", "missing") == "applied"
                 else ""
             ),
+            approved_missing_sessions=list(getattr(self, "_guided_approved_missing_sessions", [])),
         )
 
     @staticmethod
@@ -14167,7 +14412,12 @@ class MainWindow(QMainWindow):
             stale_reasons.append("diagnostic cache build request changed")
         validation = self._validate_guided_new_analysis_output_policy_path(str(path))
         if not validation.ok:
-            stale_reasons.append(validation.message)
+            reused_own_output_base = (
+                validation.code == "target_exists"
+                and classify_output_base_reuse_eligibility(path)[0]
+            )
+            if not reused_own_output_base:
+                stale_reasons.append(validation.message)
         if stale_reasons:
             became_stale = (
                 getattr(
@@ -15121,6 +15371,24 @@ class MainWindow(QMainWindow):
         output_layout.addWidget(self._guided_review_output_status_label)
         layout.addWidget(output_group)
         layout.addWidget(self._build_guided_output_policy_editor())
+
+        self._guided_missing_sessions_group = QGroupBox("Approved missing sessions")
+        self._guided_missing_sessions_group.setObjectName("guidedReviewMissingSessionsPanel")
+        missing_sessions_layout = QVBoxLayout(self._guided_missing_sessions_group)
+        missing_sessions_layout.setContentsMargins(10, 8, 10, 8)
+        self._guided_missing_sessions_explanation_label = QLabel(
+            "These sessions will remain at their original times as visible gaps. "
+            "Their analytical values will be recorded as missing, not zero."
+        )
+        self._guided_missing_sessions_explanation_label.setObjectName("guidedReviewMissingSessionsExplanation")
+        self._guided_missing_sessions_explanation_label.setWordWrap(True)
+        missing_sessions_layout.addWidget(self._guided_missing_sessions_explanation_label)
+        rows_container = QWidget()
+        self._guided_missing_sessions_rows_layout = QVBoxLayout(rows_container)
+        self._guided_missing_sessions_rows_layout.setContentsMargins(0, 0, 0, 0)
+        missing_sessions_layout.addWidget(rows_container)
+        self._guided_missing_sessions_group.setVisible(False)
+        layout.addWidget(self._guided_missing_sessions_group)
 
         next_group = QGroupBox("Next step")
         next_group.setObjectName("guidedReviewNextStepPanel")

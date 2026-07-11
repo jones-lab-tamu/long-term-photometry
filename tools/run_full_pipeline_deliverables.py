@@ -2037,6 +2037,7 @@ def main():
         },
         "errors": [],
         "warnings": [],
+        "failure_details": [],
         "validation": None,
         "artifact_contract": effective_artifact_contract,
         "intentional_skips": effective_skip_plan,
@@ -2059,7 +2060,7 @@ def main():
     # failure must stay "error", not become "cancelled").
     terminal_flags = {"written": False}
 
-    def _finalize_status(state="success", error_msg=None, completion=None):
+    def _finalize_status(state="success", error_msg=None, completion=None, failure_details=None):
         """Update and write status.json atomically with final state."""
         status_data["phase"] = "final"
         status_data["finished_utc"] = datetime.now(timezone.utc).isoformat()
@@ -2067,6 +2068,11 @@ def main():
 
         if error_msg:
             status_data["errors"].append(str(error_msg))
+
+        if failure_details is not None:
+            status_data["failure_details"] = list(failure_details)
+        else:
+            status_data["failure_details"] = status_data.get("failure_details", [])
 
         # Only a verified terminal set carries the completion block. Its absence
         # on a "success" status is itself a contradiction the loader rejects.
@@ -3580,9 +3586,99 @@ def main():
                 emitter.emit("package", "error", viol_msg)
             msg_body = f"{msg_body} | {viol_msg}"
 
+        from photometry_pipeline.input_processing_completeness import InputProcessingError
+
+        failure_details_list = []
+
+        # 1. Check if the subprocess wrote an input_processing_error.json
+        error_file_paths = []
+        if 'run_dir' in locals():
+            error_file_paths = [
+                os.path.join(run_dir, '_analysis', 'phasic_out', 'input_processing_error.json'),
+                os.path.join(run_dir, '_analysis', 'tonic_out', 'input_processing_error.json'),
+            ]
+        for path in error_file_paths:
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        err_data = json.load(handle)
+                    cat = err_data.get("category")
+                    phase = err_data.get("phase")
+                    source = err_data.get("source")
+                    s_idx = err_data.get("session_index")
+                    reason = err_data.get("reason")
+
+                    if (
+                        isinstance(cat, str)
+                        and isinstance(phase, str)
+                        and isinstance(source, str)
+                        and not isinstance(s_idx, bool)
+                        and isinstance(s_idx, int)
+                        and s_idx >= 0
+                        and isinstance(reason, str)
+                    ):
+                        eligible = (
+                            cat == "processing_exception"
+                            and phase in ("pass1", "pass1a", "pass1b", "tonic_pass1c", "pass2")
+                        )
+                        failure_details_list.append({
+                            "failure_type": "input_processing_failure",
+                            "category": cat,
+                            "phase": phase,
+                            "source": source,
+                            "session_index": s_idx,
+                            "reason": reason,
+                            "eligible_for_missing_session_authorization": eligible
+                        })
+                except Exception as read_err:
+                    print(f"ERROR: Failed to read {path}: {read_err}")
+
+        # 2. Check if the error is an in-process InputProcessingError (for completeness)
+        if isinstance(e, InputProcessingError):
+            eligible = (
+                e.category == "processing_exception"
+                and not isinstance(e.chunk_index, bool)
+                and isinstance(e.chunk_index, int)
+                and e.chunk_index >= 0
+                and bool(e.source)
+                and e.phase in ("pass1", "pass1a", "pass1b", "tonic_pass1c", "pass2")
+            )
+            norm_source = os.path.normpath(str(e.source)).replace("\\", "/")
+            failure_details_list.append({
+                "failure_type": "input_processing_failure",
+                "category": e.category,
+                "phase": e.phase,
+                "source": norm_source,
+                "session_index": e.chunk_index,
+                "reason": str(e.reason),
+                "eligible_for_missing_session_authorization": eligible
+            })
+
+        # Deduplicate: the same underlying failure must not be reported twice
+        # even though it may be observed both via a subprocess-written
+        # input_processing_error.json and via an in-process
+        # InputProcessingError. Keyed by the complete structured identity so a
+        # genuinely distinct failure is never dropped.
+        deduped_failure_details = []
+        seen_failure_keys = set()
+        for detail in failure_details_list:
+            key = (
+                detail.get("failure_type"),
+                detail.get("category"),
+                detail.get("phase"),
+                os.path.normpath(str(detail.get("source", ""))).replace("\\", "/"),
+                detail.get("session_index"),
+                detail.get("reason"),
+            )
+            if key in seen_failure_keys:
+                continue
+            seen_failure_keys.add(key)
+            deduped_failure_details.append(detail)
+        failure_details_list = deduped_failure_details
+
         # --- Finalize Status: Error ---
         try:
-            _finalize_status("error", error_msg=msg_body)
+            _finalize_status("error", error_msg=msg_body, failure_details=failure_details_list)
         except Exception as status_err:
             print(f"ERROR: Failed to finalize error status.json: {status_err}", flush=True)
         raise SystemExit(1)

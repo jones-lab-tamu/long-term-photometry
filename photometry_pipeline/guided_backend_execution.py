@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import os
 from typing import Callable
 
 import photometry_pipeline.guided_startup_orchestration as orchestration
@@ -41,6 +43,17 @@ class GuidedBackendExecutionDiagnostics:
 
 
 @dataclass(frozen=True)
+class GuidedExecutionFailureDetail:
+    failure_type: str
+    category: str
+    phase: str
+    source: str
+    session_index: int
+    reason: str
+    eligible_for_missing_session_authorization: bool
+
+
+@dataclass(frozen=True)
 class GuidedBackendExecutionResult:
     status: str
     ok: bool
@@ -57,6 +70,7 @@ class GuidedBackendExecutionResult:
     exposes_manifest_path_to_user: bool = False
     exposes_internal_cli_to_user: bool = False
     completed_run_claim: bool = False
+    failure_details: tuple[GuidedExecutionFailureDetail, ...] = ()
 
 
 _OUTPUT_NOT_CREATABLE_SUMMARY = (
@@ -185,6 +199,52 @@ def execute_guided_backend_run(
         )
         for issue in internal.blocking_issues
     )
+
+    failure_details = []
+    if status == "wrapper_failed" and internal.allocated_run_dir:
+        status_path = os.path.join(internal.allocated_run_dir, "status.json")
+        if os.path.exists(status_path):
+            try:
+                with open(status_path, "r", encoding="utf-8") as handle:
+                    status_data = json.load(handle)
+                details_list = status_data.get("failure_details", [])
+                if isinstance(details_list, list):
+                    for item in details_list:
+                        if isinstance(item, dict):
+                            ft = item.get("failure_type")
+                            cat = item.get("category")
+                            phase = item.get("phase")
+                            source = item.get("source")
+                            s_idx = item.get("session_index")
+                            reason = item.get("reason")
+                            elig = item.get("eligible_for_missing_session_authorization")
+
+                            # Validate types strictly and fail closed
+                            if (
+                                isinstance(ft, str)
+                                and isinstance(cat, str)
+                                and isinstance(phase, str)
+                                and isinstance(source, str)
+                                and not isinstance(s_idx, bool)
+                                and isinstance(s_idx, int)
+                                and s_idx >= 0
+                                and isinstance(reason, str)
+                                and isinstance(elig, bool)
+                            ):
+                                failure_details.append(
+                                    GuidedExecutionFailureDetail(
+                                        failure_type=ft,
+                                        category=cat,
+                                        phase=phase,
+                                        source=source,
+                                        session_index=s_idx,
+                                        reason=reason,
+                                        eligible_for_missing_session_authorization=elig,
+                                    )
+                                )
+            except Exception:
+                pass
+
     return GuidedBackendExecutionResult(
         status=status,
         ok=ok,
@@ -197,4 +257,5 @@ def execute_guided_backend_run(
         wrapper_completed=internal.wrapper_completed,
         blocking_issues=issues,
         diagnostics=diagnostics,
+        failure_details=tuple(failure_details),
     )

@@ -1366,7 +1366,11 @@ class Pipeline:
         )
         for chunk_id, entry in enumerate(entries):
             t_load = time.perf_counter()
-            chunk = self._load_entry_chunk(entry, chunk_id, force_format)
+            try:
+                chunk = self._load_entry_chunk(entry, chunk_id, force_format)
+            except Exception as e:
+                self._handle_pass_chunk_exception(entry, phase_name, e)
+                continue
             yield chunk_id, entry, chunk, time.perf_counter() - t_load
 
     def _continuous_metadata_channels_seen(self, entries):

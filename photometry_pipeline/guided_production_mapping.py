@@ -334,6 +334,7 @@ class GuidedProductionInputSource:
     candidate_files: tuple[GuidedProductionSourceCandidate, ...]
     source_identity_level: str
     candidate_manifest_execution_contract_version: str
+    approved_missing_candidates: tuple[GuidedProductionSourceCandidate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -916,6 +917,14 @@ def map_guided_validation_request_to_execution_intent(
                 tuple(GuidedProductionSourceCandidate(item.canonical_relative_path, item.size_bytes, item.sha256_content_digest) for item in request.source.candidate_files),
                 request.source.source_identity_level,
                 mapping_contract.candidate_manifest_execution_contract_version,
+                tuple(
+                    GuidedProductionSourceCandidate(
+                        item.canonical_relative_path,
+                        item.size_bytes,
+                        item.sha256_content_digest,
+                    )
+                    for item in request.source.approved_missing_candidates
+                ),
             ),
             acquisition=GuidedProductionAcquisition(
                 request.acquisition_dataset.acquisition_mode, request.acquisition_dataset.sessions_per_hour,

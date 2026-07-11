@@ -391,6 +391,47 @@ def test_custom_tabular_pipeline_ambiguous_overlap_uses_bounded_fallback(monkeyp
     assert p._continuous_csv_reading["phases"]["pass1"]["bounded_loader_fallback_count"] == 2
 
 
+def test_non_accounted_load_failure_skips_entry_without_unbound_local_error(monkeypatch):
+    """A load failure with no admitted accountant (preview/continuous) must be
+    logged and skipped -- not crash on an undefined `chunk`, and not silently
+    re-yield a stale chunk from a prior iteration under the failed entry's id."""
+    cfg = _continuous_cfg(target_fs_hz=10.0)
+    p = Pipeline(cfg, mode="phasic")
+    p.file_list = ["entry_000", "entry_001", "entry_002"]
+    assert p._admitted_accountant is None
+
+    def _fake_load_entry_chunk(entry, chunk_id, _force_format):
+        if entry == "entry_001":
+            raise RuntimeError("simulated transient load failure")
+        n = 10
+        t = np.arange(n, dtype=float) / 10.0
+        return adapters.Chunk(
+            chunk_id=chunk_id,
+            source_file=entry,
+            format="custom_tabular",
+            time_sec=t,
+            uv_raw=np.ones((n, 1), dtype=float),
+            sig_raw=np.ones((n, 1), dtype=float) * 2.0,
+            fs_hz=10.0,
+            channel_names=["Region0"],
+            metadata={},
+        )
+
+    monkeypatch.setattr(p, "_load_entry_chunk", _fake_load_entry_chunk)
+
+    yielded = list(p._iter_entry_chunks_for_pass(p.file_list, "custom_tabular", "pass1"))
+
+    # The failed entry is skipped entirely: no fabricated/undefined chunk for it,
+    # and it must not be masked by a stale chunk carried over from entry_000.
+    assert [item[1] for item in yielded] == ["entry_000", "entry_002"]
+    assert [item[0] for item in yielded] == [0, 2]
+    for _chunk_id, entry, chunk, _load_elapsed in yielded:
+        assert chunk.source_file == entry
+
+    assert len(p.qc_summary["failed_chunks"]) == 1
+    assert p.qc_summary["failed_chunks"][0]["file"] == "entry_001"
+
+
 def test_custom_tabular_sequential_iterator_partial_final_window_matches_bounded_loader(tmp_path: Path):
     src_path = tmp_path / "input" / "session_000.csv"
     _write_custom_tabular_csv(src_path, duration_sec=10.0, fs_hz=10.0)

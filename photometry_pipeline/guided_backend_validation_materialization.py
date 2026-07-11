@@ -74,6 +74,9 @@ from photometry_pipeline.io.rwd_contract import (
     RwdHeaderParsingContract,
     compute_rwd_header_parsing_contract_digest,
 )
+from photometry_pipeline.input_processing_completeness import (
+    resolve_session_start_time,
+)
 
 # Constants for Stage 2b
 GUIDED_BACKEND_VALIDATION_MATERIALIZATION_SCOPE = (
@@ -96,6 +99,7 @@ STAGE_2C_VALID_ISSUES = {
     "source_snapshot_cancelled",
     "source_snapshot_unstable",
     "source_snapshot_digest_mismatch",
+    "approved_missing_session_invalid",
     "unsupported_incomplete_final_exclusion",
     "incomplete_final_classification_mismatch",
     "materialization_cancelled",
@@ -242,6 +246,73 @@ def _failure(
             ),
         )
     )
+
+
+def _materialize_approved_missing_candidates(
+    draft: GuidedNewAnalysisDraftPlan,
+    snapshot,
+) -> tuple[tuple[GuidedBackendSourceCandidateFile, ...] | None, GuidedBackendValidationMaterializationFailure | None]:
+    """Validate the plan's explicit missing-session approvals against this snapshot."""
+    approvals = tuple(draft.approved_missing_sessions or ())
+    if not approvals:
+        return (), None
+    if draft.input_format != "rwd" or draft.acquisition_mode != "intermittent":
+        return None, _failure(
+            "approved_missing_session_invalid",
+            "missing_session",
+            "Missing-session continuation is available only for intermittent RWD recordings.",
+            detail_code="unsupported_recording_type",
+        )
+    candidates = {
+        item.canonical_relative_path: item for item in snapshot.candidates
+    }
+    normalized = []
+    seen = set()
+    for approval in approvals:
+        rel = approval.canonical_relative_path
+        if rel in seen:
+            return None, _failure(
+                "approved_missing_session_invalid",
+                "missing_session",
+                "The same missing session was approved more than once.",
+                detail_code="duplicate_approval",
+            )
+        seen.add(rel)
+        candidate = candidates.get(rel)
+        if candidate is None or (
+            candidate.size_bytes != approval.size_bytes
+            or candidate.sha256_content_digest != approval.sha256_content_digest
+        ):
+            return None, _failure(
+                "approved_missing_session_invalid",
+                "missing_session",
+                "An approved missing session no longer matches the selected recording files.",
+                detail_code="source_identity_changed",
+            )
+        source = os.path.join(snapshot.source_root_canonical, *rel.split("/"))
+        actual_start = resolve_session_start_time(source)
+        if actual_start is None or actual_start.isoformat() != approval.expected_start_time:
+            return None, _failure(
+                "approved_missing_session_invalid",
+                "missing_session",
+                "An approved missing session no longer has a valid recording time.",
+                detail_code="timestamp_unavailable_or_changed",
+            )
+        if float(approval.expected_duration_sec) != float(draft.session_duration_sec or 0.0):
+            return None, _failure(
+                "approved_missing_session_invalid",
+                "missing_session",
+                "An approved missing session no longer matches the planned session duration.",
+                detail_code="duration_changed",
+            )
+        normalized.append(
+            GuidedBackendSourceCandidateFile(
+                canonical_relative_path=candidate.canonical_relative_path,
+                size_bytes=candidate.size_bytes,
+                sha256_content_digest=candidate.sha256_content_digest,
+            )
+        )
+    return tuple(normalized), None
 
 
 def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str]:
@@ -1822,6 +1893,12 @@ def materialize_guided_backend_validation_facts(
             detail_code="source_path_style_unknown",
         )
 
+    approved_missing_candidates, approval_failure = _materialize_approved_missing_candidates(
+        draft, snapshot
+    )
+    if approval_failure is not None:
+        return approval_failure
+
     source_snapshot_facts = GuidedBackendSourceSnapshotFacts(
         available=True,
         source_root_canonical=snapshot.source_root_canonical,
@@ -1829,6 +1906,7 @@ def materialize_guided_backend_validation_facts(
         source_candidate_set_digest=snapshot.source_candidate_set_digest,
         source_candidate_content_digest=snapshot.source_candidate_content_digest,
         candidate_files=tuple(backend_candidate_files),
+        approved_missing_candidates=approved_missing_candidates,
         stale=False,
     )
 

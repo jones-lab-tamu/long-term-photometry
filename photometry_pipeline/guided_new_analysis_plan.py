@@ -355,6 +355,46 @@ class GuidedNewAnalysisDatasetContractSourceIdentity:
 
 
 @dataclass(frozen=True)
+class GuidedApprovedMissingSession:
+    """One explicitly approved intermittent RWD session that stays on the timeline."""
+    canonical_relative_path: str
+    size_bytes: int
+    sha256_content_digest: str
+    session_index: int
+    expected_start_time: str
+    expected_duration_sec: float
+    reason: str = "could not be processed"
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.canonical_relative_path, str)
+            or not self.canonical_relative_path
+            or self.canonical_relative_path.startswith(("/", "\\"))
+            or "\\" in self.canonical_relative_path
+            or any(part in {"", ".", ".."} for part in self.canonical_relative_path.split("/"))
+        ):
+            raise ValueError("approved missing session path must be canonical and relative")
+        if isinstance(self.size_bytes, bool) or not isinstance(self.size_bytes, int) or self.size_bytes < 0:
+            raise ValueError("approved missing session size must be a non-negative integer")
+        if (
+            not isinstance(self.sha256_content_digest, str)
+            or len(self.sha256_content_digest) != 64
+            or set(self.sha256_content_digest) - set("0123456789abcdef")
+        ):
+            raise ValueError("approved missing session requires a SHA-256 identity")
+        if isinstance(self.session_index, bool) or not isinstance(self.session_index, int) or self.session_index < 0:
+            raise ValueError("approved missing session index must be non-negative")
+        if not isinstance(self.expected_start_time, str) or not self.expected_start_time:
+            raise ValueError("approved missing session requires an expected start time")
+        if (
+            isinstance(self.expected_duration_sec, bool)
+            or not isinstance(self.expected_duration_sec, (int, float))
+            or self.expected_duration_sec <= 0
+        ):
+            raise ValueError("approved missing session requires a positive expected duration")
+
+
+@dataclass(frozen=True)
 class GuidedNewAnalysisExecutionIntent:
     schema_version: str = EXECUTION_INTENT_SCHEMA_VERSION
     timeline_anchor_mode: str = "civil"
@@ -1090,6 +1130,10 @@ class GuidedNewAnalysisDraftPlan:
     continuous_step_sec: float | None = 600.0
     allow_partial_final_window: bool = False
     exclude_incomplete_final_rwd_chunk: bool = False
+    # Scientist approvals are scoped to this draft only; no preference/global
+    # storage is used. Every entry remains identity-bound to the discovered RWD
+    # source and must be rechecked before a fresh run.
+    approved_missing_sessions: list[GuidedApprovedMissingSession] = field(default_factory=list)
     acquisition_structure_status: str = "unknown"  # "ready", "incomplete", "invalid", "unknown"
 
     # output and strategy planning state (4J11i)
@@ -1298,6 +1342,22 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
                 category="missing_or_invalid_acquisition_structure",
                 message="Continuous mode requires a positive step duration.",
                 severity="blocking"
+            ))
+
+    approved_missing = list(plan.approved_missing_sessions or [])
+    if approved_missing:
+        if plan.input_format != "rwd" or acq_mode != "intermittent":
+            issues.append(GuidedPlanIssue(
+                category="approved_missing_sessions_unsupported",
+                message="Approved missing sessions are available only for intermittent RWD recordings.",
+                severity="blocking",
+            ))
+        paths = [entry.canonical_relative_path for entry in approved_missing]
+        if len(paths) != len(set(paths)):
+            issues.append(GuidedPlanIssue(
+                category="duplicate_approved_missing_session",
+                message="The same missing session was approved more than once.",
+                severity="blocking",
             ))
 
     # 4. no_roi_inventory

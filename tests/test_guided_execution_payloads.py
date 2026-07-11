@@ -296,6 +296,7 @@ def test_config_field_dispositions_coverage():
         # 4J16k39a: feature-detection fields are sourced from the settings the
         # user confirmed in Guided Step 5, not from baked contract overrides.
         payloads.CONFIG_DISPOSITION_CONFIRMED_FEATURE,
+        payloads.CONFIG_DISPOSITION_APPROVED_MISSING,
     }
     for disp in payloads.GUIDED_CONFIG_FIELD_DISPOSITIONS.values():
         assert disp in valid_dispositions

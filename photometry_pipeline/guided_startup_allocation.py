@@ -153,6 +153,61 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
+def _is_recognized_app_owned_run_directory(child: Path) -> bool:
+    """True only if `child` carries this app's own run-allocation evidence
+    (guided_startup_status.json) with an identity consistent with its own
+    location -- a plausible-looking name alone proves nothing."""
+    if child.is_symlink() or not child.is_dir():
+        return False
+    if not _RUN_ID_RE.fullmatch(child.name):
+        return False
+    status = _read_json_object(child / GUIDED_STARTUP_STATUS_FILENAME)
+    if status is None:
+        return False
+    if status.get("schema_name") != "guided_startup_status":
+        return False
+    if status.get("run_id") != child.name:
+        return False
+    allocated_run_dir = status.get("allocated_run_dir")
+    if not isinstance(allocated_run_dir, str) or not allocated_run_dir:
+        return False
+    try:
+        recorded = Path(allocated_run_dir).resolve(strict=False)
+        actual = child.resolve(strict=False)
+    except OSError:
+        return False
+    return _same_path(recorded, actual)
+
+
+def classify_output_base_reuse_eligibility(
+    output_base: str | os.PathLike[str],
+) -> tuple[bool, str | None]:
+    """Classify whether a pre-existing directory is safe to reuse as the
+    output base for a fresh Guided run, without any filesystem mutation.
+
+    Reuse is allowed only when every direct child of the directory is
+    itself a recognized app-owned Guided run directory (proven by its own
+    guided_startup_status.json allocation evidence, not by name alone). A
+    directory with no children, a loose file, a foreign directory, a
+    symlink/junction child, or an unrecognized/malformed run directory all
+    block reuse, matching the ordinary stale-output safety behavior for a
+    target that unexpectedly appears on disk.
+    """
+    path = Path(output_base)
+    try:
+        if path.is_symlink() or not path.is_dir():
+            return False, "output_base_not_directory"
+        entries = list(path.iterdir())
+    except OSError:
+        return False, "output_base_unreadable"
+    if not entries:
+        return False, "output_base_empty"
+    for entry in entries:
+        if not _is_recognized_app_owned_run_directory(entry):
+            return False, "output_base_contains_unrecognized_entry"
+    return True, None
+
+
 def _protected_output_ancestor(
     output_base: Path,
 ) -> tuple[str, Path] | None:

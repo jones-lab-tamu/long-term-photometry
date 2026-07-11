@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import os
 from typing import Any, Mapping
 
 import math
@@ -189,6 +190,7 @@ CONFIG_DISPOSITION_NOT_APPLICABLE_FIXED = "not_applicable_serialized_fixed"
 # override. They are therefore neither "mapped_from_intent" (which covers the
 # acquisition/correction intent fields) nor "fixed_by_contract".
 CONFIG_DISPOSITION_CONFIRMED_FEATURE = "confirmed_feature_settings"
+CONFIG_DISPOSITION_APPROVED_MISSING = "approved_missing_sessions"
 
 GUIDED_CONFIG_FIELD_DISPOSITIONS = {
     "chunk_duration_sec": CONFIG_DISPOSITION_FIXED,
@@ -198,7 +200,7 @@ GUIDED_CONFIG_FIELD_DISPOSITIONS = {
     "allow_partial_final_chunk": CONFIG_DISPOSITION_FIXED_FALSE_EMPTY,
     "exclude_incomplete_final_rwd_chunk": CONFIG_DISPOSITION_INTENT,
     "rwd_excluded_source_files": CONFIG_DISPOSITION_FIXED_FALSE_EMPTY,
-    "authorized_missing_sessions": CONFIG_DISPOSITION_FIXED_FALSE_EMPTY,
+    "authorized_missing_sessions": CONFIG_DISPOSITION_APPROVED_MISSING,
     "rwd_contract_validation": CONFIG_DISPOSITION_FIXED_FALSE_EMPTY,
     "target_fs_hz": CONFIG_DISPOSITION_INTENT,
     "lowpass_hz": CONFIG_DISPOSITION_FIXED,
@@ -788,9 +790,17 @@ def derive_guided_execution_payloads(
             k for k, v in GUIDED_CONFIG_FIELD_DISPOSITIONS.items()
             if v == CONFIG_DISPOSITION_CONFIRMED_FEATURE
         }
+        approved_missing_keys = {
+            k for k, v in GUIDED_CONFIG_FIELD_DISPOSITIONS.items()
+            if v == CONFIG_DISPOSITION_APPROVED_MISSING
+        }
         non_intent_keys = {
             k for k, v in GUIDED_CONFIG_FIELD_DISPOSITIONS.items()
-            if v not in (CONFIG_DISPOSITION_INTENT, CONFIG_DISPOSITION_CONFIRMED_FEATURE)
+            if v not in (
+                CONFIG_DISPOSITION_INTENT,
+                CONFIG_DISPOSITION_CONFIRMED_FEATURE,
+                CONFIG_DISPOSITION_APPROVED_MISSING,
+            )
         }
         serialized_non_intent_keys = {k for k, v in GUIDED_CONFIG_FIELD_DISPOSITIONS.items() if v in (
             CONFIG_DISPOSITION_FIXED,
@@ -816,7 +826,7 @@ def derive_guided_execution_payloads(
             )
         overrides_keys = set(overrides_dict.keys())
         missing_overrides = non_intent_keys - overrides_keys
-        extra_overrides = overrides_keys - non_intent_keys
+        extra_overrides = overrides_keys - (non_intent_keys | approved_missing_keys)
         duplicate_mapped = overrides_keys & intent_keys
 
         if missing_overrides or extra_overrides or duplicate_mapped:
@@ -889,6 +899,23 @@ def derive_guided_execution_payloads(
         for name in sorted(serialized_non_intent_keys):
             payload_values.append(GuidedConfigFieldValue(name, overrides_dict[name]))
 
+        approved_missing_sources = []
+        for candidate in intent.input_source.approved_missing_candidates:
+            approved_missing_sources.append(
+                os.path.normpath(
+                    os.path.join(
+                        intent.input_source.source_root_canonical,
+                        *candidate.canonical_relative_path.split("/"),
+                    )
+                )
+            )
+        payload_values.append(
+            GuidedConfigFieldValue(
+                "authorized_missing_sessions",
+                approved_missing_sources,
+            )
+        )
+
         # Populate the confirmed Step 5 feature-detection settings. These are the
         # production base feature configuration; a Default-only run analyzes with
         # exactly these values, and a Custom ROI's sparse override is layered on
@@ -906,7 +933,12 @@ def derive_guided_execution_payloads(
 
         # Invariant check: ensure config payload keys equal the full set of intended serialized fields
         config_payload_keys = {v.name for v in sorted_values}
-        expected_keys = intent_keys | serialized_non_intent_keys | confirmed_feature_keys
+        expected_keys = (
+            intent_keys
+            | serialized_non_intent_keys
+            | confirmed_feature_keys
+            | approved_missing_keys
+        )
         if config_payload_keys != expected_keys:
             return _unresolved("config_mapping_incomplete", "Config payload fields mismatch.")
 

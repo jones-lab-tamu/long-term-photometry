@@ -1102,7 +1102,7 @@ def test_identity_is_deterministic_digest_with_pinned_vector():
     first = contracts.compute_guided_backend_validation_request_identity(request)
 
     assert first == (
-        "9f630e641ccbef67b04f1cc7b282e8a93aced224f0933d6f3da631adac636eac"
+        "742b7c692783477fb31adb79de1271983028b45ba25802a9732998ca8a85b46f"
     )
     assert first == contracts.compute_guided_backend_validation_request_identity(
         request
