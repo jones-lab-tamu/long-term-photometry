@@ -118,6 +118,44 @@ def _bleach_mode_label(mode_raw: str) -> str:
     return "off"
 
 
+def _signal_only_qc_note(signal_only_qc: dict | None) -> str:
+    """Format persisted Signal-Only evidence without deriving a new judgment."""
+    qc = signal_only_qc if isinstance(signal_only_qc, dict) else {}
+
+    def _first_text(keys: tuple[str, ...]) -> str:
+        for key in keys:
+            value = qc.get(key)
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    viability = _first_text(
+        (
+            "signal_only_f0_candidate_viability",
+            "signal_only_f0_candidate_support",
+            "signal_only_f0_support",
+        )
+    )
+    if viability:
+        return f"Baseline support: {viability}."
+    confidence = _first_text(("signal_only_f0_candidate_confidence", "signal_only_f0_confidence"))
+    if confidence:
+        return f"Baseline confidence: {confidence}."
+    warning = _first_text(
+        (
+            "signal_only_f0_warning",
+            "signal_only_f0_note",
+            "signal_only_f0_production_warning",
+        )
+    )
+    if warning:
+        return f"Baseline note: {warning}."
+    return "Signal-only baseline evidence recorded."
+
+
 def _reconstruct_bleach_series_from_attrs(
     trace: np.ndarray,
     time_s: np.ndarray,
@@ -195,6 +233,10 @@ def build_correction_impact_figure(
     sig_bleach_corrected: np.ndarray | None = None,
     iso_bleach_fit: np.ndarray | None = None,
     iso_bleach_corrected: np.ndarray | None = None,
+    strategy_family: str = "dynamic_fit",
+    correction_reference_label: str = "Fitted reference",
+    strategy_label: str = "Dynamic fit",
+    signal_only_qc: dict | None = None,
 ):
     fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
 
@@ -255,23 +297,48 @@ def build_correction_impact_figure(
         )
     ax2.grid(True, alpha=0.3)
 
-    # 3) Dynamic fit view in engine frame (no mixed-frame overlays)
+    # 3) Strategy-specific persisted correction reference.  No correction is
+    # recomputed here: fit_ref or signal_only_f0_baseline was loaded from the
+    # authoritative native cache by the caller.
     fit_engine = np.asarray(fit, dtype=float)
-    if sig_bleach_corrected is not None:
-        # fit is stored reconciled to original frame; subtract removed signal decay
-        # so this panel remains in the same frame dynamic fit actually used.
-        sig_decay_removed = np.asarray(sig, dtype=float) - np.asarray(sig_bleach_corrected, dtype=float)
-        fit_engine = fit_engine - sig_decay_removed
-    ax3.plot(t, sig_engine, 'g', label='Signal (fit input frame)', lw=0.8)
-    ax3.plot(t, fit_engine, 'k', label='Dynamic fit reference (same frame)', lw=0.8, linestyle='--')
-    ax3.set_ylabel("Raw Output (V)")
-    ax3.set_title(
-        "Stage 3 - Dynamic Reference Fitting "
-        f"({_dynamic_fit_mode_label(dynamic_fit_mode)}; "
-        f"{_dynamic_fit_honesty_suffix(dynamic_fit_mode, baseline_subtract_before_fit)}; "
-        f"bleach correction: {_bleach_mode_label(bleach_correction_mode)})"
-    )
+    if strategy_family == "signal_only_f0":
+        ax3.plot(t, sig, 'g', label='Raw signal', lw=0.8)
+        ax3.plot(
+            t,
+            fit_engine,
+            'k',
+            label=correction_reference_label,
+            lw=0.8,
+            linestyle='--',
+        )
+        ax3.set_ylabel("Signal / baseline")
+        ax3.set_title(f"Stage 3 - {strategy_label} correction reference")
+    else:
+        if sig_bleach_corrected is not None:
+            # fit is stored reconciled to original frame; subtract removed signal decay
+            # so this panel remains in the same frame dynamic fit actually used.
+            sig_decay_removed = np.asarray(sig, dtype=float) - np.asarray(sig_bleach_corrected, dtype=float)
+            fit_engine = fit_engine - sig_decay_removed
+        ax3.plot(t, sig_engine, 'g', label='Signal (fit input frame)', lw=0.8)
+        ax3.plot(t, fit_engine, 'k', label=correction_reference_label, lw=0.8, linestyle='--')
+        ax3.set_ylabel("Raw Output (V)")
+        ax3.set_title(
+            "Stage 3 - Dynamic Reference Fitting "
+            f"({_dynamic_fit_mode_label(dynamic_fit_mode)}; "
+            f"{_dynamic_fit_honesty_suffix(dynamic_fit_mode, baseline_subtract_before_fit)}; "
+            f"bleach correction: {_bleach_mode_label(bleach_correction_mode)})"
+        )
     ax3.legend(loc='upper right')
+    if strategy_family == "signal_only_f0":
+        ax3.text(
+            0.01,
+            0.98,
+            _signal_only_qc_note(signal_only_qc),
+            transform=ax3.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+        )
     ax3.grid(True, alpha=0.3)
 
     # 4) Final dFF output stage
@@ -291,18 +358,67 @@ def main():
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
+
+    from photometry_pipeline.completed_run_review import (
+        CompletedRunReviewError,
+        resolve_analysis_plot_context,
+        resolve_persisted_cache_strategy,
+    )
         
-    from photometry_pipeline.io.hdf5_cache_reader import open_phasic_cache, load_cache_chunk_fields
+    from photometry_pipeline.io.hdf5_cache_reader import (
+        list_cache_chunk_ids,
+        load_cache_chunk_fields,
+        open_phasic_cache,
+    )
     
     # Construct path to phasic cache
     cache_path = os.path.join(args.analysis_out, 'phasic_trace_cache.h5')
     if not os.path.exists(cache_path):
         print(f"CRITICAL: Phasic cache not found: {cache_path}")
         sys.exit(1)
+
+    try:
+        plot_context = resolve_analysis_plot_context(args.analysis_out)
+    except CompletedRunReviewError as exc:
+        print(f"CRITICAL: Cannot verify correction strategy for plotting: {exc}")
+        sys.exit(1)
         
     try:
         with open_phasic_cache(cache_path) as f:
-            fields = ['time_sec', 'sig_raw', 'uv_raw', 'fit_ref', 'dff']
+            # Keep the reader boundary compatible with the lightweight test and
+            # legacy adapters that expose only ``load_cache_chunk_fields``.
+            # Native HDF5 readers provide the group attributes used for the
+            # strategy-aware choice; an adapter without groups is dynamic-fit
+            # legacy behavior and still loads the persisted fit_ref field.
+            attrs = {}
+            try:
+                group = f[f"roi/{args.roi}/chunk_{args.chunk_id}"]
+                attrs = dict(group.attrs.items())
+            except (KeyError, TypeError, AttributeError):
+                group = None
+            if plot_context.source_kind == "current":
+                try:
+                    strategy_chunk_ids = list_cache_chunk_ids(f)
+                except Exception as exc:
+                    raise CompletedRunReviewError(
+                        "Current cache authoritative chunk index is unreadable."
+                    ) from exc
+            else:
+                strategy_chunk_ids = [args.chunk_id]
+            strategy = resolve_persisted_cache_strategy(
+                f,
+                args.roi,
+                strategy_chunk_ids,
+                strict_current=(plot_context.source_kind == "current"),
+                requested_record=(
+                    plot_context.requested_by_roi.get(args.roi)
+                    if plot_context.source_kind == "current"
+                    else None
+                ),
+            )
+            family = strategy["strategy_family"]
+            reference_field = strategy["field"]
+            fields = ['time_sec', 'sig_raw', 'uv_raw', reference_field, 'dff']
             t, sig, iso, fit, dff = load_cache_chunk_fields(f, args.roi, args.chunk_id, fields)
     except Exception as e:
         print(f"CRITICAL: Failed to read cache for ROI {args.roi} Chunk {args.chunk_id}: {e}")
@@ -312,6 +428,29 @@ def main():
     t = t - t[0]
     
     dynamic_fit_mode, baseline_subtract_before_fit, bleach_correction_mode = _resolve_dynamic_fit_settings(args.analysis_out)
+    if family == "dynamic_fit":
+        dynamic_fit_mode = str(attrs.get("correction_dynamic_fit_mode") or attrs.get("dynamic_fit_mode_resolved") or dynamic_fit_mode)
+    strategy_label = (
+        "Signal-Only F0"
+        if family == "signal_only_f0"
+        else _dynamic_fit_mode_label(dynamic_fit_mode)
+    )
+    reference_label = "Signal-only F0 baseline" if family == "signal_only_f0" else "Fitted reference"
+    signal_only_qc = {
+        key: value
+        for key, value in attrs.items()
+        if str(key).startswith("signal_only_f0_production_")
+        or str(key)
+        in {
+            "signal_only_f0_warning",
+            "signal_only_f0_note",
+            "signal_only_f0_candidate_viability",
+            "signal_only_f0_candidate_support",
+            "signal_only_f0_support",
+            "signal_only_f0_candidate_confidence",
+            "signal_only_f0_confidence",
+        }
+    }
     sig_bleach_fit = None
     sig_bleach_corrected = None
     iso_bleach_fit = None
@@ -354,6 +493,10 @@ def main():
         sig_bleach_corrected=sig_bleach_corrected,
         iso_bleach_fit=iso_bleach_fit,
         iso_bleach_corrected=iso_bleach_corrected,
+        strategy_family=family,
+        correction_reference_label=reference_label,
+        strategy_label=strategy_label,
+        signal_only_qc=signal_only_qc,
     )
     plt.tight_layout()
     fig.savefig(args.out, dpi=args.dpi)

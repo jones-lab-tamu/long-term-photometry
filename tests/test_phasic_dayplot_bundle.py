@@ -55,6 +55,27 @@ def test_peak_count_annotation_omitted_for_missing_or_invalid_count():
         assert txt is None
         assert color is None
 
+
+def test_correction_reference_resolution_uses_signal_only_baseline_without_fit_ref(tmp_path):
+    import h5py
+
+    cache_path = tmp_path / "phasic_trace_cache.h5"
+    with h5py.File(cache_path, "w") as handle:
+        meta = handle.create_group("meta")
+        meta.attrs["mode"] = "phasic"
+        meta.attrs["schema_version"] = "1.0"
+        meta.create_dataset("rois", data=np.asarray(["Region1"], dtype="S"))
+        meta.create_dataset("chunk_ids", data=np.asarray([0], dtype=int))
+        group = handle.create_group("roi/Region1/chunk_0")
+        group.attrs["correction_strategy_family"] = "signal_only_f0"
+        group.attrs["correction_selected_strategy"] = "signal_only_f0"
+        group.create_dataset("signal_only_f0_baseline", data=np.ones(4))
+    with bundle.open_phasic_cache(str(cache_path)) as cache:
+        resolved = bundle._resolve_cached_correction_reference(cache, "Region1", [0])
+    assert resolved["strategy_family"] == "signal_only_f0"
+    assert resolved["field"] == "signal_only_f0_baseline"
+    assert resolved["label"] == "Signal-only F0 baseline"
+
 class TestPhasicDayplotBundle(unittest.TestCase):
     
     @patch('tools.plot_phasic_dayplot_bundle.sys.argv', ['plot_phasic_dayplot_bundle.py', '--analysis-out', '/fake', '--roi', 'Region0', '--output-dir', '/fake_out', '--sessions-per-hour', '2'])

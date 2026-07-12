@@ -44,12 +44,18 @@ from photometry_pipeline.guided_completed_feature_event_reload import (
     format_guided_completed_feature_event_summary,
     format_guided_completed_feature_event_technical_details,
 )
+from photometry_pipeline.completed_run_review import (
+    CompletedRunReviewError,
+    CompletedRunReviewModel,
+    load_completed_phasic_review,
+)
 
 
 TAB_VERIFICATION = "Verification"
 TAB_TONIC = "Tonic"
 TAB_PHASIC_RAW = "Phasic Sig/Iso"
 TAB_PHASIC_DYNAMIC_FIT = "Dynamic Fit"
+TAB_PHASIC_CORRECTION_REFERENCE = "Correction Reference"
 TAB_PHASIC_DFF = "Phasic dFF"
 TAB_PHASIC_STACKED = "Phasic Stacked"
 TAB_PHASIC_SUMMARY = "Phasic Summary"
@@ -78,6 +84,8 @@ class RunReportViewer(QWidget):
         self._run_summary_path = ""
         self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
         self._feature_event_state = GuidedCompletedFeatureEventState.absent()
+        self._phasic_review_model: CompletedRunReviewModel | None = None
+        self._phasic_review_error = ""
         self._region_paths: Dict[str, str] = {}
         self._region_tab_images: Dict[str, Dict[str, List[str]]] = {}
         self._tab_indices: Dict[Tuple[str, str], int] = {}
@@ -97,6 +105,20 @@ class RunReportViewer(QWidget):
         self._status_label.setStyleSheet("color: gray; font-size: 14px;")
         self._status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         root.addWidget(self._status_label)
+
+        self._correction_summary_label = QLabel("")
+        self._correction_summary_label.setObjectName("completedRunCorrectionSummary")
+        self._correction_summary_label.setWordWrap(True)
+        self._correction_summary_label.setVisible(False)
+        root.addWidget(self._correction_summary_label)
+
+        self._selected_feature_settings_label = QLabel("")
+        self._selected_feature_settings_label.setObjectName(
+            "completedRunSelectedFeatureSettings"
+        )
+        self._selected_feature_settings_label.setWordWrap(True)
+        self._selected_feature_settings_label.setVisible(False)
+        root.addWidget(self._selected_feature_settings_label)
 
         self._workspace = QWidget()
         self._workspace.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -349,6 +371,12 @@ class RunReportViewer(QWidget):
         self._refresh_applied_dff_display()
         self._feature_event_state = GuidedCompletedFeatureEventState.absent()
         self._refresh_feature_event_display()
+        self._phasic_review_model = None
+        self._phasic_review_error = ""
+        self._correction_summary_label.setText("")
+        self._correction_summary_label.setVisible(False)
+        self._selected_feature_settings_label.setText("")
+        self._selected_feature_settings_label.setVisible(False)
         self._region_paths = {}
         self._region_tab_images = {}
         self._tab_indices = {}
@@ -427,6 +455,67 @@ class RunReportViewer(QWidget):
         self._refresh_feature_event_display()
 
         classification = classify_completed_run_terminal_state(out_dir)
+        self._phasic_review_model = None
+        self._phasic_review_error = ""
+        phasic_dir = os.path.join(out_dir, "_analysis", "phasic_out")
+        phasic_meta_path = os.path.join(
+            phasic_dir, "run_metadata.json"
+        )
+        phasic_cache_path = os.path.join(
+            phasic_dir, "phasic_trace_cache.h5"
+        )
+        phasic_evidence_present = os.path.isfile(phasic_meta_path) or os.path.isfile(
+            phasic_cache_path
+        )
+        phasic_requested = bool(
+            getattr(classification, "run_mode", {}).get("phasic_analysis")
+        ) or phasic_evidence_present
+        if (
+            phasic_requested
+            and not classification.is_success
+            and (phasic_evidence_present or classification.is_current)
+        ):
+            self._phasic_review_error = str(classification.reason)
+            self._set_status_message(
+                f"This completed result cannot be verified: {classification.reason}",
+                level="error",
+            )
+            self._workspace.hide()
+            return False
+        if (
+            phasic_requested
+            and classification.is_current
+            and (not os.path.isfile(phasic_meta_path) or not os.path.isfile(phasic_cache_path))
+        ):
+            self._phasic_review_error = (
+                "The current phasic result is missing its persisted native correction evidence."
+            )
+            self._set_status_message(
+                f"This completed result cannot be verified: {self._phasic_review_error}",
+                level="error",
+            )
+            self._workspace.hide()
+            return False
+        if os.path.isfile(phasic_cache_path):
+            try:
+                self._phasic_review_model = load_completed_phasic_review(out_dir)
+            except CompletedRunReviewError as exc:
+                self._phasic_review_error = str(exc)
+                self._set_status_message(
+                    f"This completed result cannot be verified: {exc}",
+                    level="error",
+                )
+                self._correction_summary_label.setVisible(False)
+                self._workspace.hide()
+                return False
+        if self._phasic_review_model is not None and self._phasic_review_model.current_native:
+            # Native current-run canonical dF/F is authoritative.  The older
+            # Guided post-hoc applied-dF/F tree remains available to its
+            # standalone tools, but must not appear as a competing completed
+            # Review result.
+            self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
+            self._refresh_applied_dff_display()
+        self._refresh_correction_summary()
         completion_summary = get_scientist_completion_summary(out_dir, classification)
         title = "Results workspace"
         if is_preview:
@@ -617,8 +706,51 @@ class RunReportViewer(QWidget):
     def _on_region_changed(self, _index: int):
         """Refresh tabs, viewer, and actions for selected region."""
         self._rebuild_tabs_for_selected_region()
+        self._refresh_correction_summary()
         self._refresh_inline_actions()
         self.region_changed.emit(self._selected_region())
+
+    def _refresh_correction_summary(self) -> None:
+        model = self._phasic_review_model
+        roi = self._selected_region()
+        if model is None or not roi:
+            self._correction_summary_label.setText("")
+            self._correction_summary_label.setVisible(False)
+            self._selected_feature_settings_label.setText("")
+            self._selected_feature_settings_label.setVisible(False)
+            return
+        label = model.strategy_label_for_roi(roi)
+        if model.heterogeneous_correction:
+            text = f"Correction approaches vary by ROI.  {roi}: {label}."
+        else:
+            text = f"Correction approach: {label}."
+        sessions = model.sessions_for_roi(roi)
+        processed_count = sum(1 for session in sessions if session.processed)
+        absent_count = max(0, len(sessions) - processed_count)
+        if sessions:
+            text += f" {processed_count} session(s) processed"
+            if absent_count:
+                text += f"; {absent_count} absent"
+            text += "."
+        if label == "Signal-Only F0":
+            qc = model.signal_only_qc_for_roi(roi)
+            viability = qc.get("signal_only_f0_candidate_viability")
+            confidence = qc.get("signal_only_f0_candidate_confidence")
+            warning = qc.get("signal_only_f0_warning")
+            if viability:
+                text += f" Baseline support: {viability}."
+            elif confidence:
+                text += f" Baseline confidence: {confidence}."
+            elif warning:
+                text += f" Baseline note: {warning}."
+            else:
+                text += " Signal-only baseline evidence recorded."
+        self._correction_summary_label.setText(text)
+        self._correction_summary_label.setVisible(True)
+        self._selected_feature_settings_label.setText(
+            model.feature_settings_summary_for_roi(roi)
+        )
+        self._selected_feature_settings_label.setVisible(True)
 
     def _on_tab_changed(self, _index: int):
         """Refresh image viewer when tab changes."""
@@ -630,6 +762,15 @@ class RunReportViewer(QWidget):
     def selected_region(self) -> str:
         """Public selected-region getter for parent workspace integrations."""
         return self._selected_region()
+
+    @property
+    def phasic_review_model(self) -> CompletedRunReviewModel | None:
+        """Return the persisted strategy-aware phasic Review model, if loaded."""
+        return self._phasic_review_model
+
+    @property
+    def phasic_review_error(self) -> str:
+        return str(self._phasic_review_error or "")
 
     def active_image_path(self) -> str:
         """Public getter for the currently displayed image path."""
@@ -724,6 +865,11 @@ class RunReportViewer(QWidget):
         region = self._selected_region()
         tab_map = self._region_tab_images.get(region, {})
         available_tabs = [t for t in TAB_ORDER if tab_map.get(t)]
+        model = self._phasic_review_model
+        if model is not None and model.strategy_label_for_roi(region) == "Signal-Only F0":
+            if TAB_PHASIC_DYNAMIC_FIT in available_tabs:
+                dynamic_index = available_tabs.index(TAB_PHASIC_DYNAMIC_FIT)
+                available_tabs[dynamic_index] = TAB_PHASIC_CORRECTION_REFERENCE
 
         current_tab = self._selected_tab()
         self._tabs.blockSignals(True)
@@ -752,7 +898,10 @@ class RunReportViewer(QWidget):
         override = self._external_tab_image_overrides.get(key, [])
         if override:
             return list(override)
-        return list(self._region_tab_images.get(region, {}).get(tab, []))
+        tab_map = self._region_tab_images.get(region, {})
+        if tab == TAB_PHASIC_CORRECTION_REFERENCE:
+            tab = TAB_PHASIC_DYNAMIC_FIT
+        return list(tab_map.get(tab, []))
 
     def _tab_key(self) -> Tuple[str, str]:
         return (self._selected_region(), self._selected_tab())

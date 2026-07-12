@@ -54,6 +54,56 @@ def test_build_correction_impact_figure_has_four_panels_and_expected_semantics()
         plt.close(fig)
 
 
+def test_build_correction_impact_figure_signal_only_uses_persisted_baseline_label():
+    t = np.array([0.0, 1.0, 2.0], dtype=float)
+    sig = np.array([5.0, 5.5, 5.2], dtype=float)
+    iso = np.array([2.0, 2.1, 2.2], dtype=float)
+    baseline = np.array([4.8, 4.9, 5.0], dtype=float)
+    dff = np.array([4.2, 12.2, 4.0], dtype=float)
+
+    fig, axes = impact.build_correction_impact_figure(
+        t=t,
+        sig=sig,
+        iso=iso,
+        fit=baseline,
+        dff=dff,
+        roi="Region1",
+        chunk_id=3,
+        strategy_family="signal_only_f0",
+        correction_reference_label="Signal-only F0 baseline",
+        strategy_label="Signal-Only F0",
+        signal_only_qc={"signal_only_f0_candidate_viability": "contextual"},
+    )
+    try:
+        ax3 = axes[2]
+        assert np.allclose(ax3.lines[0].get_ydata(), sig)
+        assert np.allclose(ax3.lines[1].get_ydata(), baseline)
+        assert ax3.lines[1].get_label() == "Signal-only F0 baseline"
+        assert "Signal-Only F0" in ax3.get_title()
+        assert "Baseline support: contextual." in [text.get_text() for text in ax3.texts]
+        assert np.allclose(axes[3].lines[0].get_ydata(), dff)
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
+@pytest.mark.parametrize(
+    "qc, expected",
+    [
+        (
+            {"signal_only_f0_candidate_viability": "viable", "signal_only_f0_candidate_confidence": "high"},
+            "Baseline support: viable.",
+        ),
+        ({"signal_only_f0_candidate_confidence": "medium"}, "Baseline confidence: medium."),
+        ({"signal_only_f0_warning": "candidate_needs_review"}, "Baseline note: candidate_needs_review."),
+        ({"signal_only_f0_production_available": True}, "Signal-only baseline evidence recorded."),
+    ],
+)
+def test_signal_only_qc_note_uses_persisted_evidence_priority(qc, expected):
+    assert impact._signal_only_qc_note(qc) == expected
+
+
 def test_build_correction_impact_figure_global_mode_title():
     t = np.array([0.0, 1.0, 2.0], dtype=float)
     sig = np.array([1.0, 2.0, 3.0], dtype=float)

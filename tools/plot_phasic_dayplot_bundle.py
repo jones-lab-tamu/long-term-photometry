@@ -49,6 +49,11 @@ from photometry_pipeline.io.hdf5_cache_reader import (
 )
 
 from photometry_pipeline.core.feature_extraction import get_peak_indices_for_trace
+from photometry_pipeline.completed_run_review import (
+    CompletedRunReviewError,
+    resolve_analysis_plot_context,
+    resolve_persisted_cache_strategy,
+)
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -83,6 +88,9 @@ DISPLAY_SERIES_COLUMNS = [
     "missing_reason",
     "is_placeholder",
     "display_marker_shape",
+    "correction_strategy_family",
+    "correction_selected_strategy",
+    "correction_reference_label",
 ]
 PEAK_INDEX_FIELD_CANDIDATES = (
     "peak_indices",
@@ -617,6 +625,24 @@ def _cache_field_present_for_all_chunks(cache, roi: str, chunk_ids: list[int], f
     return True
 
 
+def _resolve_cached_correction_reference(
+    cache,
+    roi: str,
+    chunk_ids: list[int],
+    *,
+    strict_current: bool = False,
+    requested_record=None,
+) -> dict:
+    """Resolve one ROI's persisted correction reference without recomputation."""
+    return resolve_persisted_cache_strategy(
+        cache,
+        roi,
+        chunk_ids,
+        strict_current=strict_current,
+        requested_record=requested_record,
+    )
+
+
 def _yrange_from_panel(panel, x0, x1):
     t = panel['t']
     sig = panel['sig']
@@ -950,7 +976,11 @@ def _compose_dynamic_fit_day_tile_canvas(
     title_font = _get_font(max(13, int(round(0.11 * layout["dpi"]))))
     label_font = _get_font(max(11, int(round(0.09 * layout["dpi"]))))
     chunk_font = _get_font(max(10, int(round(0.08 * layout["dpi"]))))
-    title_txt = f"Day {day} Dynamic Fit (Raw Signal + Fitted Baseline) - {plot_roi}"
+    reference_label = next(
+        (panel.get("reference_label") for panel in slot_map.values() if panel and not panel.get("is_missing")),
+        "Fitted reference",
+    )
+    title_txt = f"Day {day} Correction reference (Raw Signal + {reference_label}) - {plot_roi}"
     if timeline_anchor_label:
         title_txt += f" [{timeline_anchor_label}]"
     draw.text((canvas_w // 2, max(6, top_title_h // 4)), title_txt, fill='black', anchor='ma', font=title_font)
@@ -1559,6 +1589,9 @@ def _base_display_row(
     slot_meta: dict,
     is_placeholder: bool,
     display_marker_shape: str = "",
+    correction_strategy_family: str = "",
+    correction_selected_strategy: str = "",
+    correction_reference_label: str = "",
 ):
     row = {
         "roi": str(roi),
@@ -1585,6 +1618,9 @@ def _base_display_row(
         "missing_reason": str(slot_meta.get("missing_reason", "")),
         "is_placeholder": bool(is_placeholder),
         "display_marker_shape": str(display_marker_shape),
+        "correction_strategy_family": str(correction_strategy_family),
+        "correction_selected_strategy": str(correction_selected_strategy),
+        "correction_reference_label": str(correction_reference_label),
     }
     return row
 
@@ -1783,6 +1819,17 @@ def _export_sig_iso_day_display_series_csv(
         "display_downsampled": downsampled,
         "display_downsample_rule": _display_rule_for_render_mode(args.sig_iso_render_mode),
     }
+    first_panel = next(
+        (panel for panel in slot_map.values() if panel and not panel.get("is_missing")),
+        {},
+    )
+    common.update(
+        {
+            "correction_strategy_family": first_panel.get("correction_strategy_family", "dynamic_fit"),
+            "correction_selected_strategy": first_panel.get("correction_selected_strategy", ""),
+            "correction_reference_label": first_panel.get("reference_label", "Fitted reference"),
+        }
+    )
     rows = []
     plot_w, plot_h = _sig_iso_geometry(qc_layout)
 
@@ -1871,6 +1918,17 @@ def _export_dynamic_fit_day_display_series_csv(
         "display_downsampled": downsampled,
         "display_downsample_rule": _display_rule_for_render_mode(args.sig_iso_render_mode),
     }
+    first_panel = next(
+        (panel for panel in slot_map.values() if panel and not panel.get("is_missing")),
+        {},
+    )
+    common.update(
+        {
+            "correction_strategy_family": first_panel.get("correction_strategy_family", "dynamic_fit"),
+            "correction_selected_strategy": first_panel.get("correction_selected_strategy", ""),
+            "correction_reference_label": first_panel.get("reference_label", "Fitted reference"),
+        }
+    )
     rows = []
     plot_w, plot_h = _sig_iso_geometry(dyn_layout)
 
@@ -1961,6 +2019,17 @@ def _export_dff_day_display_series_csv(
         "display_downsampled": downsampled,
         "display_downsample_rule": _display_rule_for_render_mode(args.dff_render_mode),
     }
+    first_panel = next(
+        (panel for panel in slot_map.values() if panel and not panel.get("is_missing")),
+        {},
+    )
+    common.update(
+        {
+            "correction_strategy_family": first_panel.get("correction_strategy_family", ""),
+            "correction_selected_strategy": first_panel.get("correction_selected_strategy", ""),
+            "correction_reference_label": first_panel.get("reference_label", ""),
+        }
+    )
     rows = []
     plot_w, plot_h = _dff_geometry(dff_layout)
     y0 = float(global_ymin)
@@ -2191,10 +2260,6 @@ def main():
         print(f"CRITICAL: Cache metadata mismatch: {len(cids)} IDs vs {len(sfs)} source files.")
         sys.exit(1)
 
-    authoritative_sessions = build_authoritative_plot_sessions(
-        args.analysis_out, cids, sfs
-    )
-        
     # Build discovery entries for layout engine. 
     # The layout engine uses the 2nd element (source_file) for datetime inference.
     chunk_entries = list(zip(cids, sfs))
@@ -2202,11 +2267,34 @@ def main():
     # 3. Resolve ROI via cache
     plot_roi = resolve_cache_roi(cache, args.roi)
     print(f"Plots using ROI: {plot_roi}")
+    try:
+        plot_context = resolve_analysis_plot_context(args.analysis_out)
+        correction_reference = _resolve_cached_correction_reference(
+            cache,
+            plot_roi,
+            cids,
+            strict_current=(plot_context.source_kind == "current"),
+            requested_record=(
+                plot_context.requested_by_roi.get(plot_roi)
+                if plot_context.source_kind == "current"
+                else None
+            ),
+        )
+    except CompletedRunReviewError as exc:
+        print(f"CRITICAL: Cannot verify correction strategy for plotting: {exc}")
+        cache.close()
+        sys.exit(1)
+    reference_field = correction_reference["field"]
+    reference_label = correction_reference["label"]
+
+    authoritative_sessions = build_authoritative_plot_sessions(
+        args.analysis_out, cids, sfs
+    )
     write_dynamic_fit_grid = bool(args.write_sig_iso_grid)
-    if write_dynamic_fit_grid and not _cache_field_present_for_all_chunks(cache, plot_roi, cids, 'fit_ref'):
+    if write_dynamic_fit_grid and not _cache_field_present_for_all_chunks(cache, plot_roi, cids, reference_field):
         write_dynamic_fit_grid = False
         print(
-            "NOTICE: fit_ref missing in cache for one or more chunks; skipping Dynamic Fit dayplots.",
+            f"NOTICE: {reference_field} missing in cache for one or more chunks; skipping correction-reference dayplots.",
             flush=True,
         )
         
@@ -2256,8 +2344,8 @@ def main():
         # Fallback minimal
         fields_to_load = ['time_sec']
 
-    if write_dynamic_fit_grid and 'fit_ref' not in fields_to_load:
-        fields_to_load.append('fit_ref')
+    if write_dynamic_fit_grid and reference_field not in fields_to_load:
+        fields_to_load.append(reference_field)
 
     detection_field = None
     if needs_peak_verification:
@@ -2284,6 +2372,10 @@ def main():
                     "y_sig": None,
                     "y_uv": None,
                     "y_fit": None,
+                    "correction_reference_field": reference_field,
+                    "correction_reference_label": reference_label,
+                    "correction_strategy_family": correction_reference["strategy_family"],
+                    "correction_selected_strategy": correction_reference["selected_strategy"],
                     "y_dff": None,
                     "y_detect": None,
                     "N": 0,
@@ -2307,7 +2399,12 @@ def main():
                 'x': arr_map.get('time_sec'),
                 'y_sig': arr_map.get('sig_raw'),
                 'y_uv': arr_map.get('uv_raw'),
-                'y_fit': arr_map.get('fit_ref'),
+                'y_fit': arr_map.get(reference_field),
+                'y_reference': arr_map.get(reference_field),
+                'correction_reference_field': reference_field,
+                'correction_reference_label': reference_label,
+                'correction_strategy_family': correction_reference["strategy_family"],
+                'correction_selected_strategy': correction_reference["selected_strategy"],
                 'y_dff': arr_map.get('dff'),
                 'y_detect': arr_map.get(detection_field) if detection_field else None,
                 # N must be derived from the actual length of an array we got
@@ -2455,7 +2552,14 @@ def main():
             ),
             'expected_duration_sec': cr.expected_duration_sec,
             'missing_reason': cr.missing_reason,
-            't': t_norm
+            't': t_norm,
+            'correction_strategy_family': rec.get(
+                'correction_strategy_family', correction_reference["strategy_family"]
+            ),
+            'correction_selected_strategy': rec.get(
+                'correction_selected_strategy', correction_reference["selected_strategy"]
+            ),
+            'reference_label': rec.get('correction_reference_label', reference_label),
         }
         if args.write_sig_iso_grid:
             sig_centered, uv_centered = _prepare_sig_iso_centered_panel(
@@ -2805,8 +2909,12 @@ def main():
                     continue
                 panel_y_ranges = _dynamic_fit_panel_ranges_with_day_min_span(slot_map)
 
+                reference_label = next(
+                    (p.get("reference_label") for p in slot_map.values() if p and not p.get("is_missing")),
+                    "Fitted reference",
+                )
                 fig_dyn.suptitle(
-                    f"Day {d} Dynamic Fit (Raw Signal + Fitted Baseline) - {plot_roi} [{timeline_anchor_label}]",
+                    f"Day {d} Correction reference (Raw Signal + {reference_label}) - {plot_roi} [{timeline_anchor_label}]",
                     fontsize=16,
                 )
 
@@ -2838,8 +2946,8 @@ def main():
                             x0, x1 = _trace_domain(p['t'], p.get('xlim_600', False))
                             panel_y = _yrange_from_dynamic_panel(p, x0, x1)
                         ax.set_ylim(panel_y[0], panel_y[1])
-                        ax.plot(p['t'], p['sig_fit'], 'g', lw=0.5, label='Signal Raw')
-                        ax.plot(p['t'], p['fit_ref'], 'k', lw=0.5, label='Fitted Baseline')
+                        ax.plot(p['t'], p['sig_fit'], 'g', lw=0.5, label='Raw signal')
+                        ax.plot(p['t'], p['fit_ref'], 'k', lw=0.5, label=p.get('reference_label', 'Fitted reference'))
                         if p.get('xlim_600', False):
                             ax.set_xlim(0, 600)
                         if c == 0:

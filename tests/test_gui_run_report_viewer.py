@@ -7,6 +7,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import h5py
+import numpy as np
 import pytest
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QPixmap
@@ -20,7 +22,7 @@ from gui.run_report_parser import (
 
 from PySide6.QtWidgets import QApplication
 from gui.run_report_viewer import RunReportViewer
-from tests.terminal_run_fixtures import write_current_run
+from tests.terminal_run_fixtures import legacy_run_report, write_current_run
 from types import SimpleNamespace
 
 
@@ -199,6 +201,172 @@ def test_run_report_viewer_status_labels_tuning_prep(qapp):
         assert viewer.load_report(tmpdir) is True
         assert "[TUNING PREP]" in viewer._status_label.text()
         viewer.close()
+
+
+def test_positive_legacy_phasic_review_loads_and_viewer_opens(qapp, tmp_path):
+    run_dir = tmp_path / "legacy_phasic"
+    run_dir.mkdir()
+    (run_dir / "run_report.json").write_text(
+        json.dumps(
+            legacy_run_report(
+                run_context={"run_type": "full", "status": "success", "phase": "final"}
+            )
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "status.json").write_text(
+        json.dumps({"phase": "final", "status": "success"}), encoding="utf-8"
+    )
+    (run_dir / "Region0" / "summary").mkdir(parents=True)
+    (run_dir / "Region0" / "summary" / "phasic_correction_impact.png").write_bytes(b"")
+    phasic_dir = run_dir / "_analysis" / "phasic_out"
+    phasic_dir.mkdir(parents=True)
+    (phasic_dir / "config_used.yaml").write_text(
+        "dynamic_fit_mode: global_linear_regression\n", encoding="utf-8"
+    )
+    with h5py.File(phasic_dir / "phasic_trace_cache.h5", "w") as handle:
+        meta = handle.create_group("meta")
+        meta.attrs["mode"] = "phasic"
+        meta.attrs["schema_version"] = "1.0"
+        meta.create_dataset("rois", data=np.asarray(["Region0"], dtype="S"))
+        meta.create_dataset("chunk_ids", data=np.asarray([0], dtype=int))
+        group = handle.create_group("roi/Region0/chunk_0")
+        time_sec = np.arange(10, dtype=float)
+        group.create_dataset("time_sec", data=time_sec)
+        group.create_dataset("sig_raw", data=np.linspace(1.0, 2.0, 10))
+        group.create_dataset("dff", data=np.linspace(0.0, 1.0, 10))
+        group.create_dataset("fit_ref", data=np.linspace(1.0, 1.5, 10))
+
+    from photometry_pipeline.completed_run_review import load_completed_phasic_review
+
+    model = load_completed_phasic_review(run_dir)
+    assert model.current_native is False
+    assert model.sessions_for_roi("Region0")[0].strategy_family == "dynamic_fit"
+    assert model.sessions_for_roi("Region0")[0].fitted_reference is not None
+    assert model.sessions_for_roi("Region0")[0].production_f0_baseline is None
+    assert model.strategy_label_for_roi("Region0") == "Global linear regression"
+
+    viewer = RunReportViewer()
+    assert viewer.load_report(str(run_dir)) is True
+    qapp.processEvents()
+    assert viewer.phasic_review_model is not None
+    assert viewer.phasic_review_model.current_native is False
+    assert "Global linear regression" in viewer._correction_summary_label.text()
+    assert "legacy result" in viewer._selected_feature_settings_label.text()
+    assert "Verification" in viewer._region_tab_images["Region0"]
+    viewer.close()
+
+
+def test_mixed_native_review_switch_updates_strategy_and_feature_settings(qapp, tmp_path):
+    from photometry_pipeline.config import Config
+    from photometry_pipeline.pipeline import Pipeline
+    from photometry_pipeline.run_completion_contract import (
+        PROFILE_TUNING_PREP,
+        normalize_run_mode,
+    )
+    from tests.test_run_completion_correction_provenance import (
+        _mixed_map,
+        _root_for_case,
+        _write_source,
+        _write_terminal_set,
+    )
+
+    source = tmp_path / "input" / "2024_01_01-00_00_00" / "fluorescence.csv"
+    _write_source(source)
+    analysis = tmp_path / "mixed_analysis"
+    config = Config(
+        target_fs_hz=10.0,
+        chunk_duration_sec=20.0,
+        rwd_time_col="TimeStamp",
+        uv_suffix="-410",
+        sig_suffix="-470",
+        lowpass_hz=2.0,
+        filter_order=2,
+        signal_only_f0_min_window_samples=21,
+    )
+    Pipeline(config, mode="phasic", per_roi_correction=_mixed_map()).run(
+        str(source.parent.parent), str(analysis), force_format="rwd", recursive=True
+    )
+    root = _root_for_case(tmp_path, analysis, "mixed_native_review")
+    for roi in ("Region0", "Region1"):
+        (root / roi / "summary").mkdir(parents=True, exist_ok=True)
+        (root / roi / "summary" / "phasic_correction_impact.png").write_bytes(b"")
+        (root / roi / "day_plots").mkdir(parents=True, exist_ok=True)
+        (root / roi / "day_plots" / "phasic_dynamic_fit_day_000.png").write_bytes(b"")
+    feature_path = root / "_analysis" / "phasic_out" / "features" / "feature_event_provenance.json"
+    feature_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "guided_feature_event_provenance.v3",
+                "rois": [
+                    {
+                        "roi": "Region0",
+                        "source": "default",
+                        "feature_event_profile_id": "default",
+                        "effective_config_fields": {
+                            "event_signal": "dff",
+                            "peak_threshold_method": "mean_std",
+                            "peak_threshold_k": 2.0,
+                        },
+                    },
+                    {
+                        "roi": "Region1",
+                        "source": "override",
+                        "feature_event_profile_id": "custom",
+                        "effective_config_fields": {
+                            "event_signal": "delta_f",
+                            "peak_threshold_method": "absolute",
+                            "peak_threshold_abs": 0.5,
+                        },
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    mode = normalize_run_mode(
+        run_profile="tuning_prep",
+        run_type="full",
+        acquisition_mode="intermittent",
+        traces_only=False,
+        phasic_analysis=True,
+        tonic_analysis=False,
+        feature_extraction_ran=True,
+        deliverable_profile=PROFILE_TUNING_PREP,
+        expected_rois=["Region0", "Region1"],
+        chunked_input_processing=True,
+        shared_input_manifest=False,
+    )
+    _write_terminal_set(root, mode)
+
+    viewer = RunReportViewer()
+    assert viewer.load_report(str(root)) is True
+    qapp.processEvents()
+    combo_names = [viewer._region_combo.itemText(i) for i in range(viewer._region_combo.count())]
+    assert combo_names == ["Region0", "Region1"]
+
+    viewer._region_combo.setCurrentIndex(0)
+    qapp.processEvents()
+    assert "Global linear regression" in viewer._correction_summary_label.text()
+    assert "mean" in viewer._selected_feature_settings_label.text()
+    assert "threshold" in viewer._selected_feature_settings_label.text()
+    assert viewer._region_tab_images["Region0"]["Verification"]
+    assert "Dynamic Fit" in viewer.available_view_tabs()
+    assert viewer.phasic_review_model.sessions_for_roi("Region0")[0].fitted_reference is not None
+
+    viewer._region_combo.setCurrentIndex(1)
+    qapp.processEvents()
+    assert "Signal-Only F0" in viewer._correction_summary_label.text()
+    assert "absolute threshold" in viewer._selected_feature_settings_label.text()
+    assert "Baseline support:" in viewer._correction_summary_label.text()
+    assert viewer._region_tab_images["Region1"]["Verification"]
+    assert "Correction Reference" in viewer.available_view_tabs()
+    assert "Dynamic Fit" not in viewer.available_view_tabs()
+    signal_only = viewer.phasic_review_model.sessions_for_roi("Region1")[0]
+    assert signal_only.production_f0_baseline is not None
+    assert signal_only.fitted_reference is None
+    assert viewer.applied_dff_state.present is False
+    viewer.close()
 
 
 def test_run_report_viewer_click_to_zoom_toggle(qapp):

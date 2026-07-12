@@ -1,0 +1,763 @@
+"""Persisted native evidence model for completed-run Review and plots.
+
+This module is deliberately read-only.  It never invokes a correction engine or
+reconstructs a Signal-Only baseline from raw fluorescence; current runs are
+bound to the terminal verifier's two-copy requested provenance and the HDF5
+consumed attributes/datasets that verifier already checked.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Mapping
+
+import numpy as np
+import yaml
+
+from photometry_pipeline.input_processing_completeness import (
+    DISPOSITION_AUTHORIZED_EXCLUSION,
+    DISPOSITION_AUTHORIZED_MISSING,
+    DISPOSITION_PROCESS,
+    FROZEN_INPUT_MANIFEST_FILENAME,
+    read_input_completeness,
+    load_frozen_input_manifest,
+)
+from photometry_pipeline.io.hdf5_cache_reader import (
+    open_phasic_cache,
+    list_cache_rois,
+)
+from photometry_pipeline.guided_completed_feature_event_reload import (
+    load_guided_completed_feature_event_state,
+)
+from photometry_pipeline.run_completion_contract import (
+    CORRECTION_PROVENANCE_SCHEMA_VERSION,
+    classify_run_terminal_state,
+    correction_completion_error,
+)
+from photometry_pipeline.core.types import (
+    CORRECTION_STRATEGY_FAMILIES,
+    RESOLVED_DYNAMIC_FIT_MODES,
+)
+
+
+SCIENTIST_STRATEGY_LABELS = {
+    "global_linear_regression": "Global linear regression",
+    "robust_global_event_reject": "Robust global fit with event rejection",
+    "adaptive_event_gated_regression": "Adaptive event-gated regression",
+    "rolling_filtered_to_raw": "Rolling regression (filtered to raw)",
+    "rolling_filtered_to_filtered": "Rolling regression (filtered to filtered)",
+}
+
+
+@dataclass(frozen=True)
+class AnalysisPlotContext:
+    """Immutable source classification plus requested native authority."""
+
+    source_kind: str
+    requested_by_roi: Mapping[str, Mapping[str, Any]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    schema_version: str | None = None
+
+
+def resolve_analysis_plot_context(analysis_out: str | Path) -> AnalysisPlotContext:
+    """Classify an analysis output before a plotter consumes its cache.
+
+    A standalone analysis directory has no run-level terminal files and remains
+    usable through its historical plotting path.  Once a directory is
+    part of a current run (or carries native run metadata), plotting is strict:
+    corrupted/incomplete terminal evidence cannot silently fall back to a
+    global config or to ``fit_ref`` presence.
+    """
+    analysis_path = Path(analysis_out).expanduser().resolve()
+    run_dir = analysis_path.parent.parent
+    classification = classify_run_terminal_state(str(run_dir))
+    if classification.is_current:
+        metadata = _read_json(analysis_path / "run_metadata.json")
+        report = _read_json(analysis_path / "run_report.json")
+        requested, native_provenance = _validate_requested_provenance(metadata, report)
+        return AnalysisPlotContext(
+            source_kind="current",
+            requested_by_roi=(
+                _freeze_requested_by_roi(requested)
+                if native_provenance
+                else _freeze_requested_by_roi({})
+            ),
+            schema_version=(CORRECTION_PROVENANCE_SCHEMA_VERSION if native_provenance else None),
+        )
+    if classification.is_legacy:
+        return AnalysisPlotContext(source_kind="legacy")
+
+    terminal_files_present = any(
+        (run_dir / name).is_file()
+        for name in ("status.json", "MANIFEST.json", "run_report.json")
+    )
+
+    # A wrapper writes the phasic analysis and its two provenance copies before
+    # it can write the final run-level terminal set.  Inspect those copies
+    # before deciding that this is a historical standalone directory.
+    metadata = _read_json(analysis_path / "run_metadata.json")
+    report = _read_json(analysis_path / "run_report.json")
+    try:
+        requested, native_provenance = _validate_requested_provenance(metadata, report)
+    except CompletedRunReviewError as exc:
+        raise CompletedRunReviewError(
+            f"Current native correction provenance is unreadable ({exc})."
+        ) from exc
+    if native_provenance:
+        return AnalysisPlotContext(
+            source_kind="current",
+            requested_by_roi=_freeze_requested_by_roi(requested),
+            schema_version=CORRECTION_PROVENANCE_SCHEMA_VERSION,
+        )
+
+    if not terminal_files_present:
+        return AnalysisPlotContext(source_kind="standalone")
+    raise CompletedRunReviewError(
+        f"This analysis result cannot be verified for plotting ({classification.reason})."
+    )
+
+
+def classify_analysis_plot_source(analysis_out: str | Path) -> str:
+    """Return the historical source-kind API backed by the shared context."""
+    return resolve_analysis_plot_context(analysis_out).source_kind
+
+
+def resolve_persisted_cache_strategy(
+    cache: Any,
+    roi: str,
+    chunk_ids: list[int] | tuple[int, ...],
+    *,
+    strict_current: bool,
+    requested_record: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve one ROI's persisted strategy/reference contract.
+
+    In strict current mode every cached session must carry matching consumed
+    family/selection metadata and its family-specific reference dataset.  The
+    non-strict branch preserves the positive legacy interpretation while still
+    recognizing explicit strategy attributes in standalone native fixtures.
+    """
+    if not callable(getattr(cache, "get", None)):
+        if strict_current:
+            raise CompletedRunReviewError(
+                f"Current cache exposes no strategy metadata for ROI {roi}."
+            )
+        return {
+            "strategy_family": "dynamic_fit",
+            "selected_strategy": "dynamic_fit",
+            "dynamic_fit_mode": None,
+            "field": "fit_ref",
+            "label": "Fitted reference",
+            "title": "Dynamic Fit (Raw Signal + Fitted reference)",
+        }
+    resolved: dict[str, Any] | None = None
+    for chunk_id in chunk_ids:
+        group = cache.get(f"roi/{roi}/chunk_{int(chunk_id)}")
+        if group is None:
+            if strict_current:
+                raise CompletedRunReviewError(
+                    f"Current cache is missing ROI/session {roi}/{chunk_id}."
+                )
+            continue
+        family = str(_attr(group.attrs, "correction_strategy_family", "") or "").strip()
+        selected = str(_attr(group.attrs, "correction_selected_strategy", "") or "").strip()
+        mode = str(_attr(group.attrs, "correction_dynamic_fit_mode", "") or "").strip() or None
+        if strict_current:
+            if not isinstance(requested_record, Mapping):
+                raise CompletedRunReviewError(
+                    f"Current plot has no requested correction provenance for ROI {roi}."
+                )
+            if str(requested_record.get("roi_id", "")) != str(roi):
+                raise CompletedRunReviewError(
+                    f"Requested-versus-consumed correction mismatch for ROI {roi}: ROI identity differs."
+                )
+            if _attr(group.attrs, "correction_execution_status", "") != "consumed":
+                raise CompletedRunReviewError(
+                    f"Current cache ROI {roi}/{chunk_id} has no consumed correction status."
+                )
+            if family not in {"dynamic_fit", "signal_only_f0"}:
+                raise CompletedRunReviewError(
+                    f"Current cache ROI {roi} has no supported consumed strategy family."
+                )
+            if not selected:
+                raise CompletedRunReviewError(
+                    f"Current cache ROI {roi} has no consumed strategy selection."
+                )
+            if family == "signal_only_f0":
+                if selected != "signal_only_f0":
+                    raise CompletedRunReviewError(
+                        f"Current cache ROI {roi} has inconsistent Signal-Only strategy metadata."
+                    )
+                if mode is not None or any(
+                    _attr(group.attrs, key, "")
+                    for key in ("dynamic_fit_mode_resolved", "dynamic_fit_engine")
+                ):
+                    raise CompletedRunReviewError(
+                        f"Current cache ROI {roi} carries dynamic-fit attribution for Signal-Only."
+                    )
+                field = "signal_only_f0_baseline"
+                label = "Signal-only F0 baseline"
+            else:
+                if selected not in RESOLVED_DYNAMIC_FIT_MODES or mode != selected:
+                    raise CompletedRunReviewError(
+                        f"Current cache ROI {roi} has an unsupported or inconsistent dynamic-fit strategy."
+                    )
+                if _attr(group.attrs, "dynamic_fit_mode_resolved", "") != selected:
+                    raise CompletedRunReviewError(
+                        f"Current cache ROI {roi} has no resolved dynamic-fit mode."
+                    )
+                field = "fit_ref"
+                label = "Fitted reference"
+            if field not in group:
+                raise CompletedRunReviewError(
+                    f"Current cache ROI {roi}/{chunk_id} is missing its {label}."
+                )
+            requested_family = str(requested_record.get("strategy_family", ""))
+            requested_selected = str(requested_record.get("selected_strategy", ""))
+            requested_mode = requested_record.get("dynamic_fit_mode")
+            if (
+                family != requested_family
+                or selected != requested_selected
+                or mode != requested_mode
+            ):
+                raise CompletedRunReviewError(
+                    f"Requested-versus-consumed correction mismatch for ROI {roi}/{chunk_id}."
+                )
+            for requested_key, consumed_key in (
+                ("parameter_identity", "correction_parameter_identity"),
+                ("evidence_identity", "correction_evidence_identity"),
+            ):
+                requested_identity = requested_record.get(requested_key, "")
+                if requested_identity and _attr(group.attrs, consumed_key, "") != requested_identity:
+                    raise CompletedRunReviewError(
+                        f"Requested-versus-consumed correction mismatch for ROI {roi}/{chunk_id}: {requested_key}."
+                    )
+            candidate = {
+                "strategy_family": family,
+                "selected_strategy": selected,
+                "dynamic_fit_mode": mode,
+                "parameter_identity": _attr(group.attrs, "correction_parameter_identity", ""),
+                "evidence_identity": _attr(group.attrs, "correction_evidence_identity", ""),
+                "field": field,
+                "label": label,
+                "title": (
+                    "Signal-Only F0 (Raw Signal + Signal-only F0 baseline)"
+                    if family == "signal_only_f0"
+                    else "Dynamic Fit (Raw Signal + Fitted reference)"
+                ),
+            }
+            if resolved is not None and (
+                candidate["strategy_family"] != resolved["strategy_family"]
+                or candidate["selected_strategy"] != resolved["selected_strategy"]
+                or candidate["field"] != resolved["field"]
+            ):
+                raise CompletedRunReviewError(
+                    f"Current cache ROI {roi} changes correction strategy across sessions."
+                )
+            resolved = candidate
+        elif resolved is None:
+            if family == "signal_only_f0" or selected == "signal_only_f0":
+                resolved = {
+                    "strategy_family": "signal_only_f0",
+                    "selected_strategy": "signal_only_f0",
+                    "dynamic_fit_mode": None,
+                    "field": "signal_only_f0_baseline",
+                    "label": "Signal-only F0 baseline",
+                    "title": "Signal-Only F0 (Raw Signal + Signal-only F0 baseline)",
+                }
+            elif family == "dynamic_fit" or "fit_ref" in group:
+                resolved = {
+                    "strategy_family": "dynamic_fit",
+                    "selected_strategy": selected or mode or "dynamic_fit",
+                    "dynamic_fit_mode": mode,
+                    "field": "fit_ref",
+                    "label": "Fitted reference",
+                    "title": "Dynamic Fit (Raw Signal + Fitted reference)",
+                }
+    if resolved is not None:
+        return resolved
+    if strict_current:
+        raise CompletedRunReviewError(
+            f"Current cache contains no strategy evidence for ROI {roi}."
+        )
+    return {
+        "strategy_family": "dynamic_fit",
+        "selected_strategy": "dynamic_fit",
+        "dynamic_fit_mode": None,
+        "field": "fit_ref",
+        "label": "Fitted reference",
+        "title": "Dynamic Fit (Raw Signal + Fitted reference)",
+    }
+
+
+class CompletedRunReviewError(RuntimeError):
+    """The persisted completed result cannot be interpreted safely."""
+
+
+@dataclass(frozen=True)
+class CompletedReviewSession:
+    roi_id: str
+    session_index: int
+    chunk_id: int | None
+    source_file: str
+    disposition: str
+    missing_reason: str = ""
+    time_sec: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=float), repr=False)
+    raw_signal: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=float), repr=False)
+    canonical_dff: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=float), repr=False)
+    strategy_family: str = ""
+    selected_strategy: str = ""
+    dynamic_fit_mode: str | None = None
+    fitted_reference: np.ndarray | None = field(default=None, repr=False)
+    production_f0_baseline: np.ndarray | None = field(default=None, repr=False)
+    signal_only_qc: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def processed(self) -> bool:
+        return self.disposition == DISPOSITION_PROCESS
+
+    @property
+    def strategy_label(self) -> str:
+        if self.strategy_family == "signal_only_f0":
+            return "Signal-Only F0"
+        return SCIENTIST_STRATEGY_LABELS.get(
+            self.dynamic_fit_mode or self.selected_strategy,
+            "Fitted reference",
+        )
+
+    @property
+    def reference_label(self) -> str:
+        return (
+            "Signal-only F0 baseline"
+            if self.strategy_family == "signal_only_f0"
+            else "Fitted reference"
+        )
+
+    @property
+    def correction_reference(self) -> np.ndarray | None:
+        if self.strategy_family == "signal_only_f0":
+            return self.production_f0_baseline
+        return self.fitted_reference
+
+
+@dataclass(frozen=True)
+class CompletedRunReviewModel:
+    run_dir: str
+    rois: tuple[str, ...]
+    sessions_by_roi: dict[str, tuple[CompletedReviewSession, ...]]
+    requested_by_roi: dict[str, dict[str, Any]]
+    feature_settings_by_roi: dict[str, dict[str, Any]]
+    current_native: bool
+    terminal_state: str
+
+    @property
+    def heterogeneous_correction(self) -> bool:
+        families = {
+            str(record.get("strategy_family", ""))
+            for record in self.requested_by_roi.values()
+        }
+        selections = {
+            str(record.get("selected_strategy", ""))
+            for record in self.requested_by_roi.values()
+        }
+        return len(families) > 1 or len(selections) > 1
+
+    def sessions_for_roi(self, roi_id: str) -> tuple[CompletedReviewSession, ...]:
+        return self.sessions_by_roi.get(str(roi_id), ())
+
+    def strategy_label_for_roi(self, roi_id: str) -> str:
+        records = self.sessions_for_roi(roi_id)
+        for record in records:
+            if record.processed:
+                return record.strategy_label
+        requested = self.requested_by_roi.get(str(roi_id), {})
+        if requested.get("strategy_family") == "signal_only_f0":
+            return "Signal-Only F0"
+        return SCIENTIST_STRATEGY_LABELS.get(
+            requested.get("dynamic_fit_mode") or requested.get("selected_strategy"),
+            "Fitted reference",
+        )
+
+    def signal_only_qc_for_roi(self, roi_id: str) -> dict[str, Any]:
+        """Return the persisted concise QC attributes for one ROI."""
+        for record in self.sessions_for_roi(roi_id):
+            if record.processed and record.strategy_family == "signal_only_f0":
+                return dict(record.signal_only_qc)
+        return {}
+
+    def feature_settings_summary_for_roi(self, roi_id: str) -> str:
+        """Return a scientist-facing summary of the selected ROI's settings."""
+        row = self.feature_settings_by_roi.get(str(roi_id))
+        if not row:
+            if self.current_native:
+                return "Feature detection settings are unavailable for this result."
+            return "Feature detection settings are unavailable for this legacy result."
+        fields = row.get("effective_config_fields")
+        if not isinstance(fields, dict) or not fields:
+            return "Feature detection settings are unavailable for this result."
+        source = str(row.get("source", "")).strip().lower()
+        source_label = "Custom feature settings" if source == "override" else "Default feature settings"
+        method = str(fields.get("peak_threshold_method", "mean_std")).strip().lower()
+        method_labels = {
+            "mean_std": "mean ± SD threshold",
+            "percentile": "percentile threshold",
+            "absolute": "absolute threshold",
+        }
+        method_label = method_labels.get(method, "configured threshold")
+        threshold_key = {
+            "mean_std": "peak_threshold_k",
+            "percentile": "peak_threshold_percentile",
+            "absolute": "peak_threshold_abs",
+        }.get(method)
+        threshold = fields.get(threshold_key, "") if threshold_key else ""
+        signal = str(fields.get("event_signal", "dff")).strip().lower()
+        signal_label = {"dff": "dF/F", "delta_f": "delta F"}.get(signal, signal or "selected trace")
+        threshold_text = f" ({threshold:g})" if isinstance(threshold, (int, float)) else (f" ({threshold})" if threshold else "")
+        return f"{source_label}: {method_label}{threshold_text}; event signal {signal_label}."
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise CompletedRunReviewError(f"Could not read {path.name}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise CompletedRunReviewError(f"{path.name} is not a JSON object")
+    return value
+
+
+def _attr(attrs: Any, key: str, default: Any = None) -> Any:
+    value = attrs.get(key, default)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _load_sessions_index(run_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    manifest_path = run_dir / FROZEN_INPUT_MANIFEST_FILENAME
+    if manifest_path.is_file():
+        manifest, error = load_frozen_input_manifest(str(manifest_path))
+        if manifest is None:
+            raise CompletedRunReviewError(f"Frozen session index is invalid: {error}")
+        payload, payload_error = read_input_completeness(
+            str(run_dir / "_analysis" / "phasic_out")
+        )
+        if payload is None:
+            raise CompletedRunReviewError(
+                f"Phasic session accounting is invalid: {payload_error}"
+            )
+        return list(manifest.get("expected", [])), list(payload.get("processed", []))
+
+    payload, error = read_input_completeness(
+        str(run_dir / "_analysis" / "phasic_out")
+    )
+    if payload is None:
+        return [], []
+    return list(payload.get("expected", [])), list(payload.get("processed", []))
+
+
+def _load_feature_settings(phasic_dir: Path) -> dict[str, dict[str, Any]]:
+    state = load_guided_completed_feature_event_state(phasic_dir.parent.parent)
+    if not state.present or not state.valid:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for row in state.rows:
+        out[str(row.roi)] = {
+            "roi": str(row.roi),
+            "source": str(row.source),
+            "feature_event_profile_id": str(row.feature_event_profile_id),
+            "effective_config_fields": dict(row.effective_config_fields),
+        }
+    return out
+
+
+def _validate_requested_provenance(
+    metadata: dict[str, Any] | None,
+    report: dict[str, Any] | None,
+) -> tuple[dict[str, dict[str, Any]], bool]:
+    metadata_prov = metadata.get("correction_provenance") if metadata else None
+    derived = report.get("derived_settings") if report else None
+    report_prov = derived.get("correction_provenance") if isinstance(derived, dict) else None
+    has_metadata = isinstance(metadata, dict) and "correction_provenance" in metadata
+    has_report = isinstance(derived, dict) and "correction_provenance" in derived
+    if not has_metadata and not has_report:
+        return {}, False
+    if has_metadata != has_report:
+        raise CompletedRunReviewError(
+            "Completed result has only one copy of correction settings."
+        )
+    if not isinstance(metadata_prov, dict) or not isinstance(report_prov, dict):
+        raise CompletedRunReviewError(
+            "Completed result correction settings are malformed."
+        )
+    if metadata_prov != report_prov:
+        raise CompletedRunReviewError(
+            "Completed result correction settings disagree between report and metadata."
+        )
+    if metadata_prov.get("schema_version") != CORRECTION_PROVENANCE_SCHEMA_VERSION:
+        raise CompletedRunReviewError("Completed result correction settings are unsupported.")
+    if metadata_prov.get("analysis_mode") != "phasic":
+        raise CompletedRunReviewError("Completed result correction settings are not bound to phasic analysis.")
+    if metadata_prov.get("source") not in {
+        "explicit_per_roi_map",
+        "legacy_uniform_translation",
+    }:
+        raise CompletedRunReviewError("Completed result correction settings have an unsupported source.")
+    records = metadata_prov.get("requested_by_roi")
+    if not isinstance(records, list):
+        raise CompletedRunReviewError("Completed result correction settings are incomplete.")
+    included = metadata_prov.get("included_roi_ids")
+    if not isinstance(included, list):
+        raise CompletedRunReviewError("Completed result correction settings have incomplete ROI coverage.")
+    if len(included) != len(set(str(roi) for roi in included)):
+        raise CompletedRunReviewError("Completed result correction settings duplicate an included ROI.")
+    by_roi: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, dict) or not str(record.get("roi_id", "")):
+            raise CompletedRunReviewError("Completed result correction settings contain an invalid ROI.")
+        roi = str(record["roi_id"])
+        if roi in by_roi:
+            raise CompletedRunReviewError("Completed result correction settings duplicate an ROI.")
+        family = record.get("strategy_family")
+        selected = record.get("selected_strategy")
+        mode = record.get("dynamic_fit_mode")
+        if family not in CORRECTION_STRATEGY_FAMILIES:
+            raise CompletedRunReviewError(
+                f"Completed result correction settings have an unsupported strategy family for ROI {roi}."
+            )
+        if not isinstance(selected, str) or not selected:
+            raise CompletedRunReviewError(
+                f"Completed result correction settings have no selected strategy for ROI {roi}."
+            )
+        if family == "dynamic_fit":
+            if mode not in RESOLVED_DYNAMIC_FIT_MODES or selected != mode:
+                raise CompletedRunReviewError(
+                    f"Completed result correction settings have an invalid dynamic-fit mode for ROI {roi}."
+                )
+        elif selected != "signal_only_f0" or mode is not None:
+            raise CompletedRunReviewError(
+                f"Completed result correction settings have invalid Signal-Only fields for ROI {roi}."
+            )
+        for identity_key in ("parameter_identity", "evidence_identity"):
+            value = record.get(identity_key, "")
+            if value is not None and not isinstance(value, str):
+                raise CompletedRunReviewError(
+                    f"Completed result correction settings have malformed {identity_key} for ROI {roi}."
+                )
+        by_roi[roi] = dict(record)
+    if set(by_roi) != {str(roi) for roi in included}:
+        raise CompletedRunReviewError(
+            "Completed result correction settings do not cover exactly the included ROIs."
+        )
+    return by_roi, True
+
+
+def _freeze_requested_by_roi(
+    requested_by_roi: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Mapping[str, Any]]:
+    return MappingProxyType(
+        {
+            str(roi): MappingProxyType(dict(record))
+            for roi, record in requested_by_roi.items()
+        }
+    )
+
+
+def load_completed_phasic_review(run_dir: str | Path) -> CompletedRunReviewModel:
+    """Load a completed phasic result exclusively from persisted evidence."""
+    resolved = Path(run_dir).expanduser().resolve()
+    classification = classify_run_terminal_state(str(resolved))
+    if not classification.is_success:
+        raise CompletedRunReviewError(
+            f"This completed result cannot be verified ({classification.reason})."
+        )
+    phasic_dir = resolved / "_analysis" / "phasic_out"
+    cache_path = phasic_dir / "phasic_trace_cache.h5"
+    if not cache_path.is_file():
+        raise CompletedRunReviewError("Completed result has no phasic canonical trace cache.")
+
+    metadata = _read_json(phasic_dir / "run_metadata.json")
+    report = _read_json(phasic_dir / "run_report.json")
+    requested_by_roi, current_native = _validate_requested_provenance(metadata, report)
+    if classification.is_current and not current_native:
+        raise CompletedRunReviewError(
+            "The current phasic result has no verified native correction settings."
+        )
+    if current_native:
+        correction_error = correction_completion_error(
+            str(resolved), classification.run_mode
+        )
+        if correction_error:
+            raise CompletedRunReviewError(
+                f"Completed result correction evidence could not be verified ({correction_error})."
+            )
+
+    expected, processed = _load_sessions_index(resolved)
+    processed_by_index = {
+        int(record["index"]): record
+        for record in processed
+        if isinstance(record, dict) and isinstance(record.get("index"), int)
+    }
+
+    with open_phasic_cache(str(cache_path)) as cache:
+        cache_rois = [str(roi) for roi in list_cache_rois(cache)]
+        if current_native:
+            rois = [str(roi) for roi in requested_by_roi]
+            if set(rois) != set(cache_rois):
+                raise CompletedRunReviewError("Completed result ROI identities do not match its correction settings.")
+        else:
+            # Positive legacy runs retain the historical uniform fit-only view.
+            rois = cache_rois
+
+        config_mode = ""
+        if not current_native:
+            try:
+                config = yaml.safe_load((phasic_dir / "config_used.yaml").read_text(encoding="utf-8")) or {}
+            except Exception:
+                config = {}
+            config_mode = str(config.get("dynamic_fit_mode", "")) if isinstance(config, dict) else ""
+
+        sessions_by_roi: dict[str, list[CompletedReviewSession]] = {roi: [] for roi in rois}
+        expected_entries = sorted(
+            [entry for entry in expected if isinstance(entry, dict)],
+            key=lambda entry: int(entry.get("index", 0)),
+        )
+        using_cache_fallback = False
+        if not expected_entries:
+            # Preview/legacy fallback: expose cache chunks as processed sessions.
+            using_cache_fallback = True
+            expected_entries = [
+                {"index": int(chunk_id), "disposition": DISPOSITION_PROCESS}
+                for chunk_id in cache["meta"]["chunk_ids"][()]
+            ]
+
+        for entry in expected_entries:
+            session_index = int(entry.get("index", 0))
+            disposition = str(entry.get("disposition", DISPOSITION_PROCESS))
+            processed_record = processed_by_index.get(session_index)
+            chunk_id = (
+                int(processed_record["cache_chunk_id"])
+                if isinstance(processed_record, dict)
+                and isinstance(processed_record.get("cache_chunk_id"), int)
+                else (session_index if using_cache_fallback else None)
+            )
+            source_file = str(
+                (processed_record or {}).get("source", entry.get("source", ""))
+            )
+            reason = str(entry.get("reason", entry.get("failure_category", "")) or "")
+            for roi in rois:
+                if disposition != DISPOSITION_PROCESS:
+                    sessions_by_roi[roi].append(
+                        CompletedReviewSession(
+                            roi_id=roi,
+                            session_index=session_index,
+                            chunk_id=None,
+                            source_file=source_file,
+                            disposition=disposition,
+                            missing_reason=reason,
+                            strategy_family=(
+                                requested_by_roi.get(roi, {}).get("strategy_family", "")
+                            ),
+                            selected_strategy=(
+                                requested_by_roi.get(roi, {}).get("selected_strategy", "")
+                            ),
+                        )
+                    )
+                    continue
+                if chunk_id is None:
+                    raise CompletedRunReviewError(
+                        f"Processed session {session_index} has no canonical chunk identity."
+                    )
+                try:
+                    arrays = cache[f"roi/{roi}/chunk_{chunk_id}"]
+                except Exception as exc:
+                    raise CompletedRunReviewError(
+                        f"Completed result is missing ROI/session {roi}/{chunk_id}."
+                    ) from exc
+                required = ("time_sec", "sig_raw", "dff")
+                if any(name not in arrays for name in required):
+                    raise CompletedRunReviewError(
+                        f"Completed result is missing canonical data for ROI/session {roi}/{chunk_id}."
+                    )
+                time_sec = np.asarray(arrays["time_sec"][()], dtype=float)
+                raw_signal = np.asarray(arrays["sig_raw"][()], dtype=float)
+                dff = np.asarray(arrays["dff"][()], dtype=float)
+                attrs = arrays.attrs
+                if current_native:
+                    request = requested_by_roi.get(roi)
+                    if request is None:
+                        raise CompletedRunReviewError(f"No requested correction settings for ROI {roi}.")
+                    family = str(request.get("strategy_family", ""))
+                    selected = str(request.get("selected_strategy", ""))
+                    mode = request.get("dynamic_fit_mode")
+                    if str(_attr(attrs, "correction_strategy_family", "")) != family:
+                        raise CompletedRunReviewError(f"Consumed strategy mismatch for ROI {roi}.")
+                    if str(_attr(attrs, "correction_selected_strategy", "")) != selected:
+                        raise CompletedRunReviewError(f"Consumed selection mismatch for ROI {roi}.")
+                else:
+                    family = "dynamic_fit"
+                    mode = str(_attr(attrs, "dynamic_fit_mode_resolved", config_mode) or config_mode)
+                    selected = mode or "dynamic_fit"
+
+                fit_ref = None
+                baseline = None
+                qc: dict[str, Any] = {}
+                if family == "signal_only_f0":
+                    if "signal_only_f0_baseline" not in arrays:
+                        raise CompletedRunReviewError(f"Signal-Only baseline is missing for ROI {roi}.")
+                    baseline = np.asarray(arrays["signal_only_f0_baseline"][()], dtype=float)
+                    for key, value in attrs.items():
+                        key_text = str(key)
+                        if key_text.startswith("signal_only_f0_production_") or key_text in {
+                            "signal_only_f0_status",
+                            "signal_only_f0_warning",
+                            "signal_only_f0_candidate_viability",
+                            "signal_only_f0_candidate_confidence",
+                            "signal_only_f0_anchor_status",
+                            "signal_only_f0_flags",
+                        }:
+                            qc[key_text] = _attr(attrs, key_text, value)
+                elif family == "dynamic_fit":
+                    if "fit_ref" not in arrays:
+                        raise CompletedRunReviewError(f"Fitted reference is missing for ROI {roi}.")
+                    fit_ref = np.asarray(arrays["fit_ref"][()], dtype=float)
+                else:
+                    raise CompletedRunReviewError(f"Unknown consumed correction family for ROI {roi}.")
+
+                sessions_by_roi[roi].append(
+                    CompletedReviewSession(
+                        roi_id=roi,
+                        session_index=session_index,
+                        chunk_id=chunk_id,
+                        source_file=source_file,
+                        disposition=disposition,
+                        time_sec=time_sec,
+                        raw_signal=raw_signal,
+                        canonical_dff=dff,
+                        strategy_family=family,
+                        selected_strategy=selected,
+                        dynamic_fit_mode=(str(mode) if mode is not None else None),
+                        fitted_reference=fit_ref,
+                        production_f0_baseline=baseline,
+                        signal_only_qc=qc,
+                    )
+                )
+
+    return CompletedRunReviewModel(
+        run_dir=str(resolved),
+        rois=tuple(rois),
+        sessions_by_roi={roi: tuple(rows) for roi, rows in sessions_by_roi.items()},
+        requested_by_roi=requested_by_roi,
+        feature_settings_by_roi=_load_feature_settings(phasic_dir),
+        current_native=current_native,
+        terminal_state=classification.state,
+    )
