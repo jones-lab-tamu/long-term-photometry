@@ -298,7 +298,7 @@ def test_request_and_identity_refusals(input_value, identity, expected):
                     r.acquisition_dataset, allow_partial_final_window=True
                 ),
             ),
-            "incomplete_final_policy_not_supported",
+                "incomplete_final_policy_not_supported",
         ),
         (
             lambda r: _unchecked(
@@ -308,7 +308,7 @@ def test_request_and_identity_refusals(input_value, identity, expected):
                     exclude_incomplete_final_rwd_chunk=True,
                 ),
             ),
-            "incomplete_final_policy_not_supported",
+                None,
         ),
         (
             lambda r: _unchecked(
@@ -317,7 +317,7 @@ def test_request_and_identity_refusals(input_value, identity, expected):
                     r.correction, global_dynamic_fit_mode="signal_only_f0"
                 ),
             ),
-            "signal_only_not_supported",
+            "unsupported_correction_strategy",
         ),
         (
             lambda r: _unchecked(
@@ -373,7 +373,10 @@ def test_semantic_refusals(mutate, expected):
             request
         ),
     )
-    assert _category(result) == expected
+    if expected is None:
+        assert isinstance(result, mapping.GuidedProductionMappingSuccess)
+    else:
+        assert _category(result) == expected
 
 
 @pytest.mark.parametrize(

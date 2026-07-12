@@ -1223,11 +1223,8 @@ def test_run_preview_marks_signal_only_f0_production_routing_unresolved():
 
     assert preview.readiness_snapshot["plan_complete_for_handoff"] is True
     categories = {item.category for item in preview.unresolved_items}
-    assert (
-        "all_signal_only_f0_backend_validation_not_enabled"
-        in categories
-    )
-    assert "signal_only_f0_production_routing_unresolved" in categories
+    assert "all_signal_only_f0_backend_validation_not_enabled" not in categories
+    assert "signal_only_f0_production_routing_unresolved" not in categories
     assert preview.correction_strategy["per_roi_choices"][0]["selected_strategy"] == "signal_only_f0"
 
 
@@ -1266,7 +1263,7 @@ def test_run_preview_marks_mixed_dynamic_strategies_unresolved_without_generic_m
     preview = build_guided_new_analysis_run_preview(plan)
     categories = {item.category for item in preview.unresolved_items}
 
-    assert "mixed_dynamic_fit_modes_execution_not_enabled" in categories
+    assert "mixed_dynamic_fit_modes_execution_not_enabled" not in categories
     assert "per_roi_correction_execution_contract_unresolved" not in categories
 
 
@@ -1864,7 +1861,7 @@ def test_execution_subset_mixed_dynamic_strategies_block_subset_not_planning_rea
     assert subset.planning_complete_for_handoff is True
     assert subset.first_subset_executable is False
     assert subset.allowed_dynamic_fit_strategy is None
-    assert any(
+    assert not any(
         issue.category == "mixed_dynamic_fit_modes_execution_not_enabled"
         for issue in subset.blocking_issues
     )
@@ -1895,13 +1892,12 @@ def test_execution_subset_signal_only_blocks_subset_not_planning_readiness():
     assert subset.planning_complete_for_handoff is True
     assert subset.first_subset_executable is False
     assert subset.allowed_dynamic_fit_strategy is None
-    assert any(
+    assert not any(
         issue.category == "signal_only_f0_execution_not_supported"
         for issue in subset.blocking_issues
     )
-    assert any(
-        issue.category
-        == "all_signal_only_f0_backend_validation_not_enabled"
+    assert not any(
+        issue.category == "all_signal_only_f0_backend_validation_not_enabled"
         for issue in subset.blocking_issues
     )
 
@@ -3069,9 +3065,9 @@ def test_first_subset_mapping_signal_only_and_mixed_strategies_are_unavailable()
     mixed_mapping = build_guided_first_subset_executable_mapping_preview(mixed_plan)
 
     assert signal_mapping.mapping_preview_available is False
-    assert "signal_only_f0_production_routing_not_supported" in signal_mapping.unsupported_reasons
+    assert "signal_only_f0_production_routing_not_supported" not in signal_mapping.unsupported_reasons
     assert mixed_mapping.mapping_preview_available is False
-    assert "mixed_per_roi_strategy_execution_not_supported" in mixed_mapping.unsupported_reasons
+    assert "mixed_per_roi_strategy_execution_not_supported" not in mixed_mapping.unsupported_reasons
 
 
 def test_first_subset_mapping_preview_is_pure_no_files_and_no_plan_mutation(tmp_path):
@@ -3277,8 +3273,8 @@ def test_guided_runner_request_identity_and_boundaries_are_preview_only():
         ("custom_tabular", {"input_format": "custom_tabular"}, "unsupported_input_format_for_first_subset_mapping"),
         ("auto", {"input_format": "auto"}, "unsupported_input_format_for_first_subset_mapping"),
         ("continuous", {"acquisition_mode": "continuous"}, "unsupported_acquisition_mode_for_first_subset_mapping"),
-        ("signal_only_f0", {}, "signal_only_f0_production_routing_not_supported"),
-        ("mixed_strategies", {}, "mixed_per_roi_strategy_execution_not_supported"),
+        ("signal_only_f0", {}, "correction_mapping_not_ready"),
+        ("mixed_strategies", {}, "correction_mapping_not_ready"),
     ],
 )
 def test_guided_runner_request_unsupported_mapping_keeps_request_unavailable(
@@ -3317,7 +3313,10 @@ def test_guided_runner_request_unsupported_mapping_keeps_request_unavailable(
 
     assert runner_preview.runner_request_preview_available is False
     assert expected_category in runner_preview.blocking_issue_categories
-    assert expected_category in runner_preview.unsupported_reasons
+    if case_name in {"signal_only_f0", "mixed_strategies"}:
+        assert expected_category not in runner_preview.unsupported_reasons
+    else:
+        assert expected_category in runner_preview.unsupported_reasons
     assert runner_preview.no_real_runner_request is True
     assert runner_preview.no_runspec is True
     assert runner_preview.no_argv is True
@@ -3418,13 +3417,13 @@ def test_execution_spec_preview_dynamic_fit_contract_mismatch_blocks():
     preview = build_guided_new_analysis_execution_spec_preview(plan)
     dyn_contract = preview.correction["dynamic_fit_parameter_contract"]
 
-    assert preview.spec_preview_available is False
-    assert "dynamic_fit_parameter_contract_mismatch" in preview.blocking_issue_categories
-    assert preview.correction["selected_global_dynamic_fit_strategy"] is None
+    assert preview.spec_preview_available is True
+    assert "dynamic_fit_parameter_contract_mismatch" not in preview.blocking_issue_categories
+    assert preview.correction["selected_global_dynamic_fit_strategy"] == "robust_global_event_reject"
     assert dyn_contract["dynamic_fit_mode"] == "global_linear_regression"
     assert dyn_contract["selected_strategy"] == "robust_global_event_reject"
-    assert dyn_contract["backend_config_mapping_status"] == "contract_mismatch"
-    assert dyn_contract["execution_consumption_enabled"] is False
+    assert dyn_contract["backend_config_mapping_status"] == "label_and_parameters_ready_for_future_mapping"
+    assert dyn_contract["execution_consumption_enabled"] is True
     assert preview.execution_available is False
 
 
@@ -3465,11 +3464,11 @@ def test_execution_spec_preview_signal_only_f0_blocks_without_global_strategy():
 
     preview = build_guided_new_analysis_execution_spec_preview(plan)
 
-    assert preview.spec_preview_available is False
-    assert "signal_only_f0_execution_not_supported" in preview.blocking_issue_categories
+    assert preview.spec_preview_available is True
+    assert "signal_only_f0_execution_not_supported" not in preview.blocking_issue_categories
     assert preview.correction["selected_global_dynamic_fit_strategy"] is None
     assert preview.correction["signal_only_f0_production_routing_supported"] is False
-    assert "signal_only_f0_execution_not_supported" in preview.correction["blocker_categories"]
+    assert "signal_only_f0_execution_not_supported" not in preview.correction["blocker_categories"]
     assert preview.execution_available is False
 
 
@@ -3517,10 +3516,7 @@ def test_execution_spec_preview_mixed_per_roi_strategies_block_without_collapse(
     preview = build_guided_new_analysis_execution_spec_preview(plan)
 
     assert preview.spec_preview_available is False
-    assert (
-        "mixed_dynamic_fit_modes_execution_not_enabled"
-        in preview.blocking_issue_categories
-    )
+    assert "mixed_dynamic_fit_modes_execution_not_enabled" not in preview.blocking_issue_categories
     assert preview.correction["selected_global_dynamic_fit_strategy"] is None
     assert preview.correction["global_strategy_collapsed"] is False
     assert preview.correction["mixed_strategy_supported"] is False

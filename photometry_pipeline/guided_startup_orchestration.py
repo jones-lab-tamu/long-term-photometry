@@ -66,8 +66,6 @@ _PROHIBITED_ARGUMENTS = frozenset(
     (
         "--out-base",
         "--overwrite",
-        "tonic",
-        "both",
         "--preview-first-n",
         "--discover",
         "--validate-only",
@@ -225,7 +223,10 @@ def _validate_plan(
                 GUIDED_CANDIDATE_MANIFEST_FILENAME,
             ),
         ),
-        ("--mode", "phasic"),
+        (
+            "--mode",
+            request.authorization_result.production_intent.execution_profile.execution_mode,
+        ),
         ("--run-type", "full"),
     )
     for flag, expected in required:

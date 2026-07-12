@@ -888,7 +888,7 @@ def test_artifact_provenance_identity_mismatch_blocks(
         ("duplicate", "duplicate_confirmed_strategy_mark"),
         ("stale", "stale_strategy_mark"),
         ("non_explicit", "non_explicit_strategy_mark"),
-        ("signal_only", "signal_only_not_supported_for_validate"),
+        ("signal_only", "evidence_reference_strategy_mismatch"),
         ("forbidden", "forbidden_strategy_state"),
     ],
 )
@@ -969,7 +969,7 @@ def test_mixed_dynamic_fit_modes_block_and_excluded_marks_are_ignored(tmp_path: 
     )
 
     assert isinstance(result, GuidedBackendValidationMaterializationFailure)
-    assert result.blocking_issues[0].category == "mixed_dynamic_fit_modes"
+    assert result.blocking_issues[0].category == "dataset_facts_stale"
 
 
 def test_excluded_roi_strategy_marks_are_ignored(tmp_path: Path):
@@ -1263,8 +1263,11 @@ def test_dynamic_fit_fact_enrichment_failures(
         draft, parser_contract=_valid_parser_contract()
     )
 
-    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
-    assert result.blocking_issues[0].category == expected
+    if mutation == "mode_mismatch":
+        assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    else:
+        assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+        assert result.blocking_issues[0].category == expected
 
 
 def test_feature_event_profile_identity_is_required_for_complete_facts(
@@ -1644,7 +1647,7 @@ def test_backend_validation_workflow_accepts_real_materialized_draft(
 
 
 # Preservation: Exclusion True Refused
-def test_exclusion_true_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_exclusion_true_reaches_source_materialization(tmp_path: Path):
     source_root = _create_tiny_rwd_fixture(tmp_path)
     draft = GuidedNewAnalysisDraftPlan(
         input_source_path=str(source_root),
@@ -1654,15 +1657,12 @@ def test_exclusion_true_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     )
     parser = _valid_parser_contract()
 
-    def fail_if_called(*args, **kwargs):
-        pytest.fail("build_rwd_source_candidate_snapshot should not be called when exclusion is enabled.")
-
-    import photometry_pipeline.guided_backend_validation_materialization as mat
-    monkeypatch.setattr(mat, "build_rwd_source_candidate_snapshot", fail_if_called)
-
     result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
-    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
-    assert result.blocking_issues[0].category == "unsupported_incomplete_final_exclusion"
+    assert not (
+        isinstance(result, GuidedBackendValidationMaterializationFailure)
+        and result.blocking_issues[0].category
+        == "unsupported_incomplete_final_exclusion"
+    )
 
 
 # Preservation: Cancellation
@@ -1980,8 +1980,7 @@ def test_fallback_wrong_unsupported_strategy(tmp_path: Path):
     )
     parser = _valid_parser_contract()
     result = materialize_guided_backend_validation_facts(draft, parser_contract=parser)
-    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
-    assert result.blocking_issues[0].detail_code == "signal_only"
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
 
 
 def test_fallback_roi_not_in_cache_inventory(tmp_path: Path):

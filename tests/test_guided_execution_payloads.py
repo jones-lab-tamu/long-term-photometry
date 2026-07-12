@@ -370,7 +370,7 @@ def test_contract_immutability(auth_result):
     # 2. Passing a mutable list override, mutating original list does not change derivation/identity
     my_list = ["file1.csv", "file2.csv"]
     overrides_dict = dict(payloads.GUIDED_CONFIG_DEFAULT_OVERRIDES)
-    overrides_dict["rwd_excluded_source_files"] = my_list
+    overrides_dict["authorized_missing_sessions"] = my_list
     contract_list = payloads.build_guided_execution_startup_mapping_contract(fixed_config_overrides=overrides_dict)
     
     # Get initial identity/derivation
@@ -387,7 +387,7 @@ def test_contract_immutability(auth_result):
 
     # Verify that the value stored is immutable (tuple)
     for item in contract_list.fixed_config_overrides:
-        if item.name == "rwd_excluded_source_files":
+        if item.name == "authorized_missing_sessions":
             assert isinstance(item.value, tuple)
             assert item.value == ("file1.csv", "file2.csv")
 

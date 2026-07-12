@@ -249,7 +249,6 @@ def main():
     if args.guided_candidate_manifest and (
         args.mode not in {"phasic", "tonic"}
         or args.format != "rwd"
-        or args.overwrite
         or args.traces_only
         or args.preview_first_n is not None
         or args.include_rois is not None

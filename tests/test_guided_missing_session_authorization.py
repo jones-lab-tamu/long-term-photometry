@@ -8,7 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 import numpy as np
-from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication, QPushButton, QMessageBox, QFileDialog
+import h5py
 
 from gui.main_window import MainWindow, GUIDED_WORKFLOW_STEPS
 from gui.run_report_parser import classify_completed_run_candidate
@@ -78,7 +80,14 @@ def qapp():
 
 @pytest.fixture
 def window(qapp):
-    instance = MainWindow()
+    from photometry_pipeline.guided_execution_capabilities import (
+        GuidedExecutionCapabilities,
+    )
+    instance = MainWindow(
+        guided_execution_capabilities=GuidedExecutionCapabilities(
+            allow_signal_only_f0_execution=True
+        )
+    )
     yield instance
     instance.close()
     instance.deleteLater()
@@ -543,7 +552,11 @@ def test_gui_verification_boundaries(window, tmp_path: Path):
     assert window._guided_missing_session_approval_from_failed_run(result_wrong_phase) is None
 
 
-def _setup_guided_recording(window, tmp_path, input_root, monkeypatch):
+def _setup_guided_recording(
+    window, tmp_path, input_root, monkeypatch, *,
+    strategy_label="Global Linear Regression", analysis_mode="both",
+    exclude_incomplete_final=False,
+):
     window._guided_workflow_stepper.setCurrentRow(0)
     window._guided_start_setup_btn.click()
 
@@ -551,7 +564,7 @@ def _setup_guided_recording(window, tmp_path, input_root, monkeypatch):
     output_dir.mkdir()
     window._guided_input_dir_edit.setText(str(input_root))
     window._guided_output_dir_edit.setText(str(output_dir))
-    window._mode_combo.setCurrentText("both")
+    window._mode_combo.setCurrentText(analysis_mode)
     idx = window._format_combo.findText("rwd")
     window._format_combo.setCurrentIndex(idx)
 
@@ -608,8 +621,8 @@ def _setup_guided_recording(window, tmp_path, input_root, monkeypatch):
 
     from photometry_pipeline.core.types import Chunk
     time_sec = np.arange(6000, dtype=float) / 10.0
-    uv = np.ones(6000)
-    sig = np.ones(6000) * 1.2
+    uv = 1.0 + 0.03 * np.sin(time_sec * 0.15)
+    sig = 1.25 * uv + 0.04 * np.sin(time_sec * 0.7)
 
     import photometry_pipeline.preview.correction_preview as correction_preview_module
     def fake_load_chunk(path, input_format, _config, chunk_id):
@@ -631,6 +644,9 @@ def _setup_guided_recording(window, tmp_path, input_root, monkeypatch):
         window._guided_acquisition_mode_combo.setCurrentIndex(acquisition_idx)
     window._guided_sessions_per_hour_edit.setText("1")
     window._guided_session_duration_edit.setText("600")
+    window._guided_exclude_incomplete_final_rwd_chunk_cb.setChecked(
+        exclude_incomplete_final
+    )
     window._guided_dataset_contract_apply_btn.click()
 
     window._guided_workflow_stepper.setCurrentRow(
@@ -640,16 +656,20 @@ def _setup_guided_recording(window, tmp_path, input_root, monkeypatch):
     roi = "Region0"
     roi_idx = window._guided_preview_roi_combo.findData(roi)
     window._guided_preview_roi_combo.setCurrentIndex(roi_idx)
-    window._guided_preview_generate_btn.click()
-
-    window._guided_confirm_roi_combo.setCurrentIndex(
-        window._guided_confirm_roi_combo.findData(roi)
-    )
-    window._guided_confirm_chunk_combo.setCurrentIndex(0)
-    strategy_index = window._guided_confirm_strategy_combo.findText("Global Linear Regression")
+    strategy_index = window._guided_confirm_strategy_combo.findText(strategy_label)
     window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
-    window._guided_confirm_ack_cb.setChecked(True)
-    window._guided_confirm_mark_btn.click()
+    window._guided_preview_generate_btn.click()
+    row = window._guided_local_preview_confirmation_rows[roi]
+    selected = (
+        "signal_only_f0"
+        if strategy_label == "Signal-Only F0"
+        else "global_linear_regression"
+    )
+    row["strategy_combo"].setCurrentIndex(
+        row["strategy_combo"].findData(selected)
+    )
+    assert row["action_button"].isEnabled()
+    row["action_button"].click()
 
     window._guided_workflow_stepper.setCurrentRow(
         list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
@@ -759,7 +779,14 @@ def test_real_wrapper_failed_input_processing_failure_remains_accepted(window, t
 
 def test_guided_missing_session_real_gui_rerun_lifecycle(window, tmp_path: Path, monkeypatch, qapp):
     input_root = _build_input(tmp_path, corrupted=(1,), n_sessions=3)
-    _setup_guided_recording(window, tmp_path, input_root, monkeypatch)
+    _setup_guided_recording(
+        window,
+        tmp_path,
+        input_root,
+        monkeypatch,
+        strategy_label="Signal-Only F0",
+        analysis_mode="phasic",
+    )
 
     build_identity = mapping.build_application_build_identity(
         distribution_name="photometry-pipeline",
@@ -874,3 +901,138 @@ def test_guided_missing_session_real_gui_rerun_lifecycle(window, tmp_path: Path,
     # Check that Session 3 remains chronological session index 2 and retains timestamp/source
     assert completeness["processed"][-1]["index"] == 2
     assert "2024_01_01-02_00_00" in completeness["processed"][-1]["source"]
+    from photometry_pipeline.run_completion_contract import (
+        TERMINAL_SUCCESS_WITH_MISSING,
+        classify_run_terminal_state,
+    )
+    assert classify_run_terminal_state(rerun_result.run_directory).state == (
+        TERMINAL_SUCCESS_WITH_MISSING
+    )
+    cache_path = (
+        Path(rerun_result.run_directory)
+        / "_analysis"
+        / "phasic_out"
+        / "phasic_trace_cache.h5"
+    )
+    with h5py.File(cache_path, "r") as cache:
+        assert tuple(int(value) for value in cache["meta/chunk_ids"][()]) == (0, 2)
+        for chunk_id in (0, 2):
+            group = cache[f"roi/Region0/chunk_{chunk_id}"]
+            assert group.attrs["correction_selected_strategy"] == "signal_only_f0"
+            assert "signal_only_f0_baseline" in group
+
+    window._guided_load_completed_run_for_review_btn.click()
+    assert window._guided_workflow_mode == "open_results"
+    assert window._guided_report_viewer.phasic_review_model.strategy_label_for_roi(
+        "Region0"
+    ) == "Signal-Only F0"
+
+    reopened = MainWindow(
+        settings=QSettings(str(tmp_path / "reopen.ini"), QSettings.IniFormat)
+    )
+    try:
+        monkeypatch.setattr(
+            QFileDialog,
+            "getExistingDirectory",
+            staticmethod(lambda *_args, **_kwargs: rerun_result.run_directory),
+        )
+        reopened._guided_start_open_results_btn.click()
+        assert reopened._guided_workflow_mode == "open_results"
+        assert reopened._report_viewer.phasic_review_model.strategy_label_for_roi(
+            "Region0"
+        ) == "Signal-Only F0"
+    finally:
+        reopened.close()
+
+
+def test_guided_incomplete_final_exclusion_real_signal_only_lifecycle(
+    window, tmp_path: Path, monkeypatch, qapp
+):
+    input_root = _build_input(tmp_path, n_sessions=3)
+    final_dir = input_root / NAMES[2]
+    (final_dir / "fluorescence.csv").unlink()
+    _write_valid(final_dir, seed=2, n=1000)
+    _setup_guided_recording(
+        window,
+        tmp_path,
+        input_root,
+        monkeypatch,
+        strategy_label="Signal-Only F0",
+        analysis_mode="phasic",
+        exclude_incomplete_final=True,
+    )
+    assert window._guided_exclude_incomplete_final_rwd_chunk_cb.isChecked()
+
+    build_identity = mapping.build_application_build_identity(
+        distribution_name="photometry-pipeline",
+        distribution_version="1.0.0",
+        source_revision_kind="git",
+        source_revision="abc123",
+        source_tree_state="clean",
+    )
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+    monkeypatch.setattr(
+        request_builder,
+        "resolve_application_build_identity",
+        lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+    )
+    window._guided_backend_validate_btn.click()
+    assert window._guided_backend_validation_outcome.status == "validator_accepted", (
+        window._guided_backend_validation_outcome.blocking_issues
+    )
+    assert window._guided_run_btn.isEnabled()
+    window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_run_execution_thread is None, timeout_s=120)
+    result = window._guided_backend_execution_result
+    assert result.status == "wrapper_completed_needs_review_loading", tuple(
+        issue.message for issue in result.blocking_issues
+    )
+
+    run_dir = Path(result.run_directory)
+    completeness = json.loads(
+        (
+            run_dir
+            / "_analysis"
+            / "phasic_out"
+            / "input_processing_completeness.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert completeness["expected"][-1]["index"] == 2
+    assert completeness["expected"][-1]["disposition"] == "authorized_exclusion"
+    assert [item["index"] for item in completeness["processed"]] == [0, 1]
+    from photometry_pipeline.run_completion_contract import (
+        TERMINAL_SUCCESS_WITH_MISSING,
+        classify_run_terminal_state,
+    )
+    terminal = classify_run_terminal_state(str(run_dir))
+    assert terminal.state == TERMINAL_SUCCESS_WITH_MISSING
+    assert terminal.final_exclusion_count == 1
+    with h5py.File(
+        run_dir / "_analysis" / "phasic_out" / "phasic_trace_cache.h5", "r"
+    ) as cache:
+        assert tuple(int(value) for value in cache["meta/chunk_ids"][()]) == (0, 1)
+        assert "roi/Region0/chunk_2" not in cache
+        for chunk_id in (0, 1):
+            assert "signal_only_f0_baseline" in cache[
+                f"roi/Region0/chunk_{chunk_id}"
+            ]
+
+    window._guided_load_completed_run_for_review_btn.click()
+    assert window._guided_report_viewer.phasic_review_model.strategy_label_for_roi(
+        "Region0"
+    ) == "Signal-Only F0"
+    reopened = MainWindow(
+        settings=QSettings(str(tmp_path / "final-reopen.ini"), QSettings.IniFormat)
+    )
+    try:
+        monkeypatch.setattr(
+            QFileDialog,
+            "getExistingDirectory",
+            staticmethod(lambda *_args, **_kwargs: str(run_dir)),
+        )
+        reopened._guided_start_open_results_btn.click()
+        assert reopened._report_viewer.phasic_review_model.strategy_label_for_roi(
+            "Region0"
+        ) == "Signal-Only F0"
+    finally:
+        reopened.close()

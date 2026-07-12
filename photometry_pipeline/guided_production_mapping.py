@@ -362,6 +362,7 @@ class GuidedProductionAcquisition:
     semantic_values: tuple[GuidedProductionTypedValue, ...]
     dataset_source_setup_signature: str
     diagnostic_cache_contract_identity: str
+    execution_mode: str = "phasic"
 
 
 @dataclass(frozen=True)
@@ -569,7 +570,7 @@ class GuidedProductionExecutionIntent:
             raise ValueError("canonical_intent_identity must be a lowercase SHA-256.")
         _require_tuple(self.deferred_capabilities, "deferred_capabilities")
         if (
-            self.execution_profile.execution_mode != "phasic"
+            self.execution_profile.execution_mode not in {"phasic", "tonic", "both"}
             or self.execution_profile.run_type != "full"
             or self.execution_profile.traces_only is not False
             or self.execution_profile.allocate_output_at_future_run_start_only
@@ -842,19 +843,18 @@ def map_guided_validation_request_to_execution_intent(
         return _failure("unresolved_request_field", "source", "Source candidate snapshot is incomplete.", "source_snapshot_unresolved")
     if request.acquisition_dataset.acquisition_mode != "intermittent":
         return _failure("unsupported_acquisition_mode", "acquisition", "Only intermittent acquisition is supported.", "acquisition_not_intermittent")
-    if request.acquisition_dataset.allow_partial_final_window or request.acquisition_dataset.exclude_incomplete_final_rwd_chunk:
+    if request.acquisition_dataset.allow_partial_final_window:
         return _failure("incomplete_final_policy_not_supported", "acquisition", "Final-window policy is unsupported.", "final_policy_unsupported")
     if request.parser.unresolved_inputs:
         return _failure("unresolved_request_field", "parser", "Parser inputs are unresolved.", "parser_unresolved")
     if not request.roi_scope.included_roi_ids:
         return _failure("unresolved_request_field", "roi_scope", "Included ROI set is empty.", "included_rois_empty")
     correction = request.correction
-    if correction.global_dynamic_fit_mode == "signal_only_f0":
-        return _failure("signal_only_not_supported", "correction", "Signal-Only is unsupported.", "signal_only_mode")
+    native_per_roi = bool(correction.per_roi_production_strategy_map)
     if correction.strategy_scope != "global" or correction.global_correction_strategy != "dynamic_fit" or correction.global_dynamic_fit_mode not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
         return _failure("unsupported_correction_strategy", "correction", "Correction strategy is unsupported.", "correction_unsupported")
     modes = {item.selected_dynamic_fit_mode for item in correction.confirmed_marks}
-    if modes != {correction.global_dynamic_fit_mode}:
+    if not native_per_roi and modes != {correction.global_dynamic_fit_mode}:
         return _failure("mixed_strategy_not_supported", "correction", "Confirmed marks are not unanimous.", "confirmed_modes_mixed")
     output = request.output
     if (
@@ -945,6 +945,7 @@ def map_guided_validation_request_to_execution_intent(
                 request.acquisition_dataset.sig_suffix, _typed(request.acquisition_dataset.semantic_values),
                 request.acquisition_dataset.dataset_source_setup_signature,
                 request.acquisition_dataset.diagnostic_cache_contract_identity,
+                request.acquisition_dataset.execution_mode,
             ),
             parser=GuidedProductionParser(
                 request.parser.schema_name, request.parser.schema_version,
@@ -1024,7 +1025,9 @@ def map_guided_validation_request_to_execution_intent(
                 tuple(GuidedProductionOutputRelationship(item.relationship, item.root_kind, item.status) for item in output.relationships),
                 output.protected_root_context_complete, output.filesystem_fact_scope,
             ),
-            execution_profile=GuidedProductionExecutionProfile(),
+            execution_profile=GuidedProductionExecutionProfile(
+                execution_mode=request.acquisition_dataset.execution_mode
+            ),
             provenance_requirements=GuidedProductionProvenanceRequirements(
                 recomputed, mapping_contract.mapping_contract_version,
                 mapping_contract.config_mapping_contract_version,

@@ -1683,7 +1683,12 @@ class MainWindow(QMainWindow):
 
     WINDOW_TITLE_BASE = "Long-Term Photometry Analysis"
 
-    def __init__(self, parent=None, settings: QSettings | None = None):
+    def __init__(
+        self,
+        parent=None,
+        settings: QSettings | None = None,
+        guided_execution_capabilities=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle(self.WINDOW_TITLE_BASE)
         self.resize(1100, 850)
@@ -1691,6 +1696,20 @@ class MainWindow(QMainWindow):
 
         # Settings (injectable for testing)
         self._settings = settings if settings is not None else QSettings()
+        from photometry_pipeline.guided_execution_capabilities import (
+            GuidedExecutionCapabilities,
+            PRODUCTION_GUIDED_EXECUTION_CAPABILITIES,
+        )
+        capabilities = (
+            PRODUCTION_GUIDED_EXECUTION_CAPABILITIES
+            if guided_execution_capabilities is None
+            else guided_execution_capabilities
+        )
+        if not isinstance(capabilities, GuidedExecutionCapabilities):
+            raise TypeError(
+                "guided_execution_capabilities must be GuidedExecutionCapabilities"
+            )
+        self._guided_execution_capabilities = capabilities
 
         from photometry_pipeline.config import Config
         self._default_cfg = Config()
@@ -2126,7 +2145,7 @@ class MainWindow(QMainWindow):
 
         intro = QLabel(
             "Guided Workflow walks you through setup, evidence-backed choices, "
-            "backend validation, and running supported analyses. Some advanced "
+            "checking your setup, and running supported analyses. Some advanced "
             "or unsupported configurations may still need Full Control."
         )
         intro.setWordWrap(True)
@@ -11098,6 +11117,19 @@ class MainWindow(QMainWindow):
         button = getattr(self, "_guided_run_btn", None)
         label = getattr(self, "_guided_run_readiness_label", None)
         if button is not None:
+            from photometry_pipeline.guided_execution_capabilities import (
+                evaluate_guided_signal_only_execution_eligibility,
+            )
+            plan = self._build_guided_new_analysis_draft_plan()
+            eligibility = evaluate_guided_signal_only_execution_eligibility(
+                (
+                    choice.selected_strategy
+                    for choice in plan.per_roi_correction_strategy_choices
+                    if choice.roi_id in set(plan.included_roi_ids)
+                ),
+                self._guided_execution_capabilities,
+            )
+            temporary_signal_only_refusal = not eligibility.allowed
             ready = (
                 result.status == "ready_hidden"
                 and result.ready is True
@@ -11108,6 +11140,7 @@ class MainWindow(QMainWindow):
                     self, "_guided_backend_execution_result", None
                 )
                 is None
+                and not temporary_signal_only_refusal
             )
             button.setEnabled(ready)
             button.setToolTip(
@@ -11115,10 +11148,18 @@ class MainWindow(QMainWindow):
                     "Guided Run is ready to start."
                 )
                 if ready
-                else result.user_summary
+                else (
+                    eligibility.user_message
+                    if temporary_signal_only_refusal
+                    else result.user_summary
+                )
             )
         if label is not None:
-            label.setText(result.user_summary)
+            label.setText(
+                eligibility.user_message
+                if button is not None and temporary_signal_only_refusal
+                else result.user_summary
+            )
 
     def _current_guided_startup_transaction_request(self):
         """Return only a retained request bound to the current ready state."""
@@ -11146,6 +11187,25 @@ class MainWindow(QMainWindow):
     def _on_guided_run_clicked_backend_guarded(self) -> None:
         """Recheck readiness and start the Guided backend adapter off the GUI thread."""
         self._refresh_guided_run_readiness_display()
+        from photometry_pipeline.guided_execution_capabilities import (
+            evaluate_guided_signal_only_execution_eligibility,
+        )
+
+        plan = self._build_guided_new_analysis_draft_plan()
+        eligibility = evaluate_guided_signal_only_execution_eligibility(
+            (
+                choice.selected_strategy
+                for choice in plan.per_roi_correction_strategy_choices
+                if choice.roi_id in set(plan.included_roi_ids)
+            ),
+            self._guided_execution_capabilities,
+        )
+        self._guided_signal_only_execution_eligibility = eligibility
+        if not eligibility.allowed:
+            label = getattr(self, "_guided_run_readiness_label", None)
+            if label is not None:
+                label.setText(eligibility.user_message)
+            return
         readiness = getattr(self, "_guided_run_readiness", None)
         if not (
             getattr(readiness, "status", None) == "ready_hidden"
@@ -11158,6 +11218,24 @@ class MainWindow(QMainWindow):
         button = getattr(self, "_guided_run_btn", None)
         label = getattr(self, "_guided_run_readiness_label", None)
         if request is None:
+            if button is not None:
+                button.setEnabled(False)
+            if label is not None:
+                label.setText(
+                    "Guided Run could not start because the validated setup "
+                    "is no longer current."
+                )
+            return
+        outcome = getattr(self, "_guided_backend_validation_outcome", None)
+        authorization = getattr(self, "_guided_run_authorization_result", None)
+        if (
+            not self._is_guided_backend_validation_outcome_current()
+            or outcome is None
+            or authorization is None
+            or request.authorization_result is not authorization
+            or authorization.stored_request_identity
+            != getattr(outcome, "request_identity", None)
+        ):
             if button is not None:
                 button.setEnabled(False)
             if label is not None:
@@ -11518,6 +11596,7 @@ class MainWindow(QMainWindow):
             GuidedApprovedMissingSession,
             GuidedNewAnalysisDynamicFitParameterContract,
             GuidedNewAnalysisDraftPlan,
+            GuidedNewAnalysisExecutionIntent,
             GuidedPlanCorrectionChoice
         )
 
@@ -11868,6 +11947,9 @@ class MainWindow(QMainWindow):
                 else ""
             ),
             approved_missing_sessions=list(getattr(self, "_guided_approved_missing_sessions", [])),
+            execution_intent=GuidedNewAnalysisExecutionIntent(
+                execution_mode=str(self._mode_combo.currentText()).strip().lower()
+            ),
         )
 
     @staticmethod
@@ -26118,6 +26200,11 @@ class MainWindow(QMainWindow):
             "Select which analysis family to run: tonic, phasic, or both."
         )
         self._mode_combo.currentIndexChanged.connect(self._on_config_changed)
+        self._mode_combo.currentIndexChanged.connect(
+            lambda _index: self._invalidate_guided_backend_validation(
+                "analysis mode changed"
+            )
+        )
         form.addRow("Mode:", self._mode_combo)
 
         self._run_profile_combo = QComboBox()

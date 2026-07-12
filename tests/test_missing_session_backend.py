@@ -118,7 +118,7 @@ def test_missing_middle_session_keeps_index_and_timestamp(tmp_path: Path):
     assert by_index[2]["index"] == 2
 
 
-def test_cache_ids_are_not_session_numbers(tmp_path: Path):
+def test_cache_ids_preserve_original_session_numbers_across_gap(tmp_path: Path):
     inp = _build_input(tmp_path, corrupted=(1,))
     cfg = _config(tmp_path, authorized_missing_sessions=[_source(inp, 1)])
     out = _run(tmp_path, cfg, inp)
@@ -126,8 +126,8 @@ def test_cache_ids_are_not_session_numbers(tmp_path: Path):
     record = _record(out)
     processed = {p["index"]: p["cache_chunk_id"] for p in record["processed"]}
     # Session 2 processed into cache slot 1: the storage id must not be read as
-    # the session number.
-    assert processed == {0: 0, 2: 1}
+    # the original session number, leaving the approved gap visible.
+    assert processed == {0: 0, 2: 2}
 
 
 # features.csv: NaN not zero, distinct from zero-event --------------------------

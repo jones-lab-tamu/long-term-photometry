@@ -50,10 +50,6 @@ def build_guided_manifest_current_facts(
         raise TypeError("config must be a Config.")
     if str(getattr(config, "acquisition_mode", "intermittent")) != "intermittent":
         raise ValueError("Guided manifest execution requires intermittent acquisition.")
-    if bool(getattr(config, "exclude_incomplete_final_rwd_chunk", False)):
-        raise ValueError(
-            "Guided manifest execution does not support incomplete-final exclusion."
-        )
     included = tuple(str(item) for item in manifest_included_roi_ids)
     if not included or any(not item.strip() for item in included):
         raise ValueError("Guided manifest execution requires included ROI IDs.")

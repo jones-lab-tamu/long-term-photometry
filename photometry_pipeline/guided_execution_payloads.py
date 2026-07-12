@@ -199,7 +199,7 @@ GUIDED_CONFIG_FIELD_DISPOSITIONS = {
     "seed": CONFIG_DISPOSITION_FIXED,
     "allow_partial_final_chunk": CONFIG_DISPOSITION_FIXED_FALSE_EMPTY,
     "exclude_incomplete_final_rwd_chunk": CONFIG_DISPOSITION_INTENT,
-    "rwd_excluded_source_files": CONFIG_DISPOSITION_FIXED_FALSE_EMPTY,
+    "rwd_excluded_source_files": CONFIG_DISPOSITION_INTENT,
     "authorized_missing_sessions": CONFIG_DISPOSITION_APPROVED_MISSING,
     "rwd_contract_validation": CONFIG_DISPOSITION_FIXED_FALSE_EMPTY,
     "target_fs_hz": CONFIG_DISPOSITION_INTENT,
@@ -331,7 +331,6 @@ GUIDED_CONFIG_DEFAULT_OVERRIDES = {
     "trim_samples_end": 0,
     "seed": 0,
     "allow_partial_final_chunk": False,
-    "rwd_excluded_source_files": [],
     "authorized_missing_sessions": [],
     "rwd_contract_validation": {},
     "lowpass_hz": 1.0,
@@ -833,8 +832,6 @@ def derive_guided_execution_payloads(
             return _unresolved("config_mapping_incomplete", "Overrides mapping contract is incomplete or invalid.")
 
         # Validate intent boolean gates fail-closed
-        if intent.acquisition.exclude_incomplete_final_rwd_chunk is not False:
-            return _unresolved("config_field_unsupported", "exclude_incomplete_final_rwd_chunk must be False.")
         if intent.acquisition.acquisition_mode != "intermittent":
             return _unresolved("config_field_unsupported", "acquisition_mode must be intermittent.")
         if intent.execution_profile.traces_only is not False:
@@ -888,6 +885,27 @@ def derive_guided_execution_payloads(
         payload_values = []
         # Populate mapped intent fields
         payload_values.append(GuidedConfigFieldValue("exclude_incomplete_final_rwd_chunk", intent.acquisition.exclude_incomplete_final_rwd_chunk))
+        excluded_final_sources = []
+        if intent.acquisition.exclude_incomplete_final_rwd_chunk:
+            if not intent.input_source.candidate_files:
+                return _unresolved(
+                    "config_field_unsupported",
+                    "The approved final recording file could not be identified.",
+                )
+            final_candidate = intent.input_source.candidate_files[-1]
+            excluded_final_sources.append(
+                os.path.normpath(
+                    os.path.join(
+                        intent.input_source.source_root_canonical,
+                        *final_candidate.canonical_relative_path.split("/"),
+                    )
+                )
+            )
+        payload_values.append(
+            GuidedConfigFieldValue(
+                "rwd_excluded_source_files", excluded_final_sources
+            )
+        )
         payload_values.append(GuidedConfigFieldValue("target_fs_hz", target_fs_hz_value))
         payload_values.append(GuidedConfigFieldValue("rwd_time_col", intent.acquisition.rwd_time_col))
         payload_values.append(GuidedConfigFieldValue("uv_suffix", intent.acquisition.uv_suffix))

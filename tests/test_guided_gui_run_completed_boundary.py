@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 from pathlib import Path
 import shutil
@@ -14,7 +15,11 @@ from PySide6.QtWidgets import QApplication
 import photometry_pipeline.guided_startup_claim as claim
 import photometry_pipeline.guided_startup_orchestration as orchestration
 import tools.run_full_pipeline_deliverables as wrapper
-from gui.main_window import GUIDED_WORKFLOW_STEPS, MainWindow
+from gui.main_window import (
+    GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE,
+    GUIDED_WORKFLOW_STEPS,
+    MainWindow,
+)
 from photometry_pipeline.input_processing_completeness import INPUT_COMPLETENESS_FILENAME
 from tests.terminal_run_fixtures import (
     BASE_CONFIG_PATH,
@@ -368,7 +373,8 @@ def test_guided_review_shows_message_when_run_succeeded_but_no_regions(
 
 
 def _configure_real_analysis_duration_new_analysis_draft(
-    window, tmp_path, monkeypatch, *, strategy_by_roi, session_duration_sec=600
+    window, tmp_path, monkeypatch, *, strategy_by_roi, session_duration_sec=600,
+    analysis_mode="phasic", rois=("CH1", "CH2", "CH3"),
 ):
     """A variant of test_gui_guided_new_analysis_plan.py's
     _configure_complete_guided_new_analysis_draft_without_diagnostic_cache
@@ -396,11 +402,11 @@ def _configure_real_analysis_duration_new_analysis_draft(
     output_dir.mkdir()
     window._guided_input_dir_edit.setText(str(input_dir))
     window._guided_output_dir_edit.setText(str(output_dir))
-    window._mode_combo.setCurrentText("both")
+    window._mode_combo.setCurrentText(analysis_mode)
     idx = window._format_combo.findText("rwd")
     window._format_combo.setCurrentIndex(idx)
 
-    rois = ("CH1", "CH2", "CH3")
+    rois = tuple(rois)
     header = "Time(s)," + ",".join(f"{roi}-410,{roi}-470" for roi in rois)
     fs_hz = 20.0
     n_rows = int(round(session_duration_sec * fs_hz))
@@ -411,7 +417,12 @@ def _configure_real_analysis_duration_new_analysis_draft(
         source_file = session_dir / "fluorescence.csv"
         rows = [header]
         rows.extend(
-            f"{row_index / fs_hz:.2f}," + ",".join("1.0,2.0" for _ in rois)
+            f"{row_index / fs_hz:.2f},"
+            + ",".join(
+                f"{1.0 + 0.03 * np.sin((row_index / fs_hz) * 0.15 + roi_index):.8f},"
+                f"{1.25 + 0.12 * np.sin((row_index / fs_hz) * 0.7 + roi_index):.8f}"
+                for roi_index, _roi in enumerate(rois)
+            )
             for row_index in range(n_rows)
         )
         source_file.write_text("\n".join(rows) + "\n", encoding="utf-8")
@@ -470,8 +481,12 @@ def _configure_real_analysis_duration_new_analysis_draft(
             source_file=path,
             format=input_format,
             time_sec=time_sec,
-            uv_raw=np.column_stack((uv, uv, uv)),
-            sig_raw=np.column_stack((sig, sig * 1.01, sig * 0.99)),
+            uv_raw=np.column_stack(
+                tuple(uv * (1.0 + 0.002 * index) for index, _roi in enumerate(rois))
+            ),
+            sig_raw=np.column_stack(
+                tuple(sig * (1.0 + 0.005 * index) for index, _roi in enumerate(rois))
+            ),
             fs_hz=fs_hz,
             channel_names=list(rois),
             metadata={},
@@ -494,6 +509,15 @@ def _configure_real_analysis_duration_new_analysis_draft(
         roi_idx = window._guided_preview_roi_combo.findData(roi)
         assert roi_idx >= 0
         window._guided_preview_roi_combo.setCurrentIndex(roi_idx)
+        strategy_text = (
+            strategy_by_roi.get(roi, "Global Linear Regression")
+            if strategy_by_roi else "Global Linear Regression"
+        )
+        strategy_index = window._guided_confirm_strategy_combo.findText(strategy_text)
+        if strategy_index < 0:
+            strategy_index = window._guided_confirm_strategy_combo.findData(strategy_text)
+        assert strategy_index >= 0
+        window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
         assert window._guided_preview_generate_btn.isEnabled()
         window._guided_preview_generate_btn.click()
         result = window._guided_preview_last_result
@@ -501,21 +525,47 @@ def _configure_real_analysis_duration_new_analysis_draft(
         assert result["source_type"] == "local_raw_segment"
         assert window._guided_diagnostic_cache_record is None
 
-        window._guided_confirm_roi_combo.setCurrentIndex(
-            window._guided_confirm_roi_combo.findData(roi)
+        row = window._guided_local_preview_confirmation_rows[roi]
+        row_combo = row["strategy_combo"]
+        strategy_value = (
+            "signal_only_f0"
+            if strategy_text == "Signal-Only F0"
+            else GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE[strategy_text]
         )
-        window._guided_confirm_chunk_combo.setCurrentIndex(0)
-        strategy_text = "Global Linear Regression"
-        if strategy_by_roi and roi in strategy_by_roi:
-            strategy_text = strategy_by_roi[roi]
-        strategy_index = window._guided_confirm_strategy_combo.findText(strategy_text)
-        if strategy_index < 0:
-            strategy_index = window._guided_confirm_strategy_combo.findData(strategy_text)
-        assert strategy_index >= 0
-        window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
-        window._guided_confirm_ack_cb.setChecked(True)
-        assert window._guided_confirm_mark_btn.isEnabled()
-        window._guided_confirm_mark_btn.click()
+        strategy_index = row_combo.findData(strategy_value)
+        assert strategy_index >= 0, (roi, strategy_text, strategy_value)
+        row_combo.setCurrentIndex(strategy_index)
+        candidate = window._guided_local_preview_locked_evidence_for_roi(
+            roi, "signal_only_f0"
+        ) if strategy_text == "Signal-Only F0" else result
+        assert row["action_button"].isEnabled(), {
+            key: candidate.get(key) for key in (
+                "valid", "selectable", "locked", "current_or_stale",
+                "strategy_family", "selected_strategy", "dynamic_fit_mode",
+                "issues", "warnings",
+            )
+        }
+        row["action_button"].click()
+
+    # A mixed plan may change the legacy global preview selector while later
+    # ROIs are previewed. Reconfirm every persisted row after the full map is
+    # visible, matching the scientist's final per-ROI confirmation pass.
+    window._rebuild_guided_local_preview_confirmation_rows()
+    for roi in rois:
+        row = window._guided_local_preview_confirmation_rows[roi]
+        if row["action_button"].text() == "Confirmed":
+            continue
+        label = strategy_by_roi[roi]
+        selected = (
+            "signal_only_f0"
+            if label == "Signal-Only F0"
+            else GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE[label]
+        )
+        index = row["strategy_combo"].findData(selected)
+        assert index >= 0
+        row["strategy_combo"].setCurrentIndex(index)
+        assert row["action_button"].isEnabled()
+        row["action_button"].click()
 
     window._guided_workflow_stepper.setCurrentRow(
         list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
@@ -614,6 +664,7 @@ def test_real_gui_path_reaches_loadable_completed_run_and_reviews_it(
         "Guided Run finished. Load the completed run for review."
     )
     assert window._guided_run_btn.isEnabled() is False
+
     assert window._guided_backend_validate_btn.isEnabled() is True
     review_btn = window._guided_load_completed_run_for_review_btn
     assert review_btn.isVisible() is True
@@ -654,6 +705,448 @@ def test_real_gui_path_reaches_loadable_completed_run_and_reviews_it(
     # Guided Run stays disabled until a fresh Validate/authorize cycle.
     assert window._guided_startup_transaction_request is None
     assert window._guided_run_btn.isEnabled() is False
+
+
+@pytest.mark.extended
+@pytest.mark.parametrize(
+    ("case_name", "analysis_mode", "strategy_by_roi"),
+    [
+        ("all_signal_phasic", "phasic", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}),
+        ("all_signal_tonic", "tonic", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}),
+        ("all_signal_combined", "both", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}),
+        (
+            "mixed_four_combined",
+            "both",
+            {
+                "CH1": "Robust Global Event-Reject Fit",
+                "CH2": "Signal-Only F0",
+                "CH3": "Global Linear Regression",
+                "CH4": "Adaptive Event-Gated Fit",
+            },
+        ),
+    ],
+)
+def test_real_guided_native_correction_lifecycle_matrix(
+    tmp_path, monkeypatch, qapp, case_name, analysis_mode, strategy_by_roi
+):
+    """Real production lifecycle with only the final temporary gate enabled."""
+    from PySide6.QtCore import QSettings
+    from gui.main_window import MainWindow
+    from photometry_pipeline.guided_execution_capabilities import (
+        GuidedExecutionCapabilities,
+    )
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+    import photometry_pipeline.guided_production_mapping as production_mapping
+    from tests.test_gui_guided_new_analysis_plan import (
+        _confirm_detected_dataset_settings_via_review_plan_button,
+    )
+
+    window = MainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+        guided_execution_capabilities=GuidedExecutionCapabilities(
+            allow_signal_only_f0_execution=True
+        ),
+    )
+    try:
+        _configure_real_analysis_duration_new_analysis_draft(
+            window,
+            tmp_path,
+            monkeypatch,
+            strategy_by_roi=strategy_by_roi,
+            analysis_mode=analysis_mode,
+            rois=tuple(strategy_by_roi),
+        )
+        _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+        window._guided_workflow_stepper.setCurrentRow(
+            list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+        )
+        window._guided_review_go_to_run_btn.click()
+
+        build_identity = production_mapping.build_application_build_identity(
+            distribution_name="photometry-pipeline",
+            distribution_version="1.0.0",
+            source_revision_kind="git",
+            source_revision="abc123",
+            source_tree_state="clean",
+        )
+        monkeypatch.setattr(
+            request_builder,
+            "resolve_application_build_identity",
+            lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+        )
+        window._guided_backend_validate_btn.click()
+        assert window._guided_backend_validation_outcome.status == "validator_accepted", (
+            window._guided_backend_validation_outcome.blocking_issues
+        )
+        assert window._guided_run_btn.isEnabled(), (
+            window._guided_run_readiness,
+            window._guided_run_readiness_label.text(),
+        )
+
+        import gui.main_window as main_window_module
+        monkeypatch.setattr(
+            main_window_module.QMessageBox,
+            "information",
+            staticmethod(lambda *args, **kwargs: None),
+        )
+        window.show()
+        started = time.monotonic()
+        window._guided_run_btn.click()
+        deadline = started + 180.0
+        while window._guided_backend_execution_active and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.02)
+        assert not window._guided_backend_execution_active
+        result = window._guided_backend_execution_result
+        assert result.status == "wrapper_completed_needs_review_loading", (
+            tuple(issue.message for issue in result.blocking_issues), result.diagnostics
+        )
+        run_dir = Path(result.run_directory)
+        assert (run_dir / "guided_per_roi_correction.json").is_file()
+        assert not (run_dir / "guided_correction_strategy_map.json").exists()
+        for persisted in run_dir.rglob("*"):
+            if persisted.is_file() and persisted.suffix.lower() in {
+                ".json", ".yaml", ".yml", ".txt", ".ndjson"
+            }:
+                assert "allow_signal_only_f0_execution" not in persisted.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+        startup_provenance = json.loads(
+            (run_dir / "guided_startup_provenance.json").read_text(encoding="utf-8")
+        )
+        from photometry_pipeline.guided_startup_transaction import (
+            GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION,
+        )
+        assert startup_provenance["startup_contract_version"] == (
+            GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION
+        )
+        native_payload_path = run_dir / "guided_per_roi_correction.json"
+        assert hashlib.sha256(native_payload_path.read_bytes()).hexdigest() == (
+            startup_provenance["serialized_native_correction_sha256"]
+        )
+        from analyze_photometry import load_guided_per_roi_correction
+        loaded_specs = load_guided_per_roi_correction(
+            str(run_dir / "guided_candidate_manifest.json")
+        )
+        assert set(loaded_specs) == set(strategy_by_roi)
+        authorized_payload = json.loads(native_payload_path.read_text(encoding="utf-8"))
+        authorized_records = authorized_payload["per_roi_correction"]
+        assert (run_dir / "command_invoked.txt").read_text(encoding="utf-8").splitlines()[
+            (run_dir / "command_invoked.txt").read_text(encoding="utf-8").splitlines().index("--mode") + 1
+        ] == analysis_mode
+        expected_branches = (
+            {"tonic", "phasic"} if analysis_mode == "both" else {analysis_mode}
+        )
+        from photometry_pipeline.run_completion_contract import (
+            SUCCESS_STATES,
+            classify_run_terminal_state,
+        )
+        assert classify_run_terminal_state(str(run_dir)).state in SUCCESS_STATES
+        selected_by_roi = {
+            roi: (
+                "signal_only_f0"
+                if label == "Signal-Only F0"
+                else GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE[label]
+            )
+            for roi, label in strategy_by_roi.items()
+        }
+        for branch in expected_branches:
+            branch_dir = run_dir / "_analysis" / f"{branch}_out"
+            assert (branch_dir / "run_metadata.json").is_file()
+            branch_metadata = json.loads(
+                (branch_dir / "run_metadata.json").read_text(encoding="utf-8")
+            )
+            assert branch_metadata["correction_provenance"]["requested_by_roi"] == (
+                authorized_records
+            )
+            cache_path = branch_dir / f"{branch}_trace_cache.h5"
+            assert cache_path.is_file()
+            plot_pattern = "tonic_overview.png" if branch == "tonic" else "phasic_*.png"
+            assert list(run_dir.glob(f"*/**/{plot_pattern}"))
+            with h5py.File(cache_path, "r") as cache:
+                chunk_ids = tuple(int(value) for value in cache["meta/chunk_ids"][()])
+                for roi, selected in selected_by_roi.items():
+                    for chunk_id in chunk_ids:
+                        group = cache[f"roi/{roi}/chunk_{chunk_id}"]
+                        assert group.attrs["correction_selected_strategy"] == selected
+                        assert "dff" in group
+                        if selected == "signal_only_f0":
+                            assert "signal_only_f0_baseline" in group
+                        else:
+                            assert "fit_ref" in group
+                def assert_no_capability_attrs(group):
+                    for value in group.attrs.values():
+                        assert "allow_signal_only_f0_execution" not in str(value)
+                    for child in group.values():
+                        if isinstance(child, h5py.Group):
+                            assert_no_capability_attrs(child)
+                assert_no_capability_attrs(cache)
+        review_button = window._guided_load_completed_run_for_review_btn
+        review_button.click()
+        assert window._guided_workflow_mode == "open_results"
+        assert window._guided_report_viewer.phasic_review_model is not None
+        assert set(
+            window._guided_report_viewer.phasic_review_model.analysis_branches
+        ) == expected_branches
+        expected_review_labels = {
+            "Signal-Only F0": "Signal-Only F0",
+            "Robust Global Event-Reject Fit": "Robust global fit with event rejection",
+            "Global Linear Regression": "Global linear regression",
+            "Adaptive Event-Gated Fit": "Adaptive event-gated regression",
+        }
+        assert {
+            roi: window._guided_report_viewer.phasic_review_model.strategy_label_for_roi(roi)
+            for roi in strategy_by_roi
+        } == {roi: expected_review_labels[label] for roi, label in strategy_by_roi.items()}
+
+        reopened = MainWindow(
+            settings=QSettings(
+                str(tmp_path / "reopened-settings.ini"), QSettings.IniFormat
+            )
+        )
+        try:
+            monkeypatch.setattr(
+                main_window_module.QFileDialog,
+                "getExistingDirectory",
+                staticmethod(lambda *_args, **_kwargs: str(run_dir)),
+            )
+            reopened._guided_start_open_results_btn.click()
+            assert reopened._guided_workflow_mode == "open_results"
+            reopened_model = reopened._report_viewer.phasic_review_model
+            assert reopened_model is not None
+            assert set(reopened_model.analysis_branches) == expected_branches
+            assert {
+                roi: reopened_model.strategy_label_for_roi(roi)
+                for roi in strategy_by_roi
+            } == {roi: expected_review_labels[label] for roi, label in strategy_by_roi.items()}
+        finally:
+            reopened.close()
+    finally:
+        window.close()
+
+
+@pytest.mark.parametrize("allow_signal_only", [False, True])
+def test_authoritative_signal_only_guard_rechecks_direct_run_action(
+    tmp_path, monkeypatch, qapp, allow_signal_only
+):
+    from PySide6.QtCore import QSettings
+    from photometry_pipeline.guided_execution_capabilities import (
+        GuidedExecutionCapabilities,
+    )
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+    import photometry_pipeline.guided_production_mapping as production_mapping
+    from tests.test_gui_guided_new_analysis_plan import (
+        _confirm_detected_dataset_settings_via_review_plan_button,
+    )
+
+    window = MainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+        guided_execution_capabilities=GuidedExecutionCapabilities(
+            allow_signal_only_f0_execution=allow_signal_only
+        ),
+    )
+    try:
+        _configure_real_analysis_duration_new_analysis_draft(
+            window,
+            tmp_path,
+            monkeypatch,
+            strategy_by_roi={"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"},
+            analysis_mode="phasic",
+            rois=("CH1", "CH2"),
+        )
+        _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+        window._guided_workflow_stepper.setCurrentRow(
+            list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+        )
+        window._guided_review_go_to_run_btn.click()
+        build_identity = production_mapping.build_application_build_identity(
+            distribution_name="photometry-pipeline",
+            distribution_version="1.0.0",
+            source_revision_kind="git",
+            source_revision="abc123",
+            source_tree_state="clean",
+        )
+        monkeypatch.setattr(
+            request_builder,
+            "resolve_application_build_identity",
+            lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+        )
+        window._guided_backend_validate_btn.click()
+        assert window._guided_backend_validation_outcome.status == "validator_accepted"
+        retained = window._guided_startup_transaction_request
+        output_base = Path(retained.output_base_canonical)
+        assert output_base.exists() is False
+        starts = []
+        monkeypatch.setattr(window, "_start_guided_run_live_status", lambda *_: None)
+        monkeypatch.setattr(
+            window,
+            "_start_guided_run_execution_worker",
+            lambda request: starts.append(request),
+        )
+
+        window._on_guided_run_clicked_backend_guarded()
+
+        if allow_signal_only:
+            assert starts == [retained]
+            assert window._guided_backend_execution_active is True
+        else:
+            assert starts == []
+            assert window._guided_backend_execution_active is False
+            assert window._guided_startup_transaction_request is retained
+            assert output_base.exists() is False
+            assert window._guided_run_readiness_label.text() == (
+                "This correction approach is not available to run yet."
+            )
+            assert window._guided_signal_only_execution_eligibility.category == (
+                "signal_only_f0_execution_not_available"
+            )
+    finally:
+        window._guided_backend_execution_active = False
+        window.close()
+
+
+def test_real_gui_run_refuses_native_payload_mutated_before_wrapper_claim(
+    tmp_path, monkeypatch, qapp
+):
+    from PySide6.QtCore import QSettings
+    from photometry_pipeline.guided_execution_capabilities import (
+        GuidedExecutionCapabilities,
+    )
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+    import photometry_pipeline.guided_production_mapping as production_mapping
+    import photometry_pipeline.guided_startup_orchestration as startup_orchestration
+    from tests.test_gui_guided_new_analysis_plan import (
+        _confirm_detected_dataset_settings_via_review_plan_button,
+    )
+
+    window = MainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+        guided_execution_capabilities=GuidedExecutionCapabilities(
+            allow_signal_only_f0_execution=True
+        ),
+    )
+    try:
+        _configure_real_analysis_duration_new_analysis_draft(
+            window,
+            tmp_path,
+            monkeypatch,
+            strategy_by_roi={"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"},
+            analysis_mode="phasic",
+            rois=("CH1", "CH2"),
+        )
+        _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+        window._guided_workflow_stepper.setCurrentRow(
+            list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+        )
+        window._guided_review_go_to_run_btn.click()
+        build_identity = production_mapping.build_application_build_identity(
+            distribution_name="photometry-pipeline",
+            distribution_version="1.0.0",
+            source_revision_kind="git",
+            source_revision="abc123",
+            source_tree_state="clean",
+        )
+        monkeypatch.setattr(
+            request_builder,
+            "resolve_application_build_identity",
+            lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+        )
+        window._guided_backend_validate_btn.click()
+        assert window._guided_run_btn.isEnabled()
+
+        def mutate_then_launch(argv):
+            run_dir = Path(argv[argv.index("--out") + 1])
+            payload_path = run_dir / "guided_per_roi_correction.json"
+            payload_path.write_bytes(payload_path.read_bytes() + b"\n")
+            return startup_orchestration._default_subprocess_runner(argv)
+
+        window._guided_backend_execution_runner = mutate_then_launch
+        import gui.main_window as main_window_module
+        monkeypatch.setattr(
+            main_window_module.QMessageBox,
+            "information",
+            staticmethod(lambda *_args, **_kwargs: None),
+        )
+        window._guided_run_btn.click()
+        _pump_until(
+            qapp,
+            lambda: window._guided_run_execution_thread is None,
+            timeout_s=60,
+        )
+        result = window._guided_backend_execution_result
+        assert result.status == "wrapper_failed"
+        assert result.ok is False
+        assert result.run_directory
+        assert classify_completed_run_candidate(result.run_directory)[0] is False
+        assert window._guided_load_completed_run_for_review_btn.isVisible() is False
+        assert not (Path(result.run_directory) / "_analysis").exists()
+    finally:
+        window._guided_backend_execution_active = False
+        window.close()
+
+
+def test_real_gui_analysis_mode_changes_invalidate_authorization_identity(
+    tmp_path, monkeypatch, qapp
+):
+    from PySide6.QtCore import QSettings
+    from photometry_pipeline.guided_execution_capabilities import (
+        GuidedExecutionCapabilities,
+    )
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+    import photometry_pipeline.guided_production_mapping as production_mapping
+    from tests.test_gui_guided_new_analysis_plan import (
+        _confirm_detected_dataset_settings_via_review_plan_button,
+    )
+
+    window = MainWindow(
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
+        guided_execution_capabilities=GuidedExecutionCapabilities(
+            allow_signal_only_f0_execution=True
+        ),
+    )
+    try:
+        _configure_real_analysis_duration_new_analysis_draft(
+            window,
+            tmp_path,
+            monkeypatch,
+            strategy_by_roi={"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"},
+            analysis_mode="phasic",
+            rois=("CH1", "CH2"),
+        )
+        _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+        window._guided_workflow_stepper.setCurrentRow(
+            list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+        )
+        window._guided_review_go_to_run_btn.click()
+        build_identity = production_mapping.build_application_build_identity(
+            distribution_name="photometry-pipeline",
+            distribution_version="1.0.0",
+            source_revision_kind="git",
+            source_revision="abc123",
+            source_tree_state="clean",
+        )
+        monkeypatch.setattr(
+            request_builder,
+            "resolve_application_build_identity",
+            lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+        )
+        identities = []
+        for index, mode in enumerate(("phasic", "both", "tonic")):
+            if index:
+                window._mode_combo.setCurrentText(mode)
+                assert window._guided_run_btn.isEnabled() is False
+                assert window._guided_startup_transaction_request is None
+                window._guided_workflow_stepper.setCurrentRow(
+                    list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+                )
+            window._guided_backend_validate_btn.click()
+            assert window._guided_backend_validation_outcome.status == "validator_accepted"
+            identities.append(
+                window._guided_run_authorization_result.canonical_authorization_identity
+            )
+        assert len(set(identities)) == 3
+    finally:
+        window.close()
 
 
 def test_full_run_that_lost_a_region_directory_no_longer_loads_as_successful(

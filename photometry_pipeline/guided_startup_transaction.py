@@ -301,6 +301,9 @@ def build_guided_startup_command_plan(
     sessions_per_hour = (
         request.authorization_result.production_intent.acquisition.sessions_per_hour
     )
+    execution_mode = (
+        request.authorization_result.production_intent.execution_profile.execution_mode
+    )
     argv = (
         wrapper.python_executable,
         wrapper.entrypoint_value,
@@ -313,7 +316,7 @@ def build_guided_startup_command_plan(
         "--format",
         "rwd",
         "--mode",
-        "phasic",
+        execution_mode,
         "--run-type",
         "full",
         "--sessions-per-hour",
@@ -611,7 +614,7 @@ def _gate_issue(request: Any) -> GuidedStartupIssue | None:
     if (
         intent.input_source.source_format != "rwd"
         or intent.acquisition.acquisition_mode != "intermittent"
-        or intent.execution_profile.execution_mode != "phasic"
+        or intent.execution_profile.execution_mode not in {"phasic", "tonic", "both"}
         or intent.execution_profile.run_type != "full"
         or intent.execution_profile.traces_only is not False
         or intent.output_policy.overwrite is not False
@@ -619,14 +622,13 @@ def _gate_issue(request: Any) -> GuidedStartupIssue | None:
         or intent.roi_scope.selection_mode != "include"
         or not intent.roi_scope.included_roi_ids
         or intent.correction.strategy_scope != "global"
-        or config.get("exclude_incomplete_final_rwd_chunk") is not False
         or config.get("acquisition_mode") != "intermittent"
         or config.get("dynamic_fit_mode") != intent.correction.global_dynamic_fit_mode
     ):
         return GuidedStartupIssue(
             "first_subset_contract_unsupported",
             "execution_profile",
-            "Only the accepted RWD intermittent phasic/full first subset is supported.",
+            "The selected analysis setup is not supported for this run.",
         )
     if manifest.candidate_consumption_contract_version != (
         GUIDED_CANDIDATE_CONSUMPTION_CONTRACT_VERSION

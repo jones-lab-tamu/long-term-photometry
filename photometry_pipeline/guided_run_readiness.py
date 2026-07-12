@@ -143,7 +143,7 @@ def _first_subset_current(authorization: GuidedRunAuthorizationResult) -> bool:
         intent is not None
         and intent.input_source.source_format == "rwd"
         and intent.acquisition.acquisition_mode == "intermittent"
-        and intent.execution_profile.execution_mode == "phasic"
+        and intent.execution_profile.execution_mode in {"phasic", "tonic", "both"}
         and intent.execution_profile.run_type == "full"
         and intent.execution_profile.traces_only is False
         and intent.roi_scope.selection_mode == "include"

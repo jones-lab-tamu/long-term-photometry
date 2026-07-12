@@ -1011,7 +1011,7 @@ def test_complete_fact_gate_refusals(mutation: str, expected: str):
     [
         ("input_format", "npm", "unsupported_source_format"),
         ("acquisition_mode", "continuous", "unsupported_acquisition_mode"),
-        ("exclude_incomplete_final_rwd_chunk", True, "incomplete_final_policy_not_supported"),
+        ("exclude_incomplete_final_rwd_chunk", True, None),
         ("allow_partial_final_window", True, "incomplete_final_policy_not_supported"),
     ],
 )
@@ -1025,8 +1025,11 @@ def test_draft_first_subset_gate_refusals(field: str, value: object, expected: s
         validator_contract=_validator_contract(),
     )
 
-    assert isinstance(result, contracts.GuidedBackendValidationCompileFailure)
-    assert result.blocking_issues[0].category == expected
+    if expected is None:
+        assert isinstance(result, contracts.GuidedBackendValidationCompileSuccess)
+    else:
+        assert isinstance(result, contracts.GuidedBackendValidationCompileFailure)
+        assert result.blocking_issues[0].category == expected
 
 
 def test_compiler_performs_no_filesystem_io(monkeypatch: pytest.MonkeyPatch):
@@ -1102,7 +1105,7 @@ def test_identity_is_deterministic_digest_with_pinned_vector():
     first = contracts.compute_guided_backend_validation_request_identity(request)
 
     assert first == (
-        "742b7c692783477fb31adb79de1271983028b45ba25802a9732998ca8a85b46f"
+        "693ab202498e32cad9671726232d47b81dd7669b470fd410ea7a64a50a3afc06"
     )
     assert first == contracts.compute_guided_backend_validation_request_identity(
         request

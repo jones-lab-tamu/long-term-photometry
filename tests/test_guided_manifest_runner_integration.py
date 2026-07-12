@@ -180,12 +180,12 @@ def test_wrapper_refuses_malformed_and_roi_mismatched_manifest(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ("tonic", "both"))
-def test_wrapper_refuses_nonphasic_manifest_modes(tmp_path, mode):
+def test_wrapper_accepts_native_tonic_and_combined_manifest_modes(tmp_path, mode):
     root, path, config_path, _ = _manifest(tmp_path)
-    with pytest.raises(RuntimeError, match="verification refused"):
-        wrapper.verify_guided_manifest_before_output(
-            _args(root, path, config_path, mode=mode)
-        )
+    verified = wrapper.verify_guided_manifest_before_output(
+        _args(root, path, config_path, mode=mode)
+    )
+    assert verified.accepted is True
 
 
 def test_wrapper_missing_manifest_refuses_before_run_dir_resolution(

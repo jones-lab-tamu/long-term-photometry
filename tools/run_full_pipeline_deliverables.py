@@ -994,10 +994,6 @@ def verify_guided_manifest_before_output(args):
     )
     if acquisition_mode != "intermittent":
         raise RuntimeError("Guided manifest execution requires intermittent acquisition.")
-    if bool(getattr(cfg, "exclude_incomplete_final_rwd_chunk", False)):
-        raise RuntimeError(
-            "Guided manifest execution forbids incomplete-final RWD exclusion."
-        )
     if str(getattr(cfg, "dynamic_fit_mode", "")) not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
         raise RuntimeError("Guided manifest execution has unsupported dynamic-fit mode.")
     effective_preview_first_n = (
@@ -1058,7 +1054,10 @@ def validate_guided_preallocated_mode_args(args):
         (bool(getattr(args, "out_base", None)), "--out-base prohibited"),
         (bool(getattr(args, "overwrite", False)), "overwrite prohibited"),
         (getattr(args, "format", None) != "rwd", "RWD format required"),
-        (getattr(args, "mode", None) != "phasic", "phasic mode required"),
+        (
+            getattr(args, "mode", None) not in {"phasic", "tonic", "both"},
+            "supported analysis mode required",
+        ),
         (getattr(args, "run_type", None) != "full", "full run type required"),
         (
             getattr(args, "preview_first_n", None) is not None,

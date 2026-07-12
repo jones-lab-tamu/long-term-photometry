@@ -305,6 +305,7 @@ class Pipeline:
         # terminal disposition and none is silently omitted (4J16k41 / C8).
         self._authorized_exclusion = None
         self._admitted_accountant = None
+        self._intermittent_chunk_id_by_source = {}
         self._continuous_window_map = {}
         self._continuous_source_cache = {}
         self._continuous_plan_summary = None
@@ -1291,6 +1292,9 @@ class Pipeline:
         # single final exclusion appended last. Approved-missing sources are
         # inside file_list and are marked (not removed from the index).
         full_ordered = list(self.file_list) + ([excluded] if excluded is not None else [])
+        self._intermittent_chunk_id_by_source = {
+            _norm(source): index for index, source in enumerate(full_ordered)
+        }
         expected_duration = float(getattr(self.config, "chunk_duration_sec", 0.0)) or None
 
         local_index = build_session_index(
@@ -1511,7 +1515,11 @@ class Pipeline:
             phase_name,
             fallback_windows=len(entries) if self._is_continuous_mode_enabled() else 0,
         )
-        for chunk_id, entry in enumerate(entries):
+        for fallback_chunk_id, entry in enumerate(entries):
+            chunk_id = self._intermittent_chunk_id_by_source.get(
+                os.path.normcase(os.path.abspath(os.path.normpath(str(entry)))),
+                fallback_chunk_id,
+            )
             t_load = time.perf_counter()
             try:
                 chunk = self._load_entry_chunk(entry, chunk_id, force_format)
@@ -2864,6 +2872,41 @@ class Pipeline:
                 item.absolute_path
                 for item in guided_verification.verified_candidates
             ]
+            # Guided verification restores the authoritative full candidate
+            # order. Reapply the already validated final exclusion so the
+            # excluded source remains in session accounting but is never
+            # reopened by either analysis branch.
+            guided_exclusions = [
+                str(path)
+                for path in (
+                    getattr(self.config, "rwd_excluded_source_files", []) or []
+                )
+                if str(path).strip()
+            ]
+            if guided_exclusions:
+                if len(guided_exclusions) != 1 or not self.file_list:
+                    raise ValueError(
+                        "Guided final exclusion must identify exactly one final source."
+                    )
+                excluded_norm = os.path.normcase(
+                    os.path.abspath(os.path.normpath(guided_exclusions[0]))
+                )
+                final_norm = os.path.normcase(
+                    os.path.abspath(os.path.normpath(self.file_list[-1]))
+                )
+                if excluded_norm != final_norm:
+                    raise ValueError(
+                        "Guided final exclusion does not identify the final chronological source."
+                    )
+                self._authorized_exclusion = self.file_list[-1]
+                self.file_list = [
+                    path
+                    for path in self.file_list
+                    if os.path.normcase(
+                        os.path.abspath(os.path.normpath(path))
+                    )
+                    != excluded_norm
+                ]
             self._selected_rois = list(
                 guided_verification.verified_included_roi_ids
             )

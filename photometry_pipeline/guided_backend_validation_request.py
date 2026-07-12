@@ -352,6 +352,7 @@ class GuidedBackendAcquisitionDatasetRequest:
     diagnostic_cache_contract_identity: str = ""
     validation_issue_categories: tuple[str, ...] = ()
     stale_reason_categories: tuple[str, ...] = ()
+    execution_mode: str = "phasic"
 
     def __post_init__(self) -> None:
         if self.acquisition_mode != "intermittent":
@@ -382,7 +383,6 @@ class GuidedBackendAcquisitionDatasetRequest:
         if (
             self.fixed_daily_anchor_clock is not None
             or self.allow_partial_final_window is not False
-            or self.exclude_incomplete_final_rwd_chunk is not False
         ):
             raise GuidedBackendValidationRequestContractError(
                 "Unsupported first-subset acquisition policy."
@@ -634,7 +634,7 @@ class GuidedBackendCorrectionRequest:
                 "blocked_strategy_states must be empty."
             )
         modes = {mark.selected_dynamic_fit_mode for mark in self.confirmed_marks}
-        if modes != {self.global_dynamic_fit_mode}:
+        if not self.per_roi_production_strategy_map and modes != {self.global_dynamic_fit_mode}:
             raise GuidedBackendValidationRequestContractError(
                 "Confirmed marks must unanimously match global_dynamic_fit_mode."
             )
@@ -1052,6 +1052,7 @@ class GuidedBackendAcquisitionDatasetFacts:
     diagnostic_cache_contract_identity: str = ""
     validation_issue_categories: tuple[str, ...] = ()
     stale_reason_categories: tuple[str, ...] = ()
+    execution_mode: str = "phasic"
 
     def __post_init__(self) -> None:
         for name in (
@@ -1476,7 +1477,7 @@ def compile_guided_backend_validation_request(
             detail_code="acquisition_not_intermittent",
         )
     if (
-        draft.execution_intent.execution_mode != "phasic"
+        draft.execution_intent.execution_mode not in {"phasic", "tonic", "both"}
         or draft.execution_intent.run_profile != "full"
         or draft.execution_intent.timeline_anchor_mode != "civil"
         or draft.execution_intent.fixed_daily_anchor_clock is not None
@@ -1488,10 +1489,7 @@ def compile_guided_backend_validation_request(
             "The first compiler subset requires civil phasic/full analysis.",
             detail_code="analysis_scope_unsupported",
         )
-    if (
-        draft.exclude_incomplete_final_rwd_chunk is not False
-        or draft.allow_partial_final_window is not False
-    ):
+    if draft.allow_partial_final_window is not False:
         return _failure(
             "incomplete_final_policy_not_supported",
             "incomplete_final",
@@ -1575,7 +1573,6 @@ def compile_guided_backend_validation_request(
         or dataset_facts.timeline_anchor_mode != "civil"
         or dataset_facts.fixed_daily_anchor_clock is not None
         or dataset_facts.allow_partial_final_window is not False
-        or dataset_facts.exclude_incomplete_final_rwd_chunk is not False
         or dataset_facts.dataset_status != "applied"
         or dataset_facts.dataset_current_applied is not True
         or not dataset_facts.rwd_time_col
@@ -1658,13 +1655,6 @@ def compile_guided_backend_validation_request(
             detail_code="correction_facts_incomplete",
         )
     global_mode = correction_facts.global_dynamic_fit_mode
-    if global_mode == "signal_only_f0":
-        return _failure(
-            "signal_only_not_supported_for_validate",
-            "correction",
-            "Signal-Only is not supported by the first validation subset.",
-            detail_code="signal_only",
-        )
     if global_mode not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES:
         return _failure(
             "forbidden_strategy_state",
@@ -1687,9 +1677,14 @@ def compile_guided_backend_validation_request(
             "Every included ROI must have exactly one confirmed mark.",
             detail_code="confirmed_mark_coverage_mismatch",
         )
-    if {mark.selected_dynamic_fit_mode for mark in correction_facts.confirmed_marks} != {
-        global_mode
-    }:
+    if (
+        not correction_facts.per_roi_production_strategy_map
+        and {
+            mark.selected_dynamic_fit_mode
+            for mark in correction_facts.confirmed_marks
+        }
+        != {global_mode}
+    ):
         return _failure(
             "mixed_dynamic_fit_modes",
             "correction",
@@ -1964,6 +1959,7 @@ def compile_guided_backend_validation_request(
             diagnostic_cache_contract_identity=(
                 dataset_facts.diagnostic_cache_contract_identity
             ),
+            execution_mode=dataset_facts.execution_mode,
             validation_issue_categories=dataset_facts.validation_issue_categories,
             stale_reason_categories=dataset_facts.stale_reason_categories,
         )
@@ -2228,6 +2224,7 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "diagnostic_cache_contract_identity",
         "validation_issue_categories",
         "stale_reason_categories",
+        "execution_mode",
     ),
     GuidedBackendRwdParserRequest: (
         "schema_name",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 import json
 import os
 import threading
@@ -67,7 +68,10 @@ def _pump_until(qapp, condition, *, timeout_s: float = 5.0) -> None:
 
 def _set_ready(window, request):
     window._guided_backend_validation_revision = request.current_guided_revision
-    window._guided_backend_validation_outcome = _accepted_outcome()
+    window._guided_backend_validation_outcome = replace(
+        _accepted_outcome(),
+        request_identity=request.authorization_result.stored_request_identity,
+    )
     window._guided_backend_validation_outcome_revision = (
         request.current_guided_revision
     )
@@ -136,7 +140,10 @@ def _run_production_validation_update(
 ):
     window._guided_backend_validation_revision = request.current_guided_revision
     context = SimpleNamespace(revision=request.current_guided_revision)
-    accepted = outcome or _accepted_outcome()
+    accepted = outcome or replace(
+        _accepted_outcome(),
+        request_identity=request.authorization_result.stored_request_identity,
+    )
     monkeypatch.setattr(
         window,
         "_capture_guided_backend_validation_context",

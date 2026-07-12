@@ -2000,7 +2000,7 @@ def _execution_intent_fields(
     else:
         timeline_provenance = "first subset fixed default; matches backend/Full Control civil timeline anchor default"
 
-    execution_mode_ok = intent.execution_mode == "phasic"
+    execution_mode_ok = intent.execution_mode in {"phasic", "tonic", "both"}
     run_profile_ok = intent.run_profile == "full"
 
     return (
@@ -2418,14 +2418,6 @@ def evaluate_guided_new_analysis_execution_subset_readiness(
                 f"Strategy '{choice.selected_strategy}' for ROI '{choice.roi_id}' is forbidden for execution.",
             ))
         elif (
-            choice.selected_strategy == "signal_only_f0"
-            and not plan.applied_dff_orchestration_enabled
-        ):
-            issues.append(_execution_subset_issue(
-                "signal_only_f0_execution_not_supported",
-                "Signal-Only F0 requires applied-dF/F orchestration.",
-            ))
-        elif (
             choice.selected_strategy != "signal_only_f0"
             and choice.selected_strategy
             not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
@@ -2441,37 +2433,12 @@ def evaluate_guided_new_analysis_execution_subset_readiness(
         if strategy in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
     }
     has_signal_only_f0 = "signal_only_f0" in unique_strategies
-    if has_signal_only_f0 and not dynamic_strategies:
-        issues.append(_execution_subset_issue(
-            "all_signal_only_f0_backend_validation_not_enabled",
-            (
-                "All-Signal-Only F0 planning is supported, but the current "
-                "backend validation request subset still requires dynamic fit."
-            ),
-        ))
-    if len(dynamic_strategies) > 1:
-        issues.append(_execution_subset_issue(
-            "mixed_dynamic_fit_modes_execution_not_enabled",
-            (
-                "Mixed dynamic-fit correction choices are valid for planning, "
-                "but the current backend validation/run route does not yet "
-                "support executing multiple dynamic-fit modes in one run."
-            ),
-        ))
-    elif len(dynamic_strategies) == 1:
+    if len(dynamic_strategies) == 1:
         allowed_dynamic_fit_strategy = next(iter(dynamic_strategies))
-    if (
-        has_signal_only_f0
-        and dynamic_strategies
-        and not plan.applied_dff_orchestration_enabled
-    ):
-        issues.append(_execution_subset_issue(
-            "mixed_per_roi_strategies",
-            "Mixed strategies require applied-dF/F orchestration.",
-        ))
 
     if (
         allowed_dynamic_fit_strategy
+        and not plan.per_roi_correction_strategy_choices
         and plan.dynamic_fit_parameter_contract.dynamic_fit_mode != allowed_dynamic_fit_strategy
     ):
         issues.append(_execution_subset_issue(
@@ -3032,7 +2999,7 @@ def build_guided_feature_event_effective_values_preview(plan: GuidedNewAnalysisD
 def _feature_event_consumption_preview_dict(plan: GuidedNewAnalysisDraftPlan) -> dict[str, Any]:
     traces_only = False
     first_subset_contract = (
-        plan.execution_intent.execution_mode == "phasic"
+        plan.execution_intent.execution_mode in {"phasic", "tonic", "both"}
         and plan.execution_intent.run_profile == "full"
         and traces_only is False
     )
@@ -3121,37 +3088,6 @@ def _correction_strategy_run_preview_unresolved_items(
         if strategy in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
     }
     has_signal_only_f0 = "signal_only_f0" in unique_strategies
-    if has_signal_only_f0 and not dynamic_strategies:
-        unresolved.append(GuidedNewAnalysisRunPreviewIssue(
-            category=(
-                "all_signal_only_f0_backend_validation_not_enabled"
-            ),
-            message=(
-                "All-Signal-Only F0 planning is supported, but backend "
-                "validation for that execution route is not enabled yet."
-            ),
-            severity="blocking",
-        ))
-    if len(dynamic_strategies) > 1:
-        unresolved.append(GuidedNewAnalysisRunPreviewIssue(
-            category="mixed_dynamic_fit_modes_execution_not_enabled",
-            message=(
-                "Mixed dynamic-fit correction choices are valid for planning, "
-                "but the current backend validation/run route does not yet "
-                "support executing multiple dynamic-fit modes in one run."
-            ),
-            severity="blocking",
-        ))
-    if (
-        has_signal_only_f0
-        and dynamic_strategies
-        and not plan.applied_dff_orchestration_enabled
-    ):
-        unresolved.append(GuidedNewAnalysisRunPreviewIssue(
-            category="mixed_per_roi_strategies",
-            message="Mixed strategies require applied-dF/F orchestration.",
-            severity="blocking",
-        ))
 
     for choice in included_choices:
         if not choice.explicit_user_mark:
@@ -3170,15 +3106,6 @@ def _correction_strategy_run_preview_unresolved_items(
             unresolved.append(GuidedNewAnalysisRunPreviewIssue(
                 category="forbidden_strategy_state",
                 message=f"Strategy '{choice.selected_strategy}' for ROI '{choice.roi_id}' is forbidden for execution.",
-                severity="blocking",
-            ))
-        elif (
-            choice.selected_strategy == "signal_only_f0"
-            and not plan.applied_dff_orchestration_enabled
-        ):
-            unresolved.append(GuidedNewAnalysisRunPreviewIssue(
-                category="signal_only_f0_production_routing_unresolved",
-                message="Signal-Only F0 requires applied-dF/F orchestration.",
                 severity="blocking",
             ))
         elif (

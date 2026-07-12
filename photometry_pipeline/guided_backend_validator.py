@@ -469,7 +469,6 @@ def _validate_semantics(
         )
     if (
         dataset.allow_partial_final_window is not False
-        or dataset.exclude_incomplete_final_rwd_chunk is not False
         or dataset.classification_schema_name
         != GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME
         or dataset.classification_schema_version
@@ -607,13 +606,7 @@ def _validate_semantics(
 
     correction = request.correction
     mode = correction.global_dynamic_fit_mode
-    if mode == "signal_only_f0":
-        return _issue(
-            "signal_only_not_supported_for_validate",
-            "correction",
-            "Signal-Only is not supported by this validator subset.",
-            "signal_only_mode",
-        )
+    native_per_roi = bool(correction.per_roi_production_strategy_map)
     if (
         correction.strategy_scope != "global"
         or correction.global_correction_strategy != "dynamic_fit"
@@ -662,7 +655,7 @@ def _validate_semantics(
             "Confirmed strategy marks must be explicit and current.",
             "confirmed_mark_not_current",
         )
-    if {
+    if not native_per_roi and {
         getattr(mark, "selected_dynamic_fit_mode", "")
         for mark in correction.confirmed_marks
     } != {mode}:
@@ -998,7 +991,7 @@ def _validate_semantics(
     for roi_id in roi.included_roi_ids:
         mark = marks_by_roi[roi_id]
         reference = evidence_by_roi[roi_id]
-        if (
+        if not native_per_roi and (
             mark.selected_dynamic_fit_mode != mode
             or reference.selected_dynamic_fit_mode != mode
         ):

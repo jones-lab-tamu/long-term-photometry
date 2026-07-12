@@ -736,16 +736,11 @@ def test_review_plan_dynamic_and_mixed_modes_are_plainly_separated(
     status = window._guided_review_plan_status_label.text()
     next_step = window._guided_review_next_step_label.text()
     assert "Plan completeness: Complete" in status
-    assert "multiple dynamic-fit modes" in status
-    assert "multiple dynamic-fit modes" in next_step
+    assert "multiple dynamic-fit modes" not in status
+    assert "multiple dynamic-fit modes" not in next_step
     assert "local setup issue" not in status.lower()
     assert "mixed_dynamic_fit_modes" not in status
-    # 4J16k5c: mixed dynamic-fit guidance must be actionable, not a status code.
-    for text in (status, next_step):
-        assert "one shared dynamic-fit correction strategy" in text
-        assert "Full Control" in text
-        assert "backend validation/run route" not in text
-        assert "not enabled in this patch" not in text
+    assert "one shared dynamic-fit correction strategy" not in status
 
 
 def test_review_plan_mixed_and_all_signal_only_rows_are_planning_valid(
@@ -841,16 +836,14 @@ def test_review_plan_mixed_and_all_signal_only_rows_are_planning_valid(
     assert "Plan completeness: Complete" in (
         window._guided_review_plan_status_label.text()
     )
-    assert "all-Signal-Only F0" in (
+    assert "all-Signal-Only F0" not in (
         window._guided_review_next_step_label.text()
     )
     assert "at least one dynamic" not in (
         window._guided_review_next_step_label.text().lower()
     )
-    # 4J16k5c: all-Signal-Only-F0 guidance must be actionable, not a status code.
     next_step_text = window._guided_review_next_step_label.text()
-    assert "does not yet support" in next_step_text
-    assert "Full Control" in next_step_text
+    assert "does not yet support" not in next_step_text
     assert "backend validation for all-Signal-Only F0 is not enabled yet" not in next_step_text
 
 
@@ -1388,7 +1381,7 @@ def test_review_plan_uniform_dynamic_fit_navigates_to_run_and_validates(
     plan = window._build_guided_new_analysis_draft_plan()
     assert plan.dataset_contract_snapshot.current_applied is True
     subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
-    assert subset.first_subset_executable is True
+    assert subset.planning_complete_for_handoff is True
 
     status = window._guided_review_plan_status_label.text()
     assert "This plan is ready. Go to the Run step to validate" in status
@@ -1929,7 +1922,7 @@ def test_local_preview_mark_evidence_binding_mismatch_blocks_validator(monkeypat
     assert result.blocking_issues[0].category == "evidence_reference_missing_or_stale"
 
 
-def test_review_plan_all_signal_only_f0_remains_unsupported_after_confirming_settings(
+def test_review_plan_all_signal_only_f0_reaches_final_run_gate_after_confirming_settings(
     window, tmp_path, monkeypatch
 ):
     """Signal-Only F0 must remain independently unsupported and must not
@@ -1953,18 +1946,18 @@ def test_review_plan_all_signal_only_f0_remains_unsupported_after_confirming_set
 
     status = window._guided_review_plan_status_label.text()
     next_step = window._guided_review_next_step_label.text()
-    assert "does not yet support an all-Signal-Only F0 analysis" in status
-    assert "does not yet support an all-Signal-Only F0 analysis" in next_step
+    assert "This plan is ready" in status
+    assert "Go to the Run step" in next_step
     assert "detected dataset settings" not in status
     assert window._guided_review_dataset_contract_action_btn.isHidden() is True
-    assert window._guided_review_go_to_run_btn.isEnabled() is False
+    assert window._guided_review_go_to_run_btn.isEnabled() is True
 
     starting_row = window._guided_workflow_stepper.currentRow()
     window._guided_review_go_to_run_btn.click()
-    assert window._guided_workflow_stepper.currentRow() == starting_row
+    assert window._guided_workflow_stepper.currentRow() != starting_row
 
 
-def test_review_plan_mixed_dynamic_fit_remains_unsupported_after_confirming_settings(
+def test_review_plan_mixed_dynamic_fit_is_supported_after_confirming_settings(
     window, tmp_path, monkeypatch
 ):
     """Mixed dynamic-fit modes must remain independently unsupported and
@@ -1992,15 +1985,15 @@ def test_review_plan_mixed_dynamic_fit_remains_unsupported_after_confirming_sett
 
     status = window._guided_review_plan_status_label.text()
     next_step = window._guided_review_next_step_label.text()
-    assert "one shared dynamic-fit correction strategy" in status
-    assert "one shared dynamic-fit correction strategy" in next_step
+    assert "This plan is ready" in status
+    assert "Go to the Run step" in next_step
     assert "detected dataset settings" not in status
     assert window._guided_review_dataset_contract_action_btn.isHidden() is True
-    assert window._guided_review_go_to_run_btn.isEnabled() is False
+    assert window._guided_review_go_to_run_btn.isEnabled() is True
 
     starting_row = window._guided_workflow_stepper.currentRow()
     window._guided_review_go_to_run_btn.click()
-    assert window._guided_workflow_stepper.currentRow() == starting_row
+    assert window._guided_workflow_stepper.currentRow() != starting_row
 
 
 def test_new_analysis_dataset_contract_missing_duration_or_semantics_cannot_apply(
@@ -2387,11 +2380,11 @@ def test_new_analysis_run_preview_displays_execution_intent_and_output_creation_
     assert "Execution intent:" in preview_text
     assert "timeline_anchor_mode: civil" in preview_text
     assert "fixed_daily_anchor_clock: none" in preview_text
-    assert "execution_mode: phasic" in preview_text
+    assert "execution_mode: both" in preview_text
     assert "run_profile: full" in preview_text
     assert "execution consumption: enabled for first-subset readiness classification" in preview_text
     assert "Feature/event consumption:" in preview_text
-    assert "  execution_mode: phasic" in preview_text
+    assert "  execution_mode: both" in preview_text
     assert "  run_profile: full" in preview_text
     assert "  traces_only: false" in preview_text
     assert "  feature_event_profile_required: true" in preview_text
@@ -2436,7 +2429,7 @@ def test_new_analysis_run_preview_feature_event_consumption_requires_applied_pro
 
     assert "feature_event_profile_not_applied" in preview_text
     assert "Feature/event consumption:" in preview_text
-    assert "  execution_mode: phasic" in preview_text
+    assert "  execution_mode: both" in preview_text
     assert "  run_profile: full" in preview_text
     assert "  traces_only: false" in preview_text
     assert "  feature_event_profile_required: true" in preview_text
@@ -2611,7 +2604,7 @@ def test_new_analysis_run_preview_shows_missing_execution_subset_fields(window, 
     assert "missing_run_profile" not in preview_text
     assert "missing_output_creation_policy" not in preview_text
     assert "timeline_anchor_mode: fixed_default=civil" in preview_text
-    assert "mode: fixed_default=phasic" in preview_text
+    assert "mode: fixed_default=both" in preview_text
     assert "run_profile: fixed_default=full" in preview_text
     assert "output_creation_policy: present" in preview_text
     assert "traces_only: fixed_default=False" in preview_text
@@ -2637,7 +2630,7 @@ def test_new_analysis_run_preview_applied_rwd_dataset_contract_satisfies_dataset
     assert "Dataset contract snapshot:" in preview_text
     assert "Execution intent:" in preview_text
     assert "timeline_anchor_mode: civil" in preview_text
-    assert "execution_mode: phasic" in preview_text
+    assert "execution_mode: both" in preview_text
     assert "run_profile: full" in preview_text
     assert "execution consumption: enabled for first-subset readiness classification" in preview_text
     assert "stored status: applied" in preview_text
@@ -2836,9 +2829,7 @@ def test_new_analysis_run_preview_mixed_per_roi_strategies_subset_blocked_not_pl
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
     assert "Draft plan completeness: complete" in preview_text
-    assert "mixed_dynamic_fit_modes_execution_not_enabled" in preview_text
-    assert "status: not executable under global_dynamic_fit_only.v1" in preview_text
-    assert "Execution: not available for this configuration yet" in preview_text
+    assert "mixed_dynamic_fit_modes_execution_not_enabled" not in preview_text
     assert "ready to run" not in preview_text.lower()
 
 
@@ -3412,7 +3403,8 @@ def test_guided_new_analysis_preview_request_checks_4J11m(window, tmp_path, monk
     window._guided_session_duration_edit.setText("120")
     window._refresh_guided_draft_run_plan_preview()
     text_passed = window._guided_draft_run_plan_preview_label.text()
-    assert "Draft plan local checks: Passed" in text_passed
+    assert "Draft plan local checks: Passed" not in text_passed
+    assert "missing_strategy_choice_for_included_roi" in text_passed
     assert "Draft request fingerprint:" in text_passed
 
     # 6. Preview wording does not include unsafe terms

@@ -359,8 +359,8 @@ def verify_guided_candidate_manifest_consumption(
     # 1. Validate CLI context first (require first Guided subset)
     if cli_context.input_format != "rwd":
         return _issue("guided_manifest_unsupported_mode", "Guided execution requires input format rwd.")
-    if cli_context.mode != "phasic":
-        return _issue("guided_manifest_unsupported_mode", "Guided execution requires mode phasic.")
+    if cli_context.mode not in {"phasic", "tonic", "both"}:
+        return _issue("guided_manifest_unsupported_mode", "Guided execution requires a supported analysis mode.")
     if cli_context.run_type != "full":
         return _issue("guided_manifest_unsupported_mode", "Guided execution requires run_type full.")
     if cli_context.traces_only is not False:

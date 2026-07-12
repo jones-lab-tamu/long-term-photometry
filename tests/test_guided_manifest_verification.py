@@ -416,7 +416,7 @@ def test_verifier_refuses_bad_cli_context(tmp_path):
 
     # Test mode
     ctx = _cli_context()
-    ctx = verification.GuidedManifestCliContext(**{**ctx.__dict__, "mode": "tonic"})
+    ctx = verification.GuidedManifestCliContext(**{**ctx.__dict__, "mode": "unsupported"})
     res = verification.verify_guided_candidate_manifest_consumption(
         manifest=load_res.manifest, source_root=str(tmp_path),
         current_candidates=(), current_roi_inventory=_current_roi_inventory(),

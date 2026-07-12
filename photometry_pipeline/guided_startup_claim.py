@@ -295,15 +295,18 @@ def validate_guided_preallocated_startup(
         command_argv = tuple(command_bytes.decode("utf-8").splitlines())
     except UnicodeDecodeError:
         command_argv = ()
+    command_mode = _argument_value(command_argv, "--mode")
     semantic_pairs = (
         ("--input", input_dir),
         ("--out", output_dir),
         ("--config", config_path),
         ("--guided-candidate-manifest", manifest_path),
-        ("--mode", "phasic"),
+        ("--mode", command_mode),
         ("--run-type", "full"),
     )
     if (
+        command_mode not in {"phasic", "tonic", "both"}
+        or
         "--guided-preallocated-run-dir" not in command_argv
         or any(
             (value := _argument_value(command_argv, flag)) is None
@@ -320,8 +323,6 @@ def validate_guided_preallocated_startup(
             )
             for flag, expected in semantic_pairs
         )
-        or "tonic" in command_argv
-        or "both" in command_argv
     ):
         return _refused(
             "startup_command_invalid",

@@ -987,7 +987,7 @@ def test_real_native_completion_allows_authorized_missing_middle_session(tmp_pat
         "authorized_missing_corrupted",
         "process",
     ]
-    assert [session.chunk_id for session in sessions] == [0, None, 1]
+    assert [session.chunk_id for session in sessions] == [0, None, 2]
     assert sessions[2].time_sec[0] == 0.0
 
 

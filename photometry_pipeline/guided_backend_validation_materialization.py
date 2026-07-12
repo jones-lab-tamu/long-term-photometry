@@ -852,16 +852,13 @@ def _materialize_evidence_references(
                 f"Strategy mark for ROI '{roi_id}' is not explicit.",
                 detail_code="strategy_mark_not_explicit",
             )
-        if choice.selected_strategy == "signal_only_f0":
-            return None, _failure(
-                "signal_only_not_supported_for_validate",
-                "evidence_references",
-                "Signal-Only is not supported by the first validation subset.",
-                detail_code="signal_only",
-            )
         if (
             choice.selected_strategy in FORBIDDEN_CORRECTION_STRATEGIES
-            or choice.selected_strategy not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+            or (
+                choice.selected_strategy != "signal_only_f0"
+                and choice.selected_strategy
+                not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+            )
         ):
             return None, _failure(
                 "forbidden_strategy_state",
@@ -974,13 +971,6 @@ def _materialize_evidence_references(
             )
         )
 
-    if len(modes) != 1:
-        return None, _failure(
-            "mixed_dynamic_fit_modes",
-            "evidence_references",
-            "Included ROIs must use one supported dynamic-fit mode.",
-            detail_code="mixed_modes",
-        )
     return GuidedBackendEvidenceReferenceFacts(
         references=tuple(references),
         complete=True,
@@ -1034,16 +1024,13 @@ def _materialize_local_preview_evidence_references(
                 f"Strategy mark for ROI '{roi_id}' is not explicit.",
                 detail_code="strategy_mark_not_explicit",
             )
-        if choice.selected_strategy == "signal_only_f0":
-            return None, _failure(
-                "signal_only_not_supported_for_validate",
-                "evidence_references",
-                "Signal-Only is not supported by the first validation subset.",
-                detail_code="signal_only",
-            )
         if (
             choice.selected_strategy in FORBIDDEN_CORRECTION_STRATEGIES
-            or choice.selected_strategy not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+            or (
+                choice.selected_strategy != "signal_only_f0"
+                and choice.selected_strategy
+                not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+            )
         ):
             return None, _failure(
                 "forbidden_strategy_state",
@@ -1106,13 +1093,6 @@ def _materialize_local_preview_evidence_references(
             )
         )
 
-    if len(modes) != 1:
-        return None, _failure(
-            "mixed_dynamic_fit_modes",
-            "evidence_references",
-            "Included ROIs must use one supported dynamic-fit mode.",
-            detail_code="mixed_modes",
-        )
     return GuidedBackendEvidenceReferenceFacts(
         references=tuple(references),
         complete=True,
@@ -1151,7 +1131,7 @@ def _materialize_dataset_and_roi_facts(
     if (
         draft.execution_intent.timeline_anchor_mode != "civil"
         or draft.execution_intent.fixed_daily_anchor_clock is not None
-        or draft.execution_intent.execution_mode != "phasic"
+        or draft.execution_intent.execution_mode not in {"phasic", "tonic", "both"}
         or draft.execution_intent.run_profile != "full"
     ):
         return None, None, _failure(
@@ -1210,7 +1190,6 @@ def _materialize_dataset_and_roi_facts(
         identity.sessions_per_hour != draft.sessions_per_hour
         or identity.session_duration_sec != draft.session_duration_sec
         or identity.allow_partial_final_window is not False
-        or identity.exclude_incomplete_final_rwd_chunk is not False
     ):
         return None, None, _failure(
             "dataset_facts_stale",
@@ -1288,6 +1267,7 @@ def _materialize_dataset_and_roi_facts(
         ),
         validation_issue_categories=tuple(snapshot.validation_issues),
         stale_reason_categories=tuple(snapshot.stale_reasons),
+        execution_mode=draft.execution_intent.execution_mode,
     )
     roi_facts = GuidedBackendRoiScopeFacts(
         available=True,
@@ -1322,25 +1302,9 @@ def _materialize_correction_facts(
     evidence_by_roi = {
         reference.roi_id: reference for reference in evidence_facts.references
     }
-    modes = {
-        reference.selected_dynamic_fit_mode
-        for reference in evidence_facts.references
-    }
-    if len(modes) != 1:
-        return None, _failure(
-            "correction_facts_missing",
-            "correction",
-            "Correction evidence does not resolve to one global mode.",
-            detail_code="global_mode_unresolved",
-        )
-    global_mode = next(iter(modes))
-    if contract.dynamic_fit_mode != global_mode:
-        return None, _failure(
-            "dynamic_fit_parameter_contract_mismatch",
-            "correction",
-            "Dynamic-fit parameter contract does not match confirmed marks.",
-            detail_code="dynamic_fit_mode_mismatch",
-        )
+    # The global mode is retained only as a legacy Config compatibility value.
+    # Current Guided execution is authoritative from the exact per-ROI map.
+    global_mode = contract.dynamic_fit_mode
 
     parameter_values: list[GuidedBackendTypedFieldValue] = []
     excluded_parameter_fields = {
@@ -1402,7 +1366,7 @@ def _materialize_correction_facts(
         marks.append(
             GuidedBackendConfirmedStrategyMarkFacts(
                 roi_id=roi_id,
-                selected_dynamic_fit_mode=global_mode,
+                selected_dynamic_fit_mode=choice.selected_strategy,
                 diagnostic_cache_id=evidence.diagnostic_cache_id,
                 source_setup_signature=evidence.source_setup_signature,
                 diagnostic_scope_signature=evidence.diagnostic_scope_signature,
@@ -1817,16 +1781,7 @@ def materialize_guided_backend_validation_facts(
         unresolved_inputs=(),
     )
 
-    # 5. Incomplete-Final Policy Audit (Before Snapshot)
-    if draft.exclude_incomplete_final_rwd_chunk:
-        return _failure(
-            "unsupported_incomplete_final_exclusion",
-            "incomplete_final",
-            "Excluding incomplete final chunk is not supported by the first subset.",
-            detail_code="exclusion_enabled_unsupported",
-        )
-
-    # 6. Source Snapshot Materialization (I/O Read-Only)
+    # 5. Source Snapshot Materialization (I/O Read-Only)
     try:
         snapshot = build_rwd_source_candidate_snapshot(
             source_path,

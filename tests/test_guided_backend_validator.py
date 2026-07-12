@@ -701,7 +701,7 @@ def test_incomplete_or_stale_evidence_reference_refuses(
                     exclude_incomplete_final_rwd_chunk=True,
                 ),
             ),
-            "incomplete_final_policy_not_supported",
+            None,
         ),
         (
             lambda request: _unchecked(
@@ -740,7 +740,7 @@ def test_incomplete_or_stale_evidence_reference_refuses(
                     global_dynamic_fit_mode="signal_only_f0",
                 ),
             ),
-            "signal_only_not_supported_for_validate",
+                "forbidden_strategy_state",
         ),
         (
             lambda request: _unchecked(
@@ -850,8 +850,11 @@ def test_incomplete_or_stale_evidence_reference_refuses(
 )
 def test_structural_section_refusals(mutation, expected: str):
     result = _validate(mutation(_request()))
-    assert result.accepted is False
-    assert _category(result) == expected
+    if expected is None:
+        assert result.accepted is True
+    else:
+        assert result.accepted is False
+        assert _category(result) == expected
     assert result.request_identity is not None
     assert result.run_authorization is False
 

@@ -334,16 +334,21 @@ def _validate_config(
 
 def _validate_command(path: Path, plan: GuidedStartupPlanResult) -> None:
     content = path.read_bytes()
+    argv = plan.command_plan.argv if plan.command_plan is not None else ()
+    try:
+        execution_mode = str(argv[argv.index("--mode") + 1])
+    except (ValueError, IndexError):
+        execution_mode = ""
     required = (
         b"--guided-candidate-manifest\n",
         b"--guided-preallocated-run-dir\n",
-        b"--mode\nphasic\n",
+        f"--mode\n{execution_mode}\n".encode("utf-8"),
         b"--run-type\nfull\n",
     )
     if any(value not in content for value in required):
         raise ValueError("Command record lacks required future Guided arguments.")
-    if b"\ntonic\n" in content or b"\nboth\n" in content:
-        raise ValueError("Command record contains a prohibited execution mode.")
+    if execution_mode not in {"phasic", "tonic", "both"}:
+        raise ValueError("Command record contains an unsupported execution mode.")
     if (
         plan.command_plan is None
         or plan.command_plan.executable_now is not False
