@@ -23,6 +23,7 @@ from photometry_pipeline.guided_startup_transaction import (
     GUIDED_COMMAND_RECORD_FILENAME,
     GUIDED_CONFIG_EFFECTIVE_FILENAME,
     GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
+    GUIDED_PER_ROI_CORRECTION_FILENAME,
     GUIDED_STARTUP_PROVENANCE_FILENAME,
     GUIDED_STARTUP_STATUS_FILENAME,
     GuidedStartupPlanResult,
@@ -57,6 +58,7 @@ _MATERIALIZED_FILENAMES = frozenset(
 _OPTIONAL_MATERIALIZED_FILENAMES = frozenset(
     (
         "guided_correction_strategy_map.json",
+        GUIDED_PER_ROI_CORRECTION_FILENAME,
         GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
     )
 )
@@ -309,6 +311,7 @@ def _validate_materialization(
     materialized: GuidedStartupMaterializationResult,
     plan: GuidedStartupPlanResult,
     allocation: GuidedStartupAllocationResult,
+    request: GuidedStartupTransactionRequest,
 ) -> GuidedStartupOrchestrationIssue | None:
     if (
         not isinstance(materialized, GuidedStartupMaterializationResult)
@@ -338,9 +341,27 @@ def _validate_materialization(
     }
     try:
         names = frozenset(item.name for item in run_dir.iterdir())
+        correction = request.authorization_result.production_intent.correction
+        native_current = bool(correction.production_strategy_map_version)
+        positive_legacy = bool(
+            not correction.production_strategy_map_version
+            and not correction.per_roi_production_strategy_map
+        )
         if (
             not _MATERIALIZED_FILENAMES.issubset(names)
             or names - _MATERIALIZED_FILENAMES - _OPTIONAL_MATERIALIZED_FILENAMES
+            or (
+                native_current
+                and (
+                    GUIDED_PER_ROI_CORRECTION_FILENAME not in names
+                    or "guided_correction_strategy_map.json" in names
+                )
+            )
+            or (
+                positive_legacy
+                and GUIDED_PER_ROI_CORRECTION_FILENAME in names
+            )
+            or (not native_current and not positive_legacy)
         ):
             raise ValueError
         for filename, content in expected_bytes.items():
@@ -467,7 +488,7 @@ def run_guided_startup_to_wrapper(
             allocation_result=allocated,
         )
     materialization_issue = _validate_materialization(
-        materialized, plan, allocated
+        materialized, plan, allocated, request
     )
     if materialization_issue is not None:
         return _result(

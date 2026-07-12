@@ -777,7 +777,7 @@ def build_guided_per_roi_production_strategy_map(
     plan: "GuidedNewAnalysisDraftPlan",
 ) -> GuidedPerRoiProductionStrategyMap:
     """Build the authoritative per-ROI strategy contract without executing."""
-    included = tuple(dict.fromkeys(str(roi) for roi in plan.included_roi_ids))
+    included = tuple(str(roi) for roi in plan.included_roi_ids)
     choices_by_roi: dict[str, list[GuidedPlanCorrectionChoice]] = {
         roi: [] for roi in included
     }
@@ -787,6 +787,12 @@ def build_guided_per_roi_production_strategy_map(
 
     entries: list[GuidedPerRoiProductionStrategy] = []
     blockers: list[str] = []
+    if len(included) != len(set(included)):
+        blockers.append("duplicate_included_roi_identity")
+    included_set = set(included)
+    for choice in plan.per_roi_correction_strategy_choices:
+        if choice.roi_id not in included_set:
+            blockers.append("unknown_strategy_roi")
     for roi in included:
         choices = choices_by_roi[roi]
         if not choices:
@@ -803,10 +809,6 @@ def build_guided_per_roi_production_strategy_map(
         elif selected == "signal_only_f0":
             family = "signal_only_f0"
             dynamic_mode = None
-            if not plan.applied_dff_orchestration_enabled:
-                blockers.append(
-                    "signal_only_f0_production_routing_not_enabled"
-                )
         else:
             family = "unsupported"
             dynamic_mode = None
@@ -846,12 +848,6 @@ def build_guided_per_roi_production_strategy_map(
     legacy_mode = None
     if len(entries) == len(included) and len(dynamic_modes) == 1:
         legacy_mode = next(iter(dynamic_modes))
-    if (
-        len(families) > 1
-        and not plan.applied_dff_orchestration_enabled
-    ):
-        blockers.append("mixed_strategy_families_not_enabled")
-
     unique_blockers = tuple(dict.fromkeys(blockers))
     return GuidedPerRoiProductionStrategyMap(
         version=PER_ROI_PRODUCTION_STRATEGY_MAP_VERSION,
@@ -860,7 +856,7 @@ def build_guided_per_roi_production_strategy_map(
         execution_routing_supported=bool(
             included
             and len(entries) == len(included)
-            and (legacy_mode or families == {"signal_only_f0"})
+            and families.issubset({"dynamic_fit", "signal_only_f0"})
             and not unique_blockers
         ),
         blocking_categories=unique_blockers,

@@ -87,6 +87,41 @@ def test_valid_preallocated_directory_validates_and_claims_once(prepared_case):
     assert replay.blocking_issues[0].category == "startup_already_claimed"
 
 
+def test_current_native_artifact_mutation_refuses_before_wrapper_claim(prepared_case):
+    request, _plan, _allocated, prepared = prepared_case
+    run_dir = Path(prepared.allocated_run_dir)
+    native_path = run_dir / startup.GUIDED_PER_ROI_CORRECTION_FILENAME
+    native_bytes = b'{"authorized":"native-correction-test"}\n'
+    native_path.write_bytes(native_bytes)
+    provenance_path = run_dir / startup.GUIDED_STARTUP_PROVENANCE_FILENAME
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance["startup_contract_version"] = (
+        startup.GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION
+    )
+    provenance["serialized_native_correction_sha256"] = hashlib.sha256(
+        native_bytes
+    ).hexdigest()
+    provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+
+    accepted = claim.validate_guided_preallocated_startup(
+        input_dir=request.source_root_canonical,
+        output_dir=prepared.allocated_run_dir,
+        config_path=prepared.config_path,
+        manifest_path=prepared.manifest_path,
+    )
+    assert accepted.accepted
+
+    native_path.write_bytes(native_bytes + b" ")
+    refused = claim.validate_guided_preallocated_startup(
+        input_dir=request.source_root_canonical,
+        output_dir=prepared.allocated_run_dir,
+        config_path=prepared.config_path,
+        manifest_path=prepared.manifest_path,
+    )
+    assert not refused.accepted
+    assert refused.blocking_issues[0].category == "startup_artifact_hash_mismatch"
+
+
 @pytest.mark.parametrize(
     "changes",
     (

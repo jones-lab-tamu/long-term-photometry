@@ -326,6 +326,60 @@ def test_materialize_writes_strategy_map_when_orchestration_enabled(allocated_ca
     assert "per_roi_production_strategy_map" in payload
 
 
+@pytest.mark.parametrize(
+    "selected",
+    (
+        ("robust_global_event_reject", "global_linear_regression"),
+        ("signal_only_f0", "signal_only_f0"),
+        ("robust_global_event_reject", "signal_only_f0"),
+    ),
+)
+def test_current_native_materialization_never_writes_posthoc_artifact(
+    allocated_case, monkeypatch, selected
+):
+    from photometry_pipeline.guided_production_mapping import (
+        GuidedProductionPerRoiStrategy,
+    )
+
+    request, plan, allocated = allocated_case
+    correction = request.authorization_result.production_intent.correction
+    included = tuple(f"ROI{index + 1}" for index in range(len(selected)))
+    object.__setattr__(
+        request.authorization_result.production_intent.roi_scope,
+        "included_roi_ids", included,
+    )
+    entries = tuple(
+        GuidedProductionPerRoiStrategy(
+            roi_id=roi_id,
+            strategy_family=(
+                "signal_only_f0" if strategy == "signal_only_f0" else "dynamic_fit"
+            ),
+            dynamic_fit_mode=None if strategy == "signal_only_f0" else strategy,
+            selected_strategy=strategy,
+            evidence_source_type="test",
+            evidence_reference_json="{}",
+            explicit_user_mark=True,
+            current_or_stale="current",
+        )
+        for roi_id, strategy in zip(included, selected)
+    )
+    object.__setattr__(correction, "production_strategy_map_version", "per_roi_correction_strategy_map.v1")
+    object.__setattr__(correction, "per_roi_production_strategy_map", entries)
+    object.__setattr__(correction, "applied_dff_orchestration_enabled", True)
+    monkeypatch.setattr(
+        materialization, "_validate_preconditions",
+        lambda r, p, a: (Path(a.allocated_run_dir), None),
+    )
+
+    result = materialization.materialize_guided_startup_artifacts(
+        request=request, pure_plan=plan, allocation_result=allocated
+    )
+    run_dir = Path(result.allocated_run_dir)
+    assert result.ok, result.blocking_issues
+    assert (run_dir / "guided_per_roi_correction.json").is_file()
+    assert not (run_dir / "guided_correction_strategy_map.json").exists()
+
+
 def test_materialize_skips_strategy_map_when_orchestration_disabled(allocated_case, monkeypatch):
     request, plan, allocated = allocated_case
 

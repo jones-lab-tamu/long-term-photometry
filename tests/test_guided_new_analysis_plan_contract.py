@@ -150,7 +150,7 @@ def test_per_roi_production_strategy_map_unanimous_dynamic_fit_projection():
     assert strategy_map.blocking_categories == ()
 
 
-def test_per_roi_strategy_map_represents_signal_only_but_blocks_routing():
+def test_per_roi_strategy_map_structurally_accepts_signal_only():
     plan = _complete_new_analysis_plan(
         per_roi_correction_strategy_choices=[
             GuidedPlanCorrectionChoice(
@@ -173,10 +173,8 @@ def test_per_roi_strategy_map_represents_signal_only_but_blocks_routing():
     assert entry.strategy_family == "signal_only_f0"
     assert entry.dynamic_fit_mode is None
     assert strategy_map.legacy_global_dynamic_fit_mode is None
-    assert strategy_map.execution_routing_supported is False
-    assert "signal_only_f0_production_routing_not_enabled" in (
-        strategy_map.blocking_categories
-    )
+    assert strategy_map.execution_routing_supported is True
+    assert strategy_map.blocking_categories == ()
 
 
 def test_per_roi_strategy_map_represents_mixed_dynamic_modes_without_collapse():
@@ -209,7 +207,7 @@ def test_per_roi_strategy_map_represents_mixed_dynamic_modes_without_collapse():
         "adaptive_event_gated_regression",
     ]
     assert strategy_map.legacy_global_dynamic_fit_mode is None
-    assert strategy_map.execution_routing_supported is False
+    assert strategy_map.execution_routing_supported is True
     assert strategy_map.blocking_categories == ()
 
 
@@ -1223,7 +1221,7 @@ def test_run_preview_marks_signal_only_f0_production_routing_unresolved():
 
     preview = build_guided_new_analysis_run_preview(plan)
 
-    assert preview.readiness_snapshot["plan_complete_for_handoff"] is False
+    assert preview.readiness_snapshot["plan_complete_for_handoff"] is True
     categories = {item.category for item in preview.unresolved_items}
     assert (
         "all_signal_only_f0_backend_validation_not_enabled"
@@ -1893,8 +1891,8 @@ def test_execution_subset_signal_only_blocks_subset_not_planning_readiness():
     planning = evaluate_new_analysis_plan_readiness(plan)
     subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
 
-    assert planning.plan_complete_for_handoff is False
-    assert subset.planning_complete_for_handoff is False
+    assert planning.plan_complete_for_handoff is True
+    assert subset.planning_complete_for_handoff is True
     assert subset.first_subset_executable is False
     assert subset.allowed_dynamic_fit_strategy is None
     assert any(

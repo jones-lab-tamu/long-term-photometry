@@ -16,6 +16,11 @@ from photometry_pipeline.guided_manifest_verification import (
 from photometry_pipeline.guided_production_mapping import (
     build_per_roi_feature_event_backend_shapes,
 )
+from photometry_pipeline.guided_correction_payload import (
+    GUIDED_PER_ROI_CORRECTION_FILENAME,
+    load_guided_correction_payload,
+    serialize_guided_correction_payload,
+)
 from photometry_pipeline.guided_startup_allocation import (
     GuidedStartupAllocationResult,
 )
@@ -443,7 +448,44 @@ def materialize_guided_startup_artifacts(
             )
 
     correction = request.authorization_result.production_intent.correction
-    if correction.applied_dff_orchestration_enabled:
+    included_roi_ids = request.authorization_result.production_intent.roi_scope.included_roi_ids
+    native_current = bool(correction.production_strategy_map_version)
+    positive_legacy = bool(
+        not correction.production_strategy_map_version
+        and not correction.per_roi_production_strategy_map
+    )
+    try:
+        native_correction_bytes = (
+            serialize_guided_correction_payload(
+                included_roi_ids, correction.per_roi_production_strategy_map
+            )
+            if native_current else None
+        )
+        if native_correction_bytes is None:
+            raise StopIteration
+        native_path = run_dir / GUIDED_PER_ROI_CORRECTION_FILENAME
+        native_hash = _write_exclusive(native_path, native_correction_bytes)
+        resolved = load_guided_correction_payload(native_path, included_roi_ids)
+        if set(resolved) != set(included_roi_ids):
+            raise ValueError("Native correction payload round-trip coverage mismatch.")
+        written.append(GUIDED_PER_ROI_CORRECTION_FILENAME)
+        hashes.append((GUIDED_PER_ROI_CORRECTION_FILENAME, native_hash))
+    except StopIteration:
+        pass
+    except Exception as exc:
+        return _result(
+            status="materialization_failed_partial", ok=False, materialized=False,
+            run_dir=os.fspath(run_dir), files_written=tuple(written),
+            issue=GuidedStartupMaterializationIssue(
+                "native_correction_payload_invalid", GUIDED_PER_ROI_CORRECTION_FILENAME,
+                f"Native correction payload materialization failed: {exc}",
+            ), artifact_hashes=tuple(hashes),
+            startup_transaction_identity=pure_plan.identities.startup_transaction_identity,
+        )
+    if (
+        positive_legacy
+        and correction.applied_dff_orchestration_enabled
+    ):
         strategy_map_payload = {
             "applied_dff_orchestration_enabled": True,
             "production_strategy_map_version": correction.production_strategy_map_version,

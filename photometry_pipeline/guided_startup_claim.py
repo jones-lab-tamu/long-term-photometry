@@ -18,8 +18,12 @@ from photometry_pipeline.guided_startup_transaction import (
     GUIDED_CANDIDATE_MANIFEST_FILENAME,
     GUIDED_COMMAND_RECORD_FILENAME,
     GUIDED_CONFIG_EFFECTIVE_FILENAME,
+    GUIDED_PER_ROI_CORRECTION_FILENAME,
+    GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
     GUIDED_STARTUP_PROVENANCE_FILENAME,
     GUIDED_STARTUP_STATUS_FILENAME,
+    GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION,
+    LEGACY_GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION,
 )
 
 
@@ -164,15 +168,34 @@ def validate_guided_preallocated_startup(
             "claim",
             "Guided startup directory has already been claimed.",
         )
-    if names != _PREPARED_FILENAMES:
+    provenance = _read_json(
+        resolved_run_dir / GUIDED_STARTUP_PROVENANCE_FILENAME
+    )
+    optional = frozenset((
+        GUIDED_PER_ROI_CORRECTION_FILENAME,
+        GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
+        "guided_correction_strategy_map.json",
+    ))
+    startup_contract = (
+        provenance.get("startup_contract_version")
+        if isinstance(provenance, dict) else None
+    )
+    native_required = startup_contract == GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION
+    positive_legacy = startup_contract == LEGACY_GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION
+    if (
+        not _PREPARED_FILENAMES.issubset(names)
+        or names - _PREPARED_FILENAMES - optional
+        or (native_required and GUIDED_PER_ROI_CORRECTION_FILENAME not in names)
+        or (not native_required and not positive_legacy)
+        or (native_required and "guided_correction_strategy_map.json" in names)
+        or (positive_legacy and GUIDED_PER_ROI_CORRECTION_FILENAME in names)
+    ):
         return _refused(
             "prepared_directory_dirty_or_incomplete",
             "directory",
             "Prepared startup directory is incomplete or contains unexpected entries.",
         )
-    if any(
-        (resolved_run_dir / name).is_symlink() for name in _PREPARED_FILENAMES
-    ):
+    if any((resolved_run_dir / name).is_symlink() for name in names):
         return _refused(
             "prepared_artifact_symlink_prohibited",
             "directory",
@@ -180,9 +203,6 @@ def validate_guided_preallocated_startup(
         )
 
     status = _read_json(resolved_run_dir / GUIDED_STARTUP_STATUS_FILENAME)
-    provenance = _read_json(
-        resolved_run_dir / GUIDED_STARTUP_PROVENANCE_FILENAME
-    )
     if (
         status is None
         or status.get("schema_name") != "guided_startup_status"
@@ -254,10 +274,17 @@ def validate_guided_preallocated_startup(
     config_hash = hashlib.sha256(config_file.read_bytes()).hexdigest()
     command_bytes = command_file.read_bytes()
     command_hash = hashlib.sha256(command_bytes).hexdigest()
+    correction_file = resolved_run_dir / GUIDED_PER_ROI_CORRECTION_FILENAME
+    correction_hash = (
+        hashlib.sha256(correction_file.read_bytes()).hexdigest()
+        if correction_file.is_file() else None
+    )
     if (
         manifest_hash != provenance.get("serialized_manifest_sha256")
         or config_hash != provenance.get("serialized_config_sha256")
         or command_hash != provenance.get("command_record_sha256")
+        or correction_hash
+        != provenance.get("serialized_native_correction_sha256")
     ):
         return _refused(
             "startup_artifact_hash_mismatch",

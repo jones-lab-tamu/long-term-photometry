@@ -27,6 +27,11 @@ from photometry_pipeline.guided_execution_preflight import (
     compute_guided_roi_preflight_identity,
 )
 from photometry_pipeline.guided_identity import encode_canonical_value
+from photometry_pipeline.guided_correction_payload import (
+    GUIDED_PER_ROI_CORRECTION_FILENAME,
+    correction_payload_identity,
+    serialize_guided_correction_payload,
+)
 from photometry_pipeline.guided_manifest_verification import (
     GUIDED_CANDIDATE_CONSUMPTION_CONTRACT_VERSION,
 )
@@ -43,8 +48,11 @@ from photometry_pipeline.guided_run_authorization import (
 
 GUIDED_STARTUP_TRANSACTION_SCHEMA_NAME = "guided_startup_transaction"
 GUIDED_STARTUP_TRANSACTION_SCHEMA_VERSION = "v1"
-GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION = (
+LEGACY_GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION = (
     "guided_startup_transaction.4J14o.pure.v1"
+)
+GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION = (
+    "guided_startup_transaction.4J16k49.native_correction.v2"
 )
 GUIDED_STARTUP_STATUS_SCHEMA_NAME = "guided_startup_status"
 GUIDED_STARTUP_STATUS_SCHEMA_VERSION = "v1"
@@ -698,6 +706,38 @@ def plan_guided_startup_transaction(
     auth = request.authorization_result
     payload = request.payload_result
     intent = auth.production_intent
+    correction = intent.correction
+    native_current = bool(correction.production_strategy_map_version)
+    positive_legacy = bool(
+        not correction.production_strategy_map_version
+        and not correction.per_roi_production_strategy_map
+    )
+    effective_startup_contract_version = (
+        GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION
+        if native_current
+        else LEGACY_GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION
+        if positive_legacy
+        else GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION
+    )
+    native_correction_bytes = None
+    native_correction_sha256 = None
+    native_correction_identity = None
+    if native_current:
+        try:
+            native_correction_bytes = serialize_guided_correction_payload(
+                intent.roi_scope.included_roi_ids,
+                correction.per_roi_production_strategy_map,
+            )
+            native_correction_sha256 = _sha256_bytes(native_correction_bytes)
+            native_correction_identity = json.loads(native_correction_bytes)[
+                "canonical_correction_payload_identity"
+            ]
+        except Exception as exc:
+            return _refused(
+                "native_correction_payload_invalid",
+                "correction",
+                f"Native correction payload is invalid: {exc}",
+            )
     manifest_artifact = serialize_guided_candidate_manifest_payload_to_bytes(
         payload.candidate_manifest_payload
     )
@@ -708,7 +748,7 @@ def plan_guided_startup_transaction(
     status_document = {
         "schema_name": GUIDED_STARTUP_STATUS_SCHEMA_NAME,
         "schema_version": GUIDED_STARTUP_STATUS_SCHEMA_VERSION,
-        "startup_contract_version": GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION,
+        "startup_contract_version": effective_startup_contract_version,
         "status": "allocated_preparation_pending",
         "created_utc": request.current_time_utc_iso,
         "run_id": request.planned_run_id,
@@ -731,7 +771,7 @@ def plan_guided_startup_transaction(
     provenance_basis = {
         "schema_name": GUIDED_STARTUP_PROVENANCE_SCHEMA_NAME,
         "schema_version": GUIDED_STARTUP_PROVENANCE_SCHEMA_VERSION,
-        "startup_contract_version": GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION,
+        "startup_contract_version": effective_startup_contract_version,
         "state": "prepared_runner_not_started",
         "validation_request_identity": auth.fresh_request_identity,
         "authorization_identity": auth.canonical_authorization_identity,
@@ -769,11 +809,16 @@ def plan_guided_startup_transaction(
         "runner_started": False,
         "runner_start_uncertain": False,
         "completed_run_claim": False,
+        "native_correction_schema_version": (
+            "v1" if native_current else None
+        ),
+        "native_correction_payload_identity": native_correction_identity,
+        "serialized_native_correction_sha256": native_correction_sha256,
     }
     provenance_basis_bytes = _json_bytes(provenance_basis)
     provenance_basis_hash = _sha256_bytes(provenance_basis_bytes)
     identity_envelope = {
-        "startup_contract_version": GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION,
+        "startup_contract_version": effective_startup_contract_version,
         "authorization_identity": auth.canonical_authorization_identity,
         "production_intent_identity": auth.production_intent_identity,
         "candidate_preflight_identity": auth.candidate_preflight_identity,

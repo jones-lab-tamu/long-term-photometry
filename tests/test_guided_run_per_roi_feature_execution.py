@@ -505,7 +505,9 @@ def test_analyze_photometry_wires_per_roi_feature_config_into_pipeline(tmp_path)
 
     with patch("sys.argv", argv), patch(
         "analyze_photometry.Pipeline"
-    ) as mock_pipeline_cls:
+    ) as mock_pipeline_cls, patch(
+        "analyze_photometry.load_guided_per_roi_correction", return_value=None
+    ):
         mock_pipeline_cls.return_value.roi_selection = None
         try:
             analyze_photometry.main()
@@ -792,6 +794,14 @@ def test_end_to_end_custom_roi_feature_counts_diverge_from_default(tmp_path):
     }
     (manifest_path.parent / startup.GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME).write_text(
         json.dumps(per_roi_payload), encoding="utf-8"
+    )
+    (manifest_path.parent / startup.GUIDED_STARTUP_PROVENANCE_FILENAME).write_text(
+        json.dumps({
+            "startup_contract_version": (
+                startup.LEGACY_GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION
+            )
+        }),
+        encoding="utf-8",
     )
 
     config_path = tmp_path / "config.yaml"

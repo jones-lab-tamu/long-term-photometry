@@ -3,13 +3,24 @@ import sys
 import os
 import json
 import logging
+import hashlib
+from pathlib import Path
 from dataclasses import replace
 from photometry_pipeline.config import Config
 from photometry_pipeline.feature_event_config import FEATURE_EVENT_CONFIG_FIELDS
 from photometry_pipeline.guided_startup_transaction import (
     GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
+    GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION,
+    LEGACY_GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION,
 )
 from photometry_pipeline.pipeline import Pipeline
+from photometry_pipeline.guided_correction_payload import (
+    GuidedCorrectionPayloadError,
+    GUIDED_PER_ROI_CORRECTION_FILENAME,
+    correction_payload_identity,
+    load_guided_correction_payload,
+)
+from photometry_pipeline.guided_manifest_verification import load_guided_candidate_manifest
 
 
 class GuidedFeatureSettingsError(RuntimeError):
@@ -129,6 +140,47 @@ def load_guided_per_roi_feature_settings(guided_candidate_manifest_path, base_co
     return per_roi_feature_config, (provenance or None)
 
 
+def load_guided_per_roi_correction(guided_candidate_manifest_path):
+    """Resolve the mandatory native correction authority for a current Guided run."""
+    if not guided_candidate_manifest_path:
+        return None
+    run_dir = os.path.dirname(os.path.abspath(guided_candidate_manifest_path))
+    loaded = load_guided_candidate_manifest(guided_candidate_manifest_path)
+    if not loaded.accepted or loaded.manifest is None:
+        raise GuidedCorrectionPayloadError("Guided candidate manifest is invalid or unsupported.")
+    path = os.path.join(
+        run_dir,
+        GUIDED_PER_ROI_CORRECTION_FILENAME,
+    )
+    provenance_path = os.path.join(run_dir, "guided_startup_provenance.json")
+    try:
+        with open(provenance_path, encoding="utf-8") as handle:
+            provenance = json.load(handle)
+    except Exception as exc:
+        raise GuidedCorrectionPayloadError("Guided startup provenance is missing or malformed.") from exc
+    if not isinstance(provenance, dict):
+        raise GuidedCorrectionPayloadError("Guided startup provenance must be an object.")
+    startup_contract = provenance.get("startup_contract_version")
+    if startup_contract == LEGACY_GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION:
+        if os.path.exists(path):
+            raise GuidedCorrectionPayloadError("Legacy Guided startup unexpectedly contains a native correction payload.")
+        return None
+    if startup_contract != GUIDED_STARTUP_TRANSACTION_CONTRACT_VERSION:
+        raise GuidedCorrectionPayloadError("Guided startup transaction contract is unknown or ambiguous.")
+    if not os.path.isfile(path):
+        raise GuidedCorrectionPayloadError("Current Guided correction payload is missing.")
+    expected_hash = provenance.get("serialized_native_correction_sha256")
+    actual_hash = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    if not isinstance(expected_hash, str) or actual_hash != expected_hash:
+        raise GuidedCorrectionPayloadError("Guided correction payload does not match authorized startup provenance.")
+    resolved = load_guided_correction_payload(path, loaded.manifest.included_roi_ids)
+    if provenance.get("native_correction_payload_identity") != correction_payload_identity(
+        tuple(loaded.manifest.included_roi_ids), resolved
+    ):
+        raise GuidedCorrectionPayloadError("Guided correction payload semantic identity mismatch.")
+    return resolved
+
+
 def main():
     parser = argparse.ArgumentParser(description="V1 Lab-Default Photometry Pipeline")
     parser.add_argument('--input', required=True, help="Input folder or file")
@@ -243,9 +295,13 @@ def main():
                 args.guided_candidate_manifest, config
             )
         )
+        per_roi_correction = load_guided_per_roi_correction(
+            args.guided_candidate_manifest
+        )
         pipeline = Pipeline(
             config,
             mode=args.mode,
+            per_roi_correction=per_roi_correction,
             per_roi_feature_config=per_roi_feature_config,
             per_roi_feature_provenance=per_roi_feature_provenance,
         )
