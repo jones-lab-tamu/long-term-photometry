@@ -21,6 +21,7 @@ from photometry_pipeline.pipeline import Pipeline
 from photometry_pipeline.run_completion_contract import (
     COMPLETION_KEY,
     PROFILE_TUNING_PREP,
+    PROFILE_FULL_INTERMITTENT,
     TERMINAL_CORRUPTED,
     TERMINAL_SUCCESS_CURRENT,
     TERMINAL_SUCCESS_WITH_MISSING,
@@ -30,6 +31,7 @@ from photometry_pipeline.run_completion_contract import (
     classify_run_terminal_state,
     correction_completion_error,
     normalize_run_mode,
+    required_artifacts_for_run_mode,
     sha256_file,
 )
 
@@ -135,6 +137,115 @@ def test_real_mixed_native_cache_passes_completion_verifier(native_run, tmp_path
     analysis, mode = native_run
     root = _root_for_case(tmp_path, analysis, "positive")
     assert correction_completion_error(str(root), mode) == ""
+
+
+def test_tonic_and_combined_native_branches_pass_completion_verification(
+    native_run, tmp_path, monkeypatch
+):
+    phasic_analysis, _phasic_mode = native_run
+    source_root = tmp_path / "input"
+    tonic_analysis = tmp_path / "tonic_analysis"
+    cfg = Config(
+        target_fs_hz=10.0, chunk_duration_sec=20.0,
+        rwd_time_col="TimeStamp", uv_suffix="-410", sig_suffix="-470",
+        lowpass_hz=2.0, filter_order=2, window_sec=10.0,
+        min_samples_per_window=10, signal_only_f0_min_window_samples=21,
+    )
+    Pipeline(cfg, mode="tonic", per_roi_correction=_mixed_map()).run(
+        str(source_root), str(tonic_analysis), force_format="rwd", recursive=True
+    )
+    from tools import plot_tonic_48h
+    tonic_png = tmp_path / "prefinal_tonic.png"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "plot_tonic_48h.py", "--analysis-out", str(tonic_analysis),
+            "--roi", "Region1", "--out", str(tonic_png),
+        ],
+    )
+    plot_tonic_48h.main()
+    assert tonic_png.is_file()
+    root = tmp_path / "combined_native"
+    shutil.copytree(phasic_analysis, root / "_analysis" / "phasic_out")
+    shutil.copytree(tonic_analysis, root / "_analysis" / "tonic_out")
+    mode = normalize_run_mode(
+        run_profile="full", run_type="full", acquisition_mode="intermittent",
+        traces_only=False, phasic_analysis=True, tonic_analysis=True,
+        feature_extraction_ran=True, deliverable_profile=PROFILE_FULL_INTERMITTENT,
+        expected_rois=["Region0", "Region1"], chunked_input_processing=True,
+        shared_input_manifest=False,
+    )
+    assert correction_completion_error(str(root), mode) == ""
+    for relative in required_artifacts_for_run_mode(mode):
+        path = root / relative
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"test artifact")
+    _write_terminal_set(root, mode, run_id="combined-native")
+    def refuse_recompute(*_args, **_kwargs):
+        raise AssertionError("completed Review must use persisted correction evidence")
+    monkeypatch.setattr(
+        "photometry_pipeline.pipeline.compute_signal_only_f0_candidate",
+        refuse_recompute,
+    )
+    monkeypatch.setattr(
+        "photometry_pipeline.core.regression.fit_chunk_dynamic",
+        refuse_recompute,
+    )
+    review = load_completed_phasic_review(root)
+    assert review.analysis_branches == ("tonic", "phasic")
+    assert review.strategy_label_for_roi("Region1") == "Signal-Only F0"
+    assert review.sessions_for_roi("Region1", branch="tonic")[0].production_f0_baseline is not None
+    assert review.sessions_for_roi("Region0", branch="tonic")[0].fitted_reference is not None
+    assert review.sessions_for_roi("Region1", branch="phasic")[0].production_f0_baseline is not None
+    from gui.run_report_viewer import RunReportViewer
+    from PySide6.QtWidgets import QApplication
+    _app = QApplication.instance() or QApplication([])
+    viewer = RunReportViewer()
+    assert viewer.load_report(str(root)) is True
+    assert "tonic and phasic analyses" in viewer._correction_summary_label.text()
+    tonic_cache = root / "_analysis" / "tonic_out" / "tonic_trace_cache.h5"
+    held_cache = tonic_cache.with_suffix(".held")
+    tonic_cache.rename(held_cache)
+    assert viewer.load_report(str(root)) is False
+    assert viewer._workspace.isHidden()
+    assert viewer.phasic_review_model is None
+    assert "cannot be verified" in viewer._status_label.text().lower()
+    held_cache.rename(tonic_cache)
+    tonic_meta = json.loads(
+        (tonic_analysis / "run_metadata.json").read_text(encoding="utf-8")
+    )
+    phasic_meta = json.loads(
+        (phasic_analysis / "run_metadata.json").read_text(encoding="utf-8")
+    )
+    assert tonic_meta["correction_provenance"]["requested_by_roi"] == (
+        phasic_meta["correction_provenance"]["requested_by_roi"]
+    )
+
+    with h5py.File(
+        root / "_analysis" / "tonic_out" / "tonic_trace_cache.h5", "r+"
+    ) as cache:
+        cache["roi/Region0/chunk_0"].attrs["correction_selected_strategy"] = (
+            "robust_global_event_reject"
+        )
+        cache["roi/Region0/chunk_0"].attrs["correction_dynamic_fit_mode"] = (
+            "robust_global_event_reject"
+        )
+    assert "mismatches the request" in correction_completion_error(
+        str(root), mode
+    ).lower()
+    refused_png = tmp_path / "refused_tonic.png"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "plot_tonic_48h.py", "--analysis-out",
+            str(root / "_analysis" / "tonic_out"), "--roi", "Region0",
+            "--out", str(refused_png),
+        ],
+    )
+    with pytest.raises(SystemExit):
+        plot_tonic_48h.main()
+    assert not refused_png.exists()
 
 
 def test_completed_review_loader_reads_persisted_mixed_evidence_without_recompute(

@@ -247,7 +247,7 @@ def main():
     args = parser.parse_args()
 
     if args.guided_candidate_manifest and (
-        args.mode != "phasic"
+        args.mode not in {"phasic", "tonic"}
         or args.format != "rwd"
         or args.overwrite
         or args.traces_only

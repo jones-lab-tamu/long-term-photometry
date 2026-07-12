@@ -223,7 +223,7 @@ def test_config_preview_refuses_before_run_dir_resolution(
     assert "guided_manifest_cli_conflict" in capsys.readouterr().err
 
 
-def test_manifest_argument_is_phasic_only():
+def test_manifest_argument_reaches_both_native_analysis_branches():
     args = SimpleNamespace(guided_candidate_manifest="internal.json")
     tonic = ["python", "analyze_photometry.py", "--mode", "tonic"]
     phasic = ["python", "analyze_photometry.py", "--mode", "phasic"]
@@ -233,7 +233,7 @@ def test_manifest_argument_is_phasic_only():
     wrapper._append_guided_manifest_to_analysis_command(
         phasic, args, mode="phasic"
     )
-    assert "--guided-candidate-manifest" not in tonic
+    assert tonic[-2:] == ["--guided-candidate-manifest", "internal.json"]
     assert phasic[-2:] == ["--guided-candidate-manifest", "internal.json"]
 
 

@@ -492,9 +492,26 @@ def test_cache_complete_mixed_map_succeeds_and_legacy_no_map_remains_compatible(
 
 
 @pytest.mark.parametrize("mode", ["tonic", "both"])
-def test_signal_only_map_is_refused_for_tonic_capable_pipeline_modes(mode):
-    with pytest.raises(ValueError, match="supported only for phasic"):
-        Pipeline(_cfg(), mode=mode, per_roi_correction=_signal_only_map("ROI0"))
+def test_signal_only_map_is_structurally_supported_for_tonic_capable_modes(mode):
+    pipeline = Pipeline(
+        _cfg(), mode=mode, per_roi_correction=_signal_only_map("ROI0")
+    )
+    assert pipeline.per_roi_correction["ROI0"].selected_strategy == "signal_only_f0"
+
+
+@pytest.mark.parametrize("strategy_map", [_signal_only_map("ROI0", "ROI1"), _mixed_strategy_map()])
+def test_native_tonic_and_phasic_consume_the_same_canonical_trace(strategy_map):
+    phasic = Pipeline(_cfg(), mode="phasic", per_roi_correction=strategy_map)
+    tonic = Pipeline(_cfg(), mode="tonic", per_roi_correction=strategy_map)
+    for pipeline in (phasic, tonic):
+        pipeline.stats.f0_values = {"ROI0": 1.0, "ROI1": 1.0}
+    phasic_chunk = phasic._apply_standard_analysis(_chunk(), 4)
+    tonic_chunk = tonic._apply_standard_analysis(_chunk(), 4)
+    np.testing.assert_allclose(tonic_chunk.delta_f, phasic_chunk.delta_f, equal_nan=True)
+    np.testing.assert_allclose(tonic_chunk.dff, phasic_chunk.dff, equal_nan=True)
+    assert tonic_chunk.metadata["correction_strategy_consumed_by_roi"] == (
+        phasic_chunk.metadata["correction_strategy_consumed_by_roi"]
+    )
 
 
 def _write_rwd(path: Path, *, n=200, fs=10.0):
@@ -524,7 +541,8 @@ def _write_rwd_four_rois(path: Path, *, n=200, fs=10.0):
     pd.DataFrame(values).to_csv(path, index=False)
 
 
-def test_real_pipeline_run_consumes_native_signal_only_map_and_cache(tmp_path):
+@pytest.mark.parametrize("mode", ["phasic", "tonic"])
+def test_real_pipeline_run_consumes_native_signal_only_map_and_cache(tmp_path, mode):
     source = tmp_path / "input" / "2024_01_01-00_00_00" / "fluorescence.csv"
     _write_rwd(source)
     cfg = Config(
@@ -540,7 +558,7 @@ def test_real_pipeline_run_consumes_native_signal_only_map_and_cache(tmp_path):
     out = tmp_path / "out"
     pipeline = Pipeline(
         cfg,
-        mode="phasic",
+        mode=mode,
         per_roi_correction=_signal_only_map("Region0"),
     )
     pipeline.run(str(source.parent.parent), str(out), force_format="rwd", recursive=True)
@@ -561,7 +579,8 @@ def test_real_pipeline_run_consumes_native_signal_only_map_and_cache(tmp_path):
     ]
     report = json.loads((out / "run_report.json").read_text(encoding="utf-8"))
     assert report["derived_settings"]["correction_provenance"] == provenance
-    with h5py.File(out / "phasic_trace_cache.h5", "r") as handle:
+    assert provenance["analysis_mode"] == mode
+    with h5py.File(out / f"{mode}_trace_cache.h5", "r") as handle:
         group = handle["roi/Region0/chunk_0"]
         assert group.attrs["correction_selected_strategy"] == "signal_only_f0"
         assert "signal_only_f0_baseline" in group

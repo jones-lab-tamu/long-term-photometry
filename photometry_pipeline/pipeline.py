@@ -281,14 +281,6 @@ class Pipeline:
             if not isinstance(per_roi_correction, dict):
                 raise TypeError("per_roi_correction must be a dict or None")
             self.per_roi_correction = MappingProxyType(dict(per_roi_correction))
-            if self.mode.strip().lower() in {"tonic", "both"} and any(
-                getattr(spec, "strategy_family", None) == "signal_only_f0"
-                for spec in self.per_roi_correction.values()
-            ):
-                raise ValueError(
-                    "Signal-Only F0 is supported only for phasic Pipeline execution; "
-                    f"mode={self.mode!r} cannot consume a signal_only_f0 correction entry"
-                )
         # Optional per-ROI feature-detection settings (4J16k32b). When None
         # (the default), feature extraction uses `self.config` for every ROI,
         # identical to today's single-config behavior.
@@ -1716,7 +1708,7 @@ class Pipeline:
         # I will do this in the `run()` method right after `run_pass_1` returns.
         # Wait, run_pass_1 computes baselines. So best place is `run()`.
         # TONIC MODE: PASS 1c (Global Robust Fit)
-        if self.mode == 'tonic':
+        if self.mode == 'tonic' and self.per_roi_correction is None:
             print("Pass 1c (Tonic Global Fit accumulation)...")
             from .core.tonic_dff import compute_global_iso_fit_robust
             use_bounded_tonic_sampling = self._is_continuous_mode_enabled()
@@ -1839,10 +1831,10 @@ class Pipeline:
                  if 'scan_warnings' not in self.qc_summary: self.qc_summary['scan_warnings'] = []
                  self.qc_summary['scan_warnings'].append(msg)
         
-        if self.mode == 'tonic':
+        if self.mode == 'tonic' and self.per_roi_correction is None:
              self._process_chunk_tonic(chunk, chunk_id)
         else:
-             # PHASIC MODE (Dynamic)
+             # Native per-ROI correction is shared by phasic and tonic.
              strategy_map, dispatch_map = self._resolve_correction_map_for_chunk(
                  chunk.channel_names
              )
@@ -1850,7 +1842,10 @@ class Pipeline:
              uv_fit, delta_f = regression.fit_chunk_dynamic(
                  chunk,
                  self.config,
-                 mode=self.mode,
+                 # Native tonic consumes the same canonical per-session
+                 # correction engine as phasic. ``mode='tonic'`` is reserved
+                 # for the positive legacy recording-global tonic route.
+                 mode="phasic" if self.per_roi_correction is not None else self.mode,
                  per_roi_correction=dispatch_map,
              )
              if self._is_phasic_timing_enabled():
@@ -2008,14 +2003,6 @@ class Pipeline:
 
         strategy_map = dict(self.per_roi_correction)
         regression.validate_per_roi_correction_map(names, strategy_map)
-        if self.mode.strip().lower() in {"tonic", "both"} and any(
-            spec.strategy_family == "signal_only_f0"
-            for spec in strategy_map.values()
-        ):
-            raise ValueError(
-                "Signal-Only F0 is supported only for phasic Pipeline execution; "
-                f"mode={self.mode!r} cannot consume a signal_only_f0 correction entry"
-            )
         return strategy_map, strategy_map
 
     def _build_requested_correction_provenance(

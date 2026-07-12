@@ -48,6 +48,11 @@ from photometry_pipeline.io.hdf5_cache_reader import (
 from photometry_pipeline.viz.phasic_data_prep import (
     build_authoritative_plot_sessions,
 )
+from photometry_pipeline.completed_run_review import (
+    SCIENTIST_STRATEGY_LABELS,
+    resolve_analysis_plot_context,
+    resolve_persisted_cache_strategy,
+)
 
 
 TONIC_OVERVIEW_TARGET_DISPLAY_POINTS = 30000
@@ -491,6 +496,7 @@ def plot_tonic_overview(
     timeline_mode_label,
     timeline_axis_label,
     missing_intervals=None,
+    correction_label=None,
 ):
     """Render the two-panel tonic overview and save."""
     overview_prefix = build_overview_prefix_from_time_hours(t_h)
@@ -535,7 +541,10 @@ def plot_tonic_overview(
     )
     _annotate_missing_intervals(ax2, missing_intervals or [])
     ax2.set_ylabel("deltaF")
-    ax2.set_title(f"Tonic Output (deltaF; {mode_label}; {timeline_mode_label}) - {roi}")
+    correction_suffix = f"; {correction_label}" if correction_label else ""
+    ax2.set_title(
+        f"Tonic Output (deltaF; {mode_label}; {timeline_mode_label}{correction_suffix}) - {roi}"
+    )
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc='upper right')
 
@@ -685,6 +694,26 @@ def main():
         continuous_time, sig_raw, uv_raw, deltaf_val, missing_sessions = assemble_arrays(
             cache, roi, args, return_missing_metadata=True
         )
+        context = resolve_analysis_plot_context(args.analysis_out)
+        if "chunk_ids" not in cache["meta"]:
+            raise RuntimeError("Authoritative tonic cache chunk index is unreadable.")
+        chunk_ids = [int(value) for value in np.asarray(cache["meta"]["chunk_ids"][()]).reshape(-1)]
+        if not chunk_ids:
+            raise RuntimeError("Authoritative tonic cache chunk index is empty.")
+        requested = context.requested_by_roi.get(str(roi))
+        strategy = resolve_persisted_cache_strategy(
+            cache,
+            roi,
+            chunk_ids,
+            strict_current=context.source_kind == "current",
+            requested_record=requested,
+        )
+        selected = str(strategy.get("selected_strategy", "") or "")
+        correction_label = (
+            "Signal-Only F0"
+            if strategy.get("strategy_family") == "signal_only_f0"
+            else SCIENTIST_STRATEGY_LABELS.get(selected, selected or None)
+        )
     except Exception as exc:
         cache.close()
         print(f"CRITICAL: {exc}")
@@ -740,6 +769,7 @@ def main():
         timeline_mode_name,
         timeline_axis,
         missing_intervals=missing_intervals,
+        correction_label=correction_label,
     )
     if args.export_display_series_csv:
         _write_tonic_display_series_csv(

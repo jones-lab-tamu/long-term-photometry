@@ -62,7 +62,7 @@ class Hdf5TraceCacheWriter:
         the writer must never turn missing evidence into a silently incomplete
         cache.
         """
-        if self.mode != 'phasic' or not hasattr(chunk, 'metadata'):
+        if not hasattr(chunk, 'metadata'):
             return
         metadata = chunk.metadata
         if not isinstance(metadata, dict) or 'correction_strategy_consumed_by_roi' not in metadata:
@@ -273,8 +273,7 @@ class Hdf5TraceCacheWriter:
         # dynamic_fit_mode_resolved value -- that would silently mislabel
         # every ROI in this chunk with a single borrowed mode.
         if (
-            self.mode == 'phasic'
-            and hasattr(chunk, 'metadata')
+            hasattr(chunk, 'metadata')
             and isinstance(chunk.metadata, dict)
             and classify_per_roi_dynamic_fit_mode_contract(chunk.metadata) == 'malformed'
         ):
@@ -323,7 +322,14 @@ class Hdf5TraceCacheWriter:
                     )
             grp.attrs["source_file"] = str(source_file)
 
-            if self.mode == 'phasic' and self.config:
+            if self.config and (
+                self.mode == 'phasic'
+                or (
+                    hasattr(chunk, 'metadata')
+                    and isinstance(chunk.metadata, dict)
+                    and 'correction_strategy_consumed_by_roi' in chunk.metadata
+                )
+            ):
                 grp.attrs['peak_threshold_method'] = str(self.config.peak_threshold_method)
                 grp.attrs['peak_threshold_k'] = float(self.config.peak_threshold_k)
                 grp.attrs['signal_excursion_polarity'] = str(
@@ -861,6 +867,15 @@ class Hdf5TraceCacheWriter:
             # Modes
             if self.mode == 'tonic' and chunk.delta_f is not None:
                 grp.create_dataset('deltaF', data=chunk.delta_f[:, r_idx], **self._dataset_create_kwargs)
+                if (
+                    hasattr(chunk, 'metadata')
+                    and isinstance(chunk.metadata, dict)
+                    and 'correction_strategy_consumed_by_roi' in chunk.metadata
+                ):
+                    if chunk.dff is not None:
+                        grp.create_dataset('dff', data=chunk.dff[:, r_idx], **self._dataset_create_kwargs)
+                    if chunk.uv_fit is not None:
+                        grp.create_dataset('fit_ref', data=chunk.uv_fit[:, r_idx], **self._dataset_create_kwargs)
             elif self.mode == 'phasic':
                 if chunk.dff is not None:
                     grp.create_dataset('dff', data=chunk.dff[:, r_idx], **self._dataset_create_kwargs)

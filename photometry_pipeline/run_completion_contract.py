@@ -620,14 +620,14 @@ def _normalized_source(value: Any) -> str:
     return os.path.normcase(os.path.abspath(os.path.normpath(_text_value(value))))
 
 
-def _load_authoritative_phasic_sessions(
-    run_dir: str, run_mode: dict[str, Any]
+def _load_authoritative_analysis_sessions(
+    run_dir: str, run_mode: dict[str, Any], analysis_kind: str
 ) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None, str]:
     """Load C8's expected and processed phasic session identities."""
-    analysis_dir = os.path.join(run_dir, "_analysis", "phasic_out")
+    analysis_dir = os.path.join(run_dir, "_analysis", f"{analysis_kind}_out")
     payload, error = read_input_completeness(analysis_dir)
     if payload is None:
-        return None, None, f"the phasic analysis input-completeness record is {error}"
+        return None, None, f"the {analysis_kind} analysis input-completeness record is {error}"
 
     expected = payload.get("expected")
     processed = payload.get("processed")
@@ -639,11 +639,13 @@ def _load_authoritative_phasic_sessions(
             return None, None, f"the run-wide frozen input manifest is {manifest_error}"
         expected = manifest.get("expected")
     if not isinstance(expected, list) or not isinstance(processed, list):
-        return None, None, "the authoritative phasic session index is malformed"
+        return None, None, f"the authoritative {analysis_kind} session index is malformed"
     return expected, processed, ""
 
 
-def correction_completion_error(run_dir: str, run_mode: dict[str, Any]) -> str:
+def _correction_completion_error_for_analysis(
+    run_dir: str, run_mode: dict[str, Any], analysis_kind: str
+) -> str:
     """Verify requested/consumed correction evidence for a current phasic run.
 
     Older current runs that predate the versioned provenance section remain
@@ -652,10 +654,7 @@ def correction_completion_error(run_dir: str, run_mode: dict[str, Any]) -> str:
     Once the section is claimed, every field and every processed ROI/session is
     checked fail-closed against C8 and the canonical HDF5 cache.
     """
-    if not run_mode.get("phasic_analysis"):
-        return ""
-
-    analysis_dir = os.path.join(run_dir, "_analysis", "phasic_out")
+    analysis_dir = os.path.join(run_dir, "_analysis", f"{analysis_kind}_out")
     metadata, _metadata_error = _read_json_object(
         os.path.join(analysis_dir, "run_metadata.json")
     )
@@ -695,11 +694,15 @@ def correction_completion_error(run_dir: str, run_mode: dict[str, Any]) -> str:
         return "phasic report correction_provenance declares an unsupported schema version"
     if nested_provenance != provenance:
         return "phasic report and run_metadata correction provenance disagree"
-    if provenance.get("analysis_mode") != "phasic":
-        return "correction_provenance is not bound to phasic analysis"
+    if provenance.get("analysis_mode") != analysis_kind:
+        return f"correction_provenance is not bound to {analysis_kind} analysis"
     source = provenance.get("source")
     if source not in {"explicit_per_roi_map", "legacy_uniform_translation"}:
         return f"correction_provenance has an unknown source {source!r}"
+    if analysis_kind == "tonic" and source == "legacy_uniform_translation":
+        # Historical tonic uses its recording-global robust correction stage,
+        # not the native per-ROI cache evidence verified below.
+        return ""
 
     expected_rois = [str(roi) for roi in (run_mode.get("expected_rois") or [])]
     if len(expected_rois) != len(set(expected_rois)):
@@ -753,8 +756,8 @@ def correction_completion_error(run_dir: str, run_mode: dict[str, Any]) -> str:
     if not run_mode.get("chunked_input_processing"):
         return ""
 
-    expected, processed, session_error = _load_authoritative_phasic_sessions(
-        run_dir, run_mode
+    expected, processed, session_error = _load_authoritative_analysis_sessions(
+        run_dir, run_mode, analysis_kind
     )
     if session_error:
         return session_error
@@ -791,7 +794,7 @@ def correction_completion_error(run_dir: str, run_mode: dict[str, Any]) -> str:
         if expected_start and source_start is not None and source_start.isoformat() != expected_start:
             return f"processed session {index} timestamp does not match its source identity"
 
-    cache_path = os.path.join(analysis_dir, "phasic_trace_cache.h5")
+    cache_path = os.path.join(analysis_dir, f"{analysis_kind}_trace_cache.h5")
     if not os.path.isfile(cache_path):
         return "the phasic canonical trace cache is missing"
 
@@ -971,8 +974,24 @@ def correction_completion_error(run_dir: str, run_mode: dict[str, Any]) -> str:
                             return f"ROI {roi!r} session {cache_id} Signal-Only fit_ref is not all NaN"
     except Exception as exc:  # noqa: BLE001 - malformed cache must fail closed
         if isinstance(exc, (ValueError, KeyError, OSError)):
-            return f"the phasic canonical correction cache is malformed: {exc}"
-        return f"the phasic canonical correction cache could not be verified: {exc}"
+            return f"the {analysis_kind} canonical correction cache is malformed: {exc}"
+        return f"the {analysis_kind} canonical correction cache could not be verified: {exc}"
+    return ""
+
+
+def correction_completion_error(run_dir: str, run_mode: dict[str, Any]) -> str:
+    """Verify every analysis branch that claims native correction provenance."""
+    for analysis_kind, enabled_key in (
+        ("tonic", "tonic_analysis"),
+        ("phasic", "phasic_analysis"),
+    ):
+        if not run_mode.get(enabled_key):
+            continue
+        error = _correction_completion_error_for_analysis(
+            run_dir, run_mode, analysis_kind
+        )
+        if error:
+            return error
     return ""
 
 

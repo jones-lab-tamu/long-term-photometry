@@ -1089,9 +1089,9 @@ def validate_guided_preallocated_mode_args(args):
 
 
 def _append_guided_manifest_to_analysis_command(cmd, args, *, mode):
-    """Thread the internal manifest only into the phasic analysis subprocess."""
+    """Thread one authorized native map into both analysis branches."""
     manifest_path = getattr(args, "guided_candidate_manifest", None)
-    if manifest_path and mode == "phasic":
+    if manifest_path and mode in {"phasic", "tonic"}:
         cmd.extend(["--guided-candidate-manifest", manifest_path])
 
 

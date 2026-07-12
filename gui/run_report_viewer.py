@@ -457,24 +457,29 @@ class RunReportViewer(QWidget):
         classification = classify_completed_run_terminal_state(out_dir)
         self._phasic_review_model = None
         self._phasic_review_error = ""
-        phasic_dir = os.path.join(out_dir, "_analysis", "phasic_out")
-        phasic_meta_path = os.path.join(
-            phasic_dir, "run_metadata.json"
+        run_mode = getattr(classification, "run_mode", {}) or {}
+        enabled_branches = tuple(
+            branch
+            for branch, key in (
+                ("tonic", "tonic_analysis"),
+                ("phasic", "phasic_analysis"),
+            )
+            if bool(run_mode.get(key))
         )
-        phasic_cache_path = os.path.join(
-            phasic_dir, "phasic_trace_cache.h5"
+        branch_evidence = {
+            branch: (
+                os.path.join(out_dir, "_analysis", f"{branch}_out", "run_metadata.json"),
+                os.path.join(out_dir, "_analysis", f"{branch}_out", "run_report.json"),
+                os.path.join(out_dir, "_analysis", f"{branch}_out", f"{branch}_trace_cache.h5"),
+            )
+            for branch in ("tonic", "phasic")
+        }
+        historical_caches = tuple(
+            branch
+            for branch, paths in branch_evidence.items()
+            if os.path.isfile(paths[2])
         )
-        phasic_evidence_present = os.path.isfile(phasic_meta_path) or os.path.isfile(
-            phasic_cache_path
-        )
-        phasic_requested = bool(
-            getattr(classification, "run_mode", {}).get("phasic_analysis")
-        ) or phasic_evidence_present
-        if (
-            phasic_requested
-            and not classification.is_success
-            and (phasic_evidence_present or classification.is_current)
-        ):
+        if enabled_branches and not classification.is_success:
             self._phasic_review_error = str(classification.reason)
             self._set_status_message(
                 f"This completed result cannot be verified: {classification.reason}",
@@ -482,21 +487,21 @@ class RunReportViewer(QWidget):
             )
             self._workspace.hide()
             return False
-        if (
-            phasic_requested
-            and classification.is_current
-            and (not os.path.isfile(phasic_meta_path) or not os.path.isfile(phasic_cache_path))
-        ):
-            self._phasic_review_error = (
-                "The current phasic result is missing its persisted native correction evidence."
-            )
-            self._set_status_message(
-                f"This completed result cannot be verified: {self._phasic_review_error}",
-                level="error",
-            )
-            self._workspace.hide()
-            return False
-        if os.path.isfile(phasic_cache_path):
+        if classification.is_current and enabled_branches:
+            for branch in enabled_branches:
+                missing = [path for path in branch_evidence[branch] if not os.path.isfile(path)]
+                if missing:
+                    self._phasic_review_error = (
+                        f"The current {branch} result is missing persisted Review evidence."
+                    )
+                    self._set_status_message(
+                        f"This completed result cannot be verified: {self._phasic_review_error}",
+                        level="error",
+                    )
+                    self._workspace.hide()
+                    return False
+        should_load_review = bool(enabled_branches) if classification.is_current else bool(historical_caches)
+        if should_load_review:
             try:
                 self._phasic_review_model = load_completed_phasic_review(out_dir)
             except CompletedRunReviewError as exc:
@@ -724,6 +729,10 @@ class RunReportViewer(QWidget):
             text = f"Correction approaches vary by ROI.  {roi}: {label}."
         else:
             text = f"Correction approach: {label}."
+        if set(model.analysis_branches) == {"tonic", "phasic"}:
+            text += " Used for tonic and phasic analyses."
+        elif model.analysis_branches == ("tonic",):
+            text += " Used for tonic analysis."
         sessions = model.sessions_for_roi(roi)
         processed_count = sum(1 for session in sessions if session.processed)
         absent_count = max(0, len(sessions) - processed_count)

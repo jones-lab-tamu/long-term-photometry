@@ -28,6 +28,7 @@ from photometry_pipeline.input_processing_completeness import (
 )
 from photometry_pipeline.io.hdf5_cache_reader import (
     open_phasic_cache,
+    open_tonic_cache,
     list_cache_rois,
 )
 from photometry_pipeline.guided_completed_feature_event_reload import (
@@ -74,12 +75,27 @@ def resolve_analysis_plot_context(analysis_out: str | Path) -> AnalysisPlotConte
     global config or to ``fit_ref`` presence.
     """
     analysis_path = Path(analysis_out).expanduser().resolve()
+    analysis_kind = (
+        "tonic"
+        if (analysis_path / "tonic_trace_cache.h5").is_file()
+        else "phasic"
+    )
     run_dir = analysis_path.parent.parent
     classification = classify_run_terminal_state(str(run_dir))
     if classification.is_current:
         metadata = _read_json(analysis_path / "run_metadata.json")
         report = _read_json(analysis_path / "run_report.json")
-        requested, native_provenance = _validate_requested_provenance(metadata, report)
+        requested, native_provenance = _validate_requested_provenance(
+            metadata, report, analysis_kind
+        )
+        if (
+            analysis_kind == "tonic"
+            and isinstance(metadata, dict)
+            and isinstance(metadata.get("correction_provenance"), dict)
+            and metadata["correction_provenance"].get("source")
+            == "legacy_uniform_translation"
+        ):
+            return AnalysisPlotContext(source_kind="legacy")
         return AnalysisPlotContext(
             source_kind="current",
             requested_by_roi=(
@@ -103,11 +119,21 @@ def resolve_analysis_plot_context(analysis_out: str | Path) -> AnalysisPlotConte
     metadata = _read_json(analysis_path / "run_metadata.json")
     report = _read_json(analysis_path / "run_report.json")
     try:
-        requested, native_provenance = _validate_requested_provenance(metadata, report)
+        requested, native_provenance = _validate_requested_provenance(
+            metadata, report, analysis_kind
+        )
     except CompletedRunReviewError as exc:
         raise CompletedRunReviewError(
             f"Current native correction provenance is unreadable ({exc})."
         ) from exc
+    if (
+        analysis_kind == "tonic"
+        and isinstance(metadata, dict)
+        and isinstance(metadata.get("correction_provenance"), dict)
+        and metadata["correction_provenance"].get("source")
+        == "legacy_uniform_translation"
+    ):
+        return AnalysisPlotContext(source_kind="legacy")
     if native_provenance:
         return AnalysisPlotContext(
             source_kind="current",
@@ -301,6 +327,7 @@ class CompletedRunReviewError(RuntimeError):
 
 @dataclass(frozen=True)
 class CompletedReviewSession:
+    analysis_branch: str
     roi_id: str
     session_index: int
     chunk_id: int | None
@@ -354,6 +381,10 @@ class CompletedRunReviewModel:
     feature_settings_by_roi: dict[str, dict[str, Any]]
     current_native: bool
     terminal_state: str
+    analysis_branches: tuple[str, ...] = ("phasic",)
+    sessions_by_branch_roi: dict[
+        str, dict[str, tuple[CompletedReviewSession, ...]]
+    ] = field(default_factory=dict)
 
     @property
     def heterogeneous_correction(self) -> bool:
@@ -367,7 +398,11 @@ class CompletedRunReviewModel:
         }
         return len(families) > 1 or len(selections) > 1
 
-    def sessions_for_roi(self, roi_id: str) -> tuple[CompletedReviewSession, ...]:
+    def sessions_for_roi(
+        self, roi_id: str, branch: str | None = None
+    ) -> tuple[CompletedReviewSession, ...]:
+        if branch is not None and self.sessions_by_branch_roi:
+            return self.sessions_by_branch_roi.get(str(branch), {}).get(str(roi_id), ())
         return self.sessions_by_roi.get(str(roi_id), ())
 
     def strategy_label_for_roi(self, roi_id: str) -> str:
@@ -483,6 +518,7 @@ def _load_feature_settings(phasic_dir: Path) -> dict[str, dict[str, Any]]:
 def _validate_requested_provenance(
     metadata: dict[str, Any] | None,
     report: dict[str, Any] | None,
+    analysis_kind: str = "phasic",
 ) -> tuple[dict[str, dict[str, Any]], bool]:
     metadata_prov = metadata.get("correction_provenance") if metadata else None
     derived = report.get("derived_settings") if report else None
@@ -505,8 +541,10 @@ def _validate_requested_provenance(
         )
     if metadata_prov.get("schema_version") != CORRECTION_PROVENANCE_SCHEMA_VERSION:
         raise CompletedRunReviewError("Completed result correction settings are unsupported.")
-    if metadata_prov.get("analysis_mode") != "phasic":
-        raise CompletedRunReviewError("Completed result correction settings are not bound to phasic analysis.")
+    if metadata_prov.get("analysis_mode") != analysis_kind:
+        raise CompletedRunReviewError(
+            f"Completed result correction settings are not bound to {analysis_kind} analysis."
+        )
     if metadata_prov.get("source") not in {
         "explicit_per_roi_map",
         "legacy_uniform_translation",
@@ -572,25 +610,31 @@ def _freeze_requested_by_roi(
     )
 
 
-def load_completed_phasic_review(run_dir: str | Path) -> CompletedRunReviewModel:
-    """Load a completed phasic result exclusively from persisted evidence."""
+def _load_completed_branch_review(
+    run_dir: str | Path, analysis_kind: str
+) -> CompletedRunReviewModel:
+    """Load one completed analysis branch exclusively from persisted evidence."""
     resolved = Path(run_dir).expanduser().resolve()
     classification = classify_run_terminal_state(str(resolved))
     if not classification.is_success:
         raise CompletedRunReviewError(
             f"This completed result cannot be verified ({classification.reason})."
         )
-    phasic_dir = resolved / "_analysis" / "phasic_out"
-    cache_path = phasic_dir / "phasic_trace_cache.h5"
+    analysis_dir = resolved / "_analysis" / f"{analysis_kind}_out"
+    cache_path = analysis_dir / f"{analysis_kind}_trace_cache.h5"
     if not cache_path.is_file():
-        raise CompletedRunReviewError("Completed result has no phasic canonical trace cache.")
+        raise CompletedRunReviewError(
+            f"Completed result has no {analysis_kind} canonical trace cache."
+        )
 
-    metadata = _read_json(phasic_dir / "run_metadata.json")
-    report = _read_json(phasic_dir / "run_report.json")
-    requested_by_roi, current_native = _validate_requested_provenance(metadata, report)
+    metadata = _read_json(analysis_dir / "run_metadata.json")
+    report = _read_json(analysis_dir / "run_report.json")
+    requested_by_roi, current_native = _validate_requested_provenance(
+        metadata, report, analysis_kind
+    )
     if classification.is_current and not current_native:
         raise CompletedRunReviewError(
-            "The current phasic result has no verified native correction settings."
+            f"The current {analysis_kind} result has no verified native correction settings."
         )
     if current_native:
         correction_error = correction_completion_error(
@@ -608,7 +652,8 @@ def load_completed_phasic_review(run_dir: str | Path) -> CompletedRunReviewModel
         if isinstance(record, dict) and isinstance(record.get("index"), int)
     }
 
-    with open_phasic_cache(str(cache_path)) as cache:
+    opener = open_phasic_cache if analysis_kind == "phasic" else open_tonic_cache
+    with opener(str(cache_path)) as cache:
         cache_rois = [str(roi) for roi in list_cache_rois(cache)]
         if current_native:
             rois = [str(roi) for roi in requested_by_roi]
@@ -621,7 +666,7 @@ def load_completed_phasic_review(run_dir: str | Path) -> CompletedRunReviewModel
         config_mode = ""
         if not current_native:
             try:
-                config = yaml.safe_load((phasic_dir / "config_used.yaml").read_text(encoding="utf-8")) or {}
+                config = yaml.safe_load((analysis_dir / "config_used.yaml").read_text(encoding="utf-8")) or {}
             except Exception:
                 config = {}
             config_mode = str(config.get("dynamic_fit_mode", "")) if isinstance(config, dict) else ""
@@ -658,6 +703,7 @@ def load_completed_phasic_review(run_dir: str | Path) -> CompletedRunReviewModel
                 if disposition != DISPOSITION_PROCESS:
                     sessions_by_roi[roi].append(
                         CompletedReviewSession(
+                            analysis_branch=analysis_kind,
                             roi_id=roi,
                             session_index=session_index,
                             chunk_id=None,
@@ -683,14 +729,21 @@ def load_completed_phasic_review(run_dir: str | Path) -> CompletedRunReviewModel
                     raise CompletedRunReviewError(
                         f"Completed result is missing ROI/session {roi}/{chunk_id}."
                     ) from exc
-                required = ("time_sec", "sig_raw", "dff")
+                trace_field = (
+                    "dff"
+                    if "dff" in arrays
+                    else "deltaF"
+                    if analysis_kind == "tonic" and not current_native
+                    else "dff"
+                )
+                required = ("time_sec", "sig_raw", trace_field)
                 if any(name not in arrays for name in required):
                     raise CompletedRunReviewError(
                         f"Completed result is missing canonical data for ROI/session {roi}/{chunk_id}."
                     )
                 time_sec = np.asarray(arrays["time_sec"][()], dtype=float)
                 raw_signal = np.asarray(arrays["sig_raw"][()], dtype=float)
-                dff = np.asarray(arrays["dff"][()], dtype=float)
+                dff = np.asarray(arrays[trace_field][()], dtype=float)
                 attrs = arrays.attrs
                 if current_native:
                     request = requested_by_roi.get(roi)
@@ -727,14 +780,18 @@ def load_completed_phasic_review(run_dir: str | Path) -> CompletedRunReviewModel
                         }:
                             qc[key_text] = _attr(attrs, key_text, value)
                 elif family == "dynamic_fit":
-                    if "fit_ref" not in arrays:
+                    if "fit_ref" not in arrays and not (
+                        analysis_kind == "tonic" and not current_native
+                    ):
                         raise CompletedRunReviewError(f"Fitted reference is missing for ROI {roi}.")
-                    fit_ref = np.asarray(arrays["fit_ref"][()], dtype=float)
+                    if "fit_ref" in arrays:
+                        fit_ref = np.asarray(arrays["fit_ref"][()], dtype=float)
                 else:
                     raise CompletedRunReviewError(f"Unknown consumed correction family for ROI {roi}.")
 
                 sessions_by_roi[roi].append(
                     CompletedReviewSession(
+                        analysis_branch=analysis_kind,
                         roi_id=roi,
                         session_index=session_index,
                         chunk_id=chunk_id,
@@ -757,7 +814,75 @@ def load_completed_phasic_review(run_dir: str | Path) -> CompletedRunReviewModel
         rois=tuple(rois),
         sessions_by_roi={roi: tuple(rows) for roi, rows in sessions_by_roi.items()},
         requested_by_roi=requested_by_roi,
-        feature_settings_by_roi=_load_feature_settings(phasic_dir),
+        feature_settings_by_roi=(
+            _load_feature_settings(analysis_dir) if analysis_kind == "phasic" else {}
+        ),
         current_native=current_native,
         terminal_state=classification.state,
+        analysis_branches=(analysis_kind,),
+        sessions_by_branch_roi={
+            analysis_kind: {
+                roi: tuple(rows) for roi, rows in sessions_by_roi.items()
+            }
+        },
+    )
+
+
+def load_completed_phasic_review(run_dir: str | Path) -> CompletedRunReviewModel:
+    """Load the existing completed Review surface for tonic, phasic, or both."""
+    resolved = Path(run_dir).expanduser().resolve()
+    classification = classify_run_terminal_state(str(resolved))
+    if not classification.is_success:
+        raise CompletedRunReviewError(
+            f"This completed result cannot be verified ({classification.reason})."
+        )
+    enabled = tuple(
+        branch
+        for branch, key in (("tonic", "tonic_analysis"), ("phasic", "phasic_analysis"))
+        if classification.run_mode.get(key)
+    )
+    if not enabled and classification.is_legacy:
+        enabled = tuple(
+            branch
+            for branch in ("tonic", "phasic")
+            if (
+                resolved / "_analysis" / f"{branch}_out" / f"{branch}_trace_cache.h5"
+            ).is_file()
+        )
+    if not enabled:
+        raise CompletedRunReviewError("Completed result has no reviewable analysis branch.")
+    models = {
+        branch: _load_completed_branch_review(resolved, branch)
+        for branch in enabled
+    }
+    if len(models) == 1:
+        return next(iter(models.values()))
+
+    tonic = models["tonic"]
+    phasic = models["phasic"]
+    if tonic.current_native != phasic.current_native:
+        raise CompletedRunReviewError(
+            "Tonic and phasic correction evidence do not describe the same completed analysis."
+        )
+    if tonic.current_native and tonic.requested_by_roi != phasic.requested_by_roi:
+        raise CompletedRunReviewError(
+            "Tonic and phasic correction approaches disagree."
+        )
+    if set(tonic.rois) != set(phasic.rois):
+        raise CompletedRunReviewError("Tonic and phasic ROI identities disagree.")
+    # The existing UI remains phasic-primary for feature/result images, while
+    # branch-qualified sessions preserve both canonical trace sets.
+    return CompletedRunReviewModel(
+        run_dir=phasic.run_dir,
+        rois=phasic.rois,
+        sessions_by_roi=phasic.sessions_by_roi,
+        requested_by_roi=phasic.requested_by_roi,
+        feature_settings_by_roi=phasic.feature_settings_by_roi,
+        current_native=phasic.current_native,
+        terminal_state=phasic.terminal_state,
+        analysis_branches=("tonic", "phasic"),
+        sessions_by_branch_roi={
+            "tonic": tonic.sessions_by_roi,
+            "phasic": phasic.sessions_by_roi,
+        },
     )
