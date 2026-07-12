@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -42,6 +43,10 @@ from photometry_pipeline.input_processing_completeness import (
 # Bumped whenever the terminal set's meaning changes. A run declaring any other
 # value is not something this build knows how to verify, so it fails closed.
 COMPLETION_CONTRACT_VERSION = "run_completion.v1"
+# Versioned run-level production correction provenance.  This is deliberately
+# separate from the terminal-set version: provenance can evolve while the
+# outer status/manifest contract remains compatible.
+CORRECTION_PROVENANCE_SCHEMA_VERSION = "correction_provenance.v1"
 
 STATUS_FILENAME = "status.json"
 MANIFEST_FILENAME = "MANIFEST.json"
@@ -600,6 +605,377 @@ def build_status_completion_block(*, run_id: str, manifest_sha256: str) -> dict[
     }
 
 
+def _text_value(value: Any) -> str:
+    """Decode an HDF5 scalar/string attribute without changing its identity."""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return value.decode(errors="replace")
+    return str(value)
+
+
+def _normalized_source(value: Any) -> str:
+    """Use the same path identity semantics as C8 source accounting."""
+    return os.path.normcase(os.path.abspath(os.path.normpath(_text_value(value))))
+
+
+def _load_authoritative_phasic_sessions(
+    run_dir: str, run_mode: dict[str, Any]
+) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None, str]:
+    """Load C8's expected and processed phasic session identities."""
+    analysis_dir = os.path.join(run_dir, "_analysis", "phasic_out")
+    payload, error = read_input_completeness(analysis_dir)
+    if payload is None:
+        return None, None, f"the phasic analysis input-completeness record is {error}"
+
+    expected = payload.get("expected")
+    processed = payload.get("processed")
+    if run_mode.get("shared_input_manifest"):
+        manifest, manifest_error = load_frozen_input_manifest(
+            os.path.join(run_dir, FROZEN_INPUT_MANIFEST_FILENAME)
+        )
+        if manifest is None:
+            return None, None, f"the run-wide frozen input manifest is {manifest_error}"
+        expected = manifest.get("expected")
+    if not isinstance(expected, list) or not isinstance(processed, list):
+        return None, None, "the authoritative phasic session index is malformed"
+    return expected, processed, ""
+
+
+def correction_completion_error(run_dir: str, run_mode: dict[str, Any]) -> str:
+    """Verify requested/consumed correction evidence for a current phasic run.
+
+    Older current runs that predate the versioned provenance section remain
+    compatible: when neither ``run_metadata.json`` nor the nested report claims
+    this section, the existing completion contract continues to decide success.
+    Once the section is claimed, every field and every processed ROI/session is
+    checked fail-closed against C8 and the canonical HDF5 cache.
+    """
+    if not run_mode.get("phasic_analysis"):
+        return ""
+
+    analysis_dir = os.path.join(run_dir, "_analysis", "phasic_out")
+    metadata, _metadata_error = _read_json_object(
+        os.path.join(analysis_dir, "run_metadata.json")
+    )
+    nested_report, _ = _read_json_object(os.path.join(analysis_dir, RUN_REPORT_FILENAME))
+    metadata_has_provenance = (
+        isinstance(metadata, dict) and "correction_provenance" in metadata
+    )
+    report_has_provenance = False
+    nested_provenance = None
+    if isinstance(nested_report, dict):
+        derived = nested_report.get("derived_settings")
+        if isinstance(derived, dict):
+            report_has_provenance = "correction_provenance" in derived
+            if report_has_provenance:
+                nested_provenance = derived["correction_provenance"]
+
+    # Presence is a three-state contract across the two independent files.  A
+    # present-but-null/list value still counts as a claim and must not be
+    # mistaken for legacy absence.
+    if not metadata_has_provenance and not report_has_provenance:
+        # Deliberate pre-provenance compatibility path.
+        return ""
+    if metadata_has_provenance != report_has_provenance:
+        present = "run_metadata.json" if metadata_has_provenance else "run_report.json"
+        absent = "run_report.json" if metadata_has_provenance else "run_metadata.json"
+        return (
+            f"correction_provenance is present in {present} but absent from {absent}"
+        )
+
+    assert isinstance(metadata, dict)
+    provenance = metadata["correction_provenance"]
+    if not isinstance(provenance, dict) or not isinstance(nested_provenance, dict):
+        return "both phasic correction_provenance values must be dictionaries"
+    if provenance.get("schema_version") != CORRECTION_PROVENANCE_SCHEMA_VERSION:
+        return "correction_provenance declares an unsupported schema version"
+    if nested_provenance.get("schema_version") != CORRECTION_PROVENANCE_SCHEMA_VERSION:
+        return "phasic report correction_provenance declares an unsupported schema version"
+    if nested_provenance != provenance:
+        return "phasic report and run_metadata correction provenance disagree"
+    if provenance.get("analysis_mode") != "phasic":
+        return "correction_provenance is not bound to phasic analysis"
+    source = provenance.get("source")
+    if source not in {"explicit_per_roi_map", "legacy_uniform_translation"}:
+        return f"correction_provenance has an unknown source {source!r}"
+
+    expected_rois = [str(roi) for roi in (run_mode.get("expected_rois") or [])]
+    if len(expected_rois) != len(set(expected_rois)):
+        return "the terminal run mode contains duplicate expected ROI identities"
+    included = provenance.get("included_roi_ids")
+    if not isinstance(included, list) or [str(roi) for roi in included] != expected_rois:
+        return "correction_provenance included ROI identities do not match the run mode"
+    requested = provenance.get("requested_by_roi")
+    if not isinstance(requested, list):
+        return "correction_provenance requested_by_roi is not a list"
+    if len(requested) != len(expected_rois):
+        return "correction_provenance does not contain exactly one entry per expected ROI"
+
+    from photometry_pipeline.core.types import (
+        CORRECTION_STRATEGY_FAMILIES,
+        RESOLVED_DYNAMIC_FIT_MODES,
+    )
+
+    requested_by_roi: dict[str, dict[str, Any]] = {}
+    for record in requested:
+        if not isinstance(record, dict):
+            return "correction_provenance contains an unreadable ROI entry"
+        roi = record.get("roi_id")
+        if not isinstance(roi, str) or roi in requested_by_roi:
+            return "correction_provenance contains a missing or duplicate ROI identity"
+        if roi not in set(expected_rois):
+            return f"correction_provenance contains unknown ROI {roi!r}"
+        family = record.get("strategy_family")
+        selected = record.get("selected_strategy")
+        mode = record.get("dynamic_fit_mode")
+        if family not in CORRECTION_STRATEGY_FAMILIES:
+            return f"correction_provenance has unknown strategy_family for ROI {roi!r}"
+        if not isinstance(selected, str) or not selected:
+            return f"correction_provenance has no selected_strategy for ROI {roi!r}"
+        if family == "dynamic_fit":
+            if mode not in RESOLVED_DYNAMIC_FIT_MODES or selected != mode:
+                return f"correction_provenance has an invalid dynamic-fit mode for ROI {roi!r}"
+        else:
+            if selected != "signal_only_f0" or mode is not None:
+                return f"correction_provenance has invalid Signal-Only fields for ROI {roi!r}"
+        for identity_key in ("parameter_identity", "evidence_identity"):
+            if not isinstance(record.get(identity_key, ""), str):
+                return f"correction_provenance has malformed {identity_key} for ROI {roi!r}"
+        requested_by_roi[roi] = record
+    if set(requested_by_roi) != set(expected_rois):
+        return "correction_provenance ROI coverage is incomplete"
+
+    # A preview/continuous run without C8's intermittent session index cannot
+    # claim the per-session completion check.  Its existing artifact contract
+    # remains authoritative; full chunked runs continue below.
+    if not run_mode.get("chunked_input_processing"):
+        return ""
+
+    expected, processed, session_error = _load_authoritative_phasic_sessions(
+        run_dir, run_mode
+    )
+    if session_error:
+        return session_error
+    assert expected is not None and processed is not None
+    expected_by_index = {
+        int(entry.get("index")): entry
+        for entry in expected
+        if isinstance(entry, dict) and isinstance(entry.get("index"), int)
+    }
+    process_entries = [
+        entry
+        for entry in expected
+        if isinstance(entry, dict) and entry.get("disposition") == "process"
+    ]
+    from photometry_pipeline.input_processing_completeness import resolve_session_start_time
+
+    processed_by_index: dict[int, dict[str, Any]] = {}
+    for record in processed:
+        if not isinstance(record, dict) or not isinstance(record.get("index"), int):
+            return "the phasic processed session index contains an unreadable entry"
+        index = int(record["index"])
+        if index in processed_by_index:
+            return f"the phasic processed session index duplicates session {index}"
+        processed_by_index[index] = record
+    for entry in process_entries:
+        index = int(entry["index"])
+        record = processed_by_index.get(index)
+        if record is None:
+            return f"processed session {index} is missing from the authoritative index"
+        if _normalized_source(record.get("source", "")) != _normalized_source(entry.get("source", "")):
+            return f"processed session {index} source does not match the authoritative index"
+        expected_start = str(entry.get("expected_start_time", "")).strip()
+        source_start = resolve_session_start_time(str(entry.get("source", "")))
+        if expected_start and source_start is not None and source_start.isoformat() != expected_start:
+            return f"processed session {index} timestamp does not match its source identity"
+
+    cache_path = os.path.join(analysis_dir, "phasic_trace_cache.h5")
+    if not os.path.isfile(cache_path):
+        return "the phasic canonical trace cache is missing"
+
+    try:
+        import h5py
+        import numpy as np
+
+        coverage = float(provenance.get("finite_coverage_fraction", 0.80))
+        if not math.isfinite(coverage) or not 0.0 < coverage <= 1.0:
+            return "correction_provenance has an invalid finite-coverage policy"
+        with h5py.File(cache_path, "r") as cache:
+            roi_root = cache.get("roi")
+            meta = cache.get("meta")
+            if roi_root is None or meta is None:
+                return "the phasic canonical trace cache lacks roi/meta groups"
+            cache_rois = [str(roi) for roi in roi_root.keys()]
+            if len(cache_rois) != len(set(cache_rois)) or set(cache_rois) != set(expected_rois):
+                return "the phasic cache ROI identities do not match requested correction provenance"
+            if "rois" in meta:
+                meta_rois = [_text_value(value) for value in np.asarray(meta["rois"][()]).reshape(-1)]
+                if len(meta_rois) != len(set(meta_rois)) or set(meta_rois) != set(expected_rois):
+                    return "the phasic cache meta ROI identities are incomplete or unknown"
+
+            if "chunk_ids" not in meta:
+                return "the phasic cache has no canonical chunk identity index"
+            meta_chunk_ids = [int(value) for value in np.asarray(meta["chunk_ids"][()]).reshape(-1)]
+            if len(meta_chunk_ids) != len(set(meta_chunk_ids)):
+                return "the phasic cache chunk identity index contains duplicates"
+            expected_chunk_ids = {
+                int(record["cache_chunk_id"])
+                for record in processed_by_index.values()
+                if isinstance(record.get("cache_chunk_id"), int)
+                and not isinstance(record.get("cache_chunk_id"), bool)
+            }
+            if set(meta_chunk_ids) != expected_chunk_ids:
+                return "the phasic cache chunk identities do not match processed C8 sessions"
+            source_by_cache_id = {
+                int(record["cache_chunk_id"]): _normalized_source(record.get("source", ""))
+                for record in processed_by_index.values()
+                if isinstance(record.get("cache_chunk_id"), int)
+            }
+            if "source_files" in meta:
+                meta_sources = [_normalized_source(value) for value in np.asarray(meta["source_files"][()]).reshape(-1)]
+                if len(meta_sources) != len(meta_chunk_ids):
+                    return "the phasic cache source identity index is incomplete"
+                for cache_id, meta_source in zip(meta_chunk_ids, meta_sources):
+                    if meta_source != source_by_cache_id.get(cache_id, ""):
+                        return "the phasic cache source identity index does not match C8"
+            expected_entry_by_cache_id = {
+                int(record["cache_chunk_id"]): expected_by_index[int(index)]
+                for index, record in processed_by_index.items()
+                if isinstance(record.get("cache_chunk_id"), int)
+                and int(index) in expected_by_index
+            }
+
+            for roi in expected_rois:
+                roi_group = roi_root[roi]
+                chunk_names = list(roi_group.keys())
+                chunk_ids: list[int] = []
+                for name in chunk_names:
+                    if not str(name).startswith("chunk_"):
+                        return f"ROI {roi!r} has an unknown cache member {name!r}"
+                    try:
+                        chunk_ids.append(int(str(name)[len("chunk_"):]))
+                    except ValueError:
+                        return f"ROI {roi!r} has an invalid cache chunk identity {name!r}"
+                if len(chunk_ids) != len(set(chunk_ids)) or set(chunk_ids) != expected_chunk_ids:
+                    return f"ROI {roi!r} cache sessions do not match processed C8 sessions"
+
+                requested_record = requested_by_roi[roi]
+                family = requested_record["strategy_family"]
+                selected = requested_record["selected_strategy"]
+                requested_mode = requested_record.get("dynamic_fit_mode")
+                for cache_id in sorted(expected_chunk_ids):
+                    group = roi_group[f"chunk_{cache_id}"]
+                    source = _normalized_source(group.attrs.get("source_file", ""))
+                    if source != source_by_cache_id.get(cache_id, ""):
+                        return f"ROI {roi!r} session {cache_id} source identity does not match C8"
+                    required_datasets = ("time_sec", "sig_raw", "dff")
+                    if any(name not in group for name in required_datasets):
+                        return f"ROI {roi!r} session {cache_id} lacks a canonical correction dataset"
+                    time_sec = np.asarray(group["time_sec"][()])
+                    sig_raw = np.asarray(group["sig_raw"][()])
+                    dff = np.asarray(group["dff"][()])
+                    n = int(time_sec.size)
+                    if (
+                        time_sec.ndim != 1
+                        or sig_raw.ndim != 1
+                        or dff.ndim != 1
+                        or n == 0
+                        or sig_raw.size != n
+                        or dff.size != n
+                    ):
+                        return f"ROI {roi!r} session {cache_id} canonical dataset shapes disagree"
+                    if not np.all(np.isfinite(time_sec)) or time_sec[0] != 0.0:
+                        return f"ROI {roi!r} session {cache_id} has invalid canonical time identity"
+                    if n > 1 and not np.all(np.diff(time_sec) > 0):
+                        return f"ROI {roi!r} session {cache_id} time is not strictly increasing"
+                    expected_entry = expected_entry_by_cache_id.get(cache_id)
+                    expected_duration = (
+                        expected_entry.get("expected_duration_sec")
+                        if isinstance(expected_entry, dict)
+                        else None
+                    )
+                    if expected_duration is not None and n > 1:
+                        try:
+                            duration = float(expected_duration)
+                            dt = float(np.median(np.diff(time_sec)))
+                            if abs(float(time_sec[-1]) - duration) > max(
+                                0.10, 2.0 * abs(dt), 0.05 * abs(duration)
+                            ):
+                                return f"ROI {roi!r} session {cache_id} elapsed time does not match C8"
+                        except (TypeError, ValueError):
+                            return f"ROI {roi!r} session {cache_id} has malformed expected duration"
+                    coverage_required = max(1, int(math.ceil(coverage * n)))
+                    if int(np.sum(np.isfinite(dff))) < coverage_required:
+                        return f"ROI {roi!r} session {cache_id} canonical dF/F coverage is insufficient"
+
+                    if _text_value(group.attrs.get("correction_execution_status", "")) != "consumed":
+                        return f"ROI {roi!r} session {cache_id} has no consumed correction status"
+                    if _text_value(group.attrs.get("correction_strategy_family", "")) != family:
+                        return f"ROI {roi!r} session {cache_id} strategy family mismatches the request"
+                    if _text_value(group.attrs.get("correction_selected_strategy", "")) != selected:
+                        return f"ROI {roi!r} session {cache_id} selected strategy mismatches the request"
+                    for identity_key, attr_name in (
+                        ("parameter_identity", "correction_parameter_identity"),
+                        ("evidence_identity", "correction_evidence_identity"),
+                    ):
+                        requested_identity = requested_record.get(identity_key, "")
+                        if requested_identity and _text_value(group.attrs.get(attr_name, "")) != requested_identity:
+                            return f"ROI {roi!r} session {cache_id} {identity_key} mismatches the request"
+
+                    dynamic_mode = _text_value(group.attrs.get("correction_dynamic_fit_mode", ""))
+                    if family == "dynamic_fit":
+                        if dynamic_mode != requested_mode:
+                            return f"ROI {roi!r} session {cache_id} dynamic-fit mode mismatches the request"
+                        if _text_value(group.attrs.get("dynamic_fit_mode_resolved", "")) != requested_mode:
+                            return f"ROI {roi!r} session {cache_id} lacks resolved dynamic-fit mode metadata"
+                        if not _text_value(group.attrs.get("dynamic_fit_engine", "")):
+                            return f"ROI {roi!r} session {cache_id} lacks dynamic-fit engine metadata"
+                        if "fit_ref" not in group:
+                            return f"ROI {roi!r} session {cache_id} lacks fit_ref"
+                        fit_ref = np.asarray(group["fit_ref"][()])
+                        if fit_ref.ndim != 1 or fit_ref.size != n or int(np.sum(np.isfinite(fit_ref))) < coverage_required:
+                            return f"ROI {roi!r} session {cache_id} fit_ref coverage is insufficient"
+                        if "signal_only_f0_baseline" in group or "signal_only_f0_production_available" in group.attrs:
+                            return f"ROI {roi!r} session {cache_id} carries orphan Signal-Only production evidence"
+                        if any(
+                            key in group.attrs
+                            for key in (
+                                "signal_only_f0_production_formula",
+                                "signal_only_f0_production_baseline_source",
+                            )
+                        ):
+                            return f"ROI {roi!r} session {cache_id} carries orphan Signal-Only production metadata"
+                    else:
+                        if dynamic_mode:
+                            return f"ROI {roi!r} session {cache_id} Signal-Only entry carries dynamic-fit mode"
+                        if any(
+                            key in group.attrs
+                            for key in ("dynamic_fit_mode_resolved", "dynamic_fit_engine")
+                        ):
+                            return f"ROI {roi!r} session {cache_id} Signal-Only entry carries dynamic-fit attribution"
+                        if "signal_only_f0_baseline" not in group:
+                            return f"ROI {roi!r} session {cache_id} lacks production F0 baseline"
+                        baseline = np.asarray(group["signal_only_f0_baseline"][()])
+                        signal_only_min_required = max(10, coverage_required)
+                        if baseline.ndim != 1 or baseline.size != n or int(np.sum(np.isfinite(baseline))) < signal_only_min_required:
+                            return f"ROI {roi!r} session {cache_id} production F0 coverage is insufficient"
+                        if not bool(group.attrs.get("signal_only_f0_production_available", False)):
+                            return f"ROI {roi!r} session {cache_id} lacks production Signal-Only QC"
+                        if _text_value(group.attrs.get("signal_only_f0_production_baseline_source", "")) != "signal_only_f0_candidate_uncapped":
+                            return f"ROI {roi!r} session {cache_id} has the wrong Signal-Only baseline source"
+                        if _text_value(group.attrs.get("signal_only_f0_production_formula", "")) != "100 * (signal - f0) / f0":
+                            return f"ROI {roi!r} session {cache_id} has the wrong Signal-Only formula"
+                        if "fit_ref" in group and np.any(np.isfinite(np.asarray(group["fit_ref"][()]))):
+                            return f"ROI {roi!r} session {cache_id} Signal-Only fit_ref is not all NaN"
+    except Exception as exc:  # noqa: BLE001 - malformed cache must fail closed
+        if isinstance(exc, (ValueError, KeyError, OSError)):
+            return f"the phasic canonical correction cache is malformed: {exc}"
+        return f"the phasic canonical correction cache could not be verified: {exc}"
+    return ""
+
+
 def verify_terminal_set_before_status(
     run_dir: str,
     *,
@@ -649,6 +1025,9 @@ def verify_terminal_set_before_status(
     completeness_error = input_completeness_error(run_dir, run_mode)
     if completeness_error:
         return f"input chunks are not fully accounted for: {completeness_error}"
+    correction_error = correction_completion_error(run_dir, run_mode)
+    if correction_error:
+        return f"correction evidence is incomplete or inconsistent: {correction_error}"
 
     artifacts = manifest_block.get("artifacts")
     if not isinstance(artifacts, list):
@@ -899,6 +1278,13 @@ def _classify_current(
     if completeness_error:
         return corrupted(
             f"This run's input chunks are not fully accounted for: {completeness_error}.",
+            run_id=run_id,
+        )
+
+    correction_error = correction_completion_error(run_dir, run_mode)
+    if correction_error:
+        return corrupted(
+            f"This run's correction evidence is incomplete or inconsistent: {correction_error}.",
             run_id=run_id,
         )
 

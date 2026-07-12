@@ -47,6 +47,7 @@ from .input_processing_completeness import (
     InputProcessingError,
     POLICY_INCOMPLETE_FINAL_RWD_CHUNK,
 )
+from .run_completion_contract import CORRECTION_PROVENANCE_SCHEMA_VERSION
 from .guided_manifest_current_facts import build_guided_manifest_current_facts
 from .guided_manifest_verification import (
     GuidedManifestCliContext,
@@ -1995,10 +1996,14 @@ class Pipeline:
         """
         names = [str(name) for name in channel_names]
         if self.per_roi_correction is None:
-            strategy_map = regression.build_uniform_per_roi_correction_map(
-                names,
-                getattr(self.config, "dynamic_fit_mode", "rolling_local_regression"),
-            )
+            frozen_map = getattr(self, "_requested_correction_strategy_map", None)
+            if isinstance(frozen_map, dict) and set(frozen_map) == set(names):
+                strategy_map = dict(frozen_map)
+            else:
+                strategy_map = regression.build_uniform_per_roi_correction_map(
+                    names,
+                    getattr(self.config, "dynamic_fit_mode", "rolling_local_regression"),
+                )
             return strategy_map, None
 
         strategy_map = dict(self.per_roi_correction)
@@ -2012,6 +2017,65 @@ class Pipeline:
                 f"mode={self.mode!r} cannot consume a signal_only_f0 correction entry"
             )
         return strategy_map, strategy_map
+
+    def _build_requested_correction_provenance(
+        self, included_rois: list[str] | tuple[str, ...]
+    ) -> dict:
+        """Freeze the exact correction selection requested for this run.
+
+        The map is resolved once, after ROI inclusion/exclusion is final, and
+        then copied into the report and run metadata.  Explicit maps are never
+        reconstructed from ``Config.dynamic_fit_mode``; only legacy callers
+        that supplied no map receive the documented uniform translation.
+        """
+        names = [str(roi) for roi in included_rois]
+        if len(names) != len(set(names)):
+            raise ValueError(f"included ROI identities are duplicated: {names}")
+
+        if self.per_roi_correction is None:
+            strategy_map = regression.build_uniform_per_roi_correction_map(
+                names,
+                getattr(self.config, "dynamic_fit_mode", "rolling_local_regression"),
+            )
+            source = "legacy_uniform_translation"
+        else:
+            strategy_map = dict(self.per_roi_correction)
+            regression.validate_per_roi_correction_map(names, strategy_map)
+            source = "explicit_per_roi_map"
+
+        # Keep the resolved objects used by every subsequent chunk in this
+        # run.  The objects are frozen dataclasses; retaining this private copy
+        # prevents a legacy uniform translation from being recomputed from a
+        # later-mutated Config.dynamic_fit_mode.
+        self._requested_correction_strategy_map = dict(strategy_map)
+
+        records = []
+        for roi in names:
+            spec = strategy_map[roi]
+            record = {
+                "roi_id": str(spec.roi_id),
+                "strategy_family": str(spec.strategy_family),
+                "selected_strategy": str(spec.selected_strategy),
+                "dynamic_fit_mode": (
+                    str(spec.dynamic_fit_mode)
+                    if spec.dynamic_fit_mode is not None
+                    else None
+                ),
+                "parameter_identity": str(spec.parameter_identity),
+                "evidence_identity": str(spec.evidence_identity),
+            }
+            records.append(record)
+
+        return {
+            "schema_version": CORRECTION_PROVENANCE_SCHEMA_VERSION,
+            "source": source,
+            "analysis_mode": str(self.mode),
+            "included_roi_ids": list(names),
+            "requested_by_roi": records,
+            "finite_coverage_fraction": float(
+                getattr(self.config, "signal_only_f0_min_coverage_fraction", 0.80)
+            ),
+        }
 
     def _signal_state_config(self) -> dict:
         return {
@@ -2573,6 +2637,14 @@ class Pipeline:
             'dynamic_fit_slope_warning_summary': self.dynamic_fit_slope_warning_summary,
             'dynamic_fit_slope_constraint_summary': self.dynamic_fit_slope_constraint_summary,
             'rwd_contract_validation': _sanitize_metadata(self._rwd_contract_validation),
+            # Versioned, run-level requested correction authority.  This is the
+            # exact map frozen before Pass 1/Pass 2, including legacy uniform
+            # translation provenance when no explicit map was supplied.
+            'correction_provenance': getattr(
+                self,
+                '_requested_correction_provenance',
+                None,
+            ),
         }
         if self.mode != 'tonic':
             run_meta['dynamic_fit_slope_warning_records'] = self.dynamic_fit_slope_warning_records
@@ -2931,6 +3003,13 @@ class Pipeline:
         
         self._selected_rois = selected_rois
         self.traces_only = traces_only
+        # Freeze the requested correction authority before any production pass
+        # begins.  The same immutable snapshot is written to the report and to
+        # run_metadata; downstream completion verification never infers it from
+        # Config.dynamic_fit_mode or from consumed cache attributes.
+        self._requested_correction_provenance = (
+            self._build_requested_correction_provenance(selected_rois)
+        )
 
         # --- Representative Session Resolution ---
         t_rep = time.perf_counter()
@@ -2948,6 +3027,11 @@ class Pipeline:
             preview_info=self.preview_info,
             sessions_per_hour=sessions_per_hour,
             sessions_per_hour_source=None
+        )
+        _append_run_report_section(
+            output_dir,
+            "correction_provenance",
+            self._requested_correction_provenance,
         )
         self._add_phasic_phase_bucket("phase.run_report_write", time.perf_counter() - t_report)
         

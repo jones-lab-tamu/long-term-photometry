@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import copy
+import json
 from dataclasses import replace
 
 import h5py
@@ -338,6 +339,25 @@ def test_pipeline_copies_caller_owned_correction_map_before_execution():
     assert consumed["ROI1"]["strategy_family"] == "dynamic_fit"
 
 
+def test_legacy_pipeline_provenance_records_uniform_synthesized_fit_strategy():
+    pipeline = Pipeline(_cfg(), mode="phasic")
+    provenance = pipeline._build_requested_correction_provenance(["ROI0", "ROI1"])
+    assert provenance["source"] == "legacy_uniform_translation"
+    assert provenance["included_roi_ids"] == ["ROI0", "ROI1"]
+    assert {entry["strategy_family"] for entry in provenance["requested_by_roi"]} == {
+        "dynamic_fit"
+    }
+    assert all(
+        entry["selected_strategy"] == entry["dynamic_fit_mode"]
+        for entry in provenance["requested_by_roi"]
+    )
+    pipeline.config.dynamic_fit_mode = "global_linear_regression"
+    resolved, _ = pipeline._resolve_correction_map_for_chunk(["ROI0", "ROI1"])
+    assert {spec.selected_strategy for spec in resolved.values()} == {
+        provenance["requested_by_roi"][0]["selected_strategy"]
+    }
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -524,6 +544,23 @@ def test_real_pipeline_run_consumes_native_signal_only_map_and_cache(tmp_path):
         per_roi_correction=_signal_only_map("Region0"),
     )
     pipeline.run(str(source.parent.parent), str(out), force_format="rwd", recursive=True)
+    run_meta = json.loads((out / "run_metadata.json").read_text(encoding="utf-8"))
+    provenance = run_meta["correction_provenance"]
+    assert provenance["schema_version"] == "correction_provenance.v1"
+    assert provenance["source"] == "explicit_per_roi_map"
+    assert provenance["included_roi_ids"] == ["Region0"]
+    assert provenance["requested_by_roi"] == [
+        {
+            "roi_id": "Region0",
+            "strategy_family": "signal_only_f0",
+            "selected_strategy": "signal_only_f0",
+            "dynamic_fit_mode": None,
+            "parameter_identity": "",
+            "evidence_identity": "",
+        }
+    ]
+    report = json.loads((out / "run_report.json").read_text(encoding="utf-8"))
+    assert report["derived_settings"]["correction_provenance"] == provenance
     with h5py.File(out / "phasic_trace_cache.h5", "r") as handle:
         group = handle["roi/Region0/chunk_0"]
         assert group.attrs["correction_selected_strategy"] == "signal_only_f0"
