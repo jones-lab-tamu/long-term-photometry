@@ -804,13 +804,19 @@ def test_real_guided_native_correction_lifecycle_matrix(
         run_dir = Path(result.run_directory)
         assert (run_dir / "guided_per_roi_correction.json").is_file()
         assert not (run_dir / "guided_correction_strategy_map.json").exists()
+        # Retirement of the obsolete Guided post-hoc applied-dF/F wrapper
+        # stage (formerly Section 7.5 in tools/run_full_pipeline_deliverables.py):
+        # no applied-dF/F output tree, and no applied-dF/F phase record of
+        # any kind, for a real end-to-end native lifecycle.
+        assert not (run_dir / "applied_dff").exists()
         for persisted in run_dir.rglob("*"):
             if persisted.is_file() and persisted.suffix.lower() in {
                 ".json", ".yaml", ".yml", ".txt", ".ndjson"
             }:
-                assert "allow_signal_only_f0_execution" not in persisted.read_text(
-                    encoding="utf-8", errors="replace"
-                )
+                text = persisted.read_text(encoding="utf-8", errors="replace")
+                assert "allow_signal_only_f0_execution" not in text
+                assert "applied_dff_orchestration" not in text
+                assert "applied_trace_cache" not in text
         startup_provenance = json.loads(
             (run_dir / "guided_startup_provenance.json").read_text(encoding="utf-8")
         )

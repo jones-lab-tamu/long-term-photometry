@@ -603,6 +603,10 @@ class GuidedBackendCorrectionRequest:
     per_roi_production_strategy_map: tuple[
         GuidedBackendPerRoiProductionStrategy, ...
     ] = ()
+    # Deprecated: the obsolete Guided post-hoc applied-dF/F route has been
+    # retired from current-Guided production. Retained only as inert
+    # deprecated input threaded through for canonicalization/identity
+    # purposes; no execution logic branches on it.
     applied_dff_orchestration_enabled: bool = False
 
     def __post_init__(self) -> None:

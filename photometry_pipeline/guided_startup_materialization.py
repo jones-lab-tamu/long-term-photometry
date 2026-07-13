@@ -455,10 +455,6 @@ def materialize_guided_startup_artifacts(
     correction = request.authorization_result.production_intent.correction
     included_roi_ids = request.authorization_result.production_intent.roi_scope.included_roi_ids
     native_current = bool(correction.production_strategy_map_version)
-    positive_legacy = bool(
-        not correction.production_strategy_map_version
-        and not correction.per_roi_production_strategy_map
-    )
     try:
         native_correction_bytes = (
             serialize_guided_correction_payload(
@@ -487,49 +483,18 @@ def materialize_guided_startup_artifacts(
             ), artifact_hashes=tuple(hashes),
             startup_transaction_identity=pure_plan.identities.startup_transaction_identity,
         )
-    if (
-        positive_legacy
-        and correction.applied_dff_orchestration_enabled
-    ):
-        strategy_map_payload = {
-            "applied_dff_orchestration_enabled": True,
-            "production_strategy_map_version": correction.production_strategy_map_version,
-            "included_roi_ids": list(request.authorization_result.production_intent.roi_scope.included_roi_ids),
-            "per_roi_production_strategy_map": [
-                {
-                    "roi_id": entry.roi_id,
-                    "strategy_family": entry.strategy_family,
-                    "dynamic_fit_mode": entry.dynamic_fit_mode,
-                    "selected_strategy": entry.selected_strategy,
-                    "evidence_source_type": entry.evidence_source_type,
-                    "evidence_reference_json": entry.evidence_reference_json,
-                    "explicit_user_mark": entry.explicit_user_mark,
-                    "current_or_stale": entry.current_or_stale,
-                }
-                for entry in correction.per_roi_production_strategy_map
-            ]
-        }
-        strategy_map_bytes = json.dumps(strategy_map_payload, indent=2).encode("utf-8")
-        try:
-            _write_exclusive(run_dir / "guided_correction_strategy_map.json", strategy_map_bytes)
-            written.append("guided_correction_strategy_map.json")
-        except Exception as exc:
-            return _result(
-                status="materialization_failed_partial",
-                ok=False,
-                materialized=False,
-                run_dir=os.fspath(run_dir),
-                files_written=tuple(written),
-                issue=GuidedStartupMaterializationIssue(
-                    "startup_artifact_materialization_failed",
-                    "guided_correction_strategy_map.json",
-                    f"Startup artifact materialization failed: {exc}",
-                ),
-                artifact_hashes=tuple(hashes),
-                startup_transaction_identity=(
-                    pure_plan.identities.startup_transaction_identity
-                ),
-            )
+    # Removed: this branch used to write the obsolete
+    # guided_correction_strategy_map.json post-hoc applied-dF/F trigger
+    # artifact for `positive_legacy`-shaped (empty per-ROI map) requests.
+    # The native per-ROI correction payload above is now the only
+    # correction artifact any current Guided startup transaction
+    # materializes; `correction.applied_dff_orchestration_enabled` is
+    # retained on the dataclass only as inert deprecated input (see
+    # guided_production_mapping.py) and no longer changes materialization
+    # output. `positive_legacy` transactions (genuinely empty per-ROI map)
+    # still complete normally and fall back to historical global
+    # correction at Pipeline execution time; they no longer receive an
+    # applied-dF/F orchestration trigger file.
 
     feature_event = request.authorization_result.production_intent.feature_event
     if feature_event.per_roi_feature_event_map:

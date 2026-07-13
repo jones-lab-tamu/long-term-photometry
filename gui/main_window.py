@@ -8580,7 +8580,7 @@ class MainWindow(QMainWindow):
                 "warnings": list(candidate.get("warnings") or []),
                 "message": (
                     "Confirmed from local Signal-Only F0 preview evidence. "
-                    "Final analysis recomputes applied dF/F during Run."
+                    "Final analysis recomputes canonical dF/F during Run."
                 ),
             }
         current = (
@@ -8920,15 +8920,12 @@ class MainWindow(QMainWindow):
 
         strategy_map = build_guided_per_roi_production_strategy_map(plan)
         blockers = set(strategy_map.blocking_categories)
-        if blockers & {
-            "mixed_strategy_families_not_enabled",
-            "signal_only_f0_production_routing_not_enabled",
-        }:
-            return (
-                False,
-                "Mixed dynamic-fit and Signal-Only F0 choices require "
-                "applied-dF/F orchestration before continuing.",
-            )
+        # Removed: mixed dynamic-fit/Signal-Only F0 choices used to be
+        # blocked here with a message requiring applied-dF/F orchestration.
+        # build_guided_per_roi_production_strategy_map never actually
+        # produced either blocking category (dead code), and both
+        # configurations are natively supported by the per-ROI correction
+        # engine.
         if blockers:
             return (
                 False,
@@ -11800,11 +11797,6 @@ class MainWindow(QMainWindow):
             }
             if len(confirmed_modes) == 1:
                 unanimous_confirmed_mode = next(iter(confirmed_modes))
-        has_confirmed_signal_only_f0 = any(
-            values == ["signal_only_f0"]
-            for roi, values in current_explicit_choices_by_roi.items()
-            if roi in included
-        )
         all_confirmed_signal_only_f0 = bool(
             included
             and all(
@@ -11922,9 +11914,6 @@ class MainWindow(QMainWindow):
             signal_only_f0_path=sig_path,
             signal_only_f0_status=sig_status,
             signal_only_f0_source_cache_id=sig_source_cache_id,
-            applied_dff_orchestration_enabled=(
-                has_confirmed_signal_only_f0
-            ),
             feature_event_profile_status=getattr(self, "_guided_new_analysis_feature_event_profile_status", "missing"),
             feature_event_profile_id=self._guided_new_analysis_feature_event_profile.get("profile_id") if self._guided_new_analysis_feature_event_profile else None,
             feature_event_baseline_config_source=self._guided_new_analysis_feature_event_profile_baseline_source,

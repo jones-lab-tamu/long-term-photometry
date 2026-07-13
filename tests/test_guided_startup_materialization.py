@@ -297,7 +297,13 @@ def test_materialization_module_import_boundary():
     )
 
 
-def test_materialize_writes_strategy_map_when_orchestration_enabled(allocated_case, monkeypatch):
+def test_materialize_never_writes_posthoc_strategy_map_even_when_flag_enabled(allocated_case, monkeypatch):
+    # The obsolete Guided post-hoc applied-dF/F route has been retired from
+    # current-Guided production. This positive_legacy-shaped (empty
+    # per-ROI map) request used to trigger guided_correction_strategy_map.json
+    # materialization when applied_dff_orchestration_enabled was True; that
+    # field is now inert deprecated input and must not influence
+    # materialization output at all.
     request, plan, allocated = allocated_case
 
     object.__setattr__(
@@ -318,12 +324,7 @@ def test_materialize_writes_strategy_map_when_orchestration_enabled(allocated_ca
     )
     assert result.ok, result.blocking_issues
     strategy_map_path = Path(result.allocated_run_dir) / "guided_correction_strategy_map.json"
-    assert strategy_map_path.exists()
-    payload = json.loads(strategy_map_path.read_text(encoding="utf-8"))
-    assert payload["applied_dff_orchestration_enabled"] is True
-    assert "production_strategy_map_version" in payload
-    assert "included_roi_ids" in payload
-    assert "per_roi_production_strategy_map" in payload
+    assert not strategy_map_path.exists()
 
 
 @pytest.mark.parametrize(
@@ -378,6 +379,130 @@ def test_current_native_materialization_never_writes_posthoc_artifact(
     assert result.ok, result.blocking_issues
     assert (run_dir / "guided_per_roi_correction.json").is_file()
     assert not (run_dir / "guided_correction_strategy_map.json").exists()
+
+
+@pytest.mark.parametrize(
+    "scenario_label,execution_mode,selected",
+    (
+        ("phasic_all_signal_only_f0", "phasic", ("signal_only_f0", "signal_only_f0")),
+        ("tonic_all_signal_only_f0", "tonic", ("signal_only_f0", "signal_only_f0")),
+        ("combined_all_signal_only_f0", "both", ("signal_only_f0", "signal_only_f0")),
+        (
+            "combined_mixed_strategies",
+            "both",
+            ("robust_global_event_reject", "signal_only_f0"),
+        ),
+        (
+            "fit_only_native_per_roi_execution",
+            "phasic",
+            ("robust_global_event_reject", "global_linear_regression"),
+        ),
+    ),
+)
+def test_native_materialization_never_calls_old_orchestration(
+    allocated_case, monkeypatch, scenario_label, execution_mode, selected
+):
+    """Interception test (task: retire obsolete Guided post-hoc applied-dF/F
+    route): for every current-native strategy matrix, materialization must
+    never invoke the retired guided_applied_dff_orchestration entry point,
+    regardless of applied_dff_orchestration_enabled or execution_mode."""
+    from photometry_pipeline.guided_production_mapping import (
+        GuidedProductionPerRoiStrategy,
+    )
+    import photometry_pipeline.guided_applied_dff_orchestration as old_orchestration
+
+    def _fail_if_called(*_args, **_kwargs):
+        raise AssertionError(
+            f"old Guided orchestration entry point must not be called for "
+            f"{scenario_label}"
+        )
+
+    monkeypatch.setattr(
+        old_orchestration,
+        "run_guided_applied_dff_orchestration_if_enabled",
+        _fail_if_called,
+    )
+
+    request, plan, allocated = allocated_case
+    correction = request.authorization_result.production_intent.correction
+    included = tuple(f"ROI{index + 1}" for index in range(len(selected)))
+    object.__setattr__(
+        request.authorization_result.production_intent.roi_scope,
+        "included_roi_ids", included,
+    )
+    object.__setattr__(
+        request.authorization_result.production_intent.execution_profile,
+        "execution_mode", execution_mode,
+    )
+    entries = tuple(
+        GuidedProductionPerRoiStrategy(
+            roi_id=roi_id,
+            strategy_family=(
+                "signal_only_f0" if strategy == "signal_only_f0" else "dynamic_fit"
+            ),
+            dynamic_fit_mode=None if strategy == "signal_only_f0" else strategy,
+            selected_strategy=strategy,
+            evidence_source_type="test",
+            evidence_reference_json="{}",
+            explicit_user_mark=True,
+            current_or_stale="current",
+        )
+        for roi_id, strategy in zip(included, selected)
+    )
+    object.__setattr__(correction, "production_strategy_map_version", "per_roi_correction_strategy_map.v1")
+    object.__setattr__(correction, "per_roi_production_strategy_map", entries)
+    # Explicitly True to prove the deprecated flag cannot trigger the old
+    # route even when set.
+    object.__setattr__(correction, "applied_dff_orchestration_enabled", True)
+    monkeypatch.setattr(
+        materialization, "_validate_preconditions",
+        lambda r, p, a: (Path(a.allocated_run_dir), None),
+    )
+
+    result = materialization.materialize_guided_startup_artifacts(
+        request=request, pure_plan=plan, allocation_result=allocated
+    )
+    run_dir = Path(result.allocated_run_dir)
+    assert result.ok, result.blocking_issues
+    assert (run_dir / "guided_per_roi_correction.json").is_file()
+    assert not (run_dir / "guided_correction_strategy_map.json").exists()
+    assert not (run_dir / "applied_trace_cache.h5").exists()
+
+
+def test_guided_execution_chain_never_imports_old_orchestration_module():
+    """Static import-boundary proof that the current-native Guided
+    wrapper/execution chain has no dependency on the retired post-hoc
+    applied-dF/F orchestration module.
+
+    tools/run_full_pipeline_deliverables.py is the real production wrapper
+    (see guided_execution_request_builder.py's wrapper_path, which points
+    at it and records supported_contract_version="run_full_pipeline_deliverables.v1");
+    analyze_photometry.py is a separate, lower-level analysis entry point.
+    Both, plus the startup-to-wrapper orchestration modules, must be free
+    of this dependency."""
+    import photometry_pipeline.guided_backend_execution as backend_execution
+    import photometry_pipeline.guided_startup_orchestration as orchestration
+    import analyze_photometry as analysis_entrypoint
+    import tools.run_full_pipeline_deliverables as production_wrapper
+
+    prohibited = "photometry_pipeline.guided_applied_dff_orchestration"
+    for module in (
+        backend_execution,
+        orchestration,
+        analysis_entrypoint,
+        production_wrapper,
+    ):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        imported = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add(node.module or "")
+        assert not any(
+            name == prohibited or name.startswith(f"{prohibited}.")
+            for name in imported
+        ), f"{module.__name__} must not import {prohibited}"
 
 
 def test_materialize_skips_strategy_map_when_orchestration_disabled(allocated_case, monkeypatch):

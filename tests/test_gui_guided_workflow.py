@@ -6558,7 +6558,9 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         choice.roi_id: choice.current_or_stale
         for choice in plan.per_roi_correction_strategy_choices
     } == {"CH1": "current", "CH2": "current", "CH3": "current"}
-    assert plan.applied_dff_orchestration_enabled is True
+    # The obsolete Guided post-hoc applied-dF/F route has been retired;
+    # the GUI no longer derives/sets this deprecated field for new plans.
+    assert plan.applied_dff_orchestration_enabled is False
     assert plan.global_correction_strategy == "dynamic_fit"
     assert plan.dynamic_fit_mode == "robust_global_event_reject"
     plan_choices = {

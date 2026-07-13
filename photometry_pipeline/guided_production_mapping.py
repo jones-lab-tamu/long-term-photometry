@@ -431,6 +431,10 @@ class GuidedProductionCorrection:
     per_roi_production_strategy_map: tuple[
         GuidedProductionPerRoiStrategy, ...
     ] = ()
+    # Deprecated: the obsolete Guided post-hoc applied-dF/F route has been
+    # retired from current-Guided production. Retained only as inert
+    # deprecated input; guided_startup_materialization.py no longer acts
+    # on it, and it is never serialized into new startup artifacts.
     applied_dff_orchestration_enabled: bool = False
 
 
@@ -1076,11 +1080,14 @@ def build_per_roi_feature_event_backend_shapes(
     - "per_roi_effective_feature_config_fields_for_overrides": {roi_id:
       COMPLETE effective fields} for source="override" ROIs only. Already
       complete (every FEATURE_EVENT_CONFIG_FIELDS name present) -- ready to
-      pass directly as
-      guided_applied_dff_orchestration.run_guided_applied_dff_orchestration_if_enabled's
-      per_roi_feature_event_overrides argument or to
-      write_per_roi_feature_config_files, with no further merging. Never
-      the sparse override_config_fields.
+      pass directly to write_per_roi_feature_config_files (the current
+      native per-ROI correction route) with no further merging. Never the
+      sparse override_config_fields. (guided_applied_dff_orchestration.py's
+      run_guided_applied_dff_orchestration_if_enabled has the same
+      per_roi_feature_event_overrides argument shape, but that function is
+      retired: it has no remaining caller anywhere in current-Guided
+      production, including tools/run_full_pipeline_deliverables.py, whose
+      former call site to it has been removed.)
     - "per_roi_feature_provenance": {roi_id: {"source", "feature_event_profile_id",
       "override_config_fields", "effective_config_fields"}} for every
       resolved ROI (both "default" and "override"). Ready to pass directly

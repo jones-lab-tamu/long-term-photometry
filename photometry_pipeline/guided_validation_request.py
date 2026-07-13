@@ -42,6 +42,10 @@ class GuidedValidationRequest:
     production_strategy_map_version: str = ""
     per_roi_production_strategy_map: tuple[dict[str, Any], ...] = ()
     legacy_global_dynamic_fit_mode: str | None = None
+    # Deprecated: the obsolete Guided post-hoc applied-dF/F route has been
+    # retired from current-Guided production. This field is retained only
+    # as inert deprecated input for callers/tests that still construct it;
+    # validate_guided_validation_request no longer branches on it.
     applied_dff_orchestration_enabled: bool = False
 
     # Output Destination
@@ -349,55 +353,34 @@ def validate_guided_validation_request(request: GuidedValidationRequest) -> list
                         ),
                         severity="blocking",
                     ))
-                if not request.applied_dff_orchestration_enabled:
-                    issues.append(GuidedPlanIssue(
-                        category="signal_only_f0_production_routing_not_enabled",
-                        message=(
-                            "Signal-Only F0 production routing is not enabled in "
-                            "Guided yet."
-                        ),
-                        severity="blocking",
-                    ))
+                # Removed: this used to block Signal-Only F0 ROIs unless the
+                # obsolete applied_dff_orchestration_enabled flag was set.
+                # Signal-Only F0 is natively supported by the per-ROI
+                # correction engine for tonic, phasic, and combined analysis
+                # and no longer requires post-hoc production routing.
         dynamic_modes = {
             entry.get("dynamic_fit_mode")
             for entry in included_entries
             if entry.get("strategy_family") == "dynamic_fit"
             and entry.get("dynamic_fit_mode") is not None
         }
-        families = {
-            entry.get("strategy_family") for entry in included_entries
-        }
-        if request.applied_dff_orchestration_enabled:
-            if len(dynamic_modes) > 1:
-                issues.append(GuidedPlanIssue(
-                    category="mixed_dynamic_fit_modes_not_enabled",
-                    message=(
-                        "Mixed per-ROI dynamic-fit modes are represented in the "
-                        "plan but are not executable by the current Guided "
-                        "production path."
-                    ),
-                    severity="blocking",
-                ))
-        else:
-            if len(dynamic_modes) > 1:
-                issues.append(GuidedPlanIssue(
-                    category="mixed_dynamic_fit_modes_not_enabled",
-                    message=(
-                        "Mixed per-ROI dynamic-fit modes are represented in the "
-                        "plan but are not executable by the current Guided "
-                        "production path."
-                    ),
-                    severity="blocking",
-                ))
-            if len(families) > 1:
-                issues.append(GuidedPlanIssue(
-                    category="mixed_strategy_families_not_enabled",
-                    message=(
-                        "Mixed per-ROI correction strategy families are represented "
-                        "but production routing is not enabled."
-                    ),
-                    severity="blocking",
-                ))
+        # Removed: mixed per-ROI strategy families (dynamic_fit +
+        # signal_only_f0) used to be blocked here unless the obsolete
+        # applied_dff_orchestration_enabled flag was set. Combined
+        # mixed-strategy runs are natively supported per-ROI, so that check
+        # has been removed along with the flag. Mixed per-ROI dynamic-fit
+        # modes remain outside the currently supported first execution
+        # subset regardless of that flag, so this check is unconditional.
+        if len(dynamic_modes) > 1:
+            issues.append(GuidedPlanIssue(
+                category="mixed_dynamic_fit_modes_not_enabled",
+                message=(
+                    "Mixed per-ROI dynamic-fit modes are represented in the "
+                    "plan but are not executable by the current Guided "
+                    "production path."
+                ),
+                severity="blocking",
+            ))
         if (
             request.legacy_global_dynamic_fit_mode
             and request.dynamic_fit_mode

@@ -1080,12 +1080,13 @@ def build_per_roi_effective_feature_config_fields_for_overrides(
 ) -> dict[str, dict[str, Any]]:
     """Build {roi_id: effective_config_fields} for ROIs with an explicit override.
 
-    Suitable for
-    guided_applied_dff_orchestration.run_guided_applied_dff_orchestration_if_enabled's
-    per_roi_feature_event_overrides parameter, and for
-    write_per_roi_feature_config_files. A ROI resolved from the default
-    profile is omitted, so it keeps the applied-dF/F batch's own default
-    feature config, identical to today's behavior.
+    Suitable for write_per_roi_feature_config_files (the current native
+    per-ROI correction route). A ROI resolved from the default profile is
+    omitted, so it keeps the default feature config.
+    (guided_applied_dff_orchestration.py's
+    run_guided_applied_dff_orchestration_if_enabled has the same
+    per_roi_feature_event_overrides parameter shape, but that function is
+    retired and has no remaining caller in current-Guided production.)
 
     Unlike GuidedPerRoiFeatureEventProfile.config_fields (which may be a
     SPARSE set of fields an override profile explicitly set),
@@ -1227,6 +1228,12 @@ class GuidedNewAnalysisDraftPlan:
     execution_ready: bool = False
     executable: bool = False
     production_run_enabled: bool = False
+    # Deprecated: the obsolete Guided post-hoc applied-dF/F route has been
+    # retired from current-Guided production. Retained only as inert
+    # deprecated input for callers/tests that still construct this
+    # dataclass with the field; no current code branches on it, the GUI no
+    # longer sets it, and it is never serialized into new plans or startup
+    # artifacts.
     applied_dff_orchestration_enabled: bool = False
 
     def __post_init__(self) -> None:
@@ -1562,27 +1569,12 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
                     severity="blocking"
                 ))
 
-    strategy_map = build_guided_per_roi_production_strategy_map(plan)
-    for category in strategy_map.blocking_categories:
-        if category not in {
-            "mixed_strategy_families_not_enabled",
-            "signal_only_f0_production_routing_not_enabled",
-        }:
-            continue
-        messages = {
-            "mixed_strategy_families_not_enabled": (
-                "Mixed dynamic-fit and Signal-Only F0 strategies require "
-                "applied-dF/F orchestration."
-            ),
-            "signal_only_f0_production_routing_not_enabled": (
-                "Signal-Only F0 requires applied-dF/F orchestration."
-            ),
-        }
-        issues.append(GuidedPlanIssue(
-            category=category,
-            message=messages[category],
-            severity="blocking",
-        ))
+    # Removed: this used to surface "requires applied-dF/F orchestration"
+    # blocking issues for mixed-strategy-family and Signal-Only F0 per-ROI
+    # plans. build_guided_per_roi_production_strategy_map never actually
+    # produced either blocking category (dead code), and both
+    # configurations are natively supported by the per-ROI correction
+    # engine, so no replacement check is needed.
 
     # Evidence result missing checks
     if plan.correction_preview_result_id:

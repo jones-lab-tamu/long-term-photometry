@@ -4,6 +4,17 @@ This document is a design contract only. It does not change production code,
 HDF5 contents, GUI behavior, strategy selection, feature routing, thresholds, or
 preview-tool behavior.
 
+> **Status note:** This contract describes the standalone `tools/*applied_dff*`
+> CLI chain and the Full Control tab's "Applied dF/F Explicit Batch" group
+> (and, for already-completed runs, positive legacy-result compatibility). It
+> is not part of current Guided production. The obsolete Guided post-hoc
+> applied-dF/F route has been fully retired: current Guided runs use per-ROI
+> correction choices materialized to `guided_per_roi_correction.json` and
+> consumed by `Pipeline(per_roi_correction=...)` into canonical tonic/phasic
+> caches directly, with no separate applied-dF/F pass. The Guided wrapper
+> (`tools/run_full_pipeline_deliverables.py`) no longer schedules or calls
+> the retired orchestration stage for any invocation.
+
 The contract is for a future production implementation that turns an explicit
 recording-level correction strategy into an auditable `applied_dff` trace and,
 only when requested, routes downstream feature extraction to that trace.

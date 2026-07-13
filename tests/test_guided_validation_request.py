@@ -223,7 +223,10 @@ def test_new_strategy_map_signal_only_is_truthful_and_fail_closed(tmp_path: Path
     assert entry["strategy_family"] == "signal_only_f0"
     assert entry["dynamic_fit_mode"] is None
     assert request.legacy_global_dynamic_fit_mode is None
-    assert "signal_only_f0_production_routing_not_enabled" in {
+    # Signal-Only F0 is natively supported by the per-ROI correction engine
+    # and no longer requires the retired applied-dF/F production routing
+    # flag; this category no longer exists.
+    assert "signal_only_f0_production_routing_not_enabled" not in {
         issue.category for issue in issues
     }
     assert "unsupported_correction_strategy" not in {
@@ -749,7 +752,6 @@ def test_signal_only_f0_dynamic_fit_mode_populated_blocks(tmp_path: Path):
     issues = validate_guided_validation_request(request)
     cats = {i.category for i in issues}
     assert "signal_only_f0_dynamic_fit_mode_invalid" in cats
-    assert "signal_only_f0_production_routing_not_enabled" in cats
 
 def test_signal_only_f0_wrong_selected_strategy_blocks(tmp_path: Path):
     entry = {
@@ -764,7 +766,6 @@ def test_signal_only_f0_wrong_selected_strategy_blocks(tmp_path: Path):
     issues = validate_guided_validation_request(request)
     cats = {i.category for i in issues}
     assert "invalid_signal_only_f0_strategy_entry" in cats
-    assert "signal_only_f0_production_routing_not_enabled" in cats
 
 def test_unsupported_selected_strategy_blocks_even_when_legacy_valid(tmp_path: Path):
     entry = {

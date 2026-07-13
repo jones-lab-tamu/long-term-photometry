@@ -522,8 +522,12 @@ def test_analyze_photometry_wires_per_roi_feature_config_into_pipeline(tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# C. applied-dF/F orchestration: tools/run_full_pipeline_deliverables.py
-#    passes complete effective fields, never the sparse override.
+# C. _load_guided_per_roi_feature_event_overrides: a general-purpose,
+#    independently-tested loader for the native per-ROI feature-config
+#    artifact. Its former only caller, this wrapper's retired "Guided
+#    Post-Phasic Applied-dF/F Orchestration" stage (Section 7.5), has been
+#    removed -- see test_wrapper_never_calls_retired_applied_dff_orchestration
+#    below.
 # ---------------------------------------------------------------------------
 
 
@@ -550,18 +554,31 @@ def test_load_guided_per_roi_feature_event_overrides_absent_returns_none(tmp_pat
     assert _load_guided_per_roi_feature_event_overrides(str(tmp_path)) is None
 
 
-def test_applied_dff_call_site_wires_per_roi_feature_event_overrides():
-    """Audit/contract: the applied-dF/F orchestration call site in
-    tools/run_full_pipeline_deliverables.py must pass per_roi_feature_event_overrides
-    built from the materialized artifact, not omit it (the pre-4J16k34 gap)."""
+def test_wrapper_never_calls_retired_applied_dff_orchestration():
+    """Retirement contract: tools/run_full_pipeline_deliverables.py (the
+    real Guided production wrapper -- see
+    guided_execution_request_builder.py's wrapper_path) must no longer
+    import or call the retired Guided post-hoc applied-dF/F orchestration
+    entry point at all, for current-native, positive-legacy, or plain
+    non-Guided (--out) invocations alike."""
+    import ast
     import inspect
     import tools.run_full_pipeline_deliverables as wrapper
 
     source = inspect.getsource(wrapper)
-    call_start = source.index("ran = run_guided_applied_dff_orchestration_if_enabled(")
-    call_text = source[call_start : call_start + 400]
-    assert "per_roi_feature_event_overrides" in call_text
-    assert "_load_guided_per_roi_feature_event_overrides(run_dir)" in call_text
+    assert "run_guided_applied_dff_orchestration_if_enabled" not in source
+
+    imported = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module or "")
+    prohibited = "photometry_pipeline.guided_applied_dff_orchestration"
+    assert not any(
+        name == prohibited or name.startswith(f"{prohibited}.")
+        for name in imported
+    )
 
 
 # ---------------------------------------------------------------------------

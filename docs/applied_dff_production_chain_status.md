@@ -4,6 +4,31 @@ This checkpoint summarizes the current explicit applied_dff production chain.
 It is documentation only and does not change code, tests, schemas, HDF5 outputs,
 or runtime behavior.
 
+> **Status note:** This chain now exists in exactly two forms, neither of
+> which is current Guided production:
+>
+> 1. **Standalone tooling** -- the "Applied dF/F Explicit Batch" group under
+>    the Full Control tab (`gui/main_window.py`) and the `tools/*applied_dff*`
+>    CLI scripts, which call `tools/run_applied_dff_batch.py` directly.
+> 2. **Positive legacy-result loading** -- already-completed runs from
+>    before this retirement may still have `applied_dff/` evidence, which
+>    `guided_completed_applied_dff_reload.py` may still display for Review.
+>    This is read-only; it does not execute anything.
+>
+> Current Guided runs use per-ROI correction choices (Robust Global
+> Event-Reject Fit, Adaptive Event-Gated Fit, Global Linear Regression,
+> Signal-Only F0) materialized to `guided_per_roi_correction.json` and
+> consumed by `Pipeline(per_roi_correction=...)` into canonical
+> tonic/phasic caches. The obsolete Guided post-hoc applied-dF/F route
+> described below has been fully retired from that production path,
+> including its call site in `tools/run_full_pipeline_deliverables.py`
+> (the real Guided execution wrapper -- see
+> `guided_execution_request_builder.py`'s `wrapper_path`), which no
+> longer imports or calls
+> `photometry_pipeline/guided_applied_dff_orchestration.py` for any
+> current-native, positive-legacy, or plain non-Guided invocation. That
+> module has no remaining caller anywhere in this codebase.
+
 ## Current Status Boundary
 
 The production-supported workflow is explicit-manifest only:
