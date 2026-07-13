@@ -2226,6 +2226,7 @@ class MainWindow(QMainWindow):
         self._guided_execution_payload_result = None
         self._guided_run_readiness = None
         self._guided_startup_transaction_request = None
+        self._guided_validated_plan_identity = None
         self._guided_backend_execution_result = None
         self._guided_backend_execution_active = False
         self._guided_backend_execution_runner = None
@@ -2764,6 +2765,11 @@ class MainWindow(QMainWindow):
         )
         self._guided_output_dir_edit.textChanged.connect(
             lambda _text: self._refresh_guided_navigation_state()
+        )
+        self._guided_output_dir_edit.textChanged.connect(
+            lambda _text: self._invalidate_guided_backend_validation(
+                "output destination changed"
+            )
         )
         self._guided_format_combo.currentIndexChanged.connect(
             self._on_guided_format_changed
@@ -4246,6 +4252,17 @@ class MainWindow(QMainWindow):
             "Channels detected below."
         )
 
+    def _guided_roi_list_state(self) -> dict[str, bool]:
+        """{roi_id: checked} snapshot of the current Guided ROI checklist."""
+        if not hasattr(self, "_guided_roi_list"):
+            return {}
+        return {
+            self._guided_roi_list.item(idx).text(): (
+                self._guided_roi_list.item(idx).checkState() == Qt.Checked
+            )
+            for idx in range(self._guided_roi_list.count())
+        }
+
     def _sync_guided_discovery_from_full(self) -> None:
         sync_started = time.monotonic()
         self._guided_roi_discovery_diag("guided_sync_start")
@@ -4254,6 +4271,7 @@ class MainWindow(QMainWindow):
                 "guided_sync_skipped", reason="guided_roi_list_missing"
             )
             return
+        previous_state = self._guided_roi_list_state()
         blockers = [QSignalBlocker(self._guided_roi_list)]
         self._guided_roi_list.clear()
         for idx in range(self._roi_list.count()):
@@ -4263,6 +4281,15 @@ class MainWindow(QMainWindow):
             item.setCheckState(src.checkState())
             self._guided_roi_list.addItem(item)
         del blockers
+        if previous_state and self._guided_roi_list_state() != previous_state:
+            # The discovered ROI set or its included/excluded state
+            # genuinely changed (new discovery results, or a bulk
+            # Select All/Select None on the Full Control side) -- this
+            # is analysis-defining and must invalidate immediately, not
+            # only be caught later by the identity backstop.
+            self._invalidate_guided_backend_validation(
+                "ROI selection changed"
+            )
         if hasattr(self, "_guided_discovery_summary_label"):
             if self._discovery_cache is None:
                 self._guided_discovery_summary_label.setText(
@@ -4550,19 +4577,29 @@ class MainWindow(QMainWindow):
         mode = GUIDED_REFERENCE_CORRECTION_CARD_TO_MODE.get(card_title)
         if not mode:
             return
+        previous_intent = self._guided_correction_intent
         idx = self._dynamic_fit_mode_combo.findData(mode)
         if idx >= 0 and self._dynamic_fit_mode_combo.currentIndex() != idx:
             self._dynamic_fit_mode_combo.setCurrentIndex(idx)
         self._guided_correction_intent = card_title
         self._guided_diagnostics_status = "not_generated"
         self._sync_guided_correction_from_full()
+        if previous_intent and previous_intent != card_title:
+            self._invalidate_guided_backend_validation(
+                "correction method changed"
+            )
         self._refresh_guided_setup_summary()
 
     def _select_guided_signal_only_f0_intent(self) -> None:
         """Signal-Only F0 is explicit future intent, not a Dynamic Fit Mode fallback."""
+        previous_intent = self._guided_correction_intent
         self._guided_correction_intent = GUIDED_SIGNAL_ONLY_F0_CARD
         self._guided_diagnostics_status = "not_generated"
         self._sync_guided_correction_from_full()
+        if previous_intent and previous_intent != GUIDED_SIGNAL_ONLY_F0_CARD:
+            self._invalidate_guided_backend_validation(
+                "correction method changed"
+            )
         self._refresh_guided_setup_summary()
 
     def _sync_guided_correction_from_full(self) -> None:
@@ -4575,6 +4612,14 @@ class MainWindow(QMainWindow):
                 selected_reference_card = title
                 break
         if self._guided_correction_intent != GUIDED_SIGNAL_ONLY_F0_CARD:
+            previous_intent = self._guided_correction_intent
+            if previous_intent and previous_intent != selected_reference_card:
+                # A direct Full Control Dynamic Fit Mode change (not a
+                # Guided card click, which invalidates above) reaches here
+                # through the shared combo's signal.
+                self._invalidate_guided_backend_validation(
+                    "correction method changed"
+                )
             self._guided_correction_intent = selected_reference_card
             self._guided_diagnostics_status = "not_generated"
         for title, card in self._guided_correction_cards.items():
@@ -5511,6 +5556,7 @@ class MainWindow(QMainWindow):
         self, reason: str, *, roi: str | None = None
     ) -> None:
         choices = getattr(self, "_guided_strategy_choices", {})
+        newly_staled = False
         for key, entry in list(choices.items()):
             if (
                 not isinstance(entry, dict)
@@ -5519,11 +5565,21 @@ class MainWindow(QMainWindow):
                 or (roi is not None and str(entry.get("roi")) != str(roi))
             ):
                 continue
+            if entry.get("current") is True and not entry.get("stale"):
+                newly_staled = True
             updated = dict(entry)
             updated["current"] = False
             updated["stale"] = True
             updated["stale_reason"] = reason
             choices[key] = updated
+        if newly_staled:
+            # A previously current, confirmed per-ROI correction choice
+            # just became stale (new preview evidence supersedes it) --
+            # this changes the plan's canonical identity, so any retained
+            # validation/authorization for the old choice must not survive.
+            self._invalidate_guided_backend_validation(
+                "correction preview evidence replaced"
+            )
 
     def _refresh_guided_local_preview_choice_currency(self) -> None:
         signature = self._guided_local_preview_setup_signature()
@@ -10716,11 +10772,21 @@ class MainWindow(QMainWindow):
         self._refresh_guided_backend_validation_display()
 
     def _clear_guided_missing_session_approvals_for_source_change(self, _text: str = "") -> None:
-        """Never carry a session approval into a different recording."""
+        """Never carry a session approval into a different recording.
+
+        Self-contained: does not rely on a sibling signal connection on
+        the same source-changing widget to have already invalidated
+        validation. Guarded so it only invalidates when there was
+        actually an approval to drop (never during initial setup, when
+        the list starts empty).
+        """
         if not getattr(self, "_guided_approved_missing_sessions", []):
             return
         self._guided_approved_missing_sessions = []
         self._guided_missing_session_failure_reminder = ""
+        self._invalidate_guided_backend_validation(
+            "missing-session approvals cleared for a different recording"
+        )
         self._refresh_guided_draft_run_plan_preview()
 
     def _add_guided_missing_session_approval(self, approval) -> bool:
@@ -10749,11 +10815,19 @@ class MainWindow(QMainWindow):
         self._invalidate_guided_backend_validation("missing-session approval removed")
         self._refresh_guided_draft_run_plan_preview()
 
-    def _clear_guided_execution_readiness_state(self) -> None:
-        """Atomically discard state that could authorize Guided execution."""
+    def _clear_guided_execution_authorization_state(self) -> None:
+        """Atomically discard authorization state without touching any
+        already-recorded execution result (see
+        _finish_guided_backend_execution_with_result, which retains the
+        result while the authorization it was launched from is consumed)."""
         self._guided_run_authorization_result = None
         self._guided_execution_payload_result = None
         self._guided_startup_transaction_request = None
+        self._guided_validated_plan_identity = None
+
+    def _clear_guided_execution_readiness_state(self) -> None:
+        """Atomically discard state that could authorize Guided execution."""
+        self._clear_guided_execution_authorization_state()
         self._guided_backend_execution_result = None
         self._refresh_guided_review_handoff_display()
 
@@ -10762,6 +10836,7 @@ class MainWindow(QMainWindow):
         authorization_result,
         payload_result,
         startup_transaction_request,
+        plan_identity=None,
     ) -> bool:
         """Atomically retain one current, identity-bound execution state."""
         from photometry_pipeline.guided_execution_payloads import (
@@ -10796,6 +10871,8 @@ class MainWindow(QMainWindow):
             and startup_transaction_request.authorization_result
             is authorization_result
             and startup_transaction_request.payload_result is payload_result
+            and isinstance(plan_identity, str)
+            and len(plan_identity) == 64
         )
         if not valid:
             self._clear_guided_execution_readiness_state()
@@ -10806,6 +10883,7 @@ class MainWindow(QMainWindow):
             startup_transaction_request
         )
         self._guided_backend_execution_result = None
+        self._guided_validated_plan_identity = plan_identity
         return True
 
     def _is_guided_backend_validation_outcome_current(self) -> bool:
@@ -10893,6 +10971,10 @@ class MainWindow(QMainWindow):
         )
 
     def _on_guided_backend_validate_clicked(self) -> None:
+        from photometry_pipeline.guided_plan_identity import (
+            compute_guided_new_analysis_draft_plan_identity,
+        )
+
         if getattr(self, "_guided_backend_validation_active", False):
             return
         self._clear_guided_execution_readiness_state()
@@ -10920,6 +11002,7 @@ class MainWindow(QMainWindow):
             self._guided_backend_validation_outcome = outcome
             self._guided_backend_validation_outcome_revision = outcome_revision
             state = None
+            plan_identity = None
             if (
                 outcome.status == "validator_accepted"
                 and outcome.accepted_for_backend_validation is True
@@ -10934,8 +11017,16 @@ class MainWindow(QMainWindow):
                     )
                 except Exception:
                     state = None
+                try:
+                    plan_identity = (
+                        compute_guided_new_analysis_draft_plan_identity(
+                            context.draft
+                        )
+                    )
+                except Exception:
+                    plan_identity = None
             if state is None or not self._retain_guided_execution_readiness_state(
-                *state
+                *state, plan_identity
             ):
                 self._clear_guided_execution_readiness_state()
         finally:
@@ -11070,6 +11161,33 @@ class MainWindow(QMainWindow):
         lines.append("Guided Run is not available for this configuration yet.")
         details_label.setText("\n".join(lines))
 
+    def _guided_current_plan_identity_is_validated(self) -> bool:
+        """Fail-closed authoritative staleness backstop.
+
+        True only if the canonical identity of the live, freshly rebuilt
+        draft plan exactly matches the identity that was validated and
+        authorized. This does not depend on any UI callback having
+        remembered to bump the revision counter or call an invalidation
+        helper: any analysis-defining change to the draft changes the
+        computed identity automatically.
+        """
+        validated_identity = getattr(
+            self, "_guided_validated_plan_identity", None
+        )
+        if not validated_identity:
+            return False
+        from photometry_pipeline.guided_plan_identity import (
+            compute_guided_new_analysis_draft_plan_identity,
+        )
+
+        try:
+            current_identity = compute_guided_new_analysis_draft_plan_identity(
+                self._build_guided_new_analysis_draft_plan()
+            )
+        except Exception:
+            return False
+        return current_identity == validated_identity
+
     def _refresh_guided_run_readiness_display(self) -> None:
         """Update only the guarded Guided Run affordance and its safe text."""
         from photometry_pipeline.guided_run_readiness import (
@@ -11098,22 +11216,34 @@ class MainWindow(QMainWindow):
         self._guided_run_readiness = result
         button = getattr(self, "_guided_run_btn", None)
         label = getattr(self, "_guided_run_readiness_label", None)
+        was_ready_before_identity_check = (
+            result.status == "ready_hidden" and result.ready is True
+        )
+        plan_currently_validated = (
+            was_ready_before_identity_check
+            and self._guided_current_plan_identity_is_validated()
+        )
         ready = (
-            result.status == "ready_hidden"
-            and result.ready is True
+            plan_currently_validated
             and not getattr(self, "_guided_backend_execution_active", False)
             and getattr(self, "_guided_backend_execution_result", None)
             is None
+        )
+        summary = (
+            "The Guided setup changed after validation. Validate "
+            "again before running."
+            if was_ready_before_identity_check and not plan_currently_validated
+            else result.user_summary
         )
         if button is not None:
             button.setEnabled(ready)
             button.setToolTip(
                 "Guided Run is ready to start."
                 if ready
-                else result.user_summary
+                else summary
             )
         if label is not None:
-            label.setText(result.user_summary)
+            label.setText(summary)
 
     def _current_guided_startup_transaction_request(self):
         """Return only a retained request bound to the current ready state."""
@@ -11148,6 +11278,22 @@ class MainWindow(QMainWindow):
         ):
             return
         if getattr(self, "_guided_backend_execution_active", False):
+            return
+        # Authoritative click-time identity recheck: rebuild the current
+        # canonical plan identity fresh (not the display's cached
+        # conclusion) and require it to still exactly match the identity
+        # that was validated and authorized. Do not trust the button's
+        # enabled state or the readiness object's cached `ready` flag alone.
+        if not self._guided_current_plan_identity_is_validated():
+            button = getattr(self, "_guided_run_btn", None)
+            label = getattr(self, "_guided_run_readiness_label", None)
+            if button is not None:
+                button.setEnabled(False)
+            if label is not None:
+                label.setText(
+                    "The Guided setup changed after validation. Validate "
+                    "again before running."
+                )
             return
         request = self._current_guided_startup_transaction_request()
         button = getattr(self, "_guided_run_btn", None)
@@ -11389,7 +11535,11 @@ class MainWindow(QMainWindow):
     def _finish_guided_backend_execution_with_result(self, result) -> None:
         """GUI-thread-only: apply the existing post-execution result contract."""
         self._guided_backend_execution_result = result
-        self._guided_startup_transaction_request = None
+        # The consumed authorization/startup-request/plan-identity triple
+        # must not be reusable for a second Run once a result is recorded --
+        # clear all of it atomically (not just the startup request) without
+        # touching the result just set above.
+        self._clear_guided_execution_authorization_state()
         recovered = self._offer_guided_missing_session_recovery(result)
         if recovered:
             self._guided_backend_execution_result = result

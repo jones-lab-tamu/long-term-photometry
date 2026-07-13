@@ -779,6 +779,90 @@ def test_real_guided_native_correction_lifecycle_matrix(
             window._guided_run_readiness_label.text(),
         )
 
+        # Stale-validation invalidation (this task): mutating one
+        # analysis-defining choice after a successful Setup check must
+        # disable Run and refuse direct guarded invocation, before this
+        # representative lifecycle proceeds to a real run. A missing-
+        # session approval is analysis-defining but (unlike a Setup-step
+        # field) does not also stale the per-ROI local-preview evidence
+        # confirmation, so withdrawing it cleanly restores the exact
+        # originally-validated plan for a clean revalidate below.
+        from photometry_pipeline.guided_new_analysis_plan import (
+            GuidedApprovedMissingSession,
+        )
+
+        probe_approval = GuidedApprovedMissingSession(
+            canonical_relative_path="session-stale-probe/fluorescence.csv",
+            size_bytes=1024,
+            sha256_content_digest="d" * 64,
+            session_index=99,
+            expected_start_time="2026-01-01T00:00:00Z",
+            expected_duration_sec=600.0,
+        )
+        window._add_guided_missing_session_approval(probe_approval)
+        # Immediate invalidation: Run disables and retained state clears
+        # BEFORE the guarded Run handler is ever invoked -- not merely
+        # "refuses once clicked".
+        assert window._guided_run_btn.isEnabled() is False
+        assert window._guided_validated_plan_identity is None
+        assert window._guided_run_authorization_result is None
+        assert window._guided_execution_payload_result is None
+        assert window._guided_startup_transaction_request is None
+        stale_starts = []
+        monkeypatch.setattr(
+            window,
+            "_start_guided_run_execution_worker",
+            lambda request: stale_starts.append(request),
+        )
+        window._on_guided_run_clicked_backend_guarded()
+        assert stale_starts == []
+        assert window._guided_backend_execution_active is False
+        assert window._guided_run_btn.isEnabled() is False
+        monkeypatch.undo()
+        monkeypatch.setattr(
+            request_builder,
+            "resolve_application_build_identity",
+            lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+        )
+
+        # Restore the visible value (withdraw the approval, reproducing
+        # the exact originally-validated plan) -- Run must remain
+        # disabled and the direct guard must still refuse: restoring an
+        # old visible value must never revive prior validation without a
+        # fresh Setup check.
+        window._remove_guided_missing_session_approval(
+            probe_approval.canonical_relative_path
+        )
+        window._refresh_guided_run_readiness_display()
+        assert window._guided_run_btn.isEnabled() is False
+        assert window._guided_validated_plan_identity is None
+        assert window._guided_run_authorization_result is None
+        assert window._guided_startup_transaction_request is None
+        restore_starts = []
+        monkeypatch.setattr(
+            window,
+            "_start_guided_run_execution_worker",
+            lambda request: restore_starts.append(request),
+        )
+        window._on_guided_run_clicked_backend_guarded()
+        assert restore_starts == []
+        monkeypatch.undo()
+        monkeypatch.setattr(
+            request_builder,
+            "resolve_application_build_identity",
+            lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+        )
+
+        # A fresh Setup check is required to re-enable Run.
+        window._guided_backend_validate_btn.click()
+        assert window._guided_backend_validation_outcome.status == "validator_accepted", (
+            window._guided_backend_validation_outcome.blocking_issues
+        )
+        assert window._guided_run_btn.isEnabled(), (
+            window._guided_run_readiness,
+            window._guided_run_readiness_label.text(),
+        )
+
         import gui.main_window as main_window_module
         monkeypatch.setattr(
             main_window_module.QMessageBox,

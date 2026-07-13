@@ -43,6 +43,10 @@ def _visible_text(window):
 
 
 def _set_ready(window, request):
+    from photometry_pipeline.guided_plan_identity import (
+        compute_guided_new_analysis_draft_plan_identity,
+    )
+
     window._guided_backend_validation_revision = request.current_guided_revision
     window._guided_backend_validation_outcome = _accepted_outcome()
     window._guided_backend_validation_outcome_revision = (
@@ -50,6 +54,14 @@ def _set_ready(window, request):
     )
     window._guided_run_authorization_result = request.authorization_result
     window._guided_execution_payload_result = request.payload_result
+    # See tests/test_guided_gui_run_execution_wiring.py::_set_ready -- the
+    # authoritative identity check requires the freshly-rebuilt draft's
+    # canonical identity to match what was "validated".
+    window._guided_validated_plan_identity = (
+        compute_guided_new_analysis_draft_plan_identity(
+            window._build_guided_new_analysis_draft_plan()
+        )
+    )
     window._refresh_guided_run_readiness_display()
 
 

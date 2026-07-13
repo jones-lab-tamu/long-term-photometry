@@ -67,6 +67,10 @@ def _pump_until(qapp, condition, *, timeout_s: float = 5.0) -> None:
 
 
 def _set_ready(window, request):
+    from photometry_pipeline.guided_plan_identity import (
+        compute_guided_new_analysis_draft_plan_identity,
+    )
+
     window._guided_backend_validation_revision = request.current_guided_revision
     window._guided_backend_validation_outcome = replace(
         _accepted_outcome(),
@@ -79,6 +83,17 @@ def _set_ready(window, request):
     window._guided_execution_payload_result = request.payload_result
     window._guided_startup_transaction_request = request
     window._guided_backend_execution_result = None
+    # This helper synthesizes "already validated and authorized" state
+    # directly, bypassing a real Validate click. The authoritative identity
+    # check now requires the current, freshly-built draft plan's canonical
+    # identity to match what was "validated" -- stamp it from the window's
+    # current (unmodified-by-this-helper) draft state so the synthetic
+    # state is internally consistent with the real Run-guard.
+    window._guided_validated_plan_identity = (
+        compute_guided_new_analysis_draft_plan_identity(
+            window._build_guided_new_analysis_draft_plan()
+        )
+    )
     window._refresh_guided_run_readiness_display()
 
 
@@ -139,7 +154,10 @@ def _run_production_validation_update(
     outcome=None,
 ):
     window._guided_backend_validation_revision = request.current_guided_revision
-    context = SimpleNamespace(revision=request.current_guided_revision)
+    context = SimpleNamespace(
+        revision=request.current_guided_revision,
+        draft=window._build_guided_new_analysis_draft_plan(),
+    )
     accepted = outcome or replace(
         _accepted_outcome(),
         request_identity=request.authorization_result.stored_request_identity,
