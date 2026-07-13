@@ -64,8 +64,8 @@ def _intent(
     time_column_candidates=("Time(s)",),
 ):
     root = tmp_path / "source"
-    _write_session(root, "session_a", rois=rois, time_col=time_col)
-    _write_session(root, "session_b", rois=rois, time_col=time_col)
+    _write_session(root, "2025_01_01-00_00_00", rois=rois, time_col=time_col)
+    _write_session(root, "2025_01_01-00_10_00", rois=rois, time_col=time_col)
     snapshot = build_rwd_source_candidate_snapshot(str(root))
     parser_contract = _parser(time_column_candidates=time_column_candidates)
     parser_digest = compute_rwd_header_parsing_contract_digest(parser_contract)
@@ -182,9 +182,9 @@ def test_candidate_preflight_refuses_missing_or_extra(tmp_path, change, expected
     intent, root = _intent(tmp_path)
     request = preflight.derive_candidate_manifest_preflight_request_from_intent(intent)
     if change == "missing":
-        (root / "session_b" / "fluorescence.csv").unlink()
+        (root / "2025_01_01-00_10_00" / "fluorescence.csv").unlink()
     else:
-        _write_session(root, "session_c")
+        _write_session(root, "2025_01_01-00_20_00")
     result = preflight.run_candidate_manifest_execution_preflight(request)
     assert _category(result) == expected
     assert result.canonical_preflight_identity is None
@@ -193,7 +193,7 @@ def test_candidate_preflight_refuses_missing_or_extra(tmp_path, change, expected
 def test_candidate_preflight_refuses_changed_content_and_size(tmp_path):
     intent, root = _intent(tmp_path)
     request = preflight.derive_candidate_manifest_preflight_request_from_intent(intent)
-    target = root / "session_a" / "fluorescence.csv"
+    target = root / "2025_01_01-00_00_00" / "fluorescence.csv"
     original = target.read_text(encoding="utf-8")
     target.write_text(original + "1,2,3,4,5\n", encoding="utf-8")
     result = preflight.run_candidate_manifest_execution_preflight(request)
@@ -203,7 +203,7 @@ def test_candidate_preflight_refuses_changed_content_and_size(tmp_path):
 def test_candidate_preflight_refuses_same_size_content_change(tmp_path):
     intent, root = _intent(tmp_path)
     request = preflight.derive_candidate_manifest_preflight_request_from_intent(intent)
-    target = root / "session_a" / "fluorescence.csv"
+    target = root / "2025_01_01-00_00_00" / "fluorescence.csv"
     raw = target.read_bytes()
     target.write_bytes(raw[:-2] + (b"9\n"))
     result = preflight.run_candidate_manifest_execution_preflight(request)
@@ -305,7 +305,7 @@ def test_roi_preflight_refuses_candidate_change_after_candidate_acceptance(
             candidate.canonical_preflight_identity
         ),
     )
-    target = root / "session_a" / "fluorescence.csv"
+    target = root / "2025_01_01-00_00_00" / "fluorescence.csv"
     raw = target.read_bytes()
     if change == "same_size_content":
         target.write_bytes(raw[:-2] + b"9\n")
@@ -326,7 +326,7 @@ def test_roi_candidate_tuple_difference_refuses(tmp_path, monkeypatch):
     intent, root = _intent(tmp_path)
     _, candidate = _candidate(intent)
     accepted_snapshot = build_rwd_source_candidate_snapshot(str(root))
-    _write_session(root, "session_b", rois=("ROI0",))
+    _write_session(root, "2025_01_01-00_10_00", rois=("ROI0",))
     monkeypatch.setattr(
         preflight,
         "build_rwd_source_candidate_snapshot",
@@ -368,7 +368,7 @@ def test_roi_ambiguous_header_refuses(tmp_path, monkeypatch):
     intent, root = _intent(tmp_path)
     _, candidate = _candidate(intent)
     accepted_snapshot = build_rwd_source_candidate_snapshot(str(root))
-    target = root / "session_a" / "fluorescence.csv"
+    target = root / "2025_01_01-00_00_00" / "fluorescence.csv"
     target.write_text(
         "Time(s),ROI0-410,ROI0-410,ROI0-470,ROI1-410,ROI1-470\n",
         encoding="utf-8",

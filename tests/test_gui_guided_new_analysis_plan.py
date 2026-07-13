@@ -284,7 +284,7 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
     header = "Time(s)," + ",".join(f"{roi}-410,{roi}-470" for roi in rois)
     source_files = []
     for index in range(2):
-        session_dir = input_dir / f"session-{index}"
+        session_dir = input_dir / f"2025_01_01-{index:02d}_00_00"
         session_dir.mkdir()
         source_file = session_dir / "fluorescence.csv"
         rows = [header]
@@ -301,7 +301,7 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
         "sessions": [
             {
                 "index": index,
-                "session_id": f"session-{index}",
+                "session_id": f"2025_01_01-{index:02d}_00_00",
                 "path": str(source_file),
                 "included_in_preview": True,
             }
@@ -447,7 +447,7 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache_via_r
     header = f"{time_col}," + ",".join(f"{roi}-410,{roi}-470" for roi in rois)
     source_files = []
     for index in range(2):
-        session_dir = input_dir / f"session-{index}"
+        session_dir = input_dir / f"2025_01_01-{index:02d}_00_00"
         session_dir.mkdir()
         source_file = session_dir / "fluorescence.csv"
         rows = [header]
@@ -464,7 +464,7 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache_via_r
         "sessions": [
             {
                 "index": index,
-                "session_id": f"session-{index}",
+                "session_id": f"2025_01_01-{index:02d}_00_00",
                 "path": str(source_file),
                 "included_in_preview": True,
             }

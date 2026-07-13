@@ -10,6 +10,8 @@ import tempfile
 from pathlib import Path
 import pytest
 
+import photometry_pipeline.guided_backend_validation_materialization as materialization
+
 from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDraftPlan,
     GuidedNewAnalysisDatasetContractSnapshot,
@@ -1207,6 +1209,64 @@ def test_dataset_fact_enrichment_failures(
     assert isinstance(result, GuidedBackendValidationMaterializationFailure)
     assert result.blocking_issues[0].category == expected
     assert result.no_usable_facts is True
+
+
+def test_overlapping_rwd_sessions_block_materialization(tmp_path: Path):
+    """A2: two sessions whose intervals overlap given the confirmed session
+    duration must fail Setup check rather than silently proceed."""
+    draft = _valid_local_preview_stage2c_draft(tmp_path)
+    root = Path(draft.resolved_input_source_path or draft.input_source_path or "")
+    # The fixture's one session starts 2026_06_30-12_00_00 and the
+    # confirmed session_duration_sec is 120.0; a second session starting
+    # only 60s later overlaps it.
+    _write_session(root, "2026_06_30-12_01_00", b"time,uv,sig\n0.0,1.2,3.4\n")
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "rwd_session_overlap_detected"
+    assert "2026_06_30-12_00_00" in result.blocking_issues[0].message
+    assert "2026_06_30-12_01_00" in result.blocking_issues[0].message
+
+
+def test_non_overlapping_back_to_back_rwd_sessions_do_not_block(tmp_path: Path):
+    """Sibling of the overlap test: sessions spaced at or beyond the
+    confirmed duration are not falsely flagged as overlapping."""
+    draft = _valid_local_preview_stage2c_draft(tmp_path)
+    root = Path(draft.resolved_input_source_path or draft.input_source_path or "")
+    # 120s (== session_duration_sec) after the first session: back-to-back,
+    # not overlapping.
+    _write_session(root, "2026_06_30-12_02_00", b"time,uv,sig\n0.0,1.2,3.4\n")
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    if isinstance(result, GuidedBackendValidationMaterializationFailure):
+        assert result.blocking_issues[0].category != "rwd_session_overlap_detected"
+
+
+@pytest.mark.parametrize("duration", [None, 0.0, -1.0, float("nan"), float("inf")])
+def test_overlap_check_does_not_run_without_finite_positive_duration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, duration
+):
+    draft = _valid_local_preview_stage2c_draft(tmp_path)
+    draft.session_duration_sec = duration
+    calls = []
+    monkeypatch.setattr(
+        materialization,
+        "_detect_rwd_session_overlap",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+
+    materialization.materialize_guided_backend_validation_facts(
+        draft,
+        parser_contract=_valid_parser_contract(),
+    )
+
+    assert calls == []
 
 
 @pytest.mark.parametrize(

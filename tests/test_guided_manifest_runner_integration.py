@@ -33,8 +33,8 @@ def _write_session(root: Path, name: str, rois=("ROI0", "ROI1"), time_col="Time(
 
 def _manifest(tmp_path, time_col="Time(s)"):
     root = tmp_path / "source"
-    _write_session(root, "session_a", time_col=time_col)
-    _write_session(root, "session_b", time_col=time_col)
+    _write_session(root, "2025_01_01-00_00_00", time_col=time_col)
+    _write_session(root, "2025_01_01-00_10_00", time_col=time_col)
     config = Config(rwd_time_col=time_col)
     facts = build_guided_manifest_current_facts(
         source_root=root,
@@ -118,7 +118,7 @@ def test_wrapper_verifies_valid_manifest_and_refuses_mismatches(tmp_path):
     )
     assert result.accepted
 
-    target = root / "session_a" / "fluorescence.csv"
+    target = root / "2025_01_01-00_00_00" / "fluorescence.csv"
     target.write_text(target.read_text() + "1,2,3,4,5\n")
     with pytest.raises(RuntimeError, match="verification refused"):
         wrapper.verify_guided_manifest_before_output(
@@ -291,7 +291,7 @@ def test_passes_consume_verified_candidate_list(tmp_path, monkeypatch):
 
     def representative(*_args, **_kwargs):
         pipeline.representative_session_index = 0
-        pipeline.representative_session_id = "session_a"
+        pipeline.representative_session_id = "2025_01_01-00_00_00"
         pipeline.n_sessions_resolved = len(pipeline.file_list)
         pipeline.representative_user_provided = False
         pipeline.representative_session_info = {}

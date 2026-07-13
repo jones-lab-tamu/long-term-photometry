@@ -374,7 +374,7 @@ def test_guided_review_shows_message_when_run_succeeded_but_no_regions(
 
 def _configure_real_analysis_duration_new_analysis_draft(
     window, tmp_path, monkeypatch, *, strategy_by_roi, session_duration_sec=600,
-    analysis_mode="phasic", rois=("CH1", "CH2", "CH3"),
+    analysis_mode="phasic", rois=("CH1", "CH2", "CH3"), session_names=None,
 ):
     """A variant of test_gui_guided_new_analysis_plan.py's
     _configure_complete_guided_new_analysis_draft_without_diagnostic_cache
@@ -410,9 +410,17 @@ def _configure_real_analysis_duration_new_analysis_draft(
     header = "Time(s)," + ",".join(f"{roi}-410,{roi}-470" for roi in rois)
     fs_hz = 20.0
     n_rows = int(round(session_duration_sec * fs_hz))
+    session_names = tuple(session_names or (
+        "2025_01_01-00_00_00",
+        "2025_01_01-00_10_00",
+    ))
     source_files = []
-    for index in range(2):
-        session_dir = input_dir / f"session-{index}"
+    for index, session_name in enumerate(session_names):
+        # Back-to-back at exactly the sessions_per_hour="6" cadence set
+        # below, so live recording-timing re-inference (triggered by any
+        # discovery resync) agrees with the explicitly configured value
+        # instead of silently overwriting it.
+        session_dir = input_dir / session_name
         session_dir.mkdir()
         source_file = session_dir / "fluorescence.csv"
         rows = [header]
@@ -434,7 +442,7 @@ def _configure_real_analysis_duration_new_analysis_draft(
         "sessions": [
             {
                 "index": index,
-                "session_id": f"session-{index}",
+                "session_id": session_names[index],
                 "path": str(source_file),
                 "included_in_preview": True,
             }
@@ -709,11 +717,11 @@ def test_real_gui_path_reaches_loadable_completed_run_and_reviews_it(
 
 @pytest.mark.extended
 @pytest.mark.parametrize(
-    ("case_name", "analysis_mode", "strategy_by_roi"),
+    ("case_name", "analysis_mode", "strategy_by_roi", "session_names"),
     [
-        ("all_signal_phasic", "phasic", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}),
-        ("all_signal_tonic", "tonic", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}),
-        ("all_signal_combined", "both", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}),
+        ("all_signal_phasic", "phasic", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}, None),
+        ("all_signal_tonic", "tonic", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}, None),
+        ("all_signal_combined", "both", {"CH1": "Signal-Only F0", "CH2": "Signal-Only F0"}, None),
         (
             "mixed_four_combined",
             "both",
@@ -723,11 +731,23 @@ def test_real_gui_path_reaches_loadable_completed_run_and_reviews_it(
                 "CH3": "Global Linear Regression",
                 "CH4": "Adaptive Event-Gated Fit",
             },
+            None,
+        ),
+        (
+            "shuffled_discovery_phasic",
+            "phasic",
+            {"CH1": "Global Linear Regression"},
+            (
+                "2025_01_01-00_20_00",
+                "2025_01_01-00_00_00",
+                "2025_01_01-00_10_00",
+            ),
         ),
     ],
 )
 def test_real_guided_native_correction_lifecycle_matrix(
-    tmp_path, monkeypatch, qapp, case_name, analysis_mode, strategy_by_roi
+    tmp_path, monkeypatch, qapp, case_name, analysis_mode, strategy_by_roi,
+    session_names,
 ):
     """Real production lifecycle through ordinary production MainWindow
     construction (native Signal-Only F0 is enabled by default; no
@@ -744,6 +764,38 @@ def test_real_guided_native_correction_lifecycle_matrix(
         settings=QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
     )
     try:
+        raw_enumerations = []
+        execution_enumerations = []
+        if session_names is not None:
+            import photometry_pipeline.io.rwd_source_snapshot as snapshot_module
+            import photometry_pipeline.io.adapters as adapters_module
+
+            original_scandir_entries = snapshot_module._scandir_entries
+
+            def reversed_scandir_entries(path):
+                entries = original_scandir_entries(path)
+                if Path(path) == tmp_path / "raw_input":
+                    shuffled = list(reversed(entries))
+                    raw_enumerations.append(tuple(entry.name for entry in shuffled))
+                    return shuffled
+                return entries
+
+            monkeypatch.setattr(
+                snapshot_module, "_scandir_entries", reversed_scandir_entries
+            )
+            original_execution_scandir = adapters_module._scandir_rwd_entries
+
+            def reversed_execution_scandir(path):
+                entries = original_execution_scandir(path)
+                shuffled = list(reversed(entries))
+                execution_enumerations.append(
+                    tuple(entry.name for entry in shuffled)
+                )
+                return shuffled
+
+            monkeypatch.setattr(
+                adapters_module, "_scandir_rwd_entries", reversed_execution_scandir
+            )
         _configure_real_analysis_duration_new_analysis_draft(
             window,
             tmp_path,
@@ -751,7 +803,19 @@ def test_real_guided_native_correction_lifecycle_matrix(
             strategy_by_roi=strategy_by_roi,
             analysis_mode=analysis_mode,
             rois=tuple(strategy_by_roi),
+            session_names=session_names,
         )
+        if session_names is not None:
+            # Exercise the exact execution discovery function with its raw
+            # enumeration deliberately reversed, independently of the Setup
+            # snapshot function patched above.
+            discovered_for_execution = adapters_module.discover_rwd_chunks(
+                str(tmp_path / "raw_input")
+            )
+            assert tuple(Path(path).parent.name for path in discovered_for_execution) == tuple(
+                sorted(session_names)
+            )
+            assert execution_enumerations[-1] != tuple(sorted(session_names))
         _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
         window._guided_workflow_stepper.setCurrentRow(
             list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
@@ -778,6 +842,18 @@ def test_real_guided_native_correction_lifecycle_matrix(
             window._guided_run_readiness,
             window._guided_run_readiness_label.text(),
         )
+        if session_names is not None:
+            expected_session_names = tuple(sorted(session_names))
+            frozen_candidates = (
+                window._guided_run_authorization_result.production_intent
+                .input_source.candidate_files
+            )
+            assert tuple(
+                item.canonical_relative_path.split("/", 1)[0]
+                for item in frozen_candidates
+            ) == expected_session_names
+            assert raw_enumerations
+            assert raw_enumerations[-1] != expected_session_names
 
         # Stale-validation invalidation (this task): mutating one
         # analysis-defining choice after a successful Setup check must
@@ -951,6 +1027,14 @@ def test_real_guided_native_correction_lifecycle_matrix(
             assert list(run_dir.glob(f"*/**/{plot_pattern}"))
             with h5py.File(cache_path, "r") as cache:
                 chunk_ids = tuple(int(value) for value in cache["meta/chunk_ids"][()])
+                if session_names is not None:
+                    assert chunk_ids == (0, 1, 2)
+                    persisted_names = tuple(
+                        Path(str(cache[f"roi/CH1/chunk_{chunk_id}"].attrs["source_file"]))
+                        .parent.name
+                        for chunk_id in chunk_ids
+                    )
+                    assert persisted_names == tuple(sorted(session_names))
                 for roi, selected in selected_by_roi.items():
                     for chunk_id in chunk_ids:
                         group = cache[f"roi/{roi}/chunk_{chunk_id}"]
@@ -984,6 +1068,14 @@ def test_real_guided_native_correction_lifecycle_matrix(
             roi: window._guided_report_viewer.phasic_review_model.strategy_label_for_roi(roi)
             for roi in strategy_by_roi
         } == {roi: expected_review_labels[label] for roi, label in strategy_by_roi.items()}
+        if session_names is not None:
+            immediate_sessions = (
+                window._guided_report_viewer.phasic_review_model
+                .sessions_by_roi["CH1"]
+            )
+            assert tuple(Path(row.source_file).parent.name for row in immediate_sessions) == (
+                tuple(sorted(session_names))
+            )
 
         reopened = MainWindow(
             settings=QSettings(
@@ -1005,6 +1097,11 @@ def test_real_guided_native_correction_lifecycle_matrix(
                 roi: reopened_model.strategy_label_for_roi(roi)
                 for roi in strategy_by_roi
             } == {roi: expected_review_labels[label] for roi, label in strategy_by_roi.items()}
+            if session_names is not None:
+                assert tuple(
+                    Path(row.source_file).parent.name
+                    for row in reopened_model.sessions_by_roi["CH1"]
+                ) == tuple(sorted(session_names))
         finally:
             reopened.close()
     finally:
@@ -1207,6 +1304,109 @@ def test_real_gui_analysis_mode_changes_invalidate_authorization_identity(
                 window._guided_run_authorization_result.canonical_authorization_identity
             )
         assert len(set(identities)) == 3
+    finally:
+        window.close()
+
+
+def test_guided_run_refuses_post_setup_canonical_chronology_rename_and_does_not_revive(
+    tmp_path, monkeypatch, qapp
+):
+    """A valid canonical rename after Setup check invalidates the frozen
+    source chronology before allocation. Restoring the visible source names
+    cannot revive the consumed authorization; a fresh Setup check is required.
+    """
+    from PySide6.QtCore import QSettings
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+    import photometry_pipeline.guided_production_mapping as production_mapping
+    from tests.test_gui_guided_new_analysis_plan import (
+        _confirm_detected_dataset_settings_via_review_plan_button,
+    )
+
+    window = MainWindow(
+        settings=QSettings(str(tmp_path / "mutation-settings.ini"), QSettings.IniFormat)
+    )
+    try:
+        session_names = (
+            "2025_01_01-00_00_00",
+            "2025_01_01-00_10_00",
+            "2025_01_01-00_20_00",
+        )
+        _configure_real_analysis_duration_new_analysis_draft(
+            window,
+            tmp_path,
+            monkeypatch,
+            strategy_by_roi={"CH1": "Global Linear Regression"},
+            rois=("CH1",),
+            session_names=session_names,
+        )
+        _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+        window._guided_workflow_stepper.setCurrentRow(
+            list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+        )
+        window._guided_review_go_to_run_btn.click()
+
+        build_identity = production_mapping.build_application_build_identity(
+            distribution_name="photometry-pipeline",
+            distribution_version="1.0.0",
+            source_revision_kind="git",
+            source_revision="abc123",
+            source_tree_state="clean",
+        )
+        monkeypatch.setattr(
+            request_builder,
+            "resolve_application_build_identity",
+            lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+        )
+        window._guided_backend_validate_btn.click()
+        assert window._guided_backend_validation_outcome.status == "validator_accepted"
+        assert window._guided_run_btn.isEnabled()
+        old_authorization = window._guided_run_authorization_result
+        old_request = window._guided_startup_transaction_request
+        planned_run_dir = Path(old_request.planned_allocated_run_dir)
+
+        original = tmp_path / "raw_input" / "2025_01_01-00_10_00"
+        moved = tmp_path / "raw_input" / "2024_12_31-23_50_00"
+        original.rename(moved)
+        assert window._guided_run_btn.isEnabled()  # no GUI field changed
+
+        worker_starts = []
+        monkeypatch.setattr(
+            window,
+            "_start_guided_run_execution_worker",
+            lambda request: worker_starts.append(request),
+        )
+        window._on_guided_run_clicked_backend_guarded()
+        assert worker_starts == []
+        assert not window._guided_backend_execution_active
+        assert not planned_run_dir.exists()
+        assert window._guided_run_authorization_result is None
+        assert window._guided_startup_transaction_request is None
+        assert window._guided_validated_plan_identity is None
+        assert "recording sessions changed" in (
+            window._guided_run_readiness_label.text().lower()
+        )
+
+        # Recreate the exact superficially valid chronology. The old retained
+        # authorization/request objects must not reappear or become executable.
+        moved.rename(original)
+        window._refresh_guided_run_readiness_display()
+        assert window._guided_run_authorization_result is None
+        assert window._guided_startup_transaction_request is None
+        assert not window._guided_run_btn.isEnabled()
+        window._on_guided_run_clicked_backend_guarded()
+        assert worker_starts == []
+        assert not planned_run_dir.exists()
+        assert old_authorization is not window._guided_run_authorization_result
+        assert old_request is not window._guided_startup_transaction_request
+
+        # Only a fresh Setup check creates new authorization bound to the
+        # restored source snapshot and makes Run eligible again.
+        window._guided_backend_validate_btn.click()
+        assert window._guided_backend_validation_outcome.status == "validator_accepted"
+        assert window._guided_run_btn.isEnabled()
+        assert window._guided_run_authorization_result is not old_authorization
+        assert window._guided_startup_transaction_request is not old_request
+        assert not planned_run_dir.exists()
     finally:
         window.close()
 

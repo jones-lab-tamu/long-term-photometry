@@ -38,8 +38,8 @@ def _write_session(
 
 def _facts(tmp_path, included=("ROI0",), time_col="Time(s)"):
     root = tmp_path / "source"
-    _write_session(root, "session_a", time_col=time_col)
-    _write_session(root, "session_b", time_col=time_col)
+    _write_session(root, "2025_01_01-00_00_00", time_col=time_col)
+    _write_session(root, "2025_01_01-00_10_00", time_col=time_col)
     return root, current_facts.build_guided_manifest_current_facts(
         source_root=root,
         config=Config(rwd_time_col=time_col),
@@ -50,8 +50,8 @@ def _facts(tmp_path, included=("ROI0",), time_col="Time(s)"):
 def test_current_facts_builds_ordered_candidates_and_roi_inventory(tmp_path):
     root, facts = _facts(tmp_path)
     assert tuple(item.canonical_relative_path for item in facts.current_candidates) == (
-        "session_a/fluorescence.csv",
-        "session_b/fluorescence.csv",
+        "2025_01_01-00_00_00/fluorescence.csv",
+        "2025_01_01-00_10_00/fluorescence.csv",
     )
     assert all(Path(item.absolute_path).is_file() for item in facts.current_candidates)
     inventory = facts.current_roi_inventory
@@ -122,7 +122,7 @@ def test_strict_roi_digest_uses_first_subset_include_mode(tmp_path):
 
 def test_current_facts_refuses_missing_included_roi(tmp_path):
     root = tmp_path / "source"
-    _write_session(root, "session_a")
+    _write_session(root, "2025_01_01-00_00_00")
     with pytest.raises(ValueError, match="absent"):
         current_facts.build_guided_manifest_current_facts(
             source_root=root,
@@ -133,7 +133,7 @@ def test_current_facts_refuses_missing_included_roi(tmp_path):
 
 def test_current_facts_performs_no_writes(tmp_path, monkeypatch):
     root = tmp_path / "source"
-    _write_session(root, "session_a")
+    _write_session(root, "2025_01_01-00_00_00")
 
     def fail(*_args, **_kwargs):
         raise AssertionError("write prohibited")

@@ -683,7 +683,7 @@ def test_analyze_photometry_global_only_pipeline_kwargs_are_none(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _write_synthetic_rwd_session(root: Path, name: str = "session_a"):
+def _write_synthetic_rwd_session(root: Path, name: str = "2025_01_01-00_00_00"):
     path = root / name / "fluorescence.csv"
     path.parent.mkdir(parents=True)
     rng = np.random.default_rng(42)

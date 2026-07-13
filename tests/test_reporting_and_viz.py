@@ -128,9 +128,11 @@ class TestReportingAndViz(unittest.TestCase):
             shutil.rmtree(iso_dir)
         os.makedirs(iso_dir, exist_ok=True)
         
-        # 2. Create chunks (RWD requires subdirectories with fluorescence.csv)
-        fn0 = os.path.join(iso_dir, "chunk_0000")
-        fn1 = os.path.join(iso_dir, "chunk_0001")
+        # 2. Create chunks (RWD requires subdirectories with fluorescence.csv,
+        # named with the canonical acquisition-time token so they resolve to
+        # one authoritative chronological order)
+        fn0 = os.path.join(iso_dir, "2024_01_01-00_00_00")
+        fn1 = os.path.join(iso_dir, "2024_01_01-00_10_00")
         os.makedirs(fn0, exist_ok=True)
         os.makedirs(fn1, exist_ok=True)
         
@@ -154,7 +156,7 @@ class TestReportingAndViz(unittest.TestCase):
             qc = json.load(f)
             
         failed_files = [x['file'] for x in qc['failed_chunks']]
-        self.assertTrue(any("chunk_0000" in f for f in failed_files))
+        self.assertTrue(any("2024_01_01-00_00_00" in f for f in failed_files))
         
 if __name__ == '__main__':
     unittest.main()

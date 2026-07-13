@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields as dataclass_fields
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -77,6 +78,7 @@ from photometry_pipeline.io.rwd_contract import (
 from photometry_pipeline.input_processing_completeness import (
     resolve_session_start_time,
 )
+from photometry_pipeline.io.rwd_chronology import find_rwd_session_overlaps
 
 # Constants for Stage 2b
 GUIDED_BACKEND_VALIDATION_MATERIALIZATION_SCOPE = (
@@ -105,6 +107,7 @@ STAGE_2C_VALID_ISSUES = {
     "materialization_cancelled",
     "materializer_internal_error",
     "unsupported_stage_2a_state",
+    "rwd_session_overlap_detected",
     # Stage 2b categories
     "parser_contract_missing",
     "parser_digest_unavailable",
@@ -313,6 +316,48 @@ def _materialize_approved_missing_candidates(
             )
         )
     return tuple(normalized), None
+
+
+def _detect_rwd_session_overlap(
+    snapshot,
+    *,
+    duration_sec: float,
+) -> GuidedBackendValidationMaterializationFailure | None:
+    """Fail Setup check if any two sessions overlap given the confirmed
+    session duration.
+
+    ``snapshot.candidates`` is already in authoritative chronological order
+    (see io.rwd_chronology), so only adjacent pairs need checking.
+    """
+    starts: list[tuple[str, Any]] = []
+    for candidate in snapshot.candidates:
+        source = os.path.join(
+            snapshot.source_root_canonical,
+            *candidate.canonical_relative_path.split("/"),
+        )
+        start = resolve_session_start_time(source)
+        if start is None:
+            # Snapshot construction already refuses an unparseable session
+            # folder name; this is a defensive fallback only.
+            return _failure(
+                "source_snapshot_unavailable",
+                "source",
+                "The app cannot determine when a recording session occurred.",
+                detail_code="session_start_time_unavailable",
+            )
+        starts.append((candidate.canonical_relative_path, start))
+
+    overlaps = find_rwd_session_overlaps(starts, session_duration_sec=duration_sec)
+    if overlaps:
+        earlier, later = overlaps[0]
+        return _failure(
+            "rwd_session_overlap_detected",
+            "source",
+            "Two recording sessions overlap in time given the confirmed "
+            f"session duration: {earlier} and {later}.",
+            detail_code="session_interval_overlap",
+        )
+    return None
 
 
 def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str]:
@@ -1788,6 +1833,17 @@ def materialize_guided_backend_validation_facts(
             cancellation_check=cancellation_check,
         )
     except RwdSourceSnapshotError as exc:
+        if exc.category in ("malformed_session_timestamp", "duplicate_session_timestamp"):
+            # These come from the authoritative RWD chronology check
+            # (io.rwd_chronology) and are already written in plain,
+            # scientist-facing language -- surface them as-is.
+            return _failure(
+                "source_snapshot_unavailable",
+                "source",
+                exc.message,
+                detail_code=exc.category,
+            )
+
         category = "source_snapshot_unavailable"
         if exc.category in ("source_root_missing", "source_root_not_directory"):
             category = "missing_source"
@@ -1847,6 +1903,24 @@ def materialize_guided_backend_validation_facts(
             "The canonical source-root path style is unavailable.",
             detail_code="source_path_style_unknown",
         )
+
+    # 7b. Chronology overlap check (A2). snapshot.candidates is already in
+    # authoritative chronological order; this only needs the confirmed
+    # session duration, which a later stage independently requires to be a
+    # valid positive number -- skip here if it is not yet resolved so this
+    # check never masks that stage's own diagnostic.
+    duration_candidate = draft.session_duration_sec
+    if (
+        isinstance(duration_candidate, (int, float))
+        and not isinstance(duration_candidate, bool)
+        and math.isfinite(float(duration_candidate))
+        and duration_candidate > 0
+    ):
+        overlap_failure = _detect_rwd_session_overlap(
+            snapshot, duration_sec=float(duration_candidate)
+        )
+        if overlap_failure is not None:
+            return overlap_failure
 
     approved_missing_candidates, approval_failure = _materialize_approved_missing_candidates(
         draft, snapshot

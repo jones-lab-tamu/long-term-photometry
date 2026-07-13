@@ -18,7 +18,7 @@ class TestPreviewModeFirstN(unittest.TestCase):
 
         # Create 3 valid sessions with distinct names
         for i in range(3):
-            sess_dir = os.path.join(self.in_dir, f"chunk_{i:04d}")
+            sess_dir = os.path.join(self.in_dir, f"2024_01_01-{i:02d}_00_00")
             os.makedirs(sess_dir)
             fs = 100.0
             n_samples = 1500
@@ -72,7 +72,7 @@ class TestPreviewModeFirstN(unittest.TestCase):
         self.assertEqual(ctx["preview"]["n_total_discovered"], 3)
         self.assertEqual(ctx["preview"]["n_sessions_resolved"], 1)
         self.assertEqual(ctx["representative_session_index"], 0)
-        self.assertEqual(ctx["representative_session_id"], "chunk_0000")
+        self.assertEqual(ctx["representative_session_id"], "2024_01_01-00_00_00")
 
         # ---- events.ndjson ----
         events = []
@@ -107,16 +107,29 @@ class TestPreviewModeFirstN(unittest.TestCase):
         self.assertTrue(len(rep_events) >= 1, "Missing inputs:representative_session event")
         rep_payload = rep_events[0]["payload"]
         self.assertEqual(rep_payload["representative_session_index"], 0)
-        self.assertEqual(rep_payload["representative_session_id"], "chunk_0000")
+        self.assertEqual(rep_payload["representative_session_id"], "2024_01_01-00_00_00")
 
         # ---- Hard-wall proof: excluded sessions must not appear anywhere ----
-        excluded = ["chunk_0001", "chunk_0002"]
+        excluded = [
+            "2024_01_01-01_00_00",
+            "2024_01_01-02_00_00",
+        ]
         for dirpath, dirnames, filenames in os.walk(out_dir):
             for name in dirnames + filenames:
                 for ex in excluded:
                     self.assertNotIn(
                         ex, name,
                         f"Excluded session '{ex}' found in output: {os.path.join(dirpath, name)}"
+                    )
+            for filename in filenames:
+                artifact = os.path.join(dirpath, filename)
+                with open(artifact, "rb") as handle:
+                    persisted = handle.read()
+                for ex in excluded:
+                    self.assertNotIn(
+                        ex.encode("utf-8"),
+                        persisted,
+                        f"Excluded session '{ex}' found inside output artifact: {artifact}",
                     )
             # Also check the directory path itself for excluded session names
             for ex in excluded:

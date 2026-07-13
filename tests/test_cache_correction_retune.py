@@ -120,7 +120,7 @@ def _make_authoritative_completed_run_fixture(tmp_path, baseline_method: str):
     t = np.arange(n_samples) / cfg.target_fs_hz
     idx = np.arange(n_samples)
     for cid in (0, 1):
-        session_dir = input_dir / f"chunk_{cid:04d}"
+        session_dir = input_dir / f"2024_01_01-{cid:02d}_00_00"
         session_dir.mkdir(parents=True, exist_ok=True)
 
         phase = 0.35 * cid

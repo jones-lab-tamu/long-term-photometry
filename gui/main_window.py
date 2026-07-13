@@ -11268,6 +11268,38 @@ class MainWindow(QMainWindow):
             return None
         return request
 
+    def _guided_source_snapshot_matches_authorization(self, request) -> bool:
+        """Recheck the authorized RWD candidate snapshot at Run click time.
+
+        Setup authorization freezes both candidate identities and chronology.
+        Reuse the existing read-only execution preflight so a valid canonical
+        rename cannot reach allocation merely because the editable GUI plan is
+        otherwise unchanged.
+        """
+        from photometry_pipeline.guided_execution_preflight import (
+            compute_guided_candidate_preflight_identity,
+            derive_candidate_manifest_preflight_request_from_intent,
+            run_candidate_manifest_execution_preflight,
+        )
+
+        try:
+            authorization = request.authorization_result
+            expected_identity = authorization.candidate_preflight_identity
+            production_intent = authorization.production_intent
+            live = run_candidate_manifest_execution_preflight(
+                derive_candidate_manifest_preflight_request_from_intent(
+                    production_intent
+                )
+            )
+            return bool(
+                live.accepted is True
+                and live.canonical_preflight_identity == expected_identity
+                and compute_guided_candidate_preflight_identity(live)
+                == expected_identity
+            )
+        except Exception:
+            return False
+
     def _on_guided_run_clicked_backend_guarded(self) -> None:
         """Recheck readiness and start the Guided backend adapter off the GUI thread."""
         self._refresh_guided_run_readiness_display()
@@ -11305,6 +11337,17 @@ class MainWindow(QMainWindow):
                 label.setText(
                     "Guided Run could not start because the validated setup "
                     "is no longer current."
+                )
+            return
+        if not self._guided_source_snapshot_matches_authorization(request):
+            self._guided_validated_plan_identity = None
+            self._clear_guided_execution_authorization_state()
+            if button is not None:
+                button.setEnabled(False)
+            if label is not None:
+                label.setText(
+                    "The recording sessions changed after the setup check. "
+                    "Check your setup again before running."
                 )
             return
         outcome = getattr(self, "_guided_backend_validation_outcome", None)

@@ -186,14 +186,45 @@ def test_approving_a_session_not_discovered_fails(tmp_path: Path):
 
 
 def test_missing_session_without_validated_timestamp_cannot_be_authorized(tmp_path: Path):
-    # A corrupted session whose folder has no datetime token cannot be placed.
+    """A corrupted session whose folder has no datetime token cannot be
+    placed on the timeline.
+
+    RWD discovery itself (io.rwd_chronology, A2) now refuses a session
+    folder that does not carry the canonical acquisition timestamp before
+    the run ever reaches missing-session authorization -- earlier and more
+    specific than the previous behavior of continuing discovery and only
+    failing later when trying to authorize the session as missing.
+    """
     inp = tmp_path / "input"
     (inp / "sessionA").mkdir(parents=True)
     _write_valid(inp / "2024_01_01-00_00_00", seed=0)
     _write_corrupted(inp / "sessionA")
     cfg = _config(tmp_path, authorized_missing_sessions=[str(inp / "sessionA" / "fluorescence.csv")])
-    with pytest.raises(InputProcessingError) as excinfo:
+    with pytest.raises(ValueError) as excinfo:
         _run(tmp_path, cfg, inp)
+    assert "sessionA" in str(excinfo.value)
+    assert "does not match the expected recording-time format" in str(excinfo.value)
+
+
+def test_build_session_index_refuses_missing_session_without_own_timestamp(tmp_path: Path):
+    """Direct unit coverage of build_session_index's own defensive guard:
+    an approved-missing source whose own identity carries no resolvable
+    acquisition timestamp cannot be placed on the timeline, independent of
+    how the ordered source list was produced."""
+    _write_valid(tmp_path / "2024_01_01-00_00_00", seed=0)
+    _write_corrupted(tmp_path / "sessionA")
+    ordered = [
+        str(tmp_path / "2024_01_01-00_00_00" / "fluorescence.csv"),
+        str(tmp_path / "sessionA" / "fluorescence.csv"),
+    ]
+    with pytest.raises(InputProcessingError) as excinfo:
+        build_session_index(
+            acquisition_mode="intermittent",
+            input_format="rwd",
+            ordered_sources=ordered,
+            missing_sources=[str(tmp_path / "sessionA" / "fluorescence.csv")],
+            expected_duration_sec=60.0,
+        )
     assert excinfo.value.category == "unresolvable_missing_session_time"
 
 

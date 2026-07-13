@@ -88,10 +88,23 @@ def test_candidate_set_changes_affect_both_digests(tmp_path: Path, change: str):
         target.unlink()
         target.parent.rmdir()
     else:
-        (root / "2025_01_01-00_10_00").rename(root / "renamed_session")
+        # Renamed to another canonical RWD session timestamp -- still a
+        # trustworthy chronology, just a different session identity/time.
+        (root / "2025_01_01-00_10_00").rename(root / "2025_01_01-00_15_00")
     second = build_rwd_source_candidate_snapshot(str(root))
     assert second.source_candidate_set_digest != first.source_candidate_set_digest
     assert second.source_candidate_content_digest != first.source_candidate_content_digest
+
+
+def test_renamed_session_with_non_canonical_name_fails_closed(tmp_path: Path):
+    """A folder renamed away from the canonical RWD timestamp format is not
+    a trustworthy acquisition time and must refuse rather than silently
+    keep its old (now-incorrect) position or digest it as data (A2)."""
+    root = _dataset(tmp_path)
+    (root / "2025_01_01-00_10_00").rename(root / "renamed_session")
+    with pytest.raises(RwdSourceSnapshotError) as excinfo:
+        build_rwd_source_candidate_snapshot(str(root))
+    assert excinfo.value.category == "malformed_session_timestamp"
 
 
 def test_ignored_file_changes_summary_but_not_semantic_digests(tmp_path: Path):

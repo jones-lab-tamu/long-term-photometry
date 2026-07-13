@@ -6035,7 +6035,7 @@ def _setup_guided_local_raw_preview_ready(
     output_dir.mkdir()
     source_files = []
     for index in range(3):
-        session_dir = input_dir / f"session-{index}"
+        session_dir = input_dir / f"2025_01_01-{index:02d}_00_00"
         session_dir.mkdir()
         source_file = session_dir / "fluorescence.csv"
         source_file.write_text(
@@ -6052,7 +6052,7 @@ def _setup_guided_local_raw_preview_ready(
         "sessions": [
             {
                 "index": index,
-                "session_id": f"session-{index}",
+                "session_id": f"2025_01_01-{index:02d}_00_00",
                 "path": str(source_file),
                 "included_in_preview": True,
             }
@@ -6113,7 +6113,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     output_dir.mkdir()
     source_files = []
     for index in range(3):
-        session_dir = input_dir / f"session-{index}"
+        session_dir = input_dir / f"2025_01_01-{index:02d}_00_00"
         session_dir.mkdir()
         source_file = session_dir / "fluorescence.csv"
         source_file.write_text(
@@ -6130,7 +6130,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
         "sessions": [
             {
                 "index": index,
-                "session_id": f"session-{index}",
+                "session_id": f"2025_01_01-{index:02d}_00_00",
                 "path": str(source_file),
                 "included_in_preview": True,
             }
@@ -6771,7 +6771,7 @@ def test_local_preview_failure_reports_selected_segment_without_fallback(
     output_dir.mkdir()
     files = []
     for index in range(2):
-        path = input_dir / f"session-{index}" / "fluorescence.csv"
+        path = input_dir / f"2025_01_01-{index:02d}_00_00" / "fluorescence.csv"
         path.parent.mkdir()
         path.write_text(f"source {index}", encoding="utf-8")
         files.append(path)
@@ -6784,7 +6784,7 @@ def test_local_preview_failure_reports_selected_segment_without_fallback(
         "sessions": [
             {
                 "index": index,
-                "session_id": f"session-{index}",
+                "session_id": f"2025_01_01-{index:02d}_00_00",
                 "path": str(path),
                 "included_in_preview": True,
             }

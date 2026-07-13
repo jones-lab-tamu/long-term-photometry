@@ -11,6 +11,7 @@ from datetime import datetime
 from ..config import Config
 from ..core.types import Chunk, SessionTimeMetadata
 from ..core.utils import natural_sort_key
+from .rwd_chronology import RwdChronologyError, order_rwd_session_candidates
 from dataclasses import asdict
 import pathlib
 import logging
@@ -290,31 +291,45 @@ def _interp_with_nan_policy(time_sec, xp, fp, config, roi_idx, channel_name):
 def discover_rwd_chunks(root_path: str) -> List[str]:
     """
     Discovers RWD chunks as timestamped subdirectories containing 'fluorescence.csv'.
-    
+
     Rules:
     - Scans immediate subdirectories of root_path.
     - Valid chunk: subdirectory with 'fluorescence.csv'.
-    - Sorting: Lexicographical by directory name (YYYY_MM_DD-HH_MM_SS).
+    - Ordering: authoritative chronological order parsed from each session
+      folder's canonical acquisition-time name (YYYY_MM_DD-HH_MM_SS) --
+      not filesystem enumeration order and not an incidental lexical sort.
+      A folder name that does not match this format, or two folders that
+      resolve to the identical timestamp, fail discovery rather than
+      silently falling back to a lexical or enumeration order (see
+      io.rwd_chronology.order_rwd_session_candidates).
     - Ignores: outputs.csv, events.csv, fluorescence-unaligned.csv.
     """
     if not os.path.isdir(root_path):
         raise ValueError(f"RWD Discovery: Root path must be a directory: {root_path}")
-        
-    chunks = []
-    
-    # Iterate immediate children
-    with os.scandir(root_path) as it:
-        entries = sorted([e for e in it if e.is_dir()], key=lambda x: x.name)
-        
-        for entry in entries:
-            target_file = os.path.join(entry.path, "fluorescence.csv")
-            if os.path.isfile(target_file):
-                chunks.append(target_file)
-                
-    if not chunks:
+
+    # Iterate immediate children (unordered filesystem enumeration).
+    valid_entries = [
+        e for e in _scandir_rwd_entries(root_path)
+        if e.is_dir() and os.path.isfile(os.path.join(e.path, "fluorescence.csv"))
+    ]
+
+    if not valid_entries:
         raise ValueError(f"RWD Discovery: No valid RWD chunk directories found in {root_path} (subfolders must contain fluorescence.csv)")
-        
-    return chunks
+
+    try:
+        ordered_entries = order_rwd_session_candidates(
+            valid_entries, name_of=lambda e: e.name
+        )
+    except RwdChronologyError as exc:
+        raise ValueError(f"RWD Discovery: {exc}") from exc
+
+    return [os.path.join(entry.path, "fluorescence.csv") for entry in ordered_entries]
+
+
+def _scandir_rwd_entries(root_path: str):
+    """Materialize the raw RWD directory enumeration for deterministic tests."""
+    with os.scandir(root_path) as entries:
+        return list(entries)
 
 
 def discover_csv_or_rwd_chunks(input_dir: str, file_glob: str = "*.csv") -> List[str]:

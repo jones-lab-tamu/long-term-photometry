@@ -17,7 +17,7 @@ class TestRepresentativeSessionIndex(unittest.TestCase):
         
         # Create 2 valid sessions
         for i in range(2):
-            sess_dir = os.path.join(self.in_dir, f"chunk_{i:04d}")
+            sess_dir = os.path.join(self.in_dir, f"2024_01_01-{i:02d}_00_00")
             os.makedirs(sess_dir)
             fs = 100.0
             n_samples = 1500
@@ -60,9 +60,11 @@ class TestRepresentativeSessionIndex(unittest.TestCase):
 
     def test_default_selection_first_loadable(self):
         # Create a malformed first session
-        malformed_dir = os.path.join(self.in_dir, "chunk_0000_bad")
-        # Rename existing chunk_0000 to move it out of the way
-        shutil.move(os.path.join(self.in_dir, "chunk_0000"), os.path.join(self.tmp_dir, "temp_chunk"))
+        malformed_dir = os.path.join(self.in_dir, "2024_01_01-00_00_00")
+        # Rename existing session at that same timestamp to move it out of
+        # the way (its canonical name is reused below by the malformed
+        # replacement session).
+        shutil.move(os.path.join(self.in_dir, "2024_01_01-00_00_00"), os.path.join(self.tmp_dir, "temp_chunk"))
         os.makedirs(malformed_dir)
         with open(os.path.join(malformed_dir, "fluorescence.csv"), "w") as f:
             f.write("corrupt,data\n1,2,3\n")
@@ -77,9 +79,9 @@ class TestRepresentativeSessionIndex(unittest.TestCase):
         with open(os.path.join(out_dir, "run_report.json"), "r") as f:
             report = json.load(f)
         
-        # Should have picked chunk_0001 as the first loadable
+        # Should have picked the 01:00 timestamped session as the first loadable.
         self.assertEqual(report["run_context"]["representative_session_index"], 1)
-        self.assertEqual(report["run_context"]["representative_session_id"], "chunk_0001")
+        self.assertEqual(report["run_context"]["representative_session_id"], "2024_01_01-01_00_00")
         self.assertEqual(report["run_context"]["user_provided_representative_session_index"], False)
 
     def test_index_changes_id(self):
@@ -129,7 +131,7 @@ class TestRepresentativeSessionIndex(unittest.TestCase):
                     found_event = True
                     payload = event["payload"]
                     self.assertEqual(payload["representative_session_index"], 0)
-                    self.assertEqual(payload["representative_session_id"], "chunk_0000")
+                    self.assertEqual(payload["representative_session_id"], "2024_01_01-00_00_00")
                     self.assertEqual(payload["user_provided"], True)
                     self.assertIn("resolved_session_ids_preview", payload)
                     self.assertLessEqual(len(payload["resolved_session_ids_preview"]), 5)

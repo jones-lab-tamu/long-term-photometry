@@ -20,6 +20,10 @@ from photometry_pipeline.guided_identity import (
     canonicalize_absolute_path,
     encode_canonical_value,
 )
+from photometry_pipeline.io.rwd_chronology import (
+    RwdChronologyError,
+    order_rwd_session_candidates,
+)
 
 
 RWD_SOURCE_SNAPSHOT_SCHEMA_NAME = "guided_rwd_source_candidate_snapshot"
@@ -361,7 +365,21 @@ def _scan_candidates(source_root: str, path_style: str) -> _Discovery:
             source_root=source_root,
         )
 
-    candidates.sort(key=lambda item: item.canonical_relative_path)
+    # Authoritative chronological order (see io.rwd_chronology), not
+    # filesystem enumeration order and not an incidental lexical sort --
+    # the same ordering rule discover_rwd_chunks uses for execution, so the
+    # sequence frozen here at Setup check is provably the sequence Pipeline
+    # execution consumes.
+    try:
+        candidates = list(
+            order_rwd_session_candidates(
+                candidates,
+                name_of=lambda item: item.canonical_relative_path.split("/", 1)[0],
+            )
+        )
+    except RwdChronologyError as exc:
+        raise _error(str(exc.category), str(exc), **exc.context) from exc
+
     return _Discovery(
         candidates=tuple(candidates),
         ignored_summary=GuidedRwdIgnoredFilesSummary(
