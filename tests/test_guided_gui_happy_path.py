@@ -60,7 +60,7 @@ def test_guided_validate_run_and_loader_gated_review_handoff_happy_path(
         window._guided_load_completed_run_for_review_btn.isEnabled() is False
     )
 
-    runner, runner_calls = _completion_runner(monkeypatch)
+    runner, runner_calls = _completion_runner(monkeypatch, request)
     window._guided_backend_execution_runner = runner
     window._guided_run_btn.click()
 

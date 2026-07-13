@@ -138,32 +138,39 @@ def _accepted_outcome_with_per_roi_feature_map(
     """Same recipe as tests.test_guided_startup_allocation._accepted_outcome,
     plus both ROIs included and a resolved per-ROI feature/event map on the
     request before validation."""
+    from tests.test_guided_backend_validator import (
+        _normalized_recording_identity_for,
+    )
+
     request = _valid_request()
     roi1_mark = replace(request.correction.confirmed_marks[0], roi_id="ROI1")
     roi1_evidence = replace(
         request.diagnostic_evidence.evidence_references[0], roi_id="ROI1"
     )
+    new_source = replace(
+        request.source,
+        source_root_canonical=os.path.abspath(source_root),
+    )
+    new_acquisition_dataset = replace(
+        request.acquisition_dataset,
+        semantic_values=request.acquisition_dataset.semantic_values
+        + (_typed("target_fs_hz", 40.0),),
+    )
+    new_roi_scope = replace(
+        request.roi_scope,
+        discovered_roi_ids=("ROI0", "ROI1"),
+        included_roi_ids=("ROI0", "ROI1"),
+        excluded_roi_ids=(),
+    )
     request = replace(
         request,
-        source=replace(
-            request.source,
-            source_root_canonical=os.path.abspath(source_root),
-        ),
+        source=new_source,
         output=replace(
             request.output,
             output_base_canonical=os.path.abspath(output_base),
         ),
-        acquisition_dataset=replace(
-            request.acquisition_dataset,
-            semantic_values=request.acquisition_dataset.semantic_values
-            + (_typed("target_fs_hz", 40.0),),
-        ),
-        roi_scope=replace(
-            request.roi_scope,
-            discovered_roi_ids=("ROI0", "ROI1"),
-            included_roi_ids=("ROI0", "ROI1"),
-            excluded_roi_ids=(),
-        ),
+        acquisition_dataset=new_acquisition_dataset,
+        roi_scope=new_roi_scope,
         correction=replace(
             request.correction,
             confirmed_marks=request.correction.confirmed_marks + (roi1_mark,),
@@ -177,6 +184,11 @@ def _accepted_outcome_with_per_roi_feature_map(
             request.feature_event,
             per_roi_feature_event_map_version="per_roi_feature_event_map.v1",
             per_roi_feature_event_map=tuple(feature_event_map),
+        ),
+        # source root and ROI inventory both moved -- recompute the
+        # normalized recording description identity along with them.
+        normalized_recording_description_identity=_normalized_recording_identity_for(
+            new_source, new_acquisition_dataset, new_roi_scope, request.parser
         ),
     )
     identity = validation_request.compute_guided_backend_validation_request_identity(

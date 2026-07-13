@@ -565,11 +565,22 @@ class GuidedProductionExecutionIntent:
     execution_profile: GuidedProductionExecutionProfile
     provenance_requirements: GuidedProductionProvenanceRequirements
     deferred_capabilities: tuple[str, ...]
+    # B1: the shared, format-neutral normalized recording description's
+    # canonical identity (guided_normalized_recording.py), carried
+    # through from the validated request. Automatically covered by
+    # compute_guided_production_execution_intent_identity via
+    # _INTENT_IDENTITY_MODEL_FIELDS' fields()-introspection, so
+    # canonical_intent_identity already changes if this does.
+    normalized_recording_description_identity: str
     canonical_intent_identity: str
 
     def __post_init__(self) -> None:
         if not _sha256(self.source_request_identity):
             raise ValueError("source_request_identity must be a lowercase SHA-256.")
+        if not _sha256(self.normalized_recording_description_identity):
+            raise ValueError(
+                "normalized_recording_description_identity must be a lowercase SHA-256."
+            )
         if not _sha256(self.canonical_intent_identity):
             raise ValueError("canonical_intent_identity must be a lowercase SHA-256.")
         _require_tuple(self.deferred_capabilities, "deferred_capabilities")
@@ -704,7 +715,8 @@ REQUEST_FIELD_CLASSIFICATIONS = {
         "compiler_version", "subset_rule_version",
         "canonicalization_algorithm_version", "source", "acquisition_dataset",
         "parser", "roi_scope", "correction", "diagnostic_evidence",
-        "feature_event", "output", "local_contract")},
+        "feature_event", "output", "local_contract",
+        "normalized_recording_description_identity")},
     GuidedBackendSourceRequest: {name: ("gate_only" if name == "unresolved_source_identity_inputs" else "mapped_to_intent") for name in (item.name for item in fields(GuidedBackendSourceRequest))},
     GuidedBackendSourceCandidateFile: {name: "mapped_to_intent" for name in (item.name for item in fields(GuidedBackendSourceCandidateFile))},
     GuidedBackendAcquisitionDatasetRequest: {name: ("gate_only" if name in {"dataset_status", "dataset_current_applied", "validation_issue_categories", "stale_reason_categories"} else "mapped_to_intent") for name in (item.name for item in fields(GuidedBackendAcquisitionDatasetRequest))},
@@ -845,6 +857,13 @@ def map_guided_validation_request_to_execution_intent(
         return _failure("unsupported_source_format", "source", "Only RWD source is supported.", "source_not_rwd")
     if not request.source.candidate_files or request.source.unresolved_source_identity_inputs:
         return _failure("unresolved_request_field", "source", "Source candidate snapshot is incomplete.", "source_snapshot_unresolved")
+    if not _sha256(request.normalized_recording_description_identity):
+        return _failure(
+            "unresolved_request_field",
+            "normalized_recording",
+            "The normalized recording description identity is missing or invalid.",
+            "normalized_recording_description_identity_invalid",
+        )
     if request.acquisition_dataset.acquisition_mode != "intermittent":
         return _failure("unsupported_acquisition_mode", "acquisition", "Only intermittent acquisition is supported.", "acquisition_not_intermittent")
     if request.acquisition_dataset.allow_partial_final_window:
@@ -1044,6 +1063,9 @@ def map_guided_validation_request_to_execution_intent(
             ),
             deferred_capabilities=tuple(
                 item for item in local.deferred_capabilities if item != "app_build_identity"
+            ),
+            normalized_recording_description_identity=(
+                request.normalized_recording_description_identity
             ),
             canonical_intent_identity="0" * 64,
         )

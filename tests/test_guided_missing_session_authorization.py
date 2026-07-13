@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -221,12 +222,24 @@ def test_execution_payload_maps_full_approved_set_to_production_config(monkeypat
         auth = auth_fixture.__wrapped__(monkeypatch)
     finally:
         monkeypatch.undo()
+    from tests.test_guided_execution_payloads import (
+        _rebuild_normalized_recording_identity,
+    )
+
     candidates = auth.production_intent.input_source.candidate_files[:2]
     source = replace(
         auth.production_intent.input_source,
         approved_missing_candidates=tuple(candidates),
     )
     intent = replace(auth.production_intent, input_source=source)
+    # Missing-session state is part of the normalized recording
+    # description; recompute its identity along with the mutation.
+    intent = replace(
+        intent,
+        normalized_recording_description_identity=(
+            _rebuild_normalized_recording_identity(intent)
+        ),
+    )
     intent_id = mapping.compute_guided_production_execution_intent_identity(intent)
     provisional = _unchecked(
         auth,
@@ -919,6 +932,7 @@ def test_guided_missing_session_real_gui_rerun_lifecycle(window, tmp_path: Path,
     assert window._guided_report_viewer.phasic_review_model.strategy_label_for_roi(
         "Region0"
     ) == "Signal-Only F0"
+    shutil.rmtree(input_root)
 
     reopened = MainWindow(
         settings=QSettings(str(tmp_path / "reopen.ini"), QSettings.IniFormat)
@@ -1014,6 +1028,7 @@ def test_guided_incomplete_final_exclusion_real_signal_only_lifecycle(
     assert window._guided_report_viewer.phasic_review_model.strategy_label_for_roi(
         "Region0"
     ) == "Signal-Only F0"
+    shutil.rmtree(input_root)
     reopened = MainWindow(
         settings=QSettings(str(tmp_path / "final-reopen.ini"), QSettings.IniFormat)
     )

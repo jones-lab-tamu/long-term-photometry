@@ -48,6 +48,7 @@ def test_materializes_exact_planned_startup_artifacts(allocated_case):
         startup.GUIDED_CONFIG_EFFECTIVE_FILENAME,
         startup.GUIDED_STARTUP_PROVENANCE_FILENAME,
         startup.GUIDED_COMMAND_RECORD_FILENAME,
+        startup.GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
     }
     assert result.status == "startup_artifacts_materialized"
     assert result.ok and result.materialized

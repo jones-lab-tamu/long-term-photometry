@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import time
 from pathlib import Path
 import shutil
@@ -59,29 +60,58 @@ def window(qapp):
     instance.deleteLater()
 
 
-def _write_minimal_successful_phasic_output(output_dir: Path) -> None:
+def _write_minimal_successful_phasic_output(
+    output_dir: Path,
+    *,
+    candidate=None,
+    source_root: str | None = None,
+    roi_id: str = "Region0",
+    rwd_time_col: str = "TimeStamp",
+    uv_suffix: str = "-410",
+    sig_suffix: str = "-470",
+) -> None:
+    """Stub what a real phasic analysis subprocess would have written.
+
+    When ``candidate``/``source_root`` are given (the real authorized RWD
+    candidate this test's Guided startup chain materialized
+    guided_normalized_recording_description.json for), the C8 ledger,
+    ROI id, and per-chunk cache attrs are built to genuinely match that
+    candidate's identity and resolved parser/channel/ROI facts -- required
+    since B1's terminal normalized-recording verification now reconciles
+    this stubbed output against that real authorized description. Without
+    a candidate (callers that never reach full terminal classification),
+    the ledger falls back to the original disconnected generic fixture.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_path = output_dir / "phasic_trace_cache.h5"
     with h5py.File(cache_path, "w") as cache:
         meta = cache.create_group("meta")
         meta.attrs["mode"] = "phasic"
         meta.attrs["schema_version"] = "1"
-        meta.create_dataset("rois", data=np.asarray([b"Region0"]))
+        meta.create_dataset("rois", data=np.asarray([roi_id.encode("utf-8")]))
         meta.create_dataset("chunk_ids", data=np.asarray([0], dtype=np.int64))
-        chunk = cache.create_group("roi/Region0/chunk_0")
+        chunk = cache.create_group(f"roi/{roi_id}/chunk_0")
         time_sec = np.asarray([0.0, 1.0, 2.0], dtype=float)
         chunk.create_dataset("time_sec", data=time_sec)
         chunk.create_dataset("sig_raw", data=np.asarray([2.0, 2.1, 2.2]))
         chunk.create_dataset("uv_raw", data=np.asarray([1.0, 1.1, 1.2]))
         chunk.create_dataset("fit_ref", data=np.asarray([1.0, 1.0, 1.0]))
         chunk.create_dataset("dff", data=np.asarray([1.0, 1.1, 1.2]))
+        if candidate is not None:
+            chunk.attrs["fs_hz"] = 40.0
+            chunk.attrs["resolved_time_column"] = rwd_time_col
+            chunk.attrs["resolved_header_row"] = 0
+            chunk.attrs["resolved_timestamp_unit"] = "seconds"
+            chunk.attrs["output_time_basis"] = "relative_seconds_since_session_start"
+            chunk.attrs["resolved_signal_source"] = f"{roi_id}{sig_suffix}"
+            chunk.attrs["resolved_reference_source"] = f"{roi_id}{uv_suffix}"
     (output_dir / "run_report.json").write_text(
         json.dumps(
             {
                 "run_context": {"status": "success", "phase": "final"},
                 "roi_selection": {
-                    "selected_rois": ["Region0"],
-                    "discovered_rois": ["Region0"],
+                    "selected_rois": [roi_id],
+                    "discovered_rois": [roi_id],
                 },
             }
         ),
@@ -94,19 +124,34 @@ def _write_minimal_successful_phasic_output(output_dir: Path) -> None:
     (output_dir / "config_used.yaml").write_text(
         BASE_CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8"
     )
-    write_phasic_feature_outputs(output_dir)
+    write_phasic_feature_outputs(output_dir, rois=(roi_id,))
     # A real intermittent analysis accounts for every admitted input chunk.
+    if candidate is not None and source_root is not None:
+        source_path = os.path.normcase(
+            os.path.abspath(
+                os.path.normpath(
+                    os.path.join(source_root, *candidate.canonical_relative_path.split("/"))
+                )
+            )
+        )
+        completeness_record = valid_completeness_record(n_chunks=1)
+        completeness_record["expected"][0]["source"] = source_path
+        completeness_record["expected"][0]["size_bytes"] = candidate.size_bytes
+        completeness_record["expected"][0]["sha256"] = candidate.sha256_content_digest
+        completeness_record["processed"][0]["source"] = source_path
+    else:
+        completeness_record = valid_completeness_record()
     (output_dir / INPUT_COMPLETENESS_FILENAME).write_text(
-        json.dumps(valid_completeness_record()), encoding="utf-8"
+        json.dumps(completeness_record), encoding="utf-8"
     )
 
     # The per-ROI plot and table subprocesses are stubbed too, so stand in for
     # the deliverables a real full phasic run would have produced.
     run_dir = output_dir.parents[1]
-    seed_wrapper_deliverables(run_dir, ["Region0"], tonic=False)
+    seed_wrapper_deliverables(run_dir, [roi_id], tonic=False)
 
 
-def _completion_runner(monkeypatch):
+def _completion_runner(monkeypatch, request=None):
     calls = {
         "prepared_validation": 0,
         "live_verification": 0,
@@ -127,7 +172,10 @@ def _completion_runner(monkeypatch):
 
         def verify_live(_args):
             calls["live_verification"] += 1
-            return object()
+            return object(), object()
+
+        def verify_normalized_recording_live(_args, _facts, _verified):
+            return None
 
         def validate_inputs(_args):
             calls["input_validation"] += 1
@@ -143,7 +191,36 @@ def _completion_runner(monkeypatch):
                 output_dir = Path(
                     command_argv[command_argv.index("--out") + 1]
                 )
-                _write_minimal_successful_phasic_output(output_dir)
+                intent = (
+                    request.authorization_result.production_intent
+                    if request is not None
+                    else None
+                )
+                candidate_files = (
+                    intent.input_source.candidate_files if intent is not None else ()
+                )
+                included_roi_ids = (
+                    intent.roi_scope.included_roi_ids if intent is not None else ()
+                )
+                _write_minimal_successful_phasic_output(
+                    output_dir,
+                    candidate=candidate_files[0] if candidate_files else None,
+                    source_root=(
+                        intent.input_source.source_root_canonical
+                        if intent is not None
+                        else None
+                    ),
+                    roi_id=included_roi_ids[0] if included_roi_ids else "Region0",
+                    rwd_time_col=(
+                        intent.acquisition.rwd_time_col if intent is not None else "TimeStamp"
+                    ),
+                    uv_suffix=(
+                        intent.acquisition.uv_suffix if intent is not None else "-410"
+                    ),
+                    sig_suffix=(
+                        intent.acquisition.sig_suffix if intent is not None else "-470"
+                    ),
+                )
             return {
                 "cmd": command_argv,
                 "started_utc": "2026-07-02T00:00:00Z",
@@ -158,6 +235,11 @@ def _completion_runner(monkeypatch):
         )
         monkeypatch.setattr(
             wrapper, "verify_guided_manifest_before_output", verify_live
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "verify_guided_normalized_recording_description_before_output",
+            verify_normalized_recording_live,
         )
         monkeypatch.setattr(wrapper, "validate_inputs", validate_inputs)
         monkeypatch.setattr(
@@ -207,7 +289,7 @@ def test_gui_click_produces_loader_accepted_completed_candidate(
         "_open_completed_results_dir",
         lambda *_args, **_kwargs: pytest.fail("Review auto-loaded"),
     )
-    runner, calls = _completion_runner(monkeypatch)
+    runner, calls = _completion_runner(monkeypatch, request)
     window._guided_backend_execution_runner = runner
 
     window._guided_run_btn.click()
@@ -284,7 +366,8 @@ def test_gui_click_produces_loader_accepted_completed_candidate(
     )
     assert not any(term in visible_text for term in internal_terms)
 
-    shutil.rmtree(run_dir / "Region0")
+    roi_id = request.authorization_result.production_intent.roi_scope.included_roi_ids[0]
+    shutil.rmtree(run_dir / roi_id)
     (run_dir / "status.json").unlink()
     (run_dir / "run_report.json").unlink()
     assert classify_completed_run_candidate(str(run_dir))[0] is False
@@ -310,7 +393,7 @@ def test_guided_review_shows_message_when_run_succeeded_but_no_regions(
     rejected identically to a non-existent/failed run."""
     request, _plan = allocation_case
     _run_production_validation_update(window, request, monkeypatch)
-    runner, _calls = _completion_runner(monkeypatch)
+    runner, _calls = _completion_runner(monkeypatch, request)
     window._guided_backend_execution_runner = runner
 
     window._guided_run_btn.click()
@@ -329,7 +412,28 @@ def test_guided_review_shows_message_when_run_succeeded_but_no_regions(
     # per-ROI deliverables. That, not a mutilated full run, is the real case for
     # "successful but nothing to display": a full production run that lost its
     # region outputs is corrupt, and must not reload as successful.
-    shutil.rmtree(run_dir / "Region0")
+    roi_id = request.authorization_result.production_intent.roi_scope.included_roi_ids[0]
+    shutil.rmtree(run_dir / roi_id)
+    # write_current_run below rebuilds the terminal set (C8 ledger, deliverable
+    # profile, etc.) independently of the original Guided authorization -- it
+    # is no longer the real output of the Guided execution that materialized
+    # guided_normalized_recording_description.json, so the Guided startup
+    # markers are removed here too. Leaving them would make B1's terminal
+    # normalized-recording verification correctly refuse this synthetic
+    # rebuild as inconsistent Guided provenance, which is not what this test
+    # is exercising (a generic, format-agnostic "successful but nothing to
+    # display" terminal classification).
+    for guided_marker in (
+        "guided_candidate_manifest.json",
+        "guided_startup_provenance.json",
+            "guided_startup_status.json",
+            "guided_startup_wrapper_claim.json",
+            "guided_normalized_recording_description.json",
+            "guided_per_roi_correction.json",
+        ):
+        marker_path = run_dir / guided_marker
+        if marker_path.exists():
+            marker_path.unlink()
     write_current_run(
         run_dir,
         run_id=run_dir.name,
@@ -1077,6 +1181,14 @@ def test_real_guided_native_correction_lifecycle_matrix(
                 tuple(sorted(session_names))
             )
 
+        # Reopening Completed Review must use the normalized run-root
+        # contract and execution artifacts, not rediscover the original
+        # source tree.  Exercise this boundary for phasic, tonic, combined,
+        # mixed-strategy, and shuffled-discovery lifecycles alike.
+        source_root = tmp_path / "raw_input"
+        if source_root.exists():
+            shutil.rmtree(source_root)
+
         reopened = MainWindow(
             settings=QSettings(
                 str(tmp_path / "reopened-settings.ini"), QSettings.IniFormat
@@ -1417,7 +1529,7 @@ def test_full_run_that_lost_a_region_directory_no_longer_loads_as_successful(
     """A full production run owes per-ROI deliverables. Losing them is corruption."""
     request, _plan = allocation_case
     _run_production_validation_update(window, request, monkeypatch)
-    runner, _calls = _completion_runner(monkeypatch)
+    runner, _calls = _completion_runner(monkeypatch, request)
     window._guided_backend_execution_runner = runner
 
     window._guided_run_btn.click()
@@ -1426,7 +1538,8 @@ def test_full_run_that_lost_a_region_directory_no_longer_loads_as_successful(
     run_dir = Path(request.planned_allocated_run_dir)
     assert is_successful_completed_run_dir(str(run_dir))[0] is True
 
-    shutil.rmtree(run_dir / "Region0")
+    roi_id = request.authorization_result.production_intent.roi_scope.included_roi_ids[0]
+    shutil.rmtree(run_dir / roi_id)
     ok, reason = is_successful_completed_run_dir(str(run_dir))
     assert ok is False, reason
     assert classify_completed_run_candidate(str(run_dir))[0] is False

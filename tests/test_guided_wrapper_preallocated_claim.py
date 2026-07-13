@@ -153,6 +153,7 @@ def test_internal_flag_conflicts_refuse(prepared_case, changes):
         startup.GUIDED_CONFIG_EFFECTIVE_FILENAME,
         startup.GUIDED_STARTUP_PROVENANCE_FILENAME,
         startup.GUIDED_COMMAND_RECORD_FILENAME,
+        startup.GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
     ),
 )
 def test_missing_required_startup_file_refuses(prepared_case, filename):
@@ -315,6 +316,7 @@ def test_discovery_failure_before_status_does_not_consume_claim(
         startup.GUIDED_CONFIG_EFFECTIVE_FILENAME,
         startup.GUIDED_STARTUP_PROVENANCE_FILENAME,
         startup.GUIDED_COMMAND_RECORD_FILENAME,
+        startup.GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
     }
     assert claim.validate_guided_preallocated_startup(
         input_dir=args.input,

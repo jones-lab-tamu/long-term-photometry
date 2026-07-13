@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import math
-from typing import Any
+from typing import Any, Mapping
 
 from photometry_pipeline.guided_identity import (
     CANONICALIZATION_ALGORITHM_VERSION,
@@ -959,6 +959,22 @@ class GuidedBackendValidationRequest:
     feature_event: GuidedBackendFeatureEventRequest
     output: GuidedBackendOutputRequest
     local_contract: GuidedBackendLocalContractState
+    # B1: threads the shared, format-neutral normalized recording
+    # description's canonical identity (guided_normalized_recording.py)
+    # into the request identity chain -- compute_guided_backend_validation_request_identity
+    # already covers it once listed in
+    # _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS below, so the existing
+    # authorization/startup identity-consistency checks
+    # (guided_run_authorization.py, guided_production_mapping.py) already
+    # refuse a stale or altered normalized description without further
+    # changes there. Only the identity (not the full payload) lives on
+    # this strict, exhaustively identity-covered request contract; the
+    # full serialized description lives on
+    # GuidedBackendValidationMaterializedFacts, which downstream stages
+    # that need the full content read directly (same process) or rebuild
+    # and verify against this identity (see
+    # guided_normalized_recording.build_rwd_normalized_recording_description).
+    normalized_recording_description_identity: str = ""
 
     def __post_init__(self) -> None:
         expected = {
@@ -1241,6 +1257,18 @@ class GuidedBackendValidationMaterializedFacts:
     effective_feature_event_values: tuple[GuidedBackendTypedFieldValue, ...] = ()
     complete_for_compilation: bool = False
     unresolved_required_inputs: tuple[str, ...] = ()
+    # B1: the shared, format-neutral normalized recording description
+    # (see guided_normalized_recording.py), built from the RWD facts
+    # materialized above and stored as its canonical serialized payload
+    # (guided_normalized_recording.serialize_normalized_recording_description)
+    # so later stages read the actual persisted facts -- session order,
+    # dispositions, timing, ROI/channel pairing -- rather than rebuilding
+    # them independently. ``normalized_recording_description_identity`` is
+    # duplicated at top level for cheap comparison without deserializing.
+    # Both are "" / empty only for facts objects built before this field
+    # existed (never for a real success result).
+    normalized_recording_description_identity: str = ""
+    normalized_recording_description: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _require_tuple(
@@ -2148,6 +2176,9 @@ def compile_guided_backend_validation_request(
             feature_event=feature_request,
             output=output_request,
             local_contract=local_contract,
+            normalized_recording_description_identity=(
+                facts.normalized_recording_description_identity
+            ),
         )
     except Exception:
         return _failure(
@@ -2391,6 +2422,7 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "feature_event",
         "output",
         "local_contract",
+        "normalized_recording_description_identity",
     ),
 }
 

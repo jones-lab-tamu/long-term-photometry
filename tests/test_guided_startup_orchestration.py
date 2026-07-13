@@ -315,6 +315,7 @@ def test_zero_return_does_not_claim_completed_run_validity(allocation_case):
         "config_effective.yaml",
         "command_invoked.txt",
         "guided_startup_provenance.json",
+        "guided_normalized_recording_description.json",
     }
     accepted, _reason = classify_completed_run_candidate(
         result.allocated_run_dir

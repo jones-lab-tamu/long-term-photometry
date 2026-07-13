@@ -300,6 +300,10 @@ class Hdf5TraceCacheWriter:
 
             grp.attrs['fs_hz'] = float(chunk.fs_hz)
             if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
+                if chunk.metadata.get("output_time_basis"):
+                    grp.attrs["output_time_basis"] = str(
+                        chunk.metadata["output_time_basis"]
+                    )
                 if "acquisition_mode" in chunk.metadata:
                     grp.attrs["acquisition_mode"] = str(chunk.metadata.get("acquisition_mode"))
                 for key in (
@@ -321,6 +325,50 @@ class Hdf5TraceCacheWriter:
                         chunk.metadata.get("is_partial_final_window")
                     )
             grp.attrs["source_file"] = str(source_file)
+
+            # B1: per-chunk, per-ROI consumed parser/channel evidence -- the
+            # actual columns/rows this specific session resolved during
+            # real execution, not a first-chunk-only snapshot and not a
+            # value copied from the requested/configured contract. Written
+            # every chunk, mirroring the existing correction-evidence attr
+            # pattern above. Absent (non-RWD, or a format that doesn't
+            # populate these chunk.metadata keys) is simply omitted, never
+            # fabricated.
+            if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
+                if "rwd_time_col_resolved" in chunk.metadata and chunk.metadata.get(
+                    "rwd_time_col_resolved"
+                ):
+                    grp.attrs["resolved_time_column"] = str(
+                        chunk.metadata["rwd_time_col_resolved"]
+                    )
+                if chunk.metadata.get("rwd_header_row_resolved") is not None:
+                    try:
+                        grp.attrs["resolved_header_row"] = int(
+                            chunk.metadata["rwd_header_row_resolved"]
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                if chunk.metadata.get("rwd_timestamp_unit"):
+                    grp.attrs["resolved_timestamp_unit"] = str(
+                        chunk.metadata["rwd_timestamp_unit"]
+                    )
+                rwd_fps = chunk.metadata.get("rwd_metadata_fps")
+                if rwd_fps is not None:
+                    try:
+                        if np.isfinite(float(rwd_fps)):
+                            grp.attrs["resolved_source_metadata_fps"] = float(rwd_fps)
+                    except (TypeError, ValueError):
+                        pass
+                roi_map = chunk.metadata.get("roi_map")
+                if isinstance(roi_map, dict):
+                    roi_channels = roi_map.get(str(roi))
+                    if isinstance(roi_channels, dict):
+                        raw_sig = roi_channels.get("raw_sig")
+                        raw_uv = roi_channels.get("raw_uv")
+                        if raw_sig:
+                            grp.attrs["resolved_signal_source"] = str(raw_sig)
+                        if raw_uv:
+                            grp.attrs["resolved_reference_source"] = str(raw_uv)
 
             if self.config and (
                 self.mode == 'phasic'

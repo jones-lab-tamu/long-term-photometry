@@ -113,7 +113,7 @@ def _args(root, manifest_path, config_path, **changes):
 
 def test_wrapper_verifies_valid_manifest_and_refuses_mismatches(tmp_path):
     root, path, config_path, _ = _manifest(tmp_path)
-    result = wrapper.verify_guided_manifest_before_output(
+    _facts, result = wrapper.verify_guided_manifest_before_output(
         _args(root, path, config_path)
     )
     assert result.accepted
@@ -136,7 +136,7 @@ def test_wrapper_verifies_valid_manifest_for_timestamp_time_column(tmp_path):
     (GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES) already embedded in the
     manifest at Guided Run press time."""
     root, path, config_path, _ = _manifest(tmp_path, time_col="TimeStamp")
-    result = wrapper.verify_guided_manifest_before_output(
+    _facts, result = wrapper.verify_guided_manifest_before_output(
         _args(root, path, config_path)
     )
     assert result.accepted is True
@@ -182,7 +182,7 @@ def test_wrapper_refuses_malformed_and_roi_mismatched_manifest(tmp_path):
 @pytest.mark.parametrize("mode", ("tonic", "both"))
 def test_wrapper_accepts_native_tonic_and_combined_manifest_modes(tmp_path, mode):
     root, path, config_path, _ = _manifest(tmp_path)
-    verified = wrapper.verify_guided_manifest_before_output(
+    _facts, verified = wrapper.verify_guided_manifest_before_output(
         _args(root, path, config_path, mode=mode)
     )
     assert verified.accepted is True

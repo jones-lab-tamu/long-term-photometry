@@ -15,6 +15,7 @@ from photometry_pipeline.guided_new_analysis_plan import GuidedNewAnalysisDraftP
 _DIGEST_A = "a" * 64
 _DIGEST_B = "b" * 64
 _DIGEST_C = "c" * 64
+_DIGEST_D = "d" * 64
 
 
 def _validator_contract() -> contracts.GuidedBackendValidatorContract:
@@ -230,6 +231,7 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         feature_event=feature_event,
         output=output,
         local_contract=local_contract,
+        normalized_recording_description_identity=_DIGEST_D,
     )
 
 
@@ -391,6 +393,9 @@ def _complete_facts() -> contracts.GuidedBackendValidationMaterializedFacts:
         effective_feature_event_values=feature.effective_values,
         complete_for_compilation=True,
         unresolved_required_inputs=(),
+        normalized_recording_description_identity=(
+            request.normalized_recording_description_identity
+        ),
     )
 
 
@@ -1104,8 +1109,11 @@ def test_identity_is_deterministic_digest_with_pinned_vector():
 
     first = contracts.compute_guided_backend_validation_request_identity(request)
 
+    # Pinned vector updated for B1: normalized_recording_description_identity
+    # was added to the request identity payload (see
+    # _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS).
     assert first == (
-        "693ab202498e32cad9671726232d47b81dd7669b470fd410ea7a64a50a3afc06"
+        "71ba4c6e23ca8108f090f5db977f9ad515ffeedddc9cc100aab52fa069236e8f"
     )
     assert first == contracts.compute_guided_backend_validation_request_identity(
         request

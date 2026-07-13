@@ -44,6 +44,12 @@ from photometry_pipeline.guided_run_authorization import (
     GuidedRunAuthorizationResult,
     compute_guided_run_authorization_identity,
 )
+from photometry_pipeline.guided_normalized_recording import (
+    NormalizedRecordingError,
+    compute_normalized_recording_description_identity,
+    rebuild_normalized_recording_description_from_intent,
+    serialize_normalized_recording_description,
+)
 
 
 GUIDED_STARTUP_TRANSACTION_SCHEMA_NAME = "guided_startup_transaction"
@@ -67,6 +73,13 @@ GUIDED_CONFIG_EFFECTIVE_FILENAME = "config_effective.yaml"
 GUIDED_STARTUP_PROVENANCE_FILENAME = "guided_startup_provenance.json"
 GUIDED_COMMAND_RECORD_FILENAME = "command_invoked.txt"
 GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME = "guided_per_roi_feature_config.json"
+# B1: the durable, mandatory Setup-check-authorized recording description.
+# Unlike GUIDED_PER_ROI_CORRECTION_FILENAME (native-correction runs only),
+# this is always applicable -- every accepted intent already requires
+# source_format == "rwd" (see _gate_issue below).
+GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME = (
+    "guided_normalized_recording_description.json"
+)
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._~-]{16,256}$")
@@ -158,6 +171,7 @@ class GuidedStartupIdentityBundle:
     startup_provenance_bytes_sha256: str
     command_identity: str
     command_record_sha256: str
+    normalized_recording_description_bytes_sha256: str
     startup_transaction_identity: str
 
 
@@ -172,6 +186,7 @@ class GuidedStartupPlanResult:
     config_effective_bytes: bytes | None
     startup_provenance_bytes: bytes | None
     command_record_bytes: bytes | None
+    normalized_recording_description_bytes: bytes | None
     planned_command_argv: tuple[str, ...]
     command_plan: GuidedStartupCommandPlan | None
     identities: GuidedStartupIdentityBundle | None
@@ -359,6 +374,7 @@ def _refused(category: str, section: str, message: str) -> GuidedStartupPlanResu
         config_effective_bytes=None,
         startup_provenance_bytes=None,
         command_record_bytes=None,
+        normalized_recording_description_bytes=None,
         planned_command_argv=(),
         command_plan=None,
         identities=None,
@@ -747,6 +763,41 @@ def plan_guided_startup_transaction(
         payload.config_payload
     )
     command = build_guided_startup_command_plan(request)
+
+    # B1: rebuild the exact authorized normalized recording description
+    # (verify-by-rebuild, zero filesystem I/O -- every field this reads was
+    # already frozen onto the intent at authorization time) and serialize
+    # it for durable startup persistence. A mismatch here means the
+    # authorized intent's own frozen facts are no longer internally
+    # consistent with its own normalized_recording_description_identity,
+    # which should be impossible for an accepted authorization -- refused
+    # rather than silently proceeding.
+    try:
+        rebuilt_normalized_recording = rebuild_normalized_recording_description_from_intent(
+            intent
+        )
+        rebuilt_normalized_recording_identity = (
+            compute_normalized_recording_description_identity(
+                rebuilt_normalized_recording
+            )
+        )
+    except NormalizedRecordingError as exc:
+        return _refused(
+            "normalized_recording_description_invalid",
+            "normalized_recording",
+            f"The authorized recording description could not be rebuilt: {exc}",
+        )
+    if rebuilt_normalized_recording_identity != intent.normalized_recording_description_identity:
+        return _refused(
+            "normalized_recording_description_mismatch",
+            "normalized_recording",
+            "The rebuilt recording description does not match the authorized "
+            "intent's own normalized_recording_description_identity.",
+        )
+    normalized_recording_bytes = _json_bytes(
+        serialize_normalized_recording_description(rebuilt_normalized_recording)
+    )
+    normalized_recording_sha256 = _sha256_bytes(normalized_recording_bytes)
     status_document = {
         "schema_name": GUIDED_STARTUP_STATUS_SCHEMA_NAME,
         "schema_version": GUIDED_STARTUP_STATUS_SCHEMA_VERSION,
@@ -816,6 +867,12 @@ def plan_guided_startup_transaction(
         ),
         "native_correction_payload_identity": native_correction_identity,
         "serialized_native_correction_sha256": native_correction_sha256,
+        "normalized_recording_description_identity": (
+            intent.normalized_recording_description_identity
+        ),
+        "serialized_normalized_recording_description_sha256": (
+            normalized_recording_sha256
+        ),
     }
     provenance_basis_bytes = _json_bytes(provenance_basis)
     provenance_basis_hash = _sha256_bytes(provenance_basis_bytes)
@@ -836,6 +893,7 @@ def plan_guided_startup_transaction(
         "provenance_identity_basis_sha256": provenance_basis_hash,
         "command_identity": command.canonical_command_identity,
         "command_record_sha256": command.command_record_sha256,
+        "normalized_recording_description_bytes_sha256": normalized_recording_sha256,
         "application_build_identity": auth.application_build_identity,
         "wrapper_identity": request.wrapper_entrypoint.wrapper_identity_digest,
         "run_id": request.planned_run_id,
@@ -868,6 +926,7 @@ def plan_guided_startup_transaction(
         startup_provenance_bytes_sha256=_sha256_bytes(provenance_bytes),
         command_identity=command.canonical_command_identity,
         command_record_sha256=command.command_record_sha256,
+        normalized_recording_description_bytes_sha256=normalized_recording_sha256,
         startup_transaction_identity=transaction_identity,
     )
     return GuidedStartupPlanResult(
@@ -880,6 +939,7 @@ def plan_guided_startup_transaction(
         config_effective_bytes=config_artifact.content_bytes,
         startup_provenance_bytes=provenance_bytes,
         command_record_bytes=command.command_record_bytes,
+        normalized_recording_description_bytes=normalized_recording_bytes,
         planned_command_argv=command.argv,
         command_plan=command,
         identities=identities,

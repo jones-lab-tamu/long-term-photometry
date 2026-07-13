@@ -39,6 +39,50 @@ from photometry_pipeline.input_processing_completeness import (
     load_frozen_input_manifest,
     read_input_completeness,
 )
+from photometry_pipeline.guided_normalized_recording import (
+    NormalizedRecordingError,
+    deserialize_normalized_recording_description,
+)
+from photometry_pipeline.guided_normalized_recording_consumption import (
+    NormalizedConsumedEvidenceError,
+    build_rwd_consumed_normalized_recording_evidence,
+    compare_consumed_normalized_recording_branches,
+    compare_requested_and_consumed_normalized_recording,
+)
+from photometry_pipeline.guided_startup_transaction import (
+    GUIDED_CANDIDATE_MANIFEST_FILENAME,
+    GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
+    GUIDED_PER_ROI_CORRECTION_FILENAME,
+    GUIDED_STARTUP_PROVENANCE_FILENAME,
+    GUIDED_STARTUP_STATUS_FILENAME,
+)
+from photometry_pipeline.guided_startup_claim import (
+    GUIDED_STARTUP_WRAPPER_CLAIM_FILENAME,
+)
+
+# B1: the Guided markers that cannot validly exist for a non-Guided (Full
+# Control / legacy) run -- each is written exclusively by guided_startup_*.py
+# or the wrapper's Guided-only code paths. Presence of any one of these
+# establishes "this is a Guided run" for classify_guided_current_native_state
+# below; GUIDED_PER_ROI_CORRECTION_FILENAME is conditional (native-correction
+# runs only) but still definitive when present. Generic artifacts that a
+# Full Control run can also produce (config_effective.yaml, command_invoked.txt,
+# run_metadata.json, run_report.json, MANIFEST.json, status.json, HDF5 caches)
+# are deliberately excluded -- they must never establish Guided identity alone.
+GUIDED_DEFINITIVE_MARKER_FILENAMES = (
+    GUIDED_CANDIDATE_MANIFEST_FILENAME,
+    GUIDED_STARTUP_PROVENANCE_FILENAME,
+    GUIDED_STARTUP_STATUS_FILENAME,
+    GUIDED_STARTUP_WRAPPER_CLAIM_FILENAME,
+    GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
+    GUIDED_PER_ROI_CORRECTION_FILENAME,
+)
+
+GUIDED_CURRENT_NATIVE_STATE_MIXED = "mixed"
+GUIDED_CURRENT_NATIVE_STATE_CURRENT_NATIVE = "current_native"
+GUIDED_CURRENT_NATIVE_STATE_CORRUPTED = "corrupted"
+GUIDED_CURRENT_NATIVE_STATE_LEGACY = "legacy"
+GUIDED_CURRENT_NATIVE_STATE_NOT_GUIDED = "not_guided"
 
 # Bumped whenever the terminal set's meaning changes. A run declaring any other
 # value is not something this build knows how to verify, so it fails closed.
@@ -995,6 +1039,155 @@ def correction_completion_error(run_dir: str, run_mode: dict[str, Any]) -> str:
     return ""
 
 
+def _load_requested_normalized_recording(run_dir: str):
+    """Deserialize and identity-verify the run's authorized normalized
+    recording description. Returns the description, or raises
+    NormalizedRecordingError with an actionable category on any failure."""
+    path = os.path.join(run_dir, GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise NormalizedRecordingError(
+            "unreadable_normalized_recording_description",
+            f"the normalized recording description is unreadable: {exc}",
+        ) from exc
+    return deserialize_normalized_recording_description(payload)
+
+
+def normalized_recording_completion_error(run_dir: str, run_mode: dict[str, Any]) -> str:
+    """Verify the run's authorized normalized recording description against
+    what each enabled analysis branch actually consumed.
+
+    Reuses the shared adapter-neutral comparator
+    (guided_normalized_recording_consumption.compare_requested_and_consumed_normalized_recording)
+    for every enabled branch independently, then verifies both branches
+    consumed the same authorized session set and the same actually-used
+    cadence when both are enabled (chronology/ROI-membership facts are
+    orthogonal to correction strategy, so unlike correction_completion_error
+    there is no tonic legacy-uniform shortcut here).
+
+    "" when the run is not a Guided run at all (no normalized recording
+    description and no candidate manifest present -- an ordinary Full
+    Control/legacy run, entirely unaffected). A candidate manifest present
+    without a normalized recording description is a current Guided run
+    whose mandatory provenance is missing, and fails closed.
+    """
+    state = classify_guided_current_native_state(run_dir)
+    normalized_path = os.path.join(
+        run_dir, GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME
+    )
+    if state == GUIDED_CURRENT_NATIVE_STATE_NOT_GUIDED:
+        return ""
+    if state == GUIDED_CURRENT_NATIVE_STATE_LEGACY:
+        return ""
+    if state == GUIDED_CURRENT_NATIVE_STATE_MIXED:
+        return "mixed Guided and legacy provenance"
+    if not os.path.isfile(normalized_path):
+        return (
+            "this Guided run has no normalized recording description despite "
+            "carrying definitive Guided provenance"
+        )
+
+    try:
+        requested = _load_requested_normalized_recording(run_dir)
+    except NormalizedRecordingError as exc:
+        return f"the normalized recording description could not be verified: {exc}"
+
+    enabled_branches = [
+        analysis_kind
+        for analysis_kind, enabled_key in (
+            ("phasic", "phasic_analysis"),
+            ("tonic", "tonic_analysis"),
+        )
+        if run_mode.get(enabled_key)
+    ]
+    if not enabled_branches:
+        return ""
+
+    consumed_by_branch = {}
+    for analysis_kind in enabled_branches:
+        try:
+            consumed = build_rwd_consumed_normalized_recording_evidence(
+                run_dir=run_dir, analysis_kind=analysis_kind, requested=requested
+            )
+        except NormalizedConsumedEvidenceError as exc:
+            return (
+                f"the {analysis_kind} analysis consumed normalized recording "
+                f"evidence could not be established: {exc}"
+            )
+        comparison_error = compare_requested_and_consumed_normalized_recording(
+            requested, consumed
+        )
+        if comparison_error:
+            return comparison_error
+        consumed_by_branch[analysis_kind] = consumed
+
+    if "phasic" in consumed_by_branch and "tonic" in consumed_by_branch:
+        phasic_consumed = consumed_by_branch["phasic"]
+        tonic_consumed = consumed_by_branch["tonic"]
+        cross_branch_error = compare_consumed_normalized_recording_branches(
+            phasic_consumed, tonic_consumed
+        )
+        if cross_branch_error:
+            return cross_branch_error
+
+    return ""
+
+
+def classify_guided_current_native_state(run_dir: str, run_mode: dict[str, Any] | None = None) -> str:
+    """Classify a run directory's Guided provenance, mutually exclusively.
+
+    One shared artifact-family classifier used by both terminal classification
+    and completed Review, so the two never disagree.  Evidence verification is
+    deliberately a separate step (``normalized_recording_completion_error``)
+    so this classifier cannot recurse through terminal classification.
+    Precedence:
+
+    1. A definitive Guided marker coexists with a positively-identified
+       legacy report shape -> "mixed" (the only path to "mixed" -- mere
+       absence of one file is never "mixed").
+    2. Any definitive Guided marker present -> this run is Guided-shaped:
+       complete evidence and successful verification -> "current_native";
+       anything missing, malformed, or contradictory (including a partial
+       definitive marker set) -> "corrupted".
+    3. No definitive marker at all: a positively-identified legacy shape
+       -> "legacy"; otherwise -> "not_guided" (an ordinary current Full
+       Control run, classified independently by classify_run_terminal_state).
+    """
+    present_markers = [
+        name
+        for name in GUIDED_DEFINITIVE_MARKER_FILENAMES
+        if os.path.isfile(os.path.join(run_dir, name))
+    ]
+    root_report, _ = _read_json_object(os.path.join(run_dir, RUN_REPORT_FILENAME))
+    legacy_report = _find_legacy_report(run_dir, root_report)
+
+    if present_markers and legacy_report is not None:
+        return GUIDED_CURRENT_NATIVE_STATE_MIXED
+
+    if present_markers:
+        mandatory = (
+            GUIDED_CANDIDATE_MANIFEST_FILENAME,
+            GUIDED_STARTUP_PROVENANCE_FILENAME,
+            GUIDED_STARTUP_STATUS_FILENAME,
+            GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
+        )
+        if not all(
+            os.path.isfile(os.path.join(run_dir, name)) for name in mandatory
+        ):
+            return GUIDED_CURRENT_NATIVE_STATE_CORRUPTED
+        try:
+            _load_requested_normalized_recording(run_dir)
+        except NormalizedRecordingError:
+            return GUIDED_CURRENT_NATIVE_STATE_CORRUPTED
+        return GUIDED_CURRENT_NATIVE_STATE_CURRENT_NATIVE
+
+    if legacy_report is not None:
+        return GUIDED_CURRENT_NATIVE_STATE_LEGACY
+    return GUIDED_CURRENT_NATIVE_STATE_NOT_GUIDED
+
+
 def verify_terminal_set_before_status(
     run_dir: str,
     *,
@@ -1047,6 +1240,12 @@ def verify_terminal_set_before_status(
     correction_error = correction_completion_error(run_dir, run_mode)
     if correction_error:
         return f"correction evidence is incomplete or inconsistent: {correction_error}"
+    normalized_recording_error = normalized_recording_completion_error(run_dir, run_mode)
+    if normalized_recording_error:
+        return (
+            "normalized recording provenance is incomplete or inconsistent: "
+            f"{normalized_recording_error}"
+        )
 
     artifacts = manifest_block.get("artifacts")
     if not isinstance(artifacts, list):
@@ -1113,6 +1312,19 @@ def classify_run_terminal_state(run_dir: str) -> TerminalClassification:
     if not os.path.isdir(run_dir):
         return TerminalClassification(TERMINAL_NOT_A_RUN, f"Directory does not exist: {run_dir}")
 
+    guided_state = classify_guided_current_native_state(run_dir)
+    if guided_state == GUIDED_CURRENT_NATIVE_STATE_MIXED:
+        return TerminalClassification(
+            TERMINAL_CORRUPTED,
+            "This run mixes definitive Guided provenance with a positively identified "
+            "legacy result, so its provenance cannot be trusted.",
+        )
+    if guided_state == GUIDED_CURRENT_NATIVE_STATE_CORRUPTED:
+        return TerminalClassification(
+            TERMINAL_CORRUPTED,
+            "This run carries incomplete or malformed definitive Guided provenance.",
+        )
+
     status, status_err = _read_json_object(os.path.join(run_dir, STATUS_FILENAME))
     manifest, manifest_err = _read_json_object(os.path.join(run_dir, MANIFEST_FILENAME))
     report, report_err = _read_json_object(os.path.join(run_dir, RUN_REPORT_FILENAME))
@@ -1152,6 +1364,7 @@ def classify_run_terminal_state(run_dir: str) -> TerminalClassification:
             manifest_err=manifest_err,
             report=report,
             report_err=report_err,
+            guided_state=guided_state,
         )
 
     return _classify_without_current_contract(
@@ -1172,6 +1385,7 @@ def _classify_current(
     manifest_err: str,
     report: dict[str, Any] | None,
     report_err: str,
+    guided_state: str,
 ) -> TerminalClassification:
     """Strict validation for a run that claims the current completion contract."""
     version = COMPLETION_CONTRACT_VERSION
@@ -1306,6 +1520,17 @@ def _classify_current(
             f"This run's correction evidence is incomplete or inconsistent: {correction_error}.",
             run_id=run_id,
         )
+
+    if guided_state == GUIDED_CURRENT_NATIVE_STATE_CURRENT_NATIVE:
+        normalized_recording_error = normalized_recording_completion_error(
+            run_dir, run_mode
+        )
+        if normalized_recording_error:
+            return corrupted(
+                "This run's normalized recording provenance is incomplete or "
+                f"inconsistent: {normalized_recording_error}.",
+                run_id=run_id,
+            )
 
     mismatch = _run_mode_disagreement(run_mode, status)
     if mismatch:

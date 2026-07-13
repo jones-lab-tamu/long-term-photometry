@@ -22,6 +22,7 @@ from photometry_pipeline.guided_startup_transaction import (
     GUIDED_CANDIDATE_MANIFEST_FILENAME,
     GUIDED_COMMAND_RECORD_FILENAME,
     GUIDED_CONFIG_EFFECTIVE_FILENAME,
+    GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
     GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
     GUIDED_PER_ROI_CORRECTION_FILENAME,
     GUIDED_STARTUP_PROVENANCE_FILENAME,
@@ -47,6 +48,7 @@ _MATERIALIZED_FILENAMES = frozenset(
         GUIDED_CONFIG_EFFECTIVE_FILENAME,
         GUIDED_COMMAND_RECORD_FILENAME,
         GUIDED_STARTUP_PROVENANCE_FILENAME,
+        GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
     )
 )
 # Optional artifacts materialize_guided_startup_artifacts writes in addition
@@ -339,6 +341,9 @@ def _validate_materialization(
         GUIDED_CONFIG_EFFECTIVE_FILENAME: plan.config_effective_bytes,
         GUIDED_COMMAND_RECORD_FILENAME: plan.command_record_bytes,
         GUIDED_STARTUP_PROVENANCE_FILENAME: plan.startup_provenance_bytes,
+        GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME: (
+            plan.normalized_recording_description_bytes
+        ),
     }
     try:
         names = frozenset(item.name for item in run_dir.iterdir())

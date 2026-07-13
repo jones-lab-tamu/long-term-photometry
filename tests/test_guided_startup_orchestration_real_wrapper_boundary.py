@@ -26,10 +26,15 @@ def _real_wrapper_runner(monkeypatch, *, live_failure=False, prestatus_failure=F
             calls["live_verify"] += 1
             if live_failure:
                 raise RuntimeError("simulated live manifest refusal")
-            return object()
+            return object(), object()
 
         monkeypatch.setattr(
             wrapper, "verify_guided_manifest_before_output", live_verify
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "verify_guided_normalized_recording_description_before_output",
+            lambda _args, _facts, _verified: None,
         )
 
         original_resolve = wrapper.resolve_run_dir
@@ -123,6 +128,7 @@ def test_orchestration_enters_real_wrapper_and_stops_after_initial_status(
         "config_effective.yaml",
         "command_invoked.txt",
         "guided_startup_provenance.json",
+        "guided_normalized_recording_description.json",
         claim.GUIDED_STARTUP_WRAPPER_CLAIM_FILENAME,
         "status.json",
     }
@@ -213,7 +219,14 @@ def _real_wrapper_runner_capture_phasic_cmd(monkeypatch):
     def runner(command):
         monkeypatch.setattr(wrapper.sys, "argv", [command[1], *command[2:]])
         monkeypatch.setattr(
-            wrapper, "verify_guided_manifest_before_output", lambda _args: object()
+            wrapper,
+            "verify_guided_manifest_before_output",
+            lambda _args: (object(), object()),
+        )
+        monkeypatch.setattr(
+            wrapper,
+            "verify_guided_normalized_recording_description_before_output",
+            lambda _args, _facts, _verified: None,
         )
 
         def capture_and_stop(cmd, roi_label=None):

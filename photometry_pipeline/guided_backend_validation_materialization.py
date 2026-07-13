@@ -79,6 +79,12 @@ from photometry_pipeline.input_processing_completeness import (
     resolve_session_start_time,
 )
 from photometry_pipeline.io.rwd_chronology import find_rwd_session_overlaps
+from photometry_pipeline.guided_normalized_recording import (
+    NormalizedRecordingError,
+    build_rwd_normalized_recording_description,
+    compute_normalized_recording_description_identity,
+    serialize_normalized_recording_description,
+)
 
 # Constants for Stage 2b
 GUIDED_BACKEND_VALIDATION_MATERIALIZATION_SCOPE = (
@@ -108,6 +114,7 @@ STAGE_2C_VALID_ISSUES = {
     "materializer_internal_error",
     "unsupported_stage_2a_state",
     "rwd_session_overlap_detected",
+    "normalized_recording_description_unavailable",
     # Stage 2b categories
     "parser_contract_missing",
     "parser_digest_unavailable",
@@ -2200,6 +2207,74 @@ def materialize_guided_backend_validation_facts(
         return correction_failure
     assert correction_facts is not None
 
+    # 13. Normalized recording description (B1): translates the already-
+    # materialized RWD source/timing/ROI facts above into the shared,
+    # format-neutral model. Reuses the same snapshot and facts computed
+    # above rather than re-discovering or re-deriving anything.
+    #
+    # Final-chunk exclusion identity uses the exact same rule as the
+    # accepted production execution-payload derivation
+    # (guided_execution_payloads.py: candidate_files[-1]) -- the
+    # chronologically final candidate in the already-A2-ordered snapshot.
+    # Computed here (one stage earlier) only so it can be represented on
+    # the normalized description too; it is not a second exclusion rule.
+    excluded_canonical_relative_path = (
+        snapshot.candidates[-1].canonical_relative_path
+        if dataset_facts.exclude_incomplete_final_rwd_chunk and snapshot.candidates
+        else None
+    )
+    try:
+        target_fs_hz = next(
+            (
+                item.value
+                for item in dataset_facts.semantic_values
+                if item.field_name == "target_fs_hz"
+            ),
+            None,
+        )
+        normalized_recording = build_rwd_normalized_recording_description(
+            source_root_canonical=snapshot.source_root_canonical,
+            candidate_snapshot=snapshot,
+            session_duration_sec=dataset_facts.session_duration_sec,
+            sessions_per_hour=dataset_facts.sessions_per_hour,
+            timeline_anchor_mode=dataset_facts.timeline_anchor_mode,
+            acquisition_mode=dataset_facts.acquisition_mode,
+            discovered_roi_ids=roi_facts.discovered_roi_ids,
+            included_roi_ids=roi_facts.included_roi_ids,
+            rwd_time_col=dataset_facts.rwd_time_col,
+            uv_suffix=dataset_facts.uv_suffix,
+            sig_suffix=dataset_facts.sig_suffix,
+            parser_contract_digest=parser_facts.parser_contract_digest,
+            target_fs_hz=target_fs_hz,
+            missing_canonical_relative_paths=tuple(
+                item.canonical_relative_path
+                for item in source_snapshot_facts.approved_missing_candidates
+            ),
+            excluded_canonical_relative_path=excluded_canonical_relative_path,
+        )
+    except NormalizedRecordingError as exc:
+        # Malformed chronology, empty ROI scope, and non-positive session
+        # duration are already caught earlier by dedicated checks with
+        # scientist-facing messages. A genuinely reachable case here is a
+        # scientist having approved the same final session as both
+        # missing and exclude-incomplete-final at once
+        # ("session_both_missing_and_excluded").
+        return _failure(
+            "normalized_recording_description_unavailable",
+            "normalized_recording",
+            "The app could not confirm this recording's setup is internally "
+            f"consistent: {exc}",
+            detail_code=exc.category,
+        )
+    normalized_recording_description_payload = (
+        serialize_normalized_recording_description(normalized_recording)
+    )
+    normalized_recording_description_identity = (
+        normalized_recording_description_payload[
+            "normalized_recording_description_identity"
+        ]
+    )
+
     output_facts, output_failure = _materialize_output_facts(
         draft,
         source_snapshot_facts,
@@ -2224,6 +2299,10 @@ def materialize_guided_backend_validation_facts(
         effective_feature_event_values=tuple(backend_typed_values),
         complete_for_compilation=True,
         unresolved_required_inputs=(),
+        normalized_recording_description_identity=(
+            normalized_recording_description_identity
+        ),
+        normalized_recording_description=normalized_recording_description_payload,
     )
 
     return GuidedBackendValidationMaterializationSuccess(facts=facts)

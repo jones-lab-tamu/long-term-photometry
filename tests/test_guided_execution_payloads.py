@@ -33,7 +33,16 @@ def _accepted_outcome():
         request.acquisition_dataset,
         semantic_values=request.acquisition_dataset.semantic_values + (_typed("target_fs_hz", 40.0),)
     )
-    request = replace(request, acquisition_dataset=new_dataset)
+    from tests.test_guided_backend_validator import _normalized_recording_identity_for
+    request = replace(
+        request,
+        acquisition_dataset=new_dataset,
+        normalized_recording_description_identity=(
+            _normalized_recording_identity_for(
+                request.source, new_dataset, request.roi_scope, request.parser
+            )
+        ),
+    )
 
     identity = validation_request.compute_guided_backend_validation_request_identity(request)
     compiled = validation_request.GuidedBackendValidationCompileSuccess(request, identity)
@@ -54,6 +63,59 @@ def _accepted_outcome():
         blocking_issues=(),
         user_summary="Accepted.",
     )
+
+
+def _rebuild_normalized_recording_identity(intent) -> str:
+    """Recompute the normalized recording description identity from an
+    intent's own source/acquisition/ROI/parser fields, the same way
+    guided_execution_payloads.derive_guided_execution_payloads verifies it
+    -- used by tests that deliberately mutate one of those fields and must
+    keep the identity self-consistent with it."""
+    from types import SimpleNamespace
+
+    from photometry_pipeline.guided_normalized_recording import (
+        build_rwd_normalized_recording_description,
+        compute_normalized_recording_description_identity,
+    )
+
+    excluded_path = (
+        intent.input_source.candidate_files[-1].canonical_relative_path
+        if intent.acquisition.exclude_incomplete_final_rwd_chunk
+        and intent.input_source.candidate_files
+        else None
+    )
+    description = build_rwd_normalized_recording_description(
+        source_root_canonical=intent.input_source.source_root_canonical,
+        candidate_snapshot=SimpleNamespace(
+            candidates=intent.input_source.candidate_files,
+            source_candidate_set_digest=intent.input_source.source_candidate_set_digest,
+            source_candidate_content_digest=intent.input_source.source_candidate_content_digest,
+        ),
+        session_duration_sec=intent.acquisition.session_duration_sec,
+        sessions_per_hour=intent.acquisition.sessions_per_hour,
+        timeline_anchor_mode=intent.acquisition.timeline_anchor_mode,
+        acquisition_mode=intent.acquisition.acquisition_mode,
+        discovered_roi_ids=intent.roi_scope.discovered_roi_ids,
+        included_roi_ids=intent.roi_scope.included_roi_ids,
+        rwd_time_col=intent.acquisition.rwd_time_col,
+        uv_suffix=intent.acquisition.uv_suffix,
+        sig_suffix=intent.acquisition.sig_suffix,
+        parser_contract_digest=intent.parser.parser_contract_digest,
+        target_fs_hz=next(
+            (
+                item.value
+                for item in intent.acquisition.semantic_values
+                if item.field_name == "target_fs_hz"
+            ),
+            None,
+        ),
+        missing_canonical_relative_paths=tuple(
+            item.canonical_relative_path
+            for item in intent.input_source.approved_missing_candidates
+        ),
+        excluded_canonical_relative_path=excluded_path,
+    )
+    return compute_normalized_recording_description_identity(description)
 
 
 def _build_app_identity():
@@ -474,10 +536,18 @@ def test_payload_identity_determinism_and_sensitivity(auth_result):
     assert res1.candidate_manifest_payload_identity == res2.candidate_manifest_payload_identity
     assert res1.provenance_seed_identity == res2.provenance_seed_identity
 
-    # Change sessions_per_hour
+    # Change sessions_per_hour -- and, as real production would, the
+    # normalized recording description identity along with it (it is a
+    # sampling-contract fact the description covers).
     intent_changed = replace(
         auth_result.production_intent,
         acquisition=replace(auth_result.production_intent.acquisition, sessions_per_hour=20)
+    )
+    intent_changed = replace(
+        intent_changed,
+        normalized_recording_description_identity=(
+            _rebuild_normalized_recording_identity(intent_changed)
+        ),
     )
     auth_changed = replace(
         auth_result,

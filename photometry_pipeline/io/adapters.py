@@ -61,6 +61,38 @@ def _rwd_suffix_candidates(config: Config) -> Tuple[List[str], List[str]]:
     return uv, sig
 
 
+def rwd_authorized_time_column_candidates(rwd_time_col: str) -> Tuple[str, ...]:
+    """The exact ordered time-column candidates real RWD parsing will try.
+
+    Same resolution logic as ``_rwd_time_candidates`` (identical fallback
+    order via the shared ``_unique_ordered`` helper), parameterized by the
+    resolved ``rwd_time_col`` value rather than a full ``Config`` object, so
+    callers outside this module (Guided normalized-recording materialization,
+    which only carries the resolved scalar field, not a ``Config`` instance)
+    can capture the real execution-time candidate set -- not the separate,
+    config-independent preflight contract in ``io.rwd_contract`` -- as
+    durable authorized provenance, without duplicating this resolution
+    logic.
+    """
+    return tuple(
+        _unique_ordered(
+            [str(rwd_time_col or "").strip(), "TimeStamp", "Time(s)", "Timestamp", "Time"]
+        )
+    )
+
+
+def rwd_authorized_suffix_candidates(
+    uv_suffix: str, sig_suffix: str
+) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    """The exact ordered (uv, signal) suffix candidates real RWD parsing will try.
+
+    See ``rwd_authorized_time_column_candidates`` for why this exists.
+    """
+    uv = tuple(_unique_ordered([str(uv_suffix or "").strip(), "-410", "-415"]))
+    sig = tuple(_unique_ordered([str(sig_suffix or "").strip(), "-470"]))
+    return uv, sig
+
+
 def _parse_csv_header_fields(line: str) -> List[str]:
     try:
         fields = next(csv.reader([line]))
@@ -1458,6 +1490,7 @@ def _build_continuous_chunk_from_window_arrays(
     names = list(source_data["channel_names"])
     roi_map = dict(source_data["roi_map"])
     metadata: Dict[str, Any] = {"roi_map": roi_map}
+    metadata["output_time_basis"] = "relative_seconds_since_session_start"
     if str(format_type).lower() == "custom_tabular":
         metadata["custom_tabular_contract"] = dict(source_data.get("custom_tabular_contract", {}))
 
@@ -1813,11 +1846,15 @@ def _build_chunk_from_source(
     names = list(source_data["channel_names"])
     roi_map = dict(source_data["roi_map"])
 
-    metadata: Dict[str, Any] = {"roi_map": roi_map}
+    metadata: Dict[str, Any] = {
+        "roi_map": roi_map,
+        "output_time_basis": "relative_seconds_since_session_start",
+    }
     if str(format_type).lower() == "rwd":
         metadata.update(
             {
                 "rwd_time_col_resolved": source_data.get("rwd_time_col_resolved"),
+                "rwd_header_row_resolved": source_data.get("header_row"),
                 "rwd_timestamp_unit": source_data.get("rwd_timestamp_unit"),
                 "rwd_metadata_fps": source_data.get("rwd_metadata_fps"),
                 "rwd_enabled_excitation_count": source_data.get("rwd_enabled_excitation_count"),

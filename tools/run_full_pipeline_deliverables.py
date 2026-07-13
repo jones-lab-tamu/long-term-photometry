@@ -82,11 +82,16 @@ try:
     from photometry_pipeline.guided_new_analysis_plan import (
         FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
     )
+    from photometry_pipeline.guided_normalized_recording import (
+        NormalizedRecordingError,
+        deserialize_normalized_recording_description,
+    )
     from photometry_pipeline.guided_startup_claim import (
         claim_guided_preallocated_startup,
         validate_guided_preallocated_startup,
     )
     from photometry_pipeline.guided_startup_transaction import (
+        GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
         GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
     )
     from photometry_pipeline.run_completion_contract import (
@@ -1041,13 +1046,109 @@ def verify_guided_manifest_before_output(args):
             else "guided_manifest_verification_failed"
         )
         raise RuntimeError(f"Guided manifest verification refused: {detail}")
-    return verified
+    return facts, verified
+
+
+def verify_guided_normalized_recording_description_before_output(args, facts, verified):
+    """Cross-check the persisted normalized recording description against
+    the same freshly-verified candidate/ROI facts the manifest check just
+    established -- no second filesystem scan.
+
+    Runs immediately after ``verify_guided_manifest_before_output`` at its
+    one call site, reusing ``facts``/``verified`` already computed there.
+    By the time this runs, ``validate_guided_preallocated_startup`` (called
+    earlier, at the preallocated-mode gate) has already proven
+    ``guided_normalized_recording_description.json`` is byte-identical to
+    what Setup-check authorization and startup materialization wrote --
+    this function checks that its *content* still matches the live source
+    tree the manifest check just re-verified, catching drift between
+    Setup-check authorization and wrapper launch for exactly the facts
+    that are freshly re-derivable at this boundary. Session_duration_sec,
+    cadence, and parser fields have no independent fresh source here; their
+    integrity is already proven by the same startup-artifact hash chain
+    that protects config_effective.yaml.
+    """
+    if facts is None or verified is None:
+        return None
+    normalized_path = os.path.join(
+        args.out, GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME
+    )
+    try:
+        with open(normalized_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"Guided normalized recording description is unreadable: {exc}"
+        ) from exc
+    try:
+        requested = deserialize_normalized_recording_description(payload)
+    except NormalizedRecordingError as exc:
+        raise RuntimeError(
+            f"Guided normalized recording description verification refused: {exc}"
+        ) from exc
+
+    verified_paths = {
+        item.canonical_relative_path for item in verified.verified_candidates
+    }
+    for session in requested.sessions:
+        if session.disposition in ("process", "excluded"):
+            if session.stable_source_identity not in verified_paths:
+                raise RuntimeError(
+                    "Guided normalized recording description verification refused: "
+                    f"session {session.stable_source_identity!r} is no longer present "
+                    "among the live source candidates."
+                )
+
+    discovered = set(facts.current_roi_inventory.discovered_roi_ids)
+    included = set(facts.current_roi_inventory.included_roi_ids)
+    requested_included = {
+        item.roi_id for item in requested.roi_channels if item.included
+    }
+    requested_discovered = {item.roi_id for item in requested.roi_channels}
+    if requested_discovered != discovered:
+        raise RuntimeError(
+            "Guided normalized recording description verification refused: "
+            "the discovered ROI inventory no longer matches the authorized "
+            "recording description."
+        )
+    if requested_included != included:
+        raise RuntimeError(
+            "Guided normalized recording description verification refused: "
+            "the included ROI selection no longer matches the authorized "
+            "recording description."
+        )
+    return requested
 
 
 def validate_guided_preallocated_mode_args(args):
     """Validate the internal preallocated handoff flags without writing."""
     if not getattr(args, "guided_preallocated_run_dir", False):
         return None
+    # The prepared command is the immutable startup authority.  A caller that
+    # mutates an otherwise-supported analysis mode after Setup check must be
+    # rejected as an internal handoff conflict, rather than being allowed to
+    # reach the claim validator as a merely different-but-valid mode.
+    out_value = getattr(args, "out", None)
+    if out_value:
+        command_path = Path(out_value) / "command_invoked.txt"
+        try:
+            command_values = command_path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            command_values = []
+    else:
+        command_values = []
+    mode_positions = [
+        index for index, value in enumerate(command_values) if value == "--mode"
+    ]
+    if (
+        len(mode_positions) == 1
+        and mode_positions[0] + 1 < len(command_values)
+        and command_values[mode_positions[0] + 1] != getattr(args, "mode", None)
+    ):
+        raise RuntimeError(
+            "Guided preallocated startup handoff refused: analysis mode does not "
+            "match the prepared startup command."
+        )
     conflicts = (
         (not getattr(args, "guided_candidate_manifest", None), "manifest required"),
         (not getattr(args, "out", None), "--out required"),
@@ -1084,6 +1185,7 @@ def validate_guided_preallocated_mode_args(args):
         output_dir=args.out,
         config_path=args.config,
         manifest_path=args.guided_candidate_manifest,
+        expected_mode=args.mode,
     )
 
 
@@ -1503,7 +1605,12 @@ def main():
     # Internal Guided execution must verify live source identity before run-dir
     # resolution, allocation, status creation, or any subprocess launch.
     try:
-        verify_guided_manifest_before_output(args)
+        manifest_verification = verify_guided_manifest_before_output(args)
+        if manifest_verification is not None:
+            guided_facts, guided_verified = manifest_verification
+            verify_guided_normalized_recording_description_before_output(
+                args, guided_facts, guided_verified
+            )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1)

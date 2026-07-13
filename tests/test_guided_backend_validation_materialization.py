@@ -1084,6 +1084,74 @@ def test_stage_2d_materializes_output_facts(tmp_path: Path):
     assert result.facts.complete_for_compilation is True
 
 
+def test_setup_check_freezes_normalized_recording_description_identity(tmp_path: Path):
+    """B1: Setup check materialization (the real production boundary, not
+    a helper) must produce and freeze the shared normalized recording
+    description's canonical identity, and that identity must change when
+    the underlying facts change -- proving it is bound to real content,
+    not a constant placeholder."""
+    draft = _valid_stage2c_draft(tmp_path)
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    identity = result.facts.normalized_recording_description_identity
+    assert len(identity) == 64
+
+    # Recomputing from the identical draft is deterministic.
+    result_again = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+    assert (
+        result_again.facts.normalized_recording_description_identity == identity
+    )
+
+    # Adding a second real RWD session changes source membership and
+    # chronology -- the normalized identity must change.
+    root = Path(draft.resolved_input_source_path or draft.input_source_path or "")
+    _write_session(root, "2026_07_01-12_00_00", b"time,uv,sig\n0.0,1.2,3.4\n")
+    result_changed = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+    assert isinstance(result_changed, GuidedBackendValidationMaterializationSuccess)
+    assert (
+        result_changed.facts.normalized_recording_description_identity != identity
+    )
+
+
+def test_final_exclusion_is_represented_at_the_real_materialization_boundary(tmp_path: Path):
+    """B1-completion item 2: the real accepted final-exclusion state
+    (draft.dataset_contract_snapshot.source_identity.exclude_incomplete_final_rwd_chunk)
+    must flow into materialize_guided_backend_validation_facts (not a
+    direct adapter-unit construction) and produce a normalized recording
+    whose chronologically final session has disposition 'excluded'."""
+    draft = _valid_local_preview_stage2c_draft(tmp_path)
+    root = Path(draft.resolved_input_source_path or draft.input_source_path or "")
+    # A second, later, real RWD session -- the true chronological final
+    # session that final-exclusion should apply to.
+    _write_session(root, "2026_07_02-12_00_00", b"time,uv,sig\n0.0,1.2,3.4\n")
+    draft.dataset_contract_snapshot = replace(
+        draft.dataset_contract_snapshot,
+        source_identity=replace(
+            draft.dataset_contract_snapshot.source_identity,
+            exclude_incomplete_final_rwd_chunk=True,
+        ),
+    )
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    payload = result.facts.normalized_recording_description
+    sessions = payload["sessions"]
+    assert len(sessions) == 2
+    by_disposition = {s["disposition"]: s for s in sessions}
+    assert by_disposition["process"]["stable_source_identity"].startswith("2026_06_30-12_00_00")
+    assert by_disposition["excluded"]["stable_source_identity"].startswith("2026_07_02-12_00_00")
+    assert by_disposition["excluded"]["chronological_position"] == 1
+    assert "missing" not in by_disposition
+
+
 def test_request_ready_enriched_facts_are_complete_and_immutable(tmp_path: Path):
     draft = _valid_stage2c_draft(tmp_path)
     parser = _valid_parser_contract()

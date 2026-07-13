@@ -29,6 +29,11 @@ from photometry_pipeline.guided_execution_preflight import (
     compute_guided_candidate_preflight_identity,
     compute_guided_roi_preflight_identity,
 )
+from photometry_pipeline.guided_normalized_recording import (
+    NormalizedRecordingError,
+    compute_normalized_recording_description_identity,
+    rebuild_normalized_recording_description_from_intent,
+)
 
 
 GUIDED_EXECUTION_PAYLOAD_STATUS_NONRUNNABLE = "payloads_derived_nonrunnable"
@@ -763,6 +768,35 @@ def derive_guided_execution_payloads(
         recomputed_roi_id = compute_guided_roi_preflight_identity(roi_pre)
         if recomputed_roi_id != authorized_result.roi_preflight_identity:
             return _unresolved("roi_preflight_identity_mismatch", "Recomputed ROI preflight identity mismatch.")
+
+        # B1: the backend Config this function derives must come from the
+        # authorized normalized recording description, not be
+        # independently reconstructed from unrelated granular intent
+        # fields. Rebuilding here requires no filesystem access (folder
+        # timestamps are parsed from the already-frozen candidate names
+        # carried on the intent, not read from disk) and reuses the exact
+        # same RWD adapter Setup-check materialization used -- this is a
+        # verify-by-rebuild check against the frozen identity, not a
+        # second source scan or a second derivation rule.
+        try:
+            rebuilt_normalized_recording = rebuild_normalized_recording_description_from_intent(
+                intent
+            )
+            recomputed_normalized_id = compute_normalized_recording_description_identity(
+                rebuilt_normalized_recording
+            )
+        except NormalizedRecordingError:
+            return _unresolved(
+                "normalized_recording_description_mismatch",
+                "The recording description could not be reconstructed from the "
+                "authorized production intent.",
+            )
+        if recomputed_normalized_id != intent.normalized_recording_description_identity:
+            return _unresolved(
+                "normalized_recording_description_mismatch",
+                "The authorized recording description does not match the intent's "
+                "own source/timing/ROI facts.",
+            )
 
         # 8. Startup mapping contract type and compatibility checks
         if not isinstance(startup_mapping_contract, GuidedExecutionStartupMappingContract):

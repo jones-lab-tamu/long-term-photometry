@@ -21,6 +21,10 @@ from photometry_pipeline.guided_correction_payload import (
     load_guided_correction_payload,
     serialize_guided_correction_payload,
 )
+from photometry_pipeline.guided_normalized_recording import (
+    NormalizedRecordingError,
+    deserialize_normalized_recording_description,
+)
 from photometry_pipeline.guided_startup_allocation import (
     GuidedStartupAllocationResult,
 )
@@ -28,6 +32,7 @@ from photometry_pipeline.guided_startup_transaction import (
     GUIDED_CANDIDATE_MANIFEST_FILENAME,
     GUIDED_COMMAND_RECORD_FILENAME,
     GUIDED_CONFIG_EFFECTIVE_FILENAME,
+    GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
     GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
     GUIDED_STARTUP_PROVENANCE_FILENAME,
     GUIDED_STARTUP_STATUS_FILENAME,
@@ -42,6 +47,7 @@ _TARGET_FILENAMES = (
     GUIDED_CONFIG_EFFECTIVE_FILENAME,
     GUIDED_COMMAND_RECORD_FILENAME,
     GUIDED_STARTUP_PROVENANCE_FILENAME,
+    GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
 )
 _PRODUCTION_FILENAMES = ("status.json", "MANIFEST.json", "run_report.json")
 _PRODUCTION_DIRECTORY_NAMES = (
@@ -173,6 +179,7 @@ def _validate_preconditions(
         pure_plan.config_effective_bytes,
         pure_plan.startup_provenance_bytes,
         pure_plan.command_record_bytes,
+        pure_plan.normalized_recording_description_bytes,
     )
     if (
         not isinstance(pure_plan, GuidedStartupPlanResult)
@@ -374,13 +381,26 @@ def _validate_provenance(path: Path, plan: GuidedStartupPlanResult) -> None:
         raise ValueError("Startup provenance makes an invalid state claim.")
 
 
+def _validate_normalized_recording(path: Path) -> None:
+    try:
+        payload = json.loads(path.read_bytes())
+    except Exception as exc:
+        raise ValueError("Normalized recording description is invalid JSON.") from exc
+    try:
+        deserialize_normalized_recording_description(payload)
+    except NormalizedRecordingError as exc:
+        raise ValueError(
+            f"Normalized recording description round-trip failed: {exc}"
+        ) from exc
+
+
 def materialize_guided_startup_artifacts(
     *,
     request: GuidedStartupTransactionRequest,
     pure_plan: GuidedStartupPlanResult,
     allocation_result: GuidedStartupAllocationResult,
 ) -> GuidedStartupMaterializationResult:
-    """Write only the four deterministic startup preparation artifacts."""
+    """Write only the five deterministic startup preparation artifacts."""
     run_dir, issue = _validate_preconditions(request, pure_plan, allocation_result)
     if issue is not None:
         return _refused(
@@ -417,6 +437,12 @@ def materialize_guided_startup_artifacts(
             pure_plan.startup_provenance_bytes,
             pure_plan.identities.startup_provenance_bytes_sha256,
             lambda path: _validate_provenance(path, pure_plan),
+        ),
+        (
+            GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
+            pure_plan.normalized_recording_description_bytes,
+            pure_plan.identities.normalized_recording_description_bytes_sha256,
+            _validate_normalized_recording,
         ),
     )
     written: list[str] = []

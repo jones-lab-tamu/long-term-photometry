@@ -82,7 +82,7 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         source_candidate_content_digest=_B,
         candidate_files=(
             contracts.GuidedBackendSourceCandidateFile(
-                canonical_relative_path="session/fluorescence.csv",
+                canonical_relative_path="2025_01_01-00_00_00/fluorescence.csv",
                 size_bytes=42,
                 sha256_content_digest=_A,
             ),
@@ -272,7 +272,53 @@ def _request() -> contracts.GuidedBackendValidationRequest:
         feature_event=feature,
         output=output,
         local_contract=local,
+        normalized_recording_description_identity=(
+            _normalized_recording_identity_for(source, dataset, roi, parser)
+        ),
     )
+
+
+def _normalized_recording_identity_for(source, dataset, roi, parser) -> str:
+    """A real, self-consistent normalized recording identity computed the
+    same way production materialization does, from this fixture's own
+    source/acquisition/ROI/parser values -- not a placeholder digest.
+    Production re-verifies this identity by rebuilding it
+    (guided_execution_payloads.derive_guided_execution_payloads), so a
+    fixture whose identity doesn't match its own fields would fail there."""
+    from types import SimpleNamespace
+
+    from photometry_pipeline.guided_normalized_recording import (
+        build_rwd_normalized_recording_description,
+        compute_normalized_recording_description_identity,
+    )
+
+    description = build_rwd_normalized_recording_description(
+        source_root_canonical=source.source_root_canonical,
+        candidate_snapshot=SimpleNamespace(
+            candidates=source.candidate_files,
+            source_candidate_set_digest=source.source_candidate_set_digest,
+            source_candidate_content_digest=source.source_candidate_content_digest,
+        ),
+        session_duration_sec=dataset.session_duration_sec,
+        sessions_per_hour=dataset.sessions_per_hour,
+        timeline_anchor_mode=dataset.timeline_anchor_mode,
+        acquisition_mode=dataset.acquisition_mode,
+        discovered_roi_ids=roi.discovered_roi_ids,
+        included_roi_ids=roi.included_roi_ids,
+        rwd_time_col=dataset.rwd_time_col,
+        uv_suffix=dataset.uv_suffix,
+        sig_suffix=dataset.sig_suffix,
+        parser_contract_digest=parser.parser_contract_digest,
+        target_fs_hz=next(
+            (
+                item.value
+                for item in dataset.semantic_values
+                if item.field_name == "target_fs_hz"
+            ),
+            None,
+        ),
+    )
+    return compute_normalized_recording_description_identity(description)
 
 
 def _local_preview_request() -> contracts.GuidedBackendValidationRequest:

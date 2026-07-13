@@ -18,6 +18,7 @@ from photometry_pipeline.guided_startup_transaction import (
     GUIDED_CANDIDATE_MANIFEST_FILENAME,
     GUIDED_COMMAND_RECORD_FILENAME,
     GUIDED_CONFIG_EFFECTIVE_FILENAME,
+    GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
     GUIDED_PER_ROI_CORRECTION_FILENAME,
     GUIDED_PER_ROI_FEATURE_CONFIG_FILENAME,
     GUIDED_STARTUP_PROVENANCE_FILENAME,
@@ -41,6 +42,7 @@ _PREPARED_FILENAMES = frozenset(
         GUIDED_CONFIG_EFFECTIVE_FILENAME,
         GUIDED_STARTUP_PROVENANCE_FILENAME,
         GUIDED_COMMAND_RECORD_FILENAME,
+        GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
     )
 )
 
@@ -129,6 +131,7 @@ def validate_guided_preallocated_startup(
     output_dir: str,
     config_path: str,
     manifest_path: str,
+    expected_mode: str | None = None,
 ) -> GuidedStartupClaimValidation:
     """Validate a fully prepared startup directory without writing."""
     run_dir = Path(output_dir)
@@ -279,12 +282,27 @@ def validate_guided_preallocated_startup(
         hashlib.sha256(correction_file.read_bytes()).hexdigest()
         if correction_file.is_file() else None
     )
+    # B1: the normalized recording description is a mandatory startup
+    # artifact for every current-native Guided run (already required by
+    # _PREPARED_FILENAMES above) -- re-hash it from disk and compare
+    # against the digest materialization recorded, exactly like every
+    # other mandatory startup artifact. This proves the file the wrapper
+    # is about to consume is byte-identical to what Setup check authorized
+    # and materialization wrote, before any content-level verification runs.
+    normalized_recording_file = (
+        resolved_run_dir / GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME
+    )
+    normalized_recording_hash = hashlib.sha256(
+        normalized_recording_file.read_bytes()
+    ).hexdigest()
     if (
         manifest_hash != provenance.get("serialized_manifest_sha256")
         or config_hash != provenance.get("serialized_config_sha256")
         or command_hash != provenance.get("command_record_sha256")
         or correction_hash
         != provenance.get("serialized_native_correction_sha256")
+        or normalized_recording_hash
+        != provenance.get("serialized_normalized_recording_description_sha256")
     ):
         return _refused(
             "startup_artifact_hash_mismatch",
@@ -296,6 +314,12 @@ def validate_guided_preallocated_startup(
     except UnicodeDecodeError:
         command_argv = ()
     command_mode = _argument_value(command_argv, "--mode")
+    if expected_mode is not None and command_mode != expected_mode:
+        return _refused(
+            "startup_command_invalid",
+            "command",
+            "Recorded startup command mode does not match the wrapper handoff.",
+        )
     semantic_pairs = (
         ("--input", input_dir),
         ("--out", output_dir),

@@ -41,21 +41,36 @@ from tests.test_guided_execution_payloads import (
 
 
 def _accepted_outcome(source_root: Path, output_base: Path):
+    from tests.test_guided_backend_validator import (
+        _normalized_recording_identity_for,
+    )
+
     request = _valid_request()
+    new_source = replace(
+        request.source,
+        source_root_canonical=os.path.abspath(source_root),
+    )
+    acquisition_dataset = replace(
+        request.acquisition_dataset,
+        semantic_values=request.acquisition_dataset.semantic_values
+        + (_typed("target_fs_hz", 40.0),),
+    )
     request = replace(
         request,
-        source=replace(
-            request.source,
-            source_root_canonical=os.path.abspath(source_root),
-        ),
+        source=new_source,
         output=replace(
             request.output,
             output_base_canonical=os.path.abspath(output_base),
         ),
-        acquisition_dataset=replace(
-            request.acquisition_dataset,
-            semantic_values=request.acquisition_dataset.semantic_values
-            + (_typed("target_fs_hz", 40.0),),
+        acquisition_dataset=acquisition_dataset,
+        # source_root_canonical is part of the normalized recording
+        # description's identity (recording_source_identity); it must be
+        # recomputed after moving the source root to this test's tmp_path.
+        normalized_recording_description_identity=_normalized_recording_identity_for(
+            new_source,
+            acquisition_dataset,
+            request.roi_scope,
+            request.parser,
         ),
     )
     identity = validation_request.compute_guided_backend_validation_request_identity(

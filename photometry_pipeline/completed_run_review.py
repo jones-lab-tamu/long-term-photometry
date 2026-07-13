@@ -34,10 +34,24 @@ from photometry_pipeline.io.hdf5_cache_reader import (
 from photometry_pipeline.guided_completed_feature_event_reload import (
     load_guided_completed_feature_event_state,
 )
+from photometry_pipeline.guided_normalized_recording import (
+    NormalizedRecordingDescription,
+    NormalizedRecordingError,
+    NormalizedRoiChannel,
+    deserialize_normalized_recording_description,
+)
+from photometry_pipeline.guided_startup_transaction import (
+    GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME,
+)
 from photometry_pipeline.run_completion_contract import (
     CORRECTION_PROVENANCE_SCHEMA_VERSION,
+    GUIDED_CURRENT_NATIVE_STATE_CORRUPTED,
+    GUIDED_CURRENT_NATIVE_STATE_CURRENT_NATIVE,
+    GUIDED_CURRENT_NATIVE_STATE_MIXED,
     classify_run_terminal_state,
+    classify_guided_current_native_state,
     correction_completion_error,
+    normalized_recording_completion_error,
 )
 from photometry_pipeline.core.types import (
     CORRECTION_STRATEGY_FAMILIES,
@@ -343,6 +357,7 @@ class CompletedReviewSession:
     fitted_reference: np.ndarray | None = field(default=None, repr=False)
     production_f0_baseline: np.ndarray | None = field(default=None, repr=False)
     signal_only_qc: dict[str, Any] = field(default_factory=dict)
+    processing_diagnostics: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
     def processed(self) -> bool:
@@ -385,6 +400,19 @@ class CompletedRunReviewModel:
     sessions_by_branch_roi: dict[
         str, dict[str, tuple[CompletedReviewSession, ...]]
     ] = field(default_factory=dict)
+    # Current-native Guided ROI authority, including excluded discovered ROIs.
+    # ``rois`` remains the included, scientist-visible subset for compatibility.
+    roi_inventory: tuple[NormalizedRoiChannel, ...] = ()
+    # B1: the verified, authorized normalized recording description for
+    # current-native Guided runs (input format, acquisition mode, ordered
+    # session identities/dispositions, ROI/channel identities, sampling).
+    # None for legacy/non-Guided runs -- their existing session/ROI
+    # construction above is entirely unaffected. When present, it has
+    # already been verified via normalized_recording_completion_error
+    # against this run's own consumed C8/cache evidence before this model
+    # was constructed, so the sessions_by_roi facts above are provably
+    # consistent with it, not merely coincidentally matching.
+    normalized_recording: NormalizedRecordingDescription | None = None
 
     @property
     def heterogeneous_correction(self) -> bool:
@@ -477,23 +505,31 @@ def _attr(attrs: Any, key: str, default: Any = None) -> Any:
     return value
 
 
-def _load_sessions_index(run_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _same_source_identity(left: str, right: str) -> bool:
+    return os.path.normcase(os.path.abspath(os.path.normpath(str(left)))) == os.path.normcase(
+        os.path.abspath(os.path.normpath(str(right)))
+    )
+
+
+def _load_sessions_index(
+    run_dir: Path, analysis_kind: str = "phasic"
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     manifest_path = run_dir / FROZEN_INPUT_MANIFEST_FILENAME
     if manifest_path.is_file():
         manifest, error = load_frozen_input_manifest(str(manifest_path))
         if manifest is None:
             raise CompletedRunReviewError(f"Frozen session index is invalid: {error}")
         payload, payload_error = read_input_completeness(
-            str(run_dir / "_analysis" / "phasic_out")
+            str(run_dir / "_analysis" / f"{analysis_kind}_out")
         )
         if payload is None:
             raise CompletedRunReviewError(
-                f"Phasic session accounting is invalid: {payload_error}"
+                f"{analysis_kind.capitalize()} session accounting is invalid: {payload_error}"
             )
         return list(manifest.get("expected", [])), list(payload.get("processed", []))
 
     payload, error = read_input_completeness(
-        str(run_dir / "_analysis" / "phasic_out")
+        str(run_dir / "_analysis" / f"{analysis_kind}_out")
     )
     if payload is None:
         return [], []
@@ -610,6 +646,51 @@ def _freeze_requested_by_roi(
     )
 
 
+def _load_verified_normalized_recording(
+    resolved: Path, run_mode: dict[str, Any], *, required: bool = False
+) -> NormalizedRecordingDescription | None:
+    """Load and verify this run's authorized normalized recording
+    description, following the same precedent already used for
+    ``load_guided_completed_applied_dff_state``/
+    ``load_guided_completed_feature_event_state`` (a Guided-produced,
+    run-root JSON artifact read post-hoc for Review, never the live source
+    tree). Returns None for a legacy/non-Guided run (the file is simply
+    absent -- existing behavior entirely unchanged); raises
+    CompletedRunReviewError fail-closed for a current-native Guided run
+    whose provenance is missing, malformed, or contradicts its own
+    consumed evidence.
+    """
+    normalized_path = resolved / GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME
+    if not normalized_path.is_file():
+        if required:
+            raise CompletedRunReviewError(
+                "Completed Guided result is missing its normalized recording provenance."
+            )
+        return None
+    try:
+        payload = json.loads(normalized_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise CompletedRunReviewError(
+            f"Completed result normalized recording provenance is unreadable ({exc})."
+        ) from exc
+    try:
+        normalized_recording = deserialize_normalized_recording_description(payload)
+    except NormalizedRecordingError as exc:
+        raise CompletedRunReviewError(
+            f"Completed result normalized recording provenance could not be "
+            f"verified ({exc})."
+        ) from exc
+    reconciliation_error = normalized_recording_completion_error(
+        str(resolved), run_mode
+    )
+    if reconciliation_error:
+        raise CompletedRunReviewError(
+            "Completed result normalized recording provenance disagrees with "
+            f"its consumed evidence ({reconciliation_error})."
+        )
+    return normalized_recording
+
+
 def _load_completed_branch_review(
     run_dir: str | Path, analysis_kind: str
 ) -> CompletedRunReviewModel:
@@ -620,6 +701,16 @@ def _load_completed_branch_review(
         raise CompletedRunReviewError(
             f"This completed result cannot be verified ({classification.reason})."
         )
+    guided_state = classify_guided_current_native_state(
+        str(resolved), classification.run_mode or None
+    )
+    if guided_state in {
+        GUIDED_CURRENT_NATIVE_STATE_MIXED,
+        GUIDED_CURRENT_NATIVE_STATE_CORRUPTED,
+    }:
+        raise CompletedRunReviewError(
+            "Completed result carries mixed or corrupted Guided provenance."
+        )
     analysis_dir = resolved / "_analysis" / f"{analysis_kind}_out"
     cache_path = analysis_dir / f"{analysis_kind}_trace_cache.h5"
     if not cache_path.is_file():
@@ -629,9 +720,11 @@ def _load_completed_branch_review(
 
     metadata = _read_json(analysis_dir / "run_metadata.json")
     report = _read_json(analysis_dir / "run_report.json")
-    requested_by_roi, current_native = _validate_requested_provenance(
+    requested_by_roi, correction_native = _validate_requested_provenance(
         metadata, report, analysis_kind
     )
+    guided_current_native = guided_state == GUIDED_CURRENT_NATIVE_STATE_CURRENT_NATIVE
+    current_native = bool(correction_native or guided_current_native)
     if classification.is_current and not current_native:
         raise CompletedRunReviewError(
             f"The current {analysis_kind} result has no verified native correction settings."
@@ -645,7 +738,13 @@ def _load_completed_branch_review(
                 f"Completed result correction evidence could not be verified ({correction_error})."
             )
 
-    expected, processed = _load_sessions_index(resolved)
+    normalized_recording = _load_verified_normalized_recording(
+        resolved,
+        classification.run_mode,
+        required=guided_current_native,
+    )
+
+    expected, processed = _load_sessions_index(resolved, analysis_kind)
     processed_by_index = {
         int(record["index"]): record
         for record in processed
@@ -655,7 +754,19 @@ def _load_completed_branch_review(
     opener = open_phasic_cache if analysis_kind == "phasic" else open_tonic_cache
     with opener(str(cache_path)) as cache:
         cache_rois = [str(roi) for roi in list_cache_rois(cache)]
-        if current_native:
+        roi_inventory = (
+            tuple(normalized_recording.roi_channels)
+            if guided_current_native and normalized_recording is not None
+            else ()
+        )
+        if guided_current_native:
+            rois = [item.roi_id for item in roi_inventory if item.included]
+            if set(rois) != set(cache_rois):
+                raise CompletedRunReviewError(
+                    "Completed result cache ROI identities do not match the "
+                    "authorized normalized ROI inventory."
+                )
+        elif current_native:
             rois = [str(roi) for roi in requested_by_roi]
             if set(rois) != set(cache_rois):
                 raise CompletedRunReviewError("Completed result ROI identities do not match its correction settings.")
@@ -672,10 +783,61 @@ def _load_completed_branch_review(
             config_mode = str(config.get("dynamic_fit_mode", "")) if isinstance(config, dict) else ""
 
         sessions_by_roi: dict[str, list[CompletedReviewSession]] = {roi: [] for roi in rois}
-        expected_entries = sorted(
-            [entry for entry in expected if isinstance(entry, dict)],
-            key=lambda entry: int(entry.get("index", 0)),
-        )
+        c8_expected_by_index = {
+            int(entry["index"]): entry
+            for entry in expected
+            if isinstance(entry, dict) and isinstance(entry.get("index"), int)
+        }
+        if guided_current_native:
+            assert normalized_recording is not None
+            normalized_by_index = {
+                item.chronological_position: item
+                for item in normalized_recording.sessions
+            }
+            if set(normalized_by_index) != set(c8_expected_by_index):
+                raise CompletedRunReviewError(
+                    "Completed result C8 session accounting does not cover the "
+                    "normalized chronological session inventory."
+                )
+            normalized_entries: list[dict[str, Any]] = []
+            disposition_names = {
+                "process": DISPOSITION_PROCESS,
+                "missing": DISPOSITION_AUTHORIZED_MISSING,
+                "excluded": DISPOSITION_AUTHORIZED_EXCLUSION,
+            }
+            for session in normalized_recording.sessions:
+                c8_entry = c8_expected_by_index[session.chronological_position]
+                if not _same_source_identity(
+                    str(c8_entry.get("source", "")),
+                    session.canonical_source_reference,
+                ):
+                    raise CompletedRunReviewError(
+                        f"Completed result C8 source identity disagrees with normalized "
+                        f"session {session.chronological_position}."
+                    )
+                if c8_entry.get("disposition") != disposition_names[session.disposition]:
+                    raise CompletedRunReviewError(
+                        f"Completed result C8 disposition disagrees with normalized "
+                        f"session {session.chronological_position}."
+                    )
+                normalized_entries.append(
+                    {
+                        "index": session.chronological_position,
+                        "source": session.canonical_source_reference,
+                        "disposition": disposition_names[session.disposition],
+                        # Reason is an outcome/diagnostic owned by C8, not by
+                        # normalized recording provenance.
+                        "reason": c8_entry.get(
+                            "reason", c8_entry.get("failure_category", "")
+                        ),
+                    }
+                )
+            expected_entries = normalized_entries
+        else:
+            expected_entries = sorted(
+                [entry for entry in expected if isinstance(entry, dict)],
+                key=lambda entry: int(entry.get("index", 0)),
+            )
         using_cache_fallback = False
         if not expected_entries:
             # Preview/legacy fallback: expose cache chunks as processed sessions.
@@ -689,6 +851,26 @@ def _load_completed_branch_review(
             session_index = int(entry.get("index", 0))
             disposition = str(entry.get("disposition", DISPOSITION_PROCESS))
             processed_record = processed_by_index.get(session_index)
+            if guided_current_native:
+                if disposition == DISPOSITION_PROCESS:
+                    if processed_record is None:
+                        raise CompletedRunReviewError(
+                            f"Completed result is missing the processed C8 record for "
+                            f"normalized session {session_index}."
+                        )
+                    if not _same_source_identity(
+                        str(processed_record.get("source", "")),
+                        str(entry.get("source", "")),
+                    ):
+                        raise CompletedRunReviewError(
+                            f"Completed result processed C8 source disagrees with "
+                            f"normalized session {session_index}."
+                        )
+                elif processed_record is not None:
+                    raise CompletedRunReviewError(
+                        f"Completed result has an ordinary processed C8 record for "
+                        f"normalized non-processed session {session_index}."
+                    )
             chunk_id = (
                 int(processed_record["cache_chunk_id"])
                 if isinstance(processed_record, dict)
@@ -696,9 +878,12 @@ def _load_completed_branch_review(
                 else (session_index if using_cache_fallback else None)
             )
             source_file = str(
-                (processed_record or {}).get("source", entry.get("source", ""))
+                entry.get("source", "")
+                if guided_current_native
+                else (processed_record or {}).get("source", entry.get("source", ""))
             )
             reason = str(entry.get("reason", entry.get("failure_category", "")) or "")
+            processing_diagnostics = dict(processed_record or {})
             for roi in rois:
                 if disposition != DISPOSITION_PROCESS:
                     sessions_by_roi[roi].append(
@@ -716,6 +901,7 @@ def _load_completed_branch_review(
                             selected_strategy=(
                                 requested_by_roi.get(roi, {}).get("selected_strategy", "")
                             ),
+                            processing_diagnostics=processing_diagnostics,
                         )
                     )
                     continue
@@ -806,6 +992,7 @@ def _load_completed_branch_review(
                         fitted_reference=fit_ref,
                         production_f0_baseline=baseline,
                         signal_only_qc=qc,
+                        processing_diagnostics=processing_diagnostics,
                     )
                 )
 
@@ -825,6 +1012,8 @@ def _load_completed_branch_review(
                 roi: tuple(rows) for roi, rows in sessions_by_roi.items()
             }
         },
+        roi_inventory=roi_inventory,
+        normalized_recording=normalized_recording,
     )
 
 
@@ -870,6 +1059,19 @@ def load_completed_phasic_review(run_dir: str | Path) -> CompletedRunReviewModel
         )
     if set(tonic.rois) != set(phasic.rois):
         raise CompletedRunReviewError("Tonic and phasic ROI identities disagree.")
+    if (tonic.normalized_recording is None) != (phasic.normalized_recording is None):
+        raise CompletedRunReviewError(
+            "Tonic and phasic normalized recording provenance do not describe the "
+            "same completed analysis."
+        )
+    if (
+        tonic.normalized_recording is not None
+        and phasic.normalized_recording is not None
+        and tonic.normalized_recording != phasic.normalized_recording
+    ):
+        raise CompletedRunReviewError(
+            "Tonic and phasic normalized recording provenance disagree."
+        )
     # The existing UI remains phasic-primary for feature/result images, while
     # branch-qualified sessions preserve both canonical trace sets.
     return CompletedRunReviewModel(
@@ -885,4 +1087,6 @@ def load_completed_phasic_review(run_dir: str | Path) -> CompletedRunReviewModel
             "tonic": tonic.sessions_by_roi,
             "phasic": phasic.sessions_by_roi,
         },
+        roi_inventory=phasic.roi_inventory,
+        normalized_recording=phasic.normalized_recording,
     )
