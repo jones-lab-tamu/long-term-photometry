@@ -770,6 +770,15 @@ def test_guided_run_execution_moves_off_gui_thread_via_worker():
     assert "moveToThread" in worker_launch_source
 
 
+def test_run_button_has_one_authoritative_guarded_entry_point():
+    source = Path(inspect.getfile(MainWindow)).read_text(encoding="utf-8")
+    assert source.count(
+        "self._guided_run_btn.clicked.connect(\n"
+        "            self._on_guided_run_clicked_backend_guarded\n"
+        "        )"
+    ) == 1
+
+
 def test_run_worker_does_not_reference_main_window():
     """The worker must hold no MainWindow reference and touch no GUI state.
 

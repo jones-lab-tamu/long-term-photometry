@@ -80,14 +80,7 @@ def qapp():
 
 @pytest.fixture
 def window(qapp):
-    from photometry_pipeline.guided_execution_capabilities import (
-        GuidedExecutionCapabilities,
-    )
-    instance = MainWindow(
-        guided_execution_capabilities=GuidedExecutionCapabilities(
-            allow_signal_only_f0_execution=True
-        )
-    )
+    instance = MainWindow()
     yield instance
     instance.close()
     instance.deleteLater()

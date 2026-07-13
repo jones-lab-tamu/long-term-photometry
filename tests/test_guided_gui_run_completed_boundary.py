@@ -729,12 +729,11 @@ def test_real_gui_path_reaches_loadable_completed_run_and_reviews_it(
 def test_real_guided_native_correction_lifecycle_matrix(
     tmp_path, monkeypatch, qapp, case_name, analysis_mode, strategy_by_roi
 ):
-    """Real production lifecycle with only the final temporary gate enabled."""
+    """Real production lifecycle through ordinary production MainWindow
+    construction (native Signal-Only F0 is enabled by default; no
+    capability injection is needed or possible)."""
     from PySide6.QtCore import QSettings
     from gui.main_window import MainWindow
-    from photometry_pipeline.guided_execution_capabilities import (
-        GuidedExecutionCapabilities,
-    )
     import photometry_pipeline.guided_execution_request_builder as request_builder
     import photometry_pipeline.guided_production_mapping as production_mapping
     from tests.test_gui_guided_new_analysis_plan import (
@@ -743,9 +742,6 @@ def test_real_guided_native_correction_lifecycle_matrix(
 
     window = MainWindow(
         settings=QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
-        guided_execution_capabilities=GuidedExecutionCapabilities(
-            allow_signal_only_f0_execution=True
-        ),
     )
     try:
         _configure_real_analysis_duration_new_analysis_draft(
@@ -931,14 +927,17 @@ def test_real_guided_native_correction_lifecycle_matrix(
         window.close()
 
 
-@pytest.mark.parametrize("allow_signal_only", [False, True])
-def test_authoritative_signal_only_guard_rechecks_direct_run_action(
-    tmp_path, monkeypatch, qapp, allow_signal_only
+def test_direct_run_invocation_succeeds_for_native_signal_only_without_capability_injection(
+    tmp_path, monkeypatch, qapp
 ):
+    """Native Signal-Only F0 is enabled by production default: ordinary
+    MainWindow() construction, with no test-only capability injection,
+    must reach the guarded backend worker for a valid authorized
+    Signal-Only plan. The authoritative recheck inside
+    _on_guided_run_clicked_backend_guarded (readiness status, retained
+    request identity, authorization/outcome agreement) must still gate
+    the actual start."""
     from PySide6.QtCore import QSettings
-    from photometry_pipeline.guided_execution_capabilities import (
-        GuidedExecutionCapabilities,
-    )
     import photometry_pipeline.guided_execution_request_builder as request_builder
     import photometry_pipeline.guided_production_mapping as production_mapping
     from tests.test_gui_guided_new_analysis_plan import (
@@ -947,9 +946,6 @@ def test_authoritative_signal_only_guard_rechecks_direct_run_action(
 
     window = MainWindow(
         settings=QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
-        guided_execution_capabilities=GuidedExecutionCapabilities(
-            allow_signal_only_f0_execution=allow_signal_only
-        ),
     )
     try:
         _configure_real_analysis_duration_new_analysis_draft(
@@ -992,20 +988,8 @@ def test_authoritative_signal_only_guard_rechecks_direct_run_action(
 
         window._on_guided_run_clicked_backend_guarded()
 
-        if allow_signal_only:
-            assert starts == [retained]
-            assert window._guided_backend_execution_active is True
-        else:
-            assert starts == []
-            assert window._guided_backend_execution_active is False
-            assert window._guided_startup_transaction_request is retained
-            assert output_base.exists() is False
-            assert window._guided_run_readiness_label.text() == (
-                "This correction approach is not available to run yet."
-            )
-            assert window._guided_signal_only_execution_eligibility.category == (
-                "signal_only_f0_execution_not_available"
-            )
+        assert starts == [retained]
+        assert window._guided_backend_execution_active is True
     finally:
         window._guided_backend_execution_active = False
         window.close()
@@ -1015,9 +999,6 @@ def test_real_gui_run_refuses_native_payload_mutated_before_wrapper_claim(
     tmp_path, monkeypatch, qapp
 ):
     from PySide6.QtCore import QSettings
-    from photometry_pipeline.guided_execution_capabilities import (
-        GuidedExecutionCapabilities,
-    )
     import photometry_pipeline.guided_execution_request_builder as request_builder
     import photometry_pipeline.guided_production_mapping as production_mapping
     import photometry_pipeline.guided_startup_orchestration as startup_orchestration
@@ -1027,9 +1008,6 @@ def test_real_gui_run_refuses_native_payload_mutated_before_wrapper_claim(
 
     window = MainWindow(
         settings=QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
-        guided_execution_capabilities=GuidedExecutionCapabilities(
-            allow_signal_only_f0_execution=True
-        ),
     )
     try:
         _configure_real_analysis_duration_new_analysis_draft(
@@ -1095,9 +1073,6 @@ def test_real_gui_analysis_mode_changes_invalidate_authorization_identity(
     tmp_path, monkeypatch, qapp
 ):
     from PySide6.QtCore import QSettings
-    from photometry_pipeline.guided_execution_capabilities import (
-        GuidedExecutionCapabilities,
-    )
     import photometry_pipeline.guided_execution_request_builder as request_builder
     import photometry_pipeline.guided_production_mapping as production_mapping
     from tests.test_gui_guided_new_analysis_plan import (
@@ -1106,9 +1081,6 @@ def test_real_gui_analysis_mode_changes_invalidate_authorization_identity(
 
     window = MainWindow(
         settings=QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat),
-        guided_execution_capabilities=GuidedExecutionCapabilities(
-            allow_signal_only_f0_execution=True
-        ),
     )
     try:
         _configure_real_analysis_duration_new_analysis_draft(

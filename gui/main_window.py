@@ -1687,7 +1687,6 @@ class MainWindow(QMainWindow):
         self,
         parent=None,
         settings: QSettings | None = None,
-        guided_execution_capabilities=None,
     ):
         super().__init__(parent)
         self.setWindowTitle(self.WINDOW_TITLE_BASE)
@@ -1696,20 +1695,6 @@ class MainWindow(QMainWindow):
 
         # Settings (injectable for testing)
         self._settings = settings if settings is not None else QSettings()
-        from photometry_pipeline.guided_execution_capabilities import (
-            GuidedExecutionCapabilities,
-            PRODUCTION_GUIDED_EXECUTION_CAPABILITIES,
-        )
-        capabilities = (
-            PRODUCTION_GUIDED_EXECUTION_CAPABILITIES
-            if guided_execution_capabilities is None
-            else guided_execution_capabilities
-        )
-        if not isinstance(capabilities, GuidedExecutionCapabilities):
-            raise TypeError(
-                "guided_execution_capabilities must be GuidedExecutionCapabilities"
-            )
-        self._guided_execution_capabilities = capabilities
 
         from photometry_pipeline.config import Config
         self._default_cfg = Config()
@@ -11113,50 +11098,22 @@ class MainWindow(QMainWindow):
         self._guided_run_readiness = result
         button = getattr(self, "_guided_run_btn", None)
         label = getattr(self, "_guided_run_readiness_label", None)
+        ready = (
+            result.status == "ready_hidden"
+            and result.ready is True
+            and not getattr(self, "_guided_backend_execution_active", False)
+            and getattr(self, "_guided_backend_execution_result", None)
+            is None
+        )
         if button is not None:
-            from photometry_pipeline.guided_execution_capabilities import (
-                evaluate_guided_signal_only_execution_eligibility,
-            )
-            plan = self._build_guided_new_analysis_draft_plan()
-            eligibility = evaluate_guided_signal_only_execution_eligibility(
-                (
-                    choice.selected_strategy
-                    for choice in plan.per_roi_correction_strategy_choices
-                    if choice.roi_id in set(plan.included_roi_ids)
-                ),
-                self._guided_execution_capabilities,
-            )
-            temporary_signal_only_refusal = not eligibility.allowed
-            ready = (
-                result.status == "ready_hidden"
-                and result.ready is True
-                and not getattr(
-                    self, "_guided_backend_execution_active", False
-                )
-                and getattr(
-                    self, "_guided_backend_execution_result", None
-                )
-                is None
-                and not temporary_signal_only_refusal
-            )
             button.setEnabled(ready)
             button.setToolTip(
-                (
-                    "Guided Run is ready to start."
-                )
+                "Guided Run is ready to start."
                 if ready
-                else (
-                    eligibility.user_message
-                    if temporary_signal_only_refusal
-                    else result.user_summary
-                )
-            )
-        if label is not None:
-            label.setText(
-                eligibility.user_message
-                if button is not None and temporary_signal_only_refusal
                 else result.user_summary
             )
+        if label is not None:
+            label.setText(result.user_summary)
 
     def _current_guided_startup_transaction_request(self):
         """Return only a retained request bound to the current ready state."""
@@ -11184,25 +11141,6 @@ class MainWindow(QMainWindow):
     def _on_guided_run_clicked_backend_guarded(self) -> None:
         """Recheck readiness and start the Guided backend adapter off the GUI thread."""
         self._refresh_guided_run_readiness_display()
-        from photometry_pipeline.guided_execution_capabilities import (
-            evaluate_guided_signal_only_execution_eligibility,
-        )
-
-        plan = self._build_guided_new_analysis_draft_plan()
-        eligibility = evaluate_guided_signal_only_execution_eligibility(
-            (
-                choice.selected_strategy
-                for choice in plan.per_roi_correction_strategy_choices
-                if choice.roi_id in set(plan.included_roi_ids)
-            ),
-            self._guided_execution_capabilities,
-        )
-        self._guided_signal_only_execution_eligibility = eligibility
-        if not eligibility.allowed:
-            label = getattr(self, "_guided_run_readiness_label", None)
-            if label is not None:
-                label.setText(eligibility.user_message)
-            return
         readiness = getattr(self, "_guided_run_readiness", None)
         if not (
             getattr(readiness, "status", None) == "ready_hidden"
