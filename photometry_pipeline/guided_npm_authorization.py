@@ -468,6 +468,65 @@ def compute_guided_npm_execution_authorization_identity(
     )
 
 
+def verify_guided_npm_execution_authorization(
+    authorization: GuidedNpmExecutionAuthorization,
+) -> None:
+    """Reverify the complete immutable B2-C3 contract without filesystem I/O."""
+    if type(authorization) is not GuidedNpmExecutionAuthorization:
+        raise ValueError("authorization_type_invalid")
+    try:
+        files = authorization.verified_source_snapshot.ordered_files
+        for verified in files:
+            replace(verified)
+            if compute_guided_npm_verified_source_file_identity(verified) != (
+                verified.canonical_verified_file_identity
+            ):
+                raise ValueError("verified_source_file_identity_mismatch")
+        snapshot = authorization.verified_source_snapshot
+        replace(snapshot)
+        if compute_guided_npm_verified_source_sequence_identity(files) != (
+            snapshot.ordered_file_sequence_identity
+        ):
+            raise ValueError("verified_source_sequence_identity_mismatch")
+        if compute_guided_npm_verified_source_set_identity(files) != (
+            snapshot.source_set_identity
+        ):
+            raise ValueError("verified_source_set_identity_mismatch")
+        if compute_guided_npm_verified_source_content_identity(files) != (
+            snapshot.source_content_identity
+        ):
+            raise ValueError("verified_source_content_identity_mismatch")
+        if compute_guided_npm_verified_source_snapshot_identity(snapshot) != (
+            snapshot.canonical_verified_snapshot_identity
+        ):
+            raise ValueError("verified_source_snapshot_identity_mismatch")
+        if authorization.source_root_canonical != snapshot.source_root_canonical:
+            raise ValueError("authorization_source_root_mismatch")
+        expected_build = build_application_build_identity(
+            distribution_name=authorization.application_build_identity.distribution_name,
+            distribution_version=authorization.application_build_identity.distribution_version,
+            source_revision_kind=authorization.application_build_identity.source_revision_kind,
+            source_revision=authorization.application_build_identity.source_revision,
+            source_tree_state=authorization.application_build_identity.source_tree_state,
+            source_tree_digest=authorization.application_build_identity.source_tree_digest,
+            build_artifact_digest=authorization.application_build_identity.build_artifact_digest,
+            identity_provider_version=(
+                authorization.application_build_identity.identity_provider_version
+            ),
+        )
+        if expected_build != authorization.application_build_identity:
+            raise ValueError("application_build_identity_mismatch")
+        replace(authorization)
+        if compute_guided_npm_execution_authorization_identity(authorization) != (
+            authorization.canonical_authorization_identity
+        ):
+            raise ValueError("authorization_identity_mismatch")
+    except (AttributeError, TypeError, ValueError) as exc:
+        if isinstance(exc, ValueError):
+            raise
+        raise ValueError("authorization_contract_invalid") from exc
+
+
 def _check_cancellation(cancellation_check: Callable[[], bool] | None) -> None:
     if cancellation_check is not None and cancellation_check():
         _refuse(
