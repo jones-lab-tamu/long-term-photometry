@@ -2359,3 +2359,20 @@ def deserialize_guided_npm_execution_authority(
         if str(exc) == "authority_serialization_invalid":
             raise
         raise ValueError("authority_serialization_invalid") from exc
+
+
+def verify_guided_npm_execution_authority(
+    authority: GuidedNpmExecutionAuthority,
+) -> None:
+    """Reverify the complete immutable B2-C2 authority contract in memory.
+
+    The round trip deliberately reconstructs every frozen nested dataclass so
+    callers do not need to duplicate B2-C2's identity or invariant checks.
+    This helper performs no filesystem I/O.
+    """
+    if type(authority) is not GuidedNpmExecutionAuthority:
+        raise ValueError("authority_type_invalid")
+    payload = serialize_guided_npm_execution_authority(authority)
+    restored = deserialize_guided_npm_execution_authority(payload)
+    if restored != authority:
+        raise ValueError("authority_round_trip_mismatch")
