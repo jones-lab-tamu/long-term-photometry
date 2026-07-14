@@ -12,6 +12,7 @@ from ..config import Config
 from ..core.types import Chunk, SessionTimeMetadata
 from ..core.utils import natural_sort_key
 from .rwd_chronology import RwdChronologyError, order_rwd_session_candidates
+from .npm_contract import NpmParserContract, resolve_npm_support_geometry
 from dataclasses import asdict
 import pathlib
 import logging
@@ -543,6 +544,7 @@ def _require_strict_check(
     target_fs_hz: float,
     context: str,
     coverage_tol_sec: Optional[float] = None,
+    grid_start_sec: float = 0.0,
 ):
     """
     Strict Mode Checks:
@@ -566,8 +568,8 @@ def _require_strict_check(
     if coverage_tol_sec is not None and np.isfinite(coverage_tol_sec) and coverage_tol_sec > 0.0:
         tol = max(tol, float(coverage_tol_sec))
     
-    if raw_start > (0.0 + tol):
-        raise ValueError(f"{context}: raw_start {raw_start:.4f}s > 0.0s (Start Coverage Failure)")
+    if raw_start > (grid_start_sec + tol):
+        raise ValueError(f"{context}: raw_start {raw_start:.4f}s > {grid_start_sec:.4f}s (Start Coverage Failure)")
         
     if raw_end < (grid_end - tol):
         raise ValueError(f"{context}: raw_end {raw_end:.4f}s < grid_end {grid_end:.4f}s (End Coverage Failure)")
@@ -672,6 +674,9 @@ def _resolve_npm_strict_grid(
             f"fs={config.target_fs_hz})"
         )
 
+    # The grid is relative to the UV/signal overlap origin.  In particular,
+    # it is intentionally not re-zeroed to inner_start: staggered streams
+    # may therefore produce a first output time greater than zero.
     time_sec = np.arange(first_sample, last_sample + 1, dtype=float) / fs
     return time_sec, overlap_start, support_tol
 
@@ -1949,177 +1954,119 @@ def _load_custom_tabular(path: str, config: Config, chunk_id: int) -> Chunk:
 
 def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
     df = pd.read_csv(path)
-    
-    time_col = _resolve_npm_time_col([str(c) for c in df.columns], config)
-    expected_time_col = (
-        config.npm_system_ts_col
-        if config.npm_time_axis == 'system_timestamp'
-        else config.npm_computer_ts_col
+    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+    contract = NpmParserContract.from_config(
+        config, session_duration_sec=float(config.chunk_duration_sec)
+    )
+    time_col = next(
+        (candidate for candidate in contract.timestamp_column_candidates if candidate in df.columns),
+        None,
     )
     if time_col is None:
-        raise ValueError(f"NPM: Missing {expected_time_col}")
-    if config.npm_led_col not in df.columns: raise ValueError(f"NPM: Missing {config.npm_led_col}")
-        
-    t_full = df[time_col].values
-    led = df[config.npm_led_col].values
-    mask_uv = (led == 1)
-    mask_sig = (led == 2)
+        raise ValueError(f"NPM: Missing {contract.timestamp_column_candidates[0]}")
+    if contract.npm_led_col not in df.columns:
+        raise ValueError(f"NPM: Missing {contract.npm_led_col}")
+
+    t_full = pd.to_numeric(df[time_col], errors="coerce").to_numpy(dtype=float)
+    led = pd.to_numeric(df[contract.npm_led_col], errors="coerce").to_numpy(dtype=float)
+    mask_uv = led == 1
+    mask_sig = led == 2
     t_uv = t_full[mask_uv]
     t_sig = t_full[mask_sig]
-    
-    if len(t_uv) < 2 or len(t_sig) < 2: raise ValueError("NPM: Insufficient data")
-    
-    roi_cols = [
-        c for c in df.columns
-        if c.startswith(config.npm_region_prefix) and c.endswith(config.npm_region_suffix)
-    ]
-    roi_cols.sort(key=lambda c: _npm_roi_sort_key(c, config.npm_region_prefix, config.npm_region_suffix))
-    if not roi_cols: raise ValueError("NPM: No Region columns")
-        
+    if t_uv.size < 2 or t_sig.size < 2:
+        raise ValueError("NPM: Insufficient data")
+
+    roi_cols = sorted(
+        [
+            c for c in df.columns
+            if c.startswith(contract.npm_region_prefix)
+            and c.endswith(contract.npm_region_suffix)
+        ],
+        key=lambda c: _npm_roi_sort_key(c, contract.npm_region_prefix, contract.npm_region_suffix),
+    )
+    if not roi_cols:
+        raise ValueError("NPM: No Region columns")
     n_rois = len(roi_cols)
     names = _create_canonical_names(n_rois)
     roi_map = {names[i]: {"raw_col": c} for i, c in enumerate(roi_cols)}
-    
-    uv_vals = df.loc[mask_uv, roi_cols].values
-    sig_vals = df.loc[mask_sig, roi_cols].values
-    
+    uv_vals = df.loc[mask_uv, roi_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    sig_vals = df.loc[mask_sig, roi_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
     n_value_nans_uv = 0
     n_value_nans_sig = 0
-    
-    if not config.allow_partial_final_chunk:
-        # Strict Mode Logic
-        
-        # 1. Finite Filtering & Minimum Data Check
-        t_uv_f = t_uv[np.isfinite(t_uv)]
-        t_sig_f = t_sig[np.isfinite(t_sig)]
-        
-        if len(t_uv_f) < 2 or len(t_sig_f) < 2:
-            raise ValueError("NPM: Insufficient data")
-            
-        # 2. Strict Monotonicity Check (Pre-Align)
-        if np.any(np.diff(t_uv_f) <= 0):
-            raise ValueError("NPM UV strict (pre-align): Timestamps not strictly increasing")
-        if np.any(np.diff(t_sig_f) <= 0):
-            raise ValueError("NPM SIG strict (pre-align): Timestamps not strictly increasing")
-            
-        # 3. Compute t0 using EARLIEST validated timestamps
-        t0 = max(float(np.nanmin(t_uv_f)), float(np.nanmin(t_sig_f)))
-        
-        # 4. Relative Time (Safe because strict increasing verified)
-        t_uv_rel = t_uv - t0
-        t_sig_rel = t_sig - t0
-        
-        # Build strict grid from actual common UV/SIG support window.
-        time_sec, overlap_start, support_tol = _resolve_npm_strict_grid(t_uv_rel, t_sig_rel, config)
-        n_target = time_sec.size
-        grid_end = time_sec[-1]
-        t_uv_rel_use = t_uv_rel - overlap_start
-        t_sig_rel_use = t_sig_rel - overlap_start
-        
-        # Filter -> Check -> Interp
-        # 1. Create strict-valid masks (No negative times, no far-future times)
-        tol = support_tol * 2.0  # Allow enough bounding points for interpolation
-        mask_uv_ok = np.isfinite(t_uv_rel_use) & (t_uv_rel_use >= 0.0) & (t_uv_rel_use <= grid_end + tol)
-        mask_sig_ok = np.isfinite(t_sig_rel_use) & (t_sig_rel_use >= 0.0) & (t_sig_rel_use <= grid_end + tol)
-        
-        t_uv_use = t_uv_rel_use[mask_uv_ok]
-        uv_use = uv_vals[mask_uv_ok, :]
-        
-        t_sig_use = t_sig_rel_use[mask_sig_ok]
-        sig_use = sig_vals[mask_sig_ok, :]
-        
-        # 2. Strict Check on USED arrays
-        _require_strict_check(
-            t_uv_use, time_sec, config.target_fs_hz, "NPM UV strict", coverage_tol_sec=support_tol
-        )
-        _require_strict_check(
-            t_sig_use, time_sec, config.target_fs_hz, "NPM SIG strict", coverage_tol_sec=support_tol
-        )
-        
-        # 3. Interpolate ONLY using filtered arrays
-        uv_out = np.zeros((n_target, n_rois))
-        sig_out = np.zeros((n_target, n_rois))
-        
-        for i in range(n_rois):
-            uv_val, nans_uv = _interp_with_nan_policy(time_sec, t_uv_use, uv_use[:, i], config, i, "UV")
-            uv_out[:, i] = uv_val
-            n_value_nans_uv += nans_uv
-            
-            sig_val, nans_sig = _interp_with_nan_policy(time_sec, t_sig_use, sig_use[:, i], config, i, "SIG")
-            sig_out[:, i] = sig_val
-            n_value_nans_sig += nans_sig
-            
-    else:
-        # Permissive Mode (Original/Fallback)
-        
-        # C: Finite-Safe Permissive Check
-        mask_uv_fin = np.isfinite(t_uv)
-        mask_sig_fin = np.isfinite(t_sig)
-        
-        t_uv_f = t_uv[mask_uv_fin]
-        t_sig_f = t_sig[mask_sig_fin]
-        
-        if len(t_uv_f) < 2 or len(t_sig_f) < 2:
-             raise ValueError(f"NPM Permissive: Insufficient finite data in {path}")
+    geometry = resolve_npm_support_geometry(t_uv, t_sig, contract)
 
-        if np.any(np.diff(t_uv_f) <= 0):
-             raise ValueError(f"NPM Permissive: UV timestamps not strictly increasing (finite subset) in {path}")
-        if np.any(np.diff(t_sig_f) <= 0):
-             raise ValueError(f"NPM Permissive: SIG timestamps not strictly increasing (finite subset) in {path}")
-
-        # Overlap uses validated finite starts
-        t0 = max(t_uv_f[0], t_sig_f[0])
-        
-        # Grid Construction - clamp to actual usable support
-        # The idealized grid length is chunk_duration_sec * target_fs_hz, but the
-        # actual raw data may end earlier.  Using the idealized length produces
-        # trailing NaN via np.interp(right=np.nan) for any grid point past the
-        # last raw timestamp.  Clamp to the shared UV/SIG support so the
-        # resampled chunk contains only interpolatable samples.
-        n_target_ideal = int(np.round(config.chunk_duration_sec * config.target_fs_hz))
-        uv_max_rel = t_uv_f[-1] - t0
-        sig_max_rel = t_sig_f[-1] - t0
-        support_end = min(uv_max_rel, sig_max_rel)
-        if support_end <= 0.0:
-            raise ValueError(
-                f"NPM Permissive: No usable support after t0 alignment "
-                f"(uv_end={uv_max_rel:.4f}s, sig_end={sig_max_rel:.4f}s)"
-            )
-        n_target_support = int(np.floor(support_end * config.target_fs_hz)) + 1
-        n_target = min(n_target_ideal, n_target_support)
-        if n_target < 1:
-            raise ValueError(
-                f"NPM Permissive: Usable support too short for interpolation "
-                f"(support_end={support_end:.4f}s, n_target={n_target})"
-            )
-        time_sec = np.arange(n_target) / config.target_fs_hz
-        
-        # Interpolate
-        uv_out = np.zeros((n_target, n_rois))
-        sig_out = np.zeros((n_target, n_rois))
-        
-        # Prepare relative arrays from FULL (non-finite preserved for shape? No, interp needs valid xp)
-        # Actually interp needs xp to be increasing. Non-finite in xp breaks it?
-        # Standard np.interp expects increasing xp.
-        # So we MUST use t_uv_f for xp. And corresponding values.
-        
-        uv_vals_f = uv_vals[mask_uv_fin]
-        sig_vals_f = sig_vals[mask_sig_fin]
-        
+    if not contract.allow_partial_final_chunk:
+        t_uv_f_mask = np.isfinite(t_uv)
+        t_sig_f_mask = np.isfinite(t_sig)
+        t_uv_f = t_uv[t_uv_f_mask]
+        t_sig_f = t_sig[t_sig_f_mask]
+        uv_vals_f = uv_vals[t_uv_f_mask, :]
+        sig_vals_f = sig_vals[t_sig_f_mask, :]
+        if not np.all(np.isfinite(uv_vals_f)) or not np.all(np.isfinite(sig_vals_f)):
+            raise ValueError("NPM strict: ROI values contain non-finite values")
+        t0 = max(float(t_uv_f[0]), float(t_sig_f[0]))
         t_uv_rel = t_uv_f - t0
         t_sig_rel = t_sig_f - t0
-        
+        time_sec, overlap_start, support_tol = _resolve_npm_strict_grid(
+            t_uv_rel, t_sig_rel, config
+        )
+        grid_start = float(time_sec[0])
+        grid_end = float(time_sec[-1])
+        t_uv_rel_use = t_uv_rel - overlap_start
+        t_sig_rel_use = t_sig_rel - overlap_start
+        tol = support_tol * 2.0
+        mask_uv_ok = (t_uv_rel_use >= grid_start - tol) & (t_uv_rel_use <= grid_end + tol)
+        mask_sig_ok = (t_sig_rel_use >= grid_start - tol) & (t_sig_rel_use <= grid_end + tol)
+        t_uv_use = t_uv_rel_use[mask_uv_ok]
+        sig_use = sig_vals_f[mask_sig_ok, :]
+        t_sig_use = t_sig_rel_use[mask_sig_ok]
+        uv_use = uv_vals_f[mask_uv_ok, :]
+        _require_strict_check(
+            t_uv_use, time_sec, config.target_fs_hz, "NPM UV strict",
+            coverage_tol_sec=support_tol, grid_start_sec=grid_start,
+        )
+        _require_strict_check(
+            t_sig_use, time_sec, config.target_fs_hz, "NPM SIG strict",
+            coverage_tol_sec=support_tol, grid_start_sec=grid_start,
+        )
+        uv_out = np.zeros((time_sec.size, n_rois), dtype=float)
+        sig_out = np.zeros((time_sec.size, n_rois), dtype=float)
         for i in range(n_rois):
-            # UV
-            uv_val, nans_uv = _interp_with_nan_policy(time_sec, t_uv_rel, uv_vals_f[:, i], config, i, "UV")
-            uv_out[:, i] = uv_val
+            uv_out[:, i], nans_uv = _interp_with_nan_policy(
+                time_sec, t_uv_use, uv_use[:, i], config, i, "UV"
+            )
+            sig_out[:, i], nans_sig = _interp_with_nan_policy(
+                time_sec, t_sig_use, sig_use[:, i], config, i, "SIG"
+            )
             n_value_nans_uv += nans_uv
-            
-            # SIG
-            sig_val, nans_sig = _interp_with_nan_policy(time_sec, t_sig_rel, sig_vals_f[:, i], config, i, "SIG")
-            sig_out[:, i] = sig_val
             n_value_nans_sig += nans_sig
-        
+    else:
+        t_uv_f_mask = np.isfinite(t_uv)
+        t_sig_f_mask = np.isfinite(t_sig)
+        t_uv_f = t_uv[t_uv_f_mask]
+        t_sig_f = t_sig[t_sig_f_mask]
+        uv_vals_f = uv_vals[t_uv_f_mask, :]
+        sig_vals_f = sig_vals[t_sig_f_mask, :]
+        t0 = max(float(t_uv_f[0]), float(t_sig_f[0]))
+        support_end = min(float(t_uv_f[-1] - t0), float(t_sig_f[-1] - t0))
+        n_target_ideal = int(np.round(config.chunk_duration_sec * config.target_fs_hz))
+        n_target_support = int(np.floor(support_end * config.target_fs_hz)) + 1
+        n_target = min(n_target_ideal, n_target_support)
+        if support_end <= 0.0 or n_target < 1:
+            raise ValueError("NPM Permissive: No usable support after t0 alignment")
+        time_sec = np.arange(n_target, dtype=float) / config.target_fs_hz
+        uv_out = np.zeros((n_target, n_rois), dtype=float)
+        sig_out = np.zeros((n_target, n_rois), dtype=float)
+        for i in range(n_rois):
+            uv_out[:, i], nans_uv = _interp_with_nan_policy(
+                time_sec, t_uv_f - t0, uv_vals_f[:, i], config, i, "UV"
+            )
+            sig_out[:, i], nans_sig = _interp_with_nan_policy(
+                time_sec, t_sig_f - t0, sig_vals_f[:, i], config, i, "SIG"
+            )
+            n_value_nans_uv += nans_uv
+            n_value_nans_sig += nans_sig
+
     chunk = Chunk(
         chunk_id=chunk_id,
         source_file=path,
@@ -2133,9 +2080,17 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
             "roi_map": roi_map,
             "n_value_nans_uv": int(n_value_nans_uv),
             "n_value_nans_sig": int(n_value_nans_sig),
-            "adapter_value_nan_policy": getattr(config, 'adapter_value_nan_policy', 'strict')
+            "adapter_value_nan_policy": getattr(config, "adapter_value_nan_policy", "strict"),
+            "npm_resolved_timestamp_column": time_col,
+            "npm_timestamp_unit": "seconds",
+            "npm_output_time_basis": "relative_seconds_since_uv_signal_overlap_origin",
+            "npm_overlap_origin_absolute": float(geometry["overlap_origin_absolute"]),
+            "npm_resolved_support_start_offset_sec": float(geometry["inner_start_rel_overlap"]),
+            "npm_resolved_support_end_offset_sec": float(geometry["inner_end_rel_overlap"]),
+            "npm_resolved_support_start_absolute": float(geometry["resolved_support_start_absolute"]),
+            "npm_resolved_support_end_absolute": float(geometry["resolved_support_end_absolute"]),
+            "npm_observed_duration_sec": float(geometry["observed_duration_sec"]),
+            "npm_support_policy": contract.support_policy,
         }
     )
-    # chunk.validate() moved to load_chunk
-    # chunk.validate() moved to load_chunk
     return chunk

@@ -1,6 +1,7 @@
 """Shared, format-neutral normalized recording description (B1).
 
-Format-specific adapters (currently: RWD only) populate one shared model.
+Format-specific adapters (currently: RWD and the authorized intermittent NPM
+adapter) populate one shared model.
 Downstream Guided code that only needs the *scientific* facts of a
 recording -- session order, timing, ROI/channel identity, sampling -- can
 consume this model instead of re-deriving RWD folder-naming, NPM
@@ -14,9 +15,9 @@ candidate order already comes from ``io.rwd_chronology``) and the existing
 folder-timestamp parser (``input_processing_completeness.resolve_session_start_time``)
 rather than re-parsing or re-sorting anything.
 
-Only RWD is implemented. NPM and custom-tabular adapters are out of scope
-for this milestone; ``SUPPORTED_ADAPTER_FORMATS`` is the single place a
-future adapter would register itself.
+Custom-tabular adapters remain out of scope for this milestone;
+``SUPPORTED_ADAPTER_FORMATS`` is the single place a future adapter would
+register itself.
 
 Identity rule (resolves the A2-noted ambiguity): this schema uses
 **implementation-bound identity** (Option A). The canonical identity
@@ -38,7 +39,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import hashlib
+import json
 import os
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from photometry_pipeline.guided_identity import encode_canonical_value
@@ -55,6 +58,11 @@ NORMALIZED_RECORDING_SCHEMA_NAME = "guided_normalized_recording_description"
 NORMALIZED_RECORDING_SCHEMA_VERSION = "v1"
 NORMALIZED_RECORDING_IDENTITY_DOMAIN = "guided-normalized-recording-description:v1"
 RWD_ADAPTER_CONTRACT_VERSION = "rwd_normalized_recording_adapter.v1"
+NPM_ADAPTER_CONTRACT_VERSION = "npm_normalized_recording_adapter.v1"
+NPM_PARSER_CONTRACT_SCHEMA_NAME = "npm_normalized_parser_contract"
+NPM_PARSER_CONTRACT_SCHEMA_VERSION = "v1"
+NPM_PARSER_CONTRACT_DIGEST_DOMAIN = "npm-normalized-parser-contract:v1"
+NPM_OUTPUT_TIME_BASIS = "relative_seconds_since_uv_signal_overlap_origin"
 
 # Where an RWD session's authoritative_source_start_time evidence came
 # from. Today there is exactly one supported source; the field exists so a
@@ -73,7 +81,62 @@ _SESSION_DISPOSITIONS = frozenset(
 # custom-tabular adapter registers here and supplies its own
 # build_<format>_normalized_recording_description function; nothing else
 # in this module needs to change.
-SUPPORTED_ADAPTER_FORMATS = ("rwd",)
+SUPPORTED_ADAPTER_FORMATS = ("rwd", "npm")
+
+
+def _canonical_parser_content(value: Any) -> Any:
+    """Copy parser policy into recursively immutable canonical containers."""
+    if value is None or isinstance(value, (str, bool, int, float)):
+        if isinstance(value, float) and not value == value:
+            raise NormalizedRecordingError(
+                "parser_contract_content_invalid",
+                "NPM parser policy cannot contain non-finite numbers.",
+            )
+        if isinstance(value, float) and value in (float("inf"), float("-inf")):
+            raise NormalizedRecordingError(
+                "parser_contract_content_invalid",
+                "NPM parser policy cannot contain non-finite numbers.",
+            )
+        return value
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise NormalizedRecordingError(
+                "parser_contract_content_invalid",
+                "NPM parser policy object keys must be strings.",
+            )
+        return MappingProxyType(
+            {key: _canonical_parser_content(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_canonical_parser_content(item) for item in value)
+    raise NormalizedRecordingError(
+        "parser_contract_content_invalid",
+        "NPM parser policy contains an unsupported value type.",
+        received_type=type(value).__name__,
+    )
+
+
+def _thaw_parser_content(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_parser_content(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_parser_content(item) for item in value]
+    return value
+
+
+def compute_npm_parser_contract_digest(content: Mapping[str, Any]) -> str:
+    """Digest the complete, canonical NPM parser policy content."""
+    if not isinstance(content, Mapping):
+        raise NormalizedRecordingError(
+            "parser_contract_content_invalid",
+            "NPM parser policy content must be an object.",
+        )
+    encoded = encode_canonical_value(_thaw_parser_content(content))
+    return hashlib.sha256(
+        NPM_PARSER_CONTRACT_DIGEST_DOMAIN.encode("utf-8")
+        + b"\x00"
+        + encoded
+    ).hexdigest()
 
 
 class NormalizedRecordingError(ValueError):
@@ -166,6 +229,7 @@ class NormalizedRoiChannel:
     included: bool
     signal_channel_identity: str
     reference_channel_identity: str
+    source_column: str | None = None
 
     def __post_init__(self) -> None:
         if not self.roi_id:
@@ -189,6 +253,10 @@ class NormalizedSamplingContract:
     # acquisition contract carries it.  It remains optional for older
     # format-neutral/unit-test descriptions that predate this field.
     target_fs_hz: float | None = None
+    # NPM's complete historical parser policy is part of the normalized
+    # sampling contract.  RWD descriptions intentionally leave this absent
+    # so their serialized bytes and identity remain backward-compatible.
+    parser_contract_content: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.time_basis:
@@ -198,6 +266,37 @@ class NormalizedSamplingContract:
                 "invalid_parser_contract_identity",
                 "parser_contract_identity is required.",
             )
+        if self.parser_contract_content is not None:
+            if not isinstance(self.parser_contract_content, Mapping):
+                raise NormalizedRecordingError(
+                    "parser_contract_content_invalid",
+                    "NPM parser policy content must be an object.",
+                )
+            content = _canonical_parser_content(self.parser_contract_content)
+            if content.get("schema_name") != NPM_PARSER_CONTRACT_SCHEMA_NAME:
+                raise NormalizedRecordingError(
+                    "unsupported_parser_policy_schema",
+                    "Unsupported NPM parser policy schema.",
+                )
+            if content.get("schema_version") != NPM_PARSER_CONTRACT_SCHEMA_VERSION:
+                raise NormalizedRecordingError(
+                    "unsupported_parser_policy_version",
+                    "Unsupported NPM parser policy version.",
+                )
+            if not isinstance(content.get("sampling"), Mapping):
+                raise NormalizedRecordingError(
+                    "parser_contract_content_invalid",
+                    "NPM parser policy must contain a sampling object.",
+                )
+            expected_digest = compute_npm_parser_contract_digest(content)
+            if self.parser_contract_identity != expected_digest:
+                raise NormalizedRecordingError(
+                    "parser_contract_content_digest_mismatch",
+                    "NPM parser policy content does not match its digest.",
+                    expected_digest=expected_digest,
+                    received_digest=self.parser_contract_identity,
+                )
+            object.__setattr__(self, "parser_contract_content", content)
 
 
 @dataclass(frozen=True)
@@ -304,6 +403,111 @@ class NormalizedRecordingDescription:
             raise NormalizedRecordingError(
                 "no_included_roi", "At least one ROI must be included."
             )
+        if self.adapter_format == "npm":
+            parser_sampling = self.sampling.parser_contract_content.get(
+                "sampling"
+            ) if isinstance(self.sampling.parser_contract_content, Mapping) else None
+            authorized_led_column = (
+                parser_sampling.get("led_column")
+                if isinstance(parser_sampling, Mapping)
+                else None
+            )
+            authorized_led_values = (
+                parser_sampling.get("led_values")
+                if isinstance(parser_sampling, Mapping)
+                else None
+            )
+            if (
+                not isinstance(authorized_led_column, str)
+                or not authorized_led_column
+                or not isinstance(authorized_led_values, Mapping)
+                or isinstance(authorized_led_values.get("uv"), bool)
+                or not isinstance(authorized_led_values.get("uv"), int)
+                or isinstance(authorized_led_values.get("signal"), bool)
+                or not isinstance(authorized_led_values.get("signal"), int)
+            ):
+                raise NormalizedRecordingError(
+                    "invalid_channel_pairing",
+                    "NPM parser policy does not contain authorized LED selector facts.",
+                )
+            raw_mapping = self.adapter_evidence.get(
+                "physical_to_canonical_roi_mapping"
+            )
+            if not isinstance(raw_mapping, (list, tuple)) or not raw_mapping:
+                raise NormalizedRecordingError(
+                    "npm_physical_roi_mapping_missing",
+                    "NPM normalized recording is missing its frozen physical ROI mapping.",
+                )
+            frozen_mapping: list[tuple[str, str]] = []
+            for item in raw_mapping:
+                if not isinstance(item, Mapping):
+                    raise NormalizedRecordingError(
+                        "npm_physical_roi_mapping_invalid",
+                        "NPM physical ROI mapping entries must be objects.",
+                    )
+                canonical_roi_id = item.get("canonical_roi_id")
+                physical_source_column = item.get("physical_source_column")
+                if (
+                    not isinstance(canonical_roi_id, str)
+                    or not canonical_roi_id
+                    or not isinstance(physical_source_column, str)
+                    or not physical_source_column
+                ):
+                    raise NormalizedRecordingError(
+                        "npm_physical_roi_mapping_invalid",
+                        "NPM physical ROI mapping entries must identify both ROI forms.",
+                    )
+                frozen_mapping.append(
+                    (canonical_roi_id, physical_source_column)
+                )
+            if (
+                len({canonical for canonical, _physical in frozen_mapping})
+                != len(frozen_mapping)
+                or len({physical for _canonical, physical in frozen_mapping})
+                != len(frozen_mapping)
+                or tuple(canonical for canonical, _physical in frozen_mapping)
+                != tuple(channel.roi_id for channel in self.roi_channels)
+            ):
+                raise NormalizedRecordingError(
+                    "npm_physical_roi_mapping_mismatch",
+                    "NPM frozen physical ROI mapping does not match the canonical ROI order.",
+                )
+            mapping_by_roi = dict(frozen_mapping)
+            for channel in self.roi_channels:
+                try:
+                    signal_source, signal_column, signal_value = _parse_npm_channel_identity(
+                        channel.signal_channel_identity
+                    )
+                    reference_source, reference_column, reference_value = _parse_npm_channel_identity(
+                        channel.reference_channel_identity
+                    )
+                except (TypeError, ValueError, KeyError) as exc:
+                    raise NormalizedRecordingError(
+                        "invalid_channel_pairing",
+                        "NPM channel identity is not canonical JSON with the v1 schema.",
+                        roi_id=channel.roi_id,
+                    ) from exc
+                if mapping_by_roi.get(channel.roi_id) != signal_source:
+                    raise NormalizedRecordingError(
+                        "npm_physical_roi_mapping_mismatch",
+                        "NPM channel identity does not match its frozen physical ROI mapping.",
+                        roi_id=channel.roi_id,
+                    )
+                if (
+                    signal_value != authorized_led_values["signal"]
+                    or reference_value != authorized_led_values["uv"]
+                    or signal_column != authorized_led_column
+                    or reference_column != authorized_led_column
+                    or signal_column != reference_column
+                    or signal_source != reference_source
+                    or not channel.source_column
+                    or channel.source_column != signal_source
+                ):
+                    raise NormalizedRecordingError(
+                        "invalid_channel_pairing",
+                        "NPM channel identity does not match its frozen physical source mapping.",
+                        roi_id=channel.roi_id,
+                    )
 
 
 def _session_payload(session: NormalizedSourceSession) -> dict[str, Any]:
@@ -323,12 +527,15 @@ def _session_payload(session: NormalizedSourceSession) -> dict[str, Any]:
 
 
 def _roi_payload(roi: NormalizedRoiChannel) -> dict[str, Any]:
-    return {
+    payload = {
         "roi_id": roi.roi_id,
         "included": roi.included,
         "signal_channel_identity": roi.signal_channel_identity,
         "reference_channel_identity": roi.reference_channel_identity,
     }
+    if roi.source_column is not None:
+        payload["source_column"] = roi.source_column
+    return payload
 
 
 def build_normalized_recording_description_payload(
@@ -349,6 +556,10 @@ def build_normalized_recording_description_payload(
     }
     if description.sampling.target_fs_hz is not None:
         sampling_payload["target_fs_hz"] = description.sampling.target_fs_hz
+    if description.sampling.parser_contract_content is not None:
+        sampling_payload["parser_contract_content"] = _thaw_parser_content(
+            description.sampling.parser_contract_content
+        )
     return {
         "schema_name": description.schema_name,
         "schema_version": description.schema_version,
@@ -506,9 +717,16 @@ def deserialize_normalized_recording_description(
                 reference_channel_identity=_required_str(
                     item, "reference_channel_identity"
                 ),
+                source_column=_optional_str(item, "source_column"),
             )
             for item in raw_roi_channels
         )
+        parser_contract_content = raw_sampling.get("parser_contract_content")
+        if parser_contract_content is None and payload.get("adapter_format") == "npm":
+            raise NormalizedRecordingError(
+                "parser_contract_content_required",
+                "NPM normalized descriptions require parser policy content.",
+            )
         sampling = NormalizedSamplingContract(
             time_basis=_required_str(raw_sampling, "time_basis"),
             parser_contract_identity=_required_str(
@@ -521,6 +739,7 @@ def deserialize_normalized_recording_description(
             ),
             session_duration_sec=_optional_float(raw_sampling, "session_duration_sec"),
             target_fs_hz=_optional_float(raw_sampling, "target_fs_hz"),
+            parser_contract_content=parser_contract_content,
         )
         description = NormalizedRecordingDescription(
             schema_name=schema_name,
@@ -748,6 +967,281 @@ def build_rwd_normalized_recording_description(
             "uv_suffix": uv_suffix,
             "sig_suffix": sig_suffix,
             "source_candidate_set_digest": candidate_snapshot.source_candidate_set_digest,
+        },
+    )
+
+
+def _npm_channel_identity(
+    *, source_column: str, led_value: int, selector_column: str
+) -> str:
+    payload = {
+        "selector": {
+            "column": selector_column,
+            "operator": "eq",
+            "value": led_value,
+        },
+        "source_column": source_column,
+    }
+    return "npm-channel:v1:" + json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+
+
+def _parse_npm_channel_identity(identity: str) -> tuple[str, str, int]:
+    prefix = "npm-channel:v1:"
+    if not isinstance(identity, str) or not identity.startswith(prefix):
+        raise ValueError("NPM channel identity has an unsupported schema/version.")
+    payload = json.loads(identity[len(prefix) :])
+    if not isinstance(payload, dict) or set(payload) != {"selector", "source_column"}:
+        raise ValueError("NPM channel identity payload has an unsupported shape.")
+    selector = payload.get("selector")
+    source_column = payload.get("source_column")
+    if (
+        not isinstance(selector, dict)
+        or set(selector) != {"column", "operator", "value"}
+        or selector.get("operator") != "eq"
+        or not isinstance(selector.get("column"), str)
+        or not selector.get("column")
+        or isinstance(selector.get("value"), bool)
+        or not isinstance(selector.get("value"), int)
+        or not isinstance(source_column, str)
+        or not source_column
+    ):
+        raise ValueError("NPM channel identity selector is invalid.")
+    expected = _npm_channel_identity(
+        source_column=source_column,
+        led_value=int(selector["value"]),
+        selector_column=selector["column"],
+    )
+    if identity != expected:
+        raise ValueError("NPM channel identity JSON is not canonical.")
+    return source_column, selector["column"], int(selector["value"])
+
+
+def build_npm_normalized_recording_description(
+    *,
+    source_snapshot: Any,
+    session_inspections: Mapping[str, Any],
+    parser_contract_content: Mapping[str, Any],
+    session_duration_sec: float,
+    sessions_per_hour: int,
+    acquisition_mode: str = "intermittent",
+    timeline_anchor_mode: str = "civil",
+    discovered_roi_ids: tuple[str, ...],
+    included_roi_ids: tuple[str, ...],
+    target_fs_hz: float,
+    physical_to_canonical_roi_mapping: tuple[tuple[str, str], ...] | None = None,
+) -> NormalizedRecordingDescription:
+    """Build the authorized NPM normalized description from frozen facts.
+
+    ``source_snapshot`` owns filename chronology and content identity;
+    ``session_inspections`` owns parser-resolved support/timing facts.  This
+    function performs no discovery and does not reread the source files.
+    """
+    if not discovered_roi_ids or not included_roi_ids:
+        raise NormalizedRecordingError(
+            "invalid_roi_scope", "NPM discovered and included ROI ids are required."
+        )
+    if sessions_per_hour <= 0 or session_duration_sec <= 0 or target_fs_hz <= 0:
+        raise NormalizedRecordingError(
+            "invalid_sampling_contract",
+            "NPM session cadence, duration, and target sampling rate must be positive.",
+        )
+    content = _canonical_parser_content(parser_contract_content)
+    if not isinstance(content, Mapping):
+        raise NormalizedRecordingError(
+            "parser_contract_content_invalid", "NPM parser policy must be an object."
+        )
+    sampling_content = content.get("sampling")
+    if not isinstance(sampling_content, Mapping):
+        raise NormalizedRecordingError(
+            "parser_contract_content_invalid",
+            "NPM parser policy must contain sampling selector facts.",
+        )
+    led_column = sampling_content.get("led_column")
+    led_values = sampling_content.get("led_values")
+    if (
+        not isinstance(led_column, str)
+        or not led_column
+        or not isinstance(led_values, Mapping)
+        or isinstance(led_values.get("uv"), bool)
+        or not isinstance(led_values.get("uv"), int)
+        or isinstance(led_values.get("signal"), bool)
+        or not isinstance(led_values.get("signal"), int)
+    ):
+        raise NormalizedRecordingError(
+            "parser_contract_content_invalid",
+            "NPM parser policy must contain authorized LED selector facts.",
+        )
+    candidates = tuple(source_snapshot.candidates)
+    if not candidates:
+        raise NormalizedRecordingError("no_sessions", "NPM source snapshot is empty.")
+
+    first_inspection = session_inspections.get(candidates[0].canonical_relative_path)
+    if first_inspection is None:
+        raise NormalizedRecordingError(
+            "missing_session_inspection",
+            "NPM parser inspection facts are missing for the first source session.",
+        )
+    frozen_mapping = tuple(
+        physical_to_canonical_roi_mapping
+        if physical_to_canonical_roi_mapping is not None
+        else getattr(first_inspection, "physical_to_canonical_roi_mapping", ())
+    )
+    if not frozen_mapping or any(
+        not isinstance(item, tuple)
+        or len(item) != 2
+        or not all(isinstance(value, str) and value for value in item)
+        for item in frozen_mapping
+    ):
+        raise NormalizedRecordingError(
+            "npm_physical_roi_mapping_missing",
+            "NPM normalized construction requires an authoritative physical ROI mapping.",
+        )
+    mapped_roi_ids = tuple(canonical for canonical, _physical in frozen_mapping)
+    if mapped_roi_ids != tuple(discovered_roi_ids):
+        raise NormalizedRecordingError(
+            "npm_physical_roi_mapping_mismatch",
+            "The authoritative NPM physical ROI mapping disagrees with the discovered ROI scope.",
+        )
+    physical_columns = tuple(physical for _canonical, physical in frozen_mapping)
+    if len(set(mapped_roi_ids)) != len(mapped_roi_ids) or len(set(physical_columns)) != len(physical_columns):
+        raise NormalizedRecordingError(
+            "npm_physical_roi_mapping_invalid",
+            "The authoritative NPM physical ROI mapping must be one-to-one.",
+        )
+
+    cadence_sec = 3600.0 / float(sessions_per_hour)
+    anchor_start = candidates[0].authoritative_source_start_time
+    try:
+        anchor_dt = datetime.fromisoformat(anchor_start)
+    except (TypeError, ValueError) as exc:
+        raise NormalizedRecordingError(
+            "unresolvable_session_time",
+            "NPM filename chronology contains an invalid timestamp.",
+        ) from exc
+
+    sessions: list[NormalizedSourceSession] = []
+    adapter_session_evidence: list[dict[str, Any]] = []
+    for position, candidate in enumerate(candidates):
+        inspection = session_inspections.get(candidate.canonical_relative_path)
+        if inspection is None:
+            raise NormalizedRecordingError(
+                "missing_session_inspection",
+                "NPM parser inspection facts are missing for a source session.",
+                canonical_relative_path=candidate.canonical_relative_path,
+            )
+        inspection_mapping = tuple(
+            getattr(inspection, "physical_to_canonical_roi_mapping", ())
+        )
+        if inspection_mapping != frozen_mapping:
+            raise NormalizedRecordingError(
+                "npm_physical_roi_mapping_mismatch",
+                "NPM physical ROI mappings differ between admitted sessions.",
+                canonical_relative_path=candidate.canonical_relative_path,
+            )
+        expected = (anchor_dt + timedelta(seconds=position * cadence_sec)).isoformat()
+        actual = candidate.authoritative_source_start_time
+        try:
+            actual_elapsed_sec = (
+                datetime.fromisoformat(actual) - anchor_dt
+            ).total_seconds()
+        except (TypeError, ValueError) as exc:
+            raise NormalizedRecordingError(
+                "unresolvable_session_time",
+                "NPM filename chronology contains an invalid timestamp.",
+            ) from exc
+        sessions.append(
+            NormalizedSourceSession(
+                stable_source_identity=candidate.canonical_relative_path,
+                canonical_source_reference=os.path.join(
+                    source_snapshot.source_root_canonical,
+                    *candidate.canonical_relative_path.split("/"),
+                ),
+                chronological_position=position,
+                authoritative_source_start_time=actual,
+                source_timing_evidence="npm_filename_timestamp_yyyy_mm_dd_thh_mm_ss",
+                expected_timeline_start_time=expected,
+                expected_duration_sec=float(session_duration_sec),
+                observed_duration_sec=float(inspection.observed_duration_sec),
+                disposition=SESSION_DISPOSITION_PROCESS,
+                size_bytes=int(candidate.size_bytes),
+                content_digest=candidate.sha256_content_digest,
+            )
+        )
+        adapter_session_evidence.append(
+            {
+                "canonical_relative_path": candidate.canonical_relative_path,
+                "resolved_timestamp_column": inspection.resolved_timestamp_column,
+                "timestamp_unit": inspection.timestamp_unit,
+                "overlap_origin_absolute": inspection.overlap_origin_absolute,
+                "resolved_support_start_offset_sec": inspection.resolved_support_start_offset_sec,
+                "resolved_support_end_offset_sec": inspection.resolved_support_end_offset_sec,
+                "resolved_support_start_absolute": inspection.resolved_support_start_absolute,
+                "resolved_support_end_absolute": inspection.resolved_support_end_absolute,
+                "observed_duration_sec": inspection.observed_duration_sec,
+                "output_time_basis": inspection.output_time_basis,
+                "support_policy": inspection.support_policy,
+                "warning_categories": list(inspection.warning_categories),
+                "actual_elapsed_sec": actual_elapsed_sec,
+                "nominal_expected_elapsed_sec": position * cadence_sec,
+            }
+        )
+
+    included_set = set(included_roi_ids)
+    roi_channels = tuple(
+        NormalizedRoiChannel(
+            roi_id=canonical_roi_id,
+            included=canonical_roi_id in included_set,
+            signal_channel_identity=_npm_channel_identity(
+                source_column=physical_source_column,
+                led_value=int(led_values["signal"]),
+                selector_column=led_column,
+            ),
+            reference_channel_identity=_npm_channel_identity(
+                source_column=physical_source_column,
+                led_value=int(led_values["uv"]),
+                selector_column=led_column,
+            ),
+            source_column=physical_source_column,
+        )
+        for canonical_roi_id, physical_source_column in frozen_mapping
+    )
+    return NormalizedRecordingDescription(
+        schema_name=NORMALIZED_RECORDING_SCHEMA_NAME,
+        schema_version=NORMALIZED_RECORDING_SCHEMA_VERSION,
+        adapter_format="npm",
+        adapter_contract_version=NPM_ADAPTER_CONTRACT_VERSION,
+        acquisition_mode=acquisition_mode,
+        timeline_anchor_mode=timeline_anchor_mode,
+        recording_source_identity=source_snapshot.source_root_canonical,
+        source_evidence_identity=source_snapshot.source_candidate_content_digest,
+        sessions=tuple(sessions),
+        roi_channels=roi_channels,
+        sampling=NormalizedSamplingContract(
+            time_basis=NPM_OUTPUT_TIME_BASIS,
+            parser_contract_identity=compute_npm_parser_contract_digest(content),
+            sessions_per_hour=int(sessions_per_hour),
+            session_duration_sec=float(session_duration_sec),
+            target_fs_hz=float(target_fs_hz),
+            parser_contract_content=content,
+        ),
+        adapter_evidence={
+            "npm_source_candidate_set_digest": source_snapshot.source_candidate_set_digest,
+            "npm_source_candidate_content_digest": source_snapshot.source_candidate_content_digest,
+            "npm_sessions": adapter_session_evidence,
+            "physical_to_canonical_roi_mapping": [
+                {
+                    "canonical_roi_id": canonical_roi_id,
+                    "physical_source_column": physical_source_column,
+                }
+                for canonical_roi_id, physical_source_column in frozen_mapping
+            ],
+            "output_time_basis": NPM_OUTPUT_TIME_BASIS,
         },
     )
 

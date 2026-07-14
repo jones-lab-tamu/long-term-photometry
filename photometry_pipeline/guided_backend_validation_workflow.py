@@ -28,6 +28,7 @@ from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDraftPlan,
 )
 from photometry_pipeline.io.rwd_contract import RwdHeaderParsingContract
+from photometry_pipeline.io.npm_contract import NpmParserContract
 
 
 GUIDED_BACKEND_VALIDATION_WORKFLOW_STATUSES = frozenset(
@@ -46,8 +47,15 @@ GUIDED_BACKEND_RWD_SIGNAL_SUFFIX_CANDIDATES = ("-470",)
 
 
 def build_guided_backend_validation_parser_contract(
-) -> RwdHeaderParsingContract:
+    *,
+    source_format: str = "rwd",
+    npm_contract: NpmParserContract | None = None,
+) -> RwdHeaderParsingContract | NpmParserContract:
     """Return the explicit application-owned parser contract."""
+    if source_format == "npm":
+        if not isinstance(npm_contract, NpmParserContract):
+            raise TypeError("npm_contract is required for an NPM parser contract.")
+        return npm_contract
     return RwdHeaderParsingContract(
         time_column_candidates=GUIDED_BACKEND_RWD_TIME_COLUMN_CANDIDATES,
         uv_suffix_candidates=GUIDED_BACKEND_RWD_UV_SUFFIX_CANDIDATES,
@@ -75,7 +83,7 @@ def build_guided_backend_validator_contract(
 @dataclass(frozen=True)
 class GuidedBackendValidationGuiContext:
     draft: GuidedNewAnalysisDraftPlan
-    parser_contract: RwdHeaderParsingContract
+    parser_contract: RwdHeaderParsingContract | NpmParserContract
     additional_protected_roots: tuple[tuple[str, str], ...]
     validator_contract: GuidedBackendValidatorContract
     revision: int
@@ -83,8 +91,10 @@ class GuidedBackendValidationGuiContext:
     def __post_init__(self) -> None:
         if not isinstance(self.draft, GuidedNewAnalysisDraftPlan):
             raise TypeError("draft must be a GuidedNewAnalysisDraftPlan.")
-        if not isinstance(self.parser_contract, RwdHeaderParsingContract):
-            raise TypeError("parser_contract must be an RwdHeaderParsingContract.")
+        if not isinstance(self.parser_contract, (RwdHeaderParsingContract, NpmParserContract)):
+            raise TypeError(
+                "parser_contract must be an RwdHeaderParsingContract or NpmParserContract."
+            )
         if not isinstance(self.additional_protected_roots, tuple):
             raise TypeError("additional_protected_roots must be a tuple.")
         if not all(
@@ -134,6 +144,7 @@ class GuidedBackendValidationWorkflowOutcome:
     materialization_result: GuidedBackendValidationMaterializationSuccess | None
     blocking_issues: tuple[GuidedBackendValidationWorkflowIssue, ...]
     user_summary: str
+    warning_categories: tuple[str, ...] = ()
     stale: bool = False
     no_files_written: bool = True
     no_directories_created: bool = True
@@ -219,7 +230,7 @@ def _cancelled() -> GuidedBackendValidationWorkflowOutcome:
         compile_result=None,
         materialization_result=None,
         blocking_issues=(),
-        user_summary="Guided backend validation was cancelled.",
+        user_summary="The Guided setup check was cancelled.",
     )
 
 
@@ -237,11 +248,11 @@ def _internal_error(stage: str) -> GuidedBackendValidationWorkflowOutcome:
                 stage=stage,
                 category="workflow_internal_error",
                 section="workflow",
-                message="Guided backend validation could not complete.",
+                message="The Guided setup check could not complete.",
                 detail_code=f"{stage}_exception",
             ),
         ),
-        user_summary="Guided backend validation encountered an internal error.",
+        user_summary="The Guided setup check could not complete safely.",
     )
 
 
@@ -264,7 +275,7 @@ def _is_cancelled(
 def validate_current_guided_draft_for_backend(
     draft: GuidedNewAnalysisDraftPlan,
     *,
-    parser_contract: RwdHeaderParsingContract,
+    parser_contract: RwdHeaderParsingContract | NpmParserContract,
     additional_protected_roots: tuple[tuple[str, str], ...] = (),
     validator_contract: GuidedBackendValidatorContract,
     cancellation_check: Callable[[], bool] | None = None,
@@ -347,7 +358,12 @@ def validate_current_guided_draft_for_backend(
             blocking_issues=_normalized_issues(
                 "validator", validated.blocking_issues
             ),
-            user_summary="Backend validation refused the Guided request.",
+            user_summary=(
+                "The NPM setup check found a problem with the current import "
+                "settings."
+                if draft.input_format == "npm"
+                else "Backend validation refused the Guided request."
+            ),
         )
     return GuidedBackendValidationWorkflowOutcome(
         status="validator_accepted",
@@ -358,5 +374,11 @@ def validate_current_guided_draft_for_backend(
         compile_result=compiled,
         materialization_result=materialized,
         blocking_issues=(),
-        user_summary="Backend validation accepted the Guided request.",
+        user_summary=(
+            "This NPM recording setup was checked successfully. Running NPM "
+            "analyses is not available yet."
+            if draft.input_format == "npm"
+            else "Backend validation accepted the Guided request."
+        ),
+        warning_categories=tuple(getattr(materialized, "warning_categories", ()) or ()),
     )

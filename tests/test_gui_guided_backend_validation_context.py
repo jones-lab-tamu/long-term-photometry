@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -108,6 +108,141 @@ def test_context_adapter_captures_only_backend_neutral_inputs(
     assert context.revision == window._guided_backend_validation_revision
     assert window._input_dir.text() == before_input
     assert window._output_dir.text() == before_output
+
+
+def _configure_minimal_npm_contract_state(window):
+    window._guided_input_dir_edit.setText(r"C:\npm-source")
+    window._guided_format_combo.setCurrentText("npm")
+    window._discovery_cache = {"resolved_format": "npm"}
+    window._guided_acquisition_mode_combo.setCurrentText("intermittent")
+    window._guided_sessions_per_hour_edit.setText("6")
+    window._guided_session_duration_edit.setText("120")
+
+
+def test_npm_dataset_contract_candidate_does_not_call_legacy_inference(
+    window,
+    monkeypatch,
+):
+    _configure_minimal_npm_contract_state(window)
+
+    def fail_legacy_inference(_format):
+        raise AssertionError("legacy GUI NPM inference must not be called")
+
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        fail_legacy_inference,
+    )
+
+    candidate = window._guided_new_analysis_dataset_contract_candidate()
+
+    assert candidate.status == "inferred"
+    assert candidate.format_specific["dataset_semantics_source"] == "configured"
+    assert candidate.format_specific[
+        "dataset_semantics_inferred_from_selected_input"
+    ] is False
+    assert candidate.contract_values["npm_led_col"] == (
+        window._active_baseline_config().npm_led_col
+    )
+
+
+def test_npm_dataset_panel_uses_scientist_facing_settings_language(
+    window,
+):
+    _configure_minimal_npm_contract_state(window)
+    window._refresh_guided_dataset_contract_panel()
+
+    visible_text = "\n".join(
+        (
+            window._guided_dataset_contract_status_label.text(),
+            window._guided_dataset_contract_candidate_label.text(),
+            window._guided_dataset_contract_stored_label.text(),
+        )
+    ).lower()
+    for term in (
+        "adapter",
+        "backend",
+        "contract",
+        "materialization",
+        "normalized",
+        "parser policy",
+        "provenance",
+        "authorization",
+        "identity",
+        "digest",
+        "schema",
+        "canonical",
+    ):
+        assert term not in visible_text
+    assert (
+        "npm settings: the selected recording will be checked against the current "
+        "npm import settings during setup check."
+        in visible_text
+    )
+
+
+def test_npm_context_builds_parser_from_applied_settings_without_legacy_inference(
+    window,
+    monkeypatch,
+):
+    _configure_minimal_npm_contract_state(window)
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        lambda _format: pytest.fail("legacy GUI NPM inference was called"),
+    )
+    candidate = window._guided_new_analysis_dataset_contract_candidate()
+    snapshot = replace(candidate, status="applied", explicitly_applied=True)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=r"C:\npm-source",
+        input_format="npm",
+        acquisition_mode="intermittent",
+        sessions_per_hour=6,
+        session_duration_sec=120.0,
+        dataset_contract_snapshot=snapshot,
+    )
+    monkeypatch.setattr(
+        window,
+        "_build_guided_new_analysis_draft_plan",
+        lambda: draft,
+    )
+
+    context = window._capture_guided_backend_validation_context()
+
+    assert context.parser_contract.npm_led_col == (
+        window._active_baseline_config().npm_led_col
+    )
+    assert context.parser_contract.npm_region_prefix == (
+        window._active_baseline_config().npm_region_prefix
+    )
+    assert context.parser_contract.target_fs_hz == (
+        window._active_baseline_config().target_fs_hz
+    )
+
+
+def test_applied_npm_parser_setting_change_marks_dataset_contract_stale(
+    window,
+    monkeypatch,
+):
+    _configure_minimal_npm_contract_state(window)
+    candidate = window._guided_new_analysis_dataset_contract_candidate()
+    window._guided_new_analysis_dataset_contract_snapshot = replace(
+        candidate,
+        status="applied",
+        explicitly_applied=True,
+    )
+    baseline = window._active_baseline_config()
+    monkeypatch.setattr(
+        window,
+        "_active_baseline_config",
+        lambda: replace(baseline, npm_led_col="ChangedLedState"),
+    )
+
+    window._refresh_guided_new_analysis_dataset_contract_staleness()
+
+    snapshot = window._guided_new_analysis_dataset_contract_snapshot
+    assert snapshot.status == "stale"
+    assert "NPM import settings changed" in snapshot.stale_reasons
 
 
 def test_context_adapter_uses_no_additional_root_without_completed_run(
@@ -233,6 +368,61 @@ def test_guided_validate_and_disabled_run_widgets_exist(window):
     assert window._guided_run_btn.isEnabled() is False
     assert window._guided_run_readiness_label is not None
     assert not hasattr(window, "_guided_validation_artifact_link")
+
+
+def test_npm_accepted_setup_check_uses_approved_message_and_keeps_run_disabled(
+    window,
+):
+    outcome = replace(
+        _accepted_outcome(),
+        compile_result=SimpleNamespace(
+            request=SimpleNamespace(
+                source=SimpleNamespace(source_format="npm"),
+            )
+        ),
+    )
+    window._guided_backend_validation_outcome = outcome
+    window._guided_backend_validation_outcome_revision = (
+        window._guided_backend_validation_revision
+    )
+    window._refresh_guided_backend_validation_display()
+
+    expected = (
+        "This NPM recording setup was checked successfully. Running NPM analyses "
+        "is not available yet."
+    )
+    assert window._guided_backend_validation_status_label.text() == expected
+    assert window._guided_run_readiness_label.text() == expected
+    assert window._guided_run_btn.isEnabled() is False
+
+
+def test_npm_failure_details_hide_internal_section_names(window):
+    outcome = _failure_outcome("materialization_failed")
+    issue = replace(
+        outcome.blocking_issues[0],
+        section="normalized_recording",
+        message=(
+            "The app could not determine how to read this NPM recording from "
+            "the current settings. The ROI columns are not consistent across "
+            "all selected NPM sessions."
+        ),
+        detail_code="npm_roi_inventory_mismatch",
+    )
+    window._guided_backend_validation_outcome = replace(
+        outcome,
+        blocking_issues=(issue,),
+    )
+    window._guided_backend_validation_outcome_revision = (
+        window._guided_backend_validation_revision
+    )
+    window._refresh_guided_backend_validation_display()
+
+    details = window._guided_backend_validation_details_label.text().lower()
+    assert "normalized" not in details
+    assert "category:" not in details
+    assert "section:" not in details
+    assert "roi columns are not consistent" in details
+    assert "rerun setup check" in details
 
 
 def test_validate_button_calls_workflow_through_module_namespace(

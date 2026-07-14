@@ -7,8 +7,10 @@ to gather filesystem facts into immutable dataclasses before pure compilation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields as dataclass_fields
+from datetime import datetime, timedelta
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -79,12 +81,168 @@ from photometry_pipeline.input_processing_completeness import (
     resolve_session_start_time,
 )
 from photometry_pipeline.io.rwd_chronology import find_rwd_session_overlaps
+from photometry_pipeline.io.npm_source_snapshot import (
+    build_npm_source_candidate_snapshot,
+    NpmSourceSnapshotError,
+    NPM_SOURCE_SNAPSHOT_SCHEMA_VERSION,
+)
+from photometry_pipeline.io.npm_contract import (
+    NpmParserContract,
+    NpmParserContractError,
+    inspect_npm_csv,
+)
 from photometry_pipeline.guided_normalized_recording import (
     NormalizedRecordingError,
     build_rwd_normalized_recording_description,
     compute_normalized_recording_description_identity,
     serialize_normalized_recording_description,
+    build_npm_normalized_recording_description,
 )
+
+
+_LOGGER = logging.getLogger(__name__)
+
+
+_NPM_PARSER_PROBLEM_MESSAGES = {
+    "npm_time_column_missing": (
+        "The timestamp column specified in the NPM settings was not found."
+    ),
+    "npm_led_column_missing": (
+        "The LED-state column specified in the NPM settings was not found."
+    ),
+    "npm_roi_columns_missing": (
+        "No ROI columns matched the current NPM naming pattern."
+    ),
+    "npm_roi_inventory_mismatch": (
+        "The ROI columns are not consistent across all selected NPM sessions."
+    ),
+    "npm_roi_column_invalid": (
+        "An ROI column does not match the current NPM naming pattern."
+    ),
+    "npm_non_monotonic_timestamp": (
+        "Timestamps are not in increasing order in one or more NPM sessions."
+    ),
+    "npm_timestamp_cv_exceeded": (
+        "The sampling interval is not consistent enough for the current NPM sampling settings."
+    ),
+    "npm_support_mismatch": (
+        "The signal and reference samples do not overlap enough to analyze this recording."
+    ),
+    "npm_insufficient_overlap_support": (
+        "The signal and reference samples do not overlap enough to analyze this recording."
+    ),
+    "npm_no_support": (
+        "The signal and reference samples do not overlap enough to analyze this recording."
+    ),
+    "npm_insufficient_stream_support": (
+        "The NPM recording does not contain enough timestamped samples to analyze."
+    ),
+    "npm_csv_unreadable": (
+        "The app could not read one of the selected NPM recordings."
+    ),
+    "npm_roi_value_nonfinite": (
+        "One or more NPM ROI values are not valid numbers."
+    ),
+}
+
+
+_NPM_SOURCE_PROBLEM_MESSAGES = {
+    "source_root_missing": "The selected NPM recording folder could not be found.",
+    "source_root_not_directory": "The selected NPM recording path is not a folder.",
+    "no_npm_csv_files": "No NPM CSV recordings were found in the selected folder.",
+    "unsupported_source": "The selected NPM recording is not a CSV file.",
+    "candidate_unreadable": "The app could not read one of the selected NPM recordings.",
+    "candidate_non_regular": "One selected NPM recording is not a regular file.",
+    "source_changed_during_snapshot": (
+        "The selected NPM recording changed while it was being checked."
+    ),
+    "malformed_filename_timestamp": (
+        "The NPM recording filename does not contain one valid acquisition timestamp."
+    ),
+    "duplicate_filename_timestamp": (
+        "More than one NPM recording has the same acquisition timestamp."
+    ),
+    "invalid_source_candidate_path": "The selected NPM recording path could not be checked.",
+    "source_path_style_unavailable": "The selected NPM recording path could not be checked.",
+}
+
+
+_NPM_NORMALIZED_PROBLEM_MESSAGES = {
+    "invalid_roi_scope": "The selected ROI set for this NPM recording is incomplete.",
+    "invalid_sampling_contract": "The NPM sampling settings are incomplete or invalid.",
+    "parser_contract_content_invalid": "The NPM import settings are incomplete.",
+    "unsupported_parser_policy_schema": "The current NPM import settings are not supported by this recording.",
+    "unsupported_parser_policy_version": "The current NPM import settings are not supported by this recording.",
+    "parser_contract_content_digest_mismatch": (
+        "The current NPM import settings do not match the settings applied to this recording."
+    ),
+    "no_sessions": "No NPM recording sessions were found to check.",
+    "missing_session_inspection": "The app could not inspect every NPM recording session.",
+    "npm_physical_roi_mapping_missing": (
+        "The ROI columns could not be confirmed for this NPM recording."
+    ),
+    "npm_physical_roi_mapping_mismatch": (
+        "The ROI columns are not consistent across all selected NPM sessions."
+    ),
+    "npm_physical_roi_mapping_invalid": (
+        "The ROI columns could not be confirmed for this NPM recording."
+    ),
+    "unresolvable_session_time": (
+        "The NPM recording filename does not contain one valid acquisition timestamp."
+    ),
+}
+
+
+def _npm_settings_incomplete_message() -> str:
+    return (
+        "The NPM import settings are incomplete. Return to the NPM settings "
+        "step, apply the intended settings, and rerun Setup check."
+    )
+
+
+def _npm_settings_mismatch_message() -> str:
+    return (
+        "The current NPM import settings do not match the settings applied to "
+        "this recording. Return to the NPM settings step, apply the intended "
+        "settings, and rerun Setup check."
+    )
+
+
+def _npm_inspection_user_message(category: str) -> str:
+    if category in {"parser_contract_invalid", "npm_parser_contract_type_invalid"}:
+        return _npm_settings_incomplete_message()
+    problem = _NPM_PARSER_PROBLEM_MESSAGES.get(
+        category,
+        "The source settings or recording contents could not be confirmed.",
+    )
+    return (
+        "The app could not determine how to read this NPM recording from the "
+        f"current settings. {problem}"
+    )
+
+
+def _npm_source_snapshot_user_message(category: str) -> str:
+    problem = _NPM_SOURCE_PROBLEM_MESSAGES.get(
+        category,
+        "The selected recording could not be checked.",
+    )
+    return (
+        "The app could not determine how to read this NPM recording from the "
+        f"current settings. {problem}"
+    )
+
+
+def _npm_normalized_recording_user_message(category: str) -> str:
+    if category == "parser_contract_content_digest_mismatch":
+        return _npm_settings_mismatch_message()
+    problem = _NPM_NORMALIZED_PROBLEM_MESSAGES.get(
+        category,
+        "The recording setup could not be confirmed.",
+    )
+    return (
+        "The app could not determine how to read this NPM recording from the "
+        f"current settings. {problem}"
+    )
 
 # Constants for Stage 2b
 GUIDED_BACKEND_VALIDATION_MATERIALIZATION_SCOPE = (
@@ -185,6 +343,13 @@ STAGE_2C_VALID_ISSUES = {
     "feature_event_activity_unavailable",
     "per_roi_feature_event_map_unresolved",
     "source_path_style_unavailable",
+    "npm_filename_timestamp_invalid",
+    "npm_filename_timestamp_duplicate",
+    "npm_parser_contract_invalid",
+    "npm_inspection_failed",
+    "npm_schedule_gap",
+    "npm_early_session",
+    "npm_session_overlap_detected",
 }
 
 # Backward-compatible name retained for callers/tests from Stage 2b.
@@ -218,11 +383,64 @@ class GuidedBackendValidationMaterializationSuccess:
     materialization_scope: str = GUIDED_BACKEND_VALIDATION_MATERIALIZATION_SCOPE
     materializer_version: str = GUIDED_BACKEND_VALIDATION_MATERIALIZER_VERSION
     warning_categories: tuple[str, ...] = ()
+    npm_cadence_evidence: tuple["GuidedBackendNpmCadenceIntervalEvidence", ...] = ()
     status: str = field(default="materialized", init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.facts, GuidedBackendValidationMaterializedFacts):
             raise TypeError("facts must be an instance of GuidedBackendValidationMaterializedFacts.")
+
+
+@dataclass(frozen=True)
+class GuidedBackendNpmCadenceIntervalEvidence:
+    previous_source_start_time: str
+    current_source_start_time: str
+    actual_interval_sec: float
+    nominal_interval_sec: float
+    classification: str
+
+    def __post_init__(self) -> None:
+        if self.classification not in {
+            "nominal",
+            "npm_schedule_gap",
+            "npm_early_session",
+        }:
+            raise ValueError("Unsupported NPM cadence interval classification.")
+        if not math.isfinite(float(self.actual_interval_sec)) or not math.isfinite(
+            float(self.nominal_interval_sec)
+        ):
+            raise ValueError("NPM cadence interval evidence must be finite.")
+
+
+def classify_npm_cadence_intervals(
+    actual_starts: tuple[datetime, ...] | list[datetime],
+    *,
+    nominal_interval_sec: float,
+) -> tuple[GuidedBackendNpmCadenceIntervalEvidence, ...]:
+    """Classify each adjacent NPM source interval against nominal cadence."""
+    if not math.isfinite(float(nominal_interval_sec)) or nominal_interval_sec <= 0:
+        raise ValueError("nominal_interval_sec must be positive and finite.")
+    evidence: list[GuidedBackendNpmCadenceIntervalEvidence] = []
+    for position in range(1, len(actual_starts)):
+        actual_interval = (
+            actual_starts[position] - actual_starts[position - 1]
+        ).total_seconds()
+        if actual_interval > nominal_interval_sec:
+            classification = "npm_schedule_gap"
+        elif actual_interval < nominal_interval_sec:
+            classification = "npm_early_session"
+        else:
+            classification = "nominal"
+        evidence.append(
+            GuidedBackendNpmCadenceIntervalEvidence(
+                previous_source_start_time=actual_starts[position - 1].isoformat(),
+                current_source_start_time=actual_starts[position].isoformat(),
+                actual_interval_sec=actual_interval,
+                nominal_interval_sec=float(nominal_interval_sec),
+                classification=classification,
+            )
+        )
+    return tuple(evidence)
 
 
 @dataclass(frozen=True)
@@ -1168,16 +1386,17 @@ def _materialize_dataset_and_roi_facts(
             "The applied dataset contract snapshot is stale.",
             detail_code="dataset_snapshot_stale",
         )
+    is_npm = draft.input_format == "npm"
     if (
         not snapshot.current_applied
-        or snapshot.input_format != "rwd"
-        or snapshot.resolved_input_format != "rwd"
+        or snapshot.input_format != draft.input_format
+        or snapshot.resolved_input_format != draft.input_format
         or snapshot.acquisition_mode != "intermittent"
     ):
         return None, None, _failure(
             "dataset_facts_missing",
             "dataset",
-            "A current applied RWD/intermittent dataset contract is required.",
+            "A current applied intermittent dataset contract is required.",
             detail_code="dataset_snapshot_missing_or_invalid",
         )
     if (
@@ -1194,7 +1413,22 @@ def _materialize_dataset_and_roi_facts(
         )
 
     identity = snapshot.source_identity
-    required_semantic_names = ("rwd_time_col", "uv_suffix", "sig_suffix")
+    required_semantic_names = (
+        (
+            "npm_time_axis",
+            "npm_led_col",
+            "npm_region_prefix",
+            "npm_region_suffix",
+            (
+                "npm_system_ts_col"
+                if str(snapshot.contract_values.get("npm_time_axis"))
+                == "system_timestamp"
+                else "npm_computer_ts_col"
+            ),
+        )
+        if is_npm
+        else ("rwd_time_col", "uv_suffix", "sig_suffix")
+    )
     semantic_values: list[GuidedBackendTypedFieldValue] = []
     for field_name in sorted(snapshot.contract_values):
         value = snapshot.contract_values[field_name]
@@ -1223,8 +1457,12 @@ def _materialize_dataset_and_roi_facts(
         return None, None, _failure(
             "dataset_semantic_value_unresolved",
             "dataset",
-            "Required RWD dataset semantic values are missing.",
-            detail_code="required_rwd_semantics_missing",
+            "Required dataset semantic values are missing.",
+            detail_code=(
+                "required_npm_semantics_missing"
+                if is_npm
+                else "required_rwd_semantics_missing"
+            ),
         )
     if (
         identity.sessions_per_hour is None
@@ -1241,7 +1479,7 @@ def _materialize_dataset_and_roi_facts(
     if (
         identity.sessions_per_hour != draft.sessions_per_hour
         or identity.session_duration_sec != draft.session_duration_sec
-        or identity.allow_partial_final_window is not False
+        or (not is_npm and identity.allow_partial_final_window is not False)
     ):
         return None, None, _failure(
             "dataset_facts_stale",
@@ -1309,9 +1547,9 @@ def _materialize_dataset_and_roi_facts(
         dataset_snapshot_schema_version=snapshot.schema_version,
         dataset_status=snapshot.status,
         dataset_current_applied=snapshot.current_applied,
-        rwd_time_col=str(snapshot.contract_values["rwd_time_col"]),
-        uv_suffix=str(snapshot.contract_values["uv_suffix"]),
-        sig_suffix=str(snapshot.contract_values["sig_suffix"]),
+        rwd_time_col=str(snapshot.contract_values.get("rwd_time_col", "")),
+        uv_suffix=str(snapshot.contract_values.get("uv_suffix", "")),
+        sig_suffix=str(snapshot.contract_values.get("sig_suffix", "")),
         semantic_values=tuple(semantic_values),
         dataset_source_setup_signature=str(identity.source_setup_signature),
         diagnostic_cache_contract_identity=str(
@@ -1320,6 +1558,21 @@ def _materialize_dataset_and_roi_facts(
         validation_issue_categories=tuple(snapshot.validation_issues),
         stale_reason_categories=tuple(snapshot.stale_reasons),
         execution_mode=draft.execution_intent.execution_mode,
+        source_format=draft.input_format,
+        npm_time_axis=str(snapshot.contract_values.get("npm_time_axis", "")),
+        npm_system_ts_col=str(snapshot.contract_values.get("npm_system_ts_col", "")),
+        npm_computer_ts_col=str(snapshot.contract_values.get("npm_computer_ts_col", "")),
+        npm_led_col=str(snapshot.contract_values.get("npm_led_col", "")),
+        npm_region_prefix=str(snapshot.contract_values.get("npm_region_prefix", "")),
+        npm_region_suffix=str(snapshot.contract_values.get("npm_region_suffix", "")),
+        npm_target_fs_hz=(
+            float(snapshot.contract_values["target_fs_hz"])
+            if snapshot.contract_values.get("target_fs_hz") is not None
+            else None
+        ),
+        npm_adapter_value_nan_policy=str(
+            snapshot.contract_values.get("adapter_value_nan_policy", "")
+        ),
     )
     roi_facts = GuidedBackendRoiScopeFacts(
         available=True,
@@ -1765,7 +2018,7 @@ def materialize_guided_backend_validation_facts(
         )
 
     # 2. Input Format and Acquisition Mode Audit
-    if draft.input_format not in ("rwd", "auto"):
+    if draft.input_format not in ("rwd", "npm", "auto"):
         return _failure(
             "unsupported_source_format",
             "source",
@@ -1791,6 +2044,22 @@ def materialize_guided_backend_validation_facts(
             detail_code="source_path_missing",
         )
 
+    is_npm = draft.input_format == "npm"
+    if is_npm and not isinstance(parser_contract, NpmParserContract):
+        return _failure(
+            "unsupported_source_format",
+            "source",
+            _npm_settings_incomplete_message(),
+            detail_code="npm_parser_policy_missing",
+        )
+    if is_npm and draft.exclude_incomplete_final_rwd_chunk:
+        return _failure(
+            "unsupported_incomplete_final_exclusion",
+            "incomplete_final",
+            "Excluding an incomplete final session is not available for NPM recordings.",
+            detail_code="npm_exclusion_unsupported",
+        )
+
     # 4. Parser Contract Presence Check (Before Snapshot)
     if parser_contract is None:
         return _failure(
@@ -1800,7 +2069,7 @@ def materialize_guided_backend_validation_facts(
             detail_code="parser_contract_missing",
         )
 
-    if parser_contract.unresolved_inputs:
+    if getattr(parser_contract, "unresolved_inputs", ()):
         return _failure(
             "parser_unresolved_inputs",
             "parser",
@@ -1809,38 +2078,93 @@ def materialize_guided_backend_validation_facts(
         )
 
     try:
-        parser_contract_digest = compute_rwd_header_parsing_contract_digest(parser_contract)
+        if is_npm:
+            if not isinstance(parser_contract, NpmParserContract):
+                return _failure(
+                    "parser_contract_missing",
+                    "parser",
+                    _npm_settings_incomplete_message(),
+                    detail_code="npm_parser_contract_type_invalid",
+                )
+            parser_contract_digest = parser_contract.digest
+            parser_facts = GuidedBackendParserFacts(
+                available=True,
+                schema_name="npm_normalized_parser_contract",
+                schema_version="v1",
+                parser_contract_digest=parser_contract_digest,
+                unresolved_inputs=(),
+                npm_timestamp_column_candidates=parser_contract.timestamp_column_candidates,
+                npm_parser_contract_content=parser_contract.content(),
+            )
+        else:
+            parser_contract_digest = compute_rwd_header_parsing_contract_digest(parser_contract)
+            parser_facts = GuidedBackendParserFacts(
+                available=True,
+                schema_name=parser_contract.schema_name,
+                schema_version=parser_contract.schema_version,
+                header_search_line_limit=parser_contract.header_search_line_limit,
+                time_column_candidates=tuple(parser_contract.time_column_candidates),
+                uv_suffix_candidates=tuple(parser_contract.uv_suffix_candidates),
+                signal_suffix_candidates=tuple(parser_contract.signal_suffix_candidates),
+                column_normalization_rule=parser_contract.column_normalization_rule,
+                roi_name_rule=parser_contract.roi_name_rule,
+                ambiguity_policy=parser_contract.ambiguity_policy,
+                parser_contract_digest=parser_contract_digest,
+                unresolved_inputs=(),
+            )
     except Exception as exc:
+        if is_npm:
+            _LOGGER.debug(
+                "NPM settings could not be prepared for the setup check: %s",
+                exc,
+                exc_info=True,
+            )
         return _failure(
             "parser_digest_unavailable",
             "parser",
-            f"Failed to compute parser contract digest: {exc}",
+            _npm_settings_incomplete_message()
+            if is_npm
+            else f"Failed to compute parser contract digest: {exc}",
             detail_code="digest_error",
         )
 
-    parser_facts = GuidedBackendParserFacts(
-        available=True,
-        schema_name=parser_contract.schema_name,
-        schema_version=parser_contract.schema_version,
-        header_search_line_limit=parser_contract.header_search_line_limit,
-        time_column_candidates=tuple(parser_contract.time_column_candidates),
-        uv_suffix_candidates=tuple(parser_contract.uv_suffix_candidates),
-        signal_suffix_candidates=tuple(parser_contract.signal_suffix_candidates),
-        column_normalization_rule=parser_contract.column_normalization_rule,
-        roi_name_rule=parser_contract.roi_name_rule,
-        ambiguity_policy=parser_contract.ambiguity_policy,
-        parser_contract_digest=parser_contract_digest,
-        unresolved_inputs=(),
-    )
-
     # 5. Source Snapshot Materialization (I/O Read-Only)
     try:
-        snapshot = build_rwd_source_candidate_snapshot(
-            source_path,
-            cancellation_check=cancellation_check,
+        snapshot = (
+            build_npm_source_candidate_snapshot(
+                source_path, cancellation_check=cancellation_check
+            )
+            if is_npm
+            else build_rwd_source_candidate_snapshot(
+                source_path, cancellation_check=cancellation_check
+            )
         )
-    except RwdSourceSnapshotError as exc:
-        if exc.category in ("malformed_session_timestamp", "duplicate_session_timestamp"):
+    except (RwdSourceSnapshotError, NpmSourceSnapshotError) as exc:
+        if is_npm and isinstance(exc, NpmSourceSnapshotError):
+            _LOGGER.debug(
+                "NPM source snapshot check failed: %s",
+                exc,
+                exc_info=True,
+            )
+            category = "source_snapshot_unavailable"
+            if exc.category in ("source_root_missing", "source_root_not_directory"):
+                category = "missing_source"
+            elif exc.category == "source_changed_during_snapshot":
+                category = "source_snapshot_unstable"
+            elif exc.category in ("source_snapshot_cancelled", "snapshot_cancelled"):
+                category = "source_snapshot_cancelled"
+            return _failure(
+                category,
+                "source",
+                _npm_source_snapshot_user_message(exc.category),
+                detail_code=exc.category,
+            )
+        if exc.category in (
+            "malformed_session_timestamp",
+            "duplicate_session_timestamp",
+            "malformed_filename_timestamp",
+            "duplicate_filename_timestamp",
+        ):
             # These come from the authoritative RWD chronology check
             # (io.rwd_chronology) and are already written in plain,
             # scientist-facing language -- surface them as-is.
@@ -1866,10 +2190,21 @@ def materialize_guided_backend_validation_facts(
             detail_code=exc.category,
         )
     except Exception as exc:
+        if is_npm:
+            _LOGGER.debug(
+                "Unexpected NPM source snapshot failure: %s",
+                exc,
+                exc_info=True,
+            )
         return _failure(
             "materializer_internal_error",
             "source",
-            f"Internal error during snapshot build: {exc}",
+            (
+                "The app could not determine how to read this NPM recording from "
+                "the current settings. The selected recording could not be checked."
+                if is_npm
+                else f"Internal error during snapshot build: {exc}"
+            ),
             detail_code="internal_snapshot_error",
         )
 
@@ -1918,6 +2253,8 @@ def materialize_guided_backend_validation_facts(
     # check never masks that stage's own diagnostic.
     duration_candidate = draft.session_duration_sec
     if (
+        not is_npm
+        and
         isinstance(duration_candidate, (int, float))
         and not isinstance(duration_candidate, bool)
         and math.isfinite(float(duration_candidate))
@@ -1932,6 +2269,13 @@ def materialize_guided_backend_validation_facts(
     approved_missing_candidates, approval_failure = _materialize_approved_missing_candidates(
         draft, snapshot
     )
+    if is_npm and draft.approved_missing_sessions:
+        return _failure(
+            "approved_missing_session_invalid",
+            "missing_session",
+            "Missing-session continuation is not available for NPM recordings.",
+            detail_code="npm_missing_session_unsupported",
+        )
     if approval_failure is not None:
         return approval_failure
 
@@ -1946,26 +2290,122 @@ def materialize_guided_backend_validation_facts(
         stale=False,
     )
 
+    npm_inspections: dict[str, Any] = {}
+    npm_warning_categories: list[str] = []
+    npm_roi_ids: tuple[str, ...] = ()
+    npm_physical_to_canonical_roi_mapping: tuple[tuple[str, str], ...] = ()
+    npm_cadence_evidence: list[GuidedBackendNpmCadenceIntervalEvidence] = []
+    if is_npm:
+        assert isinstance(parser_contract, NpmParserContract)
+        actual_starts: list[datetime] = []
+        for position, candidate in enumerate(snapshot.candidates):
+            candidate_path = os.path.join(
+                snapshot.source_root_canonical,
+                *candidate.canonical_relative_path.split("/"),
+            )
+            try:
+                inspection = inspect_npm_csv(candidate_path, parser_contract)
+            except NpmParserContractError as exc:
+                _LOGGER.debug(
+                    "NPM recording inspection failed for %s: %s",
+                    candidate_path,
+                    exc,
+                    exc_info=True,
+                )
+                return _failure(
+                    "npm_inspection_failed",
+                    "parser",
+                    _npm_inspection_user_message(exc.category),
+                    detail_code=exc.category,
+                )
+            npm_inspections[candidate.canonical_relative_path] = inspection
+            if not npm_roi_ids:
+                npm_roi_ids = inspection.roi_ids
+                npm_physical_to_canonical_roi_mapping = tuple(
+                    inspection.physical_to_canonical_roi_mapping
+                )
+            elif (
+                npm_roi_ids != inspection.roi_ids
+                or npm_physical_to_canonical_roi_mapping
+                != tuple(inspection.physical_to_canonical_roi_mapping)
+            ):
+                return _failure(
+                    "npm_inspection_failed",
+                    "roi_scope",
+                    "The ROI columns are not consistent across all selected NPM sessions.",
+                    detail_code="npm_roi_inventory_mismatch",
+                )
+            try:
+                actual_starts.append(datetime.fromisoformat(candidate.authoritative_source_start_time))
+            except ValueError:
+                return _failure(
+                    "npm_filename_timestamp_invalid",
+                    "source",
+                    "The NPM recording filename does not contain one valid acquisition timestamp.",
+                    detail_code="filename_timestamp_invalid",
+                )
+            npm_warning_categories.extend(inspection.warning_categories)
+            if position > 0:
+                if actual_starts[-1] < actual_starts[-2] + timedelta(
+                    seconds=float(draft.session_duration_sec or 0.0)
+                ):
+                    return _failure(
+                        "npm_session_overlap_detected",
+                        "source",
+                        "Two NPM sessions overlap given the configured session duration.",
+                        detail_code="session_interval_overlap",
+                    )
+        cadence = (
+            3600.0 / float(draft.sessions_per_hour)
+            if draft.sessions_per_hour
+            else None
+        )
+        if cadence is not None and len(actual_starts) > 1:
+            npm_cadence_evidence = list(
+                classify_npm_cadence_intervals(
+                    actual_starts,
+                    nominal_interval_sec=cadence,
+                )
+            )
+            npm_warning_categories.extend(
+                item.classification
+                for item in npm_cadence_evidence
+                if item.classification != "nominal"
+            )
+        npm_warning_categories = list(dict.fromkeys(npm_warning_categories))
+
+        if tuple(draft.discovered_roi_ids) != npm_roi_ids:
+            return _failure(
+                "npm_inspection_failed",
+                "roi_scope",
+                "The ROI selection does not match the ROI columns found in the selected NPM recordings.",
+                detail_code="npm_roi_inventory_mismatch",
+            )
+
     # 8. Incomplete-Final not_requested Classification Materialization
 
-    try:
-        classification = make_not_requested_incomplete_final_chunk_classification(snapshot)
-        classification_digest = compute_incomplete_final_chunk_classification_digest(classification)
-    except Exception as exc:
-        return _failure(
-            "materializer_internal_error",
-            "incomplete_final",
-            f"Failed to generate incomplete-final classification: {exc}",
-            detail_code="internal_classification_error",
+    if is_npm:
+        # NPM has no RWD incomplete-final classifier. Its process-only
+        # disposition policy is compiled below as a format-neutral contract.
+        classification_facts = GuidedBackendIncompleteFinalClassificationFacts()
+    else:
+        try:
+            classification = make_not_requested_incomplete_final_chunk_classification(snapshot)
+            classification_digest = compute_incomplete_final_chunk_classification_digest(classification)
+        except Exception as exc:
+            return _failure(
+                "materializer_internal_error",
+                "incomplete_final",
+                f"Failed to generate incomplete-final classification: {exc}",
+                detail_code="internal_classification_error",
+            )
+        classification_facts = GuidedBackendIncompleteFinalClassificationFacts(
+            available=True,
+            classification_status="not_requested",
+            classification_digest=classification_digest,
+            source_candidate_set_digest=snapshot.source_candidate_set_digest,
+            source_candidate_content_digest=snapshot.source_candidate_content_digest,
         )
-
-    classification_facts = GuidedBackendIncompleteFinalClassificationFacts(
-        available=True,
-        classification_status="not_requested",
-        classification_digest=classification_digest,
-        source_candidate_set_digest=snapshot.source_candidate_set_digest,
-        source_candidate_content_digest=snapshot.source_candidate_content_digest,
-    )
 
     # 9. Cancellation check before feature/event work
     if cancellation_check and cancellation_check():
@@ -2197,6 +2637,26 @@ def materialize_guided_backend_validation_facts(
         return dataset_failure
     assert dataset_facts is not None and roi_facts is not None
 
+    if is_npm:
+        assert isinstance(parser_contract, NpmParserContract)
+        npm_sampling = parser_contract.content()["sampling"]
+        if (
+            float(npm_sampling["target_fs_hz"]) != float(dataset_facts.npm_target_fs_hz or 0.0)
+            or float(npm_sampling["session_duration_sec"]) != float(dataset_facts.session_duration_sec)
+            or bool(npm_sampling["allow_partial_final_chunk"])
+            != bool(dataset_facts.allow_partial_final_window)
+            or str(npm_sampling["time_axis"]) != dataset_facts.npm_time_axis
+            or str(npm_sampling["led_column"]) != dataset_facts.npm_led_col
+            or str(npm_sampling["region_prefix"]) != dataset_facts.npm_region_prefix
+            or str(npm_sampling["region_suffix"]) != dataset_facts.npm_region_suffix
+        ):
+            return _failure(
+                "npm_parser_contract_invalid",
+                "parser",
+                _npm_settings_mismatch_message(),
+                detail_code="npm_parser_dataset_binding_mismatch",
+            )
+
     correction_facts, correction_failure = _materialize_correction_facts(
         draft,
         roi_facts,
@@ -2232,26 +2692,41 @@ def materialize_guided_backend_validation_facts(
             ),
             None,
         )
-        normalized_recording = build_rwd_normalized_recording_description(
-            source_root_canonical=snapshot.source_root_canonical,
-            candidate_snapshot=snapshot,
-            session_duration_sec=dataset_facts.session_duration_sec,
-            sessions_per_hour=dataset_facts.sessions_per_hour,
-            timeline_anchor_mode=dataset_facts.timeline_anchor_mode,
-            acquisition_mode=dataset_facts.acquisition_mode,
-            discovered_roi_ids=roi_facts.discovered_roi_ids,
-            included_roi_ids=roi_facts.included_roi_ids,
-            rwd_time_col=dataset_facts.rwd_time_col,
-            uv_suffix=dataset_facts.uv_suffix,
-            sig_suffix=dataset_facts.sig_suffix,
-            parser_contract_digest=parser_facts.parser_contract_digest,
-            target_fs_hz=target_fs_hz,
-            missing_canonical_relative_paths=tuple(
-                item.canonical_relative_path
-                for item in source_snapshot_facts.approved_missing_candidates
-            ),
-            excluded_canonical_relative_path=excluded_canonical_relative_path,
-        )
+        if is_npm:
+            normalized_recording = build_npm_normalized_recording_description(
+                source_snapshot=snapshot,
+                session_inspections=npm_inspections,
+                parser_contract_content=parser_facts.npm_parser_contract_content or {},
+                session_duration_sec=dataset_facts.session_duration_sec,
+                sessions_per_hour=dataset_facts.sessions_per_hour,
+                timeline_anchor_mode=dataset_facts.timeline_anchor_mode,
+                acquisition_mode=dataset_facts.acquisition_mode,
+                discovered_roi_ids=roi_facts.discovered_roi_ids,
+                included_roi_ids=roi_facts.included_roi_ids,
+                target_fs_hz=float(dataset_facts.npm_target_fs_hz or target_fs_hz or 0.0),
+                physical_to_canonical_roi_mapping=npm_physical_to_canonical_roi_mapping,
+            )
+        else:
+            normalized_recording = build_rwd_normalized_recording_description(
+                source_root_canonical=snapshot.source_root_canonical,
+                candidate_snapshot=snapshot,
+                session_duration_sec=dataset_facts.session_duration_sec,
+                sessions_per_hour=dataset_facts.sessions_per_hour,
+                timeline_anchor_mode=dataset_facts.timeline_anchor_mode,
+                acquisition_mode=dataset_facts.acquisition_mode,
+                discovered_roi_ids=roi_facts.discovered_roi_ids,
+                included_roi_ids=roi_facts.included_roi_ids,
+                rwd_time_col=dataset_facts.rwd_time_col,
+                uv_suffix=dataset_facts.uv_suffix,
+                sig_suffix=dataset_facts.sig_suffix,
+                parser_contract_digest=parser_facts.parser_contract_digest,
+                target_fs_hz=target_fs_hz,
+                missing_canonical_relative_paths=tuple(
+                    item.canonical_relative_path
+                    for item in source_snapshot_facts.approved_missing_candidates
+                ),
+                excluded_canonical_relative_path=excluded_canonical_relative_path,
+            )
     except NormalizedRecordingError as exc:
         # Malformed chronology, empty ROI scope, and non-positive session
         # duration are already caught earlier by dedicated checks with
@@ -2259,11 +2734,21 @@ def materialize_guided_backend_validation_facts(
         # scientist having approved the same final session as both
         # missing and exclude-incomplete-final at once
         # ("session_both_missing_and_excluded").
+        if is_npm:
+            _LOGGER.debug(
+                "NPM recording setup could not be confirmed: %s",
+                exc,
+                exc_info=True,
+            )
         return _failure(
             "normalized_recording_description_unavailable",
             "normalized_recording",
-            "The app could not confirm this recording's setup is internally "
-            f"consistent: {exc}",
+            _npm_normalized_recording_user_message(exc.category)
+            if is_npm
+            else (
+                "The app could not confirm this recording's setup is internally "
+                f"consistent: {exc}"
+            ),
             detail_code=exc.category,
         )
     normalized_recording_description_payload = (
@@ -2305,4 +2790,8 @@ def materialize_guided_backend_validation_facts(
         normalized_recording_description=normalized_recording_description_payload,
     )
 
-    return GuidedBackendValidationMaterializationSuccess(facts=facts)
+    return GuidedBackendValidationMaterializationSuccess(
+        facts=facts,
+        warning_categories=tuple(npm_warning_categories),
+        npm_cadence_evidence=tuple(npm_cadence_evidence),
+    )

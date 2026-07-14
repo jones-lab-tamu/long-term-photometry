@@ -58,6 +58,10 @@ _SUMMARIES = {
         "Guided validation succeeded, but Guided Run execution is unavailable "
         "in this build."
     ),
+    "validated_npm_not_available": (
+        "This NPM recording setup was checked successfully. Running NPM analyses "
+        "is not available yet."
+    ),
     "authorization_not_accepted": (
         "Guided Run could not authorize the validated setup."
     ),
@@ -178,6 +182,24 @@ def evaluate_guided_run_readiness(
         or validation_revision != current_gui_revision
     ):
         status = "validation_stale"
+    elif (
+        getattr(
+            getattr(validation_outcome, "compile_result", None),
+            "request",
+            None,
+        ) is not None
+        and getattr(
+            getattr(
+                getattr(validation_outcome.compile_result, "request", None),
+                "source",
+                None,
+            ),
+            "source_format",
+            None,
+        )
+        == "npm"
+    ):
+        status = "validated_npm_not_available"
     elif not isinstance(authorization_result, GuidedRunAuthorizationResult):
         status = "authorization_missing"
     elif (

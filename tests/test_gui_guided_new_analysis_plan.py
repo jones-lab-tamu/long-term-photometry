@@ -2058,8 +2058,12 @@ def test_new_analysis_dataset_contract_invalid_candidate_cannot_apply(window, tm
     subset = evaluate_guided_new_analysis_execution_subset_readiness(plan)
 
     assert plan.dataset_contract_snapshot.current_applied is False
-    assert "Dataset contract was not applied" in window._guided_dataset_contract_status_label.text()
-    assert "NPM channel mapping is not represented" in window._guided_dataset_contract_candidate_label.text()
+    assert "NPM settings were not applied" in window._guided_dataset_contract_status_label.text()
+    assert (
+        "NPM settings: The selected recording will be checked against the current "
+        "NPM import settings during Setup check."
+        in window._guided_dataset_contract_candidate_label.text()
+    )
     assert any(issue.category == "missing_npm_channel_mapping" for issue in subset.blocking_issues)
 
 

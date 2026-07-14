@@ -10559,8 +10559,64 @@ class MainWindow(QMainWindow):
             status = "unsupported"
             validation_issues.append("unsupported_npm_continuous")
         elif fmt == "npm":
-            status = "invalid"
-            validation_issues.append("NPM channel mapping is not represented in Guided new_analysis state")
+            baseline = self._active_baseline_config()
+            semantic_names = (
+                "npm_time_axis",
+                "npm_led_col",
+                "npm_region_prefix",
+                "npm_region_suffix",
+                (
+                    "npm_system_ts_col"
+                    if str(getattr(baseline, "npm_time_axis", ""))
+                    == "system_timestamp"
+                    else "npm_computer_ts_col"
+                ),
+            )
+            dataset_semantics = {
+                "npm_time_axis": str(getattr(baseline, "npm_time_axis", "")),
+                "npm_system_ts_col": str(getattr(baseline, "npm_system_ts_col", "")),
+                "npm_computer_ts_col": str(getattr(baseline, "npm_computer_ts_col", "")),
+                "npm_led_col": str(getattr(baseline, "npm_led_col", "")),
+                "npm_region_prefix": str(getattr(baseline, "npm_region_prefix", "")),
+                "npm_region_suffix": str(getattr(baseline, "npm_region_suffix", "")),
+                "target_fs_hz": float(getattr(baseline, "target_fs_hz", 0.0)),
+                "allow_partial_final_chunk": bool(identity.allow_partial_final_window),
+                "adapter_value_nan_policy": str(
+                    getattr(baseline, "adapter_value_nan_policy", "strict")
+                ),
+            }
+            if identity.session_duration_sec is not None:
+                dataset_semantics["chunk_duration_sec"] = float(
+                    identity.session_duration_sec
+                )
+            target_fs_hz_value = float(dataset_semantics["target_fs_hz"])
+            if not math.isfinite(target_fs_hz_value) or target_fs_hz_value <= 0:
+                validation_issues.append(
+                    "The NPM sampling rate is missing or invalid."
+                )
+            missing_semantics = [
+                name
+                for name in semantic_names
+                if not str(dataset_semantics.get(name, "")).strip()
+            ]
+            if missing_semantics:
+                setting_labels = {
+                    "npm_time_axis": "time source",
+                    "npm_system_ts_col": "timestamp column",
+                    "npm_computer_ts_col": "timestamp column",
+                    "npm_led_col": "LED-state column",
+                    "npm_region_prefix": "ROI naming prefix",
+                    "npm_region_suffix": "ROI naming suffix",
+                }
+                validation_issues.append(
+                    "The NPM import settings are incomplete: "
+                    + ", ".join(
+                        setting_labels.get(item, item) for item in missing_semantics
+                    )
+                    + "."
+                )
+            if not validation_issues:
+                status = "inferred"
         elif fmt == "custom_tabular":
             status = "invalid"
             validation_issues.append("custom_tabular column mapping is not represented in Guided new_analysis state")
@@ -10568,6 +10624,8 @@ class MainWindow(QMainWindow):
             status = "invalid"
             validation_issues.append("auto format is not an applied dataset contract; choose or discover a concrete format")
         elif validation_issues:
+            status = "invalid"
+        if fmt == "npm" and validation_issues and status == "inferred":
             status = "invalid"
 
         return GuidedNewAnalysisDatasetContractSnapshot(
@@ -10595,6 +10653,9 @@ class MainWindow(QMainWindow):
             format_specific={
                 "structural_only": False,
                 "dataset_semantics_inferred_from_selected_input": fmt == "rwd",
+                "dataset_semantics_source": (
+                    "configured" if fmt == "npm" else "source_validated_candidate"
+                ),
                 "diagnostic_scope_signature": signatures["diagnostic_scope_signature"],
             },
             source_identity=identity,
@@ -10645,6 +10706,25 @@ class MainWindow(QMainWindow):
             snapshot.source_identity,
             current_identity,
         )
+        if not differences and str(snapshot.input_format or "").strip().lower() == "npm":
+            current_candidate = self._guided_new_analysis_dataset_contract_candidate()
+            npm_contract_keys = {
+                "npm_time_axis",
+                "npm_system_ts_col",
+                "npm_computer_ts_col",
+                "npm_led_col",
+                "npm_region_prefix",
+                "npm_region_suffix",
+                "target_fs_hz",
+                "allow_partial_final_chunk",
+                "adapter_value_nan_policy",
+            }
+            if any(
+                snapshot.contract_values.get(key)
+                != current_candidate.contract_values.get(key)
+                for key in npm_contract_keys
+            ):
+                differences.append("NPM import settings changed")
         if not differences:
             return
         self._guided_new_analysis_dataset_contract_snapshot = dataclasses.replace(
@@ -10655,12 +10735,55 @@ class MainWindow(QMainWindow):
         )
         if getattr(snapshot, "status", "") != "stale":
             self._invalidate_guided_backend_validation(
-                "dataset contract became stale"
+                "NPM import settings became stale"
             )
 
-    def _guided_dataset_contract_snapshot_text(self, snapshot, *, heading: str) -> str:
+    def _guided_dataset_contract_snapshot_text(
+        self,
+        snapshot,
+        *,
+        heading: str,
+        npm_context: bool | None = None,
+    ) -> str:
         status = getattr(snapshot, "status", "missing")
         identity = getattr(snapshot, "source_identity", None)
+        is_npm = (
+            bool(npm_context)
+            if npm_context is not None
+            else str(getattr(snapshot, "input_format", "") or "").lower() == "npm"
+        )
+        if is_npm:
+            if "candidate" in heading.lower():
+                heading = "NPM settings to check"
+            elif "snapshot" in heading.lower():
+                heading = "Stored NPM settings"
+            else:
+                heading = "NPM settings"
+            lines = [
+                f"{heading}:",
+                f"  status: {status}",
+                f"  current_for_setup: {str(bool(getattr(snapshot, 'current_applied', False))).lower()}",
+                f"  recording_format: {getattr(snapshot, 'input_format', None) or 'none'}",
+                f"  acquisition: {getattr(snapshot, 'acquisition_mode', None) or 'none'}",
+                f"  settings_applied: {str(bool(getattr(snapshot, 'explicitly_applied', False))).lower()}",
+            ]
+            validation_issues = list(getattr(snapshot, "validation_issues", ()) or ())
+            stale_reasons = list(getattr(snapshot, "stale_reasons", ()) or ())
+            if validation_issues:
+                lines.append(f"  setup issues: {'; '.join(validation_issues)}")
+            if stale_reasons:
+                lines.append(f"  check again because: {'; '.join(stale_reasons)}")
+            if identity is not None:
+                lines.append(
+                    "  selected recording: "
+                    f"{self._display_path(str(identity.input_source_path or 'none'))}; "
+                    f"included ROIs: {len(identity.included_roi_ids)}"
+                )
+            lines.append(
+                "  NPM settings: The selected recording will be checked against "
+                "the current NPM import settings during Setup check."
+            )
+            return "\n".join(lines)
         lines = [
             f"{heading}:",
             f"  stored status: {status}",
@@ -10696,15 +10819,29 @@ class MainWindow(QMainWindow):
             or self._default_guided_new_analysis_dataset_contract_snapshot()
         )
         can_apply = candidate.status == "inferred" and not candidate.validation_issues
-        self._guided_dataset_contract_status_label.setText(
-            f"Stored dataset contract snapshot: {stored.status}; current_applied={str(stored.current_applied).lower()}.\n"
-            f"Candidate: {candidate.status}; can_apply={str(can_apply).lower()}."
-        )
+        if str(getattr(candidate, "input_format", "") or "").lower() == "npm":
+            self._guided_dataset_contract_status_label.setText(
+                f"Stored NPM settings: {stored.status}; current_for_setup={str(stored.current_applied).lower()}.\n"
+                f"NPM settings to check: {candidate.status}; can_apply={str(can_apply).lower()}."
+            )
+        else:
+            self._guided_dataset_contract_status_label.setText(
+                f"Stored dataset contract snapshot: {stored.status}; current_applied={str(stored.current_applied).lower()}.\n"
+                f"Candidate: {candidate.status}; can_apply={str(can_apply).lower()}."
+            )
         self._guided_dataset_contract_candidate_label.setText(
-            self._guided_dataset_contract_snapshot_text(candidate, heading="Dataset contract candidate")
+            self._guided_dataset_contract_snapshot_text(
+                candidate,
+                heading="Dataset contract candidate",
+                npm_context=str(getattr(candidate, "input_format", "") or "").lower() == "npm",
+            )
         )
         self._guided_dataset_contract_stored_label.setText(
-            self._guided_dataset_contract_snapshot_text(stored, heading="Dataset contract snapshot")
+            self._guided_dataset_contract_snapshot_text(
+                stored,
+                heading="Dataset contract snapshot",
+                npm_context=str(getattr(candidate, "input_format", "") or "").lower() == "npm",
+            )
         )
 
     def _default_guided_new_analysis_dataset_contract_snapshot(self):
@@ -10718,9 +10855,13 @@ class MainWindow(QMainWindow):
         if candidate.status == "unsupported" or candidate.validation_issues:
             self._refresh_guided_dataset_contract_panel()
             self._refresh_guided_draft_run_plan_preview()
+            label = (
+                "NPM settings were not applied: "
+                if str(getattr(candidate, "input_format", "") or "").lower() == "npm"
+                else "Dataset contract was not applied: "
+            )
             self._guided_dataset_contract_status_label.setText(
-                "Dataset contract was not applied: "
-                + ("; ".join(candidate.validation_issues) or candidate.status)
+                label + ("; ".join(candidate.validation_issues) or candidate.status)
             )
             return
         now = self._guided_dataset_contract_now_utc()
@@ -10912,13 +11053,36 @@ class MainWindow(QMainWindow):
         )
 
         draft = self._build_guided_new_analysis_draft_plan()
+        parser_contract = self._guided_backend_validation_parser_contract
+        if draft.input_format == "npm":
+            from photometry_pipeline.io.npm_contract import NpmParserContract
+
+            values = draft.dataset_contract_snapshot.contract_values
+            baseline = self._active_baseline_config()
+            parser_contract = NpmParserContract(
+                npm_time_axis=str(values.get("npm_time_axis", baseline.npm_time_axis)),
+                npm_system_ts_col=str(values.get("npm_system_ts_col", baseline.npm_system_ts_col)),
+                npm_computer_ts_col=str(values.get("npm_computer_ts_col", baseline.npm_computer_ts_col)),
+                npm_led_col=str(values.get("npm_led_col", baseline.npm_led_col)),
+                npm_region_prefix=str(values.get("npm_region_prefix", baseline.npm_region_prefix)),
+                npm_region_suffix=str(values.get("npm_region_suffix", baseline.npm_region_suffix)),
+                target_fs_hz=float(values.get("target_fs_hz", baseline.target_fs_hz)),
+                session_duration_sec=float(draft.session_duration_sec or baseline.chunk_duration_sec),
+                allow_partial_final_chunk=bool(
+                    values.get("allow_partial_final_chunk", draft.allow_partial_final_window)
+                ),
+                adapter_value_nan_policy=str(
+                    values.get("adapter_value_nan_policy", baseline.adapter_value_nan_policy)
+                ),
+                timestamp_cv_max=float(baseline.timestamp_cv_max),
+            )
         additional_roots: tuple[tuple[str, str], ...] = ()
         completed_run_root = self._current_guided_completed_run_dir()
         if completed_run_root:
             additional_roots = (("completed_run", completed_run_root),)
         return GuidedBackendValidationGuiContext(
             draft=draft,
-            parser_contract=self._guided_backend_validation_parser_contract,
+            parser_contract=parser_contract,
             additional_protected_roots=additional_roots,
             validator_contract=self._guided_backend_validator_contract,
             revision=int(self._guided_backend_validation_revision),
@@ -11010,13 +11174,19 @@ class MainWindow(QMainWindow):
                 and outcome_revision
                 == int(self._guided_backend_validation_revision)
             ):
-                try:
-                    state = self._derive_guided_execution_state_from_validation(
-                        context,
-                        outcome,
-                    )
-                except Exception:
+                if context is not None and context.draft.input_format == "npm":
+                    # B2-B proves the normalized NPM setup and backend
+                    # validation request only.  It deliberately does not
+                    # enter the existing RWD authorization family.
                     state = None
+                else:
+                    try:
+                        state = self._derive_guided_execution_state_from_validation(
+                            context,
+                            outcome,
+                        )
+                    except Exception:
+                        state = None
                 try:
                     plan_identity = (
                         compute_guided_new_analysis_draft_plan_identity(
@@ -11101,6 +11271,18 @@ class MainWindow(QMainWindow):
 
         status = getattr(outcome, "status", "")
         if status == "validator_accepted":
+            request_format = ""
+            try:
+                request_format = outcome.compile_result.request.source.source_format
+            except Exception:
+                request_format = ""
+            if request_format == "npm":
+                status_label.setText(
+                    "This NPM recording setup was checked successfully. "
+                    "Running NPM analyses is not available yet."
+                )
+                details_label.setText("")
+                return
             status_label.setText(
                 "The setup check passed for the current Guided setup. It "
                 "does not authorize or start a run."
@@ -11151,11 +11333,22 @@ class MainWindow(QMainWindow):
             return
         issue = issues[0]
         detail_code = str(getattr(issue, "detail_code", "") or "")
-        lines = [
-            f"Category: {getattr(issue, 'category', '')}",
-            f"Section: {getattr(issue, 'section', '')}",
-            f"Message: {getattr(issue, 'message', '')}",
-        ]
+        message = str(getattr(issue, "message", "") or "")
+        if "npm" in message.lower():
+            lines = [f"Message: {message}"]
+            if not any(
+                phrase in message.lower()
+                for phrase in ("rerun setup check", "check again")
+            ):
+                lines.append(
+                    "Review the NPM settings and selected recording, then rerun Setup check."
+                )
+        else:
+            lines = [
+                f"Category: {getattr(issue, 'category', '')}",
+                f"Section: {getattr(issue, 'section', '')}",
+                f"Message: {message}",
+            ]
         if detail_code:
             lines.append(f"Detail code: {detail_code}")
         lines.append("Guided Run is not available for this configuration yet.")

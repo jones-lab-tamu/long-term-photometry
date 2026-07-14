@@ -4,6 +4,7 @@ import ast
 from dataclasses import fields
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -167,6 +168,23 @@ def test_fully_accepted_state_is_ready_but_hidden(ready_state):
     assert result.files_written is False
     assert result.exposes_manifest_path_to_user is False
     assert result.exposes_internal_cli_to_user is False
+
+
+def test_accepted_npm_validation_is_explicitly_not_available_for_run(ready_state):
+    outcome = _unchecked(
+        ready_state["validation_outcome"],
+        compile_result=SimpleNamespace(
+            request=SimpleNamespace(
+                source=SimpleNamespace(source_format="npm")
+            )
+        ),
+    )
+
+    result = _evaluate(ready_state, validation_outcome=outcome)
+
+    assert result.status == "validated_npm_not_available"
+    assert result.ready is False
+    assert result.user_visible_state == "cannot_run"
 
 
 def test_user_summaries_exclude_internal_terms():

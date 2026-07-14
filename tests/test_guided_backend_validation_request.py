@@ -1141,11 +1141,125 @@ def test_identity_payload_uses_domain_and_canonical_json_envelope():
     assert b" " not in encoded
 
 
+def test_npm_acquisition_request_uses_format_neutral_disposition_policy():
+    policy = contracts.GuidedBackendDispositionPolicyRequest(
+        schema_name=contracts.GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_NAME,
+        schema_version=contracts.GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_VERSION,
+        admitted_dispositions=("process",),
+        missing_session_policy="unsupported",
+        excluded_session_policy="unsupported",
+        partial_support_owner="parser_contract",
+    )
+    acquisition = contracts.GuidedBackendNpmAcquisitionDatasetRequest(
+        acquisition_mode="intermittent",
+        sessions_per_hour=6,
+        session_duration_sec=120.0,
+        timeline_anchor_mode="civil",
+        fixed_daily_anchor_clock=None,
+        allow_partial_final_window=False,
+        dataset_snapshot_schema_version=(
+            "guided_new_analysis_dataset_contract_snapshot.v1"
+        ),
+        dataset_status="applied",
+        dataset_current_applied=True,
+        semantic_values=(_typed_value("npm_led_col", "LedState"),),
+        dataset_source_setup_signature="source-signature",
+        diagnostic_cache_contract_identity="request-signature",
+        npm_time_axis="system_timestamp",
+        npm_system_ts_col="SystemTimestamp",
+        npm_computer_ts_col="ComputerTimestamp",
+        npm_led_col="LedState",
+        npm_region_prefix="Region",
+        npm_region_suffix="G",
+        npm_target_fs_hz=40.0,
+        npm_adapter_value_nan_policy="strict",
+        disposition_policy=policy,
+    )
+
+    assert acquisition.disposition_policy is policy
+    assert acquisition.disposition_policy.admitted_dispositions == ("process",)
+    assert acquisition.disposition_policy.missing_session_policy == "unsupported"
+    assert acquisition.disposition_policy.excluded_session_policy == "unsupported"
+    assert acquisition.disposition_policy.partial_support_owner == "parser_contract"
+    assert not hasattr(acquisition, "classification_schema_name")
+    assert not hasattr(acquisition, "classifier_version")
+    assert not hasattr(acquisition, "not_requested_classification_digest")
+
+
+def test_npm_disposition_policy_is_part_of_parent_request_identity():
+    from photometry_pipeline.guided_normalized_recording import (
+        compute_npm_parser_contract_digest,
+    )
+
+    policy = contracts.GuidedBackendDispositionPolicyRequest(
+        schema_name=contracts.GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_NAME,
+        schema_version=contracts.GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_VERSION,
+        admitted_dispositions=("process",),
+        missing_session_policy="unsupported",
+        excluded_session_policy="unsupported",
+        partial_support_owner="parser_contract",
+    )
+    acquisition = contracts.GuidedBackendNpmAcquisitionDatasetRequest(
+        acquisition_mode="intermittent",
+        sessions_per_hour=6,
+        session_duration_sec=120.0,
+        timeline_anchor_mode="civil",
+        fixed_daily_anchor_clock=None,
+        allow_partial_final_window=False,
+        dataset_snapshot_schema_version=(
+            "guided_new_analysis_dataset_contract_snapshot.v1"
+        ),
+        dataset_status="applied",
+        dataset_current_applied=True,
+        semantic_values=(_typed_value("npm_led_col", "LedState"),),
+        dataset_source_setup_signature="source-signature",
+        diagnostic_cache_contract_identity="request-signature",
+        npm_time_axis="system_timestamp",
+        npm_system_ts_col="SystemTimestamp",
+        npm_computer_ts_col="ComputerTimestamp",
+        npm_led_col="LedState",
+        npm_region_prefix="Region",
+        npm_region_suffix="G",
+        npm_target_fs_hz=40.0,
+        npm_adapter_value_nan_policy="strict",
+        disposition_policy=policy,
+    )
+    parser_content = {"parser": "npm"}
+    parser = contracts.GuidedBackendNpmParserRequest(
+        schema_name="npm_parser_contract",
+        schema_version="v1",
+        timestamp_column_candidates=("SystemTimestamp",),
+        parser_contract_digest=compute_npm_parser_contract_digest(parser_content),
+        parser_contract_content=parser_content,
+    )
+    request = replace(
+        _request(),
+        source=replace(_request().source, source_format="npm"),
+        acquisition_dataset=acquisition,
+        parser=parser,
+        normalized_recording_description={"adapter_format": "npm"},
+    )
+    changed_policy = replace(policy, partial_support_owner="adapter_policy")
+    changed = replace(
+        request,
+        acquisition_dataset=replace(
+            acquisition,
+            disposition_policy=changed_policy,
+        ),
+    )
+
+    assert contracts.compute_guided_backend_validation_request_identity(changed) != (
+        contracts.compute_guided_backend_validation_request_identity(request)
+    )
+
+
 def test_identity_mapper_covers_every_request_dataclass_field():
     expected_types = {
         contracts.GuidedBackendValidationRequest,
         contracts.GuidedBackendSourceRequest,
         contracts.GuidedBackendAcquisitionDatasetRequest,
+        contracts.GuidedBackendNpmAcquisitionDatasetRequest,
+        contracts.GuidedBackendDispositionPolicyRequest,
         contracts.GuidedBackendRwdParserRequest,
         contracts.GuidedBackendRoiScopeRequest,
         contracts.GuidedBackendCorrectionRequest,

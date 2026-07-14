@@ -13,6 +13,7 @@ import pytest
 import photometry_pipeline.guided_backend_validation_materialization as materialization
 
 from photometry_pipeline.guided_new_analysis_plan import (
+    GuidedApprovedMissingSession,
     GuidedNewAnalysisDraftPlan,
     GuidedNewAnalysisDatasetContractSnapshot,
     GuidedNewAnalysisDatasetContractSourceIdentity,
@@ -33,6 +34,7 @@ from photometry_pipeline.guided_backend_validation_materialization import (
     STAGE_2B_VALID_ISSUES,
 )
 from photometry_pipeline.io.rwd_contract import RwdHeaderParsingContract
+from photometry_pipeline.io.npm_contract import NpmParserContract
 
 
 def _write_session(root: Path, name: str, content: bytes) -> Path:
@@ -47,6 +49,23 @@ def _create_tiny_rwd_fixture(tmp_path: Path) -> Path:
     root = tmp_path / "raw"
     root.mkdir()
     _write_session(root, "2026_06_30-12_00_00", b"time,uv,sig\n0.0,1.2,3.4\n")
+    return root
+
+
+def _create_tiny_npm_fixture(tmp_path: Path) -> Path:
+    root = tmp_path / "npm_raw"
+    root.mkdir()
+    target = root / "photometryData2026-06-30T12_00_00.csv"
+    target.write_text(
+        "Timestamp,LedState,Region2G\n"
+        "100.0,1,10.0\n"
+        "100.5,2,100.0\n"
+        "101.0,1,11.0\n"
+        "101.5,2,101.0\n"
+        "102.0,1,12.0\n"
+        "102.5,2,102.0\n",
+        encoding="utf-8",
+    )
     return root
 
 
@@ -224,6 +243,92 @@ def _valid_stage2c_draft(tmp_path: Path) -> GuidedNewAnalysisDraftPlan:
         acquisition_mode="intermittent",
     )
     _apply_valid_feature_event_profile(draft)
+    return draft
+
+
+def _valid_npm_stage2c_draft(tmp_path: Path) -> GuidedNewAnalysisDraftPlan:
+    source_root = _create_tiny_npm_fixture(tmp_path)
+    draft = GuidedNewAnalysisDraftPlan(
+        input_source_path=str(source_root),
+        input_format="npm",
+        acquisition_mode="intermittent",
+        sessions_per_hour=1,
+        session_duration_sec=2.0,
+    )
+    draft.feature_event_profile_status = "applied"
+    draft.feature_event_profile_id = "feature-profile-001"
+    draft.feature_event_explicitly_applied = True
+    draft.feature_event_values = {
+        "event_signal": "dff",
+        "signal_excursion_polarity": "positive",
+        "peak_threshold_method": "percentile",
+        "peak_threshold_percentile": 90.0,
+        "peak_min_distance_sec": 1.0,
+        "peak_min_prominence_k": 2.0,
+        "peak_min_width_sec": 0.5,
+        "peak_pre_filter": "none",
+        "event_auc_baseline": "zero",
+        "peak_threshold_k": 1.0,
+        "peak_threshold_abs": 0.2,
+    }
+    draft.feature_event_validation_issues = []
+    draft.feature_event_stale_reasons = []
+    _apply_valid_local_preview_correction_evidence(draft, roi_id="Region0")
+    draft.sessions_per_hour = 1
+    draft.session_duration_sec = 2.0
+    from photometry_pipeline.guided_new_analysis_plan import (
+        compute_guided_local_preview_source_setup_signature,
+    )
+
+    local_preview_signature = compute_guided_local_preview_source_setup_signature(
+        draft
+    )
+    draft.per_roi_correction_strategy_choices = [
+        replace(
+            choice,
+            source_setup_signature=local_preview_signature,
+        )
+        for choice in draft.per_roi_correction_strategy_choices
+    ]
+    source_identity = GuidedNewAnalysisDatasetContractSourceIdentity(
+        input_source_path=str(source_root),
+        resolved_input_source_path=str(source_root),
+        input_format="npm",
+        resolved_input_format="npm",
+        acquisition_mode="intermittent",
+        sessions_per_hour=1,
+        session_duration_sec=2.0,
+        allow_partial_final_window=False,
+        exclude_incomplete_final_rwd_chunk=False,
+        discovered_roi_ids=("Region0",),
+        included_roi_ids=("Region0",),
+        source_setup_signature=None,
+        diagnostic_cache_contract_identity=None,
+    )
+    draft.dataset_contract_snapshot = GuidedNewAnalysisDatasetContractSnapshot(
+        status="applied",
+        input_format="npm",
+        resolved_input_format="npm",
+        acquisition_mode="intermittent",
+        contract_values={
+            "npm_time_axis": "system_timestamp",
+            "npm_system_ts_col": "SystemTimestamp",
+            "npm_computer_ts_col": "ComputerTimestamp",
+            "npm_led_col": "LedState",
+            "npm_region_prefix": "Region",
+            "npm_region_suffix": "G",
+            "target_fs_hz": 2.0,
+            "chunk_duration_sec": 2.0,
+            "allow_partial_final_chunk": False,
+            "adapter_value_nan_policy": "strict",
+        },
+        source_identity=source_identity,
+        explicitly_applied=True,
+        format_specific={
+            "dataset_semantics_source": "configured",
+            "dataset_semantics_inferred_from_selected_input": False,
+        },
+    )
     return draft
 
 
@@ -1772,6 +1877,277 @@ def test_backend_validation_workflow_accepts_real_materialized_draft(
     assert outcome.accepted_for_backend_validation is True
     assert outcome.request_identity
     assert outcome.run_authorization is False
+
+
+def test_backend_validation_workflow_accepts_npm_without_rwd_classifier_claims(
+    tmp_path: Path,
+):
+    from photometry_pipeline.guided_backend_validation_workflow import (
+        validate_current_guided_draft_for_backend,
+    )
+
+    draft = _valid_npm_stage2c_draft(tmp_path)
+    validator_contract = GuidedBackendValidatorContract(
+        validation_scope="guided_rwd_intermittent_phasic_full_validate",
+        validation_contract_version="guided_backend_validation_contract.v1",
+        validator_capability_version="test_validator_capability.v1",
+        supported_subset_rule_version="global_dynamic_fit_only.v1",
+    )
+    parser_contract = NpmParserContract(
+        npm_time_axis="system_timestamp",
+        npm_system_ts_col="SystemTimestamp",
+        npm_computer_ts_col="ComputerTimestamp",
+        npm_led_col="LedState",
+        npm_region_prefix="Region",
+        npm_region_suffix="G",
+        target_fs_hz=2.0,
+        session_duration_sec=2.0,
+        allow_partial_final_chunk=False,
+        adapter_value_nan_policy="strict",
+    )
+
+    outcome = validate_current_guided_draft_for_backend(
+        draft,
+        parser_contract=parser_contract,
+        validator_contract=validator_contract,
+    )
+
+    assert outcome.status == "validator_accepted"
+    assert outcome.accepted_for_backend_validation is True
+    assert outcome.run_authorization is False
+    assert outcome.compile_result is not None
+    acquisition = outcome.compile_result.request.acquisition_dataset
+    assert acquisition.__class__.__name__ == (
+        "GuidedBackendNpmAcquisitionDatasetRequest"
+    )
+    assert acquisition.disposition_policy.admitted_dispositions == ("process",)
+    assert acquisition.disposition_policy.missing_session_policy == "unsupported"
+    assert not hasattr(acquisition, "classification_schema_name")
+    assert outcome.materialization_result.npm_cadence_evidence == ()
+    assert outcome.user_summary == (
+        "This NPM recording setup was checked successfully. Running NPM analyses "
+        "is not available yet."
+    )
+
+    from photometry_pipeline.guided_backend_validation_request import (
+        compute_guided_backend_validation_request_identity,
+    )
+    from photometry_pipeline.guided_backend_validator import (
+        validate_guided_backend_validation_request,
+    )
+
+    tampered_payload = dict(
+        outcome.compile_result.request.normalized_recording_description
+    )
+    tampered_payload["sessions"] = [
+        {
+            **item,
+            "disposition": "excluded",
+        }
+        if index == 0
+        else item
+        for index, item in enumerate(tampered_payload["sessions"])
+    ]
+    tampered_request = replace(
+        outcome.compile_result.request,
+        normalized_recording_description=tampered_payload,
+    )
+    tampered_result = validate_guided_backend_validation_request(
+        tampered_request,
+        canonical_request_identity=compute_guided_backend_validation_request_identity(
+            tampered_request
+        ),
+        validator_contract=validator_contract,
+    )
+    assert tampered_result.accepted is False
+    assert tampered_result.blocking_issues[0].detail_code == (
+        "npm_normalized_disposition_invalid"
+    )
+
+    policy_tampered_request = replace(
+        outcome.compile_result.request,
+        acquisition_dataset=replace(
+            acquisition,
+            disposition_policy=replace(
+                acquisition.disposition_policy,
+                partial_support_owner="acquisition_request",
+            ),
+        ),
+    )
+    policy_tampered_result = validate_guided_backend_validation_request(
+        policy_tampered_request,
+        canonical_request_identity=compute_guided_backend_validation_request_identity(
+            policy_tampered_request
+        ),
+        validator_contract=validator_contract,
+    )
+    assert policy_tampered_result.accepted is False
+    assert policy_tampered_result.blocking_issues[0].detail_code == (
+        "npm_disposition_policy_invalid"
+    )
+
+
+def test_npm_missing_session_approval_is_refused_before_materialization(
+    tmp_path: Path,
+):
+    draft = _valid_npm_stage2c_draft(tmp_path)
+    draft.approved_missing_sessions = [
+        GuidedApprovedMissingSession(
+            canonical_relative_path="photometryData2026-06-30T12_00_00.csv",
+            size_bytes=1,
+            sha256_content_digest="a" * 64,
+            session_index=0,
+            expected_start_time="2026-06-30T12:00:00",
+            expected_duration_sec=2.0,
+        )
+    ]
+    result = materialize_guided_backend_validation_facts(
+        draft,
+        parser_contract=NpmParserContract(target_fs_hz=2.0, session_duration_sec=2.0),
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "approved_missing_session_invalid"
+    assert result.blocking_issues[0].detail_code == "npm_missing_session_unsupported"
+    assert result.blocking_issues[0].message == (
+        "Missing-session continuation is not available for NPM recordings."
+    )
+
+
+def test_npm_excluded_final_session_is_refused_before_materialization(
+    tmp_path: Path,
+):
+    draft = _valid_npm_stage2c_draft(tmp_path)
+    draft.exclude_incomplete_final_rwd_chunk = True
+    result = materialize_guided_backend_validation_facts(
+        draft,
+        parser_contract=NpmParserContract(target_fs_hz=2.0, session_duration_sec=2.0),
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationFailure)
+    assert result.blocking_issues[0].category == "unsupported_incomplete_final_exclusion"
+    assert result.blocking_issues[0].message == (
+        "Excluding an incomplete final session is not available for NPM recordings."
+    )
+
+
+def test_npm_setup_check_failures_use_scientist_facing_messages(tmp_path: Path):
+    draft = _valid_npm_stage2c_draft(tmp_path)
+
+    incomplete = materialize_guided_backend_validation_facts(
+        draft,
+        parser_contract=None,
+    )
+    assert isinstance(incomplete, GuidedBackendValidationMaterializationFailure)
+    assert incomplete.blocking_issues[0].message.startswith(
+        "The NPM import settings are incomplete."
+    )
+
+    inspection_failure = materialize_guided_backend_validation_facts(
+        draft,
+        parser_contract=NpmParserContract(
+            npm_time_axis="computer_timestamp",
+            npm_computer_ts_col="MissingTimestamp",
+            target_fs_hz=2.0,
+            session_duration_sec=2.0,
+        ),
+    )
+    assert isinstance(inspection_failure, GuidedBackendValidationMaterializationFailure)
+    assert inspection_failure.blocking_issues[0].message.startswith(
+        "The app could not determine how to read this NPM recording from the current settings."
+    )
+    assert "timestamp column" in inspection_failure.blocking_issues[0].message
+    assert inspection_failure.blocking_issues[0].detail_code == (
+        "npm_time_column_missing"
+    )
+
+    mismatch = materialize_guided_backend_validation_facts(
+        draft,
+        parser_contract=NpmParserContract(
+            target_fs_hz=3.0,
+            session_duration_sec=2.0,
+        ),
+    )
+    assert isinstance(mismatch, GuidedBackendValidationMaterializationFailure)
+    assert mismatch.blocking_issues[0].message.startswith(
+        "The current NPM import settings do not match the settings applied to this recording."
+    )
+    assert mismatch.blocking_issues[0].detail_code == (
+        "npm_parser_dataset_binding_mismatch"
+    )
+
+    draft.discovered_roi_ids = ["Region0", "Region1"]
+    draft.included_roi_ids = ["Region0", "Region1"]
+    roi_mismatch = materialize_guided_backend_validation_facts(
+        draft,
+        parser_contract=NpmParserContract(target_fs_hz=2.0, session_duration_sec=2.0),
+    )
+    assert isinstance(roi_mismatch, GuidedBackendValidationMaterializationFailure)
+    assert "ROI selection does not match" in roi_mismatch.blocking_issues[0].message
+    assert roi_mismatch.blocking_issues[0].detail_code == (
+        "npm_roi_inventory_mismatch"
+    )
+
+
+def test_npm_materialization_retains_per_interval_cadence_evidence(
+    tmp_path: Path,
+):
+    draft = _valid_npm_stage2c_draft(tmp_path)
+    source_root = Path(draft.input_source_path or "")
+    for name in (
+        "photometryData2026-06-30T12_01_30.csv",
+        "photometryData2026-06-30T12_02_30.csv",
+    ):
+        (source_root / name).write_text(
+            "Timestamp,LedState,Region2G\n"
+            "100.0,1,10.0\n"
+            "100.5,2,100.0\n"
+            "101.0,1,11.0\n"
+            "101.5,2,101.0\n"
+            "102.0,1,12.0\n"
+            "102.5,2,102.0\n",
+            encoding="utf-8",
+        )
+    draft.sessions_per_hour = 60
+    draft.session_duration_sec = 20.0
+    source_identity = replace(
+        draft.dataset_contract_snapshot.source_identity,
+        sessions_per_hour=60,
+        session_duration_sec=20.0,
+    )
+    draft.dataset_contract_snapshot = replace(
+        draft.dataset_contract_snapshot,
+        contract_values={
+            **draft.dataset_contract_snapshot.contract_values,
+            "chunk_duration_sec": 20.0,
+        },
+        source_identity=source_identity,
+    )
+    from photometry_pipeline.guided_new_analysis_plan import (
+        compute_guided_local_preview_source_setup_signature,
+    )
+
+    signature = compute_guided_local_preview_source_setup_signature(draft)
+    draft.per_roi_correction_strategy_choices = [
+        replace(choice, source_setup_signature=signature)
+        for choice in draft.per_roi_correction_strategy_choices
+    ]
+
+    result = materialize_guided_backend_validation_facts(
+        draft,
+        parser_contract=NpmParserContract(target_fs_hz=2.0, session_duration_sec=20.0),
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    assert result.warning_categories.count("npm_schedule_gap") == 1
+    assert [item.classification for item in result.npm_cadence_evidence] == [
+        "npm_schedule_gap",
+        "nominal",
+    ]
+    assert [item.actual_interval_sec for item in result.npm_cadence_evidence] == [
+        90.0,
+        60.0,
+    ]
 
 
 # Preservation: Exclusion True Refused

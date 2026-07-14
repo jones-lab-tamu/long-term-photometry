@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Any
+from typing import Any, Mapping
 
 from photometry_pipeline.guided_backend_validation_request import (
     GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION,
@@ -12,12 +12,17 @@ from photometry_pipeline.guided_backend_validation_request import (
     GUIDED_BACKEND_INCOMPLETE_FINAL_CLASSIFIER_VERSION,
     GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME,
     GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_VERSION,
+    GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_NAME,
+    GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_VERSION,
     GUIDED_BACKEND_LOCAL_CHECK_CONTRACT_VERSION,
     GUIDED_BACKEND_SOURCE_DISCOVERY_RULE_VERSION,
     GUIDED_BACKEND_SOURCE_IGNORED_FILES_POLICY,
     GUIDED_BACKEND_SOURCE_RELATIVE_PATH_RULE_VERSION,
     GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_NAME,
     GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_VERSION,
+    GUIDED_BACKEND_NPM_SOURCE_SNAPSHOT_SCHEMA_NAME,
+    GUIDED_BACKEND_NPM_SOURCE_DISCOVERY_RULE_VERSION,
+    GUIDED_BACKEND_NPM_SOURCE_IGNORED_FILES_POLICY,
     GUIDED_BACKEND_VALIDATION_COMPILER_VERSION,
     GUIDED_BACKEND_VALIDATION_CONTRACT_VERSION,
     GUIDED_BACKEND_VALIDATION_REQUEST_SCHEMA_NAME,
@@ -25,10 +30,17 @@ from photometry_pipeline.guided_backend_validation_request import (
     GUIDED_BACKEND_VALIDATION_SCOPE,
     GUIDED_BACKEND_VALIDATION_SUBSET_RULE_VERSION,
     GuidedBackendValidationRequest,
+    GuidedBackendAcquisitionDatasetRequest,
+    GuidedBackendNpmAcquisitionDatasetRequest,
+    GuidedBackendNpmParserRequest,
     GuidedBackendValidatorContract,
     compute_guided_backend_validation_request_identity,
 )
 from photometry_pipeline.guided_identity import CANONICALIZATION_ALGORITHM_VERSION
+from photometry_pipeline.guided_normalized_recording import (
+    compute_normalized_recording_description_identity,
+    deserialize_normalized_recording_description,
+)
 from photometry_pipeline.guided_new_analysis_plan import (
     FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
 )
@@ -376,13 +388,55 @@ def _validate_semantics(
         )
 
     source = request.source
-    if source.source_format != "rwd":
+    if source.source_format not in {"rwd", "npm"}:
         return _issue(
             "unsupported_source_format",
             "source",
             "The first validator subset requires RWD source data.",
             "source_format_not_rwd",
         )
+    if source.source_format == "npm" and not isinstance(
+        request.parser, GuidedBackendNpmParserRequest
+    ):
+        return _issue(
+            "unsupported_source_format",
+            "source",
+            "The NPM import settings are incomplete. Return to the NPM settings "
+            "step, apply the intended settings, and rerun Setup check.",
+            "npm_parser_request_missing",
+        )
+    is_npm = source.source_format == "npm"
+    if (
+        (is_npm and not isinstance(
+            request.acquisition_dataset,
+            GuidedBackendNpmAcquisitionDatasetRequest,
+        ))
+        or (not is_npm and not isinstance(
+            request.acquisition_dataset,
+            GuidedBackendAcquisitionDatasetRequest,
+        ))
+    ):
+        return _issue(
+            "unsupported_request_field",
+            "acquisition_dataset",
+            "The acquisition request variant does not match the source format.",
+            "acquisition_request_variant_mismatch",
+        )
+    expected_snapshot_schema = (
+        GUIDED_BACKEND_NPM_SOURCE_SNAPSHOT_SCHEMA_NAME
+        if is_npm
+        else GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_NAME
+    )
+    expected_discovery_rule = (
+        GUIDED_BACKEND_NPM_SOURCE_DISCOVERY_RULE_VERSION
+        if is_npm
+        else GUIDED_BACKEND_SOURCE_DISCOVERY_RULE_VERSION
+    )
+    expected_ignored_policy = (
+        GUIDED_BACKEND_NPM_SOURCE_IGNORED_FILES_POLICY
+        if is_npm
+        else GUIDED_BACKEND_SOURCE_IGNORED_FILES_POLICY
+    )
     if (
         not _is_non_empty_string(source.source_root_canonical)
         or source.source_root_path_style not in {
@@ -390,18 +444,15 @@ def _validate_semantics(
             "windows_unc",
             "posix",
         }
-        or source.snapshot_schema_name
-        != GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_NAME
+        or source.snapshot_schema_name != expected_snapshot_schema
         or source.snapshot_schema_version
         != GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_VERSION
-        or source.discovery_rule_version
-        != GUIDED_BACKEND_SOURCE_DISCOVERY_RULE_VERSION
+        or source.discovery_rule_version != expected_discovery_rule
         or source.path_canonicalization_version
         != CANONICALIZATION_ALGORITHM_VERSION
         or source.relative_path_rule_version
         != GUIDED_BACKEND_SOURCE_RELATIVE_PATH_RULE_VERSION
-        or source.ignored_files_policy
-        != GUIDED_BACKEND_SOURCE_IGNORED_FILES_POLICY
+        or source.ignored_files_policy != expected_ignored_policy
         or source.build_mode != "read_only"
         or source.source_identity_level
         != GUIDED_BACKEND_VALIDATOR_SOURCE_IDENTITY_LEVEL
@@ -467,32 +518,66 @@ def _validate_semantics(
             "Dataset timing or timeline fields are invalid.",
             "dataset_timing_invalid",
         )
-    if (
-        dataset.allow_partial_final_window is not False
-        or dataset.classification_schema_name
-        != GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME
-        or dataset.classification_schema_version
-        != GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_VERSION
-        or dataset.classifier_version
-        != GUIDED_BACKEND_INCOMPLETE_FINAL_CLASSIFIER_VERSION
-        or dataset.classification_status != "not_requested"
-        or not _is_sha256_lower(
-            dataset.not_requested_classification_digest
-        )
-    ):
-        return _issue(
-            "incomplete_final_policy_not_supported",
-            "acquisition_dataset",
-            "The incomplete-final policy is unsupported.",
-            "incomplete_final_contract_invalid",
-        )
+    if not is_npm:
+        if (
+            dataset.allow_partial_final_window is not False
+            or dataset.classification_schema_name
+            != GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME
+            or dataset.classification_schema_version
+            != GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_VERSION
+            or dataset.classifier_version
+            != GUIDED_BACKEND_INCOMPLETE_FINAL_CLASSIFIER_VERSION
+            or dataset.classification_status != "not_requested"
+            or not _is_sha256_lower(dataset.not_requested_classification_digest)
+        ):
+            return _issue(
+                "incomplete_final_policy_not_supported",
+                "acquisition_dataset",
+                "The incomplete-final policy is unsupported.",
+                "incomplete_final_contract_invalid",
+            )
+    else:
+        policy = dataset.disposition_policy
+        if (
+            policy is None
+            or policy.schema_name != GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_NAME
+            or policy.schema_version != GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_VERSION
+            or policy.admitted_dispositions != ("process",)
+            or policy.missing_session_policy != "unsupported"
+            or policy.excluded_session_policy != "unsupported"
+            or policy.partial_support_owner != "parser_contract"
+            or source.approved_missing_candidates
+        ):
+            return _issue(
+                "incomplete_final_policy_not_supported",
+                "acquisition_dataset",
+                "Missing-session continuation is not available for NPM recordings. "
+                "Excluding an incomplete final session is not available for NPM recordings.",
+                "npm_disposition_policy_invalid",
+            )
     if (
         not _is_non_empty_string(dataset.dataset_snapshot_schema_version)
         or dataset.dataset_status != "applied"
         or dataset.dataset_current_applied is not True
-        or not _is_non_empty_string(dataset.rwd_time_col)
-        or not _is_non_empty_string(dataset.uv_suffix)
-        or not _is_non_empty_string(dataset.sig_suffix)
+        or (
+            not is_npm
+            and (
+                not _is_non_empty_string(dataset.rwd_time_col)
+                or not _is_non_empty_string(dataset.uv_suffix)
+                or not _is_non_empty_string(dataset.sig_suffix)
+            )
+        )
+        or (
+            is_npm
+            and (
+                dataset.source_format != "npm"
+                or not _is_non_empty_string(dataset.npm_time_axis)
+                or not _is_non_empty_string(dataset.npm_led_col)
+                or not _is_non_empty_string(dataset.npm_region_prefix)
+                or not _is_non_empty_string(dataset.npm_region_suffix)
+                or dataset.npm_target_fs_hz is None
+            )
+        )
         or not _typed_values_valid(dataset.semantic_values)
         or not _is_non_empty_string(
             dataset.dataset_source_setup_signature
@@ -513,29 +598,60 @@ def _validate_semantics(
         )
 
     parser = request.parser
-    if (
-        not _is_non_empty_string(parser.schema_name)
-        or not _is_non_empty_string(parser.schema_version)
-        or isinstance(parser.header_search_line_limit, bool)
-        or not isinstance(parser.header_search_line_limit, int)
-        or parser.header_search_line_limit <= 0
-        or not _is_tuple(parser.time_column_candidates)
-        or not parser.time_column_candidates
-        or not _is_tuple(parser.uv_suffix_candidates)
-        or not parser.uv_suffix_candidates
-        or not _is_tuple(parser.signal_suffix_candidates)
-        or not parser.signal_suffix_candidates
-        or not _is_non_empty_string(parser.column_normalization_rule)
-        or not _is_non_empty_string(parser.roi_name_rule)
-        or not _is_non_empty_string(parser.ambiguity_policy)
-        or not _is_sha256_lower(parser.parser_contract_digest)
-    ):
+    if is_npm:
+        parser_invalid = (
+            not isinstance(parser, GuidedBackendNpmParserRequest)
+            or not _is_non_empty_string(parser.schema_name)
+            or not _is_non_empty_string(parser.schema_version)
+            or not _is_tuple(parser.timestamp_column_candidates)
+            or not parser.timestamp_column_candidates
+            or not _is_sha256_lower(parser.parser_contract_digest)
+            or not isinstance(parser.parser_contract_content, Mapping)
+        )
+    else:
+        parser_invalid = (
+            not _is_non_empty_string(parser.schema_name)
+            or not _is_non_empty_string(parser.schema_version)
+            or isinstance(parser.header_search_line_limit, bool)
+            or not isinstance(parser.header_search_line_limit, int)
+            or parser.header_search_line_limit <= 0
+            or not _is_tuple(parser.time_column_candidates)
+            or not parser.time_column_candidates
+            or not _is_tuple(parser.uv_suffix_candidates)
+            or not parser.uv_suffix_candidates
+            or not _is_tuple(parser.signal_suffix_candidates)
+            or not parser.signal_suffix_candidates
+            or not _is_non_empty_string(parser.column_normalization_rule)
+            or not _is_non_empty_string(parser.roi_name_rule)
+            or not _is_non_empty_string(parser.ambiguity_policy)
+            or not _is_sha256_lower(parser.parser_contract_digest)
+        )
+    if parser_invalid:
         return _issue(
             "parser_contract_unavailable",
             "parser",
             "The parser contract is incomplete.",
             "parser_contract_invalid",
         )
+    if is_npm:
+        parser_content = parser.parser_contract_content
+        sampling = parser_content.get("sampling") if isinstance(parser_content, Mapping) else None
+        if (
+            not isinstance(sampling, Mapping)
+            or sampling.get("allow_partial_final_chunk")
+            != dataset.allow_partial_final_window
+            or sampling.get("support_policy")
+            not in {"strict_overlap_inner_support", "permissive_overlap_from_t0"}
+            or dataset.disposition_policy.partial_support_owner != "parser_contract"
+        ):
+            return _issue(
+                "incomplete_final_policy_not_supported",
+                "parser",
+                "The NPM sampling settings do not include a supported final-session "
+                "setting. Return to the NPM settings step, apply the intended "
+                "settings, and rerun Setup check.",
+                "npm_partial_support_owner_invalid",
+            )
     if not _is_tuple(parser.unresolved_inputs) or parser.unresolved_inputs:
         return _issue(
             "parser_unresolved_inputs",
@@ -543,6 +659,28 @@ def _validate_semantics(
             "The parser contract has unresolved inputs.",
             "parser_inputs_unresolved",
         )
+
+    if is_npm:
+        try:
+            normalized = deserialize_normalized_recording_description(
+                request.normalized_recording_description
+            )
+            if (
+                normalized.adapter_format != "npm"
+                or compute_normalized_recording_description_identity(normalized)
+                != request.normalized_recording_description_identity
+                or any(session.disposition != "process" for session in normalized.sessions)
+            ):
+                raise ValueError("NPM normalized dispositions are not process-only.")
+        except Exception:
+            return _issue(
+                "incomplete_final_policy_not_supported",
+                "normalized_recording",
+                "The NPM recording sessions could not all be confirmed for "
+                "processing from the current settings. Return to the NPM settings "
+                "step and rerun Setup check.",
+                "npm_normalized_disposition_invalid",
+            )
 
     roi = request.roi_scope
     if (

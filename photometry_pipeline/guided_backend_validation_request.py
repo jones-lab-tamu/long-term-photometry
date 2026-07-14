@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import math
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from photometry_pipeline.guided_identity import (
@@ -60,11 +61,22 @@ GUIDED_BACKEND_SOURCE_RELATIVE_PATH_RULE_VERSION = (
 GUIDED_BACKEND_SOURCE_IGNORED_FILES_POLICY = (
     "ignore_non_target_entries_bounded_nested_root_check.v1"
 )
+GUIDED_BACKEND_NPM_SOURCE_SNAPSHOT_SCHEMA_NAME = (
+    "guided_npm_source_candidate_snapshot"
+)
+GUIDED_BACKEND_NPM_SOURCE_DISCOVERY_RULE_VERSION = (
+    "immediate_child_csv_exact_filename_timestamp.v1"
+)
+GUIDED_BACKEND_NPM_SOURCE_IGNORED_FILES_POLICY = (
+    "ignore_non_csv_immediate_children.v1"
+)
 GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME = (
     "guided_rwd_incomplete_final_chunk_classification"
 )
 GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_VERSION = "v1"
 GUIDED_BACKEND_INCOMPLETE_FINAL_CLASSIFIER_VERSION = "not_requested_only.v1"
+GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_NAME = "guided_backend_disposition_policy"
+GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_VERSION = "v1"
 
 
 SOURCE_DATASET_REFUSAL_CATEGORIES = (
@@ -292,9 +304,9 @@ class GuidedBackendSourceRequest:
             "source_identity_level",
         ):
             _require_non_empty(getattr(self, name), name)
-        if self.source_format != "rwd":
+        if self.source_format not in {"rwd", "npm"}:
             raise GuidedBackendValidationRequestContractError(
-                "source_format must be rwd."
+                "source_format must be rwd or npm."
             )
         _require_sha256(
             self.source_candidate_set_digest,
@@ -325,6 +337,37 @@ class GuidedBackendSourceRequest:
             raise GuidedBackendValidationRequestContractError(
                 "Approved missing sources must be exact members of the source candidate set."
             )
+
+
+@dataclass(frozen=True)
+class GuidedBackendDispositionPolicyRequest:
+    schema_name: str
+    schema_version: str
+    admitted_dispositions: tuple[str, ...]
+    missing_session_policy: str
+    excluded_session_policy: str
+    partial_support_owner: str
+
+    def __post_init__(self) -> None:
+        if self.schema_name != GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_NAME:
+            raise GuidedBackendValidationRequestContractError(
+                "Unsupported disposition policy schema name."
+            )
+        if self.schema_version != GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_VERSION:
+            raise GuidedBackendValidationRequestContractError(
+                "Unsupported disposition policy schema version."
+            )
+        _require_tuple(self.admitted_dispositions, "admitted_dispositions")
+        if any(not isinstance(value, str) or not value for value in self.admitted_dispositions):
+            raise GuidedBackendValidationRequestContractError(
+                "admitted_dispositions must contain non-empty strings."
+            )
+        for name in (
+            "missing_session_policy",
+            "excluded_session_policy",
+            "partial_support_owner",
+        ):
+            _require_non_empty(getattr(self, name), name)
 
 
 @dataclass(frozen=True)
@@ -424,6 +467,109 @@ class GuidedBackendAcquisitionDatasetRequest:
 
 
 @dataclass(frozen=True)
+class GuidedBackendNpmAcquisitionDatasetRequest:
+    """NPM acquisition facts without RWD incomplete-final classifier fields."""
+
+    acquisition_mode: str
+    sessions_per_hour: int
+    session_duration_sec: float
+    timeline_anchor_mode: str
+    fixed_daily_anchor_clock: None
+    allow_partial_final_window: bool
+    dataset_snapshot_schema_version: str
+    dataset_status: str
+    dataset_current_applied: bool
+    semantic_values: tuple[GuidedBackendTypedFieldValue, ...] = ()
+    dataset_source_setup_signature: str = ""
+    diagnostic_cache_contract_identity: str = ""
+    validation_issue_categories: tuple[str, ...] = ()
+    stale_reason_categories: tuple[str, ...] = ()
+    execution_mode: str = "phasic"
+    source_format: str = "npm"
+    npm_time_axis: str = ""
+    npm_system_ts_col: str = ""
+    npm_computer_ts_col: str = ""
+    npm_led_col: str = ""
+    npm_region_prefix: str = ""
+    npm_region_suffix: str = ""
+    npm_target_fs_hz: float | None = None
+    npm_adapter_value_nan_policy: str = ""
+    disposition_policy: GuidedBackendDispositionPolicyRequest | None = None
+
+    def __post_init__(self) -> None:
+        if self.acquisition_mode != "intermittent":
+            raise GuidedBackendValidationRequestContractError(
+                "acquisition_mode must be intermittent."
+            )
+        if (
+            isinstance(self.sessions_per_hour, bool)
+            or not isinstance(self.sessions_per_hour, int)
+            or self.sessions_per_hour <= 0
+        ):
+            raise GuidedBackendValidationRequestContractError(
+                "sessions_per_hour must be a positive integer."
+            )
+        if (
+            isinstance(self.session_duration_sec, bool)
+            or not isinstance(self.session_duration_sec, (int, float))
+            or not math.isfinite(float(self.session_duration_sec))
+            or self.session_duration_sec <= 0
+        ):
+            raise GuidedBackendValidationRequestContractError(
+                "session_duration_sec must be positive and finite."
+            )
+        if self.timeline_anchor_mode != "civil" or self.fixed_daily_anchor_clock is not None:
+            raise GuidedBackendValidationRequestContractError(
+                "NPM timeline anchor policy is unsupported."
+            )
+        if not isinstance(self.allow_partial_final_window, bool):
+            raise GuidedBackendValidationRequestContractError(
+                "allow_partial_final_window must be boolean."
+            )
+        if self.source_format != "npm":
+            raise GuidedBackendValidationRequestContractError(
+                "NPM acquisition facts must have source_format npm."
+            )
+        if self.dataset_status != "applied" or self.dataset_current_applied is not True:
+            raise GuidedBackendValidationRequestContractError(
+                "Dataset contract must be currently applied."
+            )
+        for name in (
+            "dataset_snapshot_schema_version",
+            "dataset_source_setup_signature",
+            "diagnostic_cache_contract_identity",
+            "npm_time_axis",
+            "npm_led_col",
+            "npm_region_prefix",
+            "npm_region_suffix",
+            "npm_adapter_value_nan_policy",
+        ):
+            _require_non_empty(getattr(self, name), name)
+        if self.npm_adapter_value_nan_policy not in {"strict", "mask"}:
+            raise GuidedBackendValidationRequestContractError(
+                "Unsupported NPM ROI NaN policy."
+            )
+        if self.npm_target_fs_hz is None or float(self.npm_target_fs_hz) <= 0:
+            raise GuidedBackendValidationRequestContractError(
+                "NPM target_fs_hz must be positive."
+            )
+        if not isinstance(self.disposition_policy, GuidedBackendDispositionPolicyRequest):
+            raise GuidedBackendValidationRequestContractError(
+                "NPM disposition policy is required."
+            )
+        for name in (
+            "semantic_values",
+            "validation_issue_categories",
+            "stale_reason_categories",
+        ):
+            _require_tuple(getattr(self, name), name)
+        if self.validation_issue_categories or self.stale_reason_categories:
+            raise GuidedBackendValidationRequestContractError(
+                "Dataset request cannot contain validation or stale issues."
+            )
+
+
+@dataclass(frozen=True)
 class GuidedBackendRwdParserRequest:
     schema_name: str
     schema_version: str
@@ -471,6 +617,68 @@ class GuidedBackendRwdParserRequest:
                 "Parser candidates must be complete and resolved."
             )
         _require_sha256(self.parser_contract_digest, "parser_contract_digest")
+
+
+@dataclass(frozen=True)
+class GuidedBackendNpmParserRequest:
+    schema_name: str
+    schema_version: str
+    timestamp_column_candidates: tuple[str, ...]
+    parser_contract_digest: str
+    parser_contract_content: Mapping[str, Any]
+    unresolved_inputs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("schema_name", "schema_version"):
+            _require_non_empty(getattr(self, name), name)
+        _require_tuple(self.timestamp_column_candidates, "timestamp_column_candidates")
+        if not self.timestamp_column_candidates or any(
+            not isinstance(value, str) or not value for value in self.timestamp_column_candidates
+        ):
+            raise GuidedBackendValidationRequestContractError(
+                "NPM timestamp column candidates must be complete."
+            )
+        _require_sha256(self.parser_contract_digest, "parser_contract_digest")
+        if not isinstance(self.parser_contract_content, Mapping):
+            raise GuidedBackendValidationRequestContractError(
+                "NPM parser contract content must be an object."
+            )
+        def freeze(value: Any) -> Any:
+            if isinstance(value, Mapping):
+                if any(not isinstance(key, str) for key in value):
+                    raise GuidedBackendValidationRequestContractError(
+                        "NPM parser contract content keys must be strings."
+                    )
+                return MappingProxyType({key: freeze(item) for key, item in value.items()})
+            if isinstance(value, (list, tuple)):
+                return tuple(freeze(item) for item in value)
+            if value is None or isinstance(value, (str, bool, int)):
+                return value
+            if isinstance(value, float) and math.isfinite(value):
+                return value
+            raise GuidedBackendValidationRequestContractError(
+                "NPM parser contract content contains a non-canonical value."
+            )
+        frozen_content = freeze(self.parser_contract_content)
+        object.__setattr__(self, "parser_contract_content", frozen_content)
+        if self.unresolved_inputs:
+            raise GuidedBackendValidationRequestContractError(
+                "NPM parser contract has unresolved inputs."
+            )
+        try:
+            from photometry_pipeline.guided_normalized_recording import (
+                compute_npm_parser_contract_digest,
+            )
+
+            expected = compute_npm_parser_contract_digest(self.parser_contract_content)
+        except Exception as exc:
+            raise GuidedBackendValidationRequestContractError(
+                "NPM parser contract content is invalid."
+            ) from exc
+        if expected != self.parser_contract_digest:
+            raise GuidedBackendValidationRequestContractError(
+                "NPM parser contract digest does not match its content."
+            )
 
 
 @dataclass(frozen=True)
@@ -951,8 +1159,11 @@ class GuidedBackendValidationRequest:
     subset_rule_version: str
     canonicalization_algorithm_version: str
     source: GuidedBackendSourceRequest
-    acquisition_dataset: GuidedBackendAcquisitionDatasetRequest
-    parser: GuidedBackendRwdParserRequest
+    acquisition_dataset: (
+        GuidedBackendAcquisitionDatasetRequest
+        | GuidedBackendNpmAcquisitionDatasetRequest
+    )
+    parser: GuidedBackendRwdParserRequest | GuidedBackendNpmParserRequest
     roi_scope: GuidedBackendRoiScopeRequest
     correction: GuidedBackendCorrectionRequest
     diagnostic_evidence: GuidedBackendDiagnosticEvidenceRequest
@@ -975,6 +1186,7 @@ class GuidedBackendValidationRequest:
     # and verify against this identity (see
     # guided_normalized_recording.build_rwd_normalized_recording_description).
     normalized_recording_description_identity: str = ""
+    normalized_recording_description: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         expected = {
@@ -998,6 +1210,35 @@ class GuidedBackendValidationRequest:
         if self.validator_capability_version.strip().lower() == "unknown":
             raise GuidedBackendValidationRequestContractError(
                 "validator_capability_version cannot be unknown."
+            )
+        if not isinstance(
+            self.acquisition_dataset,
+            (
+                GuidedBackendAcquisitionDatasetRequest,
+                GuidedBackendNpmAcquisitionDatasetRequest,
+            ),
+        ):
+            raise GuidedBackendValidationRequestContractError(
+                "acquisition_dataset has an unsupported request variant."
+            )
+        if self.source.source_format == "npm":
+            if not isinstance(
+                self.acquisition_dataset,
+                GuidedBackendNpmAcquisitionDatasetRequest,
+            ):
+                raise GuidedBackendValidationRequestContractError(
+                    "The NPM recording setup could not be confirmed."
+                )
+            if not isinstance(self.normalized_recording_description, Mapping):
+                raise GuidedBackendValidationRequestContractError(
+                    "The NPM recording setup could not be confirmed."
+                )
+        elif not isinstance(
+            self.acquisition_dataset,
+            GuidedBackendAcquisitionDatasetRequest,
+        ):
+            raise GuidedBackendValidationRequestContractError(
+                "RWD source requires the RWD acquisition request variant."
             )
 
 
@@ -1040,6 +1281,8 @@ class GuidedBackendParserFacts:
     ambiguity_policy: str = ""
     parser_contract_digest: str = ""
     unresolved_inputs: tuple[str, ...] = ()
+    npm_timestamp_column_candidates: tuple[str, ...] = ()
+    npm_parser_contract_content: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -1049,6 +1292,10 @@ class GuidedBackendParserFacts:
         ):
             _require_tuple(getattr(self, name), name)
         _require_tuple(self.unresolved_inputs, "unresolved_inputs")
+        _require_tuple(
+            self.npm_timestamp_column_candidates,
+            "npm_timestamp_column_candidates",
+        )
 
 
 @dataclass(frozen=True)
@@ -1073,6 +1320,15 @@ class GuidedBackendAcquisitionDatasetFacts:
     validation_issue_categories: tuple[str, ...] = ()
     stale_reason_categories: tuple[str, ...] = ()
     execution_mode: str = "phasic"
+    source_format: str = "rwd"
+    npm_time_axis: str = ""
+    npm_system_ts_col: str = ""
+    npm_computer_ts_col: str = ""
+    npm_led_col: str = ""
+    npm_region_prefix: str = ""
+    npm_region_suffix: str = ""
+    npm_target_fs_hz: float | None = None
+    npm_adapter_value_nan_policy: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -1494,12 +1750,25 @@ def compile_guided_backend_validation_request(
             detail_code="unresolved_required_inputs",
         )
 
-    if draft.input_format != "rwd":
+    if draft.input_format not in {"rwd", "npm"}:
         return _failure(
             "unsupported_source_format",
             "source",
-            "The first compiler subset requires RWD input.",
-            detail_code="source_format_not_rwd",
+            "The authorized compiler subset requires RWD or intermittent NPM input.",
+            detail_code="source_format_unsupported",
+        )
+    is_npm = draft.input_format == "npm"
+    if is_npm and (
+        not facts.parser.available
+        or not facts.parser.npm_timestamp_column_candidates
+        or facts.parser.npm_parser_contract_content is None
+    ):
+        return _failure(
+            "unsupported_source_format",
+            "source",
+            "The NPM import settings are incomplete. Return to the NPM settings "
+            "step, apply the intended settings, and rerun Setup check.",
+            detail_code="npm_parser_policy_missing",
         )
     if draft.acquisition_mode != "intermittent":
         return _failure(
@@ -1521,12 +1790,19 @@ def compile_guided_backend_validation_request(
             "The first compiler subset requires civil phasic/full analysis.",
             detail_code="analysis_scope_unsupported",
         )
-    if draft.allow_partial_final_window is not False:
+    if not is_npm and draft.allow_partial_final_window is not False:
         return _failure(
             "incomplete_final_policy_not_supported",
             "incomplete_final",
             "The first compiler subset requires the no-exclusion final-chunk policy.",
             detail_code="incomplete_final_policy_unsupported",
+        )
+    if is_npm and draft.exclude_incomplete_final_rwd_chunk:
+        return _failure(
+            "incomplete_final_policy_not_supported",
+            "incomplete_final",
+            "NPM validation does not support excluded final sessions.",
+            detail_code="npm_exclusion_unsupported",
         )
 
     source_facts = facts.source_snapshot
@@ -1545,7 +1821,7 @@ def compile_guided_backend_validation_request(
         )
 
     incomplete_facts = facts.incomplete_final_classification
-    if (
+    if not is_npm and (
         not incomplete_facts.available
         or incomplete_facts.classification_status != "not_requested"
         or incomplete_facts.source_candidate_set_digest
@@ -1561,19 +1837,29 @@ def compile_guided_backend_validation_request(
         )
 
     parser_facts = facts.parser
-    if (
-        not parser_facts.available
-        or not parser_facts.schema_name
-        or not parser_facts.schema_version
-        or parser_facts.header_search_line_limit is None
-        or not parser_facts.time_column_candidates
-        or not parser_facts.uv_suffix_candidates
-        or not parser_facts.signal_suffix_candidates
-        or not parser_facts.column_normalization_rule
-        or not parser_facts.roi_name_rule
-        or not parser_facts.ambiguity_policy
-        or not parser_facts.parser_contract_digest
-    ):
+    parser_complete = (
+        parser_facts.available
+        and bool(parser_facts.schema_name)
+        and bool(parser_facts.schema_version)
+        and bool(parser_facts.parser_contract_digest)
+        and (
+            (
+                bool(parser_facts.npm_timestamp_column_candidates)
+                and parser_facts.npm_parser_contract_content is not None
+            )
+            if is_npm
+            else (
+                parser_facts.header_search_line_limit is not None
+                and bool(parser_facts.time_column_candidates)
+                and bool(parser_facts.uv_suffix_candidates)
+                and bool(parser_facts.signal_suffix_candidates)
+                and bool(parser_facts.column_normalization_rule)
+                and bool(parser_facts.roi_name_rule)
+                and bool(parser_facts.ambiguity_policy)
+            )
+        )
+    )
+    if not parser_complete:
         return _failure(
             "parser_contract_unavailable",
             "parser",
@@ -1598,22 +1884,34 @@ def compile_guided_backend_validation_request(
         )
     if (
         dataset_facts.acquisition_mode != "intermittent"
+        or dataset_facts.source_format != draft.input_format
         or dataset_facts.sessions_per_hour is None
         or dataset_facts.sessions_per_hour <= 0
         or dataset_facts.session_duration_sec is None
         or dataset_facts.session_duration_sec <= 0
         or dataset_facts.timeline_anchor_mode != "civil"
         or dataset_facts.fixed_daily_anchor_clock is not None
-        or dataset_facts.allow_partial_final_window is not False
+        or (not is_npm and dataset_facts.allow_partial_final_window is not False)
         or dataset_facts.dataset_status != "applied"
         or dataset_facts.dataset_current_applied is not True
-        or not dataset_facts.rwd_time_col
-        or not dataset_facts.uv_suffix
-        or not dataset_facts.sig_suffix
+        or (
+            not is_npm
+            and (not dataset_facts.rwd_time_col or not dataset_facts.uv_suffix or not dataset_facts.sig_suffix)
+        )
+        or (
+            is_npm
+            and (
+                not dataset_facts.npm_time_axis
+                or not dataset_facts.npm_led_col
+                or not dataset_facts.npm_region_prefix
+                or not dataset_facts.npm_region_suffix
+                or dataset_facts.npm_target_fs_hz is None
+            )
+        )
         or not dataset_facts.semantic_values
         or dataset_facts.validation_issue_categories
         or dataset_facts.stale_reason_categories
-    ):
+        ):
         return _failure(
             "missing_or_stale_dataset_contract",
             "dataset",
@@ -1932,19 +2230,60 @@ def compile_guided_backend_validation_request(
             detail_code="output_ownership_unsupported",
         )
 
+    if is_npm:
+        try:
+            from photometry_pipeline.guided_normalized_recording import (
+                compute_normalized_recording_description_identity,
+                deserialize_normalized_recording_description,
+            )
+
+            normalized_description = deserialize_normalized_recording_description(
+                facts.normalized_recording_description
+            )
+            if (
+                compute_normalized_recording_description_identity(normalized_description)
+                != facts.normalized_recording_description_identity
+                or normalized_description.adapter_format != "npm"
+                or any(
+                    session.disposition != "process"
+                    for session in normalized_description.sessions
+                )
+                or source_facts.approved_missing_candidates
+            ):
+                raise ValueError("NPM normalized disposition facts are not process-only.")
+        except Exception:
+            return _failure(
+                "incomplete_materialized_facts",
+                "normalized_recording",
+                "The NPM recording sessions could not all be confirmed for "
+                "processing from the current settings. Return to the NPM settings "
+                "step and rerun Setup check.",
+                detail_code="npm_normalized_disposition_invalid",
+            )
+
     try:
         source_request = GuidedBackendSourceRequest(
             source_root_canonical=source_facts.source_root_canonical,
             source_root_path_style=source_facts.source_root_path_style,
-            source_format="rwd",
-            snapshot_schema_name=GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_NAME,
-            snapshot_schema_version=GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_VERSION,
-            discovery_rule_version=GUIDED_BACKEND_SOURCE_DISCOVERY_RULE_VERSION,
-            path_canonicalization_version=CANONICALIZATION_ALGORITHM_VERSION,
-            relative_path_rule_version=(
-                GUIDED_BACKEND_SOURCE_RELATIVE_PATH_RULE_VERSION
+            source_format=draft.input_format,
+            snapshot_schema_name=(
+                GUIDED_BACKEND_NPM_SOURCE_SNAPSHOT_SCHEMA_NAME
+                if is_npm
+                else GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_NAME
             ),
-            ignored_files_policy=GUIDED_BACKEND_SOURCE_IGNORED_FILES_POLICY,
+            snapshot_schema_version=GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_VERSION,
+            discovery_rule_version=(
+                GUIDED_BACKEND_NPM_SOURCE_DISCOVERY_RULE_VERSION
+                if is_npm
+                else GUIDED_BACKEND_SOURCE_DISCOVERY_RULE_VERSION
+            ),
+            path_canonicalization_version=CANONICALIZATION_ALGORITHM_VERSION,
+            relative_path_rule_version=GUIDED_BACKEND_SOURCE_RELATIVE_PATH_RULE_VERSION,
+            ignored_files_policy=(
+                GUIDED_BACKEND_NPM_SOURCE_IGNORED_FILES_POLICY
+                if is_npm
+                else GUIDED_BACKEND_SOURCE_IGNORED_FILES_POLICY
+            ),
             build_mode="read_only",
             source_candidate_set_digest=source_facts.source_candidate_set_digest,
             source_candidate_content_digest=(
@@ -1955,59 +2294,90 @@ def compile_guided_backend_validation_request(
             unresolved_source_identity_inputs=(),
             source_identity_level="content_bound_candidate_snapshot",
         )
-        acquisition_request = GuidedBackendAcquisitionDatasetRequest(
-            acquisition_mode=dataset_facts.acquisition_mode,
-            sessions_per_hour=dataset_facts.sessions_per_hour,
-            session_duration_sec=dataset_facts.session_duration_sec,
-            timeline_anchor_mode=dataset_facts.timeline_anchor_mode,
-            fixed_daily_anchor_clock=dataset_facts.fixed_daily_anchor_clock,
-            allow_partial_final_window=dataset_facts.allow_partial_final_window,
-            exclude_incomplete_final_rwd_chunk=(
-                dataset_facts.exclude_incomplete_final_rwd_chunk
-            ),
-            classification_schema_name=(
-                GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME
-            ),
-            classification_schema_version=(
-                GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_VERSION
-            ),
-            classifier_version=GUIDED_BACKEND_INCOMPLETE_FINAL_CLASSIFIER_VERSION,
-            classification_status=incomplete_facts.classification_status,
-            not_requested_classification_digest=(
-                incomplete_facts.classification_digest
-            ),
-            dataset_snapshot_schema_version=(
-                dataset_facts.dataset_snapshot_schema_version
-            ),
-            dataset_status=dataset_facts.dataset_status,
-            dataset_current_applied=dataset_facts.dataset_current_applied,
-            rwd_time_col=dataset_facts.rwd_time_col,
-            uv_suffix=dataset_facts.uv_suffix,
-            sig_suffix=dataset_facts.sig_suffix,
-            semantic_values=dataset_facts.semantic_values,
-            dataset_source_setup_signature=(
-                dataset_facts.dataset_source_setup_signature
-            ),
-            diagnostic_cache_contract_identity=(
-                dataset_facts.diagnostic_cache_contract_identity
-            ),
-            execution_mode=dataset_facts.execution_mode,
-            validation_issue_categories=dataset_facts.validation_issue_categories,
-            stale_reason_categories=dataset_facts.stale_reason_categories,
-        )
-        parser_request = GuidedBackendRwdParserRequest(
-            schema_name=parser_facts.schema_name,
-            schema_version=parser_facts.schema_version,
-            header_search_line_limit=parser_facts.header_search_line_limit,
-            time_column_candidates=parser_facts.time_column_candidates,
-            uv_suffix_candidates=parser_facts.uv_suffix_candidates,
-            signal_suffix_candidates=parser_facts.signal_suffix_candidates,
-            column_normalization_rule=parser_facts.column_normalization_rule,
-            roi_name_rule=parser_facts.roi_name_rule,
-            ambiguity_policy=parser_facts.ambiguity_policy,
-            parser_contract_digest=parser_facts.parser_contract_digest,
-            unresolved_inputs=parser_facts.unresolved_inputs,
-        )
+        if is_npm:
+            acquisition_request = GuidedBackendNpmAcquisitionDatasetRequest(
+                acquisition_mode=dataset_facts.acquisition_mode,
+                sessions_per_hour=dataset_facts.sessions_per_hour,
+                session_duration_sec=dataset_facts.session_duration_sec,
+                timeline_anchor_mode=dataset_facts.timeline_anchor_mode,
+                fixed_daily_anchor_clock=dataset_facts.fixed_daily_anchor_clock,
+                allow_partial_final_window=dataset_facts.allow_partial_final_window,
+                dataset_snapshot_schema_version=dataset_facts.dataset_snapshot_schema_version,
+                dataset_status=dataset_facts.dataset_status,
+                dataset_current_applied=dataset_facts.dataset_current_applied,
+                semantic_values=dataset_facts.semantic_values,
+                dataset_source_setup_signature=dataset_facts.dataset_source_setup_signature,
+                diagnostic_cache_contract_identity=dataset_facts.diagnostic_cache_contract_identity,
+                execution_mode=dataset_facts.execution_mode,
+                validation_issue_categories=dataset_facts.validation_issue_categories,
+                stale_reason_categories=dataset_facts.stale_reason_categories,
+                npm_time_axis=dataset_facts.npm_time_axis,
+                npm_system_ts_col=dataset_facts.npm_system_ts_col,
+                npm_computer_ts_col=dataset_facts.npm_computer_ts_col,
+                npm_led_col=dataset_facts.npm_led_col,
+                npm_region_prefix=dataset_facts.npm_region_prefix,
+                npm_region_suffix=dataset_facts.npm_region_suffix,
+                npm_target_fs_hz=dataset_facts.npm_target_fs_hz,
+                npm_adapter_value_nan_policy=dataset_facts.npm_adapter_value_nan_policy,
+                disposition_policy=GuidedBackendDispositionPolicyRequest(
+                    schema_name=GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_NAME,
+                    schema_version=GUIDED_BACKEND_DISPOSITION_POLICY_SCHEMA_VERSION,
+                    admitted_dispositions=("process",),
+                    missing_session_policy="unsupported",
+                    excluded_session_policy="unsupported",
+                    partial_support_owner="parser_contract",
+                ),
+            )
+        else:
+            acquisition_request = GuidedBackendAcquisitionDatasetRequest(
+                acquisition_mode=dataset_facts.acquisition_mode,
+                sessions_per_hour=dataset_facts.sessions_per_hour,
+                session_duration_sec=dataset_facts.session_duration_sec,
+                timeline_anchor_mode=dataset_facts.timeline_anchor_mode,
+                fixed_daily_anchor_clock=dataset_facts.fixed_daily_anchor_clock,
+                allow_partial_final_window=dataset_facts.allow_partial_final_window,
+                exclude_incomplete_final_rwd_chunk=dataset_facts.exclude_incomplete_final_rwd_chunk,
+                classification_schema_name=GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_NAME,
+                classification_schema_version=GUIDED_BACKEND_INCOMPLETE_FINAL_SCHEMA_VERSION,
+                classifier_version=GUIDED_BACKEND_INCOMPLETE_FINAL_CLASSIFIER_VERSION,
+                classification_status=incomplete_facts.classification_status,
+                not_requested_classification_digest=incomplete_facts.classification_digest,
+                dataset_snapshot_schema_version=dataset_facts.dataset_snapshot_schema_version,
+                dataset_status=dataset_facts.dataset_status,
+                dataset_current_applied=dataset_facts.dataset_current_applied,
+                rwd_time_col=dataset_facts.rwd_time_col,
+                uv_suffix=dataset_facts.uv_suffix,
+                sig_suffix=dataset_facts.sig_suffix,
+                semantic_values=dataset_facts.semantic_values,
+                dataset_source_setup_signature=dataset_facts.dataset_source_setup_signature,
+                diagnostic_cache_contract_identity=dataset_facts.diagnostic_cache_contract_identity,
+                execution_mode=dataset_facts.execution_mode,
+                validation_issue_categories=dataset_facts.validation_issue_categories,
+                stale_reason_categories=dataset_facts.stale_reason_categories,
+            )
+        if is_npm:
+            parser_request = GuidedBackendNpmParserRequest(
+                schema_name=parser_facts.schema_name,
+                schema_version=parser_facts.schema_version,
+                timestamp_column_candidates=parser_facts.npm_timestamp_column_candidates,
+                parser_contract_digest=parser_facts.parser_contract_digest,
+                parser_contract_content=parser_facts.npm_parser_contract_content or {},
+                unresolved_inputs=parser_facts.unresolved_inputs,
+            )
+        else:
+            parser_request = GuidedBackendRwdParserRequest(
+                schema_name=parser_facts.schema_name,
+                schema_version=parser_facts.schema_version,
+                header_search_line_limit=parser_facts.header_search_line_limit,
+                time_column_candidates=parser_facts.time_column_candidates,
+                uv_suffix_candidates=parser_facts.uv_suffix_candidates,
+                signal_suffix_candidates=parser_facts.signal_suffix_candidates,
+                column_normalization_rule=parser_facts.column_normalization_rule,
+                roi_name_rule=parser_facts.roi_name_rule,
+                ambiguity_policy=parser_facts.ambiguity_policy,
+                parser_contract_digest=parser_facts.parser_contract_digest,
+                unresolved_inputs=parser_facts.unresolved_inputs,
+            )
         roi_request = GuidedBackendRoiScopeRequest(
             discovered_roi_ids=roi_facts.discovered_roi_ids,
             included_roi_ids=roi_facts.included_roi_ids,
@@ -2179,6 +2549,9 @@ def compile_guided_backend_validation_request(
             normalized_recording_description_identity=(
                 facts.normalized_recording_description_identity
             ),
+            normalized_recording_description=(
+                facts.normalized_recording_description if is_npm else None
+            ),
         )
     except Exception:
         return _failure(
@@ -2260,6 +2633,41 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "validation_issue_categories",
         "stale_reason_categories",
         "execution_mode",
+    ),
+    GuidedBackendDispositionPolicyRequest: (
+        "schema_name",
+        "schema_version",
+        "admitted_dispositions",
+        "missing_session_policy",
+        "excluded_session_policy",
+        "partial_support_owner",
+    ),
+    GuidedBackendNpmAcquisitionDatasetRequest: (
+        "acquisition_mode",
+        "sessions_per_hour",
+        "session_duration_sec",
+        "timeline_anchor_mode",
+        "fixed_daily_anchor_clock",
+        "allow_partial_final_window",
+        "dataset_snapshot_schema_version",
+        "dataset_status",
+        "dataset_current_applied",
+        "semantic_values",
+        "dataset_source_setup_signature",
+        "diagnostic_cache_contract_identity",
+        "validation_issue_categories",
+        "stale_reason_categories",
+        "execution_mode",
+        "source_format",
+        "npm_time_axis",
+        "npm_system_ts_col",
+        "npm_computer_ts_col",
+        "npm_led_col",
+        "npm_region_prefix",
+        "npm_region_suffix",
+        "npm_target_fs_hz",
+        "npm_adapter_value_nan_policy",
+        "disposition_policy",
     ),
     GuidedBackendRwdParserRequest: (
         "schema_name",
@@ -2423,6 +2831,7 @@ _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS = {
         "output",
         "local_contract",
         "normalized_recording_description_identity",
+        "normalized_recording_description",
     ),
 }
 
@@ -2436,11 +2845,66 @@ def _map_guided_backend_validation_identity_value(value: Any) -> Any:
                 "Canonical request identity does not support non-finite floats."
             )
         return value
-    if isinstance(value, tuple):
+    if isinstance(value, (tuple, list)):
         return [
             _map_guided_backend_validation_identity_value(item)
             for item in value
         ]
+    if isinstance(value, Mapping):
+        return {
+            str(key): _map_guided_backend_validation_identity_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, GuidedBackendNpmParserRequest):
+        return {
+            field_name: _map_guided_backend_validation_identity_value(
+                getattr(value, field_name)
+            )
+            for field_name in (
+                "schema_name",
+                "schema_version",
+                "timestamp_column_candidates",
+                "parser_contract_digest",
+                "parser_contract_content",
+                "unresolved_inputs",
+            )
+        }
+    if isinstance(value, GuidedBackendNpmAcquisitionDatasetRequest):
+        field_names = _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS[
+            GuidedBackendNpmAcquisitionDatasetRequest
+        ]
+        return {
+            field_name: _map_guided_backend_validation_identity_value(
+                getattr(value, field_name)
+            )
+            for field_name in field_names
+        }
+    if isinstance(value, GuidedBackendAcquisitionDatasetRequest):
+        field_names = _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS[
+            GuidedBackendAcquisitionDatasetRequest
+        ]
+        return {
+            field_name: _map_guided_backend_validation_identity_value(
+                getattr(value, field_name)
+            )
+            for field_name in field_names
+        }
+    if isinstance(value, GuidedBackendValidationRequest):
+        field_names = _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS[
+            GuidedBackendValidationRequest
+        ]
+        if value.normalized_recording_description is None:
+            field_names = tuple(
+                name
+                for name in field_names
+                if name != "normalized_recording_description"
+            )
+        return {
+            field_name: _map_guided_backend_validation_identity_value(
+                getattr(value, field_name)
+            )
+            for field_name in field_names
+        }
     field_names = _GUIDED_BACKEND_VALIDATION_IDENTITY_FIELDS.get(type(value))
     if field_names is not None:
         return {
