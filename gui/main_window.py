@@ -11098,6 +11098,7 @@ class MainWindow(QMainWindow):
             parser_contract=context.parser_contract,
             additional_protected_roots=context.additional_protected_roots,
             validator_contract=context.validator_contract,
+            validation_revision=context.revision,
         )
 
     def _make_guided_backend_validation_internal_error(self):

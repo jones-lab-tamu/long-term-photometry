@@ -27,11 +27,14 @@ existing A1 (``guided_plan_identity``) pattern of one combined digest for
 "what was validated," and the existing startup-preflight pattern of exact
 digest matching. Two different adapter formats/versions therefore produce
 different identities even for scientifically equivalent facts, by design.
-Only ``adapter_evidence`` (raw, format-specific provenance, e.g. which RWD
-folder token supplied a timestamp) is excluded from the identity, because
-it is diagnostic metadata, not a normalized fact and not a derivation
-contract. If cross-adapter equivalence is ever needed, that requires a
-separate, explicitly-scoped identity -- it is not implied here.
+For RWD, ``adapter_evidence`` (raw, format-specific provenance, e.g. which
+folder token supplied a timestamp) remains excluded from the identity. For
+NPM, the adapter's validated per-session resolved-evidence projection is
+included because timestamp-column resolution, physical ROI mapping, support
+geometry, and output time basis are execution-defining facts. The remaining
+raw NPM evidence envelope remains diagnostic. If cross-adapter equivalence is
+ever needed, that requires a separate, explicitly-scoped identity -- it is
+not implied here.
 """
 
 from __future__ import annotations
@@ -63,6 +66,10 @@ NPM_PARSER_CONTRACT_SCHEMA_NAME = "npm_normalized_parser_contract"
 NPM_PARSER_CONTRACT_SCHEMA_VERSION = "v1"
 NPM_PARSER_CONTRACT_DIGEST_DOMAIN = "npm-normalized-parser-contract:v1"
 NPM_OUTPUT_TIME_BASIS = "relative_seconds_since_uv_signal_overlap_origin"
+NPM_SESSION_RESOLVED_EVIDENCE_SCHEMA_VERSION = "npm_session_resolved_evidence.v1"
+NPM_SESSION_RESOLVED_EVIDENCE_IDENTITY_DOMAIN = (
+    "npm-session-resolved-evidence:v1"
+)
 
 # Where an RWD session's authoritative_source_start_time evidence came
 # from. Today there is exactly one supported source; the field exists so a
@@ -304,9 +311,9 @@ class NormalizedRecordingDescription:
     """The one shared, format-neutral recording-description model.
 
     See the module docstring for the identity rule (Option A,
-    implementation-bound). ``adapter_evidence`` is the only field excluded
-    from the canonical identity -- it is raw, format-specific provenance
-    retained for diagnostics (see ``build_normalized_recording_description_payload``).
+    implementation-bound). RWD adapter evidence is diagnostic and excluded;
+    NPM's validated per-session resolved-evidence projection is identity-
+    bearing while the remaining adapter evidence is retained for diagnostics.
     """
 
     schema_name: str
@@ -538,6 +545,217 @@ def _roi_payload(roi: NormalizedRoiChannel) -> dict[str, Any]:
     return payload
 
 
+def _npm_session_resolved_evidence_projection(
+    description: NormalizedRecordingDescription,
+) -> list[dict[str, Any]]:
+    """Return the NPM facts resolved independently for each source session.
+
+    These facts are execution-defining for NPM: the authorized timestamp
+    column, physical ROI inventory/mapping, support geometry, and output time
+    basis must remain bound to the exact session order.  They are kept in the
+    format-specific evidence envelope for compatibility, and this validated
+    projection is additionally included in the NPM identity payload.
+    """
+    if description.adapter_format != "npm":
+        return []
+
+    raw_sessions = description.adapter_evidence.get("npm_sessions")
+    if not isinstance(raw_sessions, (list, tuple)):
+        raise NormalizedRecordingError(
+            "npm_per_session_evidence_not_identity_bound",
+            "NPM per-session resolved evidence is missing.",
+        )
+    if len(raw_sessions) != len(description.sessions):
+        raise NormalizedRecordingError(
+            "npm_per_session_evidence_not_identity_bound",
+            "NPM per-session resolved evidence does not cover every session.",
+        )
+
+    raw_mapping = description.adapter_evidence.get(
+        "physical_to_canonical_roi_mapping"
+    )
+    if not isinstance(raw_mapping, (list, tuple)) or not raw_mapping:
+        raise NormalizedRecordingError(
+            "npm_per_session_evidence_not_identity_bound",
+            "NPM physical-to-canonical ROI mapping is missing.",
+        )
+    global_mapping: list[dict[str, str]] = []
+    physical_columns: list[str] = []
+    canonical_roi_ids: list[str] = []
+    for item in raw_mapping:
+        if not isinstance(item, Mapping):
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM physical-to-canonical ROI mapping is malformed.",
+            )
+        canonical_roi_id = item.get("canonical_roi_id")
+        physical_source_column = item.get("physical_source_column")
+        if (
+            not isinstance(canonical_roi_id, str)
+            or not canonical_roi_id
+            or not isinstance(physical_source_column, str)
+            or not physical_source_column
+        ):
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM physical-to-canonical ROI mapping is incomplete.",
+            )
+        canonical_roi_ids.append(canonical_roi_id)
+        physical_columns.append(physical_source_column)
+        global_mapping.append(
+            {
+                "canonical_roi_id": canonical_roi_id,
+                "physical_source_column": physical_source_column,
+            }
+        )
+    if (
+        len(set(canonical_roi_ids)) != len(canonical_roi_ids)
+        or len(set(physical_columns)) != len(physical_columns)
+        or tuple(canonical_roi_ids)
+        != tuple(channel.roi_id for channel in description.roi_channels)
+    ):
+        raise NormalizedRecordingError(
+            "npm_per_session_evidence_not_identity_bound",
+            "NPM physical-to-canonical ROI mapping is not one-to-one.",
+        )
+
+    required_fields = (
+        "canonical_relative_path",
+        "resolved_timestamp_column",
+        "timestamp_unit",
+        "physical_roi_inventory",
+        "physical_to_canonical_roi_mapping",
+        "support_policy",
+        "support_policy_identity",
+        "overlap_origin_absolute",
+        "resolved_support_start_offset_sec",
+        "resolved_support_end_offset_sec",
+        "resolved_support_start_absolute",
+        "resolved_support_end_absolute",
+        "output_time_basis",
+    )
+    projection: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    identity_mapping: list[dict[str, str]] | None = None
+    identity_physical_columns: tuple[str, ...] | None = None
+    for position, (session, raw) in enumerate(zip(description.sessions, raw_sessions)):
+        if not isinstance(raw, Mapping):
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM per-session resolved evidence entries must be objects.",
+                chronological_position=position,
+            )
+        if any(field_name not in raw for field_name in required_fields):
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM per-session resolved evidence is incomplete.",
+                chronological_position=position,
+            )
+        path = raw.get("canonical_relative_path")
+        if not isinstance(path, str) or not path or path in seen_paths:
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM per-session evidence paths must be unique and non-empty.",
+                chronological_position=position,
+            )
+        seen_paths.add(path)
+        if path != session.stable_source_identity:
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM per-session evidence order does not match normalized sessions.",
+                chronological_position=position,
+            )
+
+        session_mapping = raw.get("physical_to_canonical_roi_mapping")
+        if not isinstance(session_mapping, (list, tuple)) or any(
+            not isinstance(item, Mapping)
+            or not isinstance(item.get("canonical_roi_id"), str)
+            or not item.get("canonical_roi_id")
+            or not isinstance(item.get("physical_source_column"), str)
+            or not item.get("physical_source_column")
+            for item in session_mapping
+        ):
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM per-session physical ROI mapping is missing or malformed.",
+                chronological_position=position,
+            )
+        normalized_session_mapping = [
+            {
+                "canonical_roi_id": item["canonical_roi_id"],
+                "physical_source_column": item["physical_source_column"],
+            }
+            for item in session_mapping
+        ]
+        if identity_mapping is None:
+            identity_mapping = normalized_session_mapping
+            identity_physical_columns = tuple(
+                item["physical_source_column"] for item in identity_mapping
+            )
+        if normalized_session_mapping != identity_mapping:
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM per-session physical ROI mapping is inconsistent.",
+                chronological_position=position,
+            )
+        inventory = raw.get("physical_roi_inventory")
+        if not isinstance(inventory, (list, tuple)) or tuple(inventory) != identity_physical_columns:
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM physical ROI inventory is missing or inconsistent.",
+                chronological_position=position,
+            )
+        support_policy = raw.get("support_policy")
+        support_policy_identity = raw.get("support_policy_identity")
+        if (
+            not isinstance(support_policy, str)
+            or not support_policy
+            or not isinstance(support_policy_identity, str)
+            or not support_policy_identity
+        ):
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM support policy identity is missing.",
+                chronological_position=position,
+            )
+        output_time_basis = raw.get("output_time_basis")
+        if not isinstance(output_time_basis, str) or not output_time_basis:
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM output time basis is missing.",
+                chronological_position=position,
+            )
+
+        projection.append(
+            {
+                "schema_version": NPM_SESSION_RESOLVED_EVIDENCE_SCHEMA_VERSION,
+                "chronological_position": position,
+                "canonical_relative_path": path,
+                "resolved_timestamp_column": raw["resolved_timestamp_column"],
+                "timestamp_unit": raw["timestamp_unit"],
+                "physical_roi_inventory": list(identity_physical_columns or ()),
+                "physical_to_canonical_roi_mapping": [
+                    dict(item) for item in (identity_mapping or ())
+                ],
+                "support_policy": support_policy,
+                "support_policy_identity": support_policy_identity,
+                "overlap_origin_absolute": raw["overlap_origin_absolute"],
+                "resolved_support_start_offset_sec": raw[
+                    "resolved_support_start_offset_sec"
+                ],
+                "resolved_support_end_offset_sec": raw[
+                    "resolved_support_end_offset_sec"
+                ],
+                "resolved_support_start_absolute": raw[
+                    "resolved_support_start_absolute"
+                ],
+                "resolved_support_end_absolute": raw["resolved_support_end_absolute"],
+                "output_time_basis": output_time_basis,
+            }
+        )
+    return projection
+
+
 def build_normalized_recording_description_payload(
     description: NormalizedRecordingDescription,
 ) -> dict[str, Any]:
@@ -577,6 +795,21 @@ def build_normalized_recording_description_payload(
         "authorized_signal_suffix_candidates": list(
             description.authorized_signal_suffix_candidates
         ),
+        **(
+            {
+                "npm_per_session_resolved_evidence": (
+                    _npm_session_resolved_evidence_projection(description)
+                ),
+                "npm_physical_to_canonical_roi_mapping": [
+                    dict(item)
+                    for item in description.adapter_evidence.get(
+                        "physical_to_canonical_roi_mapping", ()
+                    )
+                ],
+            }
+            if description.adapter_format == "npm"
+            else {}
+        ),
     }
 
 
@@ -584,9 +817,9 @@ def compute_normalized_recording_description_identity(
     description: NormalizedRecordingDescription,
 ) -> str:
     """Deterministic identity: construction order, object identity, and
-    ``adapter_evidence`` content do not affect it -- only the normalized
-    scientific facts and the adapter's own identity do (see the module
-    docstring for the Option A identity rule)."""
+    ``adapter_evidence`` content do not affect it for RWD. For NPM, only the
+    validated per-session resolved-evidence projection affects it alongside
+    the normalized scientific facts and adapter identity."""
     payload = build_normalized_recording_description_payload(description)
     payload_bytes = encode_canonical_value(payload)
     domain = NORMALIZED_RECORDING_IDENTITY_DOMAIN.encode("utf-8")
@@ -773,6 +1006,21 @@ def deserialize_normalized_recording_description(
         ) from exc
 
     recomputed_identity = compute_normalized_recording_description_identity(description)
+    if description.adapter_format == "npm":
+        persisted_projection = payload.get("npm_per_session_resolved_evidence")
+        expected_projection = _npm_session_resolved_evidence_projection(description)
+        if persisted_projection != expected_projection:
+            raise NormalizedRecordingError(
+                "serialized_npm_session_evidence_mismatch",
+                "Persisted NPM per-session evidence does not match its adapter evidence.",
+            )
+        if payload.get("npm_physical_to_canonical_roi_mapping") != description.adapter_evidence.get(
+            "physical_to_canonical_roi_mapping"
+        ):
+            raise NormalizedRecordingError(
+                "serialized_npm_mapping_mismatch",
+                "Persisted NPM physical ROI mapping does not match its adapter evidence.",
+            )
     if recomputed_identity != stored_identity:
         raise NormalizedRecordingError(
             "serialized_identity_mismatch",
@@ -1144,6 +1392,13 @@ def build_npm_normalized_recording_description(
                 "NPM physical ROI mappings differ between admitted sessions.",
                 canonical_relative_path=candidate.canonical_relative_path,
             )
+        inspection_roi_columns = tuple(getattr(inspection, "roi_columns", ()))
+        if inspection_roi_columns != physical_columns:
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM physical ROI inventory differs between admitted sessions.",
+                canonical_relative_path=candidate.canonical_relative_path,
+            )
         expected = (anchor_dt + timedelta(seconds=position * cadence_sec)).isoformat()
         actual = candidate.authoritative_source_start_time
         try:
@@ -1175,9 +1430,18 @@ def build_npm_normalized_recording_description(
         )
         adapter_session_evidence.append(
             {
+                "schema_version": NPM_SESSION_RESOLVED_EVIDENCE_SCHEMA_VERSION,
                 "canonical_relative_path": candidate.canonical_relative_path,
                 "resolved_timestamp_column": inspection.resolved_timestamp_column,
                 "timestamp_unit": inspection.timestamp_unit,
+                "physical_roi_inventory": list(physical_columns),
+                "physical_to_canonical_roi_mapping": [
+                    {
+                        "canonical_roi_id": canonical_roi_id,
+                        "physical_source_column": physical_source_column,
+                    }
+                    for canonical_roi_id, physical_source_column in frozen_mapping
+                ],
                 "overlap_origin_absolute": inspection.overlap_origin_absolute,
                 "resolved_support_start_offset_sec": inspection.resolved_support_start_offset_sec,
                 "resolved_support_end_offset_sec": inspection.resolved_support_end_offset_sec,
@@ -1186,6 +1450,12 @@ def build_npm_normalized_recording_description(
                 "observed_duration_sec": inspection.observed_duration_sec,
                 "output_time_basis": inspection.output_time_basis,
                 "support_policy": inspection.support_policy,
+                "support_policy_identity": hashlib.sha256(
+                    (
+                        "npm-support-policy:v1\x00"
+                        + str(inspection.support_policy)
+                    ).encode("utf-8")
+                ).hexdigest(),
                 "warning_categories": list(inspection.warning_categories),
                 "actual_elapsed_sec": actual_elapsed_sec,
                 "nominal_expected_elapsed_sec": position * cadence_sec,

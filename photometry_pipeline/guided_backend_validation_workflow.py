@@ -27,6 +27,9 @@ from photometry_pipeline.guided_backend_validator import (
 from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDraftPlan,
 )
+from photometry_pipeline.guided_plan_identity import (
+    compute_guided_new_analysis_draft_plan_identity,
+)
 from photometry_pipeline.io.rwd_contract import RwdHeaderParsingContract
 from photometry_pipeline.io.npm_contract import NpmParserContract
 
@@ -151,6 +154,13 @@ class GuidedBackendValidationWorkflowOutcome:
     no_artifacts_created: bool = True
     no_run_id_allocated: bool = True
     no_runner_invoked: bool = True
+    # Explicit accepted-outcome linkage for production-boundary consumers.
+    # These remain optional for legacy RWD workflow callers that do not carry
+    # a GUI revision into this function; the NPM accepted-outcome boundary
+    # refuses an outcome when any required linkage is absent.
+    accepted_request_identity: str | None = None
+    validation_revision: int | None = None
+    guided_plan_identity: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in GUIDED_BACKEND_VALIDATION_WORKFLOW_STATUSES:
@@ -184,6 +194,10 @@ class GuidedBackendValidationWorkflowOutcome:
             if (
                 not isinstance(self.request_identity, str)
                 or not self.request_identity
+                or (
+                    self.accepted_request_identity is not None
+                    and self.accepted_request_identity != self.request_identity
+                )
                 or self.validation_result is None
                 or self.validation_result.accepted is not True
                 or self.compile_result is None
@@ -279,8 +293,15 @@ def validate_current_guided_draft_for_backend(
     additional_protected_roots: tuple[tuple[str, str], ...] = (),
     validator_contract: GuidedBackendValidatorContract,
     cancellation_check: Callable[[], bool] | None = None,
+    validation_revision: int | None = None,
 ) -> GuidedBackendValidationWorkflowOutcome:
     """Materialize, compile, and validate one draft without writes or Run."""
+    if validation_revision is not None and (
+        isinstance(validation_revision, bool)
+        or not isinstance(validation_revision, int)
+        or validation_revision < 0
+    ):
+        return _internal_error("validation_revision")
     if _is_cancelled(cancellation_check):
         return _cancelled()
     try:
@@ -365,6 +386,10 @@ def validate_current_guided_draft_for_backend(
                 else "Backend validation refused the Guided request."
             ),
         )
+    try:
+        guided_plan_identity = compute_guided_new_analysis_draft_plan_identity(draft)
+    except Exception:
+        return _internal_error("guided_plan_identity")
     return GuidedBackendValidationWorkflowOutcome(
         status="validator_accepted",
         accepted_for_backend_validation=True,
@@ -381,4 +406,7 @@ def validate_current_guided_draft_for_backend(
             else "Backend validation accepted the Guided request."
         ),
         warning_categories=tuple(getattr(materialized, "warning_categories", ()) or ()),
+        accepted_request_identity=compiled.canonical_request_identity,
+        validation_revision=validation_revision,
+        guided_plan_identity=guided_plan_identity,
     )

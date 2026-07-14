@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 import hashlib
+import json
 import math
+from collections.abc import Mapping
 from typing import Any
 
 from photometry_pipeline.guided_backend_validation_request import (
@@ -22,6 +24,8 @@ from photometry_pipeline.guided_backend_validation_request import (
     GuidedBackendFeatureEventRequest,
     GuidedBackendPerRoiFeatureEvent,
     GuidedBackendLocalContractState,
+    GuidedBackendNpmAcquisitionDatasetRequest,
+    GuidedBackendNpmParserRequest,
     GuidedBackendOutputRelationship,
     GuidedBackendOutputRequest,
     GuidedBackendRoiScopeRequest,
@@ -30,7 +34,15 @@ from photometry_pipeline.guided_backend_validation_request import (
     GuidedBackendSourceRequest,
     GuidedBackendTypedFieldValue,
     GuidedBackendValidationRequest,
+    GuidedBackendValidationCompileSuccess,
     compute_guided_backend_validation_request_identity,
+)
+from photometry_pipeline.guided_normalized_recording import (
+    NormalizedRecordingError,
+    build_normalized_recording_description_payload,
+    compute_npm_parser_contract_digest,
+    deserialize_normalized_recording_description,
+    serialize_normalized_recording_description,
 )
 from photometry_pipeline.guided_identity import (
     CANONICALIZATION_ALGORITHM_VERSION,
@@ -60,6 +72,19 @@ GUIDED_PRODUCTION_INTENT_IDENTITY_DOMAIN = (
 GUIDED_PRODUCTION_MAPPING_SCHEMA_NAME = "guided_production_mapping_contract"
 GUIDED_PRODUCTION_MAPPING_SCHEMA_VERSION = "v1"
 GUIDED_PRODUCTION_MAPPING_CONTRACT_VERSION = "guided_production_mapping.v1"
+GUIDED_NPM_PRODUCTION_INTENT_SCHEMA_NAME = (
+    "guided_production_npm_execution_intent"
+)
+GUIDED_NPM_PRODUCTION_INTENT_SCHEMA_VERSION = "v1"
+GUIDED_NPM_PRODUCTION_INTENT_IDENTITY_DOMAIN = (
+    "guided_production_npm_execution_intent.v1"
+)
+GUIDED_NPM_PRODUCTION_RUNNER_CONTRACT_VERSION = (
+    "guided_npm_runner_not_yet_startable.v1"
+)
+GUIDED_NPM_PRODUCTION_CAPABILITY_STATUS = (
+    "supported_by_production_mapping_but_startup_not_implemented"
+)
 
 GUIDED_PRODUCTION_MAPPING_REFUSAL_CATEGORIES = (
     "request_missing_or_invalid",
@@ -85,6 +110,11 @@ GUIDED_PRODUCTION_MAPPING_REFUSAL_CATEGORIES = (
     "production_config_field_unmapped",
     "candidate_snapshot_execution_contract_unavailable",
     "roi_execution_contract_unavailable",
+    "unsupported_analysis_configuration",
+    "stale_or_mismatched_validation",
+    "incomplete_correction_settings",
+    "incomplete_feature_settings",
+    "per_session_evidence_not_identity_bound",
     "mapping_internal_error",
 )
 GUIDED_PRODUCTION_MAPPING_REFUSAL_CATEGORY_SET = frozenset(
@@ -596,6 +626,172 @@ class GuidedProductionExecutionIntent:
 
 
 @dataclass(frozen=True)
+class GuidedNpmProductionExecutionIntent:
+    """Immutable, non-runnable production mapping for an accepted NPM setup.
+
+    This sibling intentionally does not reuse the RWD execution-intent
+    dataclass.  NPM has no RWD candidate-manifest or global dynamic-fit
+    semantics, and keeping the variants separate prevents NPM fields from
+    changing RWD identity, serialization, or authorization behavior.
+    """
+
+    intent_schema_name: str
+    intent_schema_version: str
+    mapping_contract_version: str
+    runner_contract_version: str
+    source_request_identity: str
+    validation_status: str
+    validation_revision: int
+    current_plan_identity: str
+    application_build_identity: ApplicationBuildIdentity
+    source_format: str
+    source_root_canonical: str
+    acquisition_mode: str
+    source_candidate_files: tuple[GuidedProductionSourceCandidate, ...]
+    source_snapshot_set_identity: str
+    source_snapshot_content_identity: str
+    source_snapshot_identity: str
+    normalized_recording_description_identity: str
+    normalized_recording_payload_json: str
+    parser_policy_identity: str
+    parser_policy_content_json: str
+    ordered_session_identity: str
+    per_session_resolved_evidence_identity: str
+    physical_to_canonical_roi_mapping_identity: str
+    support_policy_identity: str
+    output_time_basis_identity: str
+    target_fs_hz: float
+    session_duration_sec: float
+    sessions_per_hour: int
+    execution_mode: str
+    run_type: str
+    discovered_roi_ids: tuple[str, ...]
+    selected_roi_ids: tuple[str, ...]
+    excluded_roi_ids: tuple[str, ...]
+    correction_parameter_values: tuple[GuidedProductionTypedValue, ...]
+    per_roi_correction_strategy_map: tuple[GuidedProductionPerRoiStrategy, ...]
+    correction_payload_identity: str
+    feature_event: GuidedProductionFeatureEvent
+    feature_payload_identity: str
+    output_policy: GuidedProductionOutputPolicy
+    deferred_capabilities: tuple[str, ...]
+    capability_status: str
+    canonical_intent_identity: str
+
+    def __post_init__(self) -> None:
+        if self.intent_schema_name != GUIDED_NPM_PRODUCTION_INTENT_SCHEMA_NAME:
+            raise ValueError("Unsupported NPM production intent schema name.")
+        if self.intent_schema_version != GUIDED_NPM_PRODUCTION_INTENT_SCHEMA_VERSION:
+            raise ValueError("Unsupported NPM production intent schema version.")
+        for name in (
+            "source_request_identity",
+            "current_plan_identity",
+            "source_snapshot_set_identity",
+            "source_snapshot_content_identity",
+            "source_snapshot_identity",
+            "normalized_recording_description_identity",
+            "parser_policy_identity",
+            "ordered_session_identity",
+            "per_session_resolved_evidence_identity",
+            "physical_to_canonical_roi_mapping_identity",
+            "support_policy_identity",
+            "output_time_basis_identity",
+            "correction_payload_identity",
+            "feature_payload_identity",
+            "canonical_intent_identity",
+        ):
+            if not _sha256(getattr(self, name)):
+                raise ValueError(f"{name} must be a lowercase SHA-256.")
+        for name in (
+            "mapping_contract_version",
+            "runner_contract_version",
+            "validation_status",
+            "source_format",
+            "source_root_canonical",
+            "acquisition_mode",
+            "normalized_recording_payload_json",
+            "parser_policy_content_json",
+            "run_type",
+            "capability_status",
+        ):
+            if not _text(getattr(self, name)):
+                raise ValueError(f"{name} must be a non-empty string.")
+        if self.source_format != "npm" or self.acquisition_mode != "intermittent":
+            raise ValueError("NPM production intent has unsupported source facts.")
+        if (
+            isinstance(self.validation_revision, bool)
+            or not isinstance(self.validation_revision, int)
+            or self.validation_revision < 0
+        ):
+            raise ValueError("validation_revision must be a non-negative integer.")
+        if (
+            isinstance(self.target_fs_hz, bool)
+            or not isinstance(self.target_fs_hz, (int, float))
+            or not math.isfinite(float(self.target_fs_hz))
+            or self.target_fs_hz <= 0
+            or isinstance(self.session_duration_sec, bool)
+            or not isinstance(self.session_duration_sec, (int, float))
+            or not math.isfinite(float(self.session_duration_sec))
+            or self.session_duration_sec <= 0
+            or isinstance(self.sessions_per_hour, bool)
+            or not isinstance(self.sessions_per_hour, int)
+            or self.sessions_per_hour <= 0
+        ):
+            raise ValueError("NPM sampling facts must be positive and finite.")
+        if self.execution_mode not in {"phasic", "tonic", "both"}:
+            raise ValueError("Unsupported NPM execution mode.")
+        if self.run_type != "full":
+            raise ValueError("Only full NPM runs are in the mapped subset.")
+        for name in (
+            "source_candidate_files",
+            "discovered_roi_ids",
+            "selected_roi_ids",
+            "excluded_roi_ids",
+            "correction_parameter_values",
+            "per_roi_correction_strategy_map",
+            "deferred_capabilities",
+        ):
+            _require_tuple(getattr(self, name), name)
+        if not self.source_candidate_files:
+            raise ValueError("NPM source candidate identity is required.")
+        if (
+            not self.discovered_roi_ids
+            or not self.selected_roi_ids
+            or len(set(self.discovered_roi_ids)) != len(self.discovered_roi_ids)
+            or len(set(self.selected_roi_ids)) != len(self.selected_roi_ids)
+            or len(set(self.excluded_roi_ids)) != len(self.excluded_roi_ids)
+            or set(self.selected_roi_ids) - set(self.discovered_roi_ids)
+            or set(self.excluded_roi_ids) - set(self.discovered_roi_ids)
+            or set(self.selected_roi_ids) & set(self.excluded_roi_ids)
+        ):
+            raise ValueError("NPM ROI scope is incomplete or inconsistent.")
+        strategy_by_roi = {
+            entry.roi_id: entry for entry in self.per_roi_correction_strategy_map
+        }
+        if set(strategy_by_roi) != set(self.selected_roi_ids):
+            raise ValueError("NPM correction strategy map must cover selected ROIs exactly.")
+        for entry in self.per_roi_correction_strategy_map:
+            if (
+                entry.strategy_family not in CORRECTION_STRATEGY_FAMILIES
+                or not entry.explicit_user_mark
+                or entry.current_or_stale != "current"
+            ):
+                raise ValueError("NPM correction strategy map contains an unusable entry.")
+            if entry.strategy_family == "signal_only_f0":
+                if entry.selected_strategy != "signal_only_f0" or entry.dynamic_fit_mode is not None:
+                    raise ValueError("Signal-Only NPM strategy entry is inconsistent.")
+            elif (
+                entry.selected_strategy not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+                or entry.dynamic_fit_mode != entry.selected_strategy
+            ):
+                raise ValueError("Dynamic-fit NPM strategy entry is inconsistent.")
+        if self.capability_status != GUIDED_NPM_PRODUCTION_CAPABILITY_STATUS:
+            raise ValueError("Unsupported NPM capability status.")
+        if self.output_policy.overwrite or self.output_policy.precreate:
+            raise ValueError("NPM production intent cannot authorize output mutation.")
+
+
+@dataclass(frozen=True)
 class GuidedProductionMappingIssue:
     category: str
     section: str
@@ -643,6 +839,53 @@ GuidedProductionMappingResult = (
 )
 
 
+@dataclass(frozen=True)
+class GuidedNpmProductionCapabilityResult:
+    status: str
+    production_mapping_supported: bool
+    startup_available: bool
+    runnable: bool
+    blocking_issues: tuple[GuidedProductionMappingIssue, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.status not in {
+            GUIDED_NPM_PRODUCTION_CAPABILITY_STATUS,
+            "unsupported_analysis_configuration",
+            "stale_or_mismatched_validation",
+            "incomplete_correction_settings",
+            "incomplete_feature_settings",
+            "per_session_evidence_not_identity_bound",
+        }:
+            raise ValueError("Unsupported NPM capability status.")
+        if not isinstance(self.blocking_issues, tuple):
+            raise ValueError("blocking_issues must be a tuple.")
+        if self.runnable is not False or self.startup_available is not False:
+            raise ValueError("B2-C1 NPM capability cannot be runnable.")
+
+
+@dataclass(frozen=True)
+class GuidedNpmProductionMappingSuccess:
+    intent: GuidedNpmProductionExecutionIntent
+    capability: GuidedNpmProductionCapabilityResult
+    canonical_intent_identity: str
+    source_request_identity: str
+    status: str = "mapped"
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.intent, GuidedNpmProductionExecutionIntent)
+            or not isinstance(self.capability, GuidedNpmProductionCapabilityResult)
+            or self.canonical_intent_identity != self.intent.canonical_intent_identity
+            or self.source_request_identity != self.intent.source_request_identity
+        ):
+            raise ValueError("NPM mapping success identities are inconsistent.")
+
+
+GuidedNpmProductionMappingResult = (
+    GuidedNpmProductionMappingSuccess | GuidedProductionMappingFailure
+)
+
+
 def _failure(
     category: str, section: str, message: str, detail_code: str
 ) -> GuidedProductionMappingFailure:
@@ -677,6 +920,14 @@ _INTENT_IDENTITY_MODEL_FIELDS = {
     ),
 }
 
+_NPM_INTENT_IDENTITY_MODEL_FIELDS = {
+    GuidedNpmProductionExecutionIntent: tuple(
+        item.name
+        for item in fields(GuidedNpmProductionExecutionIntent)
+        if item.name != "canonical_intent_identity"
+    )
+}
+
 
 def _canonical_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, bool, int)):
@@ -691,6 +942,33 @@ def _canonical_value(value: Any) -> Any:
     if names is None:
         raise ValueError("Unsupported production intent value type.")
     return {name: _canonical_value(getattr(value, name)) for name in names}
+
+
+def _npm_canonical_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Non-finite values are not canonical.")
+        return value
+    if isinstance(value, tuple):
+        return [_npm_canonical_value(item) for item in value]
+    if isinstance(value, list):
+        return [_npm_canonical_value(item) for item in value]
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("NPM identity mapping keys must be strings.")
+        return {
+            key: _npm_canonical_value(item) for key, item in value.items()
+        }
+    names = _NPM_INTENT_IDENTITY_MODEL_FIELDS.get(type(value))
+    if names is not None:
+        return {
+            name: _npm_canonical_value(getattr(value, name)) for name in names
+        }
+    if type(value) in _INTENT_IDENTITY_MODEL_FIELDS:
+        return _canonical_value(value)
+    raise ValueError("Unsupported NPM production intent value type.")
 
 
 def compute_guided_production_execution_intent_identity(
@@ -708,6 +986,22 @@ def compute_guided_production_execution_intent_identity(
         raise ValueError("Production intent identity could not be computed.") from exc
 
 
+def compute_guided_npm_production_execution_intent_identity(
+    intent: GuidedNpmProductionExecutionIntent,
+) -> str:
+    """Compute the deterministic identity of the non-runnable NPM intent."""
+    if not isinstance(intent, GuidedNpmProductionExecutionIntent):
+        raise ValueError("intent must be a GuidedNpmProductionExecutionIntent.")
+    payload = {
+        "identity_domain": GUIDED_NPM_PRODUCTION_INTENT_IDENTITY_DOMAIN,
+        "intent": _npm_canonical_value(intent),
+    }
+    try:
+        return hashlib.sha256(encode_canonical_value(payload)).hexdigest()
+    except (GuidedIdentityError, TypeError, ValueError) as exc:
+        raise ValueError("NPM production intent identity could not be computed.") from exc
+
+
 REQUEST_FIELD_CLASSIFICATIONS = {
     GuidedBackendValidationRequest: {name: "mapped_to_intent" for name in (
         "request_schema_name", "request_schema_version", "validation_scope",
@@ -716,7 +1010,8 @@ REQUEST_FIELD_CLASSIFICATIONS = {
         "canonicalization_algorithm_version", "source", "acquisition_dataset",
         "parser", "roi_scope", "correction", "diagnostic_evidence",
         "feature_event", "output", "local_contract",
-        "normalized_recording_description_identity")},
+        "normalized_recording_description_identity",
+        "normalized_recording_description")},
     GuidedBackendSourceRequest: {name: ("gate_only" if name == "unresolved_source_identity_inputs" else "mapped_to_intent") for name in (item.name for item in fields(GuidedBackendSourceRequest))},
     GuidedBackendSourceCandidateFile: {name: "mapped_to_intent" for name in (item.name for item in fields(GuidedBackendSourceCandidateFile))},
     GuidedBackendAcquisitionDatasetRequest: {name: ("gate_only" if name in {"dataset_status", "dataset_current_applied", "validation_issue_categories", "stale_reason_categories"} else "mapped_to_intent") for name in (item.name for item in fields(GuidedBackendAcquisitionDatasetRequest))},
@@ -738,6 +1033,20 @@ ACQUISITION_TYPED_FIELD_CONFIG_MAP = frozenset(
         "rwd_time_col", "uv_suffix", "sig_suffix", "target_fs_hz", "sessions_per_hour", "session_duration_sec",
         "acquisition_mode", "allow_partial_final_window", "exclude_incomplete_final_rwd_chunk",
         "input_format", "resolved_input_format", "continuous_window_sec", "continuous_step_sec",
+    }
+)
+NPM_ACQUISITION_TYPED_FIELD_CONFIG_MAP = frozenset(
+    {
+        "npm_time_axis",
+        "npm_system_ts_col",
+        "npm_computer_ts_col",
+        "npm_led_col",
+        "npm_region_prefix",
+        "npm_region_suffix",
+        "target_fs_hz",
+        "chunk_duration_sec",
+        "allow_partial_final_chunk",
+        "adapter_value_nan_policy",
     }
 )
 CORRECTION_TYPED_FIELD_CONFIG_MAP = frozenset(
@@ -1075,6 +1384,904 @@ def map_guided_validation_request_to_execution_intent(
     except Exception:
         return _failure("mapping_internal_error", "mapping", "Production intent mapping failed.", "intent_construction_failed")
 
+
+def _npm_json_value(value: Any) -> Any:
+    """Convert accepted immutable/mapping values into canonical JSON values."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("NPM intent JSON cannot contain non-finite floats.")
+        return value
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("NPM intent JSON object keys must be strings.")
+        return {key: _npm_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_npm_json_value(item) for item in value]
+    raise ValueError("NPM intent JSON encountered an unsupported value type.")
+
+
+def _npm_canonical_json(value: Any) -> str:
+    return json.dumps(
+        _npm_json_value(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+
+
+def _npm_digest(label: str, value: Any) -> str:
+    return hashlib.sha256(
+        label.encode("utf-8")
+        + b"\x00"
+        + encode_canonical_value(_npm_canonical_value(value))
+    ).hexdigest()
+
+
+def _npm_build_identity_is_usable(
+    application_build_identity: Any,
+) -> bool:
+    if not isinstance(application_build_identity, ApplicationBuildIdentity):
+        return False
+    try:
+        expected_build = hashlib.sha256(
+            encode_canonical_value(_build_identity_payload(application_build_identity))
+        ).hexdigest()
+    except Exception:
+        return False
+    return (
+        expected_build == application_build_identity.canonical_identity
+        and _usable_version(application_build_identity.distribution_name)
+        and _usable_version(application_build_identity.distribution_version)
+    )
+
+
+def _npm_output_policy(
+    output: Any,
+) -> GuidedProductionOutputPolicy:
+    return GuidedProductionOutputPolicy(
+        output.output_base_canonical,
+        output.output_base_path_style,
+        output.path_role,
+        output.future_output_owner,
+        output.run_directory_strategy,
+        output.creation_timing,
+        output.overwrite,
+        output.precreate,
+        output.safety_classifier_version,
+        tuple(
+            GuidedProductionOutputRelationship(
+                item.relationship, item.root_kind, item.status
+            )
+            for item in output.relationships
+        ),
+        output.protected_root_context_complete,
+        output.filesystem_fact_scope,
+    )
+
+
+def map_guided_npm_validation_outcome_to_execution_intent(
+    outcome: "GuidedBackendValidationWorkflowOutcome",
+    *,
+    expected_validation_revision: int,
+    expected_plan_identity: str,
+    application_build_identity: ApplicationBuildIdentity,
+    mapping_contract: GuidedProductionMappingContract,
+) -> GuidedNpmProductionMappingResult:
+    """Map only the actual accepted NPM validation workflow outcome.
+
+    This is the supported B2-C1 production boundary.  It verifies the
+    immutable workflow linkage before delegating to the pure request mapper;
+    callers cannot assert acceptance by supplying a status string, inventing
+    a revision, or substituting the request identity for the Guided plan
+    identity.
+    """
+    workflow_module = __import__(
+        "photometry_pipeline.guided_backend_validation_workflow",
+        fromlist=["GuidedBackendValidationWorkflowOutcome"],
+    )
+    workflow_outcome_type = getattr(
+        workflow_module, "GuidedBackendValidationWorkflowOutcome", None
+    )
+    if workflow_outcome_type is None or not isinstance(outcome, workflow_outcome_type):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "An accepted Guided validation outcome is required.",
+            "validation_outcome_type_invalid",
+        )
+    if (
+        outcome.status != "validator_accepted"
+        or outcome.accepted_for_backend_validation is not True
+        or outcome.validation_result is None
+        or outcome.validation_result.accepted is not True
+    ):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The Guided validation outcome was not accepted.",
+            "validation_outcome_not_accepted",
+        )
+    if outcome.stale is not False:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The Guided validation outcome is stale.",
+            "validation_outcome_stale",
+        )
+    if outcome.blocking_issues:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The accepted Guided validation outcome contains blockers.",
+            "validation_outcome_has_blockers",
+        )
+    if not isinstance(outcome.compile_result, GuidedBackendValidationCompileSuccess):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The accepted Guided validation outcome has no compile result.",
+            "validation_compile_result_missing",
+        )
+    request = outcome.compile_result.request
+    if not isinstance(request, GuidedBackendValidationRequest):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The accepted Guided validation outcome has no request.",
+            "validation_request_missing",
+        )
+    materialization_module = __import__(
+        "photometry_pipeline.guided_backend_validation_materialization",
+        fromlist=["GuidedBackendValidationMaterializationSuccess"],
+    )
+    materialization_success_type = getattr(
+        materialization_module,
+        "GuidedBackendValidationMaterializationSuccess",
+        None,
+    )
+    if materialization_success_type is None or not isinstance(
+        outcome.materialization_result, materialization_success_type
+    ):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The accepted Guided validation outcome has no materialization result.",
+            "validation_materialization_result_missing",
+        )
+
+    accepted_request_identity = outcome.accepted_request_identity
+    if not _sha256(accepted_request_identity):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "identity",
+            "The accepted request identity is missing.",
+            "accepted_request_identity_missing",
+        )
+    if (
+        outcome.request_identity != accepted_request_identity
+        or outcome.compile_result.canonical_request_identity
+        != accepted_request_identity
+    ):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "identity",
+            "The accepted request identity is inconsistent with the outcome.",
+            "accepted_request_identity_mismatch",
+        )
+    try:
+        recomputed_request_identity = (
+            compute_guided_backend_validation_request_identity(request)
+        )
+    except Exception:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "identity",
+            "The accepted request identity could not be recomputed.",
+            "accepted_request_identity_mismatch",
+        )
+    if recomputed_request_identity != accepted_request_identity:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "identity",
+            "The accepted request identity does not match request content.",
+            "accepted_request_identity_mismatch",
+        )
+
+    if expected_validation_revision is None:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The expected validation revision is missing.",
+            "validation_revision_missing",
+        )
+    if (
+        isinstance(expected_validation_revision, bool)
+        or not isinstance(expected_validation_revision, int)
+        or expected_validation_revision < 0
+        or outcome.validation_revision is None
+        or isinstance(outcome.validation_revision, bool)
+        or not isinstance(outcome.validation_revision, int)
+        or outcome.validation_revision < 0
+    ):
+        detail_code = (
+            "validation_revision_missing"
+            if outcome.validation_revision is None
+            else "validation_revision_mismatch"
+        )
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The validation revision is missing or invalid.",
+            detail_code,
+        )
+    if outcome.validation_revision != expected_validation_revision:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The validation revision does not match the current revision.",
+            "validation_revision_mismatch",
+        )
+
+    if expected_plan_identity is None:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The expected Guided plan identity is missing.",
+            "guided_plan_identity_missing",
+        )
+    if not _sha256(expected_plan_identity):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The expected Guided plan identity is invalid.",
+            "guided_plan_identity_mismatch",
+        )
+    if expected_plan_identity == accepted_request_identity:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The request identity cannot stand in for the Guided plan identity.",
+            "request_identity_used_as_plan_identity",
+        )
+    if not _sha256(outcome.guided_plan_identity):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The accepted Guided plan identity is missing.",
+            "guided_plan_identity_missing",
+        )
+    if outcome.guided_plan_identity == accepted_request_identity:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The accepted outcome used request identity as its plan identity.",
+            "request_identity_used_as_plan_identity",
+        )
+    if outcome.guided_plan_identity != expected_plan_identity:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The Guided plan identity does not match the current plan.",
+            "guided_plan_identity_mismatch",
+        )
+
+    return _map_verified_guided_npm_request_to_execution_intent(
+        request,
+        accepted_request_identity=accepted_request_identity,
+        validation_revision=outcome.validation_revision,
+        current_plan_identity=outcome.guided_plan_identity,
+        application_build_identity=application_build_identity,
+        mapping_contract=mapping_contract,
+    )
+
+
+def _map_verified_guided_npm_request_to_execution_intent(
+    request: GuidedBackendValidationRequest,
+    *,
+    accepted_request_identity: str,
+    validation_revision: int,
+    current_plan_identity: str,
+    application_build_identity: ApplicationBuildIdentity,
+    mapping_contract: GuidedProductionMappingContract,
+) -> GuidedNpmProductionMappingResult:
+    """Map an already verified accepted NPM request to a non-runnable intent.
+
+    The function consumes only already-materialized request content.  It does
+    not discover files, inspect source data, recalculate support geometry, or
+    allocate outputs.  Startup and wrapper execution are deliberately absent
+    from this path and are represented only by the capability status. This is
+    an internal helper; the public production boundary is
+    ``map_guided_npm_validation_outcome_to_execution_intent``.
+    """
+    if not isinstance(request, GuidedBackendValidationRequest):
+        return _failure(
+            "request_missing_or_invalid",
+            "request",
+            "A Guided validation request is required.",
+            "request_invalid_type",
+        )
+    if not _sha256(accepted_request_identity):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "identity",
+            "The accepted request identity is missing or invalid.",
+            "accepted_request_identity_missing",
+        )
+    try:
+        recomputed = compute_guided_backend_validation_request_identity(request)
+    except Exception:
+        return _failure(
+            "mapping_internal_error",
+            "identity",
+            "Request identity could not be recomputed.",
+            "request_identity_recomputation_failed",
+        )
+    if recomputed != accepted_request_identity:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "identity",
+            "The accepted request identity does not match request content.",
+            "accepted_request_identity_mismatch",
+        )
+    if not _sha256(current_plan_identity):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The current Guided plan identity is missing or invalid.",
+            "current_plan_identity_invalid",
+        )
+    if (
+        isinstance(validation_revision, bool)
+        or not isinstance(validation_revision, int)
+        or validation_revision < 0
+    ):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "validation",
+            "The NPM validation revision is invalid.",
+            "validation_revision_invalid",
+        )
+    problem = _contract_problem(mapping_contract)
+    if problem:
+        return _failure(
+            problem[0],
+            "mapping_contract",
+            "Production mapping contract is unavailable.",
+            problem[1],
+        )
+    if not _npm_build_identity_is_usable(application_build_identity):
+        return _failure(
+            "app_build_identity_unusable",
+            "build_identity",
+            "Application build identity is unusable.",
+            "build_identity_unusable",
+        )
+    if (
+        request.request_schema_name != mapping_contract.supported_request_schema_name
+        or request.request_schema_version
+        != mapping_contract.supported_request_schema_version
+    ):
+        return _failure(
+            "unsupported_request_schema",
+            "request",
+            "Request schema is unsupported.",
+            "request_schema_mismatch",
+        )
+    if (
+        request.validation_scope != mapping_contract.supported_validation_scope
+        or request.validation_contract_version
+        != mapping_contract.supported_validation_contract_version
+    ):
+        return _failure(
+            "unsupported_validation_scope",
+            "request",
+            "Validation scope is unsupported.",
+            "validation_scope_mismatch",
+        )
+    if (
+        request.subset_rule_version != mapping_contract.supported_subset_rule_version
+        or request.compiler_version != mapping_contract.supported_compiler_version
+        or request.canonicalization_algorithm_version
+        != mapping_contract.supported_canonicalization_algorithm_version
+    ):
+        return _failure(
+            "unsupported_subset_rule",
+            "request",
+            "Request subset or compiler contract is unsupported.",
+            "request_contract_mismatch",
+        )
+    if request.source.source_format != "npm":
+        return _failure(
+            "unsupported_source_format",
+            "source",
+            "Only NPM source is supported by the NPM production mapper.",
+            "source_not_npm",
+        )
+    if not request.source.candidate_files or request.source.unresolved_source_identity_inputs:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "source",
+            "The NPM source snapshot identity is incomplete.",
+            "source_snapshot_unresolved",
+        )
+    if not isinstance(
+        request.acquisition_dataset, GuidedBackendNpmAcquisitionDatasetRequest
+    ):
+        return _failure(
+            "unsupported_analysis_configuration",
+            "acquisition",
+            "The NPM acquisition contract is unavailable.",
+            "npm_acquisition_variant_missing",
+        )
+    acquisition = request.acquisition_dataset
+    if (
+        acquisition.source_format != "npm"
+        or acquisition.acquisition_mode != "intermittent"
+        or acquisition.allow_partial_final_window
+        or acquisition.execution_mode not in {"phasic", "tonic", "both"}
+    ):
+        return _failure(
+            "unsupported_analysis_configuration",
+            "acquisition",
+            "The NPM acquisition configuration is outside the mapped subset.",
+            "npm_acquisition_unsupported",
+        )
+    if not isinstance(request.parser, GuidedBackendNpmParserRequest):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "parser",
+            "The NPM parser policy is unavailable.",
+            "npm_parser_variant_missing",
+        )
+    parser = request.parser
+    if parser.unresolved_inputs:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "parser",
+            "The NPM parser policy is unresolved.",
+            "npm_parser_unresolved",
+        )
+    if not _sha256(request.normalized_recording_description_identity):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "normalized_recording",
+            "The normalized recording identity is missing or invalid.",
+            "normalized_recording_identity_invalid",
+        )
+    if not isinstance(request.normalized_recording_description, Mapping):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "normalized_recording",
+            "The normalized recording description is missing.",
+            "normalized_recording_payload_missing",
+        )
+    try:
+        normalized = deserialize_normalized_recording_description(
+            request.normalized_recording_description
+        )
+    except NormalizedRecordingError as exc:
+        if exc.category in {
+            "npm_per_session_evidence_not_identity_bound",
+            "serialized_npm_session_evidence_mismatch",
+        }:
+            return _failure(
+                "per_session_evidence_not_identity_bound",
+                "normalized_recording",
+                "NPM per-session evidence is not identity-bound.",
+                exc.category,
+            )
+        return _failure(
+            "stale_or_mismatched_validation",
+            "normalized_recording",
+            "The normalized recording description is stale or mismatched.",
+            exc.category,
+        )
+    if (
+        normalized.adapter_format != "npm"
+        or normalized.acquisition_mode != acquisition.acquisition_mode
+        or normalized.recording_source_identity != request.source.source_root_canonical
+        or normalized.source_evidence_identity
+        != request.source.source_candidate_content_digest
+        or normalized.sampling.parser_contract_identity != parser.parser_contract_digest
+        or normalized.sampling.target_fs_hz is None
+        or float(normalized.sampling.target_fs_hz) != float(acquisition.npm_target_fs_hz)
+        or normalized.sampling.sessions_per_hour != acquisition.sessions_per_hour
+        or float(normalized.sampling.session_duration_sec or 0.0)
+        != float(acquisition.session_duration_sec)
+        or normalized.adapter_evidence.get("npm_source_candidate_set_digest")
+        != request.source.source_candidate_set_digest
+        or normalized.adapter_evidence.get("npm_source_candidate_content_digest")
+        != request.source.source_candidate_content_digest
+    ):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "normalized_recording",
+            "NPM normalized recording facts do not match the accepted request.",
+            "normalized_recording_request_mismatch",
+        )
+    try:
+        parser_digest = compute_npm_parser_contract_digest(parser.parser_contract_content)
+    except Exception:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "parser",
+            "The NPM parser policy identity could not be verified.",
+            "parser_policy_identity_unavailable",
+        )
+    if parser_digest != parser.parser_contract_digest:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "parser",
+            "The NPM parser policy identity does not match its content.",
+            "parser_policy_identity_mismatch",
+        )
+    if any(
+        session.disposition != "process" for session in normalized.sessions
+    ):
+        return _failure(
+            "unsupported_analysis_configuration",
+            "acquisition",
+            "The NPM production subset requires processable sessions only.",
+            "npm_session_disposition_unsupported",
+        )
+    if not request.roi_scope.included_roi_ids:
+        return _failure(
+            "incomplete_correction_settings",
+            "roi_scope",
+            "The selected NPM ROI scope is empty.",
+            "selected_roi_scope_empty",
+        )
+    if (
+        tuple(item.roi_id for item in normalized.roi_channels if item.included)
+        != tuple(request.roi_scope.included_roi_ids)
+    ):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "roi_scope",
+            "The NPM normalized ROI scope is stale.",
+            "normalized_roi_scope_mismatch",
+        )
+    local = request.local_contract
+    if (
+        local.blocking_issue_categories
+        or local.warning_categories
+        or local.unsupported_state_flags
+        or local.unresolved_required_inputs
+    ):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "local_contract",
+            "The accepted NPM local contract is not clean.",
+            "local_contract_not_clean",
+        )
+    requested_deferred = set(local.deferred_capabilities)
+    if requested_deferred & set(mapping_contract.blocking_deferred_capabilities):
+        return _failure(
+            "stale_or_mismatched_validation",
+            "local_contract",
+            "A production-mapping blocker remains deferred.",
+            "blocking_deferred_capability",
+        )
+    known_deferred = (
+        set(mapping_contract.allowed_nonblocking_deferred_capabilities)
+        | set(mapping_contract.stage_deferred_capabilities)
+        | {"app_build_identity"}
+    )
+    if requested_deferred - known_deferred:
+        return _failure(
+            "stale_or_mismatched_validation",
+            "local_contract",
+            "An unknown deferred capability remains on the NPM request.",
+            "unknown_deferred_capability",
+        )
+    if _unknown_typed(
+        acquisition.semantic_values, NPM_ACQUISITION_TYPED_FIELD_CONFIG_MAP
+    ) or _unknown_typed(
+        request.correction.dynamic_fit_parameter_values,
+        CORRECTION_TYPED_FIELD_CONFIG_MAP,
+    ):
+        return _failure(
+            "unsupported_analysis_configuration",
+            "typed_values",
+            "An NPM production configuration field is not mapped.",
+            "typed_field_unmapped",
+        )
+    correction = request.correction
+    raw_entries = tuple(correction.per_roi_production_strategy_map)
+    if not raw_entries:
+        return _failure(
+            "incomplete_correction_settings",
+            "correction",
+            "NPM correction settings do not contain a per-ROI strategy map.",
+            "per_roi_strategy_map_missing",
+        )
+    selected = tuple(request.roi_scope.included_roi_ids)
+    selected_set = set(selected)
+    if (
+        len({entry.roi_id for entry in raw_entries}) != len(raw_entries)
+        or {entry.roi_id for entry in raw_entries} != selected_set
+    ):
+        return _failure(
+            "incomplete_correction_settings",
+            "correction",
+            "NPM correction settings must contain exactly one strategy per selected ROI.",
+            "per_roi_strategy_map_incomplete",
+        )
+    production_strategy_map: list[GuidedProductionPerRoiStrategy] = []
+    for entry in sorted(raw_entries, key=lambda item: item.roi_id):
+        if (
+            not entry.explicit_user_mark
+            or entry.current_or_stale != "current"
+            or not entry.evidence_source_type
+            or not entry.evidence_reference_json
+        ):
+            return _failure(
+                "incomplete_correction_settings",
+                "correction",
+                "NPM correction evidence is incomplete or stale.",
+                "per_roi_strategy_evidence_incomplete",
+            )
+        if entry.strategy_family not in CORRECTION_STRATEGY_FAMILIES:
+            return _failure(
+                "unsupported_analysis_configuration",
+                "correction",
+                "An NPM ROI correction strategy is unsupported.",
+                "per_roi_strategy_family_unsupported",
+            )
+        if entry.strategy_family == "signal_only_f0":
+            if entry.selected_strategy != "signal_only_f0" or entry.dynamic_fit_mode is not None:
+                return _failure(
+                    "unsupported_analysis_configuration",
+                    "correction",
+                    "The NPM Signal-Only strategy entry is inconsistent.",
+                    "signal_only_strategy_inconsistent",
+                )
+        elif (
+            entry.selected_strategy not in FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+            or entry.dynamic_fit_mode != entry.selected_strategy
+        ):
+            return _failure(
+                "unsupported_analysis_configuration",
+                "correction",
+                "The NPM dynamic-fit strategy entry is unsupported.",
+                "dynamic_fit_strategy_inconsistent",
+            )
+        production_strategy_map.append(
+            GuidedProductionPerRoiStrategy(
+                roi_id=entry.roi_id,
+                strategy_family=entry.strategy_family,
+                dynamic_fit_mode=entry.dynamic_fit_mode,
+                selected_strategy=entry.selected_strategy,
+                evidence_source_type=entry.evidence_source_type,
+                evidence_reference_json=entry.evidence_reference_json,
+                explicit_user_mark=entry.explicit_user_mark,
+                current_or_stale=entry.current_or_stale,
+            )
+        )
+    if _unknown_typed(
+        request.feature_event.effective_values, FEATURE_EVENT_TYPED_FIELD_CONFIG_MAP
+    ):
+        return _failure(
+            "incomplete_feature_settings",
+            "feature_event",
+            "NPM feature/event settings contain an unmapped field.",
+            "feature_typed_field_unmapped",
+        )
+    raw_feature_entries = tuple(request.feature_event.per_roi_feature_event_map)
+    if (
+        not request.feature_event.effective_values
+        or len({entry.roi_id for entry in raw_feature_entries}) != len(raw_feature_entries)
+        or {entry.roi_id for entry in raw_feature_entries} != selected_set
+    ):
+        return _failure(
+            "incomplete_feature_settings",
+            "feature_event",
+            "NPM feature/event settings must resolve one complete entry per selected ROI.",
+            "per_roi_feature_map_incomplete",
+        )
+    for entry in raw_feature_entries:
+        if (
+            not entry.explicit_user_mark
+            or entry.current_or_stale != "current"
+            or not entry.effective_config_fields
+            or _unknown_typed(entry.effective_config_fields, FEATURE_EVENT_TYPED_FIELD_CONFIG_MAP)
+            or _unknown_typed(entry.override_config_fields, FEATURE_EVENT_TYPED_FIELD_CONFIG_MAP)
+        ):
+            return _failure(
+                "incomplete_feature_settings",
+                "feature_event",
+                "NPM per-ROI feature/event settings are incomplete or stale.",
+                "per_roi_feature_entry_incomplete",
+            )
+    feature_event = GuidedProductionFeatureEvent(
+        request.feature_event.profile_schema_version,
+        request.feature_event.profile_id,
+        _typed(request.feature_event.effective_values),
+        request.feature_event.active_fields,
+        request.feature_event.inactive_fields,
+        request.feature_event.profile_status,
+        request.feature_event.explicitly_applied,
+        request.feature_event.current,
+        request.feature_event.visible_unapplied_changes,
+        request.feature_event.per_roi_feature_event_map_version,
+        tuple(
+            GuidedProductionPerRoiFeatureEvent(
+                roi_id=entry.roi_id,
+                source=entry.source,
+                feature_event_profile_id=entry.feature_event_profile_id,
+                override_config_fields=_typed(entry.override_config_fields),
+                effective_config_fields=_typed(entry.effective_config_fields),
+                explicit_user_mark=entry.explicit_user_mark,
+                current_or_stale=entry.current_or_stale,
+            )
+            for entry in sorted(raw_feature_entries, key=lambda item: item.roi_id)
+        ),
+    )
+    output = request.output
+    if (
+        output.path_role != "output_base"
+        or output.future_output_owner != "runner"
+        or output.run_directory_strategy != "derive_unique_run_id_under_output_base"
+        or output.creation_timing != "future_execution_start_only"
+        or output.overwrite
+        or output.precreate
+        or output.blocker_categories
+        or not output.protected_root_context_complete
+    ):
+        return _failure(
+            "output_policy_not_supported",
+            "output",
+            "NPM output policy is not a future-run output policy.",
+            "output_policy_invalid",
+        )
+    try:
+        normalized_payload = serialize_normalized_recording_description(normalized)
+        normalized_payload_json = _npm_canonical_json(normalized_payload)
+        parser_policy_content_json = _npm_canonical_json(parser.parser_contract_content)
+        session_projection = build_normalized_recording_description_payload(normalized)[
+            "npm_per_session_resolved_evidence"
+        ]
+        mapping_projection = normalized.adapter_evidence[
+            "physical_to_canonical_roi_mapping"
+        ]
+        ordered_session_identity = _npm_digest(
+            "npm-ordered-session-identity:v1",
+            [
+                {
+                    "chronological_position": session.chronological_position,
+                    "stable_source_identity": session.stable_source_identity,
+                    "authoritative_source_start_time": session.authoritative_source_start_time,
+                    "content_digest": session.content_digest,
+                }
+                for session in normalized.sessions
+            ],
+        )
+        per_session_evidence_identity = _npm_digest(
+            "npm-per-session-resolved-evidence:v1", session_projection
+        )
+        mapping_identity = _npm_digest(
+            "npm-physical-to-canonical-roi-mapping:v1", mapping_projection
+        )
+        support_identity = _npm_digest(
+            "npm-support-policy:v1",
+            [item["support_policy_identity"] for item in session_projection],
+        )
+        output_time_basis_identity = _npm_digest(
+            "npm-output-time-basis:v1",
+            [item["output_time_basis"] for item in session_projection],
+        )
+        source_snapshot_identity = _npm_digest(
+            "npm-source-snapshot:v1",
+            {
+                "source_root_canonical": request.source.source_root_canonical,
+                "source_candidate_set_digest": request.source.source_candidate_set_digest,
+                "source_candidate_content_digest": request.source.source_candidate_content_digest,
+                "candidate_files": [
+                    {
+                        "canonical_relative_path": item.canonical_relative_path,
+                        "size_bytes": item.size_bytes,
+                        "sha256_content_digest": item.sha256_content_digest,
+                    }
+                    for item in request.source.candidate_files
+                ],
+            },
+        )
+        correction_payload_identity = _npm_digest(
+            "npm-correction-payload:v1",
+            {
+                "parameters": _typed(correction.dynamic_fit_parameter_values),
+                "per_roi_strategy_map": tuple(production_strategy_map),
+            },
+        )
+        feature_payload_identity = _npm_digest(
+            "npm-feature-payload:v1", feature_event
+        )
+        intent = GuidedNpmProductionExecutionIntent(
+            intent_schema_name=GUIDED_NPM_PRODUCTION_INTENT_SCHEMA_NAME,
+            intent_schema_version=GUIDED_NPM_PRODUCTION_INTENT_SCHEMA_VERSION,
+            mapping_contract_version=mapping_contract.mapping_contract_version,
+            runner_contract_version=GUIDED_NPM_PRODUCTION_RUNNER_CONTRACT_VERSION,
+            source_request_identity=recomputed,
+            validation_status="validator_accepted",
+            validation_revision=validation_revision,
+            current_plan_identity=current_plan_identity,
+            application_build_identity=application_build_identity,
+            source_format=request.source.source_format,
+            source_root_canonical=request.source.source_root_canonical,
+            acquisition_mode=acquisition.acquisition_mode,
+            source_candidate_files=tuple(
+                GuidedProductionSourceCandidate(
+                    item.canonical_relative_path,
+                    item.size_bytes,
+                    item.sha256_content_digest,
+                )
+                for item in request.source.candidate_files
+            ),
+            source_snapshot_set_identity=request.source.source_candidate_set_digest,
+            source_snapshot_content_identity=request.source.source_candidate_content_digest,
+            source_snapshot_identity=source_snapshot_identity,
+            normalized_recording_description_identity=(
+                request.normalized_recording_description_identity
+            ),
+            normalized_recording_payload_json=normalized_payload_json,
+            parser_policy_identity=parser.parser_contract_digest,
+            parser_policy_content_json=parser_policy_content_json,
+            ordered_session_identity=ordered_session_identity,
+            per_session_resolved_evidence_identity=per_session_evidence_identity,
+            physical_to_canonical_roi_mapping_identity=mapping_identity,
+            support_policy_identity=support_identity,
+            output_time_basis_identity=output_time_basis_identity,
+            target_fs_hz=float(acquisition.npm_target_fs_hz),
+            session_duration_sec=float(acquisition.session_duration_sec),
+            sessions_per_hour=acquisition.sessions_per_hour,
+            execution_mode=acquisition.execution_mode,
+            run_type="full",
+            discovered_roi_ids=tuple(request.roi_scope.discovered_roi_ids),
+            selected_roi_ids=selected,
+            excluded_roi_ids=tuple(request.roi_scope.excluded_roi_ids),
+            correction_parameter_values=_typed(correction.dynamic_fit_parameter_values),
+            per_roi_correction_strategy_map=tuple(production_strategy_map),
+            correction_payload_identity=correction_payload_identity,
+            feature_event=feature_event,
+            feature_payload_identity=feature_payload_identity,
+            output_policy=_npm_output_policy(output),
+            deferred_capabilities=tuple(
+                sorted(
+                    {
+                        item
+                        for item in local.deferred_capabilities
+                        if item not in {"app_build_identity", "backend_validation"}
+                    }
+                    | {"npm_startup_orchestration"}
+                )
+            ),
+            capability_status=GUIDED_NPM_PRODUCTION_CAPABILITY_STATUS,
+            canonical_intent_identity="0" * 64,
+        )
+        digest = compute_guided_npm_production_execution_intent_identity(intent)
+        intent = replace(intent, canonical_intent_identity=digest)
+        capability = GuidedNpmProductionCapabilityResult(
+            status=GUIDED_NPM_PRODUCTION_CAPABILITY_STATUS,
+            production_mapping_supported=True,
+            startup_available=False,
+            runnable=False,
+        )
+        return GuidedNpmProductionMappingSuccess(
+            intent=intent,
+            capability=capability,
+            canonical_intent_identity=digest,
+            source_request_identity=recomputed,
+        )
+    except (NormalizedRecordingError, GuidedIdentityError, TypeError, ValueError, KeyError):
+        return _failure(
+            "mapping_internal_error",
+            "mapping",
+            "NPM production intent mapping failed.",
+            "npm_intent_construction_failed",
+        )
 
 def build_per_roi_feature_event_backend_shapes(
     intent: GuidedProductionExecutionIntent,
