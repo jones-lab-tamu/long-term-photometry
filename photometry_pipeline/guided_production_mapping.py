@@ -41,6 +41,7 @@ from photometry_pipeline.guided_normalized_recording import (
     NormalizedRecordingError,
     build_normalized_recording_description_payload,
     compute_npm_parser_contract_digest,
+    compute_npm_support_policy_identity,
     deserialize_normalized_recording_description,
     serialize_normalized_recording_description,
 )
@@ -2165,10 +2166,26 @@ def _map_verified_guided_npm_request_to_execution_intent(
         mapping_identity = _npm_digest(
             "npm-physical-to-canonical-roi-mapping:v1", mapping_projection
         )
-        support_identity = _npm_digest(
-            "npm-support-policy:v1",
-            [item["support_policy_identity"] for item in session_projection],
-        )
+        parser_sampling = parser.parser_contract_content["sampling"]
+        support_policy = parser_sampling["support_policy"]
+        for item in session_projection:
+            if item["support_policy"] != support_policy:
+                return _failure(
+                    "per_session_evidence_not_identity_bound",
+                    "normalized_recording",
+                    "NPM session support policy differs from the recording-wide policy.",
+                    "session_support_policy_mismatch",
+                )
+            if item["support_policy_identity"] != compute_npm_support_policy_identity(
+                item["support_policy"]
+            ):
+                return _failure(
+                    "per_session_evidence_not_identity_bound",
+                    "normalized_recording",
+                    "NPM session support policy identity does not match its value.",
+                    "session_support_policy_identity_mismatch",
+                )
+        support_identity = compute_npm_support_policy_identity(support_policy)
         output_time_basis_identity = _npm_digest(
             "npm-output-time-basis:v1",
             [item["output_time_basis"] for item in session_projection],

@@ -70,6 +70,7 @@ NPM_SESSION_RESOLVED_EVIDENCE_SCHEMA_VERSION = "npm_session_resolved_evidence.v1
 NPM_SESSION_RESOLVED_EVIDENCE_IDENTITY_DOMAIN = (
     "npm-session-resolved-evidence:v1"
 )
+NPM_SUPPORT_POLICY_IDENTITY_DOMAIN = "npm-support-policy:v1"
 
 # Where an RWD session's authoritative_source_start_time evidence came
 # from. Today there is exactly one supported source; the field exists so a
@@ -89,6 +90,20 @@ _SESSION_DISPOSITIONS = frozenset(
 # build_<format>_normalized_recording_description function; nothing else
 # in this module needs to change.
 SUPPORTED_ADAPTER_FORMATS = ("rwd", "npm")
+
+
+def compute_npm_support_policy_identity(support_policy: str) -> str:
+    """Return the canonical identity of one frozen NPM support policy."""
+    if not isinstance(support_policy, str) or not support_policy.strip():
+        raise NormalizedRecordingError(
+            "support_policy_invalid",
+            "NPM support policy must be a non-empty string.",
+        )
+    return hashlib.sha256(
+        NPM_SUPPORT_POLICY_IDENTITY_DOMAIN.encode("utf-8")
+        + b"\x00"
+        + support_policy.encode("utf-8")
+    ).hexdigest()
 
 
 def _canonical_parser_content(value: Any) -> Any:
@@ -619,6 +634,26 @@ def _npm_session_resolved_evidence_projection(
             "NPM physical-to-canonical ROI mapping is not one-to-one.",
         )
 
+    parser_sampling = (
+        description.sampling.parser_contract_content.get("sampling")
+        if isinstance(description.sampling.parser_contract_content, Mapping)
+        else None
+    )
+    recording_support_policy = (
+        parser_sampling.get("support_policy")
+        if isinstance(parser_sampling, Mapping)
+        else None
+    )
+    try:
+        recording_support_policy_identity = compute_npm_support_policy_identity(
+            recording_support_policy
+        )
+    except NormalizedRecordingError as exc:
+        raise NormalizedRecordingError(
+            "npm_per_session_evidence_not_identity_bound",
+            "NPM parser policy has no valid recording-wide support policy.",
+        ) from exc
+
     required_fields = (
         "canonical_relative_path",
         "resolved_timestamp_column",
@@ -716,6 +751,31 @@ def _npm_session_resolved_evidence_projection(
             raise NormalizedRecordingError(
                 "npm_per_session_evidence_not_identity_bound",
                 "NPM support policy identity is missing.",
+                chronological_position=position,
+            )
+        if support_policy != recording_support_policy:
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM session support policy differs from the recording-wide policy.",
+                chronological_position=position,
+            )
+        try:
+            expected_support_policy_identity = compute_npm_support_policy_identity(
+                support_policy
+            )
+        except NormalizedRecordingError as exc:
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM session support policy is invalid.",
+                chronological_position=position,
+            ) from exc
+        if (
+            support_policy_identity != expected_support_policy_identity
+            or support_policy_identity != recording_support_policy_identity
+        ):
+            raise NormalizedRecordingError(
+                "npm_per_session_evidence_not_identity_bound",
+                "NPM session support policy identity does not match its value.",
                 chronological_position=position,
             )
         output_time_basis = raw.get("output_time_basis")
@@ -1450,12 +1510,9 @@ def build_npm_normalized_recording_description(
                 "observed_duration_sec": inspection.observed_duration_sec,
                 "output_time_basis": inspection.output_time_basis,
                 "support_policy": inspection.support_policy,
-                "support_policy_identity": hashlib.sha256(
-                    (
-                        "npm-support-policy:v1\x00"
-                        + str(inspection.support_policy)
-                    ).encode("utf-8")
-                ).hexdigest(),
+                "support_policy_identity": compute_npm_support_policy_identity(
+                    inspection.support_policy
+                ),
                 "warning_categories": list(inspection.warning_categories),
                 "actual_elapsed_sec": actual_elapsed_sec,
                 "nominal_expected_elapsed_sec": position * cadence_sec,
