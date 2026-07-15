@@ -365,6 +365,22 @@ def _verify_live_sources(execution, check):
     return replace(evidence, canonical_live_freshness_evidence_identity=compute_guided_npm_live_freshness_evidence_identity(evidence))
 
 
+def verify_guided_npm_startup_artifact_live(
+    execution_request: GuidedNpmProductionExecutionRequest,
+    cancellation_check: Callable[[], bool] | None = None,
+) -> GuidedNpmLiveFileFacts:
+    """Reverify the exact execution-authorized startup artifact live."""
+    return _verify_startup_artifact(execution_request, cancellation_check)
+
+
+def verify_guided_npm_source_freshness_live(
+    execution_request: GuidedNpmProductionExecutionRequest,
+    cancellation_check: Callable[[], bool] | None = None,
+) -> GuidedNpmLiveSourceFreshnessEvidence:
+    """Reverify exact source membership and content in authority order."""
+    return _verify_live_sources(execution_request, cancellation_check)
+
+
 def _verify_run_directory(execution):
     output = execution.output_runtime_projection
     run = Path(output.run_directory_path)
@@ -621,9 +637,9 @@ def materialize_guided_npm_worker_request(
             _refuse("execution_request_build_mismatch", "request", "The current build identity is invalid.", str(exc) or type(exc).__name__)
         if current_application_build_identity != execution_request.application_build_identity:
             _refuse("execution_request_build_mismatch", "request", "The current build differs from the request build.", "current_build_identity_mismatch")
-        _verify_startup_artifact(execution_request, cancellation_check)
+        verify_guided_npm_startup_artifact_live(execution_request, cancellation_check)
         _check_cancelled(cancellation_check)
-        evidence = _verify_live_sources(execution_request, cancellation_check)
+        evidence = verify_guided_npm_source_freshness_live(execution_request, cancellation_check)
         _check_cancelled(cancellation_check)
         run, _ = _verify_run_directory(execution_request)
         worker = build_guided_npm_worker_request(execution_request, evidence)
