@@ -12,6 +12,7 @@ import argparse
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any, Callable
 
 from photometry_pipeline.application_build_identity import (
@@ -36,6 +37,23 @@ from photometry_pipeline.guided_npm_worker_request_materialization import (
     verify_guided_npm_source_freshness_live,
     verify_guided_npm_startup_artifact_live,
 )
+from photometry_pipeline.guided_npm_worker_terminal import (
+    STAGE_AUTHORIZED_RUNTIME_BUILD,
+    STAGE_COMPLETED_RUN_VERIFICATION,
+    STAGE_CONSUMED_AUTHORITY_PUBLICATION,
+    STAGE_LAUNCH_CONTEXT_VERIFICATION,
+    STAGE_NUMERICAL_DISPATCH,
+    STAGE_NUMERICAL_PIPELINE_RETURNED,
+    STAGE_PASS_1,
+    STAGE_TERMINAL_RECEIPT_PUBLICATION,
+    TERMINAL_OUTCOME_FAILED_AFTER_CONSUMED,
+    TERMINAL_OUTCOME_FAILED_BEFORE_CONSUMED,
+    TERMINAL_OUTCOME_FAILED_DURING_OUTPUT_FINALIZATION,
+    build_guided_npm_required_output_evidence,
+    build_guided_npm_worker_terminal_failure_receipt,
+    build_guided_npm_worker_terminal_success_receipt,
+    publish_guided_npm_worker_terminal_receipt,
+)
 from photometry_pipeline.guided_production_mapping import ApplicationBuildIdentity
 from photometry_pipeline.pipeline import Pipeline
 
@@ -43,6 +61,7 @@ from photometry_pipeline.pipeline import Pipeline
 GUIDED_NPM_WORKER_ENTRY_SUCCESS = 0
 GUIDED_NPM_WORKER_ENTRY_REFUSED = 2
 GUIDED_NPM_WORKER_ENTRY_FAILED = 3
+GUIDED_NPM_WORKER_ENTRY_TERMINAL_PUBLICATION_FAILED = 4
 GUIDED_NPM_WORKER_SMOKE_ARGUMENT = "--guided-npm-worker-entry-smoke-test-only"
 GUIDED_NPM_LAUNCH_CONTEXT_ARGUMENT = "--guided-npm-launch-context"
 
@@ -112,8 +131,16 @@ def run_guided_npm_worker(
     *,
     launch_context: GuidedNpmWorkerLaunchContext | None = None,
     pipeline_factory: Callable[..., Pipeline] = Pipeline,
+    on_pass_1_complete: Callable[[], None] | None = None,
+    on_consumed_authority_published: Callable[[Any], None] | None = None,
 ) -> None:
-    """Dispatch the verified worker through the existing numerical Pipeline."""
+    """Dispatch the verified worker through the existing numerical Pipeline.
+
+    ``on_pass_1_complete`` and ``on_consumed_authority_published`` are optional
+    B2-D2A observer hooks used only to build the child's own terminal receipt;
+    they default to None and do not alter this function's existing dispatch,
+    acknowledgement, or exception behavior for any existing caller.
+    """
     runtime = build_guided_npm_pipeline_runtime(worker)
     pipeline = pipeline_factory(
         runtime["config"],
@@ -128,6 +155,8 @@ def run_guided_npm_worker(
 
         def publish_consumed_authority(evidence) -> None:
             nonlocal publication_attempted
+            if on_pass_1_complete is not None:
+                on_pass_1_complete()
             if publication_attempted:
                 raise RuntimeError("consumed_authority_publication_repeated")
             publication_attempted = True
@@ -142,11 +171,132 @@ def run_guided_npm_worker(
                 receipt_path=launch_context.consumed_authority_receipt_path,
                 launch_context=launch_context,
             )
+            if on_consumed_authority_published is not None:
+                on_consumed_authority_published(receipt)
 
         kwargs["on_consumed_authority_verified"] = publish_consumed_authority
     pipeline.run_guided_npm_authorized(
         runtime["authorized_runtime"], runtime["output_dir"], **kwargs
     )
+
+
+def run_guided_npm_worker_to_terminal_receipt(
+    worker: GuidedNpmWorkerRequest,
+    *,
+    launch_context: GuidedNpmWorkerLaunchContext,
+    pipeline_factory: Callable[..., Pipeline] = Pipeline,
+) -> tuple[int, Any]:
+    """Dispatch the verified worker and durably record its own terminal receipt.
+
+    Assumes ``worker`` and ``launch_context`` are already verified (as
+    ``main()`` does before calling this).  Separated from ``main()`` so tests
+    can drive the full B2-D2A lifecycle with a fixture-built worker/launch
+    context directly, the same way existing B2-D1 tests call
+    ``run_guided_npm_worker`` directly rather than through the CLI's own
+    real-repository build-identity resolution.
+
+    Returns the worker-entry exit code alongside the exact terminal receipt
+    that was durably published, or ``None`` when no receipt could be.
+    """
+    # A process start timestamp anchors the required-output freshness floor:
+    # every artifact this same process writes necessarily gets an mtime at or
+    # after this instant, so a stale leftover from an earlier attempt reusing
+    # this run directory (predating this process) can never pass as fresh,
+    # while config_used.yaml/run_report.json -- written once, before Pass 1,
+    # and never touched again for phasic runs whose mode-specific late
+    # appends don't apply -- are correctly accepted since they were written
+    # by *this* process, not an earlier one.
+    process_start_time_ns = time.time_ns()
+    observed_process_id = os.getpid()
+    stage = STAGE_LAUNCH_CONTEXT_VERIFICATION
+    consumed_authority_receipt = None
+    terminal_outcome: str | None = None
+    failure_category = ""
+    failure_exception_type = ""
+
+    def _on_pass_1_complete() -> None:
+        nonlocal stage
+        stage = STAGE_PASS_1
+
+    def _on_consumed_authority_published(receipt: Any) -> None:
+        nonlocal stage, consumed_authority_receipt
+        consumed_authority_receipt = receipt
+        stage = STAGE_CONSUMED_AUTHORITY_PUBLICATION
+
+    # KeyboardInterrupt/SystemExit are deliberately not caught here: only
+    # ordinary Exception subclasses are classified into terminal evidence, so
+    # an interrupted or deliberately-exited process leaves no false success or
+    # false failure receipt behind.
+    try:
+        stage = STAGE_AUTHORIZED_RUNTIME_BUILD
+        traces_only = bool(build_guided_npm_pipeline_runtime(worker)["traces_only"])
+        stage = STAGE_NUMERICAL_DISPATCH
+        run_guided_npm_worker(
+            worker,
+            launch_context=launch_context,
+            pipeline_factory=pipeline_factory,
+            on_pass_1_complete=_on_pass_1_complete,
+            on_consumed_authority_published=_on_consumed_authority_published,
+        )
+        stage = STAGE_NUMERICAL_PIPELINE_RETURNED
+    except Exception as exc:
+        if consumed_authority_receipt is not None:
+            terminal_outcome = TERMINAL_OUTCOME_FAILED_AFTER_CONSUMED
+            failure_category = "pipeline_execution_failed"
+        else:
+            terminal_outcome = TERMINAL_OUTCOME_FAILED_BEFORE_CONSUMED
+            failure_category = (
+                "authorized_runtime_build_failed"
+                if stage == STAGE_AUTHORIZED_RUNTIME_BUILD
+                else "numerical_dispatch_failed"
+            )
+        failure_exception_type = type(exc).__name__
+
+    success_receipt = None
+    if terminal_outcome is None:
+        try:
+            stage = STAGE_COMPLETED_RUN_VERIFICATION
+            output_evidence = build_guided_npm_required_output_evidence(
+                worker.run_directory_path,
+                worker.execution_request.execution_mode,
+                traces_only=traces_only,
+                not_before_mtime_ns=process_start_time_ns,
+            )
+            success_receipt = build_guided_npm_worker_terminal_success_receipt(
+                worker_request=worker,
+                launch_context=launch_context,
+                consumed_authority_receipt=consumed_authority_receipt,
+                observed_process_id=observed_process_id,
+                output_evidence=output_evidence,
+            )
+        except Exception as exc:
+            terminal_outcome = TERMINAL_OUTCOME_FAILED_DURING_OUTPUT_FINALIZATION
+            failure_category = "output_evidence_verification_failed"
+            failure_exception_type = type(exc).__name__
+
+    if success_receipt is not None:
+        try:
+            stage = STAGE_TERMINAL_RECEIPT_PUBLICATION
+            publish_guided_npm_worker_terminal_receipt(success_receipt)
+        except Exception:
+            return GUIDED_NPM_WORKER_ENTRY_TERMINAL_PUBLICATION_FAILED, None
+        return GUIDED_NPM_WORKER_ENTRY_SUCCESS, success_receipt
+
+    try:
+        failure_receipt = build_guided_npm_worker_terminal_failure_receipt(
+            worker_request=worker,
+            launch_context=launch_context,
+            observed_process_id=observed_process_id,
+            terminal_outcome=terminal_outcome,
+            terminal_stage=stage,
+            consumed_authority_receipt=consumed_authority_receipt,
+            failure_category=failure_category,
+            failure_exception_type=failure_exception_type,
+        )
+        publish_guided_npm_worker_terminal_receipt(failure_receipt)
+    except Exception:
+        return GUIDED_NPM_WORKER_ENTRY_TERMINAL_PUBLICATION_FAILED, None
+    return GUIDED_NPM_WORKER_ENTRY_FAILED, failure_receipt
 
 
 def main(argv: tuple[str, ...] | list[str] | None = None) -> int:
@@ -172,11 +322,10 @@ def main(argv: tuple[str, ...] | list[str] | None = None) -> int:
         )
     except (OSError, TypeError, ValueError):
         return GUIDED_NPM_WORKER_ENTRY_REFUSED
-    try:
-        run_guided_npm_worker(worker, launch_context=launch_context)
-    except Exception:
-        return GUIDED_NPM_WORKER_ENTRY_FAILED
-    return GUIDED_NPM_WORKER_ENTRY_SUCCESS
+    exit_code, _receipt = run_guided_npm_worker_to_terminal_receipt(
+        worker, launch_context=launch_context
+    )
+    return exit_code
 
 
 if __name__ == "__main__":
