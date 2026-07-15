@@ -108,6 +108,15 @@ class GuidedNpmAuthorizedRuntime:
     per_roi_feature_config: dict[str, Config]
     per_roi_feature_provenance: dict[str, dict[str, Any]]
     config_field_audit: tuple[GuidedNpmAuthorizedConfigFieldAudit, ...]
+    correction_authority_identity: str
+    feature_authority_identity: str
+    canonical_guided_npm_authorized_runtime_identity: str
+
+
+@dataclass(frozen=True)
+class GuidedNpmAuthorizedChunkLoadResult:
+    chunk: Any
+    consumed_source_record: Any
 
 
 def verify_guided_npm_authorized_input(
@@ -382,7 +391,7 @@ def build_guided_npm_authorized_runtime(
         timing.output_time_basis,
     )
     verify_guided_npm_authorized_input(authorized)
-    return GuidedNpmAuthorizedRuntime(
+    provisional = GuidedNpmAuthorizedRuntime(
         authorized,
         config,
         execution.execution_mode,
@@ -390,6 +399,19 @@ def build_guided_npm_authorized_runtime(
         per_roi_feature_config,
         per_roi_feature_provenance,
         audit,
+        correction.canonical_correction_runtime_projection_identity,
+        feature.canonical_feature_runtime_projection_identity,
+        "0" * 64,
+    )
+    from photometry_pipeline.guided_npm_worker_acknowledgement import (
+        compute_guided_npm_authorized_runtime_identity,
+    )
+
+    return replace(
+        provisional,
+        canonical_guided_npm_authorized_runtime_identity=(
+            compute_guided_npm_authorized_runtime_identity(provisional, worker)
+        ),
     )
 
 
@@ -407,7 +429,7 @@ def verify_guided_npm_authorized_runtime(
 
 def _stable_authorized_bytes(
     session: GuidedNpmProductionSessionRuntimeProjection,
-) -> bytes:
+) -> tuple[bytes, os.stat_result]:
     path = Path(session.source_path)
     try:
         before = path.stat(follow_symlinks=False)
@@ -434,10 +456,10 @@ def _stable_authorized_bytes(
         or hashlib.sha256(content).hexdigest() != session.source_sha256
     ):
         raise ValueError("authorized_npm_source_identity_mismatch")
-    return content
+    return content, after
 
 
-def load_guided_npm_authorized_chunk(
+def load_guided_npm_authorized_chunk_with_record(
     authorized: GuidedNpmAuthorizedInput,
     path: str,
     config: Config,
@@ -452,7 +474,7 @@ def load_guided_npm_authorized_chunk(
     session = authorized.ordered_sessions[chunk_id]
     if not stored_paths_equal(path, session.source_path, authorized.source_path_style):
         raise ValueError("authorized_npm_source_path_mismatch")
-    content = _stable_authorized_bytes(session)
+    content, consumed_file_facts = _stable_authorized_bytes(session)
     chunk = load_npm_authorized_bytes(
         session.source_path,
         content,
@@ -519,4 +541,54 @@ def load_guided_npm_authorized_chunk(
         != authorized.authoritative_source_start_times[chunk_id]
     ):
         raise ValueError("authorized_npm_loaded_session_mismatch")
-    return chunk
+    from photometry_pipeline.guided_npm_worker_acknowledgement import (
+        GuidedNpmConsumedSourceRecord,
+        compute_guided_npm_consumed_source_record_identity,
+    )
+
+    record = GuidedNpmConsumedSourceRecord(
+        session.chronological_position,
+        session.source_path,
+        session.canonical_relative_path,
+        len(content),
+        hashlib.sha256(content).hexdigest(),
+        consumed_file_facts.st_mtime_ns,
+        consumed_file_facts.st_dev,
+        consumed_file_facts.st_ino,
+        consumed_file_facts.st_mode,
+        session.canonical_session_runtime_identity,
+        metadata["npm_resolved_timestamp_column"],
+        metadata["npm_timestamp_unit"],
+        session.resolved_led_column,
+        authorized.reference_led_value,
+        authorized.signal_led_value,
+        metadata["npm_support_policy"],
+        metadata["npm_output_time_basis"],
+        session.physical_roi_inventory,
+        tuple(metadata["npm_observed_physical_roi_ids"]),
+        tuple(chunk.channel_names),
+        authorized.physical_to_canonical_roi_map,
+        session.actual_elapsed_sec,
+        float(session.actual_elapsed_sec + chunk.time_sec[0]),
+        float(session.actual_elapsed_sec + chunk.time_sec[-1]),
+        "0" * 64,
+    )
+    record = replace(
+        record,
+        canonical_consumed_source_record_identity=(
+            compute_guided_npm_consumed_source_record_identity(record)
+        ),
+    )
+    return GuidedNpmAuthorizedChunkLoadResult(chunk, record)
+
+
+def load_guided_npm_authorized_chunk(
+    authorized: GuidedNpmAuthorizedInput,
+    path: str,
+    config: Config,
+    chunk_id: int,
+):
+    """Compatibility wrapper returning only the reconciled authorized chunk."""
+    return load_guided_npm_authorized_chunk_with_record(
+        authorized, path, config, chunk_id
+    ).chunk

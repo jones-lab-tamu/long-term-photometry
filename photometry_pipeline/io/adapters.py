@@ -1990,6 +1990,7 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
         signal_led_value=2,
         roi_cols=roi_cols,
         canonical_names=names,
+        observed_physical_roi_ids=roi_cols,
     )
 
 
@@ -2045,6 +2046,7 @@ def load_npm_authorized_bytes(
         signal_led_value=signal_led_value,
         roi_cols=list(physical),
         canonical_names=list(canonical),
+        observed_physical_roi_ids=list(roi_like),
         authorized_timing_geometry=authorized_timing_geometry,
     )
 
@@ -2061,6 +2063,7 @@ def _build_npm_chunk_from_dataframe(
     signal_led_value: int | float | str,
     roi_cols: list[str],
     canonical_names: list[str],
+    observed_physical_roi_ids: list[str],
     authorized_timing_geometry: dict[str, float] | None = None,
 ) -> Chunk:
     n_rois = len(roi_cols)
@@ -2203,6 +2206,7 @@ def _build_npm_chunk_from_dataframe(
             "npm_resolved_support_end_absolute": float(geometry["resolved_support_end_absolute"]),
             "npm_observed_duration_sec": float(geometry["observed_duration_sec"]),
             "npm_support_policy": contract.support_policy,
+            "npm_observed_physical_roi_ids": tuple(observed_physical_roi_ids),
         }
     )
     return chunk

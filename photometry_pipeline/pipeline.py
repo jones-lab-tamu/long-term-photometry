@@ -5,6 +5,7 @@ import json
 import yaml
 import logging
 import pathlib
+import stat
 import time
 import pandas as pd
 import numpy as np
@@ -310,6 +311,9 @@ class Pipeline:
         self._continuous_source_cache = {}
         self._continuous_plan_summary = None
         self._guided_npm_authorized_runtime = None
+        self._guided_npm_consumed_source_records = None
+        self._guided_npm_consumed_authority_callback = None
+        self._guided_npm_consumed_authority_callback_invoked = False
         self._rwd_contract_validation = dict(
             getattr(config, "rwd_contract_validation", {}) or {}
         )
@@ -1397,16 +1401,28 @@ class Pipeline:
     def _load_entry_chunk(self, entry: str, chunk_id: int, force_format: str) -> Chunk:
         if self._guided_npm_authorized_runtime is not None:
             from .guided_npm_authorized_adapter import (
-                load_guided_npm_authorized_chunk,
+                load_guided_npm_authorized_chunk_with_record,
             )
 
-            chunk = load_guided_npm_authorized_chunk(
+            result = load_guided_npm_authorized_chunk_with_record(
                 self._guided_npm_authorized_runtime.authorized_input,
                 entry,
                 self.config,
                 chunk_id,
             )
-            return self._bind_authorized_chunk_chronology(chunk, entry, chunk_id)
+            chunk = self._bind_authorized_chunk_chronology(
+                result.chunk, entry, chunk_id
+            )
+            record = result.consumed_source_record
+            if (
+                record.recording_time_start_sec
+                != chunk.metadata["guided_npm_recording_time_start_sec"]
+                or record.recording_time_end_sec
+                != chunk.metadata["guided_npm_recording_time_end_sec"]
+            ):
+                raise ValueError("guided_npm_consumed_source_timing_mismatch")
+            self._record_guided_npm_consumed_source(record)
+            return chunk
         rec = self._continuous_window_map.get(entry)
         if rec is not None:
             return load_chunk(
@@ -1453,6 +1469,69 @@ class Pipeline:
         # sessions_per_hour remains nominal cadence/QC authority only.  It is
         # deliberately absent from actual recording-relative placement.
         return float(authorized.actual_elapsed_sec_by_chunk[chunk_id])
+
+    def _record_guided_npm_consumed_source(self, record) -> None:
+        records = self._guided_npm_consumed_source_records
+        if records is None:
+            # Internal direct-load diagnostics predate the D1 run lifecycle.
+            # Production run_guided_npm_authorized always installs a collector.
+            return
+        position = record.chronological_position
+        existing = records.get(position)
+        if existing is not None and existing != record:
+            raise ValueError("guided_npm_consumed_source_observation_changed")
+        records[position] = record
+
+    def _publish_guided_npm_consumed_authority_boundary(self) -> None:
+        callback = self._guided_npm_consumed_authority_callback
+        if callback is None:
+            return
+        if self._guided_npm_consumed_authority_callback_invoked:
+            raise RuntimeError("guided_npm_consumed_authority_callback_repeated")
+        runtime = self._guided_npm_authorized_runtime
+        authorized = runtime.authorized_input
+        records_by_position = self._guided_npm_consumed_source_records or {}
+        if tuple(sorted(records_by_position)) != authorized.chronological_positions:
+            raise ValueError("guided_npm_consumed_source_set_incomplete")
+        records = tuple(
+            records_by_position[position]
+            for position in authorized.chronological_positions
+        )
+        for record, session in zip(records, authorized.ordered_sessions, strict=True):
+            try:
+                observed = os.stat(session.source_path, follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError("guided_npm_source_changed_before_acknowledgement") from exc
+            if (
+                not stat.S_ISREG(observed.st_mode)
+                or (
+                    observed.st_size,
+                    observed.st_mtime_ns,
+                    observed.st_dev,
+                    observed.st_ino,
+                    observed.st_mode,
+                )
+                != (
+                    record.source_size_bytes,
+                    record.source_mtime_ns,
+                    record.source_device,
+                    record.source_inode,
+                    record.source_mode,
+                )
+            ):
+                raise ValueError("guided_npm_source_changed_before_acknowledgement")
+        from .guided_npm_worker_acknowledgement import GuidedNpmConsumedAuthorityEvidence
+
+        evidence = GuidedNpmConsumedAuthorityEvidence(
+            runtime.canonical_guided_npm_authorized_runtime_identity,
+            runtime.correction_authority_identity,
+            runtime.feature_authority_identity,
+            records,
+        )
+        # Set before invoking user code: a failed/indeterminate publication is
+        # never retried and can never overwrite a competing final artifact.
+        self._guided_npm_consumed_authority_callback_invoked = True
+        callback(evidence)
 
     def _resolve_legacy_chunk_elapsed_offset_sec(
         self, entry: str, chunk_id: int
@@ -2911,6 +2990,7 @@ class Pipeline:
         output_dir: str,
         *,
         traces_only: bool = False,
+        on_consumed_authority_verified=None,
     ):
         """Run exact Guided NPM authority without legacy discovery or inference."""
         from .guided_npm_authorized_adapter import (
@@ -2937,6 +3017,11 @@ class Pipeline:
         ):
             raise ValueError("guided_npm_authorized_pipeline_binding_mismatch")
         self._guided_npm_authorized_runtime = authorized_runtime
+        self._guided_npm_consumed_source_records = {}
+        self._guided_npm_consumed_authority_callback = (
+            on_consumed_authority_verified
+        )
+        self._guided_npm_consumed_authority_callback_invoked = False
         try:
             return self.run(
                 authorized_runtime.authorized_input.source_root_path,
@@ -2951,6 +3036,9 @@ class Pipeline:
             )
         finally:
             self._guided_npm_authorized_runtime = None
+            self._guided_npm_consumed_source_records = None
+            self._guided_npm_consumed_authority_callback = None
+            self._guided_npm_consumed_authority_callback_invoked = False
 
     def run(
         self,
@@ -3287,6 +3375,11 @@ class Pipeline:
         t_pass1 = time.perf_counter()
         self.run_pass_1(force_format)
         self._add_phasic_phase_bucket("phase.pass1_total", time.perf_counter() - t_pass1)
+        if authorized_npm_runtime is not None:
+            # D1 dispatch boundary: the real first numerical pass has entered
+            # and consumed every exact authorized source at least once.  Pass 2,
+            # output completion, and terminal outcome remain entirely unknown.
+            self._publish_guided_npm_consumed_authority_boundary()
         if self.mode == "tonic":
             _append_run_report_section(
                 output_dir,

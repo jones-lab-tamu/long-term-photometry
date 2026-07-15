@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
 import inspect
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -19,6 +20,7 @@ from photometry_pipeline.guided_npm_worker_entry import (
 )
 from photometry_pipeline.guided_npm_worker_launch import (
     GUIDED_NPM_LAUNCHER_KIND,
+    GUIDED_NPM_LAUNCH_CONTEXT_ARGUMENT,
     GUIDED_NPM_WORKER_ENTRY_MODULE,
     GUIDED_NPM_WORKER_REQUEST_ARGUMENT,
     GuidedNpmStartedProcess,
@@ -37,6 +39,11 @@ from photometry_pipeline.guided_npm_worker_launch import (
 from photometry_pipeline.guided_npm_worker_prelaunch_claim import (
     GuidedNpmWorkerPrelaunchClaim,
     compute_guided_npm_worker_prelaunch_claim_identity,
+)
+from photometry_pipeline.guided_npm_worker_acknowledgement import (
+    GuidedNpmLaunchContextCleanupError,
+    expected_guided_npm_launch_context_path,
+    read_guided_npm_worker_launch_context,
 )
 from tests.test_guided_npm_worker_prelaunch_claim import (
     _claim,
@@ -102,6 +109,8 @@ def test_invocation_is_deterministic_frozen_and_exact(tmp_path):
         GUIDED_NPM_WORKER_ENTRY_MODULE,
         GUIDED_NPM_WORKER_REQUEST_ARGUMENT,
         claim.worker_request_artifact_path,
+        GUIDED_NPM_LAUNCH_CONTEXT_ARGUMENT,
+        expected_guided_npm_launch_context_path(claim.run_directory_path),
     )
     assert first.working_directory_path == os.path.dirname(
         os.path.dirname(launch_module.__file__)
@@ -123,6 +132,7 @@ def test_invocation_is_deterministic_frozen_and_exact(tmp_path):
     ("field", "value"),
     [
         ("source_prelaunch_claim_identity", "1" * 64),
+        ("source_prelaunch_freshness_evidence_identity", "1" * 64),
         ("source_worker_request_identity", "1" * 64),
         ("source_execution_request_identity", "1" * 64),
         ("guided_plan_identity", "other-plan"),
@@ -131,6 +141,7 @@ def test_invocation_is_deterministic_frozen_and_exact(tmp_path):
         ("executable_path", os.path.abspath("other-python")),
         ("working_directory_path", os.path.abspath("other-cwd")),
         ("worker_request_artifact_path", os.path.abspath("other-worker.json")),
+        ("launch_context_artifact_path", os.path.abspath("other-context.json")),
         ("run_directory_path", os.path.abspath("other-run")),
         ("environment_policy", "replace"),
         ("shell", True),
@@ -145,12 +156,12 @@ def test_outer_reidentified_invocation_field_tampering_refuses(tmp_path, field, 
     invocation = _invocation(claim)
     if field == "execution_mode" and invocation.execution_mode == value:
         value = "phasic"
-    if field in {"worker_request_artifact_path", "run_directory_path"}:
+    if field in {"worker_request_artifact_path", "launch_context_artifact_path", "run_directory_path"}:
         style = claim.worker_request.execution_request.output_runtime_projection.output_base_path_style
         if style == "windows_drive":
-            value = r"C:\Other\guided_npm_worker_request.json" if field.startswith("worker") else r"C:\Other"
+            value = r"C:\Other\guided_npm_worker_request.json" if field.startswith("worker") else r"C:\Other\guided_npm_launch_context.json" if field.startswith("launch") else r"C:\Other"
         else:
-            value = "/other/guided_npm_worker_request.json" if field.startswith("worker") else "/other"
+            value = "/other/guided_npm_worker_request.json" if field.startswith("worker") else "/other/guided_npm_launch_context.json" if field.startswith("launch") else "/other"
     with pytest.raises(ValueError):
         verify_guided_npm_worker_launch_invocation(
             _reidentify_invocation(invocation, **{field: value}), claim
@@ -572,4 +583,315 @@ def test_launch_failure_and_cancellation_preserve_authority_artifacts(tmp_path):
     )
     assert isinstance(failed, GuidedNpmWorkerLaunchFailure)
     assert isinstance(cancelled, GuidedNpmWorkerLaunchCancelled)
+    assert {path: path.read_bytes() for path in paths} == before
+
+
+def _persist_with_flag(monkeypatch, state):
+    original_persist = launch_module.persist_guided_npm_worker_launch_context
+
+    def wrapped_persist(context):
+        path = original_persist(context)
+        state["persisted"] = True
+        return path
+
+    monkeypatch.setattr(
+        launch_module, "persist_guided_npm_worker_launch_context", wrapped_persist
+    )
+
+
+def test_persist_then_cancellation_check_then_launcher_ordering(monkeypatch, tmp_path):
+    claim = _valid_claim(tmp_path)
+    events = []
+    state = {"persisted": False}
+    original_persist = launch_module.persist_guided_npm_worker_launch_context
+
+    def wrapped_persist(context):
+        path = original_persist(context)
+        state["persisted"] = True
+        events.append("context_persisted")
+        return path
+
+    monkeypatch.setattr(
+        launch_module, "persist_guided_npm_worker_launch_context", wrapped_persist
+    )
+
+    def cancelled():
+        if state["persisted"]:
+            events.append("cancellation_checked_after_persistence")
+        return False
+
+    def launcher(argv, *, cwd, shell):
+        events.append("launcher_called")
+        return GuidedNpmStartedProcess(1234, GUIDED_NPM_LAUNCHER_KIND)
+
+    result = launch_guided_npm_worker(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        cancellation_check=cancelled,
+        process_launcher=launcher,
+    )
+    assert isinstance(result, GuidedNpmWorkerExecutionStartReceipt)
+    assert events == [
+        "context_persisted",
+        "cancellation_checked_after_persistence",
+        "launcher_called",
+    ]
+
+
+def test_cancellation_immediately_after_persistence_cleans_up_and_launches_nothing(
+    monkeypatch, tmp_path
+):
+    claim = _valid_claim(tmp_path)
+    invocation = _invocation(claim)
+    state = {"persisted": False}
+    _persist_with_flag(monkeypatch, state)
+    calls = []
+
+    result = launch_guided_npm_worker(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        cancellation_check=lambda: state["persisted"],
+        process_launcher=lambda *a, **k: calls.append(1),
+    )
+    assert isinstance(result, GuidedNpmWorkerLaunchCancelled)
+    assert calls == []
+    assert not Path(invocation.launch_context_artifact_path).exists()
+
+
+def test_retry_after_post_persistence_cancellation_cleanup_succeeds(monkeypatch, tmp_path):
+    claim = _valid_claim(tmp_path)
+    invocation = _invocation(claim)
+    state = {"persisted": False}
+    _persist_with_flag(monkeypatch, state)
+    calls = []
+
+    first = launch_guided_npm_worker(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        cancellation_check=lambda: state["persisted"],
+        process_launcher=lambda *a, **k: calls.append(1),
+    )
+    assert isinstance(first, GuidedNpmWorkerLaunchCancelled)
+    assert calls == []
+    assert not Path(invocation.launch_context_artifact_path).exists()
+
+    monkeypatch.undo()
+
+    second = launch_guided_npm_worker(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        process_launcher=lambda argv, **kwargs: GuidedNpmStartedProcess(
+            5555, GUIDED_NPM_LAUNCHER_KIND
+        ),
+    )
+    assert isinstance(second, GuidedNpmWorkerExecutionStartReceipt)
+    assert second.process_id == 5555
+    assert Path(invocation.launch_context_artifact_path).is_file()
+
+
+@pytest.mark.parametrize("exc", [FileNotFoundError(), PermissionError(), OSError("boom")])
+def test_launcher_exception_cleans_up_persisted_context(tmp_path, exc):
+    claim = _valid_claim(tmp_path)
+    invocation = _invocation(claim)
+    calls = []
+
+    def launcher(*args, **kwargs):
+        calls.append(1)
+        raise exc
+
+    result = launch_guided_npm_worker(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        process_launcher=launcher,
+    )
+    assert isinstance(result, GuidedNpmWorkerLaunchFailure)
+    assert result.blocking_issues[0].category == "process_creation_failed"
+    assert len(calls) == 1
+    assert not Path(invocation.launch_context_artifact_path).exists()
+
+
+@pytest.mark.parametrize(
+    "started",
+    [
+        GuidedNpmStartedProcess(0, GUIDED_NPM_LAUNCHER_KIND),
+        GuidedNpmStartedProcess(-1, GUIDED_NPM_LAUNCHER_KIND),
+        GuidedNpmStartedProcess(True, GUIDED_NPM_LAUNCHER_KIND),
+        GuidedNpmStartedProcess(12, "other"),
+        object(),
+    ],
+)
+def test_malformed_launcher_return_preserves_launch_context(tmp_path, started):
+    claim = _valid_claim(tmp_path)
+    invocation = _invocation(claim)
+
+    result = launch_guided_npm_worker(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        process_launcher=lambda *a, **k: started,
+    )
+    assert isinstance(result, GuidedNpmWorkerPostLaunchFailure)
+    path = Path(invocation.launch_context_artifact_path)
+    assert path.is_file()
+    context = read_guided_npm_worker_launch_context(
+        os.fspath(path), worker_request=claim.worker_request
+    )
+    assert (
+        context.source_launch_invocation_identity
+        == invocation.canonical_launch_invocation_identity
+    )
+
+
+def test_post_launch_receipt_failure_preserves_launch_context(monkeypatch, tmp_path):
+    claim = _valid_claim(tmp_path)
+    invocation = _invocation(claim)
+    real_verify = launch_module.verify_guided_npm_worker_execution_start_receipt
+
+    def flaky_verify(receipt, prelaunch_claim, invocation_):
+        if receipt.process_id == 4321:
+            raise ValueError("post_launch_receipt_forced_failure")
+        return real_verify(receipt, prelaunch_claim, invocation_)
+
+    monkeypatch.setattr(
+        launch_module, "verify_guided_npm_worker_execution_start_receipt", flaky_verify
+    )
+
+    result = launch_guided_npm_worker(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        process_launcher=lambda *a, **k: GuidedNpmStartedProcess(
+            4321, GUIDED_NPM_LAUNCHER_KIND
+        ),
+    )
+    assert isinstance(result, GuidedNpmWorkerPostLaunchFailure)
+    assert result.blocking_issues[0].category == "process_created_receipt_failed"
+    path = Path(invocation.launch_context_artifact_path)
+    assert path.is_file()
+    context = read_guided_npm_worker_launch_context(
+        os.fspath(path), worker_request=claim.worker_request
+    )
+    assert (
+        context.source_launch_invocation_identity
+        == invocation.canonical_launch_invocation_identity
+    )
+
+
+def test_cleanup_failure_after_cancellation_reports_truthfully(monkeypatch, tmp_path):
+    claim = _valid_claim(tmp_path)
+    invocation = _invocation(claim)
+    state = {"persisted": False}
+    original_persist = launch_module.persist_guided_npm_worker_launch_context
+
+    def tampering_persist(context):
+        path = original_persist(context)
+        data = json.loads(Path(path).read_bytes())
+        data["source_worker_request_identity"] = "1" * 64
+        Path(path).write_bytes(
+            (json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        )
+        state["persisted"] = True
+        return path
+
+    monkeypatch.setattr(
+        launch_module, "persist_guided_npm_worker_launch_context", tampering_persist
+    )
+    calls = []
+
+    result = launch_guided_npm_worker(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        cancellation_check=lambda: state["persisted"],
+        process_launcher=lambda *a, **k: calls.append(1),
+    )
+    assert isinstance(result, GuidedNpmWorkerLaunchFailure)
+    assert result.blocking_issues[0].category == "launch_context_cleanup_failed"
+    assert result.process_creation_status == "not_created"
+    assert calls == []
+    assert Path(invocation.launch_context_artifact_path).is_file()
+
+
+def test_cancellation_cleanup_initial_stat_permission_failure_reports_cleanup_failed(
+    monkeypatch, tmp_path
+):
+    claim = _valid_claim(tmp_path)
+    invocation = _invocation(claim)
+    context_path = invocation.launch_context_artifact_path
+    state = {"persisted": False}
+    _persist_with_flag(monkeypatch, state)
+    original_stat = Path.stat
+
+    def patched_stat(self, *args, **kwargs):
+        if state["persisted"] and os.fspath(self) == context_path:
+            raise PermissionError("denied")
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", patched_stat)
+    calls = []
+
+    result = launch_guided_npm_worker(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        cancellation_check=lambda: state["persisted"],
+        process_launcher=lambda *a, **k: calls.append(1),
+    )
+    assert calls == []
+    assert isinstance(result, GuidedNpmWorkerLaunchFailure)
+    assert result.blocking_issues[0].category == "launch_context_cleanup_failed"
+    assert result.process_creation_status == "not_created"
+    assert not isinstance(result, GuidedNpmWorkerLaunchCancelled)
+
+
+def test_launcher_exception_cleanup_initial_stat_generic_oserror_reports_cleanup_failed(
+    monkeypatch, tmp_path
+):
+    claim = _valid_claim(tmp_path)
+    invocation = _invocation(claim)
+    context_path = invocation.launch_context_artifact_path
+    state = {"persisted": False}
+    _persist_with_flag(monkeypatch, state)
+    original_stat = Path.stat
+
+    def patched_stat(self, *args, **kwargs):
+        if state["persisted"] and os.fspath(self) == context_path:
+            raise OSError("boom")
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", patched_stat)
+    calls = []
+
+    def launcher(*args, **kwargs):
+        calls.append(1)
+        raise FileNotFoundError()
+
+    result = launch_guided_npm_worker(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        process_launcher=launcher,
+    )
+    assert len(calls) == 1
+    assert isinstance(result, GuidedNpmWorkerLaunchFailure)
+    assert result.blocking_issues[0].category == "launch_context_cleanup_failed"
+    assert result.process_creation_status == "not_created"
+
+
+def test_post_persistence_cancellation_preserves_authority_artifacts(monkeypatch, tmp_path):
+    claim = _valid_claim(tmp_path)
+    paths = [
+        Path(claim.worker_request_artifact_path),
+        Path(claim.worker_request.startup_artifact_path),
+        *map(
+            Path,
+            claim.worker_request.execution_request.source_runtime_projection.ordered_source_paths,
+        ),
+    ]
+    before = {path: path.read_bytes() for path in paths}
+    state = {"persisted": False}
+    _persist_with_flag(monkeypatch, state)
+
+    result = launch_guided_npm_worker(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        cancellation_check=lambda: state["persisted"],
+        process_launcher=lambda *a, **k: pytest.fail("launcher should not be called"),
+    )
+    assert isinstance(result, GuidedNpmWorkerLaunchCancelled)
     assert {path: path.read_bytes() for path in paths} == before

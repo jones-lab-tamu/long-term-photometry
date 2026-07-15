@@ -20,6 +20,12 @@ from photometry_pipeline.application_build_identity import (
 from photometry_pipeline.guided_npm_authorized_adapter import (
     build_guided_npm_authorized_runtime,
 )
+from photometry_pipeline.guided_npm_worker_acknowledgement import (
+    GuidedNpmWorkerLaunchContext,
+    build_guided_npm_worker_consumed_authority_receipt,
+    publish_guided_npm_worker_consumed_authority_receipt,
+    read_guided_npm_worker_launch_context,
+)
 from photometry_pipeline.guided_npm_worker_prelaunch_claim import stored_paths_equal
 from photometry_pipeline.guided_npm_worker_request import (
     GuidedNpmWorkerRequest,
@@ -38,6 +44,7 @@ GUIDED_NPM_WORKER_ENTRY_SUCCESS = 0
 GUIDED_NPM_WORKER_ENTRY_REFUSED = 2
 GUIDED_NPM_WORKER_ENTRY_FAILED = 3
 GUIDED_NPM_WORKER_SMOKE_ARGUMENT = "--guided-npm-worker-entry-smoke-test-only"
+GUIDED_NPM_LAUNCH_CONTEXT_ARGUMENT = "--guided-npm-launch-context"
 
 def _project_root() -> Path:
     return Path(os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir)))
@@ -103,6 +110,7 @@ def build_guided_npm_pipeline_runtime(worker: GuidedNpmWorkerRequest) -> dict[st
 def run_guided_npm_worker(
     worker: GuidedNpmWorkerRequest,
     *,
+    launch_context: GuidedNpmWorkerLaunchContext | None = None,
     pipeline_factory: Callable[..., Pipeline] = Pipeline,
 ) -> None:
     """Dispatch the verified worker through the existing numerical Pipeline."""
@@ -114,10 +122,30 @@ def run_guided_npm_worker(
         per_roi_feature_config=runtime["per_roi_feature_config"],
         per_roi_feature_provenance=runtime["per_roi_feature_provenance"],
     )
+    kwargs = {"traces_only": runtime["traces_only"]}
+    if launch_context is not None:
+        publication_attempted = False
+
+        def publish_consumed_authority(evidence) -> None:
+            nonlocal publication_attempted
+            if publication_attempted:
+                raise RuntimeError("consumed_authority_publication_repeated")
+            publication_attempted = True
+            receipt = build_guided_npm_worker_consumed_authority_receipt(
+                worker_request=worker,
+                launch_context=launch_context,
+                evidence=evidence,
+                observed_process_id=os.getpid(),
+            )
+            publish_guided_npm_worker_consumed_authority_receipt(
+                receipt,
+                receipt_path=launch_context.consumed_authority_receipt_path,
+                launch_context=launch_context,
+            )
+
+        kwargs["on_consumed_authority_verified"] = publish_consumed_authority
     pipeline.run_guided_npm_authorized(
-        runtime["authorized_runtime"],
-        runtime["output_dir"],
-        traces_only=runtime["traces_only"],
+        runtime["authorized_runtime"], runtime["output_dir"], **kwargs
     )
 
 
@@ -126,17 +154,26 @@ def main(argv: tuple[str, ...] | list[str] | None = None) -> int:
     authority = parser.add_mutually_exclusive_group(required=True)
     authority.add_argument("--guided-npm-worker-request")
     authority.add_argument(GUIDED_NPM_WORKER_SMOKE_ARGUMENT, action="store_true")
+    parser.add_argument(GUIDED_NPM_LAUNCH_CONTEXT_ARGUMENT)
     args = parser.parse_args(argv)
     if getattr(args, GUIDED_NPM_WORKER_SMOKE_ARGUMENT[2:].replace("-", "_")):
+        if args.guided_npm_launch_context is not None:
+            return GUIDED_NPM_WORKER_ENTRY_REFUSED
         return GUIDED_NPM_WORKER_ENTRY_SUCCESS
+    if args.guided_npm_launch_context is None:
+        return GUIDED_NPM_WORKER_ENTRY_REFUSED
     try:
         worker = load_verified_guided_npm_worker_request(
             args.guided_npm_worker_request
         )
+        launch_context = read_guided_npm_worker_launch_context(
+            args.guided_npm_launch_context,
+            worker_request=worker,
+        )
     except (OSError, TypeError, ValueError):
         return GUIDED_NPM_WORKER_ENTRY_REFUSED
     try:
-        run_guided_npm_worker(worker)
+        run_guided_npm_worker(worker, launch_context=launch_context)
     except Exception:
         return GUIDED_NPM_WORKER_ENTRY_FAILED
     return GUIDED_NPM_WORKER_ENTRY_SUCCESS

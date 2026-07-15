@@ -30,24 +30,33 @@ from photometry_pipeline.guided_npm_worker_prelaunch_claim import (
     verify_guided_npm_worker_prelaunch_claim,
 )
 from photometry_pipeline.guided_production_mapping import ApplicationBuildIdentity
+from photometry_pipeline.guided_npm_worker_acknowledgement import (
+    GuidedNpmLaunchContextCleanupError,
+    GuidedNpmWorkerLaunchContext,
+    expected_guided_npm_launch_context_path,
+    build_guided_npm_worker_launch_context,
+    persist_guided_npm_worker_launch_context,
+    remove_exact_guided_npm_worker_launch_context,
+)
 
 
 GUIDED_NPM_WORKER_LAUNCH_INVOCATION_SCHEMA_NAME = (
     "guided_npm_worker_launch_invocation"
 )
-GUIDED_NPM_WORKER_LAUNCH_INVOCATION_SCHEMA_VERSION = "v1"
+GUIDED_NPM_WORKER_LAUNCH_INVOCATION_SCHEMA_VERSION = "v2"
 GUIDED_NPM_WORKER_LAUNCH_INVOCATION_CONTRACT_VERSION = (
-    "guided_npm_worker_launch_invocation.v1"
+    "guided_npm_worker_launch_invocation.v2"
 )
 GUIDED_NPM_WORKER_EXECUTION_START_RECEIPT_SCHEMA_NAME = (
     "guided_npm_worker_execution_start_receipt"
 )
-GUIDED_NPM_WORKER_EXECUTION_START_RECEIPT_SCHEMA_VERSION = "v1"
+GUIDED_NPM_WORKER_EXECUTION_START_RECEIPT_SCHEMA_VERSION = "v2"
 GUIDED_NPM_WORKER_EXECUTION_START_RECEIPT_CONTRACT_VERSION = (
-    "guided_npm_worker_execution_start_receipt.v1"
+    "guided_npm_worker_execution_start_receipt.v2"
 )
 GUIDED_NPM_WORKER_ENTRY_MODULE = "photometry_pipeline.guided_npm_worker_entry"
 GUIDED_NPM_WORKER_REQUEST_ARGUMENT = "--guided-npm-worker-request"
+GUIDED_NPM_LAUNCH_CONTEXT_ARGUMENT = "--guided-npm-launch-context"
 GUIDED_NPM_LAUNCHER_KIND = "subprocess_popen"
 GUIDED_NPM_LAUNCH_ENVIRONMENT_POLICY = "inherit_unchanged"
 
@@ -64,7 +73,9 @@ GUIDED_NPM_WORKER_LAUNCH_FAILURE_CATEGORIES = (
     "launch_worker_artifact_changed",
     "launch_startup_artifact_changed",
     "launch_source_freshness_changed",
+    "launch_context_persistence_failed",
     "launch_cancelled",
+    "launch_context_cleanup_failed",
     "process_creation_failed",
     "process_identity_invalid",
     "process_created_receipt_failed",
@@ -110,6 +121,7 @@ class GuidedNpmWorkerLaunchInvocation:
     invocation_schema_version: str
     invocation_contract_version: str
     source_prelaunch_claim_identity: str
+    source_prelaunch_freshness_evidence_identity: str
     source_worker_request_identity: str
     source_execution_request_identity: str
     application_build_identity: ApplicationBuildIdentity
@@ -120,6 +132,7 @@ class GuidedNpmWorkerLaunchInvocation:
     argument_vector: tuple[str, ...]
     working_directory_path: str
     worker_request_artifact_path: str
+    launch_context_artifact_path: str
     run_directory_path: str
     environment_policy: str
     shell: bool
@@ -165,6 +178,7 @@ class GuidedNpmWorkerExecutionStartReceipt:
     argument_vector: tuple[str, ...]
     working_directory_path: str
     worker_request_artifact_path: str
+    launch_context_artifact_path: str
     run_directory_path: str
     process_id: int
     launcher_kind: str
@@ -261,13 +275,15 @@ def _executable_path() -> str:
     return os.fspath(sys.executable)
 
 
-def _expected_argv(worker_path: str) -> tuple[str, ...]:
+def _expected_argv(worker_path: str, launch_context_path: str) -> tuple[str, ...]:
     return (
         _executable_path(),
         "-m",
         GUIDED_NPM_WORKER_ENTRY_MODULE,
         GUIDED_NPM_WORKER_REQUEST_ARGUMENT,
         worker_path,
+        GUIDED_NPM_LAUNCH_CONTEXT_ARGUMENT,
+        launch_context_path,
     )
 
 
@@ -318,11 +334,15 @@ def build_guided_npm_worker_launch_invocation(
     _verify_build_binding(current_application_build_identity, prelaunch_claim)
     worker = prelaunch_claim.worker_request
     execution = worker.execution_request
+    launch_context_path = expected_guided_npm_launch_context_path(
+        prelaunch_claim.run_directory_path
+    )
     invocation = GuidedNpmWorkerLaunchInvocation(
         GUIDED_NPM_WORKER_LAUNCH_INVOCATION_SCHEMA_NAME,
         GUIDED_NPM_WORKER_LAUNCH_INVOCATION_SCHEMA_VERSION,
         GUIDED_NPM_WORKER_LAUNCH_INVOCATION_CONTRACT_VERSION,
         prelaunch_claim.canonical_prelaunch_claim_identity,
+        prelaunch_claim.source_prelaunch_freshness_evidence_identity,
         worker.canonical_worker_request_identity,
         execution.canonical_execution_request_identity,
         current_application_build_identity,
@@ -330,9 +350,12 @@ def build_guided_npm_worker_launch_invocation(
         worker.validation_revision,
         execution.execution_mode,
         _executable_path(),
-        _expected_argv(prelaunch_claim.worker_request_artifact_path),
+        _expected_argv(
+            prelaunch_claim.worker_request_artifact_path, launch_context_path
+        ),
         _application_root(),
         prelaunch_claim.worker_request_artifact_path,
+        launch_context_path,
         prelaunch_claim.run_directory_path,
         GUIDED_NPM_LAUNCH_ENVIRONMENT_POLICY,
         False,
@@ -377,7 +400,12 @@ def verify_guided_npm_worker_launch_invocation(
         )
     except ValueError as exc:
         raise ValueError("launch_invocation_path_invalid") from exc
-    expected_argv = _expected_argv(prelaunch_claim.worker_request_artifact_path)
+    expected_context_path = expected_guided_npm_launch_context_path(
+        prelaunch_claim.run_directory_path
+    )
+    expected_argv = _expected_argv(
+        prelaunch_claim.worker_request_artifact_path, expected_context_path
+    )
     if (
         (invocation.invocation_schema_name, invocation.invocation_schema_version,
          invocation.invocation_contract_version)
@@ -386,6 +414,8 @@ def verify_guided_npm_worker_launch_invocation(
             GUIDED_NPM_WORKER_LAUNCH_INVOCATION_CONTRACT_VERSION)
         or invocation.source_prelaunch_claim_identity
         != prelaunch_claim.canonical_prelaunch_claim_identity
+        or invocation.source_prelaunch_freshness_evidence_identity
+        != prelaunch_claim.source_prelaunch_freshness_evidence_identity
         or invocation.source_worker_request_identity
         != worker.canonical_worker_request_identity
         or invocation.source_execution_request_identity
@@ -397,9 +427,15 @@ def verify_guided_npm_worker_launch_invocation(
         or not os.path.isabs(invocation.executable_path)
         or invocation.argument_vector != expected_argv
         or invocation.argument_vector.count(GUIDED_NPM_WORKER_REQUEST_ARGUMENT) != 1
+        or invocation.argument_vector.count(GUIDED_NPM_LAUNCH_CONTEXT_ARGUMENT) != 1
         or invocation.working_directory_path != _application_root()
         or not os.path.isabs(invocation.working_directory_path)
         or not worker_path_matches
+        or not stored_paths_equal(
+            invocation.launch_context_artifact_path,
+            expected_context_path,
+            style,
+        )
         or not run_path_matches
         or invocation.environment_policy != GUIDED_NPM_LAUNCH_ENVIRONMENT_POLICY
         or invocation.shell is not False
@@ -438,6 +474,7 @@ def _build_execution_start_receipt(
         invocation.argument_vector,
         invocation.working_directory_path,
         invocation.worker_request_artifact_path,
+        invocation.launch_context_artifact_path,
         invocation.run_directory_path,
         started.process_id,
         started.launcher_kind,
@@ -491,6 +528,7 @@ def verify_guided_npm_worker_execution_start_receipt(
         or receipt.argument_vector != invocation.argument_vector
         or receipt.working_directory_path != invocation.working_directory_path
         or receipt.worker_request_artifact_path != invocation.worker_request_artifact_path
+        or receipt.launch_context_artifact_path != invocation.launch_context_artifact_path
         or receipt.run_directory_path != invocation.run_directory_path
         or isinstance(receipt.process_id, bool)
         or not isinstance(receipt.process_id, int)
@@ -544,6 +582,30 @@ def _cancelled() -> GuidedNpmWorkerLaunchCancelled:
             "launch_cancelled",
         ),)
     )
+
+
+def _cleanup_after_no_process(
+    launch_context: GuidedNpmWorkerLaunchContext,
+    no_process_result: GuidedNpmWorkerLaunchResult,
+) -> GuidedNpmWorkerLaunchResult:
+    """Safely remove a just-persisted launch context once no process exists.
+
+    Only called when this transaction's own persisted context is orphaned by
+    cancellation or a launcher exception, before any process could have been
+    created. If the exact context cannot be proven safe to remove, report that
+    truthfully instead of silently returning the ordinary cancellation or
+    process-creation-failure result, so a stale artifact is never masked.
+    """
+    try:
+        remove_exact_guided_npm_worker_launch_context(launch_context)
+    except GuidedNpmLaunchContextCleanupError as exc:
+        return _failure(
+            "launch_context_cleanup_failed",
+            "launch_context_cleanup",
+            str(exc) or type(exc).__name__,
+            exc,
+        )
+    return no_process_result
 
 
 def _post_launch_failure(
@@ -714,6 +776,22 @@ def launch_guided_npm_worker(
         )
         _check_cancelled(cancellation_check)
 
+        try:
+            launch_context = build_guided_npm_worker_launch_context(invocation)
+            persist_guided_npm_worker_launch_context(launch_context)
+        except Exception as exc:
+            return _failure(
+                "launch_context_persistence_failed",
+                "launch_context",
+                str(exc) or type(exc).__name__,
+                exc,
+            )
+
+        try:
+            _check_cancelled(cancellation_check)
+        except _LaunchCancelled:
+            return _cleanup_after_no_process(launch_context, _cancelled())
+
         launcher = process_launcher or _subprocess_popen_launcher
         try:
             started = launcher(
@@ -722,11 +800,14 @@ def launch_guided_npm_worker(
                 shell=False,
             )
         except Exception as exc:
-            return _failure(
-                "process_creation_failed",
-                "process_creation",
-                type(exc).__name__,
-                exc,
+            return _cleanup_after_no_process(
+                launch_context,
+                _failure(
+                    "process_creation_failed",
+                    "process_creation",
+                    type(exc).__name__,
+                    exc,
+                ),
             )
 
         if type(started) is not GuidedNpmStartedProcess:
