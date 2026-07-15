@@ -5,7 +5,16 @@ import json
 import logging
 import hashlib
 from pathlib import Path
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from photometry_pipeline.application_build_identity import (
+    resolve_application_build_identity,
+)
+from photometry_pipeline.guided_npm_startup_claim import (
+    GuidedNpmStartupClaimFailure,
+    GuidedNpmStartupClaimReceipt,
+    claim_guided_npm_startup_artifact_path,
+)
+from photometry_pipeline.guided_production_mapping import ApplicationBuildIdentity
 from photometry_pipeline.config import Config
 from photometry_pipeline.feature_event_config import FEATURE_EVENT_CONFIG_FIELDS
 from photometry_pipeline.guided_startup_transaction import (
@@ -27,6 +36,74 @@ class GuidedFeatureSettingsError(RuntimeError):
     """A Guided per-ROI feature-settings artifact is missing, incomplete, or
     inconsistent with the confirmed base configuration. Never fall back to
     baked defaults or to the global settings for a Custom ROI."""
+
+
+GUIDED_NPM_CLAIM_ONLY_SUCCESS_EXIT_CODE = 0
+GUIDED_NPM_CLAIM_FAILURE_EXIT_CODE = 2
+
+
+@dataclass(frozen=True)
+class GuidedNpmWrapperClaimOnlyOutcome:
+    claim_receipt: GuidedNpmStartupClaimReceipt
+    execution_status: str = "claimed_execution_not_implemented"
+    runnable: bool = False
+
+    def __post_init__(self):
+        if (
+            type(self.claim_receipt) is not GuidedNpmStartupClaimReceipt
+            or self.execution_status != "claimed_execution_not_implemented"
+            or self.runnable is not False
+        ):
+            raise ValueError("invalid_guided_npm_wrapper_claim_only_outcome")
+
+
+class GuidedNpmWrapperClaimError(RuntimeError):
+    pass
+
+
+def claim_guided_npm_startup_for_wrapper(
+    startup_artifact_path: str,
+    *,
+    current_application_build_identity: ApplicationBuildIdentity | None = None,
+) -> GuidedNpmWrapperClaimOnlyOutcome:
+    """Independently claim one artifact and stop at the B2-C5 boundary."""
+    current = current_application_build_identity
+    if current is None:
+        resolved = resolve_application_build_identity(
+            project_root=Path(__file__).resolve().parent
+        )
+        if resolved.status != "resolved" or resolved.build_identity is None:
+            category = (
+                resolved.blocking_issues[0].category
+                if resolved.blocking_issues
+                else "claim_internal_error"
+            )
+            raise GuidedNpmWrapperClaimError(category)
+        current = resolved.build_identity
+    result = claim_guided_npm_startup_artifact_path(
+        startup_artifact_path,
+        current_application_build_identity=current,
+    )
+    if not isinstance(result, GuidedNpmStartupClaimReceipt):
+        category = (
+            result.blocking_issues[0].category
+            if isinstance(result, GuidedNpmStartupClaimFailure)
+            and result.blocking_issues
+            else "claim_internal_error"
+        )
+        raise GuidedNpmWrapperClaimError(category)
+    return GuidedNpmWrapperClaimOnlyOutcome(claim_receipt=result)
+
+
+def _npm_claim_cli_has_authority_override(argv):
+    """Reject every option except the sole NPM artifact authority argument."""
+    allowed = "--guided-npm-startup-artifact"
+    return any(
+        token.startswith("-")
+        and token != allowed
+        and not token.startswith(allowed + "=")
+        for token in argv
+    )
 
 
 def _feature_fields_of(config):
@@ -183,9 +260,9 @@ def load_guided_per_roi_correction(guided_candidate_manifest_path):
 
 def main():
     parser = argparse.ArgumentParser(description="V1 Lab-Default Photometry Pipeline")
-    parser.add_argument('--input', required=True, help="Input folder or file")
-    parser.add_argument('--config', required=True, help="Path to config.yaml")
-    parser.add_argument('--out', required=True, help="Output directory")
+    parser.add_argument('--input', help="Input folder or file")
+    parser.add_argument('--config', help="Path to config.yaml")
+    parser.add_argument('--out', help="Output directory")
     parser.add_argument(
         '--format',
         choices=['auto', 'rwd', 'npm', 'custom_tabular'],
@@ -206,10 +283,16 @@ def main():
     parser.add_argument('--preview-first-n', type=int, default=None, help="Preview mode: process only the first N discovered sessions (after discovery/sort).")
     parser.add_argument('--sessions-per-hour', type=int, default=None, help="Force sessions per hour for timing inference (overrides inference/defaults)")
     parser.add_argument('--frozen-input-manifest', dest='frozen_input_manifest', type=str, default=None, help="Internal: path to the run-wide frozen input manifest shared across analysis subprocesses.")
-    parser.add_argument(
+    guided_authority_group = parser.add_mutually_exclusive_group()
+    guided_authority_group.add_argument(
         '--guided-candidate-manifest',
         default=None,
         help="Internal/backend use only: exact Guided candidate manifest.",
+    )
+    guided_authority_group.add_argument(
+        '--guided-npm-startup-artifact',
+        default=None,
+        help="Internal/backend use only: exact claimed NPM startup artifact.",
     )
     parser.add_argument(
         '--acquisition-mode',
@@ -245,6 +328,25 @@ def main():
     parser.set_defaults(allow_partial_final_window=None)
     
     args = parser.parse_args()
+
+    if args.guided_npm_startup_artifact:
+        if _npm_claim_cli_has_authority_override(sys.argv[1:]):
+            print("NPM startup artifact claim failed: claim_argument_conflict")
+            raise SystemExit(GUIDED_NPM_CLAIM_FAILURE_EXIT_CODE)
+        try:
+            claim_guided_npm_startup_for_wrapper(args.guided_npm_startup_artifact)
+        except GuidedNpmWrapperClaimError as exc:
+            print(f"NPM startup artifact claim failed: {exc}")
+            raise SystemExit(GUIDED_NPM_CLAIM_FAILURE_EXIT_CODE)
+        print(
+            "NPM startup artifact claimed successfully. Numerical NPM "
+            "execution is not implemented in this build."
+        )
+        raise SystemExit(GUIDED_NPM_CLAIM_ONLY_SUCCESS_EXIT_CODE)
+
+    missing = [name for name in ("input", "config", "out") if getattr(args, name) is None]
+    if missing:
+        parser.error("the following arguments are required: " + ", ".join(f"--{name}" for name in missing))
 
     if args.guided_candidate_manifest and (
         args.mode not in {"phasic", "tonic"}
