@@ -314,6 +314,13 @@ class Hdf5TraceCacheWriter:
                     "original_file_duration_sec",
                     "continuous_window_sec",
                     "continuous_step_sec",
+                    "guided_npm_chronological_position",
+                    "guided_npm_actual_elapsed_sec",
+                    "guided_npm_nominal_expected_elapsed_sec",
+                    "guided_npm_within_session_start_sec",
+                    "guided_npm_within_session_end_sec",
+                    "guided_npm_recording_time_start_sec",
+                    "guided_npm_recording_time_end_sec",
                 ):
                     if key in chunk.metadata:
                         try:
@@ -324,6 +331,13 @@ class Hdf5TraceCacheWriter:
                     grp.attrs["is_partial_final_window"] = bool(
                         chunk.metadata.get("is_partial_final_window")
                     )
+                for key in (
+                    "guided_npm_authoritative_source_start_time",
+                    "guided_npm_cross_session_time_authority",
+                    "guided_npm_within_session_output_time_basis",
+                ):
+                    if chunk.metadata.get(key):
+                        grp.attrs[key] = str(chunk.metadata[key])
             grp.attrs["source_file"] = str(source_file)
 
             # B1: per-chunk, per-ROI consumed parser/channel evidence -- the

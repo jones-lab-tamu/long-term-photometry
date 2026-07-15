@@ -5,6 +5,7 @@ import glob
 import warnings
 import itertools
 import csv
+import io
 import re
 from typing import Optional, List, Dict, Tuple, Any, Iterable
 from datetime import datetime
@@ -1967,15 +1968,6 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
     if contract.npm_led_col not in df.columns:
         raise ValueError(f"NPM: Missing {contract.npm_led_col}")
 
-    t_full = pd.to_numeric(df[time_col], errors="coerce").to_numpy(dtype=float)
-    led = pd.to_numeric(df[contract.npm_led_col], errors="coerce").to_numpy(dtype=float)
-    mask_uv = led == 1
-    mask_sig = led == 2
-    t_uv = t_full[mask_uv]
-    t_sig = t_full[mask_sig]
-    if t_uv.size < 2 or t_sig.size < 2:
-        raise ValueError("NPM: Insufficient data")
-
     roi_cols = sorted(
         [
             c for c in df.columns
@@ -1986,14 +1978,126 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
     )
     if not roi_cols:
         raise ValueError("NPM: No Region columns")
+    names = _create_canonical_names(len(roi_cols))
+    return _build_npm_chunk_from_dataframe(
+        path,
+        df,
+        config,
+        chunk_id,
+        contract=contract,
+        time_col=time_col,
+        reference_led_value=1,
+        signal_led_value=2,
+        roi_cols=roi_cols,
+        canonical_names=names,
+    )
+
+
+def load_npm_authorized_bytes(
+    path: str,
+    content: bytes,
+    config: Config,
+    chunk_id: int,
+    *,
+    contract: NpmParserContract,
+    resolved_timestamp_column: str,
+    reference_led_value: int | float | str,
+    signal_led_value: int | float | str,
+    physical_to_canonical_roi_mapping: tuple[tuple[str, str], ...],
+    authorized_timing_geometry: dict[str, float] | None = None,
+) -> Chunk:
+    """Load exact already-verified bytes without parser or ROI inference."""
+    if not isinstance(content, bytes):
+        raise TypeError("authorized_npm_content_invalid")
+    df = pd.read_csv(io.BytesIO(content))
+    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+    mapping = tuple(physical_to_canonical_roi_mapping)
+    physical = tuple(item[0] for item in mapping)
+    canonical = tuple(item[1] for item in mapping)
+    if (
+        not mapping
+        or len(physical) != len(set(physical))
+        or len(canonical) != len(set(canonical))
+    ):
+        raise ValueError("authorized_npm_roi_mapping_invalid")
+    roi_like = tuple(
+        column
+        for column in df.columns
+        if column.startswith(contract.npm_region_prefix)
+        and column.endswith(contract.npm_region_suffix)
+    )
+    if set(roi_like) != set(physical) or len(roi_like) != len(physical):
+        raise ValueError("authorized_npm_physical_roi_inventory_mismatch")
+    if any(column not in df.columns for column in physical):
+        raise ValueError("authorized_npm_physical_roi_inventory_mismatch")
+    if resolved_timestamp_column not in df.columns:
+        raise ValueError("authorized_npm_timestamp_column_missing")
+    if contract.npm_led_col not in df.columns:
+        raise ValueError("authorized_npm_led_column_missing")
+    return _build_npm_chunk_from_dataframe(
+        path,
+        df,
+        config,
+        chunk_id,
+        contract=contract,
+        time_col=resolved_timestamp_column,
+        reference_led_value=reference_led_value,
+        signal_led_value=signal_led_value,
+        roi_cols=list(physical),
+        canonical_names=list(canonical),
+        authorized_timing_geometry=authorized_timing_geometry,
+    )
+
+
+def _build_npm_chunk_from_dataframe(
+    path: str,
+    df: pd.DataFrame,
+    config: Config,
+    chunk_id: int,
+    *,
+    contract: NpmParserContract,
+    time_col: str,
+    reference_led_value: int | float | str,
+    signal_led_value: int | float | str,
+    roi_cols: list[str],
+    canonical_names: list[str],
+    authorized_timing_geometry: dict[str, float] | None = None,
+) -> Chunk:
     n_rois = len(roi_cols)
-    names = _create_canonical_names(n_rois)
+    names = list(canonical_names)
+    if len(names) != n_rois or len(names) != len(set(names)):
+        raise ValueError("authorized_npm_canonical_roi_inventory_invalid")
     roi_map = {names[i]: {"raw_col": c} for i, c in enumerate(roi_cols)}
+    t_full = pd.to_numeric(df[time_col], errors="coerce").to_numpy(dtype=float)
+    led_raw = df[contract.npm_led_col]
+    if isinstance(reference_led_value, str) or isinstance(signal_led_value, str):
+        led = led_raw.astype(str).to_numpy()
+    else:
+        led = pd.to_numeric(led_raw, errors="coerce").to_numpy(dtype=float)
+    mask_uv = led == reference_led_value
+    mask_sig = led == signal_led_value
+    t_uv = t_full[mask_uv]
+    t_sig = t_full[mask_sig]
+    if t_uv.size < 2 or t_sig.size < 2:
+        raise ValueError("NPM: Insufficient data")
     uv_vals = df.loc[mask_uv, roi_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
     sig_vals = df.loc[mask_sig, roi_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
     n_value_nans_uv = 0
     n_value_nans_sig = 0
-    geometry = resolve_npm_support_geometry(t_uv, t_sig, contract)
+    if authorized_timing_geometry is None:
+        geometry = resolve_npm_support_geometry(t_uv, t_sig, contract)
+    else:
+        required_geometry = {
+            "overlap_origin_absolute",
+            "inner_start_rel_overlap",
+            "inner_end_rel_overlap",
+            "resolved_support_start_absolute",
+            "resolved_support_end_absolute",
+            "observed_duration_sec",
+        }
+        if set(authorized_timing_geometry) != required_geometry:
+            raise ValueError("authorized_npm_timing_geometry_invalid")
+        geometry = dict(authorized_timing_geometry)
 
     if not contract.allow_partial_final_chunk:
         t_uv_f_mask = np.isfinite(t_uv)
@@ -2004,7 +2108,11 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
         sig_vals_f = sig_vals[t_sig_f_mask, :]
         if not np.all(np.isfinite(uv_vals_f)) or not np.all(np.isfinite(sig_vals_f)):
             raise ValueError("NPM strict: ROI values contain non-finite values")
-        t0 = max(float(t_uv_f[0]), float(t_sig_f[0]))
+        t0 = (
+            float(geometry["overlap_origin_absolute"])
+            if authorized_timing_geometry is not None
+            else max(float(t_uv_f[0]), float(t_sig_f[0]))
+        )
         t_uv_rel = t_uv_f - t0
         t_sig_rel = t_sig_f - t0
         time_sec, overlap_start, support_tol = _resolve_npm_strict_grid(
@@ -2047,7 +2155,11 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
         t_sig_f = t_sig[t_sig_f_mask]
         uv_vals_f = uv_vals[t_uv_f_mask, :]
         sig_vals_f = sig_vals[t_sig_f_mask, :]
-        t0 = max(float(t_uv_f[0]), float(t_sig_f[0]))
+        t0 = (
+            float(geometry["overlap_origin_absolute"])
+            if authorized_timing_geometry is not None
+            else max(float(t_uv_f[0]), float(t_sig_f[0]))
+        )
         support_end = min(float(t_uv_f[-1] - t0), float(t_sig_f[-1] - t0))
         n_target_ideal = int(np.round(config.chunk_duration_sec * config.target_fs_hz))
         n_target_support = int(np.floor(support_end * config.target_fs_hz)) + 1

@@ -309,6 +309,7 @@ class Pipeline:
         self._continuous_window_map = {}
         self._continuous_source_cache = {}
         self._continuous_plan_summary = None
+        self._guided_npm_authorized_runtime = None
         self._rwd_contract_validation = dict(
             getattr(config, "rwd_contract_validation", {}) or {}
         )
@@ -1394,6 +1395,18 @@ class Pipeline:
         return f"{src_id}__window_{int(rec['window_index']):04d}"
 
     def _load_entry_chunk(self, entry: str, chunk_id: int, force_format: str) -> Chunk:
+        if self._guided_npm_authorized_runtime is not None:
+            from .guided_npm_authorized_adapter import (
+                load_guided_npm_authorized_chunk,
+            )
+
+            chunk = load_guided_npm_authorized_chunk(
+                self._guided_npm_authorized_runtime.authorized_input,
+                entry,
+                self.config,
+                chunk_id,
+            )
+            return self._bind_authorized_chunk_chronology(chunk, entry, chunk_id)
         rec = self._continuous_window_map.get(entry)
         if rec is not None:
             return load_chunk(
@@ -1416,6 +1429,69 @@ class Pipeline:
             chunk_id=chunk_id,
             source_cache=self._continuous_source_cache,
         )
+
+    def _resolve_chunk_elapsed_offset_sec(self, entry: str, chunk_id: int) -> float:
+        """Resolve cross-session placement without changing legacy formats."""
+        runtime = self._guided_npm_authorized_runtime
+        if runtime is None:
+            return self._resolve_legacy_chunk_elapsed_offset_sec(entry, chunk_id)
+        from .guided_npm_worker_prelaunch_claim import stored_paths_equal
+
+        authorized = runtime.authorized_input
+        if (
+            isinstance(chunk_id, bool)
+            or not isinstance(chunk_id, int)
+            or chunk_id < 0
+            or chunk_id >= len(authorized.ordered_session_paths)
+            or not stored_paths_equal(
+                entry,
+                authorized.ordered_session_paths[chunk_id],
+                authorized.source_path_style,
+            )
+        ):
+            raise ValueError("guided_npm_authorized_chronology_binding_mismatch")
+        # sessions_per_hour remains nominal cadence/QC authority only.  It is
+        # deliberately absent from actual recording-relative placement.
+        return float(authorized.actual_elapsed_sec_by_chunk[chunk_id])
+
+    def _resolve_legacy_chunk_elapsed_offset_sec(
+        self, entry: str, chunk_id: int
+    ) -> float:
+        """Preserve the existing Pipeline-local time axis for ordinary runs."""
+        return 0.0
+
+    def _bind_authorized_chunk_chronology(
+        self, chunk: Chunk, entry: str, chunk_id: int
+    ) -> Chunk:
+        """Compose frozen actual elapsed time with parser-authorized local time."""
+        offset = self._resolve_chunk_elapsed_offset_sec(entry, chunk_id)
+        local_time = np.asarray(chunk.time_sec, dtype=float).reshape(-1)
+        if local_time.size == 0 or not np.all(np.isfinite(local_time)):
+            raise ValueError("guided_npm_authorized_within_session_time_invalid")
+        metadata = chunk.metadata
+        expected = self._guided_npm_authorized_runtime.authorized_input
+        if (
+            metadata.get("guided_npm_chronological_position") != chunk_id
+            or metadata.get("guided_npm_actual_elapsed_sec") != offset
+            or metadata.get("guided_npm_nominal_expected_elapsed_sec")
+            != expected.nominal_expected_elapsed_sec_by_chunk[chunk_id]
+            or metadata.get("guided_npm_authoritative_source_start_time")
+            != expected.authoritative_source_start_times[chunk_id]
+            or metadata.get("guided_npm_cross_session_time_authority")
+            != "frozen_worker_projection"
+        ):
+            raise ValueError("guided_npm_authorized_chunk_chronology_mismatch")
+        metadata["guided_npm_within_session_start_sec"] = float(local_time[0])
+        metadata["guided_npm_within_session_end_sec"] = float(local_time[-1])
+        metadata["guided_npm_recording_time_start_sec"] = float(offset + local_time[0])
+        metadata["guided_npm_recording_time_end_sec"] = float(offset + local_time[-1])
+        metadata["output_time_basis"] = (
+            "recording_relative_seconds_from_frozen_actual_elapsed_plus_"
+            "authorized_within_session_time"
+        )
+        chunk.time_sec = local_time + offset
+        chunk.validate(tolerance_frac=self.config.timestamp_cv_max)
+        return chunk
 
     def _continuous_entries_support_sequential_custom_tabular(self, entries) -> bool:
         if not self._is_continuous_mode_enabled() or not entries:
@@ -2433,6 +2509,19 @@ class Pipeline:
                     feats_df = feature_extraction.extract_features(
                         chunk, self.config, per_roi_config=self.per_roi_feature_config
                     )
+                    if self._guided_npm_authorized_runtime is not None:
+                        feats_df["guided_npm_actual_elapsed_sec"] = chunk.metadata[
+                            "guided_npm_actual_elapsed_sec"
+                        ]
+                        feats_df["guided_npm_nominal_expected_elapsed_sec"] = chunk.metadata[
+                            "guided_npm_nominal_expected_elapsed_sec"
+                        ]
+                        feats_df["recording_time_start_sec"] = chunk.metadata[
+                            "guided_npm_recording_time_start_sec"
+                        ]
+                        feats_df["recording_time_end_sec"] = chunk.metadata[
+                            "guided_npm_recording_time_end_sec"
+                        ]
                     pass2_feature_extract_sec += (time.perf_counter() - t_feats)
                     all_features.append(feats_df)
                     pass2_features_rows += int(len(feats_df))
@@ -2641,6 +2730,22 @@ class Pipeline:
                 None,
             ),
         }
+        if self._guided_npm_authorized_runtime is not None:
+            authorized = self._guided_npm_authorized_runtime.authorized_input
+            run_meta["guided_npm_cross_session_chronology"] = {
+                "authority": "frozen_worker_projection",
+                "within_session_output_time_basis": authorized.output_time_basis,
+                "combined_output_time_basis": (
+                    "recording_relative_seconds_from_frozen_actual_elapsed_plus_"
+                    "authorized_within_session_time"
+                ),
+                "chronological_positions": authorized.chronological_positions,
+                "ordered_session_paths": authorized.ordered_session_paths,
+                "actual_elapsed_sec_by_chunk": authorized.actual_elapsed_sec_by_chunk,
+                "nominal_expected_elapsed_sec_by_chunk": (
+                    authorized.nominal_expected_elapsed_sec_by_chunk
+                ),
+            }
         if self.mode != 'tonic':
             run_meta['dynamic_fit_slope_warning_records'] = self.dynamic_fit_slope_warning_records
             run_meta['dynamic_fit_slope_constraint_records'] = self.dynamic_fit_slope_constraint_records
@@ -2800,6 +2905,53 @@ class Pipeline:
             return p.parent.name
         return p.stem
 
+    def run_guided_npm_authorized(
+        self,
+        authorized_runtime,
+        output_dir: str,
+        *,
+        traces_only: bool = False,
+    ):
+        """Run exact Guided NPM authority without legacy discovery or inference."""
+        from .guided_npm_authorized_adapter import (
+            GuidedNpmAuthorizedRuntime,
+            verify_guided_npm_authorized_input,
+        )
+
+        if type(authorized_runtime) is not GuidedNpmAuthorizedRuntime:
+            raise TypeError("guided_npm_authorized_runtime_invalid")
+        if self._guided_npm_authorized_runtime is not None:
+            raise RuntimeError("guided_npm_authorized_runtime_already_active")
+        verify_guided_npm_authorized_input(authorized_runtime.authorized_input)
+        if (
+            self.config != authorized_runtime.config
+            or self.mode != authorized_runtime.mode
+            or dict(self.per_roi_correction or {})
+            != authorized_runtime.per_roi_correction
+            or self.per_roi_feature_config
+            != authorized_runtime.per_roi_feature_config
+            or self.per_roi_feature_provenance
+            != authorized_runtime.per_roi_feature_provenance
+            or output_dir
+            != authorized_runtime.authorized_input.run_directory_path
+        ):
+            raise ValueError("guided_npm_authorized_pipeline_binding_mismatch")
+        self._guided_npm_authorized_runtime = authorized_runtime
+        try:
+            return self.run(
+                authorized_runtime.authorized_input.source_root_path,
+                output_dir,
+                force_format="npm",
+                recursive=False,
+                glob_pattern="__guided_npm_authorized_no_discovery__",
+                include_rois=None,
+                exclude_rois=None,
+                traces_only=traces_only,
+                sessions_per_hour=authorized_runtime.authorized_input.sessions_per_hour,
+            )
+        finally:
+            self._guided_npm_authorized_runtime = None
+
     def run(
         self,
         input_dir: str,
@@ -2817,6 +2969,22 @@ class Pipeline:
     ):
         # Lazy import to avoid GUI side effects at module level
         from .viz import plots
+        authorized_npm_runtime = self._guided_npm_authorized_runtime
+        if authorized_npm_runtime is not None:
+            authorized = authorized_npm_runtime.authorized_input
+            if (
+                force_format != "npm"
+                or recursive
+                or glob_pattern != "__guided_npm_authorized_no_discovery__"
+                or include_rois is not None
+                or exclude_rois is not None
+                or guided_manifest_path is not None
+                or frozen_input_manifest_path is not None
+                or input_dir != authorized.source_root_path
+                or self.config != authorized_npm_runtime.config
+                or sessions_per_hour != authorized.sessions_per_hour
+            ):
+                raise ValueError("guided_npm_authorized_route_conflict")
         self._frozen_input_manifest_path = frozen_input_manifest_path
         run_started = time.perf_counter()
         if self._is_phasic_timing_enabled():
@@ -2914,7 +3082,12 @@ class Pipeline:
 
         self.output_dir = output_dir
         os.makedirs(os.path.join(output_dir, 'qc'), exist_ok=True)
-        if guided_verification is None:
+        if authorized_npm_runtime is not None:
+            self.file_list = list(
+                authorized_npm_runtime.authorized_input.ordered_session_paths
+            )
+            self._add_phasic_phase_bucket("phase.input_discovery", 0.0)
+        elif guided_verification is None:
             t_discovery = time.perf_counter()
             self.discover_files(input_dir, recursive, glob_pattern, force_format=force_format)
             self._add_phasic_phase_bucket("phase.input_discovery", time.perf_counter() - t_discovery)
@@ -2926,7 +3099,10 @@ class Pipeline:
         n_total_discovered = len(self.file_list)
         preview_first_n = self.config.preview_first_n
         t_preview = time.perf_counter()
-        if guided_verification is not None:
+        if authorized_npm_runtime is not None:
+            self.run_type = "full"
+            self.preview_info = None
+        elif guided_verification is not None:
             self.run_type = "full"
             self.preview_info = None
         elif preview_first_n is not None:
@@ -2958,7 +3134,18 @@ class Pipeline:
         self._build_admitted_accountant(force_format)
         
         t_roi_resolve = time.perf_counter()
-        if guided_verification is not None:
+        if authorized_npm_runtime is not None:
+            authorized = authorized_npm_runtime.authorized_input
+            discovered_rois = list(authorized.canonical_roi_ids)
+            selected_rois = list(authorized.selected_canonical_roi_ids)
+            selected_set = set(selected_rois)
+            include_rois = list(selected_rois)
+            exclude_rois = [
+                roi for roi in discovered_rois if roi not in selected_set
+            ]
+            self._add_phasic_phase_bucket("phase.roi_discovery_read_chunks", 0.0)
+            self._set_phasic_metric("roi_discovery_source", "guided_npm_authorized")
+        elif guided_verification is not None:
             assert guided_facts is not None
             discovered_rois = list(
                 guided_facts.current_roi_inventory.discovered_roi_ids
@@ -3063,6 +3250,38 @@ class Pipeline:
             "correction_provenance",
             self._requested_correction_provenance,
         )
+        if authorized_npm_runtime is not None:
+            authorized = authorized_npm_runtime.authorized_input
+            _append_run_report_section(
+                output_dir,
+                "guided_npm_cross_session_chronology",
+                {
+                    "authority": "frozen_worker_projection",
+                    "within_session_output_time_basis": authorized.output_time_basis,
+                    "combined_output_time_basis": (
+                        "recording_relative_seconds_from_frozen_actual_elapsed_plus_"
+                        "authorized_within_session_time"
+                    ),
+                    "sessions_per_hour_role": "nominal_cadence_only",
+                    "sessions": [
+                        {
+                            "chunk_id": position,
+                            "chronological_position": position,
+                            "source_path": path,
+                            "authoritative_source_start_time": start,
+                            "actual_elapsed_sec": actual,
+                            "nominal_expected_elapsed_sec": nominal,
+                        }
+                        for position, path, start, actual, nominal in zip(
+                            authorized.chronological_positions,
+                            authorized.ordered_session_paths,
+                            authorized.authoritative_source_start_times,
+                            authorized.actual_elapsed_sec_by_chunk,
+                            authorized.nominal_expected_elapsed_sec_by_chunk,
+                        )
+                    ],
+                },
+            )
         self._add_phasic_phase_bucket("phase.run_report_write", time.perf_counter() - t_report)
         
         t_pass1 = time.perf_counter()

@@ -181,6 +181,11 @@ GuidedNpmWorkerPrelaunchClaimResult = (
 )
 
 
+class GuidedNpmPrelaunchAuthorityLiveCancelled(RuntimeError):
+    """Cancellation observed while performing the immediate launch gate."""
+
+
+
 class _Refusal(ValueError):
     def __init__(self, category: str, section: str, message: str, detail_code: str):
         self.category, self.section, self.message, self.detail_code = category, section, message, detail_code
@@ -469,6 +474,110 @@ def verify_guided_npm_worker_prelaunch_claim(claim: GuidedNpmWorkerPrelaunchClai
         or compute_guided_npm_worker_prelaunch_claim_identity(claim) != claim.canonical_prelaunch_claim_identity
     ):
         raise ValueError("prelaunch_claim_identity_mismatch")
+
+
+def verify_guided_npm_worker_prelaunch_authority_live(
+    claim: GuidedNpmWorkerPrelaunchClaim,
+    *,
+    current_application_build_identity: ApplicationBuildIdentity,
+    cancellation_check: Callable[[], bool] | None = None,
+) -> None:
+    """Immediately reverify frozen authority before process creation.
+
+    This closes the parent-side claim-to-launch window as far as the current
+    process can truthfully observe it.  It does not prove which bytes a future
+    child opens; consumed-authority evidence remains a later lifecycle stage.
+    """
+    try:
+        _check_cancelled(cancellation_check)
+        verify_guided_npm_worker_prelaunch_claim(claim)
+        verify_application_build_identity(current_application_build_identity)
+        worker = claim.worker_request
+        receipt = claim.materialization_receipt
+        evidence = claim.prelaunch_freshness_evidence
+        if not (
+            current_application_build_identity
+            == claim.application_build_identity
+            == worker.application_build_identity
+            == worker.execution_request.application_build_identity
+            == receipt.application_build_identity
+            == evidence.current_application_build_identity
+        ):
+            raise ValueError("current_build_mismatch")
+
+        _check_cancelled(cancellation_check)
+        path = Path(claim.worker_request_artifact_path)
+        pre, opened, post, final, digest, content = _stable_read_worker_artifact(
+            path, cancellation_check
+        )
+        if (
+            len(content) != claim.worker_request_artifact_size_bytes
+            or digest != claim.worker_request_artifact_sha256
+            or digest != receipt.worker_request_artifact_sha256
+        ):
+            raise ValueError("launch_worker_artifact_changed")
+        style = worker.execution_request.output_runtime_projection.output_base_path_style
+        for facts in (pre, opened, post, final):
+            if (
+                not stored_paths_equal(
+                    facts.canonical_path, claim.worker_request_artifact_path, style
+                )
+                or _fact_metadata(facts)
+                != _fact_metadata(evidence.worker_artifact_final_facts)
+            ):
+                raise ValueError("launch_worker_artifact_changed")
+        decoded = decode_canonical_guided_npm_worker_request_bytes(content)
+        verify_guided_npm_worker_request(decoded)
+        if decoded != worker or decoded.canonical_worker_request_identity != (
+            claim.source_worker_request_identity
+        ):
+            raise ValueError("launch_worker_artifact_changed")
+        verify_guided_npm_worker_request_materialization_binding(receipt, decoded)
+
+        _check_cancelled(cancellation_check)
+        startup_facts = verify_guided_npm_startup_artifact_live(
+            worker.execution_request, cancellation_check
+        )
+        if (
+            not stored_paths_equal(
+                startup_facts.canonical_path, evidence.startup_artifact_path, style
+            )
+            or _fact_metadata(startup_facts)
+            != _fact_metadata(evidence.startup_artifact_final_facts)
+        ):
+            raise ValueError("launch_startup_artifact_changed")
+
+        _check_cancelled(cancellation_check)
+        source_freshness = verify_guided_npm_source_freshness_live(
+            worker.execution_request, cancellation_check
+        )
+        verify_guided_npm_live_source_freshness_evidence(
+            source_freshness, worker.execution_request
+        )
+        if source_freshness != evidence.source_freshness_evidence:
+            raise ValueError("launch_source_freshness_changed")
+        _final_preclaim_gate(worker, evidence)
+        _check_cancelled(cancellation_check)
+    except (_Cancelled, _LiveCancelled) as exc:
+        raise GuidedNpmPrelaunchAuthorityLiveCancelled(
+            "launch_cancelled"
+        ) from exc
+    except _LiveRefusal as exc:
+        if exc.category.startswith("startup_artifact_"):
+            category = "launch_startup_artifact_changed"
+        elif exc.category.startswith("source_"):
+            category = "launch_source_freshness_changed"
+        else:
+            category = "launch_worker_artifact_changed"
+        raise ValueError(category) from exc
+    except _Refusal as exc:
+        if exc.category.startswith("startup_artifact_"):
+            category = "launch_startup_artifact_changed"
+        elif exc.category.startswith("source_"):
+            category = "launch_source_freshness_changed"
+        else:
+            category = "launch_worker_artifact_changed"
+        raise ValueError(category) from exc
 
 
 def _final_live_gate(path: Path, expected: GuidedNpmLiveFileFacts, category: str) -> None:
