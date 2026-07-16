@@ -23,7 +23,10 @@ from photometry_pipeline.guided_npm_worker_launch import (
     GUIDED_NPM_LAUNCH_CONTEXT_ARGUMENT,
     GUIDED_NPM_WORKER_ENTRY_MODULE,
     GUIDED_NPM_WORKER_REQUEST_ARGUMENT,
+    GuidedNpmLaunchedWorkerRuntime,
+    GuidedNpmPostLaunchRuntime,
     GuidedNpmStartedProcess,
+    GuidedNpmStartedProcessRuntime,
     GuidedNpmWorkerExecutionStartReceipt,
     GuidedNpmWorkerLaunchCancelled,
     GuidedNpmWorkerLaunchFailure,
@@ -33,6 +36,7 @@ from photometry_pipeline.guided_npm_worker_launch import (
     compute_guided_npm_worker_execution_start_receipt_identity,
     compute_guided_npm_worker_launch_invocation_identity,
     launch_guided_npm_worker,
+    launch_guided_npm_worker_runtime,
     verify_guided_npm_worker_execution_start_receipt,
     verify_guided_npm_worker_launch_invocation,
 )
@@ -895,3 +899,218 @@ def test_post_persistence_cancellation_preserves_authority_artifacts(monkeypatch
     )
     assert isinstance(result, GuidedNpmWorkerLaunchCancelled)
     assert {path: path.read_bytes() for path in paths} == before
+
+
+# ---------------------------------------------------------------------------
+# B2-D2B: launch_guided_npm_worker_runtime (retains the exact process handle)
+# ---------------------------------------------------------------------------
+
+
+class _FakeHandle:
+    def __init__(self, pid, *, wait_result=0):
+        self.pid = pid
+        self._wait_result = wait_result
+
+    def wait(self, timeout=None):
+        return self._wait_result
+
+
+def test_launch_runtime_delegates_unmodified_and_retains_handle(tmp_path):
+    claim = _valid_claim(tmp_path)
+    expected = _invocation(claim)
+    calls = []
+
+    def fake_launcher(argv, *, cwd, shell):
+        calls.append((argv, cwd, shell))
+        return GuidedNpmStartedProcessRuntime(54321, GUIDED_NPM_LAUNCHER_KIND, _FakeHandle(54321))
+
+    result = launch_guided_npm_worker_runtime(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        process_launcher=fake_launcher,
+    )
+    assert isinstance(result, GuidedNpmLaunchedWorkerRuntime)
+    assert calls == [(expected.argument_vector, expected.working_directory_path, False)]
+    assert result.process_handle.pid == 54321
+    assert result.execution_start_receipt.process_id == 54321
+    assert result.prelaunch_claim is claim
+    assert result.launch_invocation == expected
+    verify_guided_npm_worker_execution_start_receipt(
+        result.execution_start_receipt, claim, result.launch_invocation
+    )
+    # Same durability standard as launch_guided_npm_worker: the launch context
+    # is genuinely persisted on disk, not merely constructed in memory.
+    assert Path(result.launch_context.consumed_authority_receipt_path).parent.is_dir()
+
+
+def test_launch_runtime_started_process_runtime_requires_matching_pid():
+    with pytest.raises(ValueError, match="launch_runtime_started_process_invalid"):
+        GuidedNpmStartedProcessRuntime(111, GUIDED_NPM_LAUNCHER_KIND, _FakeHandle(222))
+
+
+def test_launch_runtime_passes_through_non_success_results_unchanged(tmp_path):
+    claim = _valid_claim(tmp_path)
+    invalid = replace(claim, claim_status="invalid")
+    result = launch_guided_npm_worker_runtime(
+        invalid,
+        current_application_build_identity=claim.application_build_identity,
+        process_launcher=lambda *a, **k: pytest.fail("launcher should not be called"),
+    )
+    assert isinstance(result, GuidedNpmWorkerLaunchFailure)
+
+
+def test_launch_runtime_cancellation_passes_through_and_launches_nothing(tmp_path):
+    claim = _valid_claim(tmp_path)
+    calls = []
+    result = launch_guided_npm_worker_runtime(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        cancellation_check=lambda: True,
+        process_launcher=lambda *a, **k: calls.append(1),
+    )
+    assert isinstance(result, GuidedNpmWorkerLaunchCancelled)
+    assert calls == []
+
+
+def test_launch_runtime_malformed_runtime_launcher_return_refuses(tmp_path):
+    claim = _valid_claim(tmp_path)
+
+    def bad_launcher(argv, *, cwd, shell):
+        return GuidedNpmStartedProcess(4242, GUIDED_NPM_LAUNCHER_KIND)  # wrong type
+
+    result = launch_guided_npm_worker_runtime(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        process_launcher=bad_launcher,
+    )
+    assert isinstance(result, GuidedNpmWorkerLaunchFailure)
+    assert result.blocking_issues[0].category == "process_creation_failed"
+
+
+def test_launch_runtime_existing_launch_guided_npm_worker_unaffected(tmp_path):
+    """launch_guided_npm_worker itself is completely unmodified by this addition."""
+    claim = _valid_claim(tmp_path)
+    calls = []
+
+    def launcher(argv, *, cwd, shell):
+        calls.append((argv, cwd, shell))
+        return GuidedNpmStartedProcess(43210, GUIDED_NPM_LAUNCHER_KIND)
+
+    result = launch_guided_npm_worker(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        process_launcher=launcher,
+    )
+    assert isinstance(result, GuidedNpmWorkerExecutionStartReceipt)
+    assert result.process_id == 43210
+    assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# B2-D2B narrow follow-up: never discard a handle after possible process
+# creation (post-launch runtime preservation)
+# ---------------------------------------------------------------------------
+
+
+def test_launch_runtime_preserves_handle_on_malformed_process_identity(tmp_path):
+    claim = _valid_claim(tmp_path)
+
+    def bad_kind_launcher(argv, *, cwd, shell):
+        return GuidedNpmStartedProcessRuntime(4242, "wrong_kind", _FakeHandle(4242))
+
+    result = launch_guided_npm_worker_runtime(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        process_launcher=bad_kind_launcher,
+    )
+    assert isinstance(result, GuidedNpmPostLaunchRuntime)
+    assert result.process_handle.pid == 4242
+    assert result.process_id == 4242
+    assert result.launch_failure.blocking_issues[0].category == "process_identity_invalid"
+    assert result.execution_start_receipt is None
+
+
+def test_launch_runtime_preserves_handle_on_start_receipt_verification_failure(
+    monkeypatch, tmp_path
+):
+    claim = _valid_claim(tmp_path)
+    handle = _FakeHandle(54321)
+    real_verify = launch_module.verify_guided_npm_worker_execution_start_receipt
+
+    def flaky_verify(receipt, prelaunch_claim, invocation):
+        # The provisional pre-validation receipt (built with a fake PID of 1,
+        # before launch-context persistence) must keep succeeding; only the
+        # real post-launcher receipt (bound to the real captured PID) fails.
+        if receipt.process_id == 54321:
+            raise ValueError("forced_verification_failure")
+        return real_verify(receipt, prelaunch_claim, invocation)
+
+    def good_launcher(argv, *, cwd, shell):
+        return GuidedNpmStartedProcessRuntime(54321, GUIDED_NPM_LAUNCHER_KIND, handle)
+
+    monkeypatch.setattr(
+        launch_module, "verify_guided_npm_worker_execution_start_receipt", flaky_verify
+    )
+    result = launch_guided_npm_worker_runtime(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        process_launcher=good_launcher,
+    )
+    assert isinstance(result, GuidedNpmPostLaunchRuntime)
+    assert result.process_handle is handle
+    assert result.process_id == 54321
+    assert result.launch_failure.blocking_issues[0].category == "process_created_receipt_failed"
+    assert result.execution_start_receipt is None
+
+
+def test_launch_runtime_no_process_failure_remains_ordinary(tmp_path):
+    claim = _valid_claim(tmp_path)
+
+    def raising_launcher(argv, *, cwd, shell):
+        raise OSError("no process")
+
+    result = launch_guided_npm_worker_runtime(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        process_launcher=raising_launcher,
+    )
+    assert isinstance(result, GuidedNpmWorkerLaunchFailure)
+    assert result.blocking_issues[0].category == "process_creation_failed"
+
+
+def test_launch_runtime_retained_handle_can_be_reconciled_via_post_launch_path(
+    monkeypatch, tmp_path
+):
+    from photometry_pipeline.guided_npm_worker_reconciliation import (
+        OUTCOME_POST_LAUNCH_EVIDENCE_FAILED,
+        reconcile_guided_npm_post_launch_runtime,
+    )
+
+    claim = _valid_claim(tmp_path)
+    handle = _FakeHandle(9999, wait_result=0)
+    real_verify = launch_module.verify_guided_npm_worker_execution_start_receipt
+
+    def flaky_verify(receipt, prelaunch_claim, invocation):
+        if receipt.process_id == 9999:
+            raise ValueError("forced_verification_failure")
+        return real_verify(receipt, prelaunch_claim, invocation)
+
+    def good_launcher(argv, *, cwd, shell):
+        return GuidedNpmStartedProcessRuntime(9999, GUIDED_NPM_LAUNCHER_KIND, handle)
+
+    monkeypatch.setattr(
+        launch_module, "verify_guided_npm_worker_execution_start_receipt", flaky_verify
+    )
+    runtime = launch_guided_npm_worker_runtime(
+        claim,
+        current_application_build_identity=claim.application_build_identity,
+        process_launcher=good_launcher,
+    )
+    assert isinstance(runtime, GuidedNpmPostLaunchRuntime)
+    result = reconcile_guided_npm_post_launch_runtime(runtime)
+    assert result.final_outcome == OUTCOME_POST_LAUNCH_EVIDENCE_FAILED
+    assert result.observed_exit_code == 0
+    assert result.observed_process_id == 9999
+    assert result.launch_failure_category == "process_created_receipt_failed"
+    assert result.terminal_evidence_present is False
+    assert result.consumed_authority_evidence_present is False

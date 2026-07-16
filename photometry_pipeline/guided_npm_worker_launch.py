@@ -8,7 +8,7 @@ or claim numerical progress or completion.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, fields, is_dataclass, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 import hashlib
 import math
 import os
@@ -16,6 +16,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import threading
 from typing import Any, Protocol
 
 from photometry_pipeline.guided_identity import encode_canonical_value
@@ -851,3 +852,225 @@ def launch_guided_npm_worker(
         return _failure(
             "launch_internal_error", "launch", type(exc).__name__, exc
         )
+
+
+# ---------------------------------------------------------------------------
+# B2-D2B: an optional, additive runtime-retaining launch path.
+#
+# launch_guided_npm_worker() above is completely unmodified and remains the
+# durable, serializable contract every existing caller and test already
+# depends on.  The functions below are a thin wrapper around it: they inject
+# a handle-capturing launcher, let the existing verified launch sequence run
+# exactly as before, and -- only on the exact same success outcome the
+# existing function already recognizes -- additionally hand back the retained
+# in-memory process handle plus the deterministic invocation/launch-context
+# objects needed for later parent reconciliation.  No process handle is ever
+# placed in a canonical, serializable, or identity-bearing artifact.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GuidedNpmStartedProcessRuntime:
+    """A launcher's process identity together with the exact retained handle."""
+
+    process_id: int
+    launcher_kind: str
+    process_handle: Any
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.process_id, bool)
+            or not isinstance(self.process_id, int)
+            or self.process_id <= 0
+            or not isinstance(self.launcher_kind, str)
+            or not self.launcher_kind
+            or getattr(self.process_handle, "pid", None) != self.process_id
+        ):
+            raise ValueError("launch_runtime_started_process_invalid")
+
+
+class GuidedNpmProcessLauncherRuntime(Protocol):
+    def __call__(
+        self,
+        argv: tuple[str, ...],
+        *,
+        cwd: str,
+        shell: bool,
+    ) -> GuidedNpmStartedProcessRuntime: ...
+
+
+def _subprocess_popen_launcher_with_handle(
+    argv: tuple[str, ...],
+    *,
+    cwd: str,
+    shell: bool,
+) -> GuidedNpmStartedProcessRuntime:
+    process = subprocess.Popen(argv, cwd=cwd, shell=shell)
+    return GuidedNpmStartedProcessRuntime(process.pid, GUIDED_NPM_LAUNCHER_KIND, process)
+
+
+class GuidedNpmRuntimeLifecycleSlot:
+    """A generic, one-time-use opaque slot a later consumer (reconciliation)
+    attaches lifecycle state to for this exact runtime instance.
+
+    Deliberately reconciliation-agnostic: this module knows nothing about
+    reconciliation state shapes, only that each runtime instance owns exactly
+    one such slot, safely lazily initialized under its own small lock rather
+    than any global registry keyed by runtime identity/equality (which would
+    otherwise force hashing or weak-referencing an object holding an
+    arbitrary, possibly non-hashable process handle).  Never serialized;
+    never inspected by this module.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.state: Any = None
+
+    def get_or_create(self, factory: Callable[[], Any]) -> Any:
+        with self._lock:
+            if self.state is None:
+                self.state = factory()
+            return self.state
+
+
+@dataclass(frozen=True)
+class GuidedNpmLaunchedWorkerRuntime:
+    """One in-memory launched worker, ready for exactly one reconciliation.
+
+    Never serialize this object and never place ``process_handle`` in a
+    durable artifact -- every other field here is already independently
+    durable (the prelaunch claim and launch invocation are pure/deterministic;
+    the launch context and execution-start receipt are already the durable
+    artifacts B2-D1 established).
+    """
+
+    prelaunch_claim: GuidedNpmWorkerPrelaunchClaim
+    launch_invocation: GuidedNpmWorkerLaunchInvocation
+    launch_context: GuidedNpmWorkerLaunchContext
+    execution_start_receipt: GuidedNpmWorkerExecutionStartReceipt
+    process_handle: Any
+    lifecycle_slot: GuidedNpmRuntimeLifecycleSlot = field(
+        default_factory=GuidedNpmRuntimeLifecycleSlot, compare=False, repr=False
+    )
+
+
+@dataclass(frozen=True)
+class GuidedNpmPostLaunchRuntime:
+    """A process was created, but durable launch confirmation did not complete.
+
+    The retained handle is trustworthy (the runtime launcher returned an
+    exact, self-consistent ``GuidedNpmStartedProcessRuntime``) even though
+    ``launch_guided_npm_worker`` itself could not durably confirm the launch
+    (a malformed post-launch process identity, or a start-receipt that failed
+    construction or verification).  This object is in-memory only, is never
+    serialized, and must never be treated as sufficient completion authority
+    by itself -- see ``reconcile_guided_npm_post_launch_runtime``.
+    """
+
+    prelaunch_claim: GuidedNpmWorkerPrelaunchClaim
+    launch_invocation: GuidedNpmWorkerLaunchInvocation
+    launch_context: GuidedNpmWorkerLaunchContext
+    process_handle: Any
+    process_id: int
+    launch_failure: GuidedNpmWorkerPostLaunchFailure
+    execution_start_receipt: GuidedNpmWorkerExecutionStartReceipt | None = None
+    lifecycle_slot: GuidedNpmRuntimeLifecycleSlot = field(
+        default_factory=GuidedNpmRuntimeLifecycleSlot, compare=False, repr=False
+    )
+
+
+GuidedNpmWorkerLaunchRuntimeResult = (
+    GuidedNpmLaunchedWorkerRuntime
+    | GuidedNpmPostLaunchRuntime
+    | GuidedNpmWorkerLaunchFailure
+    | GuidedNpmWorkerLaunchCancelled
+)
+
+
+def launch_guided_npm_worker_runtime(
+    prelaunch_claim: GuidedNpmWorkerPrelaunchClaim,
+    *,
+    current_application_build_identity: ApplicationBuildIdentity,
+    cancellation_check: Callable[[], bool] | None = None,
+    process_launcher: GuidedNpmProcessLauncherRuntime | None = None,
+) -> GuidedNpmWorkerLaunchRuntimeResult:
+    """Launch exactly as ``launch_guided_npm_worker`` does, retaining the handle.
+
+    Delegates the entire verified launch sequence -- unchanged -- to
+    ``launch_guided_npm_worker``.  The exact retained process handle is never
+    discarded once the runtime launcher has returned it: if the delegated
+    call goes on to return its durable execution-start receipt, the handle is
+    returned inside ``GuidedNpmLaunchedWorkerRuntime``; if the delegated call
+    instead returns a post-launch indeterminate failure (a process may exist,
+    but durable launch confirmation did not complete), the same handle is
+    returned inside ``GuidedNpmPostLaunchRuntime`` together with that failure.
+    Only when no runtime launcher return ever occurred (ordinary failure,
+    cancellation, or a launcher that raised or returned an untrustworthy
+    value) is the ordinary failure/cancellation result returned with no
+    runtime to reconcile.
+    """
+    runtime_launcher = process_launcher or _subprocess_popen_launcher_with_handle
+    captured: dict[str, Any] = {}
+
+    def _capturing_launcher(
+        argv: tuple[str, ...], *, cwd: str, shell: bool
+    ) -> GuidedNpmStartedProcess:
+        started_runtime = runtime_launcher(argv, cwd=cwd, shell=shell)
+        if type(started_runtime) is not GuidedNpmStartedProcessRuntime:
+            raise ValueError("launch_runtime_launcher_return_invalid")
+        captured["runtime"] = started_runtime
+        return GuidedNpmStartedProcess(
+            started_runtime.process_id, started_runtime.launcher_kind
+        )
+
+    result = launch_guided_npm_worker(
+        prelaunch_claim,
+        current_application_build_identity=current_application_build_identity,
+        cancellation_check=cancellation_check,
+        process_launcher=_capturing_launcher,
+    )
+
+    started_runtime = captured.get("runtime")
+
+    if isinstance(result, GuidedNpmWorkerPostLaunchFailure):
+        # The runtime launcher must have returned successfully for this
+        # category to exist at all (it only arises after the launcher call
+        # itself succeeded); preserve the exact handle rather than discarding
+        # it along with the failure.
+        if started_runtime is None:
+            raise ValueError("launch_runtime_process_handle_missing_or_mismatched")
+        invocation = build_guided_npm_worker_launch_invocation(
+            prelaunch_claim,
+            current_application_build_identity=current_application_build_identity,
+        )
+        launch_context = build_guided_npm_worker_launch_context(invocation)
+        return GuidedNpmPostLaunchRuntime(
+            prelaunch_claim,
+            invocation,
+            launch_context,
+            started_runtime.process_handle,
+            started_runtime.process_id,
+            result,
+        )
+
+    if not isinstance(result, GuidedNpmWorkerExecutionStartReceipt):
+        # No runtime launcher return ever occurred for this outcome: ordinary
+        # failure before the launcher call, cancellation, or the launcher
+        # raised/returned an untrustworthy value.
+        return result
+
+    if started_runtime is None or started_runtime.process_id != result.process_id:
+        raise ValueError("launch_runtime_process_handle_missing_or_mismatched")
+
+    invocation = build_guided_npm_worker_launch_invocation(
+        prelaunch_claim,
+        current_application_build_identity=current_application_build_identity,
+    )
+    launch_context = build_guided_npm_worker_launch_context(invocation)
+    return GuidedNpmLaunchedWorkerRuntime(
+        prelaunch_claim,
+        invocation,
+        launch_context,
+        result,
+        started_runtime.process_handle,
+    )
