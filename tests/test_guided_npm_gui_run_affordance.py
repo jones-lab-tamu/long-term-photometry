@@ -8,6 +8,7 @@ import pytest
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+import gui.main_window as main_window_module
 import photometry_pipeline.guided_npm_run_launch_builder as npm_builder_module
 import photometry_pipeline.guided_npm_worker_launch as npm_launch_module
 import photometry_pipeline.guided_npm_worker_reconciliation as npm_reconciliation_module
@@ -881,6 +882,215 @@ def test_only_verified_completed_shows_output_directory(window):
     failure = SimpleNamespace(final_outcome="authority_refused", run_directory_path=r"C:\fake\npm-run")
     window._finish_guided_npm_run_with_result(failure)
     assert r"C:\fake\npm-run" not in window._guided_run_execution_details_label.text()
+
+
+# ---------------------------------------------------------------------------
+# Open-results-folder affordance and post-completion cleanup (B2-E2A)
+# ---------------------------------------------------------------------------
+
+
+def test_verified_success_exposes_open_output_button_bound_to_exact_path(
+    window, tmp_path
+):
+    run_dir = str(tmp_path)  # a real, existing directory
+    window._finish_guided_npm_run_with_result(
+        SimpleNamespace(final_outcome="verified_completed", run_directory_path=run_dir)
+    )
+    assert window._guided_npm_open_output_btn.isHidden() is False
+    assert window._guided_npm_open_output_btn.isEnabled() is True
+    assert window._guided_npm_completed_output_dir == run_dir
+    assert run_dir in window._guided_run_execution_details_label.text()
+
+
+def test_open_output_button_targets_exact_stored_path(window, tmp_path, monkeypatch):
+    run_dir = str(tmp_path)
+    opened = []
+    monkeypatch.setattr(main_window_module, "_open_folder", lambda p: opened.append(p))
+    window._finish_guided_npm_run_with_result(
+        SimpleNamespace(final_outcome="verified_completed", run_directory_path=run_dir)
+    )
+    window._on_guided_npm_open_output_folder_clicked()
+    assert opened == [run_dir]
+
+
+@pytest.mark.parametrize(
+    "final_outcome",
+    [
+        "authority_refused",
+        "verified_failed_before_consumed_authority",
+        "indeterminate",
+        "post_launch_evidence_failed",
+        "terminal_evidence_invalid",
+    ],
+)
+def test_open_output_button_hidden_for_failure_and_unconfirmed(
+    window, tmp_path, final_outcome
+):
+    window._finish_guided_npm_run_with_result(
+        SimpleNamespace(final_outcome=final_outcome, run_directory_path=str(tmp_path))
+    )
+    assert window._guided_npm_open_output_btn.isHidden() is True
+    assert window._guided_npm_completed_output_dir is None
+
+
+def test_open_output_button_hidden_for_unexpected_error(window):
+    from photometry_pipeline.guided_npm_run_result_presentation import (
+        GuidedNpmRunUnexpectedError,
+    )
+
+    window._finish_guided_npm_run_with_result(GuidedNpmRunUnexpectedError("boom"))
+    assert window._guided_npm_open_output_btn.isHidden() is True
+    assert window._guided_npm_completed_output_dir is None
+
+
+def test_editing_setup_after_success_clears_output_line_and_open_button(
+    window, tmp_path
+):
+    _set_npm_ready(window)
+    run_dir = str(tmp_path)
+    window._finish_guided_npm_run_with_result(
+        SimpleNamespace(final_outcome="verified_completed", run_directory_path=run_dir)
+    )
+    assert run_dir in window._guided_run_execution_details_label.text()
+    assert window._guided_npm_open_output_btn.isHidden() is False
+
+    # Any setup-affecting change clears the completed result; the stale
+    # output-folder line and its button must go with it so they can never
+    # be confused with the newly edited draft setup.
+    window._invalidate_guided_backend_validation("user changed a setting")
+
+    assert window._guided_backend_execution_result is None
+    assert window._guided_run_execution_details_label.text() == ""
+    assert window._guided_npm_open_output_btn.isHidden() is True
+    assert window._guided_npm_completed_output_dir is None
+    assert (
+        "changed after it was checked"
+        in window._guided_run_readiness_label.text()
+    )
+
+
+def test_open_output_missing_folder_is_handled_gracefully(window, monkeypatch):
+    opened = []
+    monkeypatch.setattr(main_window_module, "_open_folder", lambda p: opened.append(p))
+    window._finish_guided_npm_run_with_result(
+        SimpleNamespace(
+            final_outcome="verified_completed",
+            run_directory_path=r"C:\definitely\does\not\exist_zzz",
+        )
+    )
+    window._on_guided_npm_open_output_folder_clicked()
+    # No crash, no open attempt on a non-existent path, and a plain message.
+    assert opened == []
+    text = window._guided_run_execution_details_label.text().lower()
+    assert "could not be found" in text
+    for term in ("artifact", "receipt", "backend", "json", "worker", "exception"):
+        assert term not in text
+
+
+def test_open_output_button_label_is_scientist_facing(window):
+    label_text = window._guided_npm_open_output_btn.text().lower()
+    for term in ("artifact", "receipt", "backend", "json", "worker", "run directory"):
+        assert term not in label_text
+    assert "results" in label_text
+
+
+def test_new_run_start_hides_stale_open_output_button(window, monkeypatch, qapp):
+    # A prior success left the button visible; starting a fresh run must
+    # hide it during preparation before any new result exists.
+    window._finish_guided_npm_run_with_result(
+        SimpleNamespace(final_outcome="verified_completed", run_directory_path=r"C:\prev\run")
+    )
+    assert window._guided_npm_open_output_btn.isHidden() is False
+
+    _set_npm_ready(window)
+    release = threading.Event()
+
+    def blocking_build(**kwargs):
+        assert release.wait(timeout=5)
+        return _fake_build_ok(**kwargs)
+
+    monkeypatch.setattr(
+        npm_builder_module,
+        "build_guided_npm_worker_prelaunch_claim_from_validation",
+        blocking_build,
+    )
+    monkeypatch.setattr(
+        npm_launch_module,
+        "launch_guided_npm_worker_runtime",
+        lambda claim, **kwargs: _fake_launched_runtime(),
+    )
+    monkeypatch.setattr(
+        npm_reconciliation_module,
+        "reconcile_guided_npm_worker_runtime",
+        lambda runtime: SimpleNamespace(
+            final_outcome="indeterminate", run_directory_path="x"
+        ),
+    )
+
+    window._guided_run_btn.click()
+    assert window._guided_npm_open_output_btn.isHidden() is True
+    assert window._guided_npm_completed_output_dir is None
+    release.set()
+    _pump_until(qapp, lambda: window._guided_npm_run_worker_thread is None)
+
+
+# ---------------------------------------------------------------------------
+# Stale NPM handoff cleared on format switch (B2-E2A narrow follow-up)
+# ---------------------------------------------------------------------------
+
+
+def _complete_npm_success(window, run_dir):
+    _set_npm_ready(window)
+    window._finish_guided_npm_run_with_result(
+        SimpleNamespace(final_outcome="verified_completed", run_directory_path=run_dir)
+    )
+
+
+@pytest.mark.parametrize("other_format", ["rwd", "custom_tabular"])
+def test_switching_format_clears_stale_npm_completion_handoff(
+    window, tmp_path, other_format
+):
+    run_dir = str(tmp_path)
+    _complete_npm_success(window, run_dir)
+    assert window._guided_npm_open_output_btn.isHidden() is False
+    assert window._guided_npm_completed_output_dir == run_dir
+    assert run_dir in window._guided_run_execution_details_label.text()
+
+    window._guided_format_combo.setCurrentText(other_format)
+    window._refresh_guided_run_readiness_display()
+
+    assert window._guided_npm_open_output_btn.isHidden() is True
+    assert window._guided_npm_open_output_btn.isEnabled() is False
+    assert window._guided_npm_completed_output_dir is None
+    assert run_dir not in window._guided_run_execution_details_label.text()
+
+
+def test_switching_to_rwd_preserves_legitimate_rwd_readiness_text(window, tmp_path):
+    from photometry_pipeline.guided_run_readiness import _SUMMARIES
+
+    _complete_npm_success(window, str(tmp_path))
+    window._guided_format_combo.setCurrentText("rwd")
+    window._refresh_guided_run_readiness_display()
+
+    text = window._guided_run_readiness_label.text()
+    # The readiness label must carry the RWD evaluator's own legitimate
+    # message -- not be blanked, and not still show the NPM success text.
+    assert text != "Your NPM analysis finished successfully."
+    assert text in set(_SUMMARIES.values())
+    assert window._guided_run_readiness_label.text() != ""
+
+
+def test_active_npm_success_handoff_survives_readiness_refresh(window, tmp_path):
+    # While the format stays NPM and the verified result is current, a
+    # readiness refresh must not strip the handoff (guards against
+    # over-broad cleanup).
+    run_dir = str(tmp_path)
+    _complete_npm_success(window, run_dir)
+    window._refresh_guided_run_readiness_display()
+
+    assert window._guided_npm_open_output_btn.isHidden() is False
+    assert window._guided_npm_completed_output_dir == run_dir
+    assert run_dir in window._guided_run_execution_details_label.text()
 
 
 # ---------------------------------------------------------------------------

@@ -2368,6 +2368,7 @@ class MainWindow(QMainWindow):
         self._guided_npm_launch_runtime = None
         self._guided_npm_run_worker_thread = None
         self._guided_npm_run_worker = None
+        self._guided_npm_completed_output_dir = None
         self._guided_run_status_follower = None
         self._guided_run_started_monotonic = None
         self._guided_run_elapsed_timer = None
@@ -11534,6 +11535,36 @@ class MainWindow(QMainWindow):
         )
         return str(current_format or "").strip().lower() == "npm"
 
+    def _clear_guided_npm_completed_output_handoff(
+        self, *, clear_details: bool
+    ) -> None:
+        """Remove the NPM verified-completion handoff from the current view.
+
+        Hides and disables the Open-results-folder button and forgets the
+        stored output directory. When ``clear_details`` is True, the
+        execution-details line is cleared only if it is currently the NPM
+        completion output line (i.e. a completed output directory was
+        stored) -- so this never erases a legitimate RWD readiness/result
+        message that happens to share the same label.
+
+        GUI-state only: this never deletes the completed run's output
+        folder, modifies its files, or alters backend completion evidence.
+        """
+        had_completed_output = (
+            getattr(self, "_guided_npm_completed_output_dir", None) is not None
+        )
+        self._guided_npm_completed_output_dir = None
+        open_btn = getattr(self, "_guided_npm_open_output_btn", None)
+        if open_btn is not None:
+            open_btn.setVisible(False)
+            open_btn.setEnabled(False)
+        if clear_details and had_completed_output:
+            details = getattr(
+                self, "_guided_run_execution_details_label", None
+            )
+            if details is not None:
+                details.setText("")
+
     def _refresh_guided_run_readiness_display(self) -> None:
         """Update only the guarded Guided Run affordance and its safe text."""
         if self._guided_run_target_is_npm():
@@ -11571,7 +11602,31 @@ class MainWindow(QMainWindow):
                 )
             if label is not None:
                 label.setText(npm_result.user_summary)
+            # Once no completed result is pending (e.g. a setup change
+            # discarded it), the completed run's output-folder line and its
+            # Open-results-folder button no longer belong to the current
+            # draft setup -- clear both so a stale output path can never be
+            # confused with the newly edited setup. In the NPM branch the
+            # details label is NPM-owned, so clear it directly (this also
+            # drops any stale NPM failure detail, not only a success line).
+            if getattr(self, "_guided_backend_execution_result", None) is None:
+                details = getattr(
+                    self, "_guided_run_execution_details_label", None
+                )
+                if details is not None:
+                    details.setText("")
+                self._clear_guided_npm_completed_output_handoff(
+                    clear_details=False
+                )
             return
+
+        # Non-NPM format (RWD / custom tabular): a prior NPM completion's
+        # Open-results-folder button and output-folder line must never
+        # remain visible while a different input format is being set up.
+        # Clear the NPM handoff BEFORE the RWD evaluator writes its own
+        # text; `clear_details=True` drops the stale NPM output line only
+        # (it leaves any legitimate RWD message intact).
+        self._clear_guided_npm_completed_output_handoff(clear_details=True)
 
         from photometry_pipeline.guided_run_readiness import (
             evaluate_guided_run_readiness,
@@ -12071,6 +12126,7 @@ class MainWindow(QMainWindow):
         details = getattr(self, "_guided_run_execution_details_label", None)
         if details is not None:
             details.setText("")
+        self._clear_guided_npm_completed_output_handoff(clear_details=False)
         self._start_guided_npm_run_worker(
             validation_context=context,
             validation_outcome=outcome,
@@ -12223,11 +12279,16 @@ class MainWindow(QMainWindow):
         `present_guided_npm_run_result`.
         """
         from photometry_pipeline.guided_npm_run_result_presentation import (
+            GUIDED_NPM_RUN_OUTCOME_SUCCESS,
             present_guided_npm_run_result,
         )
 
         self._guided_backend_execution_result = result
         presentation = present_guided_npm_run_result(result)
+        is_success = (
+            presentation.category == GUIDED_NPM_RUN_OUTCOME_SUCCESS
+            and bool(presentation.output_directory)
+        )
         label = getattr(self, "_guided_run_readiness_label", None)
         if label is not None:
             label.setText(presentation.title)
@@ -12240,6 +12301,16 @@ class MainWindow(QMainWindow):
                 )
             else:
                 details.setText(presentation.detail)
+        # Expose the Open-results-folder affordance only for a verified
+        # completion, bound to that exact authoritative output directory;
+        # keep it hidden for failure and unconfirmed results.
+        self._guided_npm_completed_output_dir = (
+            presentation.output_directory if is_success else None
+        )
+        open_btn = getattr(self, "_guided_npm_open_output_btn", None)
+        if open_btn is not None:
+            open_btn.setVisible(is_success)
+            open_btn.setEnabled(is_success)
         # Deliberately do not call `_refresh_guided_run_readiness_display`
         # here: the Run button was already disabled when the run started
         # and must stay disabled until the next setup change triggers a
@@ -12247,6 +12318,23 @@ class MainWindow(QMainWindow):
         # `_finish_guided_backend_execution_with_result` convention) -- it
         # would otherwise immediately overwrite this result message with
         # the generic "result pending" readiness summary.
+
+    def _on_guided_npm_open_output_folder_clicked(self) -> None:
+        """Open the exact verified-completion output folder in the file
+        manager. Uses only the authoritative path stored at completion --
+        never rediscovers or globs for a folder -- and reports a missing or
+        moved folder in plain language rather than failing silently.
+        """
+        output_dir = getattr(self, "_guided_npm_completed_output_dir", None)
+        details = getattr(self, "_guided_run_execution_details_label", None)
+        if not output_dir or not os.path.isdir(output_dir):
+            if details is not None:
+                details.setText(
+                    "The results folder could not be found. It may have "
+                    "been moved or deleted."
+                )
+            return
+        _open_folder(output_dir)
 
     def _refresh_guided_review_handoff_display(self) -> None:
         """Expose Review handoff only for a loader-validation candidate."""
@@ -16526,6 +16614,23 @@ class MainWindow(QMainWindow):
             Qt.TextSelectableByMouse
         )
         run_layout.addWidget(self._guided_run_execution_details_label)
+
+        # Only shown after a verified NPM completion, bound to that exact
+        # authoritative output directory (see
+        # `_finish_guided_npm_run_with_result`). Hidden for failure,
+        # unconfirmed, and every non-NPM state, and cleared whenever the
+        # completed result is discarded by a setup change.
+        self._guided_npm_open_output_btn = QPushButton("Open results folder")
+        self._guided_npm_open_output_btn.setObjectName(
+            "guidedNpmOpenOutputButton"
+        )
+        self._guided_npm_open_output_btn.setVisible(False)
+        self._guided_npm_open_output_btn.clicked.connect(
+            self._on_guided_npm_open_output_folder_clicked
+        )
+        run_layout.addWidget(
+            self._guided_npm_open_output_btn, alignment=Qt.AlignLeft
+        )
 
         self._guided_run_live_status_group = QGroupBox("Analysis progress")
         self._guided_run_live_status_group.setObjectName(
