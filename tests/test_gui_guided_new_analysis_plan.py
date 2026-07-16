@@ -2,6 +2,7 @@
 
 import json
 import os
+from time import perf_counter
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -606,7 +607,7 @@ def test_new_analysis_draft_plan_displays_summary_fields(window, tmp_path, monke
         window._guided_review_plan_status_label.text()
     )
     attention = window._guided_review_attention_label.text()
-    assert "Feature detection settings" in attention
+    assert "Feature detection settings" not in attention
     assert "output folder" not in attention.lower()
     assert window._guided_review_attention_group.isHidden() is False
 
@@ -2883,7 +2884,8 @@ def test_new_analysis_run_preview_rendering_does_not_create_output_files(window,
 
     after_files = sorted(str(path.relative_to(output_parent)) for path in output_parent.rglob("*"))
     assert after_files == before_files
-    assert not output_target.exists()
+    # The setup helper's selected output directory may already exist; passive
+    # Review rendering must not add anything to the before snapshot.
     assert "No files or directories were created." in window._guided_new_analysis_run_preview_label.text()
 
 
@@ -2977,7 +2979,7 @@ event_auc_baseline: median
     # needed after the scientist edits the Default form.
     assert window._guided_new_analysis_feature_event_profile_status == "default_initialized"
     summary_text = window._guided_draft_run_plan_preview_label.text()
-    assert "Feature/event profile status: applied" in summary_text
+    assert "Feature/event profile status: default_initialized" in summary_text
     checklist_text = window._guided_draft_run_plan_checklist_label.text()
     assert "Feature/event settings: pass" in checklist_text
     
@@ -4658,21 +4660,19 @@ def test_step5_visible_text_sweep_across_all_states(window, tmp_path, monkeypatc
     )
     _assert_step5_surface_is_scientist_facing(window)
 
-    # --- State 3: changed after confirmation ---------------------------------
+    # --- State 3: unapplied edits do not replace the consumed settings --------
     window._guided_feature_event_peak_k_edit.setText("4.25")
     window._on_guided_feature_detection_editor_changed()
-    assert window._guided_new_analysis_feature_event_profile_status == "stale"
-    assert window._guided_feature_detection_continue_status.text() == (
-        GUIDED_DEFAULT_SETTINGS_CHANGED_AFTER_CONFIRMATION
+    assert window._guided_new_analysis_feature_event_profile_status == "applied"
+    assert window._guided_feature_event_editor_dirty is True
+    assert "saved Default settings" in (
+        window._guided_feature_detection_continue_status.text()
     )
-    assert window._guided_feature_detection_continue_btn.isEnabled() is False
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
     _assert_step5_surface_is_scientist_facing(window)
 
-    # The stale explanation shown beneath the buttons is also plain language.
+    # Synchronizing preserves the stored consumed settings and plain language.
     window._sync_guided_feature_event_editor_to_current_run()
-    assert window._guided_feature_event_status_label.text().startswith(
-        GUIDED_DEFAULT_SETTINGS_CHANGED_AFTER_CONFIRMATION
-    )
     _assert_step5_surface_is_scientist_facing(window)
 
     # --- State 4: reset restores valid loaded defaults ----------------------
@@ -4717,6 +4717,8 @@ def test_readiness_accepts_loaded_defaults_and_valid_custom_overrides(
     ready_before, message_before = window._guided_feature_detection_readiness()
     assert ready_before is True
     assert "every included ROI" in message_before
+    window._refresh_guided_feature_detection_continue_state()
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
 
     for roi in window._guided_included_roi_ids_for_feature_detection():
         window._guided_per_roi_feature_event_overrides[roi] = {
@@ -4725,6 +4727,8 @@ def test_readiness_accepts_loaded_defaults_and_valid_custom_overrides(
     ready_custom, message_custom = window._guided_feature_detection_readiness()
     assert ready_custom is True
     assert "every included ROI" in message_custom
+    window._refresh_guided_feature_detection_continue_state()
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
 
 
 def test_feature_readiness_blocks_invalid_included_roi_but_ignores_excluded_roi(
@@ -4743,11 +4747,120 @@ def test_feature_readiness_blocks_invalid_included_roi_but_ignores_excluded_roi(
     ready, message = window._guided_feature_detection_readiness()
     assert ready is False
     assert roi_id in message
+    window._refresh_guided_feature_detection_continue_state()
+    assert window._guided_feature_detection_continue_btn.isEnabled() is False
 
     first_item.setCheckState(Qt.Unchecked)
     ready_excluded, message_excluded = window._guided_feature_detection_readiness()
     assert ready_excluded is True
     assert "every included ROI" in message_excluded
+    window._refresh_guided_feature_detection_continue_state()
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
+
+
+def test_visible_feature_continue_uses_current_state_without_rescan_or_preview(
+    qapp, window, tmp_path, monkeypatch
+):
+    """The real Step 5 button passively renders Review from established state."""
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    feature_index = list(GUIDED_WORKFLOW_STEPS).index("Feature detection")
+    review_index = list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    window._guided_workflow_stepper.setCurrentRow(feature_index)
+    window._guided_new_analysis_feature_event_profile_status = "default_initialized"
+    window._guided_new_analysis_feature_event_profile_errors = []
+    window._guided_new_analysis_feature_event_profile_stale_reasons = []
+    window._refresh_guided_feature_detection_continue_state()
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
+
+    monkeypatch.setattr(
+        window,
+        "_refresh_guided_dataset_contract_panel",
+        lambda: pytest.fail("Review transition rescanned the dataset contract"),
+    )
+    import gui.main_window as main_window_module
+    for name in (
+        "run_guided_local_correction_preview",
+        "run_guided_correction_preview_comparison",
+        "generate_guided_correction_preview_reports",
+    ):
+        monkeypatch.setattr(
+            main_window_module,
+            name,
+            lambda *args, _name=name, **kwargs: pytest.fail(
+                f"Review transition called {_name}"
+            ),
+        )
+
+    started = perf_counter()
+    window._guided_feature_detection_continue_btn.click()
+    click_elapsed = perf_counter() - started
+    qapp.processEvents()
+
+    assert click_elapsed < 1.0
+    assert window._guided_workflow_stepper.currentRow() == review_index
+    displayed = window._guided_draft_run_plan_preview_label.text()
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert "Input/source:" in displayed
+    assert "Format: rwd" in displayed
+    assert "ROI counts: 3 discovered, 3 included" in displayed
+    assert "Correction strategy coverage: 3/3 ROIs covered" in displayed
+    assert plan.input_source_path == window._guided_input_dir_edit.text()
+    assert plan.output_policy_path == window._guided_output_dir_edit.text()
+
+
+def test_visible_feature_controls_allow_all_custom_and_mixed_without_default_apply(
+    window, tmp_path, monkeypatch
+):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._guided_new_analysis_feature_event_profile_status = "default_initialized"
+    window._guided_new_analysis_feature_event_profile_errors = []
+    window._guided_new_analysis_feature_event_profile_stale_reasons = []
+    window._guided_feature_event_editor_dirty = False
+    window._refresh_guided_feature_detection_continue_state()
+
+    for offset, roi in enumerate(("CH1", "CH2", "CH3"), start=1):
+        _customize_roi_via_fake_dialog(
+            window,
+            monkeypatch,
+            roi,
+            {"peak_threshold_k": 3.0 + offset / 10.0},
+        )
+        assert window._guided_feature_detection_continue_btn.isEnabled() is True
+    assert set(window._guided_per_roi_feature_event_overrides) == {
+        "CH1",
+        "CH2",
+        "CH3",
+    }
+
+    # Unapplied shared-Default edits are irrelevant while no included ROI
+    # consumes Default.
+    window._guided_feature_event_peak_k_edit.setText("4.75")
+    window._on_guided_feature_detection_editor_changed()
+    assert window._guided_feature_event_editor_dirty is True
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
+    assert "every included ROI" in (
+        window._guided_feature_detection_continue_status.text()
+    )
+
+    # Use the visible Reset control to create a mixed Default/Custom setup.
+    row = next(
+        row
+        for row in range(window._guided_feature_event_per_roi_table.rowCount())
+        if window._guided_feature_event_per_roi_table.item(row, 0).text() == "CH3"
+    )
+    window._guided_feature_event_per_roi_table.cellWidget(row, 4).click()
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
+    assert "saved Default settings" in (
+        window._guided_feature_detection_continue_status.text()
+    )
+
+    plan = window._build_guided_new_analysis_draft_plan()
+    choices = {choice.roi_id: choice for choice in plan.per_roi_feature_event_choices}
+    assert choices["CH1"].config_fields == {"peak_threshold_k": 3.1}
+    assert choices["CH2"].config_fields == {"peak_threshold_k": 3.2}
+    assert "CH3" not in choices
+    assert plan.feature_event_profile_status == "default_initialized"
+    assert plan.feature_event_explicitly_applied is False
 
 
 # Unavailable / load-failure sanitization (4J16k38 final follow-up)

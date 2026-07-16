@@ -1613,13 +1613,16 @@ def evaluate_new_analysis_plan_issues(plan: GuidedNewAnalysisDraftPlan) -> list[
             severity="blocking"
         ))
 
-    # 12. feature_event_profile_not_applied
+    # Loaded defaults are effective configuration, not a separate
+    # authorization state. The Apply action records edits to those defaults;
+    # it is not required merely to consume already-loaded valid values.
     elif plan.feature_event_profile_status == "default_initialized":
-        issues.append(GuidedPlanIssue(
-            category="feature_event_profile_not_applied",
-            message="Defaults are loaded, but feature/event settings have not been explicitly applied to the draft plan.",
-            severity="blocking"
-        ))
+        if plan.feature_event_validation_issues:
+            issues.append(GuidedPlanIssue(
+                category="invalid_feature_event_profile",
+                message=f"Feature/event profile has validation issues: {'; '.join(plan.feature_event_validation_issues)}",
+                severity="blocking",
+            ))
 
     # 12b. invalid_feature_event_profile
     elif plan.feature_event_profile_status == "invalid":
@@ -2856,8 +2859,13 @@ def _output_creation_policy_preview_dict(
 
 def _feature_event_profile_current_for_first_subset(plan: GuidedNewAnalysisDraftPlan) -> bool:
     return (
-        plan.feature_event_profile_status == "applied"
-        and bool(plan.feature_event_explicitly_applied)
+        (
+            plan.feature_event_profile_status == "default_initialized"
+            or (
+                plan.feature_event_profile_status == "applied"
+                and bool(plan.feature_event_explicitly_applied)
+            )
+        )
         and not plan.feature_event_validation_issues
         and not plan.feature_event_stale_reasons
     )

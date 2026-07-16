@@ -1065,7 +1065,6 @@ def test_readiness_complete_plan_allows_future_handoff_but_not_execution():
         ({"cache_id": None}, "missing_diagnostic_cache", "diagnostic_cache"),
         ({"stale_or_current": "stale", "stale_reasons": ["ROI changed"]}, "stale_diagnostic_cache", "diagnostic_cache"),
         ({"per_roi_correction_strategy_choices": []}, "missing_strategy_choice_for_included_roi", "correction_strategies"),
-        ({"feature_event_profile_status": "default_initialized", "feature_event_explicitly_applied": False}, "feature_event_profile_not_applied", "feature_event"),
         ({"feature_event_profile_status": "stale", "feature_event_stale_reasons": ["baseline changed"]}, "stale_feature_event_profile", "feature_event"),
         ({"output_policy_status": "missing", "output_policy_path": None, "output_policy_explicitly_applied": False}, "missing_output_policy", "output_policy"),
         ({"output_policy_status": "stale", "output_policy_stale_reasons": ["target appeared"]}, "stale_output_policy", "output_policy"),
@@ -1286,7 +1285,7 @@ def test_run_preview_uses_only_plan_fields_and_marks_missing_execution_fields_un
     assert preview.acquisition["timeline_anchor_mode"]["source"] == "GuidedNewAnalysisDraftPlan.execution_intent"
 
 
-def test_run_preview_feature_event_consumption_contract_requires_current_applied_profile():
+def test_run_preview_feature_event_consumes_valid_loaded_defaults_without_apply():
     plan = _complete_new_analysis_plan(
         feature_event_profile_status="default_initialized",
         feature_event_explicitly_applied=False,
@@ -1296,19 +1295,18 @@ def test_run_preview_feature_event_consumption_contract_requires_current_applied
     preview = build_guided_new_analysis_run_preview(plan)
     categories = {issue.category for issue in readiness.blocking_issues}
 
-    assert "feature_event_profile_not_applied" in categories
+    assert "feature_event_profile_not_applied" not in categories
     assert preview.feature_event_consumption["execution_mode"] == "phasic"
     assert preview.feature_event_consumption["run_profile"] == "full"
     assert preview.feature_event_consumption["traces_only"] is False
     assert preview.feature_event_consumption["feature_event_profile_required"] is True
-    assert preview.feature_event_consumption["feature_event_profile_current_applied"] is False
-    assert preview.feature_event_consumption["feature_event_values_consumed"] is False
+    assert preview.feature_event_consumption["feature_event_profile_current_applied"] is True
+    assert preview.feature_event_consumption["feature_event_values_consumed"] is True
     assert preview.feature_event_consumption["feature_extraction_in_scope"] is True
     assert preview.feature_event_consumption["feature_dependent_phasic_summaries_in_scope"] is True
     assert preview.feature_event_consumption["tonic_outputs_in_scope"] is False
     assert preview.feature_event_consumption["full_both_mode_outputs_in_scope"] is False
-    assert preview.feature_event_consumption["execution_consumption_enabled"] is False
-    assert preview.execution_available is False
+    assert preview.feature_event_consumption["execution_consumption_enabled"] is True
 
 
 @pytest.mark.parametrize(
@@ -3567,7 +3565,6 @@ def test_execution_spec_preview_dataset_contract_blockers(snapshot, expected_cat
     "overrides",
     [
         {"feature_event_profile_status": "missing", "feature_event_explicitly_applied": False},
-        {"feature_event_profile_status": "default_initialized", "feature_event_explicitly_applied": False},
         {
             "feature_event_profile_status": "invalid",
             "feature_event_validation_issues": ["bad threshold"],
@@ -3871,15 +3868,13 @@ def test_feature_event_profile_statuses_validation():
     issues_a = evaluate_new_analysis_plan_issues(plan_a)
     assert not any(iss.category.startswith("missing_feature_event") or iss.category.startswith("feature_event") or iss.category.startswith("invalid_feature_event") or iss.category.startswith("stale_feature_event") for iss in issues_a)
 
-    # Case B: default_initialized status results in blocking feature_event_profile_not_applied
+    # Case B: valid loaded defaults are effective without a ceremonial Apply.
     plan_b = GuidedNewAnalysisDraftPlan(
         feature_event_profile_status="default_initialized"
     )
     issues_b = evaluate_new_analysis_plan_issues(plan_b)
     iss_b = [iss for iss in issues_b if iss.category == "feature_event_profile_not_applied"]
-    assert len(iss_b) == 1
-    assert iss_b[0].severity == "blocking"
-    assert "explicitly applied" in iss_b[0].message
+    assert iss_b == []
 
     # Case C: invalid status results in blocking invalid_feature_event_profile
     plan_c = GuidedNewAnalysisDraftPlan(

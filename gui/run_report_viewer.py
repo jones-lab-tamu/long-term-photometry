@@ -85,6 +85,7 @@ class RunReportViewer(QWidget):
         self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
         self._feature_event_state = GuidedCompletedFeatureEventState.absent()
         self._phasic_review_model: CompletedRunReviewModel | None = None
+        self._completed_review_overview: dict = {}
         self._phasic_review_error = ""
         self._region_paths: Dict[str, str] = {}
         self._region_tab_images: Dict[str, Dict[str, List[str]]] = {}
@@ -372,6 +373,7 @@ class RunReportViewer(QWidget):
         self._feature_event_state = GuidedCompletedFeatureEventState.absent()
         self._refresh_feature_event_display()
         self._phasic_review_model = None
+        self._completed_review_overview = {}
         self._phasic_review_error = ""
         self._correction_summary_label.setText("")
         self._correction_summary_label.setVisible(False)
@@ -408,7 +410,12 @@ class RunReportViewer(QWidget):
         self.clear()
         self._set_status_message(message, level="running")
 
-    def load_report(self, out_dir: str) -> bool:
+    def load_report(
+        self,
+        out_dir: str,
+        *,
+        review_overview: dict | None = None,
+    ) -> bool:
         """Load complete-state workspace from a run directory."""
         self.clear()
         self._current_run_dir = out_dir
@@ -449,23 +456,32 @@ class RunReportViewer(QWidget):
             self._workspace.hide()
             return False
 
-        self._applied_dff_state = load_guided_completed_applied_dff_state(out_dir)
-        self._refresh_applied_dff_display()
-        self._feature_event_state = load_guided_completed_feature_event_state(out_dir)
-        self._refresh_feature_event_display()
-
-        classification = classify_completed_run_terminal_state(out_dir)
         self._phasic_review_model = None
+        self._completed_review_overview = dict(review_overview or {})
         self._phasic_review_error = ""
-        run_mode = getattr(classification, "run_mode", {}) or {}
-        enabled_branches = tuple(
-            branch
-            for branch, key in (
-                ("tonic", "tonic_analysis"),
-                ("phasic", "phasic_analysis"),
+        if self._completed_review_overview:
+            classification = None
+            enabled_branches = tuple(
+                str(branch)
+                for branch in self._completed_review_overview.get(
+                    "analysis_branches", ()
+                )
             )
-            if bool(run_mode.get(key))
-        )
+        else:
+            self._applied_dff_state = load_guided_completed_applied_dff_state(out_dir)
+            self._refresh_applied_dff_display()
+            self._feature_event_state = load_guided_completed_feature_event_state(out_dir)
+            self._refresh_feature_event_display()
+            classification = classify_completed_run_terminal_state(out_dir)
+            run_mode = getattr(classification, "run_mode", {}) or {}
+            enabled_branches = tuple(
+                branch
+                for branch, key in (
+                    ("tonic", "tonic_analysis"),
+                    ("phasic", "phasic_analysis"),
+                )
+                if bool(run_mode.get(key))
+            )
         branch_evidence = {
             branch: (
                 os.path.join(out_dir, "_analysis", f"{branch}_out", "run_metadata.json"),
@@ -479,7 +495,7 @@ class RunReportViewer(QWidget):
             for branch, paths in branch_evidence.items()
             if os.path.isfile(paths[2])
         )
-        if enabled_branches and not classification.is_success:
+        if classification is not None and enabled_branches and not classification.is_success:
             self._phasic_review_error = str(classification.reason)
             self._set_status_message(
                 f"This completed result cannot be verified: {classification.reason}",
@@ -487,7 +503,7 @@ class RunReportViewer(QWidget):
             )
             self._workspace.hide()
             return False
-        if classification.is_current and enabled_branches:
+        if classification is not None and classification.is_current and enabled_branches:
             for branch in enabled_branches:
                 missing = [path for path in branch_evidence[branch] if not os.path.isfile(path)]
                 if missing:
@@ -500,8 +516,12 @@ class RunReportViewer(QWidget):
                     )
                     self._workspace.hide()
                     return False
-        should_load_review = bool(enabled_branches) if classification.is_current else bool(historical_caches)
-        if should_load_review:
+        should_load_review = (
+            bool(enabled_branches)
+            if classification is None or classification.is_current
+            else bool(historical_caches)
+        )
+        if should_load_review and not self._completed_review_overview:
             try:
                 self._phasic_review_model = load_completed_phasic_review(out_dir)
             except CompletedRunReviewError as exc:
@@ -513,7 +533,10 @@ class RunReportViewer(QWidget):
                 self._correction_summary_label.setVisible(False)
                 self._workspace.hide()
                 return False
-        if self._phasic_review_model is not None and self._phasic_review_model.current_native:
+        if (
+            self._phasic_review_model is not None
+            and self._phasic_review_model.current_native
+        ) or self._completed_review_overview:
             # Native current-run canonical dF/F is authoritative.  The older
             # Guided post-hoc applied-dF/F tree remains available to its
             # standalone tools, but must not appear as a competing completed
@@ -521,13 +544,24 @@ class RunReportViewer(QWidget):
             self._applied_dff_state = GuidedCompletedAppliedDffState.absent()
             self._refresh_applied_dff_display()
         self._refresh_correction_summary()
-        completion_summary = get_scientist_completion_summary(out_dir, classification)
         title = "Results workspace"
+        if self._completed_review_overview:
+            overview_format = str(
+                self._completed_review_overview.get("format") or "analysis"
+            ).upper()
+            overview_rois = self._completed_review_overview.get(
+                "included_rois", ()
+            )
+            title = (
+                f"Results workspace — completed {overview_format} analysis "
+                f"({len(overview_rois)} included ROI(s))"
+            )
         if is_preview:
             title += " [PREVIEW]"
         elif run_type == "tuning_prep":
             title += " [TUNING PREP]"
-        if classification.completed_with_missing:
+        if classification is not None and classification.completed_with_missing:
+            completion_summary = get_scientist_completion_summary(out_dir, classification)
             self._set_status_message(completion_summary, level="ready")
         else:
             self._set_status_message(title, level="ready")
@@ -539,9 +573,31 @@ class RunReportViewer(QWidget):
         self._region_combo.addItems(region_names)
         self._region_combo.blockSignals(False)
 
-        if self._region_combo.count() > 0:
+        if self._region_combo.count() > 0 and not self._completed_review_overview:
             self._region_combo.setCurrentIndex(0)
             self._on_region_changed(0)
+        elif self._completed_review_overview:
+            self._region_combo.insertItem(0, "Choose an ROI to inspect")
+            self._region_combo.setCurrentIndex(0)
+            self._show_no_image(
+                "Choose an ROI to inspect its available review images."
+            )
+            requested = self._completed_review_overview.get(
+                "requested_by_roi", {}
+            )
+            self._correction_summary_label.setText(
+                "Correction settings are available for "
+                f"{len(requested)} included ROI(s). Choose an ROI for details."
+            )
+            self._correction_summary_label.setVisible(True)
+            features = self._completed_review_overview.get(
+                "feature_settings_by_roi", {}
+            )
+            self._selected_feature_settings_label.setText(
+                "Feature detection settings are available for "
+                f"{len(features)} included ROI(s)."
+            )
+            self._selected_feature_settings_label.setVisible(True)
         else:
             self._show_no_image("No region available.")
             self._refresh_inline_actions()
@@ -718,6 +774,45 @@ class RunReportViewer(QWidget):
     def _refresh_correction_summary(self) -> None:
         model = self._phasic_review_model
         roi = self._selected_region()
+        if model is None and self._completed_review_overview and roi:
+            requested = self._completed_review_overview.get(
+                "requested_by_roi", {}
+            )
+            features = self._completed_review_overview.get(
+                "feature_settings_by_roi", {}
+            )
+            record = requested.get(roi, {}) if isinstance(requested, dict) else {}
+            selected = str(
+                record.get("dynamic_fit_mode")
+                or record.get("selected_strategy")
+                or ""
+            )
+            labels = {
+                "global_linear_regression": "Global linear regression",
+                "robust_global_event_reject": (
+                    "Robust global fit with event rejection"
+                ),
+                "adaptive_event_gated_regression": (
+                    "Adaptive event-gated regression"
+                ),
+                "signal_only_f0": "Signal-Only F0",
+            }
+            self._correction_summary_label.setText(
+                f"Correction approach for {roi}: "
+                f"{labels.get(selected, selected or 'available')}."
+            )
+            self._correction_summary_label.setVisible(True)
+            row = features.get(roi, {}) if isinstance(features, dict) else {}
+            fields = row.get("effective_config_fields", {}) if isinstance(row, dict) else {}
+            method = str(fields.get("peak_threshold_method") or "")
+            source = str(row.get("source") or "default").lower()
+            source_label = "Custom" if source == "override" else "Default"
+            self._selected_feature_settings_label.setText(
+                f"{source_label} feature settings"
+                + (f": {method} threshold." if method else ".")
+            )
+            self._selected_feature_settings_label.setVisible(True)
+            return
         if model is None or not roi:
             self._correction_summary_label.setText("")
             self._correction_summary_label.setVisible(False)
@@ -875,7 +970,19 @@ class RunReportViewer(QWidget):
         tab_map = self._region_tab_images.get(region, {})
         available_tabs = [t for t in TAB_ORDER if tab_map.get(t)]
         model = self._phasic_review_model
-        if model is not None and model.strategy_label_for_roi(region) == "Signal-Only F0":
+        overview_requested = self._completed_review_overview.get(
+            "requested_by_roi", {}
+        )
+        overview_record = (
+            overview_requested.get(region, {})
+            if isinstance(overview_requested, dict)
+            else {}
+        )
+        signal_only = bool(
+            model is not None
+            and model.strategy_label_for_roi(region) == "Signal-Only F0"
+        ) or str(overview_record.get("strategy_family") or "") == "signal_only_f0"
+        if signal_only:
             if TAB_PHASIC_DYNAMIC_FIT in available_tabs:
                 dynamic_index = available_tabs.index(TAB_PHASIC_DYNAMIC_FIT)
                 available_tabs[dynamic_index] = TAB_PHASIC_CORRECTION_REFERENCE

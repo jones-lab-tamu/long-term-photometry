@@ -8,6 +8,7 @@ consumed attributes/datasets that verifier already checked.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass, field
@@ -1090,3 +1091,143 @@ def load_completed_phasic_review(run_dir: str | Path) -> CompletedRunReviewModel
         roi_inventory=phasic.roi_inventory,
         normalized_recording=phasic.normalized_recording,
     )
+
+
+def load_completed_review_overview(run_dir: str | Path) -> dict[str, Any]:
+    """Load a compact Guided Review orientation without trace datasets.
+
+    This deliberately reads only terminal/analysis metadata plus the persisted
+    normalized recording and feature configuration. It never opens an HDF5
+    cache or materializes a full-resolution trace.
+    """
+    resolved = Path(run_dir).expanduser().resolve()
+    status = _read_json(resolved / "status.json")
+    manifest_path = resolved / "MANIFEST.json"
+    manifest = _read_json(manifest_path)
+    top_report = _read_json(resolved / "run_report.json")
+    completion = manifest.get("completion", {})
+    status_completion = status.get("completion", {})
+    report_completion = top_report.get("completion_contract", {})
+    run_id = str(status.get("run_id", ""))
+    manifest_run_id = str(completion.get("run_id", ""))
+    report_run_id = str(report_completion.get("run_id", ""))
+    try:
+        manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise CompletedRunReviewError(
+            f"Completed result manifest is unreadable ({exc})."
+        ) from exc
+    compact_terminal_ok = bool(
+        status.get("phase") == "final"
+        and status.get("status") == "success"
+        and completion.get("final") is True
+        and status_completion.get("completion_contract_version")
+        == "run_completion.v1"
+        and completion.get("completion_contract_version") == "run_completion.v1"
+        and report_completion.get("contract_version") == "run_completion.v1"
+        and run_id
+        and run_id == manifest_run_id == report_run_id
+        and status_completion.get("manifest_sha256") == manifest_digest
+    )
+    if not compact_terminal_ok:
+        raise CompletedRunReviewError(
+            "This completed result has incomplete or inconsistent completion metadata."
+        )
+    run_mode = completion.get("run_mode", {})
+    if not isinstance(run_mode, dict):
+        raise CompletedRunReviewError(
+            "This completed result has unreadable run-mode metadata."
+        )
+    enabled = tuple(
+        branch
+        for branch, key in (
+            ("tonic", "tonic_analysis"),
+            ("phasic", "phasic_analysis"),
+        )
+        if run_mode.get(key)
+    )
+    if not enabled:
+        raise CompletedRunReviewError(
+            "This completed result has no reviewable analysis branch."
+        )
+    analysis_kind = "phasic" if "phasic" in enabled else "tonic"
+    analysis_dir = resolved / "_analysis" / f"{analysis_kind}_out"
+    for branch in enabled:
+        branch_dir = resolved / "_analysis" / f"{branch}_out"
+        required = (
+            branch_dir / "run_metadata.json",
+            branch_dir / "run_report.json",
+            branch_dir / f"{branch}_trace_cache.h5",
+        )
+        if any(not path.is_file() for path in required):
+            raise CompletedRunReviewError(
+                f"The completed {branch} result is missing persisted Review evidence."
+            )
+    metadata = _read_json(analysis_dir / "run_metadata.json")
+    report = _read_json(analysis_dir / "run_report.json")
+    requested_by_roi, native = _validate_requested_provenance(
+        metadata, report, analysis_kind
+    )
+    if not native:
+        raise CompletedRunReviewError(
+            "The completed result has no verified correction summary."
+        )
+
+    normalized_path = resolved / GUIDED_NORMALIZED_RECORDING_DESCRIPTION_FILENAME
+    normalized = None
+    if normalized_path.is_file():
+        try:
+            normalized = deserialize_normalized_recording_description(
+                json.loads(normalized_path.read_text(encoding="utf-8"))
+            )
+        except (OSError, json.JSONDecodeError, NormalizedRecordingError) as exc:
+            raise CompletedRunReviewError(
+                f"Completed result recording summary is unreadable ({exc})."
+            ) from exc
+    feature_settings = (
+        _load_feature_settings(resolved / "_analysis" / "phasic_out")
+        if "phasic" in enabled
+        else {}
+    )
+    included_rois = list(requested_by_roi)
+    excluded_rois: list[str] = []
+    session_counts = {"total": 0, "processed": 0, "missing": 0, "excluded": 0}
+    adapter_format = ""
+    acquisition_mode = ""
+    if normalized is not None:
+        adapter_format = str(normalized.adapter_format)
+        acquisition_mode = str(normalized.acquisition_mode)
+        included_rois = [
+            item.roi_id for item in normalized.roi_channels if item.included
+        ]
+        excluded_rois = [
+            item.roi_id for item in normalized.roi_channels if not item.included
+        ]
+        session_counts["total"] = len(normalized.sessions)
+        for session in normalized.sessions:
+            disposition = str(session.disposition)
+            count_key = {
+                "process": "processed",
+                "missing": "missing",
+                "excluded": "excluded",
+            }.get(disposition)
+            if count_key:
+                session_counts[count_key] += 1
+
+    return {
+        "run_dir": str(resolved),
+        "terminal_state": "success",
+        "format": adapter_format,
+        "acquisition_mode": acquisition_mode,
+        "analysis_branches": list(enabled),
+        "included_rois": list(included_rois),
+        "excluded_rois": list(excluded_rois),
+        "session_counts": dict(session_counts),
+        "requested_by_roi": {
+            str(roi): dict(record) for roi, record in requested_by_roi.items()
+        },
+        "feature_settings_by_roi": {
+            str(roi): dict(record) for roi, record in feature_settings.items()
+        },
+        "full_resolution_traces_loaded": False,
+    }

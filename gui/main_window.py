@@ -134,6 +134,9 @@ from photometry_pipeline.guided_recording_structure_inference import (
     GuidedRecordingStructureInference,
     infer_guided_recording_structure,
 )
+from photometry_pipeline.completed_run_review import (
+    load_completed_review_overview,
+)
 from photometry_pipeline.signal_only_f0_diagnostics import (
     build_default_signal_only_f0_diagnostic_cache_output_dir,
     make_signal_only_f0_diagnostic_id,
@@ -494,6 +497,25 @@ class _GuidedCorrectionPreviewWorker(QObject):
             )
             return
         self.succeeded.emit(result)
+
+
+class _GuidedCompletedReviewLoadWorker(QObject):
+    """Read one compact completed-run overview without retaining GUI state."""
+
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, run_dir: str):
+        super().__init__()
+        self._run_dir = str(run_dir)
+
+    def run(self) -> None:
+        try:
+            overview = load_completed_review_overview(self._run_dir)
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            return
+        self.succeeded.emit(dict(overview))
 
 
 class _GuidedRunExecutionWorker(QObject):
@@ -2357,6 +2379,7 @@ class MainWindow(QMainWindow):
         self._guided_feature_event_editor_synced_run = None
         self._guided_new_analysis_feature_event_profile = None
         self._guided_new_analysis_feature_event_profile_status = "missing"
+        self._guided_feature_event_editor_dirty = False
         self._guided_new_analysis_feature_event_profile_baseline_source = None
         self._guided_new_analysis_feature_event_profile_baseline_kind = None
         self._guided_new_analysis_feature_event_profile_stale_reasons = []
@@ -2421,6 +2444,10 @@ class MainWindow(QMainWindow):
         self._guided_correction_preview_thread = None
         self._guided_correction_preview_worker = None
         self._guided_correction_preview_context = None
+        self._guided_completed_review_loading = False
+        self._guided_completed_review_load_thread = None
+        self._guided_completed_review_load_worker = None
+        self._guided_completed_review_load_path = ""
         self._guided_npm_launch_runtime = None
         self._guided_npm_run_worker_thread = None
         self._guided_npm_run_worker = None
@@ -3337,7 +3364,7 @@ class MainWindow(QMainWindow):
                     )
                 )
                 validation_errors = validate_feature_event_config_fields(
-                    effective
+                    self._guided_active_feature_event_config_fields(effective)
                 )
                 if validation_errors:
                     return (
@@ -3345,6 +3372,20 @@ class MainWindow(QMainWindow):
                         f"Choose valid feature settings for {roi_id} before "
                         "continuing.",
                     )
+            overrides = getattr(
+                self, "_guided_per_roi_feature_event_overrides", {}
+            ) or {}
+            uses_default = any(roi_id not in overrides for roi_id in included)
+            if (
+                uses_default
+                and getattr(self, "_guided_feature_event_editor_dirty", False)
+            ):
+                return (
+                    True,
+                    "The saved Default settings and all Custom settings are "
+                    "ready. Edits still shown in the Default form will not "
+                    "be used unless you select ‘Use these as Default settings’.",
+                )
             return True, "Feature detection settings are ready for every included ROI."
         if status == "stale":
             return (
@@ -4282,6 +4323,12 @@ class MainWindow(QMainWindow):
         if thread is not None and thread.isRunning():
             thread.quit()
             thread.wait()
+        review_thread = getattr(
+            self, "_guided_completed_review_load_thread", None
+        )
+        if review_thread is not None and review_thread.isRunning():
+            review_thread.quit()
+            review_thread.wait()
         super().closeEvent(event)
 
     def _on_guided_recording_timing_user_edit(self, _text: str) -> None:
@@ -10474,17 +10521,10 @@ class MainWindow(QMainWindow):
             run_preview_group = getattr(self, "_guided_new_analysis_run_preview_group", None)
             if run_preview_group is not None:
                 run_preview_group.setVisible(True)
-            # The dataset-contract panel lives on the Draft plan step's
-            # advanced/technical disclosure. Refreshing it can trigger a
-            # real RWD-folder scan (one open+parse per discovered chunk
-            # file), which is expensive for a large real dataset. This
-            # preview refresh runs on every workflow-mode change (e.g.
-            # "Set up new analysis" -> Select data), so only pay that cost
-            # here when the user could actually be looking at the panel;
-            # explicit Apply/Clear actions on it always refresh regardless
-            # of step (4J16k23).
-            if self._guided_current_step_name() == "Draft plan":
-                self._refresh_guided_dataset_contract_panel()
+            # Passive Review rendering consumes the already-established
+            # dataset-contract snapshot. The panel's explicit Apply/Clear
+            # actions remain responsible for any requested source audit;
+            # entering Review must not rescan every RWD session.
             return
 
         run_preview_group = getattr(self, "_guided_new_analysis_run_preview_group", None)
@@ -12762,7 +12802,10 @@ class MainWindow(QMainWindow):
             is True
         )
         button.setVisible(ready)
-        button.setEnabled(ready)
+        button.setEnabled(
+            ready
+            and not getattr(self, "_guided_completed_review_loading", False)
+        )
         button.setToolTip(
             "Load the completed run into Review."
             if ready
@@ -12771,6 +12814,8 @@ class MainWindow(QMainWindow):
 
     def _on_guided_load_completed_run_for_review_clicked(self) -> None:
         """Loader-gate an explicit Guided transition into Review."""
+        if getattr(self, "_guided_completed_review_loading", False):
+            return
         result = getattr(self, "_guided_backend_execution_result", None)
         label = getattr(self, "_guided_run_readiness_label", None)
         if (
@@ -12796,43 +12841,101 @@ class MainWindow(QMainWindow):
                     "Guided Run did not provide a completed-run candidate."
                 )
             return
-        # 4J16k20: is_successful_completed_run_dir checks only run
-        # completion metadata (run_report.json/status.json/MANIFEST.json),
-        # independent of whether any region has displayable outputs. A
-        # genuinely-completed run must still be openable for review even
-        # if it happens to have no displayable regions -- that is a
-        # distinct, later condition handled below, not a reason to reject
-        # navigation to Review outright.
-        successful, _success_reason = is_successful_completed_run_dir(candidate)
-        if not successful:
+        thread = QThread(self)
+        worker = _GuidedCompletedReviewLoadWorker(candidate)
+        worker.moveToThread(thread)
+        self._guided_completed_review_load_path = candidate
+        self._guided_completed_review_load_thread = thread
+        self._guided_completed_review_load_worker = worker
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(
+            self._on_guided_completed_review_load_succeeded
+        )
+        worker.failed.connect(self._on_guided_completed_review_load_failed)
+        worker.succeeded.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.succeeded.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._cleanup_guided_completed_review_loader)
+        self._set_guided_completed_review_loading(True)
+        thread.start()
+
+    def _set_guided_completed_review_loading(self, loading: bool) -> None:
+        self._guided_completed_review_loading = bool(loading)
+        button = getattr(
+            self, "_guided_load_completed_run_for_review_btn", None
+        )
+        if button is not None:
+            button.setEnabled(not loading)
+            button.setText(
+                "Loading completed analysis…"
+                if loading
+                else "Load completed run for review"
+            )
+        progress = getattr(
+            self, "_guided_completed_review_load_progress", None
+        )
+        if progress is not None:
+            progress.setVisible(bool(loading))
+        label = getattr(self, "_guided_run_readiness_label", None)
+        if loading and label is not None:
+            label.setText("Loading completed analysis for review…")
+
+    def _on_guided_completed_review_load_succeeded(
+        self, overview: dict[str, object]
+    ) -> None:
+        candidate = str(
+            getattr(self, "_guided_completed_review_load_path", "") or ""
+        )
+        self._set_guided_completed_review_loading(False)
+        guided_viewer = getattr(self, "_guided_report_viewer", None)
+        loaded = bool(
+            candidate
+            and guided_viewer is not None
+            and guided_viewer.load_report(
+                candidate, review_overview=dict(overview)
+            )
+        )
+        label = getattr(self, "_guided_run_readiness_label", None)
+        if not loaded:
+            if guided_viewer is not None:
+                technical_reason = guided_viewer._status_label.text()
+                self._append_log(
+                    "Completed Review display failed: " + technical_reason
+                )
+                guided_viewer.clear()
             if label is not None:
                 label.setText(
-                    "The completed run could not be loaded for review. "
+                    "The completed analysis could not be opened for review. "
                     "The output folder may be incomplete."
                 )
             return
-        # Preserve Full Control's existing loader/state exactly as before
-        # whenever it also accepts this run (it always will when regions
-        # are present, since both use the same region-discovery logic).
-        accepted, _reason = self._is_openable_completed_results_dir(candidate)
-        if accepted:
-            self._open_completed_results_dir(candidate)
-        else:
-            self._current_run_dir = candidate
+        self._current_run_dir = candidate
         self._set_guided_workflow_mode("open_results")
         review_index = self._guided_step_index("Review")
         self._guided_workflow_stepper.setCurrentRow(review_index)
-        guided_viewer = getattr(self, "_guided_report_viewer", None)
-        if guided_viewer is not None:
-            if not guided_viewer.load_report(candidate):
-                technical_reason = guided_viewer._status_label.text()
-                guided_viewer._status_label.setText(
-                    "Guided Run finished and the run folder loaded, but no "
-                    f"reviewable outputs were found in:\n{candidate}\n\n"
-                    f"Reason: {technical_reason}"
-                )
         if label is not None:
             label.setText("Completed run loaded for review.")
+
+    def _on_guided_completed_review_load_failed(self, message: str) -> None:
+        self._set_guided_completed_review_loading(False)
+        self._append_log(f"Completed Review load failed: {message}")
+        guided_viewer = getattr(self, "_guided_report_viewer", None)
+        if guided_viewer is not None:
+            guided_viewer.clear()
+        label = getattr(self, "_guided_run_readiness_label", None)
+        if label is not None:
+            label.setText(
+                "The completed analysis could not be opened for review. "
+                "Check that the completed output folder is still available "
+                "and try again."
+            )
+
+    def _cleanup_guided_completed_review_loader(self) -> None:
+        self._guided_completed_review_load_thread = None
+        self._guided_completed_review_load_worker = None
+        self._guided_completed_review_load_path = ""
 
     def _build_guided_new_analysis_draft_plan(self):
         from photometry_pipeline.guided_new_analysis_plan import (
@@ -13100,17 +13203,22 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_guided_output_dir_edit"):
             out_base_path = self._guided_output_dir_edit.text().strip() or None
 
-        feature_ready, _feature_reason = (
-            self._guided_feature_detection_readiness()
-        )
         stored_feature_status = getattr(
             self,
             "_guided_new_analysis_feature_event_profile_status",
             "missing",
         )
-        effective_feature_status = (
-            "applied" if feature_ready else stored_feature_status
+        stored_feature_values = self._guided_active_feature_event_config_fields(
+            dict(
+                getattr(
+                    self,
+                    "_guided_new_analysis_feature_event_profile",
+                    {},
+                )
+                or {}
+            )
         )
+        stored_feature_values.pop("profile_id", None)
         output_selected = bool(str(out_base_path or "").strip())
 
         global_corr_strategy = None
@@ -13171,15 +13279,15 @@ class MainWindow(QMainWindow):
             signal_only_f0_path=sig_path,
             signal_only_f0_status=sig_status,
             signal_only_f0_source_cache_id=sig_source_cache_id,
-            feature_event_profile_status=effective_feature_status,
+            feature_event_profile_status=stored_feature_status,
             feature_event_profile_id=self._guided_new_analysis_feature_event_profile.get("profile_id") if self._guided_new_analysis_feature_event_profile else None,
             feature_event_baseline_config_source=self._guided_new_analysis_feature_event_profile_baseline_source,
             feature_event_baseline_status=self._guided_new_analysis_feature_event_profile_baseline_kind,
-            feature_event_values=self._guided_new_analysis_feature_event_profile if self._guided_new_analysis_feature_event_profile else {},
+            feature_event_values=stored_feature_values,
             feature_event_validation_issues=self._guided_new_analysis_feature_event_profile_errors,
             feature_event_stale_reasons=self._guided_new_analysis_feature_event_profile_stale_reasons,
             feature_event_updated_at_utc=self._guided_new_analysis_feature_event_profile_updated_at_utc,
-            feature_event_explicitly_applied=feature_ready,
+            feature_event_explicitly_applied=(stored_feature_status == "applied"),
             per_roi_feature_event_choices=self._guided_new_analysis_per_roi_feature_event_choices(included),
             output_policy_status="applied" if output_selected else "missing",
             output_policy_path=out_base_path,
@@ -14157,6 +14265,7 @@ class MainWindow(QMainWindow):
             defaults = self._event_feature_defaults_from_active_baseline()
             self._guided_new_analysis_feature_event_profile = dict(defaults)
             self._guided_new_analysis_feature_event_profile_status = "default_initialized"
+            self._guided_feature_event_editor_dirty = False
             self._guided_new_analysis_feature_event_profile_baseline_source = baseline_path
             self._guided_new_analysis_feature_event_profile_baseline_kind = baseline_kind
             self._guided_new_analysis_feature_event_profile_format = current_format
@@ -14270,6 +14379,29 @@ class MainWindow(QMainWindow):
         effective = dict(default_fields)
         effective.update(override.get("config_fields") or {})
         return effective
+
+    @staticmethod
+    def _guided_active_feature_event_config_fields(
+        config_fields: dict,
+    ) -> dict:
+        """Return only feature fields consumed by the selected threshold method."""
+        active = dict(config_fields or {})
+        method = str(active.get("peak_threshold_method") or "")
+        threshold_fields = {
+            "peak_threshold_k",
+            "peak_threshold_percentile",
+            "peak_threshold_abs",
+        }
+        selected = {
+            "mean_std": "peak_threshold_k",
+            "median_mad": "peak_threshold_k",
+            "percentile": "peak_threshold_percentile",
+            "absolute": "peak_threshold_abs",
+        }.get(method)
+        for field in threshold_fields:
+            if field != selected:
+                active.pop(field, None)
+        return active
 
     def _guided_per_roi_feature_event_summary_text(self, config_fields: dict) -> str:
         method = str(config_fields.get("peak_threshold_method", "mean_std"))
@@ -14502,25 +14634,21 @@ class MainWindow(QMainWindow):
     ) -> None:
         if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
             return
-        if (
-            self._guided_new_analysis_feature_event_profile_status
-            == "applied"
-        ):
-            current_values, error = self._guided_feature_event_current_values()
-            stored = dict(
-                self._guided_new_analysis_feature_event_profile or {}
+        current_values, error = self._guided_feature_event_current_values()
+        current_values = self._guided_active_feature_event_config_fields(
+            dict(current_values or {})
+        )
+        stored = self._guided_active_feature_event_config_fields(
+            dict(self._guided_new_analysis_feature_event_profile or {})
+        )
+        stored.pop("profile_id", None)
+        self._guided_feature_event_editor_dirty = bool(
+            error or current_values != stored
+        )
+        if self._guided_feature_event_editor_dirty:
+            self._invalidate_guided_backend_validation(
+                "feature detection settings edited"
             )
-            stored.pop("profile_id", None)
-            if error or current_values != stored:
-                self._guided_new_analysis_feature_event_profile_status = (
-                    "stale"
-                )
-                self._guided_new_analysis_feature_event_profile_stale_reasons = [
-                    "the Default settings were edited after being confirmed"
-                ]
-                self._invalidate_guided_backend_validation(
-                    "feature detection settings changed"
-                )
         self._clear_guided_feature_detection_preview_result("Settings changed. Re-generate preview to update.")
         self._refresh_guided_feature_detection_continue_state()
         self._refresh_guided_draft_run_plan_preview()
@@ -15430,6 +15558,7 @@ class MainWindow(QMainWindow):
         self._guided_new_analysis_feature_event_profile = dict(config_fields or {})
         self._guided_new_analysis_feature_event_profile["profile_id"] = profile_id
         self._guided_new_analysis_feature_event_profile_status = "applied"
+        self._guided_feature_event_editor_dirty = False
         self._guided_new_analysis_feature_event_profile_baseline_source = baseline_path
         self._guided_new_analysis_feature_event_profile_baseline_kind = baseline_kind
         self._guided_new_analysis_feature_event_profile_format = current_format
@@ -15500,6 +15629,7 @@ class MainWindow(QMainWindow):
         defaults = self._event_feature_defaults_from_active_baseline()
         self._guided_new_analysis_feature_event_profile = dict(defaults)
         self._guided_new_analysis_feature_event_profile_status = "default_initialized"
+        self._guided_feature_event_editor_dirty = False
         self._guided_new_analysis_feature_event_profile_baseline_source = baseline_path
         self._guided_new_analysis_feature_event_profile_baseline_kind = baseline_kind
         self._guided_new_analysis_feature_event_profile_format = current_format
@@ -17100,6 +17230,13 @@ class MainWindow(QMainWindow):
             self._guided_load_completed_run_for_review_btn,
             alignment=Qt.AlignLeft,
         )
+        self._guided_completed_review_load_progress = QProgressBar()
+        self._guided_completed_review_load_progress.setObjectName(
+            "guidedCompletedReviewLoadProgress"
+        )
+        self._guided_completed_review_load_progress.setRange(0, 0)
+        self._guided_completed_review_load_progress.setVisible(False)
+        run_layout.addWidget(self._guided_completed_review_load_progress)
         new_analysis_layout.addWidget(run_group)
 
         self._guided_new_analysis_mode_panels["Run"] = new_analysis_panel
