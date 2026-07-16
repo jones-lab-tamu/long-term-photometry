@@ -477,6 +477,138 @@ class _GuidedRunExecutionWorker(QObject):
         self.succeeded.emit(result)
 
 
+@dataclasses.dataclass(frozen=True)
+class _GuidedNpmRunWorkerFailure:
+    """Internal-only marker for a pre-reconciliation NPM run-worker failure.
+
+    Never displayed directly and never persisted to disk. `stage` selects
+    which scientist-facing text branch the GUI thread applies; `category`
+    is the stable backend category (if any), used only to look up a safe
+    mapped detail sentence -- the raw backend issue message is never
+    carried across this boundary.
+    """
+
+    stage: str
+    category: str | None = None
+
+
+class _GuidedNpmRunWorker(QObject):
+    """Builds the prelaunch claim, launches the NPM worker, and reconciles
+    it -- entirely off the GUI thread.
+
+    Holds only the plain, already-captured validation context/outcome/
+    revision values; it must never call a MainWindow method, read a
+    MainWindow/widget attribute, or infer current GUI values after
+    starting, since it runs on a separate thread. It calls only the
+    existing module-level `build_guided_npm_worker_prelaunch_claim_from_
+    validation`, `launch_guided_npm_worker_runtime`,
+    `reconcile_guided_npm_worker_runtime`, and
+    `reconcile_guided_npm_post_launch_runtime` functions -- it never
+    replicates their internal chains.
+    """
+
+    launched = Signal(object, bool)
+    succeeded = Signal(object)
+    failed = Signal(object)
+
+    def __init__(
+        self,
+        *,
+        validation_context,
+        validation_outcome,
+        current_gui_revision: int,
+    ):
+        super().__init__()
+        self._validation_context = validation_context
+        self._validation_outcome = validation_outcome
+        self._current_gui_revision = current_gui_revision
+
+    def run(self) -> None:
+        from photometry_pipeline.guided_npm_run_launch_builder import (
+            build_guided_npm_worker_prelaunch_claim_from_validation,
+        )
+        from photometry_pipeline.guided_npm_worker_launch import (
+            GuidedNpmLaunchedWorkerRuntime,
+            GuidedNpmPostLaunchRuntime,
+            GuidedNpmWorkerLaunchCancelled,
+            GuidedNpmWorkerLaunchFailure,
+            launch_guided_npm_worker_runtime,
+        )
+        from photometry_pipeline.guided_npm_worker_reconciliation import (
+            reconcile_guided_npm_post_launch_runtime,
+            reconcile_guided_npm_worker_runtime,
+        )
+
+        try:
+            build_result = build_guided_npm_worker_prelaunch_claim_from_validation(
+                validation_context=self._validation_context,
+                validation_outcome=self._validation_outcome,
+                current_gui_revision=self._current_gui_revision,
+            )
+        except Exception:
+            self.failed.emit(_GuidedNpmRunWorkerFailure(stage="unexpected_error"))
+            return
+        if build_result is None or not build_result.ok:
+            self.failed.emit(
+                _GuidedNpmRunWorkerFailure(
+                    stage="build_failed",
+                    category=getattr(build_result, "status", None),
+                )
+            )
+            return
+
+        try:
+            launch_result = launch_guided_npm_worker_runtime(
+                build_result.prelaunch_claim,
+                current_application_build_identity=(
+                    build_result.application_build_identity
+                ),
+            )
+        except Exception:
+            self.failed.emit(_GuidedNpmRunWorkerFailure(stage="unexpected_error"))
+            return
+
+        if isinstance(launch_result, GuidedNpmWorkerLaunchCancelled):
+            self.failed.emit(_GuidedNpmRunWorkerFailure(stage="launch_cancelled"))
+            return
+
+        if isinstance(launch_result, GuidedNpmWorkerLaunchFailure):
+            blocking_issues = (
+                getattr(launch_result, "blocking_issues", None) or ()
+            )
+            category = (
+                blocking_issues[0].category if blocking_issues else None
+            )
+            self.failed.emit(
+                _GuidedNpmRunWorkerFailure(
+                    stage="launch_failed", category=category
+                )
+            )
+            return
+
+        if not isinstance(
+            launch_result,
+            (GuidedNpmLaunchedWorkerRuntime, GuidedNpmPostLaunchRuntime),
+        ):
+            # Any other/unexpected outcome must never be treated as
+            # started or completed.
+            self.failed.emit(_GuidedNpmRunWorkerFailure(stage="unexpected_error"))
+            return
+
+        is_post_launch = isinstance(launch_result, GuidedNpmPostLaunchRuntime)
+        self.launched.emit(launch_result, is_post_launch)
+
+        try:
+            if is_post_launch:
+                result = reconcile_guided_npm_post_launch_runtime(launch_result)
+            else:
+                result = reconcile_guided_npm_worker_runtime(launch_result)
+        except Exception:
+            self.failed.emit(_GuidedNpmRunWorkerFailure(stage="unexpected_error"))
+            return
+        self.succeeded.emit(result)
+
+
 def _open_folder(path: str) -> None:
     """Cross-platform open a folder in the file manager."""
     if sys.platform == "win32":
@@ -2232,6 +2364,10 @@ class MainWindow(QMainWindow):
         self._guided_backend_execution_runner = None
         self._guided_run_execution_thread = None
         self._guided_run_execution_worker = None
+        self._guided_npm_run_readiness = None
+        self._guided_npm_launch_runtime = None
+        self._guided_npm_run_worker_thread = None
+        self._guided_npm_run_worker = None
         self._guided_run_status_follower = None
         self._guided_run_started_monotonic = None
         self._guided_run_elapsed_timer = None
@@ -11382,8 +11518,61 @@ class MainWindow(QMainWindow):
             return False
         return current_identity == validated_identity
 
+    def _guided_run_target_is_npm(self) -> bool:
+        """Return whether the current, live Guided format selection is NPM.
+
+        Reads the same combo box `_build_guided_new_analysis_draft_plan`
+        derives `input_format` from, so this reflects the live selection
+        (including before any validation exists), consistent with how
+        `_capture_guided_backend_validation_context` decides the NPM
+        branch at validate time.
+        """
+        current_format = (
+            self._guided_format_combo.currentText()
+            if hasattr(self, "_guided_format_combo")
+            else ""
+        )
+        return str(current_format or "").strip().lower() == "npm"
+
     def _refresh_guided_run_readiness_display(self) -> None:
         """Update only the guarded Guided Run affordance and its safe text."""
+        if self._guided_run_target_is_npm():
+            from photometry_pipeline.guided_npm_run_readiness import (
+                evaluate_guided_npm_run_readiness,
+            )
+
+            npm_result = evaluate_guided_npm_run_readiness(
+                validation_outcome=getattr(
+                    self, "_guided_backend_validation_outcome", None
+                ),
+                validation_revision=getattr(
+                    self, "_guided_backend_validation_outcome_revision", None
+                ),
+                current_gui_revision=int(
+                    getattr(self, "_guided_backend_validation_revision", 0)
+                ),
+                execution_active=getattr(
+                    self, "_guided_backend_execution_active", False
+                ),
+                execution_result_pending=getattr(
+                    self, "_guided_backend_execution_result", None
+                )
+                is not None,
+            )
+            self._guided_npm_run_readiness = npm_result
+            button = getattr(self, "_guided_run_btn", None)
+            label = getattr(self, "_guided_run_readiness_label", None)
+            if button is not None:
+                button.setEnabled(npm_result.ready)
+                button.setToolTip(
+                    "Guided Run is ready to start."
+                    if npm_result.ready
+                    else npm_result.user_summary
+                )
+            if label is not None:
+                label.setText(npm_result.user_summary)
+            return
+
         from photometry_pipeline.guided_run_readiness import (
             evaluate_guided_run_readiness,
         )
@@ -11496,6 +11685,9 @@ class MainWindow(QMainWindow):
 
     def _on_guided_run_clicked_backend_guarded(self) -> None:
         """Recheck readiness and start the Guided backend adapter off the GUI thread."""
+        if self._guided_run_target_is_npm():
+            self._on_guided_npm_run_clicked()
+            return
         self._refresh_guided_run_readiness_display()
         readiness = getattr(self, "_guided_run_readiness", None)
         if not (
@@ -11819,6 +12011,242 @@ class MainWindow(QMainWindow):
     def _cleanup_guided_run_execution_worker(self) -> None:
         self._guided_run_execution_worker = None
         self._guided_run_execution_thread = None
+
+    def _on_guided_npm_run_clicked(self) -> None:
+        """Cheap recheck, capture stable inputs, enter preparing state, and
+        start the NPM run worker. Building the prelaunch claim, launching
+        the worker process, and reconciling it all happen off the GUI
+        thread -- see `_GuidedNpmRunWorker`.
+        """
+        self._refresh_guided_run_readiness_display()
+        readiness = getattr(self, "_guided_npm_run_readiness", None)
+        if not (readiness is not None and readiness.ready is True):
+            return
+        if getattr(self, "_guided_backend_execution_active", False):
+            return
+
+        label = getattr(self, "_guided_run_readiness_label", None)
+        button = getattr(self, "_guided_run_btn", None)
+        revision = int(getattr(self, "_guided_backend_validation_revision", 0))
+        outcome = getattr(self, "_guided_backend_validation_outcome", None)
+        # `_capture_guided_backend_validation_context` reads only current
+        # widget values into plain dataclasses (strings, booleans, already-
+        # resolved paths) -- it performs no filesystem traversal, hashing,
+        # source inspection, or durable writes, so it remains on the GUI
+        # thread. All genuinely blocking preparation (build/launch/
+        # reconcile) happens in the worker below.
+        try:
+            context = self._capture_guided_backend_validation_context()
+        except Exception:
+            context = None
+        if (
+            context is None
+            or context.revision != revision
+            or outcome is None
+        ):
+            # Deliberately do not call `_refresh_guided_run_readiness_display`
+            # here: it would immediately overwrite this message with a
+            # generic readiness summary. Disable Run explicitly instead --
+            # the initial refresh above already left it enabled based on
+            # the (now stale) cached readiness.
+            if button is not None:
+                button.setEnabled(False)
+            if label is not None:
+                label.setText(
+                    "The Guided setup changed after it was checked. Check "
+                    "it again before running."
+                )
+            return
+
+        self._guided_backend_execution_active = True
+        self._guided_backend_execution_result = None
+        self._guided_npm_launch_runtime = None
+        if button is not None:
+            button.setEnabled(False)
+        validate_btn = getattr(self, "_guided_backend_validate_btn", None)
+        if validate_btn is not None:
+            validate_btn.setEnabled(False)
+        if label is not None:
+            label.setText("Preparing your NPM analysis…")
+        details = getattr(self, "_guided_run_execution_details_label", None)
+        if details is not None:
+            details.setText("")
+        self._start_guided_npm_run_worker(
+            validation_context=context,
+            validation_outcome=outcome,
+            current_gui_revision=revision,
+        )
+
+    def _start_guided_npm_run_worker(
+        self, *, validation_context, validation_outcome, current_gui_revision: int
+    ) -> None:
+        """Build, launch, and reconcile the NPM worker on a worker thread.
+
+        The immutable validation context/outcome/revision are read here,
+        on the GUI thread, before the worker starts -- exactly the state
+        captured at Run press. The worker itself receives only these
+        plain values and never holds a reference to `self` / MainWindow.
+        """
+        thread = QThread(self)
+        worker = _GuidedNpmRunWorker(
+            validation_context=validation_context,
+            validation_outcome=validation_outcome,
+            current_gui_revision=current_gui_revision,
+        )
+        worker.moveToThread(thread)
+        self._guided_npm_run_worker_thread = thread
+        self._guided_npm_run_worker = worker
+        thread.started.connect(worker.run)
+        worker.launched.connect(self._on_guided_npm_run_worker_launched)
+        worker.succeeded.connect(self._on_guided_npm_run_worker_succeeded)
+        worker.failed.connect(self._on_guided_npm_run_worker_failed)
+        worker.succeeded.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.succeeded.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._cleanup_guided_npm_run_worker)
+        thread.start()
+
+    def _on_guided_npm_run_worker_launched(self, runtime, _is_post_launch: bool) -> None:
+        """GUI-thread slot: a process now exists for this run.
+
+        Not a terminal callback -- it must not consume or be gated by the
+        one-terminal-callback guard used by the succeeded/failed slots
+        below. A post-launch runtime still shows the running text (a
+        process was created), but only the eventual terminal result may
+        ever map to success.
+        """
+        if not getattr(self, "_guided_backend_execution_active", False):
+            return
+        self._guided_npm_launch_runtime = runtime
+        label = getattr(self, "_guided_run_readiness_label", None)
+        if label is not None:
+            label.setText("Your NPM analysis is running.")
+        run_dir = str(
+            getattr(
+                getattr(runtime, "prelaunch_claim", None),
+                "run_directory_path",
+                "",
+            )
+            or ""
+        )
+        self._start_guided_run_live_status(run_dir)
+
+    def _on_guided_npm_run_worker_succeeded(self, result) -> None:
+        """GUI-thread slot: worker returned a reconciliation result.
+
+        Ignores this callback once the active NPM run has already been
+        terminated by an earlier callback. `_guided_backend_execution_active`
+        is flipped to False exactly once, by whichever terminal callback
+        (succeeded/failed) is delivered first for this run; a duplicate or
+        late-queued signal for the same run must never re-apply a result,
+        replace an already-stored result, or re-trigger the cleanup/state
+        transitions below a second time.
+        """
+        if not getattr(self, "_guided_backend_execution_active", False):
+            return
+        self._guided_backend_execution_active = False
+        self._stop_guided_run_live_status()
+        validate_btn = getattr(self, "_guided_backend_validate_btn", None)
+        if validate_btn is not None:
+            validate_btn.setEnabled(True)
+        self._finish_guided_npm_run_with_result(result)
+
+    def _on_guided_npm_run_worker_failed(self, failure) -> None:
+        """GUI-thread slot: a pre-reconciliation failure, or an unexpected
+        exception anywhere in the worker (including during reconciliation).
+
+        Same one-terminal-callback guard as
+        `_on_guided_npm_run_worker_succeeded` -- see its docstring. Never
+        displays a raw backend message; only the controlled, category-
+        mapped detail sentence for build/launch failures, the neutral
+        not-started text for cancellation, or the controlled unconfirmed
+        result for anything unexpected.
+        """
+        if not getattr(self, "_guided_backend_execution_active", False):
+            return
+        self._guided_backend_execution_active = False
+        self._stop_guided_run_live_status()
+        validate_btn = getattr(self, "_guided_backend_validate_btn", None)
+        if validate_btn is not None:
+            validate_btn.setEnabled(True)
+
+        stage = getattr(failure, "stage", None)
+        if stage == "launch_cancelled":
+            self._guided_backend_execution_result = failure
+            label = getattr(self, "_guided_run_readiness_label", None)
+            if label is not None:
+                label.setText("Guided Run was not started.")
+            return
+
+        if stage in ("build_failed", "launch_failed"):
+            from photometry_pipeline.guided_npm_run_result_presentation import (
+                GUIDED_NPM_LAUNCH_FAILURE_PRIMARY_TEXT,
+                present_guided_npm_launch_failure_detail,
+            )
+
+            self._guided_backend_execution_result = failure
+            label = getattr(self, "_guided_run_readiness_label", None)
+            if label is not None:
+                label.setText(GUIDED_NPM_LAUNCH_FAILURE_PRIMARY_TEXT)
+            details = getattr(
+                self, "_guided_run_execution_details_label", None
+            )
+            if details is not None:
+                details.setText(
+                    present_guided_npm_launch_failure_detail(
+                        getattr(failure, "category", None)
+                    )
+                )
+            return
+
+        # stage == "unexpected_error" (or anything this handler does not
+        # recognize): route through the same controlled-unconfirmed path
+        # reconciliation exceptions already use.
+        from photometry_pipeline.guided_npm_run_result_presentation import (
+            GuidedNpmRunUnexpectedError,
+        )
+
+        self._finish_guided_npm_run_with_result(
+            GuidedNpmRunUnexpectedError(str(stage or "unexpected_error"))
+        )
+
+    def _cleanup_guided_npm_run_worker(self) -> None:
+        self._guided_npm_run_worker = None
+        self._guided_npm_run_worker_thread = None
+
+    def _finish_guided_npm_run_with_result(self, result) -> None:
+        """GUI-thread-only: apply the scientist-facing NPM result mapping.
+
+        Only `final_outcome == "verified_completed"` may show success; see
+        `present_guided_npm_run_result`.
+        """
+        from photometry_pipeline.guided_npm_run_result_presentation import (
+            present_guided_npm_run_result,
+        )
+
+        self._guided_backend_execution_result = result
+        presentation = present_guided_npm_run_result(result)
+        label = getattr(self, "_guided_run_readiness_label", None)
+        if label is not None:
+            label.setText(presentation.title)
+        details = getattr(self, "_guided_run_execution_details_label", None)
+        if details is not None:
+            if presentation.output_directory:
+                details.setText(
+                    f"{presentation.detail}\nOutput folder: "
+                    f"{presentation.output_directory}".strip()
+                )
+            else:
+                details.setText(presentation.detail)
+        # Deliberately do not call `_refresh_guided_run_readiness_display`
+        # here: the Run button was already disabled when the run started
+        # and must stay disabled until the next setup change triggers a
+        # fresh, appropriately-worded readiness refresh (matching the RWD
+        # `_finish_guided_backend_execution_with_result` convention) -- it
+        # would otherwise immediately overwrite this result message with
+        # the generic "result pending" readiness summary.
 
     def _refresh_guided_review_handoff_display(self) -> None:
         """Expose Review handoff only for a loader-validation candidate."""
