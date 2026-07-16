@@ -2369,6 +2369,7 @@ class MainWindow(QMainWindow):
         self._guided_npm_run_worker_thread = None
         self._guided_npm_run_worker = None
         self._guided_npm_completed_output_dir = None
+        self._guided_completed_output_format = None
         self._guided_run_status_follower = None
         self._guided_run_started_monotonic = None
         self._guided_run_elapsed_timer = None
@@ -2802,7 +2803,7 @@ class MainWindow(QMainWindow):
         )
         incomplete_layout.setContentsMargins(10, 8, 10, 8)
         self._guided_exclude_incomplete_final_rwd_chunk_cb = QCheckBox(
-            "Allow one incomplete final recording session"
+            "Exclude one incomplete final recording session"
         )
         self._guided_exclude_incomplete_final_rwd_chunk_cb.setObjectName(
             "guidedExcludeIncompleteFinalRwdChunk"
@@ -2814,10 +2815,10 @@ class MainWindow(QMainWindow):
             self._guided_exclude_incomplete_final_rwd_chunk_cb,
         )
         self._guided_incomplete_final_rwd_help_label = QLabel(
-            "If the last recording file is shorter than expected, Guided "
-            "Mode can exclude that final incomplete session and continue. "
-            "Earlier incomplete sessions still stop validation. Raw files "
-            "are not modified."
+            "Use this only when the last recording file is shorter than "
+            "expected. Selecting it explicitly excludes that one final "
+            "recording file. Earlier incomplete sessions still stop "
+            "validation. Raw files are not modified."
         )
         self._guided_incomplete_final_rwd_help_label.setProperty(
             "guidedSecondaryText", True
@@ -4111,10 +4112,51 @@ class MainWindow(QMainWindow):
             status="failed",
         )
         QMessageBox.critical(
-            self, "ROI Selection Failed", str(message)
+            self,
+            "ROI Selection Failed",
+            self._guided_roi_discovery_failure_message(message),
         )
         if self._guided_roi_discovery_thread is None:
             self._guided_roi_discovery_diag_start = None
+
+    @staticmethod
+    def _guided_roi_discovery_failure_message(message: str) -> str:
+        """Return an actionable scientist-facing discovery failure.
+
+        The full parser error remains in the application log for support,
+        but it is not useful as the primary instruction in a blocking dialog.
+        """
+        lowered = str(message or "").lower()
+        if "no recognizable rwd header" in lowered or "header row" in lowered:
+            return (
+                "The selected recording does not contain a recognizable "
+                "fluorescence header. Check that you selected the folder "
+                "containing the recording-session folders and their "
+                "Fluorescence.csv files."
+            )
+        if "fs mismatch" in lowered or "sampling" in lowered:
+            return (
+                "The recording files do not agree on their sampling rate. "
+                "Check that all selected session folders belong to the same "
+                "recording, then try Select ROIs again."
+            )
+        if "suffix mismatch" in lowered or "time column mismatch" in lowered:
+            return (
+                "The recording files do not use the same channel layout. "
+                "Check that all selected session folders belong to the same "
+                "recording, then try Select ROIs again."
+            )
+        if "no usable roi" in lowered or "no roi" in lowered:
+            return (
+                "No usable signal/reference channel pairs were found. Check "
+                "that the selected folder contains Fluorescence.csv files "
+                "with matching 410 and 470 channels."
+            )
+        return (
+            "The selected input could not be read as one consistent "
+            "recording. Check the selected folder and its Fluorescence.csv "
+            "files, then try Select ROIs again."
+        )
 
     def _cleanup_guided_roi_discovery_worker(self) -> None:
         self._guided_roi_discovery_diag("worker_thread_cleanup")
@@ -10313,6 +10355,19 @@ class MainWindow(QMainWindow):
             )
         included = ", ".join(plan.included_roi_ids) or "none"
         excluded = ", ".join(plan.excluded_roi_ids) or "none"
+        final_session_policy = ""
+        if plan.input_format == "rwd" and plan.acquisition_mode == "intermittent":
+            if plan.exclude_incomplete_final_rwd_chunk:
+                final_session_policy = (
+                    "\nFinal incomplete session: if the final recording is "
+                    "incomplete, exclude that one final recording file. Earlier "
+                    "incomplete sessions still stop the setup check."
+                )
+            else:
+                final_session_policy = (
+                    "\nFinal incomplete session: do not exclude; an "
+                    "incomplete final recording stops the setup check."
+                )
         self._guided_review_analysis_summary_label.setText(
             f"Dataset/input folder: {plan.input_source_path or 'not set'}\n"
             f"Input format: {plan.input_format or 'not set'}\n"
@@ -10321,6 +10376,7 @@ class MainWindow(QMainWindow):
             f"Sessions discovered: {len(sessions) if sessions else 'not available'}\n"
             f"Included ROIs: {included}\n"
             f"Excluded ROIs: {excluded}"
+            f"{final_session_policy}"
         )
 
         self._guided_review_feature_detection_summary_label.setText(
@@ -11425,7 +11481,6 @@ class MainWindow(QMainWindow):
                 "The setup check passed for the current Guided setup. It "
                 "does not authorize or start a run."
             )
-            identity = str(getattr(outcome, "request_identity", "") or "")
             run_readiness = getattr(self, "_guided_run_readiness", None)
             if getattr(run_readiness, "ready", False):
                 run_status_line = "Guided Run is ready to start."
@@ -11434,9 +11489,7 @@ class MainWindow(QMainWindow):
                     "Guided Run is not available for this configuration "
                     "yet. Review the readiness details below."
                 )
-            details_label.setText(
-                f"Setup reference: {identity}\n{run_status_line}"
-            )
+            details_label.setText(run_status_line)
             return
 
         summaries = {
@@ -11470,7 +11523,6 @@ class MainWindow(QMainWindow):
             )
             return
         issue = issues[0]
-        detail_code = str(getattr(issue, "detail_code", "") or "")
         message = str(getattr(issue, "message", "") or "")
         if "npm" in message.lower():
             lines = [f"Message: {message}"]
@@ -11482,13 +11534,7 @@ class MainWindow(QMainWindow):
                     "Review the NPM settings and selected recording, then rerun Setup check."
                 )
         else:
-            lines = [
-                f"Category: {getattr(issue, 'category', '')}",
-                f"Section: {getattr(issue, 'section', '')}",
-                f"Message: {message}",
-            ]
-        if detail_code:
-            lines.append(f"Detail code: {detail_code}")
+            lines = [f"Message: {message}"]
         lines.append("Guided Run is not available for this configuration yet.")
         details_label.setText("\n".join(lines))
 
@@ -11538,14 +11584,12 @@ class MainWindow(QMainWindow):
     def _clear_guided_npm_completed_output_handoff(
         self, *, clear_details: bool
     ) -> None:
-        """Remove the NPM verified-completion handoff from the current view.
+        """Remove the completed-output handoff from the current view.
 
         Hides and disables the Open-results-folder button and forgets the
         stored output directory. When ``clear_details`` is True, the
-        execution-details line is cleared only if it is currently the NPM
-        completion output line (i.e. a completed output directory was
-        stored) -- so this never erases a legitimate RWD readiness/result
-        message that happens to share the same label.
+        execution-details line is cleared only when a completed output
+        directory was stored.
 
         GUI-state only: this never deletes the completed run's output
         folder, modifies its files, or alters backend completion evidence.
@@ -11554,6 +11598,7 @@ class MainWindow(QMainWindow):
             getattr(self, "_guided_npm_completed_output_dir", None) is not None
         )
         self._guided_npm_completed_output_dir = None
+        self._guided_completed_output_format = None
         open_btn = getattr(self, "_guided_npm_open_output_btn", None)
         if open_btn is not None:
             open_btn.setVisible(False)
@@ -11626,7 +11671,11 @@ class MainWindow(QMainWindow):
         # Clear the NPM handoff BEFORE the RWD evaluator writes its own
         # text; `clear_details=True` drops the stale NPM output line only
         # (it leaves any legitimate RWD message intact).
-        self._clear_guided_npm_completed_output_handoff(clear_details=True)
+        if (
+            getattr(self, "_guided_completed_output_format", None) == "npm"
+            or getattr(self, "_guided_backend_execution_result", None) is None
+        ):
+            self._clear_guided_npm_completed_output_handoff(clear_details=True)
 
         from photometry_pipeline.guided_run_readiness import (
             evaluate_guided_run_readiness,
@@ -12059,7 +12108,28 @@ class MainWindow(QMainWindow):
                 }
                 and blocking_issues
             ):
-                details_label.setText(str(blocking_issues[0].message))
+                details_label.setText(
+                    "The analysis stopped before results were completed. "
+                    "Check the selected recording and setup, then try again. "
+                    "If the problem repeats, keep the run folder and ask for "
+                    "support."
+                )
+            elif (
+                not recovered
+                and getattr(result, "status", "")
+                == "wrapper_completed_needs_review_loading"
+                and getattr(result, "completed_run_candidate_path", None)
+            ):
+                output_dir = str(result.completed_run_candidate_path)
+                self._guided_npm_completed_output_dir = output_dir
+                self._guided_completed_output_format = "rwd"
+                open_btn = getattr(self, "_guided_npm_open_output_btn", None)
+                if open_btn is not None:
+                    open_btn.setVisible(True)
+                    open_btn.setEnabled(True)
+                details_label.setText(
+                    f"Results folder: {output_dir}"
+                )
             else:
                 details_label.setText("")
 
@@ -12307,6 +12377,7 @@ class MainWindow(QMainWindow):
         self._guided_npm_completed_output_dir = (
             presentation.output_directory if is_success else None
         )
+        self._guided_completed_output_format = "npm" if is_success else None
         open_btn = getattr(self, "_guided_npm_open_output_btn", None)
         if open_btn is not None:
             open_btn.setVisible(is_success)
@@ -16615,11 +16686,9 @@ class MainWindow(QMainWindow):
         )
         run_layout.addWidget(self._guided_run_execution_details_label)
 
-        # Only shown after a verified NPM completion, bound to that exact
-        # authoritative output directory (see
-        # `_finish_guided_npm_run_with_result`). Hidden for failure,
-        # unconfirmed, and every non-NPM state, and cleared whenever the
-        # completed result is discarded by a setup change.
+        # Shown after a completed Guided run, bound to the exact output
+        # directory returned by that run. Hidden for failure and unconfirmed
+        # states, and cleared whenever setup changes discard the handoff.
         self._guided_npm_open_output_btn = QPushButton("Open results folder")
         self._guided_npm_open_output_btn.setObjectName(
             "guidedNpmOpenOutputButton"

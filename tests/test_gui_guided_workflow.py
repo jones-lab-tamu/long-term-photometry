@@ -2040,7 +2040,13 @@ def test_guided_recording_continuous_readiness_and_mode_visibility(window):
     assert window._guided_continuous_window_sec_spin.isHidden() is True
     assert window._guided_incomplete_final_rwd_group.isHidden() is False
     assert window._guided_exclude_incomplete_final_rwd_chunk_cb.text() == (
-        "Allow one incomplete final recording session"
+        "Exclude one incomplete final recording session"
+    )
+    assert "Use this only when" in (
+        window._guided_incomplete_final_rwd_help_label.text()
+    )
+    assert "explicitly excludes" in (
+        window._guided_incomplete_final_rwd_help_label.text()
     )
     assert "Earlier incomplete sessions still stop validation" in (
         window._guided_incomplete_final_rwd_help_label.text()
@@ -2075,6 +2081,23 @@ def test_guided_recording_continuous_readiness_and_mode_visibility(window):
     assert window._guided_recording_continue_status.text() == (
         "Continuous analysis window must be greater than 0 seconds."
     )
+
+
+def test_guided_roi_discovery_failure_hides_parser_internals(window):
+    message = window._guided_roi_discovery_failure_message(
+        "ValueError: Inconsistent RWD contract across chunks: fs mismatch "
+        "at chunk 0; hard tolerance 0.050000000"
+    )
+
+    assert message == (
+        "The recording files do not agree on their sampling rate. Check "
+        "that all selected session folders belong to the same recording, "
+        "then try Select ROIs again."
+    )
+    lowered = message.lower()
+    assert "valueerror" not in lowered
+    assert "hard tolerance" not in lowered
+    assert "chunk 0" not in lowered
 
 
 def test_guided_incomplete_final_rwd_option_hidden_for_non_rwd(window):
@@ -2626,7 +2649,12 @@ def test_guided_roi_discovery_restores_busy_state_after_failure(
     assert window._guided_discovery_summary_label.text() == (
         "ROI discovery failed. Check the selected input and try again."
     )
-    assert "simulated discovery failure" in critical[0]
+    assert critical[0] == (
+        "The selected input could not be read as one consistent recording. "
+        "Check the selected folder and its Fluorescence.csv files, then try "
+        "Select ROIs again."
+    )
+    assert "simulated discovery failure" not in critical[0]
     for _ in range(100):
         QApplication.processEvents()
         if window._guided_roi_discovery_thread is None:
@@ -2672,7 +2700,12 @@ def test_guided_roi_discovery_worker_spec_build_failure_restores_ui(
     assert window._guided_roi_discovery_running is False
     assert window._guided_roi_discovery_progress.isHidden() is True
     assert window._guided_discover_rois_btn.isEnabled() is True
-    assert "simulated spec build failure" in critical[0]
+    assert critical[0] == (
+        "The selected input could not be read as one consistent recording. "
+        "Check the selected folder and its Fluorescence.csv files, then try "
+        "Select ROIs again."
+    )
+    assert "simulated spec build failure" not in critical[0]
 
 
 def test_guided_roi_discovery_running_guard_blocks_duplicate_call(
@@ -5854,7 +5887,7 @@ def test_recording_structure_page_avoids_developer_facing_wording(window, qapp):
     # QCheckBox text isn't covered by the generic label/button/group scan
     # above; check it directly.
     assert window._guided_exclude_incomplete_final_rwd_chunk_cb.text() == (
-        "Allow one incomplete final recording session"
+        "Exclude one incomplete final recording session"
     )
     assert "Sessions per hour (required)" not in visible_text
 

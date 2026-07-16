@@ -1,6 +1,7 @@
 """GUI tests for the new_analysis Guided draft plan summary."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
@@ -741,6 +742,43 @@ def test_review_plan_dynamic_and_mixed_modes_are_plainly_separated(
     assert "local setup issue" not in status.lower()
     assert "mixed_dynamic_fit_modes" not in status
     assert "one shared dynamic-fit correction strategy" not in status
+
+
+def test_review_plan_describes_final_session_exclusion_as_conditional(window):
+    plan = replace(
+        _complete_new_analysis_plan_for_gui(),
+        exclude_incomplete_final_rwd_chunk=True,
+    )
+    window._discovery_cache = {
+        "sessions": [
+            {"session_id": "2025_01_01-00_00_00"},
+            {"session_id": "2025_01_01-00_30_00"},
+        ]
+    }
+
+    _render_review_checkpoint(window, plan)
+
+    summary = window._guided_review_analysis_summary_label.text()
+    assert "if the final recording is incomplete" in summary
+    assert "exclude that one final recording file" in summary
+    assert "2025_01_01-00_30_00" not in summary
+    assert "Earlier incomplete sessions still stop the setup check" in summary
+
+
+def test_review_plan_says_incomplete_final_session_blocks_without_policy(window):
+    plan = replace(
+        _complete_new_analysis_plan_for_gui(),
+        exclude_incomplete_final_rwd_chunk=False,
+    )
+
+    _render_review_checkpoint(window, plan)
+
+    summary = window._guided_review_analysis_summary_label.text()
+    assert (
+        "Final incomplete session: do not exclude; an incomplete final "
+        "recording stops the setup check."
+        in summary
+    )
 
 
 def test_review_plan_mixed_and_all_signal_only_rows_are_planning_valid(

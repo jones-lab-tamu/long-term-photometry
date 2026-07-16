@@ -504,10 +504,10 @@ def test_refused_and_error_outcome_display(
     window._refresh_guided_backend_validation_display()
     assert expected in window._guided_backend_validation_status_label.text()
     details = window._guided_backend_validation_details_label.text()
-    assert "Category: test_category" in details
-    assert "Section: test_section" in details
     assert "Message: test message" in details
-    assert "Detail code: test_detail" in details
+    assert "Category:" not in details
+    assert "Section:" not in details
+    assert "Detail code:" not in details
     assert "Guided Run is not available for this configuration yet" in details
 
 

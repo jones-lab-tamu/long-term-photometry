@@ -521,13 +521,10 @@ def test_backend_result_maps_to_safe_text_and_is_stored(
 
 
 @pytest.mark.parametrize("status", ("wrapper_failed", "wrapper_start_failed"))
-def test_wrapper_failure_surfaces_first_blocking_issue_message(
+def test_wrapper_failure_surfaces_actionable_scientist_message(
     window, startup_request, monkeypatch, qapp, status
 ):
-    """4J16k19: a real, specific wrapper failure (e.g. the
-    guided_manifest_parser_contract_mismatch regression) must not be fully
-    hidden behind the generic readiness message -- the first blocking
-    issue's message is shown in the dedicated execution-details label."""
+    """A technical worker failure must not be the primary GUI instruction."""
     issue = backend.GuidedBackendExecutionIssue(
         category="wrapper_returned_nonzero",
         section="wrapper",
@@ -569,7 +566,14 @@ def test_wrapper_failure_surfaces_first_blocking_issue_message(
     _set_ready(window, startup_request)
     window._guided_run_btn.click()
     _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
-    assert window._guided_run_execution_details_label.text() == issue.message
+    detail = window._guided_run_execution_details_label.text()
+    assert detail == (
+        "The analysis stopped before results were completed. Check the "
+        "selected recording and setup, then try again. If the problem "
+        "repeats, keep the run folder and ask for support."
+    )
+    assert "manifest" not in detail.lower()
+    assert "parser_contract" not in detail.lower()
 
 
 def test_execution_details_label_clears_on_next_run_start(
@@ -615,7 +619,9 @@ def test_execution_details_label_clears_on_next_run_start(
     _set_ready(window, startup_request)
     window._guided_run_btn.click()
     _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
-    assert window._guided_run_execution_details_label.text() == "stale failure detail"
+    assert "analysis stopped before results were completed" in (
+        window._guided_run_execution_details_label.text().lower()
+    )
 
     _set_ready(window, startup_request)
     monkeypatch.setattr(
@@ -661,6 +667,83 @@ def test_completed_result_does_not_auto_load_or_claim_success(
     assert window._guided_load_completed_run_for_review_btn.isEnabled() is True
     # Thread/worker cleanup must leave no dangling reference.
     assert window._guided_run_execution_worker is None
+
+
+def test_rwd_completion_shows_exact_output_and_clears_it_after_edit(
+    window, startup_request, tmp_path, monkeypatch, qapp
+):
+    run_dir = tmp_path / "guided-run"
+    run_dir.mkdir()
+    completed = replace(
+        _result(
+            "wrapper_completed_needs_review_loading",
+            "Guided Run finished. Load the completed run for review.",
+        ),
+        run_directory=str(run_dir),
+        completed_run_candidate_path=str(run_dir),
+    )
+    monkeypatch.setattr(
+        backend,
+        "execute_guided_backend_run",
+        lambda *, request, runner=None: completed,
+    )
+    opened = []
+    monkeypatch.setattr("gui.main_window._open_folder", opened.append)
+
+    _set_ready(window, startup_request)
+    window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_run_execution_thread is None)
+
+    assert window._guided_run_execution_details_label.text() == (
+        f"Results folder: {run_dir}"
+    )
+    assert window._guided_npm_completed_output_dir == str(run_dir)
+    assert window._guided_completed_output_format == "rwd"
+    assert window._guided_npm_open_output_btn.isEnabled() is True
+    window._on_guided_npm_open_output_folder_clicked()
+    assert opened == [str(run_dir)]
+
+    window._invalidate_guided_backend_validation("feature settings changed")
+    assert window._guided_npm_completed_output_dir is None
+    assert window._guided_completed_output_format is None
+    assert window._guided_npm_open_output_btn.isHidden() is True
+    assert window._guided_run_execution_details_label.text() == ""
+
+
+def test_rwd_completion_does_not_infer_exclusion_from_selected_policy(
+    window, startup_request, tmp_path, monkeypatch, qapp
+):
+    run_dir = tmp_path / "guided-run-with-exclusion"
+    run_dir.mkdir()
+    completed = replace(
+        _result(
+            "wrapper_completed_needs_review_loading",
+            "Guided Run finished. Load the completed run for review.",
+        ),
+        run_directory=str(run_dir),
+        completed_run_candidate_path=str(run_dir),
+    )
+    monkeypatch.setattr(
+        backend,
+        "execute_guided_backend_run",
+        lambda *, request, runner=None: completed,
+    )
+    window._discovery_cache = {
+        "sessions": [
+            {"session_id": "2025_01_01-00_00_00"},
+            {"session_id": "2025_01_01-00_30_00"},
+        ]
+    }
+    window._guided_exclude_incomplete_final_rwd_chunk_cb.setChecked(True)
+
+    _set_ready(window, startup_request)
+    window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_run_execution_thread is None)
+
+    detail = window._guided_run_execution_details_label.text()
+    assert f"Results folder: {run_dir}" in detail
+    assert "Excluded final recording session" not in detail
+    assert "2025_01_01-00_30_00" not in detail
 
 
 def test_fake_backend_click_writes_no_files(
