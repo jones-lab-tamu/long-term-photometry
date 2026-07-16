@@ -1,4 +1,5 @@
 import json
+import threading
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -6,7 +7,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pytest
-from PySide6.QtCore import QSignalBlocker, Qt
+from PySide6.QtCore import QObject, QSignalBlocker, QTimer, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
@@ -893,10 +894,11 @@ def test_guided_new_analysis_feature_event_profile_requires_apply_without_open_r
     assert not any(term in visible for term in prohibited)
 
 
-def test_guided_feature_detection_step_gates_review_and_writes_nothing(
+def test_guided_feature_detection_step_accepts_loaded_defaults_and_writes_nothing(
     window, tmp_path
 ):
     window._set_guided_workflow_mode("new_analysis")
+    _populate_fake_discovery(window)
     feature_index = list(GUIDED_WORKFLOW_STEPS).index("Feature detection")
     draft_index = list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
     window._reach_guided_step("Feature detection")
@@ -913,9 +915,16 @@ def test_guided_feature_detection_step_gates_review_and_writes_nothing(
     assert feature_widget.findChild(
         QWidget, "guidedFeatureEventProfileEditorPanel"
     ) is not None
-    assert window._guided_feature_detection_continue_btn.isEnabled() is False
+    window._guided_feature_event_apply_btn.click()
+    window._guided_new_analysis_feature_event_profile_status = (
+        "default_initialized"
+    )
+    window._guided_new_analysis_feature_event_profile_errors = []
+    window._guided_new_analysis_feature_event_profile_stale_reasons = []
+    window._refresh_guided_feature_detection_continue_state()
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
     assert window._guided_feature_detection_continue_status.text() == (
-        "Confirm the Default settings before continuing."
+        "Feature detection settings are ready for every included ROI."
     )
     assert list(tmp_path.iterdir()) == []
 
@@ -2519,8 +2528,10 @@ def test_guided_roi_discovery_button_reuses_existing_discovery_handler(
     input_dir.mkdir()
     output_dir.mkdir()
     window._set_guided_workflow_mode("new_analysis")
+    _populate_fake_discovery(window)
     window._guided_input_dir_edit.setText(str(input_dir))
     window._guided_output_dir_edit.setText(str(output_dir))
+    assert window._guided_format_combo.currentText() == "auto"
 
     started = threading.Event()
     release = threading.Event()
@@ -2576,6 +2587,10 @@ def test_guided_roi_discovery_button_reuses_existing_discovery_handler(
         QTest.qWait(10)
 
     assert window._guided_roi_discovery_running is False
+    assert window._guided_format_combo.currentText() == "rwd"
+    assert "detected this format automatically" in (
+        window._guided_format_help_label.text()
+    )
     assert window._guided_roi_list.item(0).text() == "ROI_A"
     assert window._guided_discovery_summary_label.text() == (
         "Detected RWD data with 1 recording session. Channels detected "
@@ -6137,6 +6152,361 @@ def _setup_guided_local_raw_preview_ready(
     return source_files
 
 
+def test_npm_local_preview_runs_off_the_gui_thread_and_blocks_duplicate_start(
+    window, qapp, tmp_path, monkeypatch
+):
+    source_files = _setup_guided_local_raw_preview_ready(
+        window, tmp_path, monkeypatch, n_rois=1
+    )
+    discovery = dict(window._discovery_cache)
+    discovery["resolved_format"] = "npm"
+    discovery["rois"] = [{"roi_id": "Region0"}]
+    window._format_combo.setCurrentText("npm")
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+    window._refresh_guided_diagnostics_panel()
+    monkeypatch.setattr(
+        window,
+        "_infer_npm_dataset_contract_overrides",
+        lambda *args, **kwargs: {"chunk_duration_sec": 600.0},
+    )
+
+    gui_thread_id = threading.get_ident()
+    release = threading.Event()
+    safety_release = threading.Timer(3.0, release.set)
+    safety_release.start()
+    calls = []
+    correction_thread_ids = []
+    report_thread_ids = []
+    success_thread_ids = []
+    widget_update_thread_ids = []
+
+    def blocking_preview(*args, **kwargs):
+        calls.append((args, kwargs))
+        correction_thread_ids.append(threading.get_ident())
+        assert release.wait(timeout=5.0)
+        return {
+            "ok": True,
+            "status": "success",
+            "preview_output_dir": str(tmp_path / "preview"),
+        }
+
+    def worker_safe_reports(result, *, report_inputs):
+        report_thread_ids.append(threading.get_ident())
+        assert report_inputs["selected_roi"] == "Region0"
+        result["visual_preview_path"] = str(tmp_path / "preview.png")
+        result["user_report_path"] = str(tmp_path / "preview.html")
+        return result
+
+    finished = []
+    gui_report_calls = []
+    original_finish = window._finish_guided_correction_preview_result
+    original_running = window._set_guided_correction_preview_running
+
+    def track_widget_updates(running):
+        widget_update_thread_ids.append(threading.get_ident())
+        return original_running(running)
+
+    def track_finish(result, **context):
+        success_thread_ids.append(threading.get_ident())
+        finished.append((result, context))
+        return original_finish(result, **context)
+
+    monkeypatch.setattr(
+        main_window_module,
+        "run_guided_local_correction_preview",
+        blocking_preview,
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "generate_guided_correction_preview_reports",
+        worker_safe_reports,
+    )
+    monkeypatch.setattr(
+        window,
+        "_set_guided_correction_preview_running",
+        track_widget_updates,
+    )
+    monkeypatch.setattr(
+        window,
+        "_finish_guided_correction_preview_result",
+        track_finish,
+    )
+    monkeypatch.setattr(
+        window,
+        "_generate_guided_preview_reports",
+        lambda *args, **kwargs: gui_report_calls.append((args, kwargs)),
+    )
+
+    timer_fired = []
+    QTimer.singleShot(0, lambda: timer_fired.append(True))
+    window._guided_preview_generate_btn.click()
+    qapp.processEvents()
+
+    assert timer_fired == [True]
+    assert window._guided_correction_preview_running is True
+    assert window._guided_preview_generate_btn.isEnabled() is False
+    assert window._guided_preview_progress.isHidden() is False
+    worker = window._guided_correction_preview_worker
+    assert worker is not None
+    assert not hasattr(worker, "_postprocess")
+    assert all(
+        getattr(value, "__self__", None) is not window
+        for value in vars(worker).values()
+    )
+
+    def assert_plain(value):
+        assert not isinstance(value, QObject)
+        if isinstance(value, dict):
+            for key, item in value.items():
+                assert_plain(key)
+                assert_plain(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                assert_plain(item)
+        else:
+            assert isinstance(value, (str, int, float, bool, type(None)))
+
+    assert_plain(worker._args)
+    assert_plain(worker._kwargs)
+    assert_plain(worker._report_inputs)
+    for _ in range(100):
+        qapp.processEvents()
+        if calls:
+            break
+        QTest.qWait(5)
+    assert len(calls) == 1
+    window._on_generate_guided_correction_preview()
+    assert len(calls) == 1
+
+    release.set()
+    safety_release.cancel()
+    for _ in range(100):
+        qapp.processEvents()
+        if window._guided_correction_preview_thread is None:
+            break
+        QTest.qWait(10)
+
+    assert window._guided_correction_preview_thread is None
+    assert window._guided_correction_preview_running is False
+    assert window._guided_preview_progress.isHidden() is True
+    assert len(finished) == 1
+    assert correction_thread_ids and correction_thread_ids[0] != gui_thread_id
+    assert report_thread_ids == correction_thread_ids
+    assert success_thread_ids == [gui_thread_id]
+    assert widget_update_thread_ids
+    assert set(widget_update_thread_ids) == {gui_thread_id}
+    assert len(report_thread_ids) == 1
+    assert gui_report_calls == []
+    assert finished[0][0]["user_report_path"].endswith("preview.html")
+    assert calls[0][0][0] == str(source_files[0].resolve())
+    assert calls[0][1]["roi"] == "Region0"
+    assert calls[0][1]["adapter_chunk_index"] == 0
+
+
+@pytest.mark.parametrize("create_output_dir", [True, False])
+def test_npm_preview_report_failure_is_delivered_on_gui_thread(
+    window, qapp, tmp_path, monkeypatch, create_output_dir
+):
+    _setup_guided_local_raw_preview_ready(window, tmp_path, monkeypatch, n_rois=1)
+    discovery = dict(window._discovery_cache)
+    discovery["resolved_format"] = "npm"
+    discovery["rois"] = [{"roi_id": "Region0"}]
+    window._format_combo.setCurrentText("npm")
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+    window._refresh_guided_diagnostics_panel()
+    monkeypatch.setattr(
+        window,
+        "_infer_npm_dataset_contract_overrides",
+        lambda *args, **kwargs: {"chunk_duration_sec": 600.0},
+    )
+    gui_thread_id = threading.get_ident()
+    report_thread_ids = []
+    failure_thread_ids = []
+    failure_logs = []
+    widget_update_thread_ids = []
+    report_calls = []
+    computation_calls = []
+
+    def successful_computation(*args, **kwargs):
+        computation_calls.append((args, kwargs))
+        if create_output_dir:
+            Path(args[1]).mkdir(parents=True)
+        return {"ok": True, "status": "success"}
+
+    def fail_reports(result, *, report_inputs):
+        report_calls.append((result, report_inputs))
+        report_thread_ids.append(threading.get_ident())
+        raise RuntimeError("report renderer failed")
+
+    original_append_log = window._append_log
+    original_running = window._set_guided_correction_preview_running
+
+    def track_failure_log(message):
+        failure_thread_ids.append(threading.get_ident())
+        failure_logs.append(message)
+        return original_append_log(message)
+
+    def track_widget_updates(running):
+        widget_update_thread_ids.append(threading.get_ident())
+        return original_running(running)
+
+    monkeypatch.setattr(
+        main_window_module,
+        "run_guided_local_correction_preview",
+        successful_computation,
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "generate_guided_correction_preview_reports",
+        fail_reports,
+    )
+    monkeypatch.setattr(
+        window,
+        "_set_guided_correction_preview_running",
+        track_widget_updates,
+    )
+    monkeypatch.setattr(
+        window,
+        "_append_log",
+        track_failure_log,
+    )
+
+    window._guided_preview_generate_btn.click()
+    for _ in range(200):
+        qapp.processEvents()
+        if window._guided_correction_preview_thread is None:
+            break
+        QTest.qWait(5)
+
+    assert len(computation_calls) == 1
+    assert len(report_calls) == 1
+    assert report_thread_ids and report_thread_ids[0] != gui_thread_id
+    assert failure_thread_ids == [gui_thread_id]
+    assert len(failure_logs) == 1
+    assert "preview_report_failed" in failure_logs[0]
+    assert set(widget_update_thread_ids) == {gui_thread_id}
+    assert window._guided_correction_preview_running is False
+    assert window._guided_preview_progress.isHidden() is True
+    assert window._guided_preview_generate_btn.isEnabled() is True
+    assert window._guided_preview_roi_combo.isEnabled() is True
+    assert window._guided_preview_chunk_combo.isEnabled() is True
+    assert window._guided_preview_signal_f0_cb.isEnabled() is True
+    assert all(
+        checkbox.isEnabled()
+        for checkbox in window._guided_preview_method_checkboxes.values()
+    )
+    message = window._guided_preview_status_label.text()
+    lowered = message.lower()
+    assert "preview was calculated" in lowered
+    assert "report could not be created" in lowered
+    assert "try generating the preview again" in lowered
+    assert "source" not in lowered
+    for forbidden in (
+        "report renderer failed",
+        "renderer",
+        "matplotlib",
+        "traceback",
+        "worker",
+        "backend",
+    ):
+        assert forbidden not in lowered
+    assert ("keep the preview output folder" in lowered) is create_output_dir
+    assert window._guided_preview_has_result is False
+    assert window._guided_preview_last_result == {}
+
+
+def test_npm_preview_computation_failure_is_classified_before_reporting(
+    window, qapp, tmp_path, monkeypatch
+):
+    _setup_guided_local_raw_preview_ready(window, tmp_path, monkeypatch, n_rois=1)
+    discovery = dict(window._discovery_cache)
+    discovery["resolved_format"] = "npm"
+    discovery["rois"] = [{"roi_id": "Region0"}]
+    window._format_combo.setCurrentText("npm")
+    window._discovery_cache = discovery
+    window._populate_discovery_ui(discovery)
+    window._refresh_guided_diagnostics_panel()
+    monkeypatch.setattr(
+        window,
+        "_infer_npm_dataset_contract_overrides",
+        lambda *args, **kwargs: {"chunk_duration_sec": 600.0},
+    )
+    gui_thread_id = threading.get_ident()
+    computation_thread_ids = []
+    report_calls = []
+    failure_thread_ids = []
+    failure_logs = []
+    widget_update_thread_ids = []
+
+    def fail_computation(*args, **kwargs):
+        computation_thread_ids.append(threading.get_ident())
+        raise RuntimeError("source parser exploded")
+
+    original_append_log = window._append_log
+    original_running = window._set_guided_correction_preview_running
+
+    def track_failure_log(message):
+        failure_thread_ids.append(threading.get_ident())
+        failure_logs.append(message)
+        return original_append_log(message)
+
+    def track_widget_updates(running):
+        widget_update_thread_ids.append(threading.get_ident())
+        return original_running(running)
+
+    monkeypatch.setattr(
+        main_window_module,
+        "run_guided_local_correction_preview",
+        fail_computation,
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "generate_guided_correction_preview_reports",
+        lambda *args, **kwargs: report_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(window, "_append_log", track_failure_log)
+    monkeypatch.setattr(
+        window,
+        "_set_guided_correction_preview_running",
+        track_widget_updates,
+    )
+
+    window._guided_preview_generate_btn.click()
+    for _ in range(200):
+        qapp.processEvents()
+        if window._guided_correction_preview_thread is None:
+            break
+        QTest.qWait(5)
+
+    assert computation_thread_ids
+    assert computation_thread_ids[0] != gui_thread_id
+    assert report_calls == []
+    assert failure_thread_ids == [gui_thread_id]
+    assert len(failure_logs) == 1
+    assert "preview_computation_failed" in failure_logs[0]
+    assert set(widget_update_thread_ids) == {gui_thread_id}
+    assert window._guided_correction_preview_running is False
+    assert window._guided_preview_progress.isHidden() is True
+    assert window._guided_preview_generate_btn.isEnabled() is True
+    assert window._guided_preview_roi_combo.isEnabled() is True
+    assert window._guided_preview_chunk_combo.isEnabled() is True
+    assert window._guided_preview_signal_f0_cb.isEnabled() is True
+    assert all(
+        checkbox.isEnabled()
+        for checkbox in window._guided_preview_method_checkboxes.values()
+    )
+    message = window._guided_preview_status_label.text()
+    lowered = message.lower()
+    assert "selected preview segment could not be processed" in lowered
+    assert "try another segment" in lowered
+    assert "report" not in lowered
+    assert "source parser exploded" not in lowered
+    assert window._guided_preview_has_result is False
+    assert window._guided_preview_last_result == {}
+
+
 def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     window, tmp_path, monkeypatch
 ):
@@ -6264,7 +6634,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert provenance["selected_roi"] == "CH1"
     assert provenance["selected_chunk"] == 2
     assert provenance["selected_segment_index"] == 2
-    assert provenance["selected_segment_label"] == "session-2"
+    assert provenance["selected_segment_label"] == "2025_01_01-02_00_00"
     assert provenance["adapter_local_chunk_id"] == 0
     assert provenance["source_file"] == str(source_files[2].resolve())
     assert provenance["production_analysis"] is False
@@ -6280,7 +6650,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert window._guided_local_signal_f0_preview_label.text() == ""
     assert window._guided_local_signal_f0_preview_label.isHidden() is True
     review_text = window._guided_preview_review_label.text()
-    assert "segment session-2" in review_text
+    assert "segment 2025_01_01-02_00_00" in review_text
     assert "Signal-Only F0" in review_text
     preview_dir = Path(result["preview_output_dir"])
     assert not (preview_dir / "status.json").exists()
@@ -6299,7 +6669,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     rows = window._guided_local_preview_confirmation_rows
     assert set(rows) == {"CH1", "CH2", "CH3"}
     assert rows["CH1"]["evidence_label"].text() == (
-        "Local preview, segment session-2"
+        "Local preview, segment 2025_01_01-02_00_00"
     )
     assert rows["CH1"]["strategy_combo"].isEnabled() is True
     assert rows["CH2"]["evidence_label"].text() == "Preview first"
@@ -6372,10 +6742,10 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     assert ch2_result["roi"] == "CH2"
     rows = window._guided_local_preview_confirmation_rows
     assert rows["CH1"]["evidence_label"].text() == (
-        "Local preview, segment session-2"
+        "Local preview, segment 2025_01_01-02_00_00"
     )
     assert rows["CH2"]["evidence_label"].text() == (
-        "Local preview, segment session-2"
+        "Local preview, segment 2025_01_01-02_00_00"
     )
     assert rows["CH3"]["evidence_label"].text() == "Preview first"
     assert rows["CH2"]["strategy_combo"].findData(
@@ -6416,7 +6786,7 @@ def test_local_preview_bypasses_full_evidence_and_unlocks_explicit_confirmation(
     ch1_reference = ch1_choice["local_preview_evidence"]
     assert ch1_reference["preview_id"] == result["preview_id"]
     assert ch1_reference["roi"] == "CH1"
-    assert ch1_reference["selected_segment_label"] == "session-2"
+    assert ch1_reference["selected_segment_label"] == "2025_01_01-02_00_00"
     assert ch1_reference["selected_segment_index"] == 2
     assert ch1_reference["source_file"] == str(source_files[2].resolve())
     assert ch1_reference["source_file_hash"]
@@ -6866,7 +7236,7 @@ def test_local_preview_failure_reports_selected_segment_without_fallback(
         "check that the source file is still available."
     )
     details = window._guided_preview_messages_label.text()
-    assert "Selected segment: session-1" in details
+    assert "Selected segment: 2025_01_01-01_00_00" in details
     assert "Discovered session index: 1" in details
     assert f"Source path: {files[1].resolve()}" in details
     assert "Adapter-local chunk ID: 0" in details
@@ -8482,4 +8852,9 @@ def test_guided_diagnostics_guidance_new_analysis_failed_cache(window):
     status_text = window._guided_diagnostic_cache_status_label.text()
     assert status_text == (
         "Correction evidence: build failed. Fix the issue and try again."
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "run_guided_local_correction_preview",
+        successful_computation,
     )

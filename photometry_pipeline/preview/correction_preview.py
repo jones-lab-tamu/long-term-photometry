@@ -14,7 +14,10 @@ from __future__ import annotations
 import csv
 import dataclasses
 import hashlib
+import html
+import itertools
 import json
+import math
 import os
 import re
 import secrets
@@ -74,6 +77,359 @@ REJECTED_GUIDED_PREVIEW_METHODS = {
 }
 VALID_PREVIEW_SOURCE_TYPES = {"completed_run", "phasic_cache", "diagnostic_cache"}
 REQUIRED_PREVIEW_CHUNK_FIELDS = ("time_sec", "sig_raw", "uv_raw")
+
+
+def generate_guided_correction_preview_reports(
+    result: dict[str, Any],
+    *,
+    report_inputs: dict[str, Any],
+) -> dict[str, Any]:
+    """Render local-preview review artifacts using only plain snapshotted inputs."""
+    method_labels = dict(report_inputs.get("method_labels") or {})
+    max_plot_points = max(1, int(report_inputs.get("max_plot_points", 800)))
+    figure_dpi = max(1, int(report_inputs.get("figure_dpi", 80)))
+    result.setdefault("roi", str(report_inputs.get("selected_roi") or ""))
+    result.setdefault(
+        "chunk_index", int(report_inputs.get("selected_chunk_index") or 0)
+    )
+    result.setdefault(
+        "preview_segment_label",
+        str(report_inputs.get("selected_segment_label") or ""),
+    )
+    result.setdefault(
+        "preview_output_dir", str(report_inputs.get("preview_output_dir") or "")
+    )
+    result["visual_preview_path"] = _render_guided_correction_preview_visual(
+        result,
+        method_labels=method_labels,
+        max_plot_points=max_plot_points,
+        figure_dpi=figure_dpi,
+    )
+    result["user_report_path"] = _write_guided_correction_preview_report(
+        result,
+        method_labels=method_labels,
+    )
+    return result
+
+
+def _preview_method_label(method: str, method_labels: dict[str, str]) -> str:
+    return str(method_labels.get(str(method), str(method)))
+
+
+def _render_guided_correction_preview_visual(
+    result: dict[str, Any],
+    *,
+    method_labels: dict[str, str],
+    max_plot_points: int,
+    figure_dpi: int,
+) -> str:
+    output_text = str(result.get("preview_output_dir") or "").strip()
+    method_statuses = result.get("method_statuses", {})
+    if not output_text or not isinstance(method_statuses, dict):
+        return ""
+    traces: dict[str, dict[str, list[float]]] = {}
+    trace_sources: dict[str, str] = {}
+    columns = ("time_sec", "sig_raw", "uv_raw", "fit_ref", "delta_f")
+    for method, raw_status in method_statuses.items():
+        status = raw_status if isinstance(raw_status, dict) else {}
+        trace_path = Path(str(status.get("trace_csv") or ""))
+        if not trace_path.is_file():
+            continue
+        series = {column: [] for column in columns}
+        try:
+            with trace_path.open("r", encoding="utf-8", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    for column in columns:
+                        try:
+                            series[column].append(float(row[column]))
+                        except (KeyError, TypeError, ValueError):
+                            series[column].append(float("nan"))
+        except Exception:
+            continue
+        if series["time_sec"]:
+            traces[str(method)] = series
+            trace_sources[str(method)] = str(trace_path)
+    result["visual_trace_sources"] = trace_sources
+    result["visual_trace_sample_counts"] = {
+        method: len(series["time_sec"]) for method, series in traces.items()
+    }
+    signal_f0 = result.get("signal_only_f0_preview_evidence")
+    signal_f0_valid = bool(
+        isinstance(signal_f0, dict)
+        and signal_f0.get("valid") is True
+        and len(signal_f0.get("time_sec", ()))
+        == len(signal_f0.get("preview_dff", ()))
+        and len(signal_f0.get("time_sec", ())) > 0
+    )
+    if signal_f0_valid:
+        result["visual_trace_sample_counts"]["signal_only_f0"] = len(
+            signal_f0["time_sec"]
+        )
+    plot_traces: dict[str, dict[str, list[float]]] = {}
+    for method, series in traces.items():
+        stride = max(1, math.ceil(len(series["time_sec"]) / max_plot_points))
+        plot_traces[method] = {
+            key: values[::stride] for key, values in series.items()
+        }
+    signal_f0_plot = signal_f0
+    if signal_f0_valid:
+        stride = max(1, math.ceil(len(signal_f0["time_sec"]) / max_plot_points))
+        signal_f0_plot = {
+            key: value[::stride]
+            if isinstance(value, (list, tuple, np.ndarray))
+            else value
+            for key, value in signal_f0.items()
+        }
+    dynamic_labels = [
+        _preview_method_label(method, method_labels) for method in traces
+    ]
+    if traces:
+        panel_titles = [
+            "Source segment",
+            "Dynamic-fit corrected signal comparison",
+            "Dynamic-fit fitted reference comparison",
+        ]
+        trace_labels = ["Raw signal", "Reference/control signal", *dynamic_labels]
+    else:
+        panel_titles = []
+        trace_labels = []
+    if signal_f0_valid:
+        panel_titles.extend(
+            ["Signal-Only F0 baseline", "Signal-Only F0-corrected dF/F preview"]
+        )
+        trace_labels.extend(["Signal-only F0 baseline", "Signal-only dF/F"])
+        if not traces:
+            trace_labels.insert(0, "Raw signal")
+    result["visual_panel_titles"] = panel_titles
+    result["visual_trace_labels"] = trace_labels
+    if not traces and not signal_f0_valid:
+        return ""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
+
+        with matplotlib.rc_context({"figure.dpi": figure_dpi}):
+            if not traces:
+                figure, axes = plt.subplots(2, 1, figsize=(7.5, 5.5), sharex=True)
+                axes[0].plot(
+                    signal_f0_plot["time_sec"],
+                    signal_f0_plot["signal_raw"],
+                    label="Raw signal",
+                    linewidth=1.2,
+                )
+                axes[0].plot(
+                    signal_f0_plot["time_sec"],
+                    signal_f0_plot["signal_only_f0_uncapped"],
+                    label="Signal-only F0 baseline",
+                    linewidth=1.1,
+                )
+                axes[0].set_title("Signal-Only F0 baseline")
+                axes[0].set_ylabel("Signal")
+                axes[0].legend(loc="best", fontsize="small")
+                axes[1].plot(
+                    signal_f0_plot["time_sec"],
+                    signal_f0_plot["preview_dff"],
+                    label="Signal-only dF/F",
+                    linewidth=1.1,
+                )
+                axes[1].set_title("Signal-Only F0-corrected dF/F preview")
+                axes[1].set_ylabel("dF/F")
+                axes[1].set_xlabel("Time (seconds)")
+                axes[1].legend(loc="best", fontsize="small")
+            else:
+                panel_count = 5 if signal_f0_valid else 3
+                figure, axes = plt.subplots(
+                    panel_count,
+                    1,
+                    figsize=(7.5, 10.0 if signal_f0_valid else 6.5),
+                    sharex=True,
+                )
+                first = next(iter(plot_traces.values()))
+                axes[0].plot(
+                    first["time_sec"], first["sig_raw"], label="Raw signal", linewidth=1.2
+                )
+                axes[0].plot(
+                    first["time_sec"],
+                    first["uv_raw"],
+                    label="Reference/control signal",
+                    linewidth=1.0,
+                    alpha=0.8,
+                )
+                axes[0].set_title("Source segment")
+                axes[0].set_ylabel("Signal")
+                axes[0].legend(loc="best")
+                for method, series in plot_traces.items():
+                    label = _preview_method_label(method, method_labels)
+                    axes[1].plot(
+                        series["time_sec"], series["delta_f"], label=label, linewidth=1.1
+                    )
+                    axes[2].plot(
+                        series["time_sec"], series["fit_ref"], label=label, linewidth=1.1
+                    )
+                axes[1].set_title("Dynamic-fit corrected signal comparison")
+                axes[1].set_ylabel("Corrected signal")
+                axes[1].legend(loc="best", fontsize="small")
+                axes[2].set_title("Dynamic-fit fitted reference comparison")
+                axes[2].set_ylabel("Fitted reference")
+                axes[2].legend(loc="best", fontsize="small")
+                if signal_f0_valid:
+                    axes[3].plot(
+                        signal_f0_plot["time_sec"],
+                        signal_f0_plot["signal_raw"],
+                        label="Raw signal",
+                        linewidth=1.2,
+                    )
+                    axes[3].plot(
+                        signal_f0_plot["time_sec"],
+                        signal_f0_plot["signal_only_f0_uncapped"],
+                        label="Signal-only F0 baseline",
+                        linewidth=1.1,
+                    )
+                    axes[3].set_title("Signal-Only F0 baseline")
+                    axes[3].set_ylabel("Signal")
+                    axes[3].legend(loc="best", fontsize="small")
+                    axes[4].plot(
+                        signal_f0_plot["time_sec"],
+                        signal_f0_plot["preview_dff"],
+                        label="Signal-only dF/F",
+                        linewidth=1.1,
+                    )
+                    axes[4].set_title("Signal-Only F0-corrected dF/F preview")
+                    axes[4].set_ylabel("dF/F")
+                    axes[4].legend(loc="best", fontsize="small")
+                axes[-1].set_xlabel("Time (seconds)")
+            figure.suptitle(
+                "Correction preview — "
+                f"ROI {result.get('roi', '')}, segment {result.get('chunk_index', '')}"
+            )
+            figure.subplots_adjust(
+                left=0.11, right=0.97, bottom=0.07, top=0.94, hspace=0.46
+            )
+            visual_path = Path(output_text) / "correction_preview_visual.png"
+            figure.savefig(visual_path)
+            plt.close(figure)
+    except Exception:
+        return ""
+    return str(visual_path)
+
+
+def _write_guided_correction_preview_report(
+    result: dict[str, Any], *, method_labels: dict[str, str]
+) -> str:
+    output_text = str(result.get("preview_output_dir") or "").strip()
+    if not output_text:
+        return ""
+    output_dir = Path(output_text)
+    if not output_dir.is_dir():
+        return ""
+    method_statuses = result.get("method_statuses", {})
+    if not isinstance(method_statuses, dict):
+        method_statuses = {}
+    sections: list[str] = []
+    for method, raw_status in method_statuses.items():
+        status = raw_status if isinstance(raw_status, dict) else {}
+        label = _preview_method_label(str(method), method_labels)
+        warnings = "; ".join(str(x) for x in status.get("warnings", []))
+        errors = "; ".join(str(x) for x in status.get("errors", []))
+        diagnostics_path = Path(str(status.get("diagnostics_json") or ""))
+        trace_path = Path(str(status.get("trace_csv") or ""))
+        diagnostic_lines: list[str] = []
+        if diagnostics_path.is_file():
+            try:
+                payload = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                if payload.get("n_samples") is not None:
+                    diagnostic_lines.append(
+                        f"Samples: {html.escape(str(payload['n_samples']))}"
+                    )
+                for key, title in (
+                    ("fit_ref_summary", "Fitted reference"),
+                    ("delta_f_summary", "Corrected signal"),
+                ):
+                    summary = payload.get(key)
+                    if isinstance(summary, dict):
+                        values = ", ".join(
+                            f"{html.escape(str(name))}: {html.escape(str(value))}"
+                            for name, value in summary.items()
+                        )
+                        diagnostic_lines.append(f"{title}: {values}")
+        trace_rows: list[dict[str, str]] = []
+        if trace_path.is_file():
+            try:
+                with trace_path.open("r", encoding="utf-8", newline="") as handle:
+                    trace_rows = list(itertools.islice(csv.DictReader(handle), 12))
+            except Exception:
+                trace_rows = []
+        table = ""
+        if trace_rows:
+            columns = ("time_sec", "sig_raw", "uv_raw", "fit_ref", "delta_f")
+            header = "".join(
+                f"<th>{html.escape(column)}</th>" for column in columns
+            )
+            body = "".join(
+                "<tr>"
+                + "".join(
+                    f"<td>{html.escape(str(row.get(column, '')))}</td>"
+                    for column in columns
+                )
+                + "</tr>"
+                for row in trace_rows
+            )
+            table = (
+                "<p>First 12 trace samples:</p>"
+                f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
+            )
+        links = []
+        for path, text in (
+            (trace_path, "Trace CSV"),
+            (diagnostics_path, "Diagnostics JSON"),
+        ):
+            if path.is_file():
+                links.append(
+                    f'<a href="{html.escape(path.name)}">{html.escape(text)}</a>'
+                )
+        sections.append(
+            f"<section><h2>{html.escape(label)}</h2>"
+            f"<p>Status: {html.escape(str(status.get('status', '')))}</p>"
+            f"<p>Warnings: {html.escape(warnings or 'none')}</p>"
+            f"<p>Errors: {html.escape(errors or 'none')}</p>"
+            + "".join(f"<p>{line}</p>" for line in diagnostic_lines)
+            + table
+            + (
+                "<p>Technical files: " + " | ".join(links) + "</p>"
+                if links
+                else ""
+            )
+            + "</section>"
+        )
+    method_names = ", ".join(
+        _preview_method_label(str(method), method_labels) for method in method_statuses
+    )
+    report = (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        "<title>Correction preview</title><style>"
+        "body{font-family:system-ui,sans-serif;max-width:1100px;"
+        "margin:2rem auto;padding:0 1rem;color:#202124}"
+        "table{border-collapse:collapse;width:100%;font-size:.9rem}"
+        "th,td{border:1px solid #ccc;padding:.35rem;text-align:right}"
+        "th{background:#f3f4f6}section{margin:2rem 0}</style></head>"
+        "<body><h1>Correction preview</h1>"
+        f"<p><strong>ROI:</strong> {html.escape(str(result.get('roi', '')))}</p>"
+        f"<p><strong>Preview segment:</strong> "
+        f"{html.escape(str(result.get('preview_segment_label') or result.get('chunk_index', '')))}</p>"
+        f"<p><strong>Methods compared:</strong> {html.escape(method_names)}</p>"
+        "<p>This report is for correction-method review only. Opening it "
+        "does not confirm a strategy or start the final analysis.</p>"
+        + "".join(sections)
+        + "</body></html>"
+    )
+    report_path = output_dir / "correction_preview_report.html"
+    report_path.write_text(report, encoding="utf-8")
+    return str(report_path)
 
 
 @dataclass(frozen=True)
@@ -1647,11 +2003,15 @@ def run_guided_local_correction_preview(
             config_values = dataclasses.asdict(base_cfg)
             config_values.update(applied_config_overrides)
             base_cfg = Config(**config_values)
+        load_kwargs = {}
+        if str(input_format).strip().lower() == "npm":
+            load_kwargs["selected_roi"] = str(roi)
         raw_chunk = load_chunk(
             source_path,
             str(input_format).strip().lower(),
             base_cfg,
             int(adapter_chunk_index),
+            **load_kwargs,
         )
         if roi not in raw_chunk.channel_names:
             raise GuidedCorrectionPreviewError(

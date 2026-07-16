@@ -2252,16 +2252,21 @@ def _execution_field_classifications(plan: GuidedNewAnalysisDraftPlan) -> tuple[
         else:
             npm_has_mapping = dataset_snapshot_usable and _snapshot_has_mapping_fields(
                 plan.dataset_contract_snapshot,
-                ("signal_channel", "control_channel", "time_column"),
+                (
+                    "npm_time_axis",
+                    "npm_led_col",
+                    "npm_region_prefix",
+                    "npm_region_suffix",
+                ),
             )
             fields.append(_execution_field(
                 "npm_channel_mapping",
                 "present" if npm_has_mapping else "required_missing",
                 value=_snapshot_field_value(plan.dataset_contract_snapshot) if npm_has_mapping else None,
                 provenance=(
-                    "applied GuidedNewAnalysisDraftPlan dataset contract snapshot provides signal_channel/control_channel/time_column"
+                    "applied GuidedNewAnalysisDraftPlan dataset contract snapshot provides the NPM time, LED, region-prefix, and region-suffix mapping"
                     if npm_has_mapping
-                    else "NPM signal/control/time channel mapping is not represented in current applied GuidedNewAnalysisDraftPlan dataset contract snapshot"
+                    else "NPM time, LED, and region-column mapping is not represented in the current applied GuidedNewAnalysisDraftPlan dataset contract snapshot"
                 ),
                 blocks_subset=not npm_has_mapping,
                 issue_category=None if npm_has_mapping else "missing_npm_channel_mapping",

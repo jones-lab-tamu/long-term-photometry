@@ -61,8 +61,8 @@ def infer_guided_recording_structure(
             status="unsupported",
             evidence={"resolved_format": resolved, "source_path": source_path},
             message=(
-                "Automatic timing detection is not available for this format "
-                "yet."
+                "Confirm sessions per hour and session duration for this "
+                "recording."
             ),
         )
 

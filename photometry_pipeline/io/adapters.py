@@ -1917,6 +1917,7 @@ def load_chunk(
     *,
     continuous_window: Optional[Dict[str, Any]] = None,
     source_cache: Optional[Dict[str, Any]] = None,
+    selected_roi: Optional[str] = None,
 ) -> Chunk:
     fmt = str(format_type).strip().lower()
     if fmt in {"rwd", "custom_tabular"}:
@@ -1934,7 +1935,12 @@ def load_chunk(
             raise ValueError(
                 "Continuous acquisition mode is not yet implemented for NPM/interleaved inputs."
             )
-        chunk = _load_npm(path, config, chunk_id)
+        chunk = _load_npm(
+            path,
+            config,
+            chunk_id,
+            selected_roi=selected_roi,
+        )
     else:
         raise ValueError(f"Unknown format: {format_type}")
 
@@ -1953,24 +1959,38 @@ def _load_custom_tabular(path: str, config: Config, chunk_id: int) -> Chunk:
     return _build_chunk_from_source(path, "custom_tabular", config, chunk_id, source_data=source)
 
 
-def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
-    df = pd.read_csv(path)
-    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+def _load_npm(
+    path: str,
+    config: Config,
+    chunk_id: int,
+    *,
+    selected_roi: Optional[str] = None,
+) -> Chunk:
     contract = NpmParserContract.from_config(
         config, session_duration_sec=float(config.chunk_duration_sec)
     )
+    if selected_roi is None:
+        df = pd.read_csv(path)
+        df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+        columns = list(df.columns)
+    else:
+        header = pd.read_csv(path, nrows=0)
+        header.columns = [
+            str(c).strip().lstrip("\ufeff") for c in header.columns
+        ]
+        columns = list(header.columns)
     time_col = next(
-        (candidate for candidate in contract.timestamp_column_candidates if candidate in df.columns),
+        (candidate for candidate in contract.timestamp_column_candidates if candidate in columns),
         None,
     )
     if time_col is None:
         raise ValueError(f"NPM: Missing {contract.timestamp_column_candidates[0]}")
-    if contract.npm_led_col not in df.columns:
+    if contract.npm_led_col not in columns:
         raise ValueError(f"NPM: Missing {contract.npm_led_col}")
 
     roi_cols = sorted(
         [
-            c for c in df.columns
+            c for c in columns
             if c.startswith(contract.npm_region_prefix)
             and c.endswith(contract.npm_region_suffix)
         ],
@@ -1979,6 +1999,21 @@ def _load_npm(path: str, config: Config, chunk_id: int) -> Chunk:
     if not roi_cols:
         raise ValueError("NPM: No Region columns")
     names = _create_canonical_names(len(roi_cols))
+    if selected_roi is not None:
+        selected_text = str(selected_roi).strip()
+        if selected_text not in names:
+            raise ValueError(
+                f"NPM: Requested ROI '{selected_text}' is not present"
+            )
+        selected_index = names.index(selected_text)
+        selected_column = roi_cols[selected_index]
+        roi_cols = [selected_column]
+        names = [selected_text]
+        df = pd.read_csv(
+            path,
+            usecols=[time_col, contract.npm_led_col, selected_column],
+        )
+        df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
     return _build_npm_chunk_from_dataframe(
         path,
         df,

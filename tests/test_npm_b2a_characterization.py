@@ -147,6 +147,40 @@ def test_current_npm_loader_discovers_multiple_rois_by_natural_region_order():
     np.testing.assert_allclose(chunk.sig_raw[:, 1], [200.0, 201.0])
 
 
+def test_npm_preview_load_reads_only_the_selected_roi(monkeypatch):
+    cfg = _npm_config()
+    path = FIXTURE_ROOT / "multi_roi" / "photometryData2025-03-05T16_00_00.csv"
+    from photometry_pipeline.io import adapters
+
+    real_read_csv = adapters.pd.read_csv
+    calls = []
+
+    def recording_read_csv(*args, **kwargs):
+        calls.append(dict(kwargs))
+        return real_read_csv(*args, **kwargs)
+
+    monkeypatch.setattr(adapters.pd, "read_csv", recording_read_csv)
+
+    chunk = load_chunk(
+        str(path), "npm", cfg, chunk_id=0, selected_roi="Region1"
+    )
+
+    assert chunk.channel_names == ["Region1"]
+    assert chunk.metadata["roi_map"] == {"Region1": {"raw_col": "Region1G"}}
+    assert calls[0].get("nrows") == 0
+    assert calls[1]["usecols"] == ["Timestamp", "LedState", "Region1G"]
+    np.testing.assert_allclose(chunk.uv_raw[:, 0], [20.0, 21.0])
+    np.testing.assert_allclose(chunk.sig_raw[:, 0], [200.0, 201.0])
+
+
+def test_npm_preview_load_rejects_an_unknown_selected_roi():
+    cfg = _npm_config()
+    path = FIXTURE_ROOT / "multi_roi" / "photometryData2025-03-05T16_00_00.csv"
+
+    with pytest.raises(ValueError, match="Requested ROI 'Region9' is not present"):
+        load_chunk(str(path), "npm", cfg, chunk_id=0, selected_roi="Region9")
+
+
 def test_current_npm_malformed_missing_signal_refuses():
     cfg = _npm_config()
     path = FIXTURE_ROOT / "malformed" / "missing_signal.csv"

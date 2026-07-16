@@ -1,12 +1,13 @@
 """GUI tests for the new_analysis Guided draft plan summary."""
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
 import pytest
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QSignalBlocker, Qt
 from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QWidget
 
 import photometry_pipeline.preview.correction_preview as correction_preview_module
@@ -197,7 +198,7 @@ def _configure_complete_guided_new_analysis_draft(
 ):
     window._guided_workflow_stepper.setCurrentRow(0)
     window._guided_start_setup_btn.click()
-    input_dir, _output_dir = _configure_guided_raw_cache_setup(
+    input_dir, output_dir = _configure_guided_raw_cache_setup(
         window, tmp_path, monkeypatch
     )
     if write_rwd_file:
@@ -221,6 +222,10 @@ def _configure_complete_guided_new_analysis_draft(
             str(session_duration if session_duration is not None else 120)
         )
 
+    cache_output = tmp_path / "preview_cache"
+    cache_output.mkdir()
+    with QSignalBlocker(window._output_dir):
+        window._output_dir.setText(str(cache_output))
     fake_runner = _FakeDiagnosticCacheRunner()
     window._guided_diagnostic_cache_runner = fake_runner
     window._guided_diagnostic_cache_build_btn.click()
@@ -248,12 +253,7 @@ def _configure_complete_guided_new_analysis_draft(
     window._guided_workflow_stepper.setCurrentRow(list(GUIDED_WORKFLOW_STEPS).index("Draft plan"))
     window._guided_feature_event_apply_btn.click()
 
-    output_parent = tmp_path / "planned_outputs"
-    output_parent.mkdir()
-    output_target = output_parent / "future_run_outputs"
-    window._guided_output_path_edit.setText(str(output_target))
-    window._guided_output_apply_btn.click()
-    return output_parent, output_target
+    return output_dir, output_dir
 
 
 def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
@@ -598,7 +598,7 @@ def test_new_analysis_draft_plan_displays_summary_fields(window, tmp_path, monke
     assert "Diagnostic cache: missing" in summary_text
     assert "Correction strategy coverage:" in summary_text
     assert "Feature/event profile status: default_initialized" in summary_text
-    assert "Output policy status: missing" in summary_text
+    assert "Output policy status: applied" in summary_text
     assert "Draft plan completeness: incomplete for the future analysis configuration" in summary_text
     assert "Execution: not available for this configuration yet" in summary_text
     assert "This draft plan is not executable yet for this configuration. See blocking issues above." in summary_text
@@ -607,7 +607,7 @@ def test_new_analysis_draft_plan_displays_summary_fields(window, tmp_path, monke
     )
     attention = window._guided_review_attention_label.text()
     assert "Feature detection settings" in attention
-    assert "Output destination" in attention
+    assert "output folder" not in attention.lower()
     assert window._guided_review_attention_group.isHidden() is False
 
 
@@ -2455,7 +2455,7 @@ def test_new_analysis_run_preview_displays_execution_intent_and_output_creation_
     assert "output folder created" not in preview_text
 
 
-def test_new_analysis_run_preview_feature_event_consumption_requires_applied_profile(
+def test_new_analysis_run_preview_consumes_valid_loaded_default_profile(
     window,
     tmp_path,
     monkeypatch,
@@ -2469,18 +2469,17 @@ def test_new_analysis_run_preview_feature_event_consumption_requires_applied_pro
 
     preview_text = window._guided_new_analysis_run_preview_label.text()
 
-    assert "feature_event_profile_not_applied" in preview_text
+    assert "feature_event_profile_not_applied" not in preview_text
     assert "Feature/event consumption:" in preview_text
     assert "  execution_mode: both" in preview_text
     assert "  run_profile: full" in preview_text
     assert "  traces_only: false" in preview_text
     assert "  feature_event_profile_required: true" in preview_text
-    assert "  feature_event_profile_current_applied: false" in preview_text
-    assert "  feature_event_values_consumed: false" in preview_text
+    assert "  feature_event_profile_current_applied: true" in preview_text
+    assert "  feature_event_values_consumed: true" in preview_text
     assert "  feature_extraction_in_scope: true" in preview_text
     assert "  feature_dependent_phasic_summaries_in_scope: true" in preview_text
-    assert "  execution consumption: not enabled until feature/event profile is applied and current" in preview_text
-    assert "Execution: not available for this configuration yet" in preview_text
+    assert "  execution consumption: enabled for first-subset readiness classification" in preview_text
     assert "ready to run" not in preview_text.lower()
     assert "execution-ready" not in preview_text.lower()
     assert "runnable" not in preview_text.lower()
@@ -2629,7 +2628,8 @@ def test_new_analysis_run_preview_panel_renders_complete_plan(window, tmp_path, 
     assert "allowed_dynamic_fit_strategy: global_linear_regression" in preview_text
     assert "execution_available: false" in preview_text
     assert "No files or directories were created." in preview_text
-    assert not output_target.exists()
+    assert output_target.is_dir()
+    assert list(output_target.iterdir()) == []
 
 
 def test_new_analysis_run_preview_shows_missing_execution_subset_fields(window, tmp_path, monkeypatch):
@@ -2973,12 +2973,13 @@ event_auc_baseline: median
     assert window._guided_feature_event_pre_filter_combo.currentText() == "lowpass"
     assert window._guided_feature_event_auc_baseline_combo.currentText() == "median"
     
-    # Verify profile status is default_initialized, which does not count as configured/passed (blocking issue)
+    # Loaded valid defaults are effective immediately; the Apply button is only
+    # needed after the scientist edits the Default form.
     assert window._guided_new_analysis_feature_event_profile_status == "default_initialized"
     summary_text = window._guided_draft_run_plan_preview_label.text()
-    assert "Feature/event profile status: default_initialized" in summary_text
+    assert "Feature/event profile status: applied" in summary_text
     checklist_text = window._guided_draft_run_plan_checklist_label.text()
-    assert "Feature/event settings: fail" in checklist_text
+    assert "Feature/event settings: pass" in checklist_text
     
     # Case G: GUI Apply valid feature/event settings in new_analysis
     window._guided_feature_event_apply_btn.click()
@@ -3128,7 +3129,7 @@ peak_threshold_abs: 0.123
     assert "Feature/event profile baseline status: custom_config" in summary_text
 
 
-def test_new_analysis_output_policy_typed_path_is_not_applied(window, tmp_path, monkeypatch):
+def test_hidden_legacy_output_editor_does_not_replace_select_data_destination(window, tmp_path, monkeypatch):
     window._guided_workflow_stepper.setCurrentRow(0)
     window._guided_start_setup_btn.click()
     _configure_guided_raw_cache_setup(window, tmp_path, monkeypatch)
@@ -3143,8 +3144,12 @@ def test_new_analysis_output_policy_typed_path_is_not_applied(window, tmp_path, 
     assert window._guided_new_analysis_output_policy_status == "missing"
     summary_text = window._guided_draft_run_plan_preview_label.text()
     checklist_text = window._guided_draft_run_plan_checklist_label.text()
-    assert "Output policy status: missing" in summary_text
-    assert "Output destination: fail" in checklist_text
+    plan = window._build_guided_new_analysis_draft_plan()
+    assert plan.output_policy_status == "applied"
+    assert plan.output_policy_path == window._guided_output_dir_edit.text()
+    assert target.name not in summary_text
+    assert "Output destination: pass" in checklist_text
+    assert window._guided_legacy_output_policy_editor.isHidden() is True
     assert not target.exists()
 
 
@@ -3168,7 +3173,10 @@ def test_new_analysis_output_policy_apply_valid_path_stores_state_without_creati
     assert window._guided_new_analysis_output_policy_explicitly_applied is True
     assert "No directories or files were created" in window._guided_output_status_label.text()
     assert "Output policy status: applied" in window._guided_draft_run_plan_preview_label.text()
-    assert target.name in window._guided_draft_run_plan_preview_label.text()
+    assert target.name not in window._guided_draft_run_plan_preview_label.text()
+    assert window._build_guided_new_analysis_draft_plan().output_policy_path == (
+        window._guided_output_dir_edit.text()
+    )
     assert "Output destination: pass" in window._guided_draft_run_plan_checklist_label.text()
     assert not target.exists()
     after_files = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*"))
@@ -3287,15 +3295,15 @@ def test_new_analysis_output_policy_marks_stale_when_context_changes(window, tmp
 
     assert window._guided_new_analysis_output_policy_status == "stale"
     assert "input source path changed" in window._guided_new_analysis_output_policy_stale_reasons
-    assert "Output policy status: stale" in window._guided_draft_run_plan_preview_label.text()
-    assert "Output destination: fail" in window._guided_draft_run_plan_checklist_label.text()
+    assert "Output policy status: applied" in window._guided_draft_run_plan_preview_label.text()
+    assert "Output destination: pass" in window._guided_draft_run_plan_checklist_label.text()
     assert not target.exists()
 
     window._guided_input_dir_edit.setText(str(input_dir))
     window._refresh_guided_draft_run_plan_preview()
 
     assert window._guided_new_analysis_output_policy_status == "stale"
-    assert "Output policy status: stale" in window._guided_draft_run_plan_preview_label.text()
+    assert "Output policy status: applied" in window._guided_draft_run_plan_preview_label.text()
 
     window._guided_output_path_edit.setText(str(target))
     window._guided_output_apply_btn.click()
@@ -3351,7 +3359,7 @@ def test_new_analysis_output_policy_marks_stale_when_target_appears(window, tmp_
 
     assert window._guided_new_analysis_output_policy_status == "stale"
     assert any("already exists" in reason for reason in window._guided_new_analysis_output_policy_stale_reasons)
-    assert "Output destination: fail" in window._guided_draft_run_plan_checklist_label.text()
+    assert "Output destination: pass" in window._guided_draft_run_plan_checklist_label.text()
 
 
 def test_new_analysis_output_policy_clear_removes_state(window, tmp_path, monkeypatch):
@@ -3372,7 +3380,7 @@ def test_new_analysis_output_policy_clear_removes_state(window, tmp_path, monkey
     assert window._guided_new_analysis_output_policy_status == "missing"
     assert window._guided_new_analysis_output_policy_path is None
     assert window._guided_output_path_edit.text() == ""
-    assert "Output policy status: missing" in window._guided_draft_run_plan_preview_label.text()
+    assert "Output policy status: applied" in window._guided_draft_run_plan_preview_label.text()
     assert not target.exists()
 
 
@@ -3385,6 +3393,10 @@ def test_guided_new_analysis_compilation_bindings_4J11i(window, tmp_path, monkey
     window._guided_output_dir_edit.setText("C:/guided_test_output")
     plan = window._build_guided_new_analysis_draft_plan()
     assert plan.output_base_path == "C:/guided_test_output"
+    assert plan.output_policy_path == "C:/guided_test_output"
+    assert plan.output_policy_status == "applied"
+    assert plan.output_policy_explicitly_applied is True
+    assert window._guided_legacy_output_policy_editor.isHidden() is True
 
     # 2. Rejects completed-run-scoped _guided_strategy_choices mapping
     window._guided_correction_intent = None
@@ -4016,21 +4028,19 @@ def test_new_analysis_valid_custom_roi_passes_consistency_check(
     assert ready is True
 
 
-def test_new_analysis_missing_default_with_uncustomized_roi_blocks_readiness(
+def test_new_analysis_loaded_default_with_one_custom_roi_is_ready(
     window, tmp_path, monkeypatch
 ):
-    """A realistic GUI-reachable inconsistency: a ROI is customized while
-    the default settings were never applied. Check setup must block rather
-    than silently letting the un-customized ROIs fall back to nothing."""
+    """A valid custom ROI can coexist with valid loaded defaults."""
     _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
     _customize_roi_via_fake_dialog(
         window, monkeypatch, "CH1", {"peak_threshold_k": 3.5}
     )
     window._guided_new_analysis_feature_event_profile_status = "default_initialized"
 
-    assert window._guided_per_roi_feature_event_consistency_problem() != ""
-    ready, _message = window._guided_feature_detection_readiness()
-    assert ready is False
+    ready, message = window._guided_feature_detection_readiness()
+    assert ready is True
+    assert "every included ROI" in message
 
 
 def test_new_analysis_review_plan_summarizes_default_and_custom_rois(
@@ -4365,8 +4375,7 @@ def test_default_block_wording_reads_as_default_settings(window):
     text = note.text()
     assert "Default" in text
     assert "Expand this section" in text
-    # The note must not tell the user they can simply leave the section alone:
-    # confirmation via "Use these as Default settings" is still mandatory.
+    assert "leave the values unchanged" in text
     assert "Use these as Default settings" in text
     _assert_no_internal_words(text)
 
@@ -4604,7 +4613,7 @@ def _assert_step5_surface_is_scientist_facing(window) -> None:
 
 def test_step5_visible_text_sweep_across_all_states(window, tmp_path, monkeypatch):
     """The complete visible Step 5 surface must stay scientist-facing in the
-    unconfirmed, confirmed, changed-after-confirmation and reset states."""
+    loaded-default, edited, confirmed and reset states."""
     from gui.main_window import (
         GUIDED_DEFAULT_SETTINGS_CHANGED_AFTER_CONFIRMATION,
         GUIDED_DEFAULT_SETTINGS_CONFIRM_BEFORE_CONTINUING,
@@ -4614,8 +4623,11 @@ def test_step5_visible_text_sweep_across_all_states(window, tmp_path, monkeypatc
 
     _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
 
-    # --- State 1: unconfirmed ------------------------------------------------
-    window._guided_feature_event_clear_btn.click()
+    # --- State 1: loaded valid defaults -------------------------------------
+    window._guided_new_analysis_feature_event_profile_status = "default_initialized"
+    window._guided_new_analysis_feature_event_profile_errors = []
+    window._guided_new_analysis_feature_event_profile_stale_reasons = []
+    window._sync_guided_feature_event_editor_to_current_run()
     assert window._guided_new_analysis_feature_event_profile_status == (
         "default_initialized"
     )
@@ -4624,21 +4636,21 @@ def test_step5_visible_text_sweep_across_all_states(window, tmp_path, monkeypatc
         GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED
     )
     assert window._guided_feature_detection_continue_status.text() == (
-        GUIDED_DEFAULT_SETTINGS_CONFIRM_BEFORE_CONTINUING
+        "Feature detection settings are ready for every included ROI."
     )
-    assert window._guided_feature_detection_continue_btn.isEnabled() is False
-    assert "Status: Not confirmed" in (
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
+    assert "Status: Ready" in (
         window._guided_feature_detection_summary_label.text()
     )
     _assert_step5_surface_is_scientist_facing(window)
 
-    # --- State 2: confirmed --------------------------------------------------
+    # --- State 2: button remains an available explicit accept action --------
     window._guided_feature_event_apply_btn.click()
     assert window._guided_feature_event_status_label.text() == (
         GUIDED_DEFAULT_SETTINGS_READY
     )
     assert window._guided_feature_detection_continue_status.text() == (
-        GUIDED_DEFAULT_SETTINGS_READY
+        "Feature detection settings are ready for every included ROI."
     )
     assert window._guided_feature_detection_continue_btn.isEnabled() is True
     assert "Status: Confirmed" in (
@@ -4663,8 +4675,11 @@ def test_step5_visible_text_sweep_across_all_states(window, tmp_path, monkeypatc
     )
     _assert_step5_surface_is_scientist_facing(window)
 
-    # --- State 4: reset ------------------------------------------------------
-    window._guided_feature_event_clear_btn.click()
+    # --- State 4: reset restores valid loaded defaults ----------------------
+    window._guided_new_analysis_feature_event_profile_status = "default_initialized"
+    window._guided_new_analysis_feature_event_profile_errors = []
+    window._guided_new_analysis_feature_event_profile_stale_reasons = []
+    window._sync_guided_feature_event_editor_to_current_run()
     assert window._guided_new_analysis_feature_event_profile_status == (
         "default_initialized"
     )
@@ -4672,41 +4687,67 @@ def test_step5_visible_text_sweep_across_all_states(window, tmp_path, monkeypatc
     assert window._guided_feature_event_status_label.text() == (
         GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED
     )
-    assert window._guided_feature_detection_continue_btn.isEnabled() is False
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
     _assert_step5_surface_is_scientist_facing(window)
 
 
-def test_unconfirmed_status_tells_user_to_confirm_without_editing(window):
-    """The unconfirmed status text must name the confirmation action, so the
-    user is not told to simply leave the section alone."""
+def test_loaded_default_status_explains_no_confirmation_is_required(window):
+    """The starting valid defaults must not manufacture an extra gate."""
     from gui.main_window import GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED
 
-    assert "Use these as Default settings" in GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED
-    assert "starting Default settings" in GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED
+    assert "ready" in GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED
     _assert_no_implementation_words(GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED)
 
     note = window.findChild(QLabel, "guidedFeatureEventProfileEditorNote")
     note_text = note.text()
     assert "leave the values unchanged" in note_text
     assert "Use these as Default settings" in note_text
+    assert "only if" in note_text
 
 
-def test_readiness_blocks_before_confirmation_and_permits_after(
+def test_readiness_accepts_loaded_defaults_and_valid_custom_overrides(
     window, tmp_path, monkeypatch
 ):
-    """Behavior preserved: the explicit confirmation model still gates
-    Continue, regardless of the reworded status language."""
+    """Default, all-custom, and mixed valid ROI settings all continue."""
     _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
 
-    window._guided_feature_event_clear_btn.click()
+    window._guided_new_analysis_feature_event_profile_status = "default_initialized"
+    window._guided_new_analysis_feature_event_profile_errors = []
+    window._guided_new_analysis_feature_event_profile_stale_reasons = []
     ready_before, message_before = window._guided_feature_detection_readiness()
-    assert ready_before is False
-    assert "Confirm the Default settings" in message_before
+    assert ready_before is True
+    assert "every included ROI" in message_before
 
-    window._guided_feature_event_apply_btn.click()
-    ready_after, message_after = window._guided_feature_detection_readiness()
-    assert ready_after is True
-    assert message_after == "Default settings are ready."
+    for roi in window._guided_included_roi_ids_for_feature_detection():
+        window._guided_per_roi_feature_event_overrides[roi] = {
+            "config_fields": {"peak_threshold_k": 3.0}
+        }
+    ready_custom, message_custom = window._guided_feature_detection_readiness()
+    assert ready_custom is True
+    assert "every included ROI" in message_custom
+
+
+def test_feature_readiness_blocks_invalid_included_roi_but_ignores_excluded_roi(
+    window, tmp_path, monkeypatch
+):
+    _configure_complete_guided_new_analysis_draft(window, tmp_path, monkeypatch)
+    window._guided_new_analysis_feature_event_profile_status = "default_initialized"
+    window._guided_new_analysis_feature_event_profile_errors = []
+    window._guided_new_analysis_feature_event_profile_stale_reasons = []
+    first_item = window._guided_roi_list.item(0)
+    roi_id = first_item.text()
+    window._guided_per_roi_feature_event_overrides[roi_id] = {
+        "config_fields": {"peak_threshold_k": 0.0}
+    }
+
+    ready, message = window._guided_feature_detection_readiness()
+    assert ready is False
+    assert roi_id in message
+
+    first_item.setCheckState(Qt.Unchecked)
+    ready_excluded, message_excluded = window._guided_feature_detection_readiness()
+    assert ready_excluded is True
+    assert "every included ROI" in message_excluded
 
 
 # Unavailable / load-failure sanitization (4J16k38 final follow-up)

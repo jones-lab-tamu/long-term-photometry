@@ -1590,7 +1590,7 @@ def test_execution_subset_default_output_creation_policy_removes_output_creation
     assert "missing_output_creation_policy" not in categories
 
 
-def test_execution_subset_invalid_execution_intent_blocks_subset():
+def test_execution_subset_invalid_anchor_and_profile_block_subset_but_both_mode_is_valid():
     plan = _complete_new_analysis_plan(
         execution_intent=GuidedNewAnalysisExecutionIntent(
             timeline_anchor_mode="fixed_daily_anchor",
@@ -1605,10 +1605,10 @@ def test_execution_subset_invalid_execution_intent_blocks_subset():
     fields = {field.field_name: field for field in subset.field_classifications}
 
     assert "invalid_timeline_anchor_mode" in categories
-    assert "invalid_execution_mode" in categories
+    assert "invalid_execution_mode" not in categories
     assert "unsupported_run_profile_for_first_subset" in categories
     assert fields["timeline_anchor_mode"].blocks_subset is True
-    assert fields["mode"].blocks_subset is True
+    assert fields["mode"].blocks_subset is False
     assert fields["run_profile"].blocks_subset is True
     assert subset.execution_available is False
 
@@ -2017,9 +2017,10 @@ def test_execution_subset_npm_intermittent_with_explicit_mapping_satisfies_npm_d
     plan.dataset_contract_snapshot = _current_applied_snapshot_for_plan(
         plan,
         contract_values={
-            "signal_channel": "465",
-            "control_channel": "405",
-            "time_column": "time_sec",
+            "npm_time_axis": "system_timestamp",
+            "npm_led_col": "LedState",
+            "npm_region_prefix": "Region",
+            "npm_region_suffix": "G",
         },
     )
 

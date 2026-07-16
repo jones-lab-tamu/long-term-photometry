@@ -126,6 +126,7 @@ from photometry_pipeline.preview.correction_preview import (
     PREVIEW_SUMMARY_FILENAME,
     resolve_completed_run_preview_source,
     compute_guided_local_preview_dff_trace_in_memory,
+    generate_guided_correction_preview_reports,
     run_guided_correction_preview_comparison,
     run_guided_local_correction_preview,
 )
@@ -440,6 +441,59 @@ class _GuidedRoiDiscoveryWorker(QObject):
                 message=str(exc),
             )
             self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class _GuidedCorrectionPreviewWorker(QObject):
+    """Run one already-snapshotted local correction preview off the GUI thread."""
+
+    succeeded = Signal(object)
+    failed = Signal(object)
+
+    def __init__(
+        self,
+        args: tuple,
+        kwargs: dict[str, object],
+        report_inputs: dict[str, object],
+    ):
+        super().__init__()
+        self._args = tuple(args)
+        self._kwargs = dict(kwargs)
+        self._report_inputs = dict(report_inputs)
+
+    def run(self) -> None:
+        try:
+            result = run_guided_local_correction_preview(
+                *self._args,
+                **self._kwargs,
+            )
+        except Exception as exc:
+            self.failed.emit(
+                {
+                    "stage": "preview_computation_failed",
+                    "message": f"{type(exc).__name__}: {exc}",
+                    "preview_output_dir": str(
+                        self._report_inputs.get("preview_output_dir") or ""
+                    ),
+                }
+            )
+            return
+        try:
+            generate_guided_correction_preview_reports(
+                result,
+                report_inputs=self._report_inputs,
+            )
+        except Exception as exc:
+            self.failed.emit(
+                {
+                    "stage": "preview_report_failed",
+                    "message": f"{type(exc).__name__}: {exc}",
+                    "preview_output_dir": str(
+                        self._report_inputs.get("preview_output_dir") or ""
+                    ),
+                }
+            )
+            return
+        self.succeeded.emit(result)
 
 
 class _GuidedRunExecutionWorker(QObject):
@@ -1388,17 +1442,15 @@ def peak_threshold_method_requires_abs(method_str: str) -> bool:
     return method_str == "absolute"
 
 
-# Scientist-facing Step 5 Default-settings status language. The readiness model
-# requires an explicit confirmation ("Use these as Default settings") even when
-# the displayed values are unchanged, so the not-yet-confirmed text must say so
-# rather than implying the user can simply leave the section alone.
+# Scientist-facing Step 5 Default-settings status language. Loaded, valid
+# defaults are already effective for ROIs marked Default; the button is a
+# convenience for accepting edits, not a separate authorization gate.
 GUIDED_DEFAULT_SETTINGS_NOT_CONFIRMED = (
-    "These values are the starting Default settings. Select "
-    "“Use these as Default settings” to confirm them before continuing."
+    "These starting Default settings are ready for ROIs marked Default."
 )
 GUIDED_DEFAULT_SETTINGS_READY = "Default settings are ready."
 GUIDED_DEFAULT_SETTINGS_CONFIRM_BEFORE_CONTINUING = (
-    "Confirm the Default settings before continuing."
+    "Default settings need attention before continuing."
 )
 GUIDED_DEFAULT_SETTINGS_CHANGED_AFTER_CONFIRMATION = (
     "Default settings changed. Confirm them again before continuing."
@@ -2365,6 +2417,10 @@ class MainWindow(QMainWindow):
         self._guided_run_execution_thread = None
         self._guided_run_execution_worker = None
         self._guided_npm_run_readiness = None
+        self._guided_correction_preview_running = False
+        self._guided_correction_preview_thread = None
+        self._guided_correction_preview_worker = None
+        self._guided_correction_preview_context = None
         self._guided_npm_launch_runtime = None
         self._guided_npm_run_worker_thread = None
         self._guided_npm_run_worker = None
@@ -2580,8 +2636,8 @@ class MainWindow(QMainWindow):
 
         output_help_label = QLabel(
             "This is where results for this analysis will be saved. You "
-            "can review or adjust this on the Review Plan page before "
-            "running."
+            "can review this exact destination on Review Plan. Return to "
+            "Select Data if you need to change it."
         )
         output_help_label.setProperty("guidedMutedText", True)
         output_help_label.setWordWrap(True)
@@ -2596,13 +2652,13 @@ class MainWindow(QMainWindow):
         self._make_guided_widget_shrinkable(self._guided_format_combo)
         form.addRow("Format:", self._guided_format_combo)
 
-        format_help_label = QLabel(
-            "The app detected this format automatically. Change it only if "
-            "the detection is wrong."
+        self._guided_format_help_label = QLabel(
+            "Auto will detect the data format when you select ROIs."
         )
-        format_help_label.setProperty("guidedMutedText", True)
-        format_help_label.setWordWrap(True)
-        form.addRow("", format_help_label)
+        self._guided_format_help_label.setObjectName("guidedFormatHelp")
+        self._guided_format_help_label.setProperty("guidedMutedText", True)
+        self._guided_format_help_label.setWordWrap(True)
+        form.addRow("", self._guided_format_help_label)
 
         roi_group = QGroupBox("ROI discovery and selection")
         roi_group.setObjectName("guidedRoiDiscoveryGroup")
@@ -3138,8 +3194,6 @@ class MainWindow(QMainWindow):
                 self._guided_format_combo.currentText(),
             )
         ).strip().lower()
-        if resolved_format != "rwd":
-            return True, "Recording structure is ready."
         sessions_text = self._guided_sessions_per_hour_edit.text().strip()
         duration_text = self._guided_session_duration_edit.text().strip()
         if not sessions_text or not duration_text:
@@ -3270,17 +3324,28 @@ class MainWindow(QMainWindow):
         profile = getattr(
             self, "_guided_new_analysis_feature_event_profile", None
         )
-        if (
-            status == "applied"
-            and isinstance(profile, dict)
-            and bool(profile)
-            and not errors
-            and not stale_reasons
-        ):
-            per_roi_problem = self._guided_per_roi_feature_event_consistency_problem()
-            if per_roi_problem:
-                return False, per_roi_problem
-            return True, GUIDED_DEFAULT_SETTINGS_READY
+        if status in {"applied", "default_initialized"}:
+            if not isinstance(profile, dict) or not profile or errors or stale_reasons:
+                return False, GUIDED_DEFAULT_SETTINGS_NEED_ATTENTION
+            included = self._guided_included_roi_ids_for_feature_detection()
+            if not included:
+                return False, "Include at least one ROI before continuing."
+            for roi_id in included:
+                effective = (
+                    self._guided_effective_feature_event_config_fields_for_roi(
+                        roi_id
+                    )
+                )
+                validation_errors = validate_feature_event_config_fields(
+                    effective
+                )
+                if validation_errors:
+                    return (
+                        False,
+                        f"Choose valid feature settings for {roi_id} before "
+                        "continuing.",
+                    )
+            return True, "Feature detection settings are ready for every included ROI."
         if status == "stale":
             return (
                 False,
@@ -3348,8 +3413,8 @@ class MainWindow(QMainWindow):
             display = "Confirmed"
             action = GUIDED_DEFAULT_SETTINGS_READY
         elif status == "default_initialized":
-            display = "Not confirmed"
-            action = GUIDED_DEFAULT_SETTINGS_CONFIRM_BEFORE_CONTINUING
+            display = "Ready"
+            action = "Starting Default settings are ready."
         else:
             display = "Needs attention"
             action = GUIDED_DEFAULT_SETTINGS_NEED_ATTENTION
@@ -3568,7 +3633,12 @@ class MainWindow(QMainWindow):
         self._refresh_guided_mode_display()
 
     def _on_guided_start_setup_new_analysis(self) -> None:
+        starting_fresh = (
+            getattr(self, "_guided_workflow_mode", "start") != "new_analysis"
+        )
         self._set_guided_workflow_mode("new_analysis")
+        if starting_fresh and hasattr(self, "_guided_format_combo"):
+            self._guided_format_combo.setCurrentText("auto")
         self._reach_guided_step("Select data")
         idx = self._guided_step_index("Select data")
         self._guided_workflow_stepper.setCurrentRow(idx)
@@ -3585,6 +3655,8 @@ class MainWindow(QMainWindow):
 
     def _on_guided_switch_to_new_analysis_setup(self) -> None:
         self._set_guided_workflow_mode("new_analysis")
+        if hasattr(self, "_guided_format_combo"):
+            self._guided_format_combo.setCurrentText("auto")
         self._reach_guided_step("Select data")
         idx = self._guided_step_index("Select data")
         self._guided_workflow_stepper.setCurrentRow(idx)
@@ -3621,6 +3693,14 @@ class MainWindow(QMainWindow):
             return
         self._discovery_cache = None
         self._rwd_contract_cache = None
+        if hasattr(self, "_guided_format_help_label"):
+            selected = self._guided_format_combo.currentText().strip().lower()
+            self._guided_format_help_label.setText(
+                "Auto will detect the data format when you select ROIs."
+                if selected == "auto"
+                else "This format was selected manually. Select ROIs to check "
+                "the recording."
+            )
         if hasattr(self, "_roi_list"):
             blocker = QSignalBlocker(self._roi_list)
             self._roi_list.clear()
@@ -3815,14 +3895,17 @@ class MainWindow(QMainWindow):
                 "Session duration (s):"
             )
             self._guided_session_duration_edit.setPlaceholderText(
-                "(optional, seconds > 0)"
+                "(required, seconds > 0)"
             )
             self._guided_session_duration_edit.setToolTip(
                 self._duration_edit.toolTip()
             )
             self._guided_recording_structure_help_label.setText(
-                "Intermittent timing is available for planning, but this input "
-                "format is outside the current Guided Run scope."
+                "Intermittent NPM is supported. Confirm sessions per hour and "
+                "session duration before continuing."
+                if input_format == "npm"
+                else "Confirm sessions per hour and session duration before "
+                "continuing."
             )
             self._refresh_guided_navigation_state()
             return
@@ -3953,6 +4036,9 @@ class MainWindow(QMainWindow):
 
     def _on_guided_discover_rois(self) -> None:
         """Start shared discovery off the GUI thread."""
+        self._guided_discovery_requested_format = (
+            self._guided_format_combo.currentText().strip().lower()
+        )
         if not self._guided_roi_discovery_running:
             self._guided_roi_discovery_diag_start = time.monotonic()
         self._guided_roi_discovery_diag("handler_entered")
@@ -4052,6 +4138,24 @@ class MainWindow(QMainWindow):
             rois=len(discovery.get("rois", [])),
         )
         self._discovery_cache = discovery
+        resolved_format = str(
+            discovery.get("resolved_format") or ""
+        ).strip().lower()
+        if resolved_format in FORMAT_CHOICES:
+            with QSignalBlocker(self._guided_format_combo):
+                self._guided_format_combo.setCurrentText(resolved_format)
+            with QSignalBlocker(self._format_combo):
+                self._format_combo.setCurrentText(resolved_format)
+        if hasattr(self, "_guided_format_help_label"):
+            requested_format = str(
+                getattr(self, "_guided_discovery_requested_format", "auto")
+            ).strip().lower()
+            self._guided_format_help_label.setText(
+                f"Detected format: {resolved_format.upper()}. The app detected "
+                "this format automatically."
+                if requested_format == "auto"
+                else f"Confirmed format: {resolved_format.upper()}."
+            )
         populate_started = time.monotonic()
         self._guided_roi_discovery_diag("populate_discovery_ui_before")
         self._populate_discovery_ui(discovery)
@@ -5096,6 +5200,14 @@ class MainWindow(QMainWindow):
         self._guided_preview_gated_widgets.append(
             self._guided_preview_generate_btn
         )
+
+        self._guided_preview_progress = QProgressBar()
+        self._guided_preview_progress.setObjectName(
+            "guidedCorrectionPreviewProgress"
+        )
+        self._guided_preview_progress.setRange(0, 0)
+        self._guided_preview_progress.setVisible(False)
+        preview_layout.addWidget(self._guided_preview_progress)
 
         self._guided_preview_status_label = QLabel("")
         self._guided_preview_status_label.setObjectName("guidedCorrectionPreviewStatus")
@@ -6345,6 +6457,28 @@ class MainWindow(QMainWindow):
             result["visual_trace_sample_counts"]["signal_only_f0"] = len(
                 signal_f0["time_sec"]
             )
+        # Keep full-resolution CSV evidence, but bound the display-only plot.
+        # Matplotlib can otherwise spend tens of seconds rasterizing several
+        # 12,000-point traces on the real NPM preview path.
+        max_plot_points = 800
+        plot_traces: dict[str, dict[str, list[float]]] = {}
+        for method, series in traces.items():
+            stride = max(1, math.ceil(len(series["time_sec"]) / max_plot_points))
+            plot_traces[method] = {
+                key: values[::stride] for key, values in series.items()
+            }
+        signal_f0_plot = signal_f0
+        if signal_f0_valid:
+            stride = max(
+                1,
+                math.ceil(len(signal_f0["time_sec"]) / max_plot_points),
+            )
+            signal_f0_plot = {
+                key: value[::stride]
+                if isinstance(value, (list, tuple, np.ndarray))
+                else value
+                for key, value in signal_f0.items()
+            }
         dynamic_labels = [
             self._guided_preview_method_label(method) for method in traces
         ]
@@ -6384,20 +6518,20 @@ class MainWindow(QMainWindow):
             matplotlib.use("Agg")
             from matplotlib import pyplot as plt
 
-            with matplotlib.rc_context({"figure.dpi": 100}):
+            with matplotlib.rc_context({"figure.dpi": 80}):
                 if not traces:
                     figure, axes = plt.subplots(
                         2, 1, figsize=(7.5, 5.5), sharex=True
                     )
                     axes[0].plot(
-                        signal_f0["time_sec"],
-                        signal_f0["signal_raw"],
+                        signal_f0_plot["time_sec"],
+                        signal_f0_plot["signal_raw"],
                         label="Raw signal",
                         linewidth=1.2,
                     )
                     axes[0].plot(
-                        signal_f0["time_sec"],
-                        signal_f0["signal_only_f0_uncapped"],
+                        signal_f0_plot["time_sec"],
+                        signal_f0_plot["signal_only_f0_uncapped"],
                         label="Signal-only F0 baseline",
                         linewidth=1.1,
                     )
@@ -6405,8 +6539,8 @@ class MainWindow(QMainWindow):
                     axes[0].set_ylabel("Signal")
                     axes[0].legend(loc="best", fontsize="small")
                     axes[1].plot(
-                        signal_f0["time_sec"],
-                        signal_f0["preview_dff"],
+                        signal_f0_plot["time_sec"],
+                        signal_f0_plot["preview_dff"],
                         label="Signal-only dF/F",
                         linewidth=1.1,
                     )
@@ -6424,7 +6558,7 @@ class MainWindow(QMainWindow):
                         figsize=(7.5, 10.0 if signal_f0_valid else 6.5),
                         sharex=True,
                     )
-                    first = next(iter(traces.values()))
+                    first = next(iter(plot_traces.values()))
                     axes[0].plot(
                         first["time_sec"],
                         first["sig_raw"],
@@ -6441,7 +6575,7 @@ class MainWindow(QMainWindow):
                     axes[0].set_title("Source segment")
                     axes[0].set_ylabel("Signal")
                     axes[0].legend(loc="best")
-                    for method, series in traces.items():
+                    for method, series in plot_traces.items():
                         label = self._guided_preview_method_label(method)
                         axes[1].plot(
                             series["time_sec"],
@@ -6467,14 +6601,14 @@ class MainWindow(QMainWindow):
                     axes[2].legend(loc="best", fontsize="small")
                     if signal_f0_valid:
                         axes[3].plot(
-                            signal_f0["time_sec"],
-                            signal_f0["signal_raw"],
+                            signal_f0_plot["time_sec"],
+                            signal_f0_plot["signal_raw"],
                             label="Raw signal",
                             linewidth=1.2,
                         )
                         axes[3].plot(
-                            signal_f0["time_sec"],
-                            signal_f0["signal_only_f0_uncapped"],
+                            signal_f0_plot["time_sec"],
+                            signal_f0_plot["signal_only_f0_uncapped"],
                             label="Signal-only F0 baseline",
                             linewidth=1.1,
                         )
@@ -6482,8 +6616,8 @@ class MainWindow(QMainWindow):
                         axes[3].set_ylabel("Signal")
                         axes[3].legend(loc="best", fontsize="small")
                         axes[4].plot(
-                            signal_f0["time_sec"],
-                            signal_f0["preview_dff"],
+                            signal_f0_plot["time_sec"],
+                            signal_f0_plot["preview_dff"],
                             label="Signal-only dF/F",
                             linewidth=1.1,
                         )
@@ -6498,11 +6632,20 @@ class MainWindow(QMainWindow):
                     f"ROI {result.get('roi', '')}, "
                     f"segment {result.get('chunk_index', '')}"
                 )
-                figure.tight_layout()
+                # Fixed margins avoid tight_layout's additional renderer pass.
+                figure.subplots_adjust(
+                    left=0.11,
+                    right=0.97,
+                    bottom=0.07,
+                    top=0.94,
+                    hspace=0.46,
+                )
                 visual_path = (
                     Path(output_text) / "correction_preview_visual.png"
                 )
-                figure.savefig(visual_path, bbox_inches="tight")
+                # tight_layout above already fits labels; bbox_inches="tight"
+                # triggers a second expensive full render on the real NPM plot.
+                figure.savefig(visual_path)
                 plt.close(figure)
         except Exception:
             return ""
@@ -7437,6 +7580,8 @@ class MainWindow(QMainWindow):
         return "\n".join(lines)
 
     def _on_generate_guided_correction_preview(self) -> None:
+        if getattr(self, "_guided_correction_preview_running", False):
+            return
         source_path = str(getattr(self, "_guided_preview_source_path", "") or "")
         source_type = str(getattr(self, "_guided_preview_source_type", "") or "")
         source_id = str(getattr(self, "_guided_preview_loaded_run_dir", "") or "")
@@ -7463,7 +7608,9 @@ class MainWindow(QMainWindow):
             self._refresh_guided_preview_enablement()
             return
         if hasattr(self, "_guided_preview_status_label"):
-            self._guided_preview_status_label.setText("Generating preview...")
+            self._guided_preview_status_label.setText(
+                "Generating correction preview…"
+            )
             QApplication.processEvents()
         try:
             if source_type == "local_raw_segment":
@@ -7494,10 +7641,12 @@ class MainWindow(QMainWindow):
                         "sig_suffix": str(local_contract["sig_suffix"]),
                     }
                 else:
-                    config_overrides = (
-                        self._infer_dataset_contract_overrides(
-                            str(segment["input_format"])
-                        )
+                    # A local preview uses one selected session. Do not repeat
+                    # full-dataset NPM contract inference across every session.
+                    config_overrides = self._infer_npm_dataset_contract_overrides(
+                        "npm",
+                        input_path=str(segment["source_path"]),
+                        baseline_config=self._active_baseline_config(),
                     )
                 if not isinstance(config_overrides, dict):
                     config_overrides = {}
@@ -7506,25 +7655,42 @@ class MainWindow(QMainWindow):
                     config_overrides["chunk_duration_sec"] = float(
                         duration_text
                     )
-                result = run_guided_local_correction_preview(
+                preview_args = (
                     str(segment["source_path"]),
                     os.path.join(preview_root, preview_id),
-                    roi=roi,
-                    chunk_index=int(chunk),
-                    adapter_chunk_index=int(
+                )
+                preview_kwargs = {
+                    "roi": roi,
+                    "chunk_index": int(chunk),
+                    "adapter_chunk_index": int(
                         segment.get("adapter_chunk_index", 0)
                     ),
-                    segment_label=str(
+                    "segment_label": str(
                         segment.get("segment_label") or chunk
                     ),
-                    input_format=str(segment["input_format"]),
-                    config_path=self._active_config_source_path(),
-                    methods=methods,
-                    include_signal_only_f0_preview=bool(
+                    "input_format": str(segment["input_format"]),
+                    "config_path": self._active_config_source_path(),
+                    "methods": methods,
+                    "include_signal_only_f0_preview": bool(
                         self._guided_preview_signal_f0_cb.isChecked()
                     ),
-                    preview_id=preview_id,
-                    config_overrides=config_overrides,
+                    "preview_id": preview_id,
+                    "config_overrides": config_overrides,
+                }
+                if str(segment["input_format"]).lower() == "npm":
+                    self._start_guided_npm_correction_preview(
+                        preview_args,
+                        preview_kwargs,
+                        source_type=source_type,
+                        source_id=source_id,
+                        roi=roi,
+                        chunk=int(chunk),
+                        segment=dict(segment),
+                    )
+                    return
+                result = run_guided_local_correction_preview(
+                    *preview_args,
+                    **preview_kwargs,
                 )
             else:
                 kwargs = {
@@ -7585,6 +7751,23 @@ class MainWindow(QMainWindow):
                 ),
                 "local_preview_diagnostics": local_diagnostics,
             }
+        self._finish_guided_correction_preview_result(
+            result,
+            source_type=source_type,
+            source_id=source_id,
+            roi=roi,
+            chunk=int(chunk),
+        )
+
+    def _finish_guided_correction_preview_result(
+        self,
+        result: dict[str, object],
+        *,
+        source_type: str,
+        source_id: str,
+        roi: str,
+        chunk: int,
+    ) -> None:
         self._guided_preview_has_result = True
         self._guided_preview_result_stale = False
         if source_type == "completed_run":
@@ -7606,9 +7789,10 @@ class MainWindow(QMainWindow):
                 )
         result["roi"] = roi
         result["chunk_index"] = int(chunk)
-        self._generate_guided_preview_reports(
-            result, signal_only_f0=False
-        )
+        if "user_report_path" not in result:
+            self._generate_guided_preview_reports(
+                result, signal_only_f0=False
+            )
         if result.get("source_type") == "local_raw_segment":
             self._register_guided_local_preview_evidence(result)
         self._guided_preview_last_result = result
@@ -7630,6 +7814,150 @@ class MainWindow(QMainWindow):
         self._populate_guided_preview_result_widgets(result)
         self._refresh_guided_preview_enablement()
         self._refresh_guided_confirm_strategy_panel()
+
+    def _set_guided_correction_preview_running(self, running: bool) -> None:
+        self._guided_correction_preview_running = bool(running)
+        for widget in (
+            getattr(self, "_guided_preview_generate_btn", None),
+            getattr(self, "_guided_preview_roi_combo", None),
+            getattr(self, "_guided_preview_chunk_combo", None),
+            getattr(self, "_guided_preview_signal_f0_cb", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(not running)
+        for checkbox in getattr(
+            self, "_guided_preview_method_checkboxes", {}
+        ).values():
+            checkbox.setEnabled(not running)
+        progress = getattr(self, "_guided_preview_progress", None)
+        if progress is not None:
+            progress.setVisible(bool(running))
+        if running and hasattr(self, "_guided_preview_status_label"):
+            self._guided_preview_status_label.setText(
+                "Generating correction preview…"
+            )
+        elif not running:
+            self._refresh_guided_preview_enablement()
+
+    def _start_guided_npm_correction_preview(
+        self,
+        args: tuple,
+        kwargs: dict[str, object],
+        *,
+        source_type: str,
+        source_id: str,
+        roi: str,
+        chunk: int,
+        segment: dict[str, object],
+    ) -> None:
+        if getattr(self, "_guided_correction_preview_running", False):
+            return
+        self._guided_correction_preview_context = {
+            "source_type": source_type,
+            "source_id": source_id,
+            "roi": roi,
+            "chunk": int(chunk),
+            "segment": dict(segment),
+        }
+        thread = QThread(self)
+        report_inputs = {
+            "preview_output_dir": str(args[1]),
+            "selected_methods": tuple(kwargs.get("methods") or ()),
+            "method_labels": dict(GUIDED_CORRECTION_PREVIEW_METHOD_LABELS),
+            "selected_roi": str(roi),
+            "selected_chunk_index": int(chunk),
+            "selected_segment_label": str(
+                segment.get("segment_label") or chunk
+            ),
+            "signal_only_f0": False,
+            "max_plot_points": 800,
+            "figure_dpi": 80,
+        }
+        worker = _GuidedCorrectionPreviewWorker(
+            args,
+            kwargs,
+            report_inputs,
+        )
+        worker.moveToThread(thread)
+        self._guided_correction_preview_thread = thread
+        self._guided_correction_preview_worker = worker
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(
+            self._on_guided_npm_correction_preview_succeeded
+        )
+        worker.failed.connect(self._on_guided_npm_correction_preview_failed)
+        worker.succeeded.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.succeeded.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            self._cleanup_guided_correction_preview_worker
+        )
+        self._set_guided_correction_preview_running(True)
+        thread.start()
+
+    def _on_guided_npm_correction_preview_succeeded(
+        self, result: dict[str, object]
+    ) -> None:
+        context = dict(
+            getattr(self, "_guided_correction_preview_context", None) or {}
+        )
+        self._set_guided_correction_preview_running(False)
+        self._finish_guided_correction_preview_result(
+            dict(result),
+            source_type=str(context.get("source_type") or "local_raw_segment"),
+            source_id=str(context.get("source_id") or ""),
+            roi=str(context.get("roi") or ""),
+            chunk=int(context.get("chunk") or 0),
+        )
+
+    def _on_guided_npm_correction_preview_failed(
+        self, failure: dict[str, object]
+    ) -> None:
+        self._set_guided_correction_preview_running(False)
+        payload = dict(failure or {})
+        stage = str(payload.get("stage") or "preview_computation_failed")
+        output_dir = str(payload.get("preview_output_dir") or "")
+        if stage == "preview_report_failed":
+            support_guidance = (
+                "If the problem repeats, keep the preview output folder and "
+                "ask for support."
+                if output_dir and os.path.isdir(output_dir)
+                else "If the problem repeats, ask for support."
+            )
+            user_message = (
+                "The correction preview was calculated, but its preview report "
+                "could not be created. Try generating the preview again. "
+                + support_guidance
+            )
+        else:
+            user_message = (
+                "The selected preview segment could not be processed. Try "
+                "another segment or check that the source recording is still "
+                "available."
+            )
+        technical_message = str(payload.get("message") or "")
+        if technical_message:
+            self._append_log(
+                f"Correction preview failure ({stage}): {technical_message}"
+            )
+        self._guided_preview_has_result = False
+        self._guided_preview_result_stale = False
+        self._guided_preview_last_result = {}
+        self._clear_guided_preview_result_widgets()
+        if hasattr(self, "_guided_preview_status_label"):
+            self._guided_preview_status_label.setText(user_message)
+        if hasattr(self, "_guided_preview_messages_label"):
+            self._guided_preview_messages_label.setText(user_message)
+        self._refresh_guided_preview_review_affordances()
+        self._refresh_guided_confirm_strategy_panel()
+        self._refresh_guided_generated_outputs_summary()
+
+    def _cleanup_guided_correction_preview_worker(self) -> None:
+        self._guided_correction_preview_worker = None
+        self._guided_correction_preview_thread = None
+        self._guided_correction_preview_context = None
 
     def _refresh_guided_diagnostics_panel(self) -> None:
         if not hasattr(self, "_guided_diagnostics_status_label"):
@@ -10233,9 +10561,8 @@ class MainWindow(QMainWindow):
             "stale_feature_event_profile",
         }:
             actions.append(
-                "Feature detection settings have not been applied or need "
-                "attention. Return to Feature Detection and apply current "
-                "settings before validation."
+                "Feature detection settings need attention. Return to Feature "
+                "Detection and choose valid settings for every included ROI."
             )
         if categories & {
             "missing_output_policy",
@@ -10244,8 +10571,7 @@ class MainWindow(QMainWindow):
             "stale_output_policy",
         }:
             actions.append(
-                "Output destination is not set or needs attention. Choose "
-                "where results should be written later and apply it."
+                "Select an output folder on Select Data before continuing."
             )
         if categories & {
             "missing_diagnostic_cache",
@@ -10271,6 +10597,14 @@ class MainWindow(QMainWindow):
         )
         if status_label is None:
             return
+        legacy_output_editor = getattr(
+            self, "_guided_legacy_output_policy_editor", None
+        )
+        if legacy_output_editor is not None:
+            legacy_output_editor.setVisible(
+                getattr(self, "_guided_workflow_mode", "start")
+                != "new_analysis"
+            )
 
         execution_categories = {
             issue.category for issue in subset_readiness.blocking_issues
@@ -12510,7 +12844,7 @@ class MainWindow(QMainWindow):
         )
 
         # Draft construction is the shared consumption boundary for Draft Plan,
-        # backend validation/materialization, and the revision-bound Run request.
+        # setup validation/materialization, and the revision-bound Run request.
         # Enforce local-preview currency here so correctness never depends on
         # revisiting the Confirm Strategy UI.
         self._refresh_guided_local_preview_choice_currency()
@@ -12765,8 +13099,19 @@ class MainWindow(QMainWindow):
         out_base_path = None
         if hasattr(self, "_guided_output_dir_edit"):
             out_base_path = self._guided_output_dir_edit.text().strip() or None
-        if out_base_path is None:
-            out_base_path = getattr(self, "_guided_new_analysis_output_policy_path", None)
+
+        feature_ready, _feature_reason = (
+            self._guided_feature_detection_readiness()
+        )
+        stored_feature_status = getattr(
+            self,
+            "_guided_new_analysis_feature_event_profile_status",
+            "missing",
+        )
+        effective_feature_status = (
+            "applied" if feature_ready else stored_feature_status
+        )
+        output_selected = bool(str(out_base_path or "").strip())
 
         global_corr_strategy = None
         df_mode = None
@@ -12826,7 +13171,7 @@ class MainWindow(QMainWindow):
             signal_only_f0_path=sig_path,
             signal_only_f0_status=sig_status,
             signal_only_f0_source_cache_id=sig_source_cache_id,
-            feature_event_profile_status=getattr(self, "_guided_new_analysis_feature_event_profile_status", "missing"),
+            feature_event_profile_status=effective_feature_status,
             feature_event_profile_id=self._guided_new_analysis_feature_event_profile.get("profile_id") if self._guided_new_analysis_feature_event_profile else None,
             feature_event_baseline_config_source=self._guided_new_analysis_feature_event_profile_baseline_source,
             feature_event_baseline_status=self._guided_new_analysis_feature_event_profile_baseline_kind,
@@ -12834,17 +13179,17 @@ class MainWindow(QMainWindow):
             feature_event_validation_issues=self._guided_new_analysis_feature_event_profile_errors,
             feature_event_stale_reasons=self._guided_new_analysis_feature_event_profile_stale_reasons,
             feature_event_updated_at_utc=self._guided_new_analysis_feature_event_profile_updated_at_utc,
-            feature_event_explicitly_applied=(getattr(self, "_guided_new_analysis_feature_event_profile_status", "missing") == "applied"),
+            feature_event_explicitly_applied=feature_ready,
             per_roi_feature_event_choices=self._guided_new_analysis_per_roi_feature_event_choices(included),
-            output_policy_status=getattr(self, "_guided_new_analysis_output_policy_status", "missing"),
-            output_policy_path=getattr(self, "_guided_new_analysis_output_policy_path", None),
-            output_policy_validation_issues=getattr(self, "_guided_new_analysis_output_policy_validation_issues", []),
-            output_policy_stale_reasons=getattr(self, "_guided_new_analysis_output_policy_stale_reasons", []),
-            output_policy_updated_at_utc=getattr(self, "_guided_new_analysis_output_policy_updated_at_utc", None),
-            output_policy_explicitly_applied=bool(getattr(self, "_guided_new_analysis_output_policy_explicitly_applied", False)),
+            output_policy_status="applied" if output_selected else "missing",
+            output_policy_path=out_base_path,
+            output_policy_validation_issues=[],
+            output_policy_stale_reasons=[],
+            output_policy_updated_at_utc=None,
+            output_policy_explicitly_applied=output_selected,
             output_policy_safety_summary=(
-                "Output destination validated as planning state only; no directories or files were created."
-                if getattr(self, "_guided_new_analysis_output_policy_status", "missing") == "applied"
+                "The Select Data output folder will contain a new run folder."
+                if output_selected
                 else ""
             ),
             approved_missing_sessions=list(getattr(self, "_guided_approved_missing_sessions", [])),
@@ -15546,8 +15891,8 @@ class MainWindow(QMainWindow):
 
         note = QLabel(
             "These settings are used by ROIs marked Default in the table "
-            "below. Most users can leave the values unchanged and select "
-            "“Use these as Default settings.” Expand this section only if the "
+            "below. Most users can leave the values unchanged. Expand this "
+            "section and use “Use these as Default settings” only if the "
             "Default settings need to be adjusted."
         )
         note.setObjectName("guidedFeatureEventProfileEditorNote")
@@ -16353,7 +16698,11 @@ class MainWindow(QMainWindow):
         )
         output_layout.addWidget(self._guided_review_output_status_label)
         layout.addWidget(output_group)
-        layout.addWidget(self._build_guided_output_policy_editor())
+        self._guided_legacy_output_policy_editor = (
+            self._build_guided_output_policy_editor()
+        )
+        self._guided_legacy_output_policy_editor.setVisible(False)
+        layout.addWidget(self._guided_legacy_output_policy_editor)
 
         self._guided_missing_sessions_group = QGroupBox("Approved missing sessions")
         self._guided_missing_sessions_group.setObjectName("guidedReviewMissingSessionsPanel")

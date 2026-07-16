@@ -13,6 +13,7 @@ from photometry_pipeline.preview.correction_preview import (
     PREVIEW_SUMMARY_FILENAME,
     compute_guided_local_preview_dff_trace_in_memory,
     compute_guided_local_signal_only_f0_preview,
+    generate_guided_correction_preview_reports,
     run_guided_correction_preview_comparison,
     run_guided_local_correction_preview,
 )
@@ -28,6 +29,61 @@ from photometry_pipeline.core.types import Chunk
 
 
 PREVIEW_ID = "preview_20260617T010203Z_abcd1234"
+
+
+def test_worker_safe_report_generation_uses_only_plain_snapshot(tmp_path):
+    source = tmp_path / "session-0" / "fluorescence.csv"
+    _write_realistic_rwd_session(source, offset=0.0)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "target_fs_hz: 20.0\n"
+        "chunk_duration_sec: 600.0\n"
+        "rwd_time_col: TimeStamp\n"
+        "uv_suffix: '-410'\n"
+        "sig_suffix: '-470'\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "preview"
+    result = run_guided_local_correction_preview(
+        source,
+        output_dir,
+        roi="CH1",
+        chunk_index=0,
+        input_format="rwd",
+        config_path=config,
+        methods=["global_linear_regression"],
+        include_signal_only_f0_preview=False,
+        preview_id="worker_safe_report",
+    )
+    report_inputs = {
+        "preview_output_dir": str(output_dir),
+        "selected_methods": ("global_linear_regression",),
+        "method_labels": {
+            "global_linear_regression": "Global Linear Regression"
+        },
+        "selected_roi": "CH1",
+        "selected_chunk_index": 0,
+        "selected_segment_label": "session-0",
+        "signal_only_f0": False,
+        "max_plot_points": 800,
+        "figure_dpi": 80,
+    }
+
+    returned = generate_guided_correction_preview_reports(
+        result, report_inputs=report_inputs
+    )
+
+    assert returned is result
+    assert Path(result["visual_preview_path"]).is_file()
+    assert Path(result["user_report_path"]).is_file()
+    assert result["visual_trace_labels"] == [
+        "Raw signal",
+        "Reference/control signal",
+        "Global Linear Regression",
+    ]
+    assert "Global Linear Regression" in Path(
+        result["user_report_path"]
+    ).read_text(encoding="utf-8")
 
 
 def test_local_dynamic_fit_preview_dff_uses_fractional_ratio_units():
