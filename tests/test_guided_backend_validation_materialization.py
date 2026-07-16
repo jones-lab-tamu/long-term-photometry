@@ -628,6 +628,23 @@ def test_feature_event_materialization_success(tmp_path: Path):
             assert val.source_classification == "explicit"
 
 
+def test_loaded_default_feature_profile_is_current_without_explicit_apply(
+    tmp_path: Path,
+):
+    """Persisted valid Defaults are consumed while the editor remains dirty."""
+    draft = _valid_stage2c_draft(tmp_path)
+    draft.feature_event_profile_status = "default_initialized"
+    draft.feature_event_explicitly_applied = False
+
+    result = materialize_guided_backend_validation_facts(
+        draft, parser_contract=_valid_parser_contract()
+    )
+
+    assert isinstance(result, GuidedBackendValidationMaterializationSuccess)
+    assert result.facts.feature_event.profile_status == "default_initialized"
+    assert result.facts.feature_event.explicitly_applied is False
+
+
 # H. Missing Feature/Event Values Block (Active missing / default)
 def test_missing_feature_event_values_block(tmp_path: Path):
     source_root = _create_tiny_rwd_fixture(tmp_path)
@@ -1985,6 +2002,45 @@ def test_backend_validation_workflow_accepts_npm_without_rwd_classifier_claims(
     assert policy_tampered_result.blocking_issues[0].detail_code == (
         "npm_disposition_policy_invalid"
     )
+
+
+def test_shared_npm_validation_accepts_loaded_default_profile_without_apply(
+    tmp_path: Path,
+):
+    from photometry_pipeline.guided_backend_validation_workflow import (
+        validate_current_guided_draft_for_backend,
+    )
+
+    draft = _valid_npm_stage2c_draft(tmp_path)
+    draft.feature_event_profile_status = "default_initialized"
+    draft.feature_event_explicitly_applied = False
+    validator_contract = GuidedBackendValidatorContract(
+        validation_scope="guided_rwd_intermittent_phasic_full_validate",
+        validation_contract_version="guided_backend_validation_contract.v1",
+        validator_capability_version="test_validator_capability.v1",
+        supported_subset_rule_version="global_dynamic_fit_only.v1",
+    )
+    parser_contract = NpmParserContract(
+        npm_time_axis="system_timestamp",
+        npm_system_ts_col="SystemTimestamp",
+        npm_computer_ts_col="ComputerTimestamp",
+        npm_led_col="LedState",
+        npm_region_prefix="Region",
+        npm_region_suffix="G",
+        target_fs_hz=2.0,
+        session_duration_sec=2.0,
+        allow_partial_final_chunk=False,
+        adapter_value_nan_policy="strict",
+    )
+
+    outcome = validate_current_guided_draft_for_backend(
+        draft,
+        parser_contract=parser_contract,
+        validator_contract=validator_contract,
+    )
+
+    assert outcome.status == "validator_accepted"
+    assert outcome.accepted_for_backend_validation is True
 
 
 def test_npm_missing_session_approval_is_refused_before_materialization(

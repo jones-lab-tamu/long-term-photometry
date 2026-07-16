@@ -1558,6 +1558,69 @@ def test_review_plan_local_preview_without_diagnostic_cache_navigates_to_run_and
     assert window._guided_run_btn.isEnabled() is True
 
 
+def test_dirty_shared_default_does_not_make_successful_setup_check_stale(
+    window, tmp_path, monkeypatch
+):
+    """The visible mixed Default/Custom path validates the saved profile."""
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+    import photometry_pipeline.guided_production_mapping as production_mapping
+
+    _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
+        window,
+        tmp_path,
+        monkeypatch,
+        strategy_by_roi={roi: "Global Linear Regression" for roi in ("CH1", "CH2", "CH3")},
+    )
+    # CH1 is explicitly customized; CH2/CH3 continue to consume the saved
+    # Default profile. The visible editor edit is intentionally not applied.
+    window._guided_per_roi_feature_event_overrides["CH1"] = {
+        "config_fields": {"peak_threshold_k": 3.25},
+        "profile_id": "custom-CH1",
+    }
+    window._guided_feature_event_peak_k_edit.setText("4.75")
+    window._on_guided_feature_detection_editor_changed()
+    assert window._guided_feature_event_editor_dirty is True
+    revision_before_validation = window._guided_backend_validation_revision
+
+    _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+    window._guided_review_go_to_run_btn.click()
+    from photometry_pipeline.guided_plan_identity import (
+        compute_guided_new_analysis_draft_plan_identity,
+    )
+
+    identity_before_validation = compute_guided_new_analysis_draft_plan_identity(
+        window._build_guided_new_analysis_draft_plan()
+    )
+    build_identity = production_mapping.build_application_build_identity(
+        distribution_name="photometry-pipeline",
+        distribution_version="1.0.0",
+        source_revision_kind="git",
+        source_revision="abc123",
+        source_tree_state="clean",
+    )
+    monkeypatch.setattr(
+        request_builder,
+        "resolve_application_build_identity",
+        lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+    )
+
+    window._guided_backend_validate_btn.click()
+
+    assert window._guided_backend_validation_outcome.status == "validator_accepted"
+    assert window._guided_backend_validation_revision == revision_before_validation + 1
+    assert window._is_guided_backend_validation_outcome_current() is True
+    assert window._guided_current_plan_identity_is_validated() is True
+    assert window._guided_validated_plan_identity == identity_before_validation
+    assert (
+        compute_guided_new_analysis_draft_plan_identity(
+            window._build_guided_new_analysis_draft_plan()
+        )
+        == identity_before_validation
+    )
+    assert window._guided_run_btn.isEnabled() is True
+    assert window._guided_feature_event_editor_dirty is True
+
+
 @pytest.mark.parametrize(
     "strategy_label",
     (
@@ -4665,8 +4728,8 @@ def test_step5_visible_text_sweep_across_all_states(window, tmp_path, monkeypatc
     window._on_guided_feature_detection_editor_changed()
     assert window._guided_new_analysis_feature_event_profile_status == "applied"
     assert window._guided_feature_event_editor_dirty is True
-    assert "saved Default settings" in (
-        window._guided_feature_detection_continue_status.text()
+    assert "saved default settings" in (
+        window._guided_feature_detection_continue_status.text().lower()
     )
     assert window._guided_feature_detection_continue_btn.isEnabled() is True
     _assert_step5_surface_is_scientist_facing(window)
@@ -4850,8 +4913,8 @@ def test_visible_feature_controls_allow_all_custom_and_mixed_without_default_app
     )
     window._guided_feature_event_per_roi_table.cellWidget(row, 4).click()
     assert window._guided_feature_detection_continue_btn.isEnabled() is True
-    assert "saved Default settings" in (
-        window._guided_feature_detection_continue_status.text()
+    assert "saved default settings" in (
+        window._guided_feature_detection_continue_status.text().lower()
     )
 
     plan = window._build_guided_new_analysis_draft_plan()

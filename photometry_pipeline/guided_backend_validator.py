@@ -35,6 +35,7 @@ from photometry_pipeline.guided_backend_validation_request import (
     GuidedBackendNpmParserRequest,
     GuidedBackendValidatorContract,
     compute_guided_backend_validation_request_identity,
+    is_saved_feature_event_profile_current,
 )
 from photometry_pipeline.guided_identity import CANONICALIZATION_ALGORITHM_VERSION
 from photometry_pipeline.guided_normalized_recording import (
@@ -951,8 +952,9 @@ def _validate_semantics(
         or not _is_tuple(feature.active_fields)
         or not feature.active_fields
         or not _is_tuple(feature.inactive_fields)
-        or feature.profile_status != "applied"
-        or feature.explicitly_applied is not True
+        or not is_saved_feature_event_profile_current(
+            feature.profile_status, feature.explicitly_applied
+        )
         or feature.current is not True
         or feature.visible_unapplied_changes is not False
         or not _is_tuple(feature.validation_issue_categories)

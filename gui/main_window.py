@@ -2402,6 +2402,7 @@ class MainWindow(QMainWindow):
         self._guided_new_analysis_output_policy_build_request_signature = None
         self._guided_new_analysis_dataset_contract_snapshot = None
         self._guided_new_analysis_dataset_contract_candidate_snapshot = None
+        self._guided_dataset_contract_confirmation_active = False
         # Current-plan-only approvals. They are intentionally never persisted in
         # QSettings and are cleared when the recording source changes.
         self._guided_approved_missing_sessions = []
@@ -3382,9 +3383,9 @@ class MainWindow(QMainWindow):
             ):
                 return (
                     True,
-                    "The saved Default settings and all Custom settings are "
-                    "ready. Edits still shown in the Default form will not "
-                    "be used unless you select ‘Use these as Default settings’.",
+                    "Saved Default settings will be used. The edits still shown "
+                    "above will not be used unless you select \"Use these as "
+                    "Default settings.\"",
                 )
             return True, "Feature detection settings are ready for every included ROI."
         if status == "stale":
@@ -11087,7 +11088,33 @@ class MainWindow(QMainWindow):
         if fmt == "rwd":
             semantic_names = ("rwd_time_col", "uv_suffix", "sig_suffix")
             try:
-                inferred = self._infer_dataset_contract_overrides(fmt)
+                # Discovery has already validated the selected RWD source. Reuse
+                # that immutable in-memory result for the visible confirmation
+                # action instead of reopening every chunk solely to rebuild the
+                # same candidate. A changed policy falls through to the normal
+                # inference path so the exclusion semantics remain explicit.
+                cache = getattr(self, "_rwd_contract_cache", None)
+                policy = bool(identity.exclude_incomplete_final_rwd_chunk)
+                cached_overrides = (
+                    cache.get("overrides") if isinstance(cache, dict) else None
+                )
+                if (
+                    isinstance(cache, dict)
+                    and str(cache.get("input_path") or "")
+                    == str(identity.input_source_path or "")
+                    and str(cache.get("format") or "").strip().lower()
+                    in {"auto", "rwd"}
+                    and isinstance(cached_overrides, dict)
+                    and bool(
+                        cached_overrides.get(
+                            "exclude_incomplete_final_rwd_chunk", policy
+                        )
+                    )
+                    == policy
+                ):
+                    inferred = dict(cached_overrides)
+                else:
+                    inferred = self._infer_dataset_contract_overrides(fmt)
             except Exception as exc:
                 validation_issues.append(
                     f"RWD dataset semantics could not be resolved: {exc}"
@@ -11417,41 +11444,78 @@ class MainWindow(QMainWindow):
         return GuidedNewAnalysisDatasetContractSnapshot()
 
     def _on_guided_apply_dataset_contract(self) -> None:
-        candidate = self._guided_new_analysis_dataset_contract_candidate()
-        self._guided_new_analysis_dataset_contract_candidate_snapshot = candidate
-        if candidate.status == "unsupported" or candidate.validation_issues:
+        if getattr(self, "_guided_dataset_contract_confirmation_active", False):
+            return
+        self._guided_dataset_contract_confirmation_active = True
+        action_btn = getattr(self, "_guided_review_dataset_contract_action_btn", None)
+        if action_btn is not None:
+            action_btn.setEnabled(False)
+            action_btn.setText("Confirming detected dataset settings…")
+        try:
+            candidate = self._guided_new_analysis_dataset_contract_candidate()
+            self._guided_new_analysis_dataset_contract_candidate_snapshot = candidate
+            if candidate.status == "unsupported" or candidate.validation_issues:
+                self._refresh_guided_dataset_contract_panel()
+                self._refresh_guided_draft_run_plan_preview()
+                label = (
+                    "NPM settings were not applied: "
+                    if str(getattr(candidate, "input_format", "") or "").lower() == "npm"
+                    else "Dataset contract was not applied: "
+                )
+                self._guided_dataset_contract_status_label.setText(
+                    label + ("; ".join(candidate.validation_issues) or candidate.status)
+                )
+                return
+            stored = getattr(self, "_guided_new_analysis_dataset_contract_snapshot", None)
+            semantic_fields = (
+                "input_format",
+                "resolved_input_format",
+                "acquisition_mode",
+                "contract_values",
+                "format_specific",
+                "source_identity",
+                "validation_issues",
+                "stale_reasons",
+            )
+            unchanged = bool(
+                stored is not None
+                and getattr(stored, "current_applied", False)
+                and getattr(stored, "status", "") == "applied"
+                and not getattr(stored, "stale_reasons", ())
+                and all(getattr(stored, name, None) == getattr(candidate, name, None)
+                        for name in semantic_fields)
+            )
+            if not unchanged:
+                now = self._guided_dataset_contract_now_utc()
+                self._guided_new_analysis_dataset_contract_snapshot = dataclasses.replace(
+                    candidate,
+                    status="applied",
+                    explicitly_applied=True,
+                    stale_reasons=(),
+                    validation_issues=(),
+                    updated_at_utc=now,
+                    created_at_utc=(
+                        getattr(stored, "created_at_utc", None)
+                        if stored is not None and getattr(stored, "created_at_utc", None)
+                        else candidate.created_at_utc or now
+                    ),
+                    provenance={
+                        **dict(candidate.provenance or {}),
+                        "explicit_guided_apply": True,
+                        "no_runspec": True,
+                        "no_argv": True,
+                        "no_config_written": True,
+                        "no_files_written": True,
+                    },
+                )
+                self._invalidate_guided_backend_validation("dataset contract applied")
             self._refresh_guided_dataset_contract_panel()
             self._refresh_guided_draft_run_plan_preview()
-            label = (
-                "NPM settings were not applied: "
-                if str(getattr(candidate, "input_format", "") or "").lower() == "npm"
-                else "Dataset contract was not applied: "
-            )
-            self._guided_dataset_contract_status_label.setText(
-                label + ("; ".join(candidate.validation_issues) or candidate.status)
-            )
-            return
-        now = self._guided_dataset_contract_now_utc()
-        self._guided_new_analysis_dataset_contract_snapshot = dataclasses.replace(
-            candidate,
-            status="applied",
-            explicitly_applied=True,
-            stale_reasons=(),
-            validation_issues=(),
-            updated_at_utc=now,
-            created_at_utc=candidate.created_at_utc or now,
-            provenance={
-                **dict(candidate.provenance or {}),
-                "explicit_guided_apply": True,
-                "no_runspec": True,
-                "no_argv": True,
-                "no_config_written": True,
-                "no_files_written": True,
-            },
-        )
-        self._invalidate_guided_backend_validation("dataset contract applied")
-        self._refresh_guided_dataset_contract_panel()
-        self._refresh_guided_draft_run_plan_preview()
+        finally:
+            self._guided_dataset_contract_confirmation_active = False
+            if action_btn is not None:
+                action_btn.setText("Confirm detected dataset settings")
+                action_btn.setEnabled(True)
 
     def _on_guided_clear_dataset_contract(self) -> None:
         self._guided_new_analysis_dataset_contract_snapshot = (
@@ -13219,6 +13283,16 @@ class MainWindow(QMainWindow):
             )
         )
         stored_feature_values.pop("profile_id", None)
+        stored_feature_profile_id = (
+            self._guided_new_analysis_feature_event_profile.get("profile_id")
+            if self._guided_new_analysis_feature_event_profile
+            else None
+        )
+        if not stored_feature_profile_id and stored_feature_status == "default_initialized":
+            # Loaded valid Defaults are already the consumed profile. Give the
+            # immutable plan facts a stable semantic identity without changing
+            # the editor status or treating its visible edits as applied.
+            stored_feature_profile_id = "default-guided-profile"
         output_selected = bool(str(out_base_path or "").strip())
 
         global_corr_strategy = None
@@ -13280,7 +13354,7 @@ class MainWindow(QMainWindow):
             signal_only_f0_status=sig_status,
             signal_only_f0_source_cache_id=sig_source_cache_id,
             feature_event_profile_status=stored_feature_status,
-            feature_event_profile_id=self._guided_new_analysis_feature_event_profile.get("profile_id") if self._guided_new_analysis_feature_event_profile else None,
+            feature_event_profile_id=stored_feature_profile_id,
             feature_event_baseline_config_source=self._guided_new_analysis_feature_event_profile_baseline_source,
             feature_event_baseline_status=self._guided_new_analysis_feature_event_profile_baseline_kind,
             feature_event_values=stored_feature_values,
@@ -14645,10 +14719,6 @@ class MainWindow(QMainWindow):
         self._guided_feature_event_editor_dirty = bool(
             error or current_values != stored
         )
-        if self._guided_feature_event_editor_dirty:
-            self._invalidate_guided_backend_validation(
-                "feature detection settings edited"
-            )
         self._clear_guided_feature_detection_preview_result("Settings changed. Re-generate preview to update.")
         self._refresh_guided_feature_detection_continue_state()
         self._refresh_guided_draft_run_plan_preview()

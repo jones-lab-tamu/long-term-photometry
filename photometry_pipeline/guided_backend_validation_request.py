@@ -46,6 +46,22 @@ GUIDED_BACKEND_VALIDATION_IDENTITY_DOMAIN = (
 GUIDED_BACKEND_FEATURE_EVENT_PROFILE_SCHEMA_VERSION = (
     "guided_feature_event_profile.v1"
 )
+
+
+def is_saved_feature_event_profile_current(
+    profile_status: str, explicitly_applied: bool
+) -> bool:
+    """Whether persisted feature settings are usable for validation.
+
+    Loaded valid Defaults are already consumed; the Apply action is required
+    only to accept edits to that saved Default profile.
+    """
+    return bool(
+        profile_status == "default_initialized"
+        or (profile_status == "applied" and explicitly_applied is True)
+    )
+
+
 GUIDED_BACKEND_LOCAL_CHECK_CONTRACT_VERSION = "guided_backend_local_checks.v1"
 GUIDED_BACKEND_DIAGNOSTIC_CACHE_SCHEMA_VERSION = "guided_diagnostic_cache.v1"
 GUIDED_BACKEND_SOURCE_SNAPSHOT_SCHEMA_NAME = (
@@ -1030,15 +1046,16 @@ class GuidedBackendFeatureEventRequest:
             _require_tuple(getattr(self, name), name)
         if (
             not self.effective_values
-            or self.profile_status != "applied"
-            or self.explicitly_applied is not True
+            or not is_saved_feature_event_profile_current(
+                self.profile_status, self.explicitly_applied
+            )
             or self.current is not True
             or self.visible_unapplied_changes is not False
             or self.validation_issue_categories
             or self.stale_reason_categories
         ):
             raise GuidedBackendValidationRequestContractError(
-                "Feature/event profile must be complete, applied, and current."
+                "Feature/event profile must be complete and current."
             )
 
 
@@ -2151,8 +2168,9 @@ def compile_guided_backend_validation_request(
     feature_facts = facts.feature_event
     if (
         not feature_facts.available
-        or feature_facts.profile_status != "applied"
-        or feature_facts.explicitly_applied is not True
+        or not is_saved_feature_event_profile_current(
+            feature_facts.profile_status, feature_facts.explicitly_applied
+        )
         or feature_facts.current is not True
         or feature_facts.visible_unapplied_changes is not False
         or not feature_facts.profile_schema_version

@@ -942,9 +942,11 @@ def test_guided_feature_detection_step_accepts_loaded_defaults_and_writes_nothin
     window._guided_feature_event_peak_k_edit.setFocus()
     window._guided_feature_event_peak_k_edit.selectAll()
     QTest.keyClicks(window._guided_feature_event_peak_k_edit, "4")
-    assert window._guided_feature_detection_continue_btn.isEnabled() is False
-    assert window._guided_feature_detection_continue_status.text() == (
-        "Default settings changed. Confirm them again before continuing."
+    # The visible edit is advisory until the scientist explicitly applies it;
+    # the saved Default profile remains the consumed, valid state.
+    assert window._guided_feature_detection_continue_btn.isEnabled() is True
+    assert "saved default settings" in (
+        window._guided_feature_detection_continue_status.text().lower()
     )
 
     window._guided_feature_event_peak_k_edit.selectAll()

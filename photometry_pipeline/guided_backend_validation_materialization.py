@@ -37,6 +37,7 @@ from photometry_pipeline.guided_backend_validation_request import (
     GuidedBackendOutputRelationship,
     GuidedBackendTypedFieldValue,
     GUIDED_BACKEND_FEATURE_EVENT_PROFILE_SCHEMA_VERSION,
+    is_saved_feature_event_profile_current,
 )
 from photometry_pipeline.guided_new_analysis_plan import (
     GuidedNewAnalysisDraftPlan,
@@ -2433,8 +2434,10 @@ def materialize_guided_backend_validation_facts(
             detail_code="profile_stale",
         )
     elif (
-        not draft.feature_event_explicitly_applied
-        or draft.feature_event_profile_status != "applied"
+        not is_saved_feature_event_profile_current(
+            draft.feature_event_profile_status,
+            draft.feature_event_explicitly_applied,
+        )
         or draft.feature_event_stale_reasons
     ):
         return _failure(

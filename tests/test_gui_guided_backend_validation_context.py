@@ -146,6 +146,128 @@ def test_npm_dataset_contract_candidate_does_not_call_legacy_inference(
     )
 
 
+def test_rwd_dataset_contract_candidate_reuses_discovery_contract_cache(
+    window, monkeypatch
+):
+    source = r"C:\rwd-source"
+    window._guided_input_dir_edit.setText(source)
+    window._guided_format_combo.setCurrentText("rwd")
+    window._discovery_cache = {"resolved_format": "rwd"}
+    window._guided_acquisition_mode_combo.setCurrentText("intermittent")
+    window._guided_sessions_per_hour_edit.setText("2")
+    window._guided_session_duration_edit.setText("600")
+    window._rwd_contract_cache = {
+        "input_path": source,
+        "format": "auto",
+        "overrides": {
+            "target_fs_hz": 20.0,
+            "chunk_duration_sec": 600.0,
+            "rwd_time_col": "Time(s)",
+            "uv_suffix": "-410",
+            "sig_suffix": "-470",
+            "exclude_incomplete_final_rwd_chunk": False,
+        },
+    }
+    monkeypatch.setattr(
+        window,
+        "_infer_dataset_contract_overrides",
+        lambda _fmt: pytest.fail("RWD source was rescanned after discovery"),
+    )
+
+    candidate = window._guided_new_analysis_dataset_contract_candidate()
+
+    assert candidate.status == "inferred"
+    assert candidate.contract_values["rwd_time_col"] == "Time(s)"
+    assert candidate.contract_values["target_fs_hz"] == 20.0
+
+
+def test_dataset_confirmation_busy_guard_blocks_duplicate_request(
+    window, monkeypatch
+):
+    source = r"C:\rwd-source"
+    window._guided_input_dir_edit.setText(source)
+    window._guided_format_combo.setCurrentText("rwd")
+    window._discovery_cache = {"resolved_format": "rwd"}
+    window._guided_acquisition_mode_combo.setCurrentText("intermittent")
+    window._guided_sessions_per_hour_edit.setText("2")
+    window._guided_session_duration_edit.setText("600")
+    window._rwd_contract_cache = {
+        "input_path": source,
+        "format": "auto",
+        "overrides": {
+            "target_fs_hz": 20.0,
+            "chunk_duration_sec": 600.0,
+            "rwd_time_col": "Time(s)",
+            "uv_suffix": "-410",
+            "sig_suffix": "-470",
+            "exclude_incomplete_final_rwd_chunk": False,
+        },
+    }
+    candidate = window._guided_new_analysis_dataset_contract_candidate()
+    calls = []
+
+    def candidate_with_reentrant_click():
+        calls.append(True)
+        button = window._guided_review_dataset_contract_action_btn
+        assert button.isEnabled() is False
+        assert "Confirming detected dataset settings" in button.text()
+        window._on_guided_apply_dataset_contract()
+        return candidate
+
+    monkeypatch.setattr(
+        window,
+        "_guided_new_analysis_dataset_contract_candidate",
+        candidate_with_reentrant_click,
+    )
+    monkeypatch.setattr(
+        window, "_refresh_guided_dataset_contract_panel", lambda: None
+    )
+
+    window._on_guided_apply_dataset_contract()
+
+    assert calls == [True]
+    assert window._guided_dataset_contract_confirmation_active is False
+    assert window._guided_review_dataset_contract_action_btn.isEnabled() is True
+    assert window._guided_review_dataset_contract_action_btn.text() == (
+        "Confirm detected dataset settings"
+    )
+
+
+def test_unchanged_dataset_confirmation_does_not_invalidate_current_validation(
+    window,
+):
+    source = r"C:\rwd-source"
+    window._guided_input_dir_edit.setText(source)
+    window._guided_format_combo.setCurrentText("rwd")
+    window._discovery_cache = {"resolved_format": "rwd"}
+    window._guided_acquisition_mode_combo.setCurrentText("intermittent")
+    window._guided_sessions_per_hour_edit.setText("2")
+    window._guided_session_duration_edit.setText("600")
+    window._rwd_contract_cache = {
+        "input_path": source,
+        "format": "auto",
+        "overrides": {
+            "target_fs_hz": 20.0,
+            "chunk_duration_sec": 600.0,
+            "rwd_time_col": "Time(s)",
+            "uv_suffix": "-410",
+            "sig_suffix": "-470",
+            "exclude_incomplete_final_rwd_chunk": False,
+        },
+    }
+    candidate = window._guided_new_analysis_dataset_contract_candidate()
+    window._guided_new_analysis_dataset_contract_snapshot = replace(
+        candidate,
+        status="applied",
+        explicitly_applied=True,
+    )
+    window._guided_backend_validation_revision = 7
+
+    window._on_guided_apply_dataset_contract()
+
+    assert window._guided_backend_validation_revision == 7
+
+
 def test_npm_dataset_panel_uses_scientist_facing_settings_language(
     window,
 ):
@@ -291,6 +413,34 @@ def test_invalidation_increments_revision_and_marks_outcome_stale(window):
     assert window._guided_backend_validation_outcome_revision is None
     assert window._guided_backend_validation_stale_reason == "ROI changed"
     assert window._is_guided_backend_validation_outcome_current() is False
+
+
+def test_dirty_default_editor_is_advisory_and_does_not_invalidate_saved_plan(
+    window, monkeypatch
+):
+    window._guided_workflow_mode = "new_analysis"
+    window._guided_new_analysis_feature_event_profile_status = (
+        "default_initialized"
+    )
+    window._guided_new_analysis_feature_event_profile = {
+        "peak_threshold_k": 2.0
+    }
+    monkeypatch.setattr(
+        window,
+        "_guided_feature_event_current_values",
+        lambda: ({"peak_threshold_k": 4.75}, None),
+    )
+    monkeypatch.setattr(
+        window,
+        "_guided_active_feature_event_config_fields",
+        lambda values: dict(values or {}),
+    )
+    revision_before = window._guided_backend_validation_revision
+
+    window._on_guided_feature_detection_editor_changed()
+
+    assert window._guided_feature_event_editor_dirty is True
+    assert window._guided_backend_validation_revision == revision_before
 
 
 def test_outcome_currentness_requires_matching_revision_and_not_stale(window):
