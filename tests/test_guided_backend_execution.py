@@ -234,9 +234,11 @@ def test_output_base_not_a_directory_also_gets_accurate_message(allocation_case)
 def test_other_pure_plan_refusals_keep_generic_staleness_message(
     allocation_case,
 ):
-    """Only the output-creatability categories get the accurate message;
-    every other pure-plan gate refusal keeps its existing generic text
-    (unchanged behavior, not broadened by this patch)."""
+    """Categories that genuinely represent a stale or invalid startup
+    request (here: the explicit-run-transition marker being absent) keep
+    the existing generic "no longer current" text -- unchanged by the
+    Phase 3C fix, which only redirects the output-safety categories
+    to their own truthful summary."""
     request, _plan = allocation_case
     stale_request = replace(request, explicit_user_run_transition=False)
     result = backend.execute_guided_backend_run(
@@ -250,6 +252,99 @@ def test_other_pure_plan_refusals_keep_generic_staleness_message(
         == "Guided Run could not start because the validated setup is no "
         "longer current."
     )
+
+
+def test_completed_run_root_output_gets_truthful_not_current_message(
+    allocation_case,
+):
+    """Phase 3C repair: reproduces the real defect. An output destination
+    that is itself a completed run's own folder is a genuinely current,
+    correctly-authorized request that a later, more exhaustive
+    startup-planning safety check refuses for a specific, scientist-
+    actionable reason. Before this fix, `_validate_plan` (guided_
+    startup_orchestration.py) collapsed this into the generic "the
+    validated setup is no longer current" summary -- which is actively
+    false (the setup was current) and would send a scientist to redo
+    Validate for no reason instead of picking a different output folder."""
+    request, _plan = allocation_case
+    unsafe_request = replace(
+        request,
+        filesystem_policy=replace(
+            request.filesystem_policy,
+            output_base_is_completed_run_root=True,
+        ),
+    )
+    result = backend.execute_guided_backend_run(
+        request=unsafe_request,
+        runner=lambda command: pytest.fail("runner called"),
+    )
+    assert result.status == "refused_before_startup"
+    assert result.ok is False
+    assert result.blocking_issues[0].category == "pure_plan_output_unsafe"
+    assert "no longer current" not in result.user_summary
+    assert "output destination" in result.user_summary.lower()
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "output_base_overlaps_source",
+        "output_base_is_completed_run_root",
+        "output_base_is_guided_diagnostic_cache_root",
+        "output_base_is_protected_ineligible_root",
+        "planned_child_already_exists",
+        "overwrite_requested",
+    ),
+)
+def test_every_output_safety_category_gets_truthful_message(
+    allocation_case, field
+):
+    """All eight non-creatability output-policy categories (see
+    `_PURE_PLAN_OUTPUT_UNSAFE_CATEGORIES` in guided_startup_orchestration.py)
+    share the one truthful output-safety summary, not the false
+    currentness claim."""
+    request, _plan = allocation_case
+    unsafe_request = replace(
+        request,
+        filesystem_policy=replace(
+            request.filesystem_policy, **{field: True}
+        ),
+    )
+    result = backend.execute_guided_backend_run(
+        request=unsafe_request,
+        runner=lambda command: pytest.fail("runner called"),
+    )
+    assert result.blocking_issues[0].category == "pure_plan_output_unsafe"
+    assert "no longer current" not in result.user_summary
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "protected_root_context_complete",
+        "planned_child_directly_under_base",
+    ),
+)
+def test_inverted_output_safety_fields_get_truthful_message(
+    allocation_case, field
+):
+    """`protected_root_context_complete` and
+    `planned_child_directly_under_base` are inverted (False triggers the
+    refusal), so they cannot share the boolean-True parametrization
+    above."""
+    request, _plan = allocation_case
+    unsafe_request = replace(
+        request,
+        filesystem_policy=replace(
+            request.filesystem_policy, **{field: False}
+        ),
+    )
+    result = backend.execute_guided_backend_run(
+        request=unsafe_request,
+        runner=lambda command: pytest.fail("runner called"),
+    )
+    assert result.blocking_issues[0].category == "pure_plan_output_unsafe"
+    assert "no longer current" not in result.user_summary
 
 
 def test_all_user_summaries_exclude_internal_terms():

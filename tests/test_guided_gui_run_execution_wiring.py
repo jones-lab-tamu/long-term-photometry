@@ -1231,6 +1231,115 @@ def _drive_real_guided_rwd_setup(window, tmp_path, monkeypatch, *, apply_feature
     window._guided_backend_validate_btn.click()
 
 
+def test_natural_path_fresh_output_reaches_beyond_previous_refusal(
+    window, tmp_path, monkeypatch, qapp
+):
+    """Phase 3C natural-path regression: drives the real production
+    validation -> authorization -> payload derivation -> startup request
+    -> Run click -> worker seam -> execute_guided_backend_run ->
+    startup orchestration path for an ordinary "new analysis" output
+    destination (never used before, not a completed run). Proves the
+    pure-plan handoff itself was never broken for this, the standard
+    case -- the request is accepted and allocation is reached, so the
+    previous refusal point (`refused_before_startup` /
+    `pure_plan_not_accepted`) is never returned.
+    """
+    _drive_real_guided_rwd_setup(
+        window, tmp_path, monkeypatch, apply_feature_defaults=True
+    )
+    outcome = window._guided_backend_validation_outcome
+    assert outcome.status == "validator_accepted"
+    assert window._guided_run_btn.isEnabled() is True
+
+    retained_request = window._current_guided_startup_transaction_request()
+    assert retained_request is not None
+    assert (
+        retained_request.filesystem_policy.output_base_is_completed_run_root
+        is False
+    )
+
+    monkeypatch.setattr(
+        QMessageBox, "information", staticmethod(lambda *a, **k: None)
+    )
+    runner, calls = _real_wrapper_runner(monkeypatch)
+    window._guided_backend_execution_runner = runner
+
+    window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
+
+    result = window._guided_backend_execution_result
+    assert result.status != "refused_before_startup"
+    assert result.status == "wrapper_running"
+    assert result.blocking_issues == ()
+    assert "no longer current" not in result.user_summary
+    assert calls == {"live_verify": 1, "analysis": 0, "root_makedirs": 0}
+
+
+def test_natural_path_completed_run_root_gets_truthful_message(
+    window, tmp_path, monkeypatch, qapp
+):
+    """Phase 3C natural-path regression: reproduces the real defect Jeff
+    hit end-to-end through the real production path. The output
+    destination is itself a genuinely completed prior run's folder (the
+    exact condition confirmed on Jeff's real machine: the real artifact's
+    planned run directory was nested directly under a previous run whose
+    status.json read schema_version=1 / phase="final" / status="success").
+
+    Before the Phase 3C fix, this reached `execute_guided_backend_run` and
+    returned the false "the validated setup is no longer current" message
+    even though the request was genuinely current -- the real problem was
+    the (correct, safety-preserving) refusal to allocate under a
+    completed run. After the fix, the request is still correctly refused
+    (output safety is not weakened), but with a truthful, actionable
+    summary and no output is created.
+    """
+    _drive_real_guided_rwd_setup(
+        window, tmp_path, monkeypatch, apply_feature_defaults=True
+    )
+    outcome = window._guided_backend_validation_outcome
+    assert outcome.status == "validator_accepted"
+
+    output_dir = tmp_path / "output"
+    (output_dir / "status.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "phase": "final", "status": "success"}
+        ),
+        encoding="utf-8",
+    )
+    # Re-validate so the request is rebuilt against the output folder's
+    # current (now completed-run-marked) on-disk state -- filesystem_policy
+    # is computed fresh at build time, not cached from the first click.
+    window._guided_backend_validate_btn.click()
+    assert window._guided_backend_validation_outcome.status == "validator_accepted"
+    assert window._guided_run_btn.isEnabled() is True
+
+    retained_request = window._current_guided_startup_transaction_request()
+    assert retained_request is not None
+    assert (
+        retained_request.filesystem_policy.output_base_is_completed_run_root
+        is True
+    )
+
+    calls = []
+    window._guided_backend_execution_runner = (
+        lambda command: calls.append(command) or pytest.fail("runner called")
+    )
+
+    window._guided_run_btn.click()
+    _pump_until(qapp, lambda: window._guided_backend_execution_result is not None)
+
+    result = window._guided_backend_execution_result
+    assert result.status == "refused_before_startup"
+    assert result.blocking_issues[0].category == "pure_plan_output_unsafe"
+    assert calls == []
+    assert "no longer current" not in result.user_summary
+    assert "output destination" in result.user_summary.lower()
+    # Output safety preserved: nothing was allocated under the completed
+    # run, and the completed run's own contents are untouched.
+    assert not (output_dir / retained_request.planned_run_id).exists()
+    assert (output_dir / "status.json").read_text(encoding="utf-8") != ""
+
+
 def test_real_gui_loaded_defaults_without_apply_enables_run(
     window, tmp_path, monkeypatch, qapp
 ):

@@ -77,6 +77,19 @@ _OUTPUT_NOT_CREATABLE_SUMMARY = (
     "Guided Run could not find or create the selected output folder. "
     "Choose a writable output destination and try again."
 )
+# `pure_plan_output_unsafe` (see guided_startup_orchestration._validate_plan)
+# represents a genuinely current setup that a later, more exhaustive
+# startup-planning check has correctly refused for a specific,
+# scientist-actionable reason -- not a stale/expired validation. The
+# shared "no longer current" fallback below is actively false for this;
+# a scientist would re-check their setup for no reason instead of picking
+# a different output destination.
+_OUTPUT_UNSAFE_SUMMARY = (
+    "Guided Run could not start because the selected output destination "
+    "is not safe to use for a new run (for example, it is a previous "
+    "completed run's folder). Choose a different output destination and "
+    "try again."
+)
 
 _STATUS_MAP = {
     "refused_before_allocation": (
@@ -167,12 +180,12 @@ def execute_guided_backend_run(
             "Guided Run could not continue because of an internal error.",
         )
     status, user_state, ok, summary = mapped
-    if (
-        internal.status == "refused_before_allocation"
-        and internal.blocking_issues
-        and internal.blocking_issues[0].category == "pure_plan_output_not_creatable"
-    ):
-        summary = _OUTPUT_NOT_CREATABLE_SUMMARY
+    if internal.status == "refused_before_allocation" and internal.blocking_issues:
+        first_category = internal.blocking_issues[0].category
+        if first_category == "pure_plan_output_not_creatable":
+            summary = _OUTPUT_NOT_CREATABLE_SUMMARY
+        elif first_category == "pure_plan_output_unsafe":
+            summary = _OUTPUT_UNSAFE_SUMMARY
     completed_candidate = (
         internal.allocated_run_dir
         if status == "wrapper_completed_needs_review_loading"

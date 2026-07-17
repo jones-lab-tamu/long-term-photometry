@@ -104,6 +104,36 @@ def test_refused_plan_writes_nothing_and_does_not_invoke(allocation_case):
     assert not Path(refused_request.planned_allocated_run_dir).exists()
 
 
+def test_completed_run_root_output_refuses_before_allocation_creates_nothing(
+    allocation_case,
+):
+    """Phase 3C: a genuinely current, correctly-authorized request whose
+    output destination is itself a completed run must still be refused
+    before allocation -- the message-fidelity fix in `_validate_plan`
+    (guided_startup_orchestration.py) changes only which category/summary
+    is reported, never whether allocation is safely blocked."""
+    request, _plan = allocation_case
+    unsafe_request = replace(
+        request,
+        filesystem_policy=replace(
+            request.filesystem_policy,
+            output_base_is_completed_run_root=True,
+        ),
+    )
+    calls = []
+    result = orchestration.run_guided_startup_to_wrapper(
+        request=unsafe_request,
+        subprocess_runner=lambda command: calls.append(command),
+    )
+    assert result.status == "refused_before_allocation"
+    assert result.blocking_issues[0].category == "pure_plan_output_unsafe"
+    assert calls == []
+    assert not Path(unsafe_request.planned_allocated_run_dir).exists()
+    assert result.allocation_status is None
+    assert result.materialization_status is None
+    assert result.wrapper_started is False
+
+
 def test_supplied_stale_plan_refuses_before_writes(allocation_case):
     request, plan = allocation_case
     stale = replace(plan, status="refused")
@@ -114,6 +144,41 @@ def test_supplied_stale_plan_refuses_before_writes(allocation_case):
     )
     assert result.blocking_issues[0].category == "pure_plan_stale_or_tampered"
     assert not Path(request.planned_allocated_run_dir).exists()
+
+
+def test_accepted_plan_from_a_different_request_cannot_be_reused(
+    tmp_path, monkeypatch
+):
+    """An accepted pure plan is bound to the exact request it was computed
+    for (identity-bound); supplying request A's own accepted plan for
+    request B (a distinct planned run id) must refuse as tampered/stale,
+    not silently substitute."""
+    from tests.test_guided_startup_allocation import _request_for_paths
+
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    source.mkdir()
+    output.mkdir()
+    request_a, plan_a = _request_for_paths(
+        monkeypatch,
+        source_root=source,
+        output_base=output,
+        run_id="guided_run_20260101T000000Z_aaaaaa",
+    )
+    request_b, _plan_b = _request_for_paths(
+        monkeypatch,
+        source_root=source,
+        output_base=output,
+        run_id="guided_run_20260101T000000Z_bbbbbb",
+    )
+    result = orchestration.run_guided_startup_to_wrapper(
+        request=request_b,
+        pure_plan=plan_a,
+        subprocess_runner=lambda command: pytest.fail("runner called"),
+    )
+    assert result.blocking_issues[0].category == "pure_plan_stale_or_tampered"
+    assert not Path(request_b.planned_allocated_run_dir).exists()
+    assert not Path(request_a.planned_allocated_run_dir).exists()
 
 
 def test_allocation_refusal_stops_before_materialization_and_runner(

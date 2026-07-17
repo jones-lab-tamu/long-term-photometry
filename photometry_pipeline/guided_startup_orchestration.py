@@ -171,6 +171,36 @@ def _same_path(left: str, right: str) -> bool:
     )
 
 
+
+# `_gate_issue` (guided_startup_transaction.py) reports the exact reason a
+# pure plan was refused, but most of its categories describe internal
+# wiring/identity consistency that should be unreachable for a well-formed
+# request and whose own messages are not scientist-safe to show verbatim.
+# This group is different: an output destination that is itself a
+# completed run (or otherwise unsafe to allocate under) is reachable
+# through an ordinary, legitimate scientist choice -- most commonly the
+# output field defaulting to a previous run's own folder -- and collapsing
+# it into the generic "the validated setup is no longer current" text
+# would be actively false: the setup *was* current; the chosen output
+# destination is the actual, actionable problem. See
+# `_OUTPUT_UNSAFE_SUMMARY` in guided_backend_execution.py, which maps this
+# category to its own truthful summary the same way
+# `pure_plan_output_not_creatable` already does for the two
+# output-creatability categories below.
+_PURE_PLAN_OUTPUT_UNSAFE_CATEGORIES = frozenset(
+    (
+        "output_source_overlap",
+        "completed_run_root_prohibited",
+        "diagnostic_cache_root_prohibited",
+        "protected_output_root_prohibited",
+        "protected_root_context_incomplete",
+        "planned_child_not_direct",
+        "planned_child_exists",
+        "overwrite_prohibited",
+    )
+)
+
+
 def _validate_plan(
     request: GuidedStartupTransactionRequest,
     supplied: GuidedStartupPlanResult | None,
@@ -193,14 +223,21 @@ def _validate_plan(
         or command.requires_future_wrapper_preallocated_mode is not True
         or request.payload_result.runner_request is not None
     ):
-        if plan.blocking_issues and plan.blocking_issues[0].category in (
-            "output_base_unavailable",
-            "output_base_not_directory",
-        ):
+        first_category = (
+            plan.blocking_issues[0].category if plan.blocking_issues else None
+        )
+        if first_category in ("output_base_unavailable", "output_base_not_directory"):
             return None, GuidedStartupOrchestrationIssue(
                 "pure_plan_output_not_creatable",
                 "output",
                 "The selected output folder could not be found or created.",
+            )
+        if first_category in _PURE_PLAN_OUTPUT_UNSAFE_CATEGORIES:
+            return None, GuidedStartupOrchestrationIssue(
+                "pure_plan_output_unsafe",
+                "output",
+                "The selected output destination is not safe to use for a "
+                "new run.",
             )
         return None, GuidedStartupOrchestrationIssue(
             "pure_plan_not_accepted",
