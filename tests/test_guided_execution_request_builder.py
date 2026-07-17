@@ -223,6 +223,68 @@ def test_payload_failure_is_classified(
     assert result.status == "payload_derivation_failed"
 
 
+def test_payload_failure_preserves_specific_blocking_issues(
+    startup_request, validation_state, monkeypatch
+):
+    """A structured payload refusal's own blocking issues must be preserved
+    in the builder result so the GUI can show a truthful, specific reason
+    instead of only the generic 'payload derivation failed'."""
+    _patch_success(monkeypatch, startup_request)
+    refused_payload = SimpleNamespace(
+        ok=False,
+        status="refused",
+        blocking_issues=(
+            SimpleNamespace(
+                category="config_field_unsupported",
+                section="guided_execution_payload",
+                message="The saved Feature Detection settings are not ready "
+                "for this analysis.",
+                detail_code="",
+            ),
+        ),
+    )
+    # Force isinstance(payload_result, GuidedExecutionPayloadDerivationResult)
+    # False path is not needed: the builder only checks ok. Use the real type.
+    from photometry_pipeline.guided_execution_payloads import (
+        GuidedExecutionPayloadDerivationResult,
+    )
+
+    real_refused = GuidedExecutionPayloadDerivationResult(
+        status="refused",
+        ok=False,
+        runnable=False,
+        config_payload=None,
+        candidate_manifest_payload=None,
+        runner_request=None,
+        provenance_seed=None,
+        config_payload_identity=None,
+        candidate_manifest_payload_identity=None,
+        runner_request_identity=None,
+        provenance_seed_identity=None,
+        limiting_issues=(),
+        blocking_issues=refused_payload.blocking_issues,
+    )
+    monkeypatch.setattr(
+        builder,
+        "derive_guided_execution_payloads",
+        lambda *_a, **_k: real_refused,
+    )
+    context, outcome = validation_state
+    result = builder.build_guided_startup_request_from_validation(
+        validation_context=context,
+        validation_outcome=outcome,
+        current_gui_revision=context.revision,
+    )
+    assert result.status == "payload_derivation_failed"
+    categories = [issue.category for issue in result.blocking_issues]
+    messages = [issue.message for issue in result.blocking_issues]
+    # The generic top-level issue is still first (unchanged contract)...
+    assert result.blocking_issues[0].category == "payload_derivation_failed"
+    # ...but the specific payload reason is now preserved too.
+    assert "config_field_unsupported" in categories
+    assert any("not ready" in message for message in messages)
+
+
 def test_builder_writes_no_files_or_directories(
     startup_request, validation_state, monkeypatch
 ):

@@ -263,6 +263,7 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
     monkeypatch,
     *,
     strategy_by_roi=None,
+    apply_feature_defaults=True,
 ):
     """Drive the standard cache-free local-preview path: no diagnostic
     cache is ever built. Correction preview comes from
@@ -400,7 +401,11 @@ def _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
     window._guided_workflow_stepper.setCurrentRow(
         list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
     )
-    window._guided_feature_event_apply_btn.click()
+    # When apply_feature_defaults is False, the auto-loaded valid Default
+    # Feature Detection profile is left as `default_initialized` (never
+    # explicitly applied) -- the exact "loaded Defaults, no Apply" case.
+    if apply_feature_defaults:
+        window._guided_feature_event_apply_btn.click()
 
     output_parent = tmp_path / "planned_outputs"
     output_parent.mkdir()

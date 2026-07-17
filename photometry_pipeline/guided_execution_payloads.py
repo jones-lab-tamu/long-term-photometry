@@ -676,8 +676,23 @@ def resolve_confirmed_feature_config_fields(
     feature_event = getattr(intent, "feature_event", None)
     if feature_event is None:
         return None, "Intent carries no confirmed feature/event settings."
-    if not getattr(feature_event, "explicitly_applied", False):
-        return None, "Feature-detection settings were never confirmed."
+    # A valid loaded Default profile (`default_initialized`) is already
+    # consumed and executable; pressing "Use these as Default settings"
+    # (which flips the profile to `applied` + `explicitly_applied`) is
+    # required only to accept *edits* to that saved Default. Reuse the exact
+    # same shared predicate the GUI readiness, draft plan, and backend
+    # validation layers already use so this contract cannot drift between
+    # them (was: an obsolete `explicitly_applied` requirement that refused
+    # valid loaded Defaults -- see is_saved_feature_event_profile_current).
+    from photometry_pipeline.guided_backend_validation_request import (
+        is_saved_feature_event_profile_current,
+    )
+
+    if not is_saved_feature_event_profile_current(
+        str(getattr(feature_event, "profile_status", "")),
+        bool(getattr(feature_event, "explicitly_applied", False)),
+    ):
+        return None, "The saved Feature Detection settings are not ready for this analysis."
     if not getattr(feature_event, "current", False):
         return None, "Confirmed feature-detection settings are stale."
 

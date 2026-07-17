@@ -516,6 +516,217 @@ def test_guided_validate_and_disabled_run_widgets_exist(window):
     assert window._guided_backend_validation_details_label is not None
     assert window._guided_run_btn.text() == "Run Guided Analysis"
     assert window._guided_run_btn.isEnabled() is False
+
+
+# ---------------------------------------------------------------------------
+# B2 Phase 2: specific execution-derivation failure reason is surfaced
+# (instead of collapsing to "unavailable in this build").
+# ---------------------------------------------------------------------------
+
+
+def test_derivation_reason_from_result_prefers_feature_detection_message():
+    from gui.main_window import MainWindow as _MW
+
+    result = SimpleNamespace(
+        blocking_issues=(
+            SimpleNamespace(
+                category="payload_derivation_failed",
+                section="payload",
+                message="Guided execution payload derivation failed.",
+            ),
+            SimpleNamespace(
+                category="config_field_unsupported",
+                section="guided_execution_payload",
+                message="The saved Feature Detection settings are not ready "
+                "for this analysis.",
+            ),
+        )
+    )
+    reason = _MW._guided_execution_derivation_reason_from_result(result)
+    assert reason == (
+        "The saved Feature Detection settings are not ready for this analysis."
+    )
+
+
+def test_derivation_reason_from_result_ignores_internal_only_messages():
+    from gui.main_window import MainWindow as _MW
+
+    result = SimpleNamespace(
+        blocking_issues=(
+            SimpleNamespace(
+                category="config_mapping_incomplete",
+                section="payload",
+                message="Disposition map fields do not match Config fields.",
+            ),
+        )
+    )
+    # No scientist-facing message -> None (do not leak internal jargon).
+    assert _MW._guided_execution_derivation_reason_from_result(result) is None
+
+
+_FEATURE_REASON = (
+    "The saved Feature Detection settings are not ready for this analysis."
+)
+
+
+def _payload_refusal_build_result(revision):
+    """A real builder result that preserves a specific Feature Detection
+    payload refusal (generic top-level issue + preserved specific issue),
+    exactly as the production builder now produces it."""
+    from photometry_pipeline.guided_execution_request_builder import (
+        GuidedExecutionRequestBuildIssue,
+        GuidedExecutionRequestBuildResult,
+    )
+
+    return GuidedExecutionRequestBuildResult(
+        status="payload_derivation_failed",
+        ok=False,
+        authorization_result=None,
+        payload_result=None,
+        startup_transaction_request=None,
+        blocking_issues=(
+            GuidedExecutionRequestBuildIssue(
+                "payload_derivation_failed",
+                "payload",
+                "Guided execution payload derivation failed.",
+            ),
+            GuidedExecutionRequestBuildIssue(
+                "config_field_unsupported",
+                "guided_execution_payload",
+                _FEATURE_REASON,
+            ),
+        ),
+        current_gui_revision=revision,
+        request_ready=False,
+    )
+
+
+def _drive_validate(window, monkeypatch, *, builder_result=None, outcome=None):
+    """Drive the real `_on_guided_backend_validate_clicked` sequence with an
+    accepted validation outcome and a controllable builder result, letting
+    the real `_derive_guided_execution_state_from_validation` run.
+    """
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+
+    draft = GuidedNewAnalysisDraftPlan(input_format="rwd")
+    context = GuidedBackendValidationGuiContext(
+        draft=draft,
+        parser_contract=window._guided_backend_validation_parser_contract,
+        additional_protected_roots=(),
+        validator_contract=window._guided_backend_validator_contract,
+        revision=window._guided_backend_validation_revision,
+    )
+    monkeypatch.setattr(
+        window, "_capture_guided_backend_validation_context", lambda: context
+    )
+    monkeypatch.setattr(
+        workflow,
+        "validate_current_guided_draft_for_backend",
+        lambda *_a, **_k: (outcome or _accepted_outcome()),
+    )
+    if builder_result is not None:
+        monkeypatch.setattr(
+            request_builder,
+            "build_guided_startup_request_from_validation",
+            lambda **_k: builder_result,
+        )
+    window._guided_backend_validate_btn.click()
+    return context
+
+
+def test_failed_derivation_reason_survives_failed_state_clear(window, monkeypatch):
+    """Natural production sequence: accepted validation -> builder returns a
+    structured payload refusal -> derivation records the reason and returns
+    None -> the normal failed-state clear runs -> the display refresh must
+    still show the specific Feature Detection reason."""
+    _drive_validate(
+        window,
+        monkeypatch,
+        builder_result=_payload_refusal_build_result(
+            window._guided_backend_validation_revision
+        ),
+    )
+    # No execution authority retained; Run stays disabled.
+    assert window._guided_run_authorization_result is None
+    assert window._guided_execution_payload_result is None
+    assert window._guided_startup_transaction_request is None
+    assert window._guided_run_btn.isEnabled() is False
+    # The specific reason survived the failed-state clear and is visible.
+    details = window._guided_backend_validation_details_label.text()
+    assert details == _FEATURE_REASON
+    assert "unavailable in this build" not in details.lower()
+    assert window._guided_execution_derivation_reason == _FEATURE_REASON
+
+
+def test_passive_refresh_preserves_current_reason(window, monkeypatch):
+    _drive_validate(
+        window,
+        monkeypatch,
+        builder_result=_payload_refusal_build_result(
+            window._guided_backend_validation_revision
+        ),
+    )
+    assert window._guided_backend_validation_details_label.text() == _FEATURE_REASON
+    # A passive refresh (no setup change) must not erase the current reason.
+    window._refresh_guided_backend_validation_display()
+    assert window._guided_backend_validation_details_label.text() == _FEATURE_REASON
+    assert window._guided_execution_derivation_reason == _FEATURE_REASON
+
+
+def test_new_validation_attempt_clears_stale_reason(window, monkeypatch):
+    # Seed a stale reason from a prior failed attempt.
+    window._guided_execution_derivation_reason = "stale prior reason"
+    # A new successful attempt must drop it before processing the new result.
+    _drive_validate(
+        window,
+        monkeypatch,
+        builder_result=SimpleNamespace(
+            ok=True,
+            authorization_result=SimpleNamespace(status="authorized"),
+            payload_result=SimpleNamespace(),
+            startup_transaction_request=SimpleNamespace(),
+        ),
+    )
+    assert window._guided_execution_derivation_reason != "stale prior reason"
+
+
+def test_successful_derivation_clears_stale_reason(window, monkeypatch):
+    window._guided_execution_derivation_reason = "stale prior reason"
+    # Call the real method with a stubbed builder returning a valid triple.
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+
+    monkeypatch.setattr(
+        request_builder,
+        "build_guided_startup_request_from_validation",
+        lambda **_k: SimpleNamespace(
+            ok=True,
+            authorization_result=SimpleNamespace(),
+            payload_result=SimpleNamespace(),
+            startup_transaction_request=SimpleNamespace(),
+        ),
+    )
+    triple = window._derive_guided_execution_state_from_validation(
+        SimpleNamespace(), SimpleNamespace()
+    )
+    assert triple is not None
+    assert window._guided_execution_derivation_reason is None
+
+
+def test_genuine_invalidation_clears_reason(window):
+    window._guided_execution_derivation_reason = _FEATURE_REASON
+    window._invalidate_guided_backend_validation("output destination changed")
+    assert window._guided_execution_derivation_reason is None
+
+
+def test_accepted_setup_without_reason_keeps_generic_line(window):
+    window._guided_backend_validation_revision = 40
+    window._guided_backend_validation_outcome = _accepted_outcome()
+    window._guided_backend_validation_outcome_revision = 40
+    window._guided_run_readiness = SimpleNamespace(ready=False)
+    window._guided_execution_derivation_reason = None
+    window._refresh_guided_backend_validation_display()
+    details = window._guided_backend_validation_details_label.text()
+    assert "not available for this configuration" in details
     assert window._guided_run_readiness_label is not None
     assert not hasattr(window, "_guided_validation_artifact_link")
 

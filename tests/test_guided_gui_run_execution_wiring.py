@@ -1189,3 +1189,225 @@ def test_real_gui_path_press_run_after_authorization(
     # execute_guided_backend_run in
     # tests/test_guided_backend_execution.py::
     # test_output_not_creatable_maps_to_accurate_message.
+
+
+def _drive_real_guided_rwd_setup(window, tmp_path, monkeypatch, *, apply_feature_defaults):
+    """Drive the real GUI new-analysis RWD path up to (not including) the
+    Run press, returning after Check My Setup. Shared by the loaded-Defaults
+    visible regression tests below."""
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+    import photometry_pipeline.guided_production_mapping as production_mapping
+    from gui.main_window import GUIDED_WORKFLOW_STEPS
+    from tests.test_gui_guided_new_analysis_plan import (
+        _configure_complete_guided_new_analysis_draft_without_diagnostic_cache,
+        _confirm_detected_dataset_settings_via_review_plan_button,
+    )
+
+    strategy_by_roi = {roi: "Global Linear Regression" for roi in ("CH1", "CH2", "CH3")}
+    _configure_complete_guided_new_analysis_draft_without_diagnostic_cache(
+        window,
+        tmp_path,
+        monkeypatch,
+        strategy_by_roi=strategy_by_roi,
+        apply_feature_defaults=apply_feature_defaults,
+    )
+    _confirm_detected_dataset_settings_via_review_plan_button(window, monkeypatch)
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Draft plan")
+    )
+    window._guided_review_go_to_run_btn.click()
+    build_identity = production_mapping.build_application_build_identity(
+        distribution_name="photometry-pipeline",
+        distribution_version="1.0.0",
+        source_revision_kind="git",
+        source_revision="abc123",
+        source_tree_state="clean",
+    )
+    monkeypatch.setattr(
+        request_builder,
+        "resolve_application_build_identity",
+        lambda **_kwargs: SimpleNamespace(build_identity=build_identity),
+    )
+    window._guided_backend_validate_btn.click()
+
+
+def test_real_gui_loaded_defaults_without_apply_enables_run(
+    window, tmp_path, monkeypatch, qapp
+):
+    """B2 Phase 2 visible regression: a valid loaded Feature Detection Default
+    profile that was NEVER explicitly applied must reach ready_hidden and
+    enable Run through the real validate -> authorize -> payload derivation
+    path. This is the exact real interactive failure the payload predicate
+    repair fixes. Nothing about authorization/payload/readiness is assigned
+    directly."""
+    _drive_real_guided_rwd_setup(
+        window, tmp_path, monkeypatch, apply_feature_defaults=False
+    )
+    outcome = window._guided_backend_validation_outcome
+    assert outcome.status == "validator_accepted"
+    # The saved Default profile was loaded but never explicitly applied.
+    draft = window._build_guided_new_analysis_draft_plan()
+    assert draft.feature_event_profile_status == "default_initialized"
+    assert draft.feature_event_explicitly_applied is False
+    # With the repaired payload predicate, authorization + payload succeed
+    # naturally and Run is enabled.
+    auth = window._guided_run_authorization_result
+    assert getattr(auth, "status", None) == "authorized"
+    assert window._guided_execution_derivation_reason is None
+    assert window._guided_run_readiness.status == "ready_hidden"
+    assert window._guided_run_btn.isEnabled() is True
+    # The old-code failure for this exact loaded-Defaults case is pinned at
+    # the source in tests/test_guided_execution_payloads.py::
+    # test_old_predicate_would_have_refused_loaded_default. It cannot be
+    # pinned by monkeypatching is_saved_feature_event_profile_current here,
+    # because that shared predicate is also consumed by backend validation
+    # (reverting it would refuse validation before payload derivation is
+    # ever reached), whereas the real defect was payload derivation using
+    # its own obsolete explicitly-applied gate instead of the shared rule.
+
+
+def test_applied_defaults_also_enable_run_after_repair(
+    window, tmp_path, monkeypatch, qapp
+):
+    """Regression guard: explicitly applied Defaults must still reach
+    ready_hidden and enable Run (the repair must not only fix the
+    default_initialized case)."""
+    _drive_real_guided_rwd_setup(
+        window, tmp_path, monkeypatch, apply_feature_defaults=True
+    )
+    assert window._guided_backend_validation_outcome.status == "validator_accepted"
+    draft = window._build_guided_new_analysis_draft_plan()
+    assert draft.feature_event_profile_status == "applied"
+    assert draft.feature_event_explicitly_applied is True
+    assert getattr(window._guided_run_authorization_result, "status", None) == (
+        "authorized"
+    )
+    assert window._guided_run_btn.isEnabled() is True
+    # Baseline applied-Default value is in the payload.
+    assert _retained_config_values(window)["peak_threshold_k"] == 2.5
+
+    # Now genuinely edit AND apply a distinguishable value; the newly applied
+    # value must be the one that reaches the payload, and the former saved
+    # value must be gone for that active field.
+    window._guided_feature_event_peak_k_edit.setText("3.25")
+    window._guided_feature_event_apply_btn.click()
+    window._guided_backend_validate_btn.click()
+    assert window._guided_backend_validation_outcome.status == "validator_accepted"
+    assert window._guided_run_btn.isEnabled() is True
+    applied_values = _retained_config_values(window)
+    assert applied_values["peak_threshold_k"] == 3.25
+    assert applied_values["peak_threshold_k"] != 2.5
+
+
+def _retained_config_values(window):
+    """The actual retained execution config payload as a {name: value} dict."""
+    request = window._guided_startup_transaction_request
+    assert request is not None, "no startup request was retained"
+    return {v.name: v.value for v in request.payload_result.config_payload.values}
+
+
+def test_real_gui_dirty_default_editor_uses_saved_value_not_draft(
+    window, tmp_path, monkeypatch, qapp
+):
+    """Visible dirty-editor payload regression: a valid saved Default profile
+    is loaded (peak_threshold_k = 2.5). The shared Default editor is then
+    edited to a clearly distinguishable 4.75 WITHOUT pressing "Use these as
+    Default settings". After re-checking the setup, payload derivation must
+    use the SAVED 2.5, never the unapplied draft 4.75, while Run still
+    enables. The actual retained config payload is inspected directly."""
+    _drive_real_guided_rwd_setup(
+        window, tmp_path, monkeypatch, apply_feature_defaults=False
+    )
+    # Baseline: the saved Default value is in the payload.
+    assert window._guided_run_btn.isEnabled() is True
+    assert _retained_config_values(window)["peak_threshold_k"] == 2.5
+
+    # Edit the visible shared Default form to a distinguishable value and do
+    # NOT apply it.
+    window._guided_feature_event_peak_k_edit.setText("4.75")
+    window._guided_feature_event_peak_k_edit.editingFinished.emit()
+
+    # Re-check the setup (the edit invalidated the prior check).
+    window._guided_backend_validate_btn.click()
+
+    # The draft still reflects the saved (never-applied) Default profile.
+    draft = window._build_guided_new_analysis_draft_plan()
+    assert draft.feature_event_profile_status == "default_initialized"
+    assert draft.feature_event_explicitly_applied is False
+
+    # Payload derivation succeeded and Run is enabled again...
+    assert window._guided_backend_validation_outcome.status == "validator_accepted"
+    assert window._guided_run_btn.isEnabled() is True
+    # ...and the ACTUAL retained config uses the saved 2.5, not the draft 4.75.
+    values = _retained_config_values(window)
+    assert values["peak_threshold_k"] == 2.5
+    assert values["peak_threshold_k"] != 4.75
+
+
+def _customize_all_included_rois(window, monkeypatch, config_fields):
+    """Give every included ROI a valid Custom Feature Detection override via
+    the fake per-ROI dialog (no real UI)."""
+    import gui.main_window as main_window_module
+
+    class _FakeRoiDialog:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def exec(self):
+            return main_window_module.QDialog.Accepted
+
+        def result_values(self):
+            return dict(config_fields)
+
+    monkeypatch.setattr(
+        main_window_module, "_GuidedRoiFeatureEventDialog", _FakeRoiDialog
+    )
+    for roi in ("CH1", "CH2", "CH3"):
+        window._on_guided_customize_roi_feature_event(roi)
+
+
+def test_real_gui_all_custom_with_dirty_default_editor_enables_run(
+    window, tmp_path, monkeypatch, qapp
+):
+    """Visible all-Custom regression: every included ROI uses a valid Custom
+    Feature Detection override (peak_threshold_k = 3.5) while the shared
+    Default editor holds an unapplied dirty 4.75. The plan -> validation ->
+    authorization -> payload path must reach Run-ready, the Custom values
+    must be in the effective configuration, and the dirty Default draft must
+    not enter the payload. No readiness state is injected."""
+    _drive_real_guided_rwd_setup(
+        window, tmp_path, monkeypatch, apply_feature_defaults=True
+    )
+    assert window._guided_run_btn.isEnabled() is True
+
+    _customize_all_included_rois(window, monkeypatch, {"peak_threshold_k": 3.5})
+    assert set(window._guided_per_roi_feature_event_overrides) == {"CH1", "CH2", "CH3"}
+
+    # Unapplied dirty edit in the shared Default editor.
+    window._guided_feature_event_peak_k_edit.setText("4.75")
+    window._guided_feature_event_peak_k_edit.editingFinished.emit()
+
+    window._guided_backend_validate_btn.click()
+
+    assert window._guided_backend_validation_outcome.status == "validator_accepted"
+    assert window._guided_run_btn.isEnabled() is True
+
+    request = window._guided_startup_transaction_request
+    assert request is not None
+    per_roi = request.authorization_result.production_intent.feature_event.per_roi_feature_event_map
+    by_roi = {entry.roi_id: entry for entry in per_roi}
+    for roi in ("CH1", "CH2", "CH3"):
+        entry = by_roi[roi]
+        assert entry.source == "override"  # genuinely Custom
+        override = {v.field_name: v.value for v in entry.override_config_fields}
+        effective = {v.field_name: v.value for v in entry.effective_config_fields}
+        # The Custom value is present in the effective execution config...
+        assert override.get("peak_threshold_k") == 3.5
+        assert effective.get("peak_threshold_k") == 3.5
+        # ...and the dirty unapplied Default draft (4.75) is nowhere.
+        assert override.get("peak_threshold_k") != 4.75
+        assert effective.get("peak_threshold_k") != 4.75
+
+    # The base config payload also never picked up the dirty 4.75.
+    base_values = _retained_config_values(window)
+    assert base_values["peak_threshold_k"] != 4.75

@@ -2436,6 +2436,7 @@ class MainWindow(QMainWindow):
         self._guided_startup_transaction_request = None
         self._guided_validated_plan_identity = None
         self._guided_backend_execution_result = None
+        self._guided_execution_derivation_reason = None
         self._guided_backend_execution_active = False
         self._guided_backend_execution_runner = None
         self._guided_run_execution_thread = None
@@ -11526,6 +11527,9 @@ class MainWindow(QMainWindow):
         self._refresh_guided_draft_run_plan_preview()
 
     def _invalidate_guided_backend_validation(self, reason: str) -> None:
+        # A genuine setup change ends the attempt that owned any derivation
+        # explanation; the stale reason must not survive into the new state.
+        self._clear_guided_execution_derivation_reason()
         self._clear_guided_execution_readiness_state()
         self._guided_backend_validation_revision = int(
             getattr(self, "_guided_backend_validation_revision", 0)
@@ -11598,10 +11602,29 @@ class MainWindow(QMainWindow):
         self._guided_validated_plan_identity = None
 
     def _clear_guided_execution_readiness_state(self) -> None:
-        """Atomically discard state that could authorize Guided execution."""
+        """Atomically discard state that could authorize Guided execution.
+
+        Deliberately does NOT clear
+        ``_guided_execution_derivation_reason``: this method runs as part of
+        the same failed Check My Setup attempt that produced that reason
+        (see ``_on_guided_backend_validate_clicked``), so erasing it here
+        would hide the specific "why" before the display refresh can show
+        it. The reason is instead cleared explicitly when a *new* attempt
+        begins, on a genuine validation invalidation, and on a successful
+        derivation -- see ``_clear_guided_execution_derivation_reason``.
+        """
         self._clear_guided_execution_authorization_state()
         self._guided_backend_execution_result = None
         self._refresh_guided_review_handoff_display()
+
+    def _clear_guided_execution_derivation_reason(self) -> None:
+        """Clear the current Check My Setup derivation explanation.
+
+        Called only at the boundaries that end the attempt that owned the
+        reason: a new Check My Setup, a genuine validation invalidation, and
+        a successful derivation.
+        """
+        self._guided_execution_derivation_reason = None
 
     def _retain_guided_execution_readiness_state(
         self,
@@ -11759,12 +11782,38 @@ class MainWindow(QMainWindow):
             ),
         )
         if not result.ok:
+            # Preserve a specific scientist-facing reason (if the builder
+            # carried one up from the payload layer) so an accepted setup
+            # that cannot be prepared shows a truthful reason instead of the
+            # generic "unavailable in this build" fallthrough.
+            self._guided_execution_derivation_reason = (
+                self._guided_execution_derivation_reason_from_result(result)
+            )
             return None
+        # Successful derivation: no explanation to carry.
+        self._clear_guided_execution_derivation_reason()
         return (
             result.authorization_result,
             result.payload_result,
             result.startup_transaction_request,
         )
+
+    @staticmethod
+    def _guided_execution_derivation_reason_from_result(result):
+        """Return a bounded, scientist-facing reason for a failed execution
+        derivation from the builder's preserved blocking issues, or ``None``.
+
+        Only messages that are already scientist-facing (currently the
+        Feature Detection readiness message) are surfaced verbatim; other
+        internal payload categories are deliberately not shown, to avoid
+        leaking implementation jargon.
+        """
+        issues = getattr(result, "blocking_issues", None) or ()
+        for issue in issues:
+            message = str(getattr(issue, "message", "") or "")
+            if "feature detection" in message.lower():
+                return message
+        return None
 
     def _on_guided_backend_validate_clicked(self) -> None:
         from photometry_pipeline.guided_plan_identity import (
@@ -11773,6 +11822,9 @@ class MainWindow(QMainWindow):
 
         if getattr(self, "_guided_backend_validation_active", False):
             return
+        # A new attempt owns its own explanation: drop any reason left by a
+        # previous failed derivation before this attempt runs.
+        self._clear_guided_execution_derivation_reason()
         self._clear_guided_execution_readiness_state()
         self._guided_backend_validation_active = True
         self._guided_backend_validate_btn.setEnabled(False)
@@ -11920,8 +11972,13 @@ class MainWindow(QMainWindow):
                 "does not authorize or start a run."
             )
             run_readiness = getattr(self, "_guided_run_readiness", None)
+            derivation_reason = getattr(
+                self, "_guided_execution_derivation_reason", None
+            )
             if getattr(run_readiness, "ready", False):
                 run_status_line = "Guided Run is ready to start."
+            elif derivation_reason:
+                run_status_line = derivation_reason
             else:
                 run_status_line = (
                     "Guided Run is not available for this configuration "

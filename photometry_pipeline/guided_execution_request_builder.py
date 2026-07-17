@@ -68,6 +68,7 @@ def _refused(
     section: str,
     message: str,
     revision: int,
+    extra_issues: tuple[GuidedExecutionRequestBuildIssue, ...] = (),
 ) -> GuidedExecutionRequestBuildResult:
     return GuidedExecutionRequestBuildResult(
         status=status,
@@ -77,10 +78,32 @@ def _refused(
         startup_transaction_request=None,
         blocking_issues=(
             GuidedExecutionRequestBuildIssue(status, section, message),
+            *extra_issues,
         ),
         current_gui_revision=revision,
         request_ready=False,
     )
+
+
+def _payload_blocking_issues(
+    payload_result: object,
+) -> tuple[GuidedExecutionRequestBuildIssue, ...]:
+    """Carry a failed payload result's own blocking issues into the builder
+    result so the specific refusal reason is not lost. Never raises."""
+    issues = getattr(payload_result, "blocking_issues", None) or ()
+    preserved: list[GuidedExecutionRequestBuildIssue] = []
+    for issue in issues:
+        try:
+            preserved.append(
+                GuidedExecutionRequestBuildIssue(
+                    category=str(getattr(issue, "category", "") or ""),
+                    section=str(getattr(issue, "section", "") or "payload"),
+                    message=str(getattr(issue, "message", "") or ""),
+                )
+            )
+        except Exception:
+            continue
+    return tuple(preserved)
 
 
 def _default_run_id(now: datetime) -> str:
@@ -266,11 +289,16 @@ def build_guided_startup_request_from_validation(
         )
         or payload_result.ok is not True
     ):
+        # Preserve the payload layer's own specific blocking issues (e.g. an
+        # invalid saved Feature Detection profile) so the GUI can show a
+        # truthful scientist-facing reason instead of collapsing every
+        # payload failure into a single opaque message.
         return _refused(
             "payload_derivation_failed",
             "payload",
             "Guided execution payload derivation failed.",
             current_gui_revision,
+            extra_issues=_payload_blocking_issues(payload_result),
         )
 
     try:

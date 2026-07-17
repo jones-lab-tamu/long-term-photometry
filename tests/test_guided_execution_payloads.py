@@ -836,3 +836,206 @@ def test_identity_field_coverage():
     }
     seed_fields = {f.name for f in fields(payloads.GuidedStartupProvenanceSeed)}
     assert seed_fields == set(seed_map.keys())
+
+
+# ---------------------------------------------------------------------------
+# Feature Detection "loaded Defaults, no Apply" contract repair (B2 Phase 2)
+#
+# resolve_confirmed_feature_config_fields previously required
+# `explicitly_applied is True`, which refused a valid loaded Default profile
+# (`profile_status == "default_initialized"`) with
+# "Feature-detection settings were never confirmed." -- the exact real
+# interactive failure. It now reuses the shared
+# is_saved_feature_event_profile_current predicate so the contract matches
+# GUI readiness, the draft plan, and backend validation.
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace as _NS
+from photometry_pipeline.feature_event_config import FEATURE_EVENT_CONFIG_FIELDS
+from tests.test_guided_backend_validator import CONFIRMED_FEATURE_PROFILE_VALUES
+
+
+def _feature_event(*, profile_status, explicitly_applied, current=True, values=None):
+    field_values = dict(CONFIRMED_FEATURE_PROFILE_VALUES)
+    if values:
+        field_values.update(values)
+    return _NS(
+        profile_status=profile_status,
+        explicitly_applied=explicitly_applied,
+        current=current,
+        effective_values=tuple(
+            _NS(field_name=name, value=value)
+            for name, value in field_values.items()
+        ),
+    )
+
+
+def _intent_with(feature_event):
+    return _NS(feature_event=feature_event)
+
+
+def test_loaded_default_profile_without_apply_is_accepted():
+    # Case A: default_initialized + explicitly_applied=False is executable.
+    # This is the exact old-code failure: the previous predicate returned
+    # (None, "Feature-detection settings were never confirmed.") here.
+    intent = _intent_with(
+        _feature_event(
+            profile_status="default_initialized", explicitly_applied=False
+        )
+    )
+    result_fields, reason = payloads.resolve_confirmed_feature_config_fields(intent)
+    assert reason == ""
+    assert result_fields is not None
+    assert result_fields["peak_threshold_method"] == "mean_std"
+    assert set(result_fields) == set(FEATURE_EVENT_CONFIG_FIELDS)
+
+
+def test_old_predicate_would_have_refused_loaded_default(monkeypatch):
+    # Pin the fix: with the obsolete explicitly-applied gate restored, the
+    # same loaded-Default profile is refused -- proving this exercises the
+    # exact repaired predicate.
+    import photometry_pipeline.guided_backend_validation_request as vr
+
+    monkeypatch.setattr(
+        vr,
+        "is_saved_feature_event_profile_current",
+        lambda status, applied: bool(status == "applied" and applied is True),
+    )
+    intent = _intent_with(
+        _feature_event(
+            profile_status="default_initialized", explicitly_applied=False
+        )
+    )
+    result_fields, reason = payloads.resolve_confirmed_feature_config_fields(intent)
+    assert result_fields is None
+    assert "not ready" in reason.lower()
+
+
+def test_applied_default_profile_is_accepted():
+    # Case C: applied + explicitly_applied=True still works.
+    intent = _intent_with(
+        _feature_event(profile_status="applied", explicitly_applied=True)
+    )
+    result_fields, reason = payloads.resolve_confirmed_feature_config_fields(intent)
+    assert reason == ""
+    assert result_fields is not None
+
+
+def test_unknown_or_unapplied_edit_profile_is_refused():
+    # An `applied` profile that was never explicitly applied, an empty status,
+    # and an unknown status are all refused (edits are not silently consumed).
+    for status, applied in (("applied", False), ("", False), ("initialized", True)):
+        intent = _intent_with(
+            _feature_event(profile_status=status, explicitly_applied=applied)
+        )
+        result_fields, reason = payloads.resolve_confirmed_feature_config_fields(
+            intent
+        )
+        assert result_fields is None
+        assert "not ready" in reason.lower()
+
+
+def test_stale_saved_profile_is_refused():
+    intent = _intent_with(
+        _feature_event(
+            profile_status="default_initialized",
+            explicitly_applied=False,
+            current=False,
+        )
+    )
+    result_fields, reason = payloads.resolve_confirmed_feature_config_fields(intent)
+    assert result_fields is None
+    assert "stale" in reason.lower()
+
+
+def test_invalid_saved_default_is_refused_with_specific_reason():
+    # Case D: a genuinely invalid saved Default still refuses, with a specific
+    # Feature Detection reason (not the generic gate).
+    intent = _intent_with(
+        _feature_event(
+            profile_status="default_initialized",
+            explicitly_applied=False,
+            values={"peak_threshold_k": -5.0},
+        )
+    )
+    result_fields, reason = payloads.resolve_confirmed_feature_config_fields(intent)
+    assert result_fields is None
+    assert "invalid" in reason.lower()
+
+
+def test_incomplete_saved_default_is_refused():
+    intent = _intent_with(
+        _feature_event(
+            profile_status="default_initialized", explicitly_applied=False
+        )
+    )
+    intent.feature_event.effective_values = tuple(
+        item
+        for item in intent.feature_event.effective_values
+        if item.field_name != "peak_min_distance_sec"
+    )
+    result_fields, reason = payloads.resolve_confirmed_feature_config_fields(intent)
+    assert result_fields is None
+    assert "incomplete" in reason.lower()
+
+
+def test_inactive_threshold_fields_do_not_block_loaded_default():
+    # Case F: under mean_std, percentile/abs threshold fields are inactive and
+    # must not block even if they carry dormant values.
+    intent = _intent_with(
+        _feature_event(
+            profile_status="default_initialized",
+            explicitly_applied=False,
+            values={
+                "peak_threshold_method": "mean_std",
+                "peak_threshold_percentile": 999.0,
+                "peak_threshold_abs": -123.0,
+            },
+        )
+    )
+    result_fields, reason = payloads.resolve_confirmed_feature_config_fields(intent)
+    assert reason == ""
+    assert result_fields is not None
+    assert result_fields["peak_threshold_percentile"] == 999.0
+
+
+def test_end_to_end_payload_accepts_default_initialized_intent(auth_result):
+    # Full payload derivation with a default_initialized (no-Apply) intent
+    # succeeds and carries the saved feature values into the config payload.
+    intent = auth_result.production_intent
+    loaded_feature_event = replace(
+        intent.feature_event,
+        profile_status="default_initialized",
+        explicitly_applied=False,
+    )
+    loaded_intent = replace(intent, feature_event=loaded_feature_event)
+    loaded_intent = replace(
+        loaded_intent,
+        canonical_intent_identity=(
+            mapping.compute_guided_production_execution_intent_identity(
+                loaded_intent
+            )
+        ),
+    )
+    loaded_auth = _unchecked(
+        auth_result,
+        production_intent=loaded_intent,
+        production_intent_identity=loaded_intent.canonical_intent_identity,
+    )
+    loaded_auth = _unchecked(
+        loaded_auth,
+        canonical_authorization_identity=(
+            authorization.compute_guided_run_authorization_identity(loaded_auth)
+        ),
+    )
+    contract = payloads.build_guided_execution_startup_mapping_contract()
+    result = payloads.derive_guided_execution_payloads(
+        loaded_auth, startup_mapping_contract=contract
+    )
+    assert result.ok is True
+    assert result.status == payloads.GUIDED_EXECUTION_PAYLOAD_STATUS_NONRUNNABLE
+    assert result.config_payload is not None
+    assert result.provenance_seed is not None
+    assert result.candidate_manifest_payload is not None
+    config_names = {v.name for v in result.config_payload.values}
+    assert "peak_threshold_method" in config_names
