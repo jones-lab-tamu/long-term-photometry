@@ -105,6 +105,9 @@ from photometry_pipeline.workflow_safety import (
 from photometry_pipeline.guided_startup_allocation import (
     classify_output_base_reuse_eligibility,
 )
+from photometry_pipeline.guided_execution_request_builder import (
+    is_successful_completed_run_root,
+)
 from photometry_pipeline.guided_diagnostic_cache import (
     DIAGNOSTIC_CACHE_PURPOSE,
     DIAGNOSTIC_CACHE_SCOPE_FULL,
@@ -1495,6 +1498,10 @@ GUIDED_DEFAULT_SETTINGS_FILE_UNREADABLE = (
     "The starting settings file could not be read. "
     + GUIDED_DEFAULT_SETTINGS_LOAD_FAILURE_ADVICE
 )
+GUIDED_OUTPUT_COMPLETED_RUN_GUIDANCE = (
+    "This folder is the output of a previous completed analysis. Choose "
+    "its parent folder or another destination for the new analysis."
+)
 
 
 def sanitize_guided_default_settings_load_failure(fallback_reason: object) -> str:
@@ -2391,6 +2398,14 @@ class MainWindow(QMainWindow):
         # {roi_id: {"config_fields": dict, "profile_id": str, "updated_at_utc": str}}
         # A ROI absent from this dict uses the default settings above.
         self._guided_per_roi_feature_event_overrides = {}
+        # Distinguishes an app-supplied/restored/completed-run-derived output
+        # destination default (eligible for silent completed-run
+        # normalization when mirrored into the Guided output field) from a
+        # current-session explicit user selection (must stay visible,
+        # never silently rewritten). See _set_output_dir_from_automatic_source
+        # and _mark_guided_output_destination_explicit.
+        self._guided_output_destination_provenance = "automatic"
+        self._guided_output_dir_auto_assignment_active = False
         self._guided_new_analysis_output_policy_status = "missing"
         self._guided_new_analysis_output_policy_path = None
         self._guided_new_analysis_output_policy_validation_issues = []
@@ -2984,6 +2999,9 @@ class MainWindow(QMainWindow):
             lambda _text: self._refresh_guided_navigation_state()
         )
         self._guided_output_dir_edit.textChanged.connect(
+            lambda _text: self._mark_guided_output_destination_explicit()
+        )
+        self._guided_output_dir_edit.textChanged.connect(
             lambda text: self._sync_line_edit_value(self._output_dir, text)
         )
         self._guided_output_dir_edit.textChanged.connect(
@@ -3088,6 +3106,9 @@ class MainWindow(QMainWindow):
         )
 
         self._input_dir.textChanged.connect(lambda _text: self._sync_guided_setup_from_full())
+        self._output_dir.textChanged.connect(
+            lambda _text: self._mark_guided_output_destination_explicit()
+        )
         self._output_dir.textChanged.connect(lambda _text: self._sync_guided_setup_from_full())
         self._format_combo.currentIndexChanged.connect(lambda _idx: self._sync_guided_setup_from_full())
         self._acquisition_mode_combo.currentIndexChanged.connect(
@@ -3179,16 +3200,25 @@ class MainWindow(QMainWindow):
         self._refresh_guided_confirm_strategy_panel()
         self._refresh_guided_navigation_state()
 
-    def _guided_select_data_ready_to_continue(self) -> bool:
+    def _guided_select_data_readiness(self) -> tuple[bool, str]:
+        default_reason = "Select data and include at least one ROI to continue."
         if getattr(self, "_guided_workflow_mode", "start") != "new_analysis":
-            return False
+            return False, default_reason
         if not self._guided_input_dir_edit.text().strip():
-            return False
-        if not self._guided_output_dir_edit.text().strip():
-            return False
+            return False, default_reason
+        output_text = self._guided_output_dir_edit.text().strip()
+        if not output_text:
+            return False, default_reason
+        if self._guided_output_destination_is_completed_run_root(output_text):
+            return False, GUIDED_OUTPUT_COMPLETED_RUN_GUIDANCE
         if getattr(self, "_discovery_cache", None) is None:
-            return False
-        return bool(self._guided_selected_roi_ids()[1])
+            return False, default_reason
+        if not self._guided_selected_roi_ids()[1]:
+            return False, default_reason
+        return True, "Data selection is ready."
+
+    def _guided_select_data_ready_to_continue(self) -> bool:
+        return self._guided_select_data_readiness()[0]
 
     def _guided_recording_structure_ready_to_continue(self) -> bool:
         ready, _reason = self._guided_recording_structure_readiness()
@@ -3280,17 +3310,13 @@ class MainWindow(QMainWindow):
                 flags &= ~Qt.ItemIsEnabled
                 flags &= ~Qt.ItemIsSelectable
             item.setFlags(flags)
-        select_ready = bool(
-            hasattr(self, "_guided_select_data_continue_btn")
-            and self._guided_select_data_ready_to_continue()
-        )
+        select_ready = False
+        select_reason = "Select data and include at least one ROI to continue."
+        if hasattr(self, "_guided_select_data_continue_btn"):
+            select_ready, select_reason = self._guided_select_data_readiness()
         if hasattr(self, "_guided_select_data_continue_btn"):
             self._guided_select_data_continue_btn.setEnabled(select_ready)
-            self._guided_select_data_continue_status.setText(
-                "Data selection is ready."
-                if select_ready
-                else "Select data and include at least one ROI to continue."
-            )
+            self._guided_select_data_continue_status.setText(select_reason)
         recording_ready = False
         recording_reason = (
             "Complete required recording structure fields to continue."
@@ -3820,6 +3846,82 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             combo.setCurrentIndex(idx)
 
+    def _mark_guided_output_destination_explicit(self) -> None:
+        """Record that the output-destination text now reflects a
+        deliberate current-session user choice (typed or browsed in either
+        the Full Control or Guided output field), not an app-supplied,
+        restored, or completed-run-derived default. Ignored while an
+        automatic assignment is in progress (see
+        _set_output_dir_from_automatic_source) so the automatic source
+        itself is never mistaken for a user edit."""
+        if getattr(self, "_guided_output_dir_auto_assignment_active", False):
+            return
+        self._guided_output_destination_provenance = "explicit"
+
+    def _set_output_dir_from_automatic_source(self, value: str) -> None:
+        """Assign an app-supplied, restored, or completed-run-derived value
+        to the shared Full Control output field -- never an explicit
+        current-session user selection. The Full Control field itself keeps
+        the raw value (it also identifies the currently loaded completed
+        run for unrelated Full Control features), but this marks the value
+        as eligible for completed-run normalization when it is mirrored
+        into the Guided output field by _sync_guided_setup_from_full.
+
+        Qt does not emit textChanged when `value` already equals the
+        widget's current text, so the usual signal-driven sync to the
+        Guided field would silently not run. When that happens, trigger
+        the same sync explicitly instead of relying on the signal."""
+        previous = self._output_dir.text()
+        self._guided_output_dir_auto_assignment_active = True
+        self._guided_output_destination_provenance = "automatic"
+        try:
+            self._output_dir.setText(value)
+            if self._output_dir.text() == previous:
+                self._sync_guided_setup_from_full()
+        finally:
+            self._guided_output_dir_auto_assignment_active = False
+
+    def _normalize_guided_output_destination_default(self, candidate: str) -> str:
+        """Redirect an automatic/remembered/completed-run-derived output
+        destination default away from a completed Guided Run's own folder,
+        toward that folder's parent -- using the same authoritative
+        completed-run contract as backend output safety
+        (guided_execution_request_builder.is_successful_completed_run_root).
+        Never applied to an explicit current-session user selection.
+        """
+        text = str(candidate or "").strip()
+        if not text:
+            return candidate
+        try:
+            path = Path(text).expanduser().resolve(strict=False)
+            if not path.is_dir():
+                return candidate
+            if not is_successful_completed_run_root(path):
+                return candidate
+            parent = path.parent
+            if parent == path or not parent.is_dir():
+                return candidate
+        except OSError:
+            return candidate
+        return str(parent)
+
+    def _guided_output_destination_is_completed_run_root(self, candidate: str) -> bool:
+        """True only if `candidate` is itself a completed Guided Run's own
+        folder, using the same authoritative contract as backend output
+        safety. Used to block Guided progress before Run -- whether the
+        value is an explicit user selection or an automatic default that
+        could not be safely normalized (e.g. its parent is unavailable)."""
+        text = str(candidate or "").strip()
+        if not text:
+            return False
+        try:
+            path = Path(text).expanduser().resolve(strict=False)
+            if not path.is_dir():
+                return False
+            return is_successful_completed_run_root(path)
+        except OSError:
+            return False
+
     def _sync_guided_setup_from_full(self) -> None:
         """Refresh Guided setup controls from the existing Full Control widgets."""
         if getattr(self, "_guided_setup_syncing", False):
@@ -3851,7 +3953,15 @@ class MainWindow(QMainWindow):
                 QSignalBlocker(self._guided_exclude_incomplete_final_rwd_chunk_cb),
             ]
             self._guided_input_dir_edit.setText(self._input_dir.text())
-            self._guided_output_dir_edit.setText(self._output_dir.text())
+            output_dir_text = self._output_dir.text()
+            if (
+                getattr(self, "_guided_output_destination_provenance", "automatic")
+                != "explicit"
+            ):
+                output_dir_text = self._normalize_guided_output_destination_default(
+                    output_dir_text
+                )
+            self._guided_output_dir_edit.setText(output_dir_text)
             fmt_idx = self._guided_format_combo.findText(self._format_combo.currentText())
             if fmt_idx >= 0:
                 self._guided_format_combo.setCurrentIndex(fmt_idx)
@@ -24898,7 +25008,13 @@ class MainWindow(QMainWindow):
             return False
 
         self._current_run_dir = selected
-        self._output_dir.setText(selected)
+        # This completed run's own folder is not a safe default output
+        # destination for the next Guided analysis; route it through the
+        # automatic-source path so the Guided output field (but not this
+        # Full Control field, which must keep pointing at the loaded run)
+        # is normalized to the parent if a new analysis is started before
+        # the user explicitly picks a destination of their own.
+        self._set_output_dir_from_automatic_source(selected)
         self._save_widgets_to_settings()
         self._append_run_log(f"--- Opening results from {selected} ---")
 
@@ -26070,7 +26186,9 @@ class MainWindow(QMainWindow):
         """Restore widget values from QSettings. Safe if keys are absent."""
         self._settings.beginGroup(_SETTINGS_GROUP)
         self._input_dir.setText(self._settings.value("input_dir", "", str))
-        self._output_dir.setText(self._settings.value("output_dir", "", str))
+        self._set_output_dir_from_automatic_source(
+            self._settings.value("output_dir", "", str)
+        )
         use_custom_config = bool(
             self._settings.value("use_custom_config", False, bool)
         )

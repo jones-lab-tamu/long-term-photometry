@@ -148,7 +148,14 @@ def _output_base_creatability(output_base: Path) -> tuple[bool, bool]:
     return writable, writable
 
 
-def _is_successful_completed_run_root(path: Path) -> bool:
+def is_successful_completed_run_root(path: Path) -> bool:
+    """Return True only if `path` is itself a directory that carries this
+    app's own successful-completion evidence (status.json / run_report.json
+    / MANIFEST.json), matching the exact contract used to compute
+    `GuidedStartupFilesystemPolicy.output_base_is_completed_run_root` below.
+    Public so GUI-side output-destination defaulting can reuse the same
+    authoritative contract instead of duplicating it."""
+
     def read_object(filename: str) -> dict | None:
         try:
             value = json.loads((path / filename).read_text(encoding="utf-8"))
@@ -341,7 +348,7 @@ def build_guided_startup_request_from_validation(
             output_base_is_directory_or_creatable=output_is_dir_or_creatable,
             output_base_overlaps_source=overlap,
             output_base_is_completed_run_root=(
-                _is_successful_completed_run_root(output_base)
+                is_successful_completed_run_root(output_base)
                 if output_is_dir
                 else False
             ),
