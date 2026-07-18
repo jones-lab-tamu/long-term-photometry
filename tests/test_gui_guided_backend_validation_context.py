@@ -731,9 +731,15 @@ def test_accepted_setup_without_reason_keeps_generic_line(window):
     assert not hasattr(window, "_guided_validation_artifact_link")
 
 
-def test_npm_accepted_setup_check_uses_approved_message_and_keeps_run_disabled(
+def test_npm_accepted_setup_check_shows_truthful_ready_state_and_enables_run(
     window,
 ):
+    """Phase 4A: a genuinely accepted, current NPM setup check must show a
+    truthful status (not a hard-coded "not available yet" that used to
+    fire even when NPM Run was already enabled) and must enable Run --
+    NPM readiness is governed solely by evaluate_guided_npm_run_readiness,
+    the same predicate that already drives the Run button."""
+    window._guided_format_combo.setCurrentText("npm")
     outcome = replace(
         _accepted_outcome(),
         compile_result=SimpleNamespace(
@@ -748,12 +754,47 @@ def test_npm_accepted_setup_check_uses_approved_message_and_keeps_run_disabled(
     )
     window._refresh_guided_backend_validation_display()
 
-    expected = (
-        "This NPM recording setup was checked successfully. Running NPM analyses "
-        "is not available yet."
+    assert window._guided_backend_validation_status_label.text() == (
+        "The setup check passed for the current Guided NPM setup. It "
+        "does not authorize or start a run."
     )
-    assert window._guided_backend_validation_status_label.text() == expected
-    assert window._guided_run_readiness_label.text() == expected
+    assert window._guided_backend_validation_details_label.text() == (
+        "Guided Run is ready to start."
+    )
+    assert window._guided_run_readiness_label.text() == (
+        "This NPM recording setup was checked successfully and is ready "
+        "to run."
+    )
+    assert window._guided_run_btn.isEnabled() is True
+
+
+def test_npm_accepted_but_stale_setup_check_shows_truthful_not_ready_state(
+    window,
+):
+    """The same truthful-status path must not falsely claim readiness when
+    the accepted outcome is genuinely stale -- it must reflect
+    evaluate_guided_npm_run_readiness's real "validation_stale" result,
+    not a blanket accepted-therefore-ready assumption."""
+    window._guided_format_combo.setCurrentText("npm")
+    outcome = replace(
+        _accepted_outcome(),
+        compile_result=SimpleNamespace(
+            request=SimpleNamespace(
+                source=SimpleNamespace(source_format="npm"),
+            )
+        ),
+        stale=True,
+    )
+    window._guided_backend_validation_outcome = outcome
+    window._guided_backend_validation_outcome_revision = (
+        window._guided_backend_validation_revision
+    )
+    window._refresh_guided_backend_validation_display()
+
+    assert window._guided_backend_validation_status_label.text() == (
+        "This setup check is out of date because the setup changed. "
+        "Check again before relying on this result."
+    )
     assert window._guided_run_btn.isEnabled() is False
 
 

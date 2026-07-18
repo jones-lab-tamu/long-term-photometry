@@ -352,6 +352,14 @@ GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES = frozenset((
     "invalid_dataset_contract_snapshot",
     "stale_dataset_contract_snapshot",
     "inconsistent_dataset_contract_snapshot",
+    # NPM's own dataset-contract-confirmation categories (see
+    # guided_new_analysis_plan._execution_field_classifications, fmt ==
+    # "npm" branch). Without these, a supported NPM plan that only needs
+    # its detected dataset settings confirmed fell through to the
+    # generic "Guided Run does not yet support this configuration"
+    # message instead of prompting for confirmation.
+    "missing_npm_channel_mapping",
+    "missing_npm_dataset_contract",
 ))
 
 
@@ -12072,10 +12080,22 @@ class MainWindow(QMainWindow):
                 request_format = ""
             if request_format == "npm":
                 status_label.setText(
-                    "This NPM recording setup was checked successfully. "
-                    "Running NPM analyses is not available yet."
+                    "The setup check passed for the current Guided NPM "
+                    "setup. It does not authorize or start a run."
                 )
-                details_label.setText("")
+                npm_readiness = getattr(
+                    self, "_guided_npm_run_readiness", None
+                )
+                details_label.setText(
+                    "Guided Run is ready to start."
+                    if getattr(npm_readiness, "ready", False)
+                    else (
+                        getattr(npm_readiness, "user_summary", None)
+                        or "Guided Run is not available for this "
+                        "configuration yet. Review the readiness details "
+                        "below."
+                    )
+                )
                 return
             status_label.setText(
                 "The setup check passed for the current Guided setup. It "

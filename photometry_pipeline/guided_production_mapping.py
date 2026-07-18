@@ -1048,6 +1048,24 @@ NPM_ACQUISITION_TYPED_FIELD_CONFIG_MAP = frozenset(
         "chunk_duration_sec",
         "allow_partial_final_chunk",
         "adapter_value_nan_policy",
+        # The materialized dataset-contract snapshot's semantic_values
+        # always carries the same universal draft-identity fields
+        # regardless of format (guided_backend_validation_materialization.
+        # materialize_guided_backend_validation_facts iterates every key of
+        # snapshot.contract_values, not just the format-specific ones --
+        # see ACQUISITION_TYPED_FIELD_CONFIG_MAP above, which already
+        # allows these same fields for RWD). Omitting them here made every
+        # real, GUI-driven NPM production mapping refuse with
+        # "typed_field_unmapped", even for a genuinely accepted validation.
+        "sessions_per_hour",
+        "session_duration_sec",
+        "acquisition_mode",
+        "allow_partial_final_window",
+        "exclude_incomplete_final_rwd_chunk",
+        "input_format",
+        "resolved_input_format",
+        "continuous_window_sec",
+        "continuous_step_sec",
     }
 )
 CORRECTION_TYPED_FIELD_CONFIG_MAP = frozenset(
