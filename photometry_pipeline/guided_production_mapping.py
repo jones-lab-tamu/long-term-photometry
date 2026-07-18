@@ -1113,6 +1113,40 @@ def _unknown_typed(
     return len(names) != len(set(names)) or any(name not in allowed for name in names)
 
 
+def feature_entry_provenance_valid(
+    *,
+    entry_source: str,
+    entry_feature_event_profile_id: str,
+    entry_explicit_user_mark: bool,
+    enclosing_profile_status: str,
+    enclosing_profile_id: str,
+    enclosing_current: bool,
+    enclosing_visible_unapplied_changes: bool,
+) -> bool:
+    """Whether a per-ROI feature/event entry's provenance is acceptable.
+
+    An entry the scientist explicitly marked is always acceptable. A
+    default-sourced entry may also be acceptable without an explicit mark
+    when the enclosing feature/event profile is itself a current, unedited
+    loaded Default (``profile_status == "default_initialized"``) -- the
+    same already-supported "valid without Apply" state recognized by
+    is_saved_feature_event_profile_current -- and the entry's profile
+    identity matches that enclosing profile exactly. An applied profile,
+    and any override/custom-sourced entry, must still carry an explicit
+    mark. Shared by production mapping and execution-authority per-ROI
+    feature checks so the two layers cannot diverge.
+    """
+    if entry_explicit_user_mark:
+        return True
+    return bool(
+        entry_source == "default"
+        and enclosing_profile_status == "default_initialized"
+        and enclosing_current is True
+        and enclosing_visible_unapplied_changes is False
+        and entry_feature_event_profile_id == enclosing_profile_id
+    )
+
+
 def _contract_problem(contract: Any) -> tuple[str, str] | None:
     if not isinstance(contract, GuidedProductionMappingContract):
         return ("mapping_contract_unavailable", "mapping_contract_invalid_type")
@@ -2103,7 +2137,15 @@ def _map_verified_guided_npm_request_to_execution_intent(
         )
     for entry in raw_feature_entries:
         if (
-            not entry.explicit_user_mark
+            not feature_entry_provenance_valid(
+                entry_source=entry.source,
+                entry_feature_event_profile_id=entry.feature_event_profile_id,
+                entry_explicit_user_mark=entry.explicit_user_mark,
+                enclosing_profile_status=request.feature_event.profile_status,
+                enclosing_profile_id=request.feature_event.profile_id,
+                enclosing_current=request.feature_event.current,
+                enclosing_visible_unapplied_changes=request.feature_event.visible_unapplied_changes,
+            )
             or entry.current_or_stale != "current"
             or not entry.effective_config_fields
             or _unknown_typed(entry.effective_config_fields, FEATURE_EVENT_TYPED_FIELD_CONFIG_MAP)

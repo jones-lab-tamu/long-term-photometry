@@ -38,17 +38,41 @@ from photometry_pipeline.guided_normalized_recording import (
 )
 from photometry_pipeline.io.npm_contract import NpmParserContract
 from photometry_pipeline.guided_production_mapping import (
+    GuidedNpmProductionMappingSuccess,
+    GuidedProductionMappingFailure,
     compute_guided_npm_production_execution_intent_identity,
 )
 
 from tests.test_guided_backend_validation_materialization import _valid_npm_stage2c_draft
-from tests.test_guided_npm_production_mapping import _accepted_npm, _map
+from tests.test_guided_npm_production_mapping import (
+    _accepted_npm,
+    _accepted_npm_default_initialized,
+    _map,
+)
 
 
 def _accepted_authority(tmp_path: Path):
     outcome, _request = _accepted_npm(tmp_path)
     mapped = _map(outcome)
     return build_guided_npm_execution_authority(mapped.intent)
+
+
+def _accepted_authority_with_default_initialized_features(tmp_path: Path):
+    """Same real materialization path as _accepted_authority, but with a
+    loaded Default Feature Detection profile left as
+    "default_initialized" (never explicitly applied) -- an equally
+    current, real, production-accepted state."""
+    outcome, _request = _accepted_npm_default_initialized(tmp_path)
+    return build_guided_npm_execution_authority(_map(outcome).intent)
+
+
+def _default_initialized_mapped_intent(tmp_path: Path):
+    """The mapped (but not yet authority-built) intent for the same
+    default_initialized state as _accepted_authority_with_default_
+    initialized_features, so callers can tamper per-ROI entries before
+    building the authority."""
+    outcome, _request = _accepted_npm_default_initialized(tmp_path)
+    return _map(outcome).intent
 
 
 def _accepted_two_session_authority(tmp_path: Path):
@@ -210,6 +234,208 @@ def test_accepted_intent_builds_frozen_unauthorized_authority(tmp_path: Path):
     assert authority.roi_authority.selected_physical_source_columns
     with pytest.raises((AttributeError, TypeError)):
         authority.runnable = True
+
+
+def test_default_initialized_feature_profile_without_apply_builds_authority(
+    tmp_path: Path,
+):
+    """Repair regression: _build_feature_authority's completeness
+    check must accept the same "default_initialized" (never explicitly
+    applied) state _feature_event_profile_current_for_first_subset
+    already treats as current, using the same real materialization path
+    Check My Setup itself uses -- not a hand-built intent. The per-ROI
+    entries' truthful explicit_user_mark=False is accepted because the
+    enclosing profile is itself current and default_initialized (see
+    feature_entry_provenance_valid); the check must not require a
+    falsified explicit mark."""
+    authority = _accepted_authority_with_default_initialized_features(tmp_path)
+    assert isinstance(authority, GuidedNpmExecutionAuthority)
+    assert authority.feature_authority.per_roi_feature_event_map
+    for entry in authority.feature_authority.per_roi_feature_event_map:
+        assert entry.source == "default"
+        assert entry.explicit_user_mark is False
+        assert entry.current_or_stale == "current"
+
+
+def test_genuinely_stale_feature_profile_still_refuses_authority(tmp_path: Path):
+    """The completeness check must continue refusing a genuinely
+    incomplete/stale feature profile -- proves the repair did not widen
+    the check beyond the one legitimate default_initialized case."""
+    outcome, _request = _accepted_npm(tmp_path)
+    mapped = _map(outcome)
+    stale_feature_event = replace(
+        mapped.intent.feature_event,
+        profile_status="stale",
+        explicitly_applied=False,
+        current=False,
+    )
+    tampered_intent = _rebound_intent(
+        mapped.intent, feature_event=stale_feature_event
+    )
+    result = build_guided_npm_execution_authority(tampered_intent)
+    _assert_failure(result, "feature_authority_incomplete")
+
+
+def test_applied_profile_entry_without_explicit_mark_refuses_authority(
+    tmp_path: Path,
+):
+    """Negative provenance case A: under an "applied" enclosing profile,
+    a per-ROI entry without an explicit mark must still refuse -- the
+    narrow default_initialized acceptance does not apply here."""
+    outcome, _request = _accepted_npm(tmp_path)
+    mapped = _map(outcome)
+    entries = mapped.intent.feature_event.per_roi_feature_event_map
+    tampered_entries = (replace(entries[0], explicit_user_mark=False),) + entries[1:]
+    tampered_feature_event = replace(
+        mapped.intent.feature_event, per_roi_feature_event_map=tampered_entries
+    )
+    tampered_intent = _rebound_intent(
+        mapped.intent, feature_event=tampered_feature_event
+    )
+    result = build_guided_npm_execution_authority(tampered_intent)
+    _assert_failure(result, "feature_authority_incomplete")
+
+
+def test_override_entry_without_explicit_mark_refuses_authority(tmp_path: Path):
+    """Negative provenance case B: an override/custom-sourced entry must
+    still carry an explicit mark; the narrow default_initialized
+    acceptance only applies to source == "default"."""
+    outcome, _request = _accepted_npm(tmp_path)
+    mapped = _map(outcome)
+    entries = mapped.intent.feature_event.per_roi_feature_event_map
+    override_entry = replace(
+        entries[0],
+        source="override",
+        feature_event_profile_id="feature-profile-custom",
+        explicit_user_mark=False,
+    )
+    tampered_feature_event = replace(
+        mapped.intent.feature_event,
+        per_roi_feature_event_map=(override_entry,) + entries[1:],
+    )
+    tampered_intent = _rebound_intent(
+        mapped.intent, feature_event=tampered_feature_event
+    )
+    result = build_guided_npm_execution_authority(tampered_intent)
+    _assert_failure(result, "feature_authority_incomplete")
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        lambda entry: replace(entry, current_or_stale="stale"),
+        lambda entry: replace(entry, effective_config_fields=()),
+        lambda entry: replace(entry, feature_event_profile_id="a-different-profile-id"),
+    ),
+)
+def test_default_initialized_entry_edge_cases_refuse_authority(
+    tmp_path: Path, tamper
+):
+    """Negative provenance cases C/D/E: even under the narrow
+    default_initialized acceptance, a stale entry (C), an entry with no
+    effective settings (D), or a default-sourced entry whose profile
+    identity does not match the enclosing accepted default profile (E)
+    must still refuse at the authority layer too -- proves
+    feature_entry_provenance_valid does not infer validity from a
+    non-explicit entry alone."""
+    intent = _default_initialized_mapped_intent(tmp_path)
+    entries = intent.feature_event.per_roi_feature_event_map
+    tampered_entries = (tamper(entries[0]),) + entries[1:]
+    tampered_feature_event = replace(
+        intent.feature_event, per_roi_feature_event_map=tampered_entries
+    )
+    tampered_intent = _rebound_intent(intent, feature_event=tampered_feature_event)
+    result = build_guided_npm_execution_authority(tampered_intent)
+    _assert_failure(result, "feature_authority_incomplete")
+
+
+def test_stray_feature_entry_roi_not_selected_refuses_authority(tmp_path: Path):
+    """Negative provenance case F: a per-ROI feature entry for a ROI
+    outside the selected set must not be silently accepted as
+    authoritative -- the coverage check catches this before the
+    per-entry provenance rule is ever reached."""
+    intent = _default_initialized_mapped_intent(tmp_path)
+    entries = intent.feature_event.per_roi_feature_event_map
+    stray_entry = replace(entries[0], roi_id="NotSelectedRoi")
+    tampered_feature_event = replace(
+        intent.feature_event,
+        per_roi_feature_event_map=(stray_entry,) + entries[1:],
+    )
+    tampered_intent = _rebound_intent(intent, feature_event=tampered_feature_event)
+    result = build_guided_npm_execution_authority(tampered_intent)
+    _assert_failure(result, "feature_selected_roi_coverage_mismatch")
+
+
+def test_mapping_and_authority_agree_default_initialized_state_is_valid(
+    tmp_path: Path,
+):
+    """Mapper/authority agreement (positive): the same accepted, current
+    default_initialized feature state -- passed through production
+    mapping and then execution authority -- is accepted by both layers,
+    and both preserve the truthful explicit_user_mark=False rather than
+    requiring or fabricating an explicit mark."""
+    outcome, _request = _accepted_npm_default_initialized(tmp_path)
+    mapped = _map(outcome)
+    assert isinstance(mapped, GuidedNpmProductionMappingSuccess)
+    mapped_entries = mapped.intent.feature_event.per_roi_feature_event_map
+    assert mapped_entries
+    for entry in mapped_entries:
+        assert entry.source == "default"
+        assert entry.explicit_user_mark is False
+
+    authority = build_guided_npm_execution_authority(mapped.intent)
+    assert isinstance(authority, GuidedNpmExecutionAuthority)
+    authority_entries = authority.feature_authority.per_roi_feature_event_map
+    assert authority_entries
+    for entry in authority_entries:
+        assert entry.source == "default"
+        assert entry.explicit_user_mark is False
+
+
+def test_mapping_and_authority_agree_applied_profile_non_explicit_entry_is_invalid(
+    tmp_path: Path,
+):
+    """Mapper/authority agreement (negative): an applied-profile per-ROI
+    entry without an explicit mark is rejected identically by production
+    mapping and by execution authority -- the two layers cannot diverge
+    on this mismatch."""
+    from tests.test_guided_npm_production_mapping import (
+        _outcome_with_request,
+    )
+
+    outcome, request = _accepted_npm(tmp_path)
+    tampered_request = replace(
+        request,
+        feature_event=replace(
+            request.feature_event,
+            per_roi_feature_event_map=(
+                replace(
+                    request.feature_event.per_roi_feature_event_map[0],
+                    explicit_user_mark=False,
+                ),
+            )
+            + request.feature_event.per_roi_feature_event_map[1:],
+        ),
+    )
+    mapping_result = _map(_outcome_with_request(outcome, tampered_request))
+    assert isinstance(mapping_result, GuidedProductionMappingFailure)
+    assert mapping_result.blocking_issues[0].category == "incomplete_feature_settings"
+    assert mapping_result.blocking_issues[0].detail_code == (
+        "per_roi_feature_entry_incomplete"
+    )
+
+    mapped = _map(outcome)
+    entries = mapped.intent.feature_event.per_roi_feature_event_map
+    tampered_feature_event = replace(
+        mapped.intent.feature_event,
+        per_roi_feature_event_map=(replace(entries[0], explicit_user_mark=False),)
+        + entries[1:],
+    )
+    tampered_intent = _rebound_intent(
+        mapped.intent, feature_event=tampered_feature_event
+    )
+    authority_result = build_guided_npm_execution_authority(tampered_intent)
+    _assert_failure(authority_result, "feature_authority_incomplete")
 
 
 def test_authority_round_trips_and_nested_identities_are_verified(tmp_path: Path):

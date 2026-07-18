@@ -956,6 +956,20 @@ def build_guided_per_roi_feature_event_map(
                     source="default",
                     feature_event_profile_id=str(plan.feature_event_profile_id or ""),
                     config_fields=dict(default_config_fields),
+                    # Truthful provenance: explicit_user_mark reflects
+                    # whether the scientist actually pressed Apply, not
+                    # whether the profile is current. default_current
+                    # (just verified True above) already accepts the
+                    # equally valid, equally current "default_initialized"
+                    # state -- a loaded default the scientist never had to
+                    # explicitly apply -- so this entry is legitimately
+                    # non-explicit in that case. Downstream consumers
+                    # accept a non-explicit default-sourced entry only
+                    # when the enclosing profile is itself current and
+                    # default_initialized (see
+                    # feature_entry_provenance_valid in
+                    # guided_production_mapping.py); they must not learn
+                    # of that state from a falsified explicit mark here.
                     explicit_user_mark=bool(plan.feature_event_explicitly_applied),
                     current_or_stale="current",
                 )

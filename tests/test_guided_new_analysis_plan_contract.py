@@ -289,8 +289,41 @@ def test_per_roi_feature_event_map_no_overrides_resolves_to_default():
         entry.config_fields == {"event_signal": "dff"}
         for entry in feature_map.entries
     )
+    assert all(entry.explicit_user_mark is True for entry in feature_map.entries)
     assert feature_map.resolution_supported is True
     assert feature_map.blocking_categories == ()
+
+
+def test_per_roi_feature_event_map_default_initialized_without_apply_is_truthfully_non_explicit():
+    """Repair regression: a loaded Default Feature Detection
+    profile left as "default_initialized" (never explicitly applied) is
+    an equally current, supported state --
+    _feature_event_profile_current_for_first_subset already treats it as
+    current -- so it resolves to a complete per-ROI entry for every
+    included ROI. explicit_user_mark must truthfully reflect that the
+    scientist never pressed Apply (False here), not be falsified to True;
+    downstream consumers are responsible for accepting this specific
+    current/default_initialized/default-sourced combination without an
+    explicit mark (see feature_entry_provenance_valid in
+    guided_production_mapping.py)."""
+    plan = _complete_new_analysis_plan(
+        discovered_roi_ids=["CH1", "CH2", "CH3"],
+        included_roi_ids=["CH1", "CH2", "CH3"],
+        excluded_roi_ids=[],
+        feature_event_profile_status="default_initialized",
+        feature_event_explicitly_applied=False,
+    )
+
+    feature_map = build_guided_per_roi_feature_event_map(plan)
+
+    assert feature_map.resolution_supported is True
+    assert feature_map.blocking_categories == ()
+    assert len(feature_map.entries) == 3
+    for entry in feature_map.entries:
+        assert entry.source == "default"
+        assert entry.explicit_user_mark is False
+        assert entry.current_or_stale == "current"
+        assert entry.config_fields
 
 
 def test_per_roi_feature_event_map_single_roi_override_resolves_custom_others_default():

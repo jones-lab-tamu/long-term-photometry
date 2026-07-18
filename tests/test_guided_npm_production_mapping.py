@@ -71,6 +71,41 @@ def _accepted_npm(tmp_path: Path):
     return outcome, request
 
 
+def _accepted_npm_default_initialized(tmp_path: Path):
+    draft = _valid_npm_stage2c_draft(tmp_path)
+    draft.feature_event_profile_status = "default_initialized"
+    draft.feature_event_explicitly_applied = False
+    validator_contract = GuidedBackendValidatorContract(
+        validation_scope="guided_rwd_intermittent_phasic_full_validate",
+        validation_contract_version="guided_backend_validation_contract.v1",
+        validator_capability_version="test_validator_capability.v1",
+        supported_subset_rule_version="global_dynamic_fit_only.v1",
+    )
+    parser_contract = NpmParserContract(
+        npm_time_axis="system_timestamp",
+        npm_system_ts_col="SystemTimestamp",
+        npm_computer_ts_col="ComputerTimestamp",
+        npm_led_col="LedState",
+        npm_region_prefix="Region",
+        npm_region_suffix="G",
+        target_fs_hz=2.0,
+        session_duration_sec=2.0,
+        allow_partial_final_chunk=False,
+        adapter_value_nan_policy="strict",
+    )
+    outcome = validate_current_guided_draft_for_backend(
+        draft,
+        parser_contract=parser_contract,
+        validator_contract=validator_contract,
+        validation_revision=4,
+    )
+    assert outcome.status == "validator_accepted", outcome.blocking_issues
+    assert outcome.compile_result is not None
+    request = outcome.compile_result.request
+    assert request is not None
+    return outcome, request
+
+
 def _accepted_npm_two_rois(tmp_path: Path):
     from photometry_pipeline.guided_new_analysis_plan import (
         compute_guided_local_preview_source_setup_signature,
@@ -240,6 +275,29 @@ def test_accepted_npm_maps_to_immutable_non_runnable_intent(tmp_path: Path):
     assert result.intent.canonical_intent_identity == (
         compute_guided_npm_production_execution_intent_identity(result.intent)
     )
+
+
+def test_default_initialized_feature_profile_without_apply_maps_successfully(
+    tmp_path: Path,
+):
+    """Repair regression: a loaded Default Feature Detection
+    profile left as "default_initialized" (never explicitly applied) is
+    real production-accepted state -- the same real materialization path
+    Check My Setup itself uses, not a hand-built intent. Production
+    mapping accepts the per-ROI entries' truthful explicit_user_mark=False
+    here because the enclosing profile is itself current and
+    default_initialized (see feature_entry_provenance_valid); it must not
+    require a falsified explicit mark."""
+    outcome, _request = _accepted_npm_default_initialized(tmp_path)
+
+    result = _assert_mapped(_map(outcome))
+    entries = result.intent.feature_event.per_roi_feature_event_map
+    assert entries
+    for entry in entries:
+        assert entry.source == "default"
+        assert entry.explicit_user_mark is False
+        assert entry.current_or_stale == "current"
+        assert entry.effective_config_fields
 
 
 @pytest.mark.parametrize(
@@ -471,6 +529,120 @@ def test_feature_defaults_and_override_identity_are_preserved(tmp_path: Path):
     )
     assert custom_result.intent.feature_event.per_roi_feature_event_map[0].source == "override"
     assert custom_result.intent.feature_payload_identity != default_result.intent.feature_payload_identity
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        lambda entry: replace(entry, explicit_user_mark=False),
+        lambda entry: replace(entry, current_or_stale="stale"),
+        lambda entry: replace(entry, effective_config_fields=()),
+    ),
+)
+def test_incomplete_or_stale_per_roi_feature_entry_still_refuses(
+    tmp_path: Path, tamper
+):
+    """Repair regression (negative case): the strict per-entry
+    completeness check in guided_production_mapping.py must continue
+    refusing a genuinely non-explicit, stale, or empty per-ROI feature
+    entry with per_roi_feature_entry_incomplete -- proves the repair
+    (which only changed how a current default-sourced entry is marked
+    explicit) did not widen this check to accept genuinely incomplete
+    entries too."""
+    outcome, request = _accepted_npm(tmp_path)
+    tampered_entry = tamper(request.feature_event.per_roi_feature_event_map[0])
+    tampered_request = replace(
+        request,
+        feature_event=replace(
+            request.feature_event,
+            per_roi_feature_event_map=(tampered_entry,),
+        ),
+    )
+    result = _map(_outcome_with_request(outcome, tampered_request))
+    assert result.status == "refused"
+    assert result.blocking_issues[0].category == "incomplete_feature_settings"
+    assert result.blocking_issues[0].detail_code == "per_roi_feature_entry_incomplete"
+
+
+def test_override_entry_without_explicit_mark_still_refuses(tmp_path: Path):
+    """Negative provenance case B: an override/custom-sourced entry must
+    still carry an explicit mark -- the narrow default_initialized
+    acceptance in feature_entry_provenance_valid only applies to
+    source == "default", never to an override."""
+    outcome, request = _accepted_npm(tmp_path)
+    override_entry = replace(
+        request.feature_event.per_roi_feature_event_map[0],
+        source="override",
+        feature_event_profile_id="feature-profile-custom",
+        override_config_fields=request.feature_event.per_roi_feature_event_map[
+            0
+        ].effective_config_fields[:1],
+        explicit_user_mark=False,
+    )
+    tampered_request = replace(
+        request,
+        feature_event=replace(
+            request.feature_event,
+            per_roi_feature_event_map=(override_entry,),
+        ),
+    )
+    result = _map(_outcome_with_request(outcome, tampered_request))
+    assert result.status == "refused"
+    assert result.blocking_issues[0].category == "incomplete_feature_settings"
+    assert result.blocking_issues[0].detail_code == "per_roi_feature_entry_incomplete"
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        lambda entry: replace(entry, current_or_stale="stale"),
+        lambda entry: replace(entry, effective_config_fields=()),
+        lambda entry: replace(entry, feature_event_profile_id="a-different-profile-id"),
+    ),
+)
+def test_default_initialized_entry_edge_cases_still_refuse(tmp_path: Path, tamper):
+    """Negative provenance cases C/D/E: even under the narrow
+    default_initialized acceptance, a stale entry (C), an entry with no
+    effective settings (D), or a default-sourced entry whose profile
+    identity does not match the enclosing accepted default profile (E)
+    must still refuse -- proves the new acceptance path does not infer
+    validity from a non-explicit entry alone."""
+    outcome, request = _accepted_npm_default_initialized(tmp_path)
+    tampered_entry = tamper(request.feature_event.per_roi_feature_event_map[0])
+    tampered_request = replace(
+        request,
+        feature_event=replace(
+            request.feature_event,
+            per_roi_feature_event_map=(tampered_entry,),
+        ),
+    )
+    result = _map(_outcome_with_request(outcome, tampered_request))
+    assert result.status == "refused"
+    assert result.blocking_issues[0].category == "incomplete_feature_settings"
+    assert result.blocking_issues[0].detail_code == "per_roi_feature_entry_incomplete"
+
+
+def test_stray_feature_entry_roi_not_in_included_set_still_refuses(tmp_path: Path):
+    """Negative provenance case F: a per-ROI feature entry for a ROI
+    outside the accepted included set must not be silently accepted as
+    authoritative, even when it is otherwise a valid default_initialized
+    entry -- the exact-coverage check catches this before the per-entry
+    provenance rule is ever reached."""
+    outcome, request = _accepted_npm_default_initialized(tmp_path)
+    stray_entry = replace(
+        request.feature_event.per_roi_feature_event_map[0], roi_id="NotIncludedRoi"
+    )
+    tampered_request = replace(
+        request,
+        feature_event=replace(
+            request.feature_event,
+            per_roi_feature_event_map=(stray_entry,),
+        ),
+    )
+    result = _map(_outcome_with_request(outcome, tampered_request))
+    assert result.status == "refused"
+    assert result.blocking_issues[0].category == "incomplete_feature_settings"
+    assert result.blocking_issues[0].detail_code == "per_roi_feature_map_incomplete"
 
 
 def test_per_session_evidence_changes_npm_identity(tmp_path: Path):

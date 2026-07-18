@@ -198,10 +198,26 @@ def _confirm_npm_correction_strategies(window, qapp, monkeypatch, *, included_ro
         window._guided_confirm_mark_btn.click()
 
 
-def test_natural_path_npm_reaches_review_plan_check_my_setup_and_run(
-    window, tmp_path, monkeypatch, qapp
+def _drive_npm_to_check_my_setup(
+    window,
+    tmp_path,
+    monkeypatch,
+    qapp,
+    *,
+    mode: str,
+    apply_feature_defaults: bool,
 ):
+    """Drive the real Guided New Analysis wizard for NPM from Select data
+    through a real Check My Setup click, returning (outcome, output_dir,
+    included_rois, excluded_roi). Reused by every natural-path test in
+    this module so the only real variable between them is `mode` and
+    whether Feature Detection defaults are explicitly applied -- both
+    supported, real scientist-facing states (see
+    _feature_event_profile_current_for_first_subset: a loaded default
+    profile is current whether left as "default_initialized" or
+    explicitly applied)."""
     _configure_npm_new_analysis_setup(window, tmp_path, monkeypatch)
+    window._mode_combo.setCurrentText(mode)
 
     output_dir = tmp_path / "npm_output"
     output_dir.mkdir()
@@ -221,7 +237,14 @@ def test_natural_path_npm_reaches_review_plan_check_my_setup_and_run(
     window._guided_workflow_stepper.setCurrentRow(
         list(GUIDED_WORKFLOW_STEPS).index("Feature detection")
     )
-    window._guided_feature_event_apply_btn.click()
+    if apply_feature_defaults:
+        window._guided_feature_event_apply_btn.click()
+    # else: leave the auto-loaded valid Default profile as
+    # "default_initialized" -- never explicitly applied. The real Guided
+    # wizard already presents this state as complete (Continue is
+    # enabled) without requiring the Apply click; this is the exact real
+    # configuration that reached Jeff's genuine
+    # per_roi_feature_entry_incomplete refusal.
 
     # Confirm the detected NPM dataset settings -- the real production
     # step the Phase 4A GUIDED_DATASET_CONTRACT_BLOCKER_CATEGORIES fix
@@ -273,14 +296,18 @@ def test_natural_path_npm_reaches_review_plan_check_my_setup_and_run(
         "This NPM recording setup was checked successfully and is ready "
         "to run."
     )
+    return outcome, output_dir, included_rois, excluded_roi
 
-    # Let Run press drive the REAL, unmocked pre-existing NPM launch-
-    # builder chain (production mapping -> execution authority ->
-    # authorization -> startup payload -> persistence -> claim ->
-    # materialization -> prelaunch claim), the same chain the existing
-    # guided_npm_* backend suite already proves in isolation -- only wrap
-    # it to capture its result. Only the actual OS process launch (the
-    # numerical-execution seam) is replaced, so no subprocess starts.
+
+def _click_run_with_real_build(window, monkeypatch, qapp):
+    """Click Run, letting it drive the REAL, unmocked pre-existing NPM
+    launch-builder chain (production mapping -> execution authority ->
+    authorization -> startup payload -> persistence -> claim ->
+    materialization -> prelaunch claim), the same chain the existing
+    guided_npm_* backend suite already proves in isolation -- only wrap
+    it to capture its result. Only the actual OS process launch (the
+    numerical-execution seam) is replaced, so no subprocess starts.
+    Returns (build_result, launch_calls)."""
     build_results = []
     real_build_prelaunch_claim = (
         npm_builder_module.build_guided_npm_worker_prelaunch_claim_from_validation
@@ -307,11 +334,34 @@ def test_natural_path_npm_reaches_review_plan_check_my_setup_and_run(
 
     window._guided_run_btn.click()
     assert window._guided_backend_execution_active is True
-
-    _pump_until(qapp, lambda: window._guided_npm_launch_runtime is not None)
+    _pump_until(
+        qapp,
+        lambda: window._guided_npm_launch_runtime is not None
+        or not window._guided_backend_execution_active,
+    )
 
     assert len(build_results) == 1
-    build_result = build_results[0]
+    return build_results[0], launch_calls
+
+
+def test_natural_path_npm_reaches_review_plan_check_my_setup_and_run(
+    window, tmp_path, monkeypatch, qapp
+):
+    """Explicit-Apply natural path (unchanged Phase 4A regression)."""
+    outcome, output_dir, included_rois, excluded_roi = (
+        _drive_npm_to_check_my_setup(
+            window,
+            tmp_path,
+            monkeypatch,
+            qapp,
+            mode="phasic",
+            apply_feature_defaults=True,
+        )
+    )
+
+    build_result, launch_calls = _click_run_with_real_build(
+        window, monkeypatch, qapp
+    )
     assert build_result.ok is True, build_result.blocking_issues
     assert build_result.status == "built"
     claim = build_result.prelaunch_claim
@@ -326,3 +376,107 @@ def test_natural_path_npm_reaches_review_plan_check_my_setup_and_run(
     # the allocated run directory must contain no analysis outputs.
     allocated_children = {p.name for p in Path(claim.run_directory_path).iterdir()}
     assert not (allocated_children & {"_analysis", "region_summary.csv"})
+
+
+def test_natural_path_npm_loaded_defaults_without_apply_reaches_built(
+    window, tmp_path, monkeypatch, qapp
+):
+    """Repair regression: reproduces Jeff's real defect exactly.
+
+    A loaded Default Feature Detection profile left as
+    "default_initialized" (never explicitly applied -- the GUI already
+    presents this as complete, and Check My Setup already accepts it,
+    exactly as the real diagnostic evidence showed) must still reach a
+    successful, unmocked production mapping / execution authority /
+    prelaunch build -- not the false per_roi_feature_entry_incomplete /
+    feature_authority_incomplete refusals both existing before this
+    repair. Before the repair, this test fails at build_result.ok with
+    exactly Jeff's real category/detail_code.
+    """
+    outcome, output_dir, included_rois, excluded_roi = (
+        _drive_npm_to_check_my_setup(
+            window,
+            tmp_path,
+            monkeypatch,
+            qapp,
+            mode="phasic",
+            apply_feature_defaults=False,
+        )
+    )
+
+    build_result, launch_calls = _click_run_with_real_build(
+        window, monkeypatch, qapp
+    )
+    assert build_result.ok is True, build_result.blocking_issues
+    assert build_result.status == "built"
+    claim = build_result.prelaunch_claim
+    assert claim.execution_mode == "phasic"
+    assert len(launch_calls) == 1
+
+    # Every included ROI has a complete feature/event mapping; the
+    # excluded ROI is absent from the request the wrapper would consume.
+    request = outcome.compile_result.request
+    mapped_roi_ids = {
+        entry.roi_id for entry in request.feature_event.per_roi_feature_event_map
+    }
+    assert mapped_roi_ids == set(included_rois)
+    assert excluded_roi not in mapped_roi_ids
+    for entry in request.feature_event.per_roi_feature_event_map:
+        # Truthful provenance: the scientist never pressed Apply, so this
+        # default-sourced entry stays explicit_user_mark=False. It is
+        # still accepted because the enclosing profile is current and
+        # default_initialized (see feature_entry_provenance_valid).
+        assert entry.source == "default"
+        assert entry.explicit_user_mark is False
+        assert entry.current_or_stale == "current"
+        assert entry.effective_config_fields
+
+    allocated_children = {p.name for p in Path(claim.run_directory_path).iterdir()}
+    assert not (allocated_children & {"_analysis", "region_summary.csv"})
+
+
+def test_natural_path_npm_tonic_only_with_loaded_defaults_reaches_built(
+    window, tmp_path, monkeypatch, qapp
+):
+    """Tonic-only must also succeed with the same repaired handoff."""
+    _drive_npm_to_check_my_setup(
+        window,
+        tmp_path,
+        monkeypatch,
+        qapp,
+        mode="tonic",
+        apply_feature_defaults=False,
+    )
+    build_result, _launch_calls = _click_run_with_real_build(
+        window, monkeypatch, qapp
+    )
+    assert build_result.ok is True, build_result.blocking_issues
+    assert build_result.prelaunch_claim.execution_mode == "tonic"
+
+
+def test_natural_path_npm_combined_mode_reaches_existing_refusal_not_feature_error(
+    window, tmp_path, monkeypatch, qapp
+):
+    """Combined phasic+tonic ("both") remains a separate, unimplemented
+    limitation (pipeline_combined_mode_unavailable) -- this proves the
+    feature-settings repair does not mask or weaken it: with the exact
+    same repaired feature handoff, a "both" request now reaches THAT
+    known boundary instead of failing earlier with a false
+    incomplete-feature-settings refusal."""
+    _drive_npm_to_check_my_setup(
+        window,
+        tmp_path,
+        monkeypatch,
+        qapp,
+        mode="both",
+        apply_feature_defaults=False,
+    )
+    build_result, launch_calls = _click_run_with_real_build(
+        window, monkeypatch, qapp
+    )
+    assert build_result.ok is False
+    assert build_result.status == "production_execution_request_failed"
+    assert build_result.blocking_issues[0].category == (
+        "production_execution_request_failed"
+    )
+    assert launch_calls == []

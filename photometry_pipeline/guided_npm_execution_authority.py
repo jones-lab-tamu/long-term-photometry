@@ -44,6 +44,7 @@ from photometry_pipeline.guided_production_mapping import (
     GuidedProductionTypedValue,
     build_application_build_identity,
     compute_guided_npm_production_execution_intent_identity,
+    feature_entry_provenance_valid,
 )
 
 
@@ -1623,8 +1624,11 @@ def _build_feature_authority(
         )
     if (
         not feature.effective_values
-        or feature.profile_status != "applied"
-        or feature.explicitly_applied is not True
+        or feature.profile_status not in ("applied", "default_initialized")
+        or (
+            feature.profile_status == "applied"
+            and feature.explicitly_applied is not True
+        )
         or feature.current is not True
         or feature.visible_unapplied_changes is not False
     ):
@@ -1646,7 +1650,15 @@ def _build_feature_authority(
         if (
             entry.source not in {"default", "override"}
             or not _text(entry.feature_event_profile_id)
-            or not entry.explicit_user_mark
+            or not feature_entry_provenance_valid(
+                entry_source=entry.source,
+                entry_feature_event_profile_id=entry.feature_event_profile_id,
+                entry_explicit_user_mark=entry.explicit_user_mark,
+                enclosing_profile_status=feature.profile_status,
+                enclosing_profile_id=feature.profile_id,
+                enclosing_current=feature.current,
+                enclosing_visible_unapplied_changes=feature.visible_unapplied_changes,
+            )
             or entry.current_or_stale != "current"
             or not entry.effective_config_fields
             or not _validate_typed_values(tuple(entry.effective_config_fields))
