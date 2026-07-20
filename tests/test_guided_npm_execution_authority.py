@@ -40,6 +40,8 @@ from photometry_pipeline.io.npm_contract import NpmParserContract
 from photometry_pipeline.guided_production_mapping import (
     GuidedNpmProductionMappingSuccess,
     GuidedProductionMappingFailure,
+    GuidedProductionPerRoiStrategy,
+    GuidedProductionTypedValue,
     compute_guided_npm_production_execution_intent_identity,
 )
 
@@ -114,6 +116,303 @@ def _accepted_two_session_authority(tmp_path: Path):
     )
     assert outcome.status == "validator_accepted"
     return build_guided_npm_execution_authority(_map(outcome).intent)
+
+
+def _accepted_npm_with_strategy(tmp_path: Path, strategy: str):
+    """Same real construction as tests.test_guided_npm_production_mapping.
+    _accepted_npm, except the single included ROI's correction choice
+    selects `strategy` instead of the default "global_linear_regression"
+    -- a genuine, otherwise-unmodified explicit/current local-preview
+    choice, not a fabricated/malformed entry."""
+    draft = _valid_npm_stage2c_draft(tmp_path)
+    draft.per_roi_correction_strategy_choices = [
+        replace(choice, selected_strategy=strategy)
+        for choice in draft.per_roi_correction_strategy_choices
+    ]
+    validator_contract = GuidedBackendValidatorContract(
+        validation_scope="guided_rwd_intermittent_phasic_full_validate",
+        validation_contract_version="guided_backend_validation_contract.v1",
+        validator_capability_version="test_validator_capability.v1",
+        supported_subset_rule_version="global_dynamic_fit_only.v1",
+    )
+    parser_contract = NpmParserContract(
+        npm_time_axis="system_timestamp",
+        npm_system_ts_col="SystemTimestamp",
+        npm_computer_ts_col="ComputerTimestamp",
+        npm_led_col="LedState",
+        npm_region_prefix="Region",
+        npm_region_suffix="G",
+        target_fs_hz=2.0,
+        session_duration_sec=2.0,
+        allow_partial_final_chunk=False,
+        adapter_value_nan_policy="strict",
+    )
+    outcome = validate_current_guided_draft_for_backend(
+        draft,
+        parser_contract=parser_contract,
+        validator_contract=validator_contract,
+        validation_revision=4,
+    )
+    assert outcome.status == "validator_accepted", outcome.blocking_issues
+    return outcome
+
+
+# Every dynamic-fit-family strategy Guided Mode actually offers
+# (gui.main_window.GUIDED_CONFIRM_STRATEGIES), excluding Signal-Only F0
+# which is a separate strategy_family covered on its own below.
+_GUI_DYNAMIC_FIT_STRATEGIES = (
+    "global_linear_regression",
+    "robust_global_event_reject",
+    "adaptive_event_gated_regression",
+)
+# All four strategies visible in Guided Mode's confirm-strategy combo.
+_ALL_GUI_STRATEGIES = _GUI_DYNAMIC_FIT_STRATEGIES + ("signal_only_f0",)
+
+
+@pytest.mark.parametrize("strategy", _ALL_GUI_STRATEGIES)
+def test_authority_accepts_every_guided_visible_correction_strategy(
+    tmp_path: Path, strategy: str
+):
+    """Real-dataset bug reproduction and full coverage: every one of the
+    four strategies Guided Mode actually offers (gui.main_window.
+    GUIDED_CONFIRM_STRATEGIES) must survive real Stage 1 mapping (already
+    proven, via guided_new_analysis_plan.FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES
+    / the signal_only_f0 branch) and real Stage 2 authority construction.
+    Before the repair, this failed for "robust_global_event_reject" and
+    "adaptive_event_gated_regression" with correction_strategy_unsupported,
+    because build_guided_npm_execution_authority's own
+    _SUPPORTED_DYNAMIC_STRATEGIES allowlist used different, stale literal
+    strings that no other part of the codebase produces."""
+    outcome = _accepted_npm_with_strategy(tmp_path, strategy)
+    mapped = _map(outcome)
+    assert isinstance(mapped, GuidedNpmProductionMappingSuccess), mapped
+    mapped_entry = mapped.intent.per_roi_correction_strategy_map[0]
+    assert mapped_entry.selected_strategy == strategy
+
+    result = build_guided_npm_execution_authority(mapped.intent)
+    assert isinstance(result, GuidedNpmExecutionAuthority), (
+        f"expected authority to accept the real, supported strategy "
+        f"{strategy!r}, got: {result}"
+    )
+    authority_entry = result.correction_authority.per_roi_correction_strategy_map[0]
+    assert authority_entry.selected_strategy == strategy
+    assert authority_entry.roi_id == mapped_entry.roi_id
+    if strategy == "signal_only_f0":
+        assert authority_entry.strategy_family == "signal_only_f0"
+        assert authority_entry.dynamic_fit_mode is None
+    else:
+        assert authority_entry.strategy_family == "dynamic_fit"
+        assert authority_entry.dynamic_fit_mode == strategy
+
+
+def test_authority_accepts_signal_only_f0_with_complete_and_valid_output(
+    tmp_path: Path,
+):
+    """Signal-Only F0 support proven directly (not inferred from the
+    branch merely existing): required fields, strategy family, and the
+    complete authority output are all checked explicitly."""
+    outcome = _accepted_npm_with_strategy(tmp_path, "signal_only_f0")
+    mapped = _map(outcome)
+    assert isinstance(mapped, GuidedNpmProductionMappingSuccess), mapped
+
+    result = build_guided_npm_execution_authority(mapped.intent)
+    assert isinstance(result, GuidedNpmExecutionAuthority), result
+
+    entries = result.correction_authority.per_roi_correction_strategy_map
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.strategy_family == "signal_only_f0"
+    assert entry.selected_strategy == "signal_only_f0"
+    assert entry.dynamic_fit_mode is None
+    assert entry.explicit_user_mark is True
+    assert entry.current_or_stale == "current"
+    assert entry.evidence_source_type
+    assert entry.evidence_reference_json
+    # Identity and status fields must be genuinely computed, not left
+    # unset, for this to be a usable authority output.
+    assert result.correction_authority.canonical_correction_authority_identity
+    assert result.authorization_status == GUIDED_NPM_AUTHORIZATION_STATUS_NOT_AUTHORIZED
+    assert result.startup_status == GUIDED_NPM_STARTUP_STATUS_NOT_MATERIALIZED
+    assert result.runnable is False
+
+
+def test_authority_accepts_mixed_per_roi_strategies_independently(tmp_path: Path):
+    """Support is genuinely per-ROI, not accidentally dependent on every
+    ROI sharing one strategy: four ROIs, each a different one of the four
+    Guided-visible options, must all be accepted together in one
+    authority, each preserving its own distinct strategy."""
+    from photometry_pipeline.guided_new_analysis_plan import (
+        compute_guided_local_preview_source_setup_signature,
+    )
+
+    draft = _valid_npm_stage2c_draft(tmp_path)
+    source_root = Path(draft.input_source_path)
+    source_file = next(source_root.glob("*.csv"))
+    roi_ids = ["Region0", "Region1", "Region2", "Region3"]
+    header = "Timestamp,LedState," + ",".join(f"{roi}G" for roi in roi_ids)
+    rows = [header]
+    values = ",".join(str(10.0 + i) for i in range(len(roi_ids)))
+    values2 = ",".join(str(100.0 + i) for i in range(len(roi_ids)))
+    for base_t in (100.0, 101.0, 102.0):
+        rows.append(f"{base_t:.1f},1,{values}")
+        rows.append(f"{base_t + 0.5:.1f},2,{values2}")
+    source_file.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    draft.discovered_roi_ids = list(roi_ids)
+    draft.included_roi_ids = list(roi_ids)
+    draft.excluded_roi_ids = []
+    draft.dataset_contract_snapshot = replace(
+        draft.dataset_contract_snapshot,
+        source_identity=replace(
+            draft.dataset_contract_snapshot.source_identity,
+            discovered_roi_ids=tuple(roi_ids),
+            included_roi_ids=tuple(roi_ids),
+        ),
+    )
+    local_preview_signature = compute_guided_local_preview_source_setup_signature(draft)
+    base_choice = replace(
+        draft.per_roi_correction_strategy_choices[0],
+        source_setup_signature=local_preview_signature,
+    )
+    strategy_by_roi = dict(zip(roi_ids, _ALL_GUI_STRATEGIES))
+    draft.per_roi_correction_strategy_choices = [
+        replace(base_choice, roi_id=roi_id, selected_strategy=strategy)
+        for roi_id, strategy in strategy_by_roi.items()
+    ]
+    validator_contract = GuidedBackendValidatorContract(
+        validation_scope="guided_rwd_intermittent_phasic_full_validate",
+        validation_contract_version="guided_backend_validation_contract.v1",
+        validator_capability_version="test_validator_capability.v1",
+        supported_subset_rule_version="global_dynamic_fit_only.v1",
+    )
+    parser_contract = NpmParserContract(
+        npm_time_axis="system_timestamp",
+        npm_system_ts_col="SystemTimestamp",
+        npm_computer_ts_col="ComputerTimestamp",
+        npm_led_col="LedState",
+        npm_region_prefix="Region",
+        npm_region_suffix="G",
+        target_fs_hz=2.0,
+        session_duration_sec=2.0,
+        allow_partial_final_chunk=False,
+        adapter_value_nan_policy="strict",
+    )
+    outcome = validate_current_guided_draft_for_backend(
+        draft,
+        parser_contract=parser_contract,
+        validator_contract=validator_contract,
+        validation_revision=4,
+    )
+    assert outcome.status == "validator_accepted", outcome.blocking_issues
+
+    mapped = _map(outcome)
+    assert isinstance(mapped, GuidedNpmProductionMappingSuccess), mapped
+
+    result = build_guided_npm_execution_authority(mapped.intent)
+    assert isinstance(result, GuidedNpmExecutionAuthority), result
+    entries = {
+        entry.roi_id: entry
+        for entry in result.correction_authority.per_roi_correction_strategy_map
+    }
+    assert set(entries) == set(roi_ids)
+    for roi_id, expected_strategy in strategy_by_roi.items():
+        assert entries[roi_id].selected_strategy == expected_strategy
+        if expected_strategy == "signal_only_f0":
+            assert entries[roi_id].strategy_family == "signal_only_f0"
+            assert entries[roi_id].dynamic_fit_mode is None
+        else:
+            assert entries[roi_id].strategy_family == "dynamic_fit"
+            assert entries[roi_id].dynamic_fit_mode == expected_strategy
+
+
+# ---------------------------------------------------------------------------
+# Refusal behavior must be preserved -- the repair reused the canonical
+# strategy source; it must not have weakened any other completeness check
+# in _build_correction_authority's per-entry validation loop.
+# ---------------------------------------------------------------------------
+
+
+def _tamper_first_strategy_entry(intent, **changes):
+    """Replace the first (only, in these fixtures) per-ROI strategy entry
+    with a tampered copy, using this file's existing _rebound_intent
+    helper so the intent's own canonical_intent_identity is recomputed to
+    match (build_guided_npm_execution_authority checks intent identity
+    before ever reaching correction-authority construction; without
+    rebinding, tampering would be caught there as intent_identity_mismatch
+    instead of exercising the per-entry correction validation under
+    test). The tampered map is still rejected by the per-entry validation
+    loop before correction_payload_identity is consulted."""
+    original = intent.per_roi_correction_strategy_map[0]
+    tampered = replace(original, **changes)
+    return _rebound_intent(
+        intent,
+        per_roi_correction_strategy_map=(tampered,) + intent.per_roi_correction_strategy_map[1:],
+    )
+
+
+def test_authority_still_refuses_unknown_dynamic_fit_strategy_id(tmp_path: Path):
+    outcome = _accepted_npm_with_strategy(tmp_path, "global_linear_regression")
+    mapped = _map(outcome)
+    tampered_intent = _tamper_first_strategy_entry(
+        mapped.intent,
+        selected_strategy="totally_unknown_strategy",
+        dynamic_fit_mode="totally_unknown_strategy",
+    )
+    result = build_guided_npm_execution_authority(tampered_intent)
+    _assert_failure(result, "correction_strategy_unsupported")
+
+
+def test_authority_still_refuses_malformed_signal_only_f0_entry(tmp_path: Path):
+    outcome = _accepted_npm_with_strategy(tmp_path, "signal_only_f0")
+    mapped = _map(outcome)
+    # A Signal-Only F0 entry that also carries a dynamic_fit_mode is
+    # internally inconsistent -- must never be silently accepted.
+    tampered_intent = _tamper_first_strategy_entry(
+        mapped.intent,
+        dynamic_fit_mode="global_linear_regression",
+    )
+    result = build_guided_npm_execution_authority(tampered_intent)
+    _assert_failure(result, "correction_strategy_unsupported")
+
+
+def test_authority_still_refuses_invalid_strategy_family(tmp_path: Path):
+    outcome = _accepted_npm_with_strategy(tmp_path, "global_linear_regression")
+    mapped = _map(outcome)
+    tampered_intent = _tamper_first_strategy_entry(
+        mapped.intent, strategy_family="unknown_family"
+    )
+    result = build_guided_npm_execution_authority(tampered_intent)
+    _assert_failure(result, "correction_strategy_unsupported")
+
+
+def test_authority_still_refuses_missing_evidence_on_strategy_entry(tmp_path: Path):
+    outcome = _accepted_npm_with_strategy(tmp_path, "global_linear_regression")
+    mapped = _map(outcome)
+    tampered_intent = _tamper_first_strategy_entry(
+        mapped.intent, evidence_source_type=""
+    )
+    result = build_guided_npm_execution_authority(tampered_intent)
+    _assert_failure(result, "correction_strategy_unsupported")
+
+
+def test_authority_still_refuses_missing_dynamic_fit_parameter_values(tmp_path: Path):
+    """Distinct from a per-ROI strategy entry problem: the run-wide
+    dynamic_fit_parameter_values must also remain individually validated
+    (correction_authority_incomplete), not silently accepted merely
+    because every per-ROI strategy entry itself is valid."""
+    outcome = _accepted_npm_with_strategy(tmp_path, "global_linear_regression")
+    mapped = _map(outcome)
+    tampered_values = (GuidedProductionTypedValue(
+        field_name="",
+        value_type="str",
+        value="x",
+        source_classification="applied_dynamic_fit_contract",
+    ),)
+    tampered_intent = _rebound_intent(
+        mapped.intent, correction_parameter_values=tampered_values
+    )
+    result = build_guided_npm_execution_authority(tampered_intent)
+    _assert_failure(result, "correction_authority_incomplete")
 
 
 def _assert_failure(result, category: str):

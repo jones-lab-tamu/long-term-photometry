@@ -161,7 +161,19 @@ def _fake_npm_load_chunk(path, input_format, _config, chunk_id, **_kwargs):
     )
 
 
-def _confirm_npm_correction_strategies(window, qapp, monkeypatch, *, included_rois):
+def _confirm_npm_correction_strategies(
+    window,
+    qapp,
+    monkeypatch,
+    *,
+    included_rois,
+    strategy_label: str = "Global Linear Regression",
+    strategy_label_by_roi: dict | None = None,
+):
+    """Confirm one strategy per included ROI via the real GUI controls.
+    `strategy_label_by_roi`, when given, selects a distinct strategy per
+    ROI (falling back to `strategy_label` for any ROI it omits) -- proving
+    per-ROI choices are genuinely independent, not just per-call uniform."""
     monkeypatch.setattr(
         correction_preview_module, "load_chunk", _fake_npm_load_chunk
     )
@@ -184,8 +196,9 @@ def _confirm_npm_correction_strategies(window, qapp, monkeypatch, *, included_ro
             window._guided_confirm_roi_combo.findData(roi)
         )
         window._guided_confirm_chunk_combo.setCurrentIndex(0)
+        roi_strategy_label = (strategy_label_by_roi or {}).get(roi, strategy_label)
         strategy_index = window._guided_confirm_strategy_combo.findText(
-            "Global Linear Regression"
+            roi_strategy_label
         )
         assert strategy_index >= 0
         window._guided_confirm_strategy_combo.setCurrentIndex(strategy_index)
@@ -201,6 +214,8 @@ def _drive_npm_to_check_my_setup(
     qapp,
     *,
     apply_feature_defaults: bool,
+    strategy_label: str = "Global Linear Regression",
+    strategy_label_by_roi: dict | None = None,
 ):
     """Drive the real Guided New Analysis wizard for NPM from Select data
     through a real Check My Setup click, returning (outcome, output_dir,
@@ -209,8 +224,9 @@ def _drive_npm_to_check_my_setup(
     Detection defaults are explicitly applied, both supported, real
     scientist-facing states (see _feature_event_profile_current_for_first_subset:
     a loaded default profile is current whether left as
-    "default_initialized" or explicitly applied). No mode is ever
-    selected: the accepted authorization always naturally carries
+    "default_initialized" or explicitly applied), and (optionally) which
+    Guided-visible correction strategy is confirmed per ROI. No mode is
+    ever selected: the accepted authorization always naturally carries
     execution_mode == "both"."""
     _configure_npm_new_analysis_setup(window, tmp_path, monkeypatch)
 
@@ -226,7 +242,12 @@ def _drive_npm_to_check_my_setup(
             item.setCheckState(main_window_module.Qt.Unchecked)
 
     _confirm_npm_correction_strategies(
-        window, qapp, monkeypatch, included_rois=included_rois
+        window,
+        qapp,
+        monkeypatch,
+        included_rois=included_rois,
+        strategy_label=strategy_label,
+        strategy_label_by_roi=strategy_label_by_roi,
     )
 
     window._guided_workflow_stepper.setCurrentRow(
@@ -394,6 +415,170 @@ def test_natural_path_npm_reaches_check_my_setup_and_dispatches_shared_run(
     # replaced above, so the wrapper subprocess is never spawned and the
     # planned run directory is never created.
     assert not Path(request.planned_allocated_run_dir).exists()
+
+
+@pytest.mark.parametrize(
+    "strategy_label",
+    ["Robust Global Event-Reject Fit", "Adaptive Event-Gated Fit"],
+)
+def test_natural_path_npm_real_gui_correction_strategy_reaches_ready_authority(
+    window, tmp_path, monkeypatch, qapp, strategy_label
+):
+    """Real-dataset bug regression, driven from the real GUI (not a
+    lower-level fixture): confirming either of the two dynamic-fit
+    correction strategies affected by the stale authority allowlist --
+    not just "Global Linear Regression" -- must reach a populated
+    GuidedStartupAuthority with Run enabled. Uses the lighter
+    Check-My-Setup-only path (not the full Run+wrapper dispatch every
+    other natural-path test already covers), since this test's only new
+    variable is the correction strategy choice. Signal-Only F0 uses a
+    distinct evidence lookup inside the same Correction-approach GUI flow
+    (see test_natural_path_npm_real_gui_signal_only_f0_reaches_ready_
+    authority below) and is covered there, with the fuller assertion set
+    that regression required."""
+    outcome, output_dir, included_rois, excluded_roi = (
+        _drive_npm_to_check_my_setup(
+            window,
+            tmp_path,
+            monkeypatch,
+            qapp,
+            apply_feature_defaults=True,
+            strategy_label=strategy_label,
+        )
+    )
+
+    authority = window._guided_startup_authority
+    assert isinstance(authority, GuidedStartupAuthority)
+    assert authority.is_npm is True
+    assert authority.execution_mode == "both"
+    assert authority.included_roi_ids == tuple(included_rois)
+    assert window._guided_run_btn.isEnabled() is True
+    assert window._guided_run_readiness_label.text() == "Guided Run is ready to start."
+
+
+def test_natural_path_npm_real_gui_signal_only_f0_reaches_ready_authority(
+    window, tmp_path, monkeypatch, qapp
+):
+    """Real-dataset bug regression, driven from the real GUI through
+    Signal-Only F0's own distinct correction-evidence path (the local
+    preview's Signal-Only F0 checkbox, checked by default, producing
+    signal_only_f0_preview_evidence; then the Confirm-strategy panel's
+    ROI-scoped evidence lookup) -- not obtained by relabeling a
+    dynamic-fit choice after the fact.
+
+    This uncovered a second, distinct production bug: the Confirm-
+    strategy panel's enablement check and its "Confirm method" click
+    handler both called _guided_local_preview_evidence_reference(strategy)
+    without the roi= keyword. For every other strategy this happened to
+    work (the generic branch falls back to "the currently active preview
+    ROI"), but Signal-Only F0's own dedicated evidence branch requires
+    roi= explicitly (`if strategy == "signal_only_f0" and roi:`) and
+    silently returned None without it -- so the "Confirm method" button
+    could never be enabled for Signal-Only F0 through the real GUI, no
+    matter what. Fixed by passing roi=self._selected_guided_confirm_roi()
+    at both call sites (gui/main_window.py, _refresh_guided_confirm_
+    strategy_panel and _on_guided_mark_strategy_choice) -- the same
+    pattern this file's other four correctly-written call sites already
+    use."""
+    outcome, output_dir, included_rois, excluded_roi = (
+        _drive_npm_to_check_my_setup(
+            window,
+            tmp_path,
+            monkeypatch,
+            qapp,
+            apply_feature_defaults=True,
+            strategy_label="Signal-Only F0",
+        )
+    )
+
+    assert outcome.status == "validator_accepted", outcome.blocking_issues
+    assert outcome.accepted_for_backend_validation is True
+
+    authority = window._guided_startup_authority
+    assert isinstance(authority, GuidedStartupAuthority)
+    assert authority.is_npm is True
+    assert authority.execution_mode == "both"
+    assert authority.included_roi_ids == tuple(included_rois)
+
+    mapped_entries = {
+        entry.roi_id: entry
+        for entry in authority.npm_intent.per_roi_correction_strategy_map
+    }
+    assert set(mapped_entries) == set(included_rois)
+    for entry in mapped_entries.values():
+        assert entry.strategy_family == "signal_only_f0"
+        assert entry.selected_strategy == "signal_only_f0"
+        assert entry.dynamic_fit_mode is None
+
+    assert window._guided_execution_payload_result is not None
+    assert window._guided_execution_payload_result.ok is True
+    assert window._guided_startup_transaction_request is not None
+
+    readiness = window._guided_run_readiness
+    assert readiness is not None
+    assert readiness.ready is True
+
+    assert window._guided_run_btn.isEnabled() is True
+    run_readiness_text = window._guided_run_readiness_label.text()
+    validation_details_text = window._guided_backend_validation_details_label.text()
+    assert run_readiness_text == "Guided Run is ready to start."
+    assert validation_details_text == "Guided Run is ready to start."
+    for text in (run_readiness_text, validation_details_text):
+        assert "correction_strategy_unsupported" not in text
+        assert "not available" not in text.lower()
+        assert "unavailable in this build" not in text.lower()
+
+
+def test_natural_path_npm_real_gui_mixed_signal_only_f0_and_dynamic_fit_per_roi(
+    window, tmp_path, monkeypatch, qapp
+):
+    """The real GUI's Correction-approach step naturally supports a
+    distinct strategy per included ROI (the Confirm-strategy panel is
+    ROI-scoped: select an ROI, generate/select its own preview, confirm
+    its own strategy, repeat for the next ROI) -- proven here with
+    Region0 confirmed as Signal-Only F0 and Region1 confirmed as a
+    dynamic-fit strategy, both through real GUI controls, both reaching
+    one shared, ready authority."""
+    included_rois = NPM_ROIS[:2]
+    strategy_label_by_roi = {
+        included_rois[0]: "Signal-Only F0",
+        included_rois[1]: "Robust Global Event-Reject Fit",
+    }
+    outcome, output_dir, returned_included_rois, excluded_roi = (
+        _drive_npm_to_check_my_setup(
+            window,
+            tmp_path,
+            monkeypatch,
+            qapp,
+            apply_feature_defaults=True,
+            strategy_label_by_roi=strategy_label_by_roi,
+        )
+    )
+    assert returned_included_rois == included_rois
+
+    authority = window._guided_startup_authority
+    assert isinstance(authority, GuidedStartupAuthority)
+    assert authority.is_npm is True
+    assert authority.execution_mode == "both"
+
+    mapped_entries = {
+        entry.roi_id: entry
+        for entry in authority.npm_intent.per_roi_correction_strategy_map
+    }
+    assert set(mapped_entries) == set(included_rois)
+
+    signal_only_entry = mapped_entries[included_rois[0]]
+    assert signal_only_entry.strategy_family == "signal_only_f0"
+    assert signal_only_entry.selected_strategy == "signal_only_f0"
+    assert signal_only_entry.dynamic_fit_mode is None
+
+    dynamic_fit_entry = mapped_entries[included_rois[1]]
+    assert dynamic_fit_entry.strategy_family == "dynamic_fit"
+    assert dynamic_fit_entry.selected_strategy == "robust_global_event_reject"
+    assert dynamic_fit_entry.dynamic_fit_mode == "robust_global_event_reject"
+
+    assert window._guided_run_btn.isEnabled() is True
+    assert window._guided_run_readiness_label.text() == "Guided Run is ready to start."
 
 
 def test_natural_path_npm_loaded_defaults_without_apply_dispatches_shared_run(

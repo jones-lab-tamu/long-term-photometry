@@ -19,6 +19,9 @@ import posixpath
 from typing import Any
 
 from photometry_pipeline.guided_identity import encode_canonical_value
+from photometry_pipeline.guided_new_analysis_plan import (
+    FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES,
+)
 from photometry_pipeline.guided_normalized_recording import (
     NormalizedRecordingError,
     build_normalized_recording_description_payload,
@@ -114,14 +117,16 @@ GUIDED_NPM_EXECUTION_AUTHORITY_REFUSAL_CATEGORIES = (
 )
 _REFUSAL_CATEGORY_SET = frozenset(GUIDED_NPM_EXECUTION_AUTHORITY_REFUSAL_CATEGORIES)
 _SHA_HEX = frozenset("0123456789abcdef")
-_SUPPORTED_DYNAMIC_STRATEGIES = frozenset(
-    {
-        "global_linear_regression",
-        "dynamic_fit_classic",
-        "dynamic_fit_robust_event_reject",
-        "dynamic_fit_adaptive_event_gate",
-    }
-)
+# The set of dynamic-fit strategy IDs this authority accepts must be the
+# same canonical set Guided Mode actually offers and Stage 1 mapping
+# already validated against (guided_new_analysis_plan.
+# FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES) -- not an independently
+# hand-maintained duplicate. A second, separately typed allowlist here
+# previously drifted from the real strategy IDs (invented a
+# "dynamic_fit_" prefix and renamed two strategies), silently refusing
+# every genuinely supported NPM correction choice except
+# "global_linear_regression".
+_SUPPORTED_DYNAMIC_STRATEGIES = frozenset(FIRST_SUBSET_DYNAMIC_FIT_STRATEGIES)
 
 
 def _sha256(value: Any) -> bool:

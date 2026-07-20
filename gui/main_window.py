@@ -10456,7 +10456,7 @@ class MainWindow(QMainWindow):
         selected_strategy = self._selected_guided_confirm_strategy()
         local_reference = (
             self._guided_local_preview_evidence_reference(
-                selected_strategy
+                selected_strategy, roi=self._selected_guided_confirm_roi()
             )
             if source_type == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE
             else None
@@ -14410,7 +14410,7 @@ class MainWindow(QMainWindow):
             }
         elif source_type == LOCAL_CORRECTION_PREVIEW_SOURCE_TYPE:
             reference = self._guided_local_preview_evidence_reference(
-                strategy
+                strategy, roi=roi
             )
             if reference is None or reference.get("roi") != roi:
                 self._refresh_guided_confirm_strategy_panel()
