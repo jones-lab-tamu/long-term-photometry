@@ -12101,19 +12101,30 @@ class MainWindow(QMainWindow):
                     "The setup check passed for the current Guided NPM "
                     "setup. It does not authorize or start a run."
                 )
-                npm_readiness = getattr(
-                    self, "_guided_npm_run_readiness", None
+                # Supported Guided NPM runs use the identical shared
+                # readiness evaluation RWD does (see
+                # _refresh_guided_run_readiness_display) -- read that same
+                # shared state here too, mirroring the non-NPM branch's
+                # information priority below, so a real derivation refusal
+                # reason is shown instead of always being suppressed by a
+                # generic fallback.
+                run_readiness = getattr(self, "_guided_run_readiness", None)
+                derivation_reason = getattr(
+                    self, "_guided_execution_derivation_reason", None
                 )
-                details_label.setText(
-                    "Guided Run is ready to start."
-                    if getattr(npm_readiness, "ready", False)
-                    else (
-                        getattr(npm_readiness, "user_summary", None)
-                        or "Guided Run is not available for this "
+                if getattr(run_readiness, "ready", False):
+                    run_status_line = "Guided Run is ready to start."
+                elif derivation_reason:
+                    run_status_line = derivation_reason
+                elif getattr(run_readiness, "user_summary", None):
+                    run_status_line = run_readiness.user_summary
+                else:
+                    run_status_line = (
+                        "Guided Run is not available for this "
                         "configuration yet. Review the readiness details "
                         "below."
                     )
-                )
+                details_label.setText(run_status_line)
                 return
             status_label.setText(
                 "The setup check passed for the current Guided setup. It "

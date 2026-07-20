@@ -731,6 +731,151 @@ def test_accepted_setup_without_reason_keeps_generic_line(window):
     assert not hasattr(window, "_guided_validation_artifact_link")
 
 
+# ---------------------------------------------------------------------------
+# NPM display branch reads the shared _guided_run_readiness (not the dead
+# _guided_npm_run_readiness attribute) and surfaces the same real
+# derivation-refusal reason the non-NPM branch already does.
+# ---------------------------------------------------------------------------
+
+
+def _accepted_npm_outcome():
+    return replace(
+        _accepted_outcome(),
+        compile_result=SimpleNamespace(
+            request=SimpleNamespace(source=SimpleNamespace(source_format="npm")),
+        ),
+    )
+
+
+def _drive_npm_validate(
+    window, monkeypatch, *, builder_result=None, builder_exception=None, outcome=None
+):
+    """NPM analog of _drive_validate: drives the real
+    _on_guided_backend_validate_clicked sequence with an accepted NPM
+    validation outcome and a controllable NPM builder result or
+    exception."""
+    import photometry_pipeline.guided_execution_request_builder as request_builder
+
+    draft = GuidedNewAnalysisDraftPlan(input_format="npm")
+    context = GuidedBackendValidationGuiContext(
+        draft=draft,
+        parser_contract=window._guided_backend_validation_parser_contract,
+        additional_protected_roots=(),
+        validator_contract=window._guided_backend_validator_contract,
+        revision=window._guided_backend_validation_revision,
+    )
+    monkeypatch.setattr(
+        window, "_capture_guided_backend_validation_context", lambda: context
+    )
+    monkeypatch.setattr(
+        workflow,
+        "validate_current_guided_draft_for_backend",
+        lambda *_a, **_k: (outcome or _accepted_npm_outcome()),
+    )
+    if builder_exception is not None:
+        def _raise(**_k):
+            raise builder_exception
+
+        monkeypatch.setattr(
+            request_builder,
+            "build_guided_npm_startup_request_from_validation",
+            _raise,
+        )
+    elif builder_result is not None:
+        monkeypatch.setattr(
+            request_builder,
+            "build_guided_npm_startup_request_from_validation",
+            lambda **_k: builder_result,
+        )
+    window._guided_backend_validate_btn.click()
+    return context
+
+
+_NPM_FEATURE_REASON = (
+    "The saved Feature Detection settings are not ready for this analysis."
+)
+
+
+def _npm_payload_refusal_build_result(revision):
+    """A real builder result that preserves a specific Feature Detection
+    payload refusal, exactly as the production NPM builder produces it."""
+    from photometry_pipeline.guided_execution_request_builder import (
+        GuidedExecutionRequestBuildIssue,
+        GuidedExecutionRequestBuildResult,
+    )
+
+    return GuidedExecutionRequestBuildResult(
+        status="payload_derivation_failed",
+        ok=False,
+        startup_authority=None,
+        payload_result=None,
+        startup_transaction_request=None,
+        blocking_issues=(
+            GuidedExecutionRequestBuildIssue(
+                "payload_derivation_failed",
+                "payload",
+                "Guided execution payload derivation failed.",
+            ),
+            GuidedExecutionRequestBuildIssue(
+                "config_field_unsupported",
+                "guided_execution_payload",
+                _NPM_FEATURE_REASON,
+            ),
+        ),
+        current_gui_revision=revision,
+        request_ready=False,
+    )
+
+
+def test_npm_failed_derivation_reason_is_shown_not_generic_fallback(
+    window, monkeypatch
+):
+    """B: an NPM startup-request derivation refusal with a specific
+    user-facing reason must be shown verbatim -- not collapsed into the
+    generic 'unavailable in this build' text. This is the exact defect the
+    stale-attribute repair fixes: previously the NPM branch always read
+    the dead _guided_npm_run_readiness attribute and never surfaced
+    _guided_execution_derivation_reason at all."""
+    _drive_npm_validate(
+        window,
+        monkeypatch,
+        builder_result=_npm_payload_refusal_build_result(
+            window._guided_backend_validation_revision
+        ),
+    )
+    assert window._guided_startup_authority is None
+    assert window._guided_run_btn.isEnabled() is False
+    details = window._guided_backend_validation_details_label.text()
+    assert details == _NPM_FEATURE_REASON
+    assert "unavailable in this build" not in details.lower()
+    assert "not available for this configuration" not in details.lower()
+    assert window._guided_execution_derivation_reason == _NPM_FEATURE_REASON
+
+
+def test_npm_derivation_exception_shows_safe_reason_not_traceback(
+    window, monkeypatch
+):
+    """C: an exception raised while deriving the NPM startup request must
+    never leak internal exception text to the scientist -- the Run button
+    stays disabled and the established safe (shared-readiness) reason is
+    shown instead."""
+    _drive_npm_validate(
+        window,
+        monkeypatch,
+        builder_exception=RuntimeError("boom: internal derivation failure"),
+    )
+    assert window._guided_startup_authority is None
+    assert window._guided_run_btn.isEnabled() is False
+    details = window._guided_backend_validation_details_label.text()
+    assert "boom" not in details
+    assert "RuntimeError" not in details
+    assert "Traceback" not in details
+    assert details == (
+        "Guided validation succeeded, but Guided Run execution is "
+        "unavailable in this build."
+    )
+
+
 def test_npm_accepted_but_stale_setup_check_shows_truthful_not_ready_state(
     window,
 ):

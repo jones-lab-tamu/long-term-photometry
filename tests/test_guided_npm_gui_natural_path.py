@@ -302,6 +302,14 @@ def _drive_npm_to_check_my_setup(
     )
     assert window._guided_run_btn.isEnabled() is True
     assert window._guided_run_readiness_label.text() == "Guided Run is ready to start."
+    # A: accepted NPM shared readiness must be reflected in the Check My
+    # Setup details panel too (the same shared _guided_run_readiness, not
+    # the dead _guided_npm_run_readiness attribute), with no stale
+    # "not available"/"unavailable in this build" text.
+    validation_details = window._guided_backend_validation_details_label.text()
+    assert validation_details == "Guided Run is ready to start."
+    assert "not available" not in validation_details.lower()
+    assert "unavailable in this build" not in validation_details.lower()
 
     authority = window._guided_startup_authority
     assert isinstance(authority, GuidedStartupAuthority)
