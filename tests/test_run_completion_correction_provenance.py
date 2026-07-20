@@ -918,6 +918,31 @@ def test_completion_verifier_rejects_one_corrupt_native_component(
     assert expected.lower() in error.lower()
 
 
+def test_completion_verifier_rejects_non_zero_canonical_time_origin(native_run, tmp_path):
+    """Focused regression for the exact real-world discovered failure
+    predicate (guided_run_20260720T181438506426Z_1edeecfc21c6): a phasic
+    cache chunk whose canonical time_sec does not start at exactly 0.0 (as
+    the real preserved NPM run's resampled chunk_0 did, at 0.02s -- one
+    full sample period, not 0.0) is correctly refused by the terminal
+    completion verifier with "invalid canonical time identity", reproducing
+    the real production predicate against a real native cache rather than a
+    synthetic one."""
+    analysis, mode = native_run
+    root = _root_for_case(tmp_path, analysis, "nonzero_time_origin")
+    _write_terminal_set(root, mode)
+    cache_path = root / "_analysis" / "phasic_out" / "phasic_trace_cache.h5"
+    with h5py.File(cache_path, "r+") as handle:
+        group = handle["roi/Region0/chunk_0"]
+        time_sec = group["time_sec"][()]
+        time_sec = time_sec + 0.02
+        group["time_sec"][...] = time_sec
+    error = correction_completion_error(str(root), mode)
+    assert "invalid canonical time identity" in error
+    assert "Region0" in error
+    _write_terminal_set(root, mode)
+    assert classify_run_terminal_state(str(root)).state == TERMINAL_CORRUPTED
+
+
 def test_completion_verifier_rejects_requested_consumed_mismatch(native_run, tmp_path):
     analysis, mode = native_run
     root = _root_for_case(tmp_path, analysis, "requested_mismatch")

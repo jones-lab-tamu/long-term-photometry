@@ -2390,6 +2390,15 @@ def main():
                 error_code="TERMINAL_VALIDATION_FAILED",
             )
             _finalize_status("error", error_msg=f"TERMINAL_VALIDATION_FAILED: {terminal_error}")
+            # This is the actual terminal cause of a nonzero exit here. Unlike
+            # status.json/events.ndjson (files), stderr is the only channel a
+            # caller that only captures process.stderr (e.g. the Guided
+            # startup orchestration's blocking-issue message) ever sees --
+            # without this, only earlier, unrelated stderr output (such as a
+            # successful plotting phase's library warnings) would be visible,
+            # silently hiding why a run that produced every ordinary
+            # deliverable was still correctly rejected.
+            print(f"Error: TERMINAL_VALIDATION_FAILED: {terminal_error}", file=sys.stderr, flush=True)
             raise SystemExit(1)
 
         _finalization_checkpoint("before_success_status")

@@ -825,7 +825,7 @@ def _render_sig_iso_panel_tile_lightweight(panel, layout, title_font, panel_y_ra
     arr[plot_y0:plot_y1 + 1, plot_x1, :] = (220, 220, 220)
 
     if panel.get("is_missing"):
-        return _annotate_missing_tile(Image.fromarray(arr, mode='RGB'), panel, title_font)
+        return _annotate_missing_tile(Image.fromarray(arr), panel, title_font)
 
     t = panel['t']
     x0, x1 = _trace_domain(t, panel.get('xlim_600', False))
@@ -867,7 +867,7 @@ def _render_sig_iso_panel_tile_lightweight(panel, layout, title_font, panel_y_ra
             color=(180, 0, 180), stroke=1
         )
 
-    tile = Image.fromarray(arr, mode='RGB')
+    tile = Image.fromarray(arr)
     draw = ImageDraw.Draw(tile)
     draw.text((plot_x0, max(1, int(0.03 * tile_h))), f"Chunk {panel['chunk_id']}", fill='black', font=title_font)
     return tile
@@ -897,7 +897,7 @@ def _render_dynamic_fit_panel_tile_lightweight(panel, layout, title_font, panel_
     arr[plot_y0:plot_y1 + 1, plot_x1, :] = (220, 220, 220)
 
     if panel.get("is_missing"):
-        return _annotate_missing_tile(Image.fromarray(arr, mode='RGB'), panel, title_font)
+        return _annotate_missing_tile(Image.fromarray(arr), panel, title_font)
 
     t = panel['t']
     x0, x1 = _trace_domain(t, panel.get('xlim_600', False))
@@ -939,7 +939,7 @@ def _render_dynamic_fit_panel_tile_lightweight(panel, layout, title_font, panel_
             color=(0, 0, 0), stroke=1
         )
 
-    tile = Image.fromarray(arr, mode='RGB')
+    tile = Image.fromarray(arr)
     draw = ImageDraw.Draw(tile)
     draw.text((plot_x0, max(1, int(0.03 * tile_h))), f"Chunk {panel['chunk_id']}", fill='black', font=title_font)
     return tile
@@ -1019,7 +1019,7 @@ def _build_blank_sig_iso_tile(layout):
     arr[plot_y1, plot_x0:plot_x1 + 1, :] = (235, 235, 235)
     arr[plot_y0:plot_y1 + 1, plot_x0, :] = (235, 235, 235)
     arr[plot_y0:plot_y1 + 1, plot_x1, :] = (235, 235, 235)
-    return Image.fromarray(arr, mode='RGB')
+    return Image.fromarray(arr)
 
 
 def _compose_sig_iso_day_tile_canvas(
@@ -1133,7 +1133,7 @@ def _build_blank_dff_tile(layout):
     arr[plot_y1, plot_x0:plot_x1 + 1, :] = (235, 235, 235)
     arr[plot_y0:plot_y1 + 1, plot_x0, :] = (235, 235, 235)
     arr[plot_y0:plot_y1 + 1, plot_x1, :] = (235, 235, 235)
-    return Image.fromarray(arr, mode='RGB')
+    return Image.fromarray(arr)
 
 
 def _render_dff_panel_tile_lightweight(
@@ -1168,7 +1168,7 @@ def _render_dff_panel_tile_lightweight(
     arr[plot_y0:plot_y1 + 1, plot_x1, :] = (220, 220, 220)
 
     if panel.get("is_missing"):
-        return _annotate_missing_tile(Image.fromarray(arr, mode='RGB'), panel, title_font), {
+        return _annotate_missing_tile(Image.fromarray(arr), panel, title_font), {
             "trace_sec": 0.0,
             "marker_sec": 0.0,
             "title_text_sec": 0.0,
@@ -1208,7 +1208,7 @@ def _render_dff_panel_tile_lightweight(
         )
     trace_sec = time.perf_counter() - trace_t0
 
-    tile = Image.fromarray(arr, mode='RGB')
+    tile = Image.fromarray(arr)
     draw = ImageDraw.Draw(tile)
     title_t0 = time.perf_counter()
     draw.text((plot_x0, max(1, int(0.02 * tile_h))), f"Chunk {panel['chunk_id']}", fill='black', font=title_font)
@@ -1415,7 +1415,7 @@ def _render_stacked_day_canvas_lightweight(
             color=(0, 0, 0), stroke=1
         )
 
-    img = Image.fromarray(arr, mode='RGB')
+    img = Image.fromarray(arr)
     draw = ImageDraw.Draw(img)
     title_font = _get_font(max(12, int(round(0.11 * dpi))))
     label_font = _get_font(max(10, int(round(0.09 * dpi))))

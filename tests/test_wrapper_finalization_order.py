@@ -270,3 +270,92 @@ def test_missing_per_roi_deliverable_blocks_success(tmp_path: Path):
     assert code == 1
     assert is_successful_completed_run_dir(str(run_dir))[0] is False
     assert _status(run_dir)["status"] == "error"
+
+
+# Real terminal-cause surfacing on stderr (4J17 post-success completion repair) --
+
+
+def test_terminal_validation_failure_surfaces_actual_cause_to_stderr(
+    tmp_path: Path, capsys
+):
+    """A genuine nonzero exit from _finalize_terminal_success's terminal
+    validation must print its real cause to stderr, not leave stderr
+    containing only whatever unrelated output happened to be printed
+    earlier (e.g. a successful plotting phase's library warnings). Before
+    this repair, this exact failure path wrote TERMINAL_VALIDATION_FAILED
+    only to status.json/events.ndjson and silently re-raised SystemExit(1),
+    leaving stderr empty for this failure."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    seed_wrapper_analysis_outputs(run_dir, tmp_path / "input")
+    (run_dir / "_analysis" / "tonic_out" / "config_used.yaml").unlink()
+
+    code = _run_wrapper(run_dir, tmp_path, seed=False)
+    assert code == 1
+
+    status = _status(run_dir)
+    assert status["status"] == "error"
+    real_cause = status["errors"][-1]
+    assert "TERMINAL_VALIDATION_FAILED" in real_cause
+
+    stderr = capsys.readouterr().err
+    assert "TERMINAL_VALIDATION_FAILED" in stderr
+    assert real_cause in stderr or real_cause.split(": ", 1)[-1] in stderr
+
+
+def test_warnings_on_stderr_during_success_do_not_cause_failure(
+    tmp_path: Path, capsys
+):
+    """A process that returns 0 with warnings must succeed. Child commands
+    (here, the mocked analysis/plotting subprocess calls) may legitimately
+    print deprecation-warning-style text to stderr without raising -- that
+    alone must never be mistaken for a failure, and must not be swallowed
+    either."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    def _print_deprecation_warning(*_args, **_kwargs):
+        print(
+            "DeprecationWarning: Image.fromarray(arr, mode='RGB') is "
+            "deprecated; use Image.fromarray(arr) instead",
+            file=sys.stderr,
+        )
+
+    input_dir = tmp_path / "input"
+    input_dir.mkdir(exist_ok=True)
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(BASE_CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    seed_wrapper_rwd_input(input_dir)
+    seed_wrapper_analysis_outputs(run_dir, input_dir)
+    seed_wrapper_deliverables(run_dir, ["Region0"])
+
+    args = [
+        "tools/run_full_pipeline_deliverables.py",
+        "--input", str(input_dir),
+        "--out", str(run_dir),
+        "--config", str(config_file),
+        "--format", "rwd",
+        "--mode", "both",
+        "--sessions-per-hour", "1",
+        "--overwrite",
+    ]
+    mock_discovery = {"sessions": [{"id": "chunk_0000"}], "rois": ["Region0"]}
+    code = None
+    with patch("sys.argv", args), \
+         patch("subprocess.check_call", side_effect=_print_deprecation_warning), \
+         patch("photometry_pipeline.discovery.discover_inputs", return_value=mock_discovery), \
+         patch("tools.run_full_pipeline_deliverables.validate_inputs"), \
+         patch("tools.run_full_pipeline_deliverables._cleanup_run_outputs_in_place"):
+        try:
+            wrapper.main()
+        except SystemExit as exc:
+            code = exc.code
+
+    assert code in (None, 0)
+    assert classify_run_terminal_state(str(run_dir)).state == TERMINAL_SUCCESS_CURRENT
+    assert is_successful_completed_run_dir(str(run_dir))[0] is True
+    assert _status(run_dir)["status"] == "success"
+    assert _status(run_dir)["errors"] == []
+
+    stderr = capsys.readouterr().err
+    assert "DeprecationWarning" in stderr
