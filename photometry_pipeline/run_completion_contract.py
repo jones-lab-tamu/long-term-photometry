@@ -934,7 +934,31 @@ def _correction_completion_error_for_analysis(
                         or dff.size != n
                     ):
                         return f"ROI {roi!r} session {cache_id} canonical dataset shapes disagree"
-                    if not np.all(np.isfinite(time_sec)) or time_sec[0] != 0.0:
+                    if not np.all(np.isfinite(time_sec)) or time_sec[0] < 0.0:
+                        return f"ROI {roi!r} session {cache_id} has invalid canonical time identity"
+                    # Canonical time origin is not universally 0.0: RWD's
+                    # strict grid (io.adapters._resample_strict) always
+                    # starts at sample index 0 by construction, but NPM's
+                    # strict grid (io.adapters._resolve_npm_strict_grid) is
+                    # anchored to the UV/signal overlap origin and is
+                    # "intentionally not re-zeroed to inner_start: staggered
+                    # streams may therefore produce a first output time
+                    # greater than zero" (see that function's own docstring
+                    # comment). Both formats' real construction algorithms
+                    # guarantee the first sample lands exactly on the
+                    # target-rate grid (an integer multiple of 1/fs_hz), so
+                    # that -- not a hardcoded zero -- is the genuine
+                    # format-neutral invariant to verify here.
+                    fs_attr = group.attrs.get("fs_hz")
+                    try:
+                        fs_val = float(fs_attr)
+                    except (TypeError, ValueError):
+                        fs_val = float("nan")
+                    if not math.isfinite(fs_val) or fs_val <= 0.0:
+                        return f"ROI {roi!r} session {cache_id} has invalid canonical time identity"
+                    samples_from_origin = float(time_sec[0]) * fs_val
+                    nearest_sample = round(samples_from_origin)
+                    if nearest_sample < 0 or abs(samples_from_origin - nearest_sample) > 1e-6:
                         return f"ROI {roi!r} session {cache_id} has invalid canonical time identity"
                     if n > 1 and not np.all(np.diff(time_sec) > 0):
                         return f"ROI {roi!r} session {cache_id} time is not strictly increasing"

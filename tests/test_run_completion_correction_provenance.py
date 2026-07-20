@@ -918,29 +918,204 @@ def test_completion_verifier_rejects_one_corrupt_native_component(
     assert expected.lower() in error.lower()
 
 
-def test_completion_verifier_rejects_non_zero_canonical_time_origin(native_run, tmp_path):
-    """Focused regression for the exact real-world discovered failure
-    predicate (guided_run_20260720T181438506426Z_1edeecfc21c6): a phasic
-    cache chunk whose canonical time_sec does not start at exactly 0.0 (as
-    the real preserved NPM run's resampled chunk_0 did, at 0.02s -- one
-    full sample period, not 0.0) is correctly refused by the terminal
-    completion verifier with "invalid canonical time identity", reproducing
-    the real production predicate against a real native cache rather than a
-    synthetic one."""
+def test_completion_verifier_accepts_grid_aligned_nonzero_canonical_time_origin(
+    native_run, tmp_path
+):
+    """The real production predicate this once was
+    (guided_run_20260720T181438506426Z_1edeecfc21c6): NPM's strict grid
+    (io.adapters._resolve_npm_strict_grid) is anchored to the UV/signal
+    overlap origin and is "intentionally not re-zeroed to inner_start:
+    staggered streams may therefore produce a first output time greater
+    than zero" -- the real preserved run's chunk_0 legitimately started at
+    0.02s (one full sample period at its real 50 Hz target rate), not
+    0.0s. A canonical time_sec that starts at a *grid-aligned*, non-negative
+    offset (an exact integer multiple of 1/fs_hz) must be accepted, not
+    refused -- the completion verifier's genuine invariant is grid
+    alignment, not a hardcoded zero."""
     analysis, mode = native_run
-    root = _root_for_case(tmp_path, analysis, "nonzero_time_origin")
+    root = _root_for_case(tmp_path, analysis, "grid_aligned_nonzero_origin")
+    cache_path = root / "_analysis" / "phasic_out" / "phasic_trace_cache.h5"
+    with h5py.File(cache_path, "r+") as handle:
+        group = handle["roi/Region0/chunk_0"]
+        fs = float(group.attrs["fs_hz"])
+        time_sec = group["time_sec"][()]
+        time_sec = time_sec + (1.0 / fs)  # exactly one sample period, grid-aligned
+        group["time_sec"][...] = time_sec
+    error = correction_completion_error(str(root), mode)
+    assert error == "", error
+
+
+def test_completion_verifier_rejects_non_grid_aligned_canonical_time_origin(
+    native_run, tmp_path
+):
+    """A canonical time_sec[0] that is not an exact multiple of 1/fs_hz --
+    i.e. not a real sample the strict grid construction could ever produce
+    -- is still correctly refused."""
+    analysis, mode = native_run
+    root = _root_for_case(tmp_path, analysis, "non_grid_aligned_origin")
     _write_terminal_set(root, mode)
     cache_path = root / "_analysis" / "phasic_out" / "phasic_trace_cache.h5"
     with h5py.File(cache_path, "r+") as handle:
         group = handle["roi/Region0/chunk_0"]
+        fs = float(group.attrs["fs_hz"])
         time_sec = group["time_sec"][()]
-        time_sec = time_sec + 0.02
+        # Half a sample period -- not an integer multiple of 1/fs_hz.
+        time_sec = time_sec + (0.5 / fs)
         group["time_sec"][...] = time_sec
     error = correction_completion_error(str(root), mode)
     assert "invalid canonical time identity" in error
     assert "Region0" in error
     _write_terminal_set(root, mode)
     assert classify_run_terminal_state(str(root)).state == TERMINAL_CORRUPTED
+
+
+def test_completion_verifier_rejects_negative_canonical_time_origin(
+    native_run, tmp_path
+):
+    """A negative canonical time origin is never valid for either format's
+    construction algorithm and must still be refused."""
+    analysis, mode = native_run
+    root = _root_for_case(tmp_path, analysis, "negative_origin")
+    _write_terminal_set(root, mode)
+    cache_path = root / "_analysis" / "phasic_out" / "phasic_trace_cache.h5"
+    with h5py.File(cache_path, "r+") as handle:
+        group = handle["roi/Region0/chunk_0"]
+        fs = float(group.attrs["fs_hz"])
+        time_sec = group["time_sec"][()]
+        time_sec = time_sec - (1.0 / fs)
+        group["time_sec"][...] = time_sec
+    error = correction_completion_error(str(root), mode)
+    assert "invalid canonical time identity" in error
+    assert "Region0" in error
+    _write_terminal_set(root, mode)
+    assert classify_run_terminal_state(str(root)).state == TERMINAL_CORRUPTED
+
+
+def test_completion_verifier_rejects_missing_fs_hz_attr_for_time_origin_check(
+    native_run, tmp_path
+):
+    """A cache chunk missing the fs_hz attribute the grid-alignment check
+    depends on must fail closed, not silently skip verification."""
+    analysis, mode = native_run
+    root = _root_for_case(tmp_path, analysis, "missing_fs_hz")
+    _write_terminal_set(root, mode)
+    cache_path = root / "_analysis" / "phasic_out" / "phasic_trace_cache.h5"
+    with h5py.File(cache_path, "r+") as handle:
+        group = handle["roi/Region0/chunk_0"]
+        del group.attrs["fs_hz"]
+    error = correction_completion_error(str(root), mode)
+    assert "invalid canonical time identity" in error
+
+
+def _write_npm_staggered_source(path: Path, *, n_pairs: int = 201, dt: float = 0.1) -> None:
+    """A real-shaped NPM source with staggered UV/SIG timestamps: SIG runs
+    0.03s (less than one full sample period) ahead of the corresponding UV
+    sample, mirroring the real production dataset's own stagger (SIG
+    started 0.016672s before UV in guided_run_20260720T181438506426Z_...).
+    This is the exact condition that makes UV define the overlap origin
+    while SIG's first in-window sample lands at a small positive offset,
+    producing a grid-aligned but nonzero canonical time_sec[0]."""
+    rows = []
+    frame = 0
+    base = 1000.0
+    for i in range(n_pairs):
+        uv_t = base + i * dt
+        sig_t = base + i * dt - 0.03
+        phase = 0.2 * i
+        rows.append((frame, uv_t, 1, 2.0 + 0.15 * np.sin(phase), 1.5 + 0.12 * np.cos(phase + 0.3)))
+        frame += 1
+        rows.append((frame, sig_t, 2, 5.0 + 1.1 * np.sin(phase + 0.1), 4.0 + 0.9 * np.cos(phase + 0.4)))
+        frame += 1
+    # SIG rows are timestamped earlier than their paired UV row but written
+    # in acquisition (frame) order, exactly like the real interleaved NPM
+    # vendor format -- sort by timestamp is not assumed by the adapter.
+    lines = ["FrameCounter,Timestamp,LedState,Region0G,Region1G"]
+    for frame_counter, timestamp, led_state, r0, r1 in rows:
+        lines.append(f"{frame_counter},{timestamp},{led_state},{r0},{r1}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@pytest.fixture
+def npm_native_run(tmp_path):
+    source = tmp_path / "npm_input" / "photometryData2025-03-05T15_37_44.csv"
+    _write_npm_staggered_source(source)
+    cfg = Config(
+        target_fs_hz=10.0,
+        chunk_duration_sec=20.0,
+        npm_time_axis="system_timestamp",
+        npm_system_ts_col="Timestamp",
+        npm_computer_ts_col="ComputerTimestamp",
+        npm_led_col="LedState",
+        npm_region_prefix="Region",
+        npm_region_suffix="G",
+        allow_partial_final_chunk=False,
+        adapter_value_nan_policy="strict",
+        timestamp_cv_max=0.05,
+        lowpass_hz=2.0,
+        filter_order=2,
+        window_sec=10.0,
+        min_samples_per_window=10,
+        signal_only_f0_min_window_samples=21,
+    )
+    analysis = tmp_path / "npm_analysis"
+    Pipeline(cfg, mode="phasic", per_roi_correction=_mixed_map()).run(
+        str(source.parent), str(analysis), force_format="npm", recursive=False
+    )
+    mode = normalize_run_mode(
+        run_profile="tuning_prep",
+        run_type="full",
+        acquisition_mode="intermittent",
+        traces_only=False,
+        phasic_analysis=True,
+        tonic_analysis=False,
+        feature_extraction_ran=True,
+        deliverable_profile=PROFILE_TUNING_PREP,
+        expected_rois=["Region0", "Region1"],
+        chunked_input_processing=True,
+        shared_input_manifest=False,
+    )
+    return analysis, mode, cfg
+
+
+def test_real_staggered_npm_cache_has_grid_aligned_nonzero_origin_and_is_accepted(
+    npm_native_run, tmp_path
+):
+    """End-to-end numerical/temporal equivalence proof with a real-shaped,
+    staggered NPM fixture (not RWD): the real io.adapters NPM strict-grid
+    path produces a genuinely nonzero, grid-aligned canonical time_sec[0]
+    for this fixture, exactly as it does for the real preserved production
+    dataset, and the repaired completion verifier accepts it -- proving the
+    repair and the real NPM adapter path agree end to end, not merely in a
+    hand-constructed HDF5 fixture."""
+    analysis, mode, cfg = npm_native_run
+    root = _root_for_case(tmp_path, analysis, "npm_staggered")
+    cache_path = root / "_analysis" / "phasic_out" / "phasic_trace_cache.h5"
+
+    fs = cfg.target_fs_hz
+    with h5py.File(cache_path, "r") as handle:
+        for roi in ("Region0", "Region1"):
+            group = handle[f"roi/{roi}/chunk_0"]
+            time_sec = np.asarray(group["time_sec"][()])
+            sig_raw = np.asarray(group["sig_raw"][()])
+            uv_raw = np.asarray(group["uv_raw"][()])
+
+            # The genuine repro of the real bug: nonzero, but grid-aligned.
+            assert time_sec[0] > 0.0
+            samples_from_origin = time_sec[0] * fs
+            assert abs(samples_from_origin - round(samples_from_origin)) < 1e-9
+
+            # Sample spacing is exactly 1/target_fs_hz throughout.
+            np.testing.assert_allclose(np.diff(time_sec), 1.0 / fs, atol=1e-9)
+
+            # No missing/duplicated samples; shapes agree.
+            assert sig_raw.shape == time_sec.shape
+            assert uv_raw.shape == time_sec.shape
+            assert np.all(np.isfinite(sig_raw))
+            assert np.all(np.isfinite(uv_raw))
+
+    error = correction_completion_error(str(root), mode)
+    assert error == "", error
 
 
 def test_completion_verifier_rejects_requested_consumed_mismatch(native_run, tmp_path):
