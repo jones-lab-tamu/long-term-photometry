@@ -2473,6 +2473,14 @@ class MainWindow(QMainWindow):
         self._guided_completed_review_load_thread = None
         self._guided_completed_review_load_worker = None
         self._guided_completed_review_load_path = ""
+        self._guided_start_open_results_loading = False
+        self._guided_start_open_results_thread = None
+        self._guided_start_open_results_worker = None
+        self._guided_start_open_results_path = ""
+        self._guided_start_open_results_selected_path = ""
+        self._accepted_completed_review_path = ""
+        self._accepted_completed_review_overview = None
+        self._guided_compact_review_defer_diagnostics = False
         self._guided_npm_launch_runtime = None
         self._guided_npm_run_worker_thread = None
         self._guided_npm_run_worker = None
@@ -2601,6 +2609,14 @@ class MainWindow(QMainWindow):
         self._guided_start_open_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._make_guided_widget_shrinkable(self._guided_start_open_status_label)
         open_layout.addWidget(self._guided_start_open_status_label)
+        self._guided_start_open_results_progress = QProgressBar()
+        self._guided_start_open_results_progress.setObjectName(
+            "guidedStartOpenResultsProgress"
+        )
+        self._guided_start_open_results_progress.setRange(0, 0)
+        self._guided_start_open_results_progress.setTextVisible(False)
+        self._guided_start_open_results_progress.setVisible(False)
+        open_layout.addWidget(self._guided_start_open_results_progress)
         self._guided_start_open_results_btn = QPushButton("Open Results...")
         self._guided_start_open_results_btn.setObjectName("guidedStartOpenResultsButton")
         self._guided_start_open_results_btn.clicked.connect(self._on_guided_start_open_results)
@@ -3576,10 +3592,16 @@ class MainWindow(QMainWindow):
         mode = getattr(self, "_guided_workflow_mode", "start")
         input_dir = self._input_dir.text().strip() if hasattr(self, "_input_dir") else ""
         run_dir = os.path.realpath((self._current_run_dir or "").strip())
+        accepted_overview = self._accepted_completed_review_for(run_dir)
         has_loaded_results = (
-            hasattr(self, "_report_viewer")
-            and bool(self._report_viewer.has_loaded_results())
-            and bool(run_dir)
+            bool(run_dir)
+            and bool(
+                accepted_overview
+                or (
+                    hasattr(self, "_report_viewer")
+                    and self._report_viewer.has_loaded_results()
+                )
+            )
         )
         if hasattr(self, "_guided_mode_banner_label"):
             if mode == "new_analysis":
@@ -3645,10 +3667,16 @@ class MainWindow(QMainWindow):
             return
         input_dir = self._input_dir.text().strip() if hasattr(self, "_input_dir") else ""
         run_dir = os.path.realpath((self._current_run_dir or "").strip())
+        accepted_overview = self._accepted_completed_review_for(run_dir)
         has_loaded_results = (
-            hasattr(self, "_report_viewer")
-            and bool(self._report_viewer.has_loaded_results())
-            and bool(run_dir)
+            bool(run_dir)
+            and bool(
+                accepted_overview
+                or (
+                    hasattr(self, "_report_viewer")
+                    and self._report_viewer.has_loaded_results()
+                )
+            )
         )
         lines = []
         mode = getattr(self, "_guided_workflow_mode", "start")
@@ -3708,6 +3736,14 @@ class MainWindow(QMainWindow):
                 self._set_guided_workflow_mode("new_analysis")
         self._guided_workflow_stack.setCurrentIndex(idx)
         self._refresh_guided_mode_display()
+        if (
+            GUIDED_WORKFLOW_STEPS[idx] == "Correction approach"
+            and getattr(
+                self, "_guided_compact_review_defer_diagnostics", False
+            )
+        ):
+            self._guided_compact_review_defer_diagnostics = False
+            self._refresh_guided_diagnostics_panel()
 
     def _on_guided_start_setup_new_analysis(self) -> None:
         starting_fresh = (
@@ -3721,14 +3757,144 @@ class MainWindow(QMainWindow):
         self._guided_workflow_stepper.setCurrentRow(idx)
 
     def _on_guided_start_open_results(self) -> None:
-        loaded = self._prompt_open_completed_results()
-        if loaded:
-            self._set_guided_workflow_mode("open_results")
-            self._reach_guided_step("Correction approach")
-            self._refresh_guided_start_panel()
-            self._refresh_guided_diagnostics_panel()
-            idx = self._guided_step_index("Correction approach")
-            self._guided_workflow_stepper.setCurrentRow(idx)
+        if getattr(self, "_guided_start_open_results_loading", False):
+            return
+        current = (self._current_run_dir or "").strip()
+        output = self._output_dir.text().strip()
+        start_dir = (
+            output
+            if output and os.path.isdir(output)
+            else current if current and os.path.isdir(current) else ""
+        )
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select Completed Pipeline Run Folder",
+            start_dir,
+        )
+        if not selected:
+            return
+
+        selected = os.path.realpath(str(selected))
+        self._guided_start_open_results_selected_path = selected
+        if self._accepted_completed_review_path != selected:
+            self._accepted_completed_review_path = ""
+            self._accepted_completed_review_overview = None
+
+        thread = QThread(self)
+        worker = _GuidedCompletedReviewLoadWorker(selected)
+        worker.moveToThread(thread)
+        self._guided_start_open_results_path = selected
+        self._guided_start_open_results_thread = thread
+        self._guided_start_open_results_worker = worker
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._on_guided_start_open_results_succeeded)
+        worker.failed.connect(self._on_guided_start_open_results_failed)
+        worker.succeeded.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.succeeded.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._cleanup_guided_start_open_results_loader)
+        self._set_guided_start_open_results_loading(True)
+        thread.start()
+
+    def _set_guided_start_open_results_loading(self, loading: bool) -> None:
+        self._guided_start_open_results_loading = bool(loading)
+        button = getattr(self, "_guided_start_open_results_btn", None)
+        if button is not None:
+            button.setEnabled(not loading)
+            button.setText("Opening completed run..." if loading else "Open Results...")
+        progress = getattr(self, "_guided_start_open_results_progress", None)
+        if progress is not None:
+            progress.setVisible(bool(loading))
+        if loading and hasattr(self, "_guided_start_open_status_label"):
+            selected = self._guided_start_open_results_selected_path
+            self._guided_start_open_status_label.setText(
+                f"Opening completed run...\n{selected}"
+            )
+            self._guided_start_open_status_label.setToolTip(selected)
+        self._update_button_states()
+
+    def _on_guided_start_open_results_succeeded(
+        self, overview: dict[str, object]
+    ) -> None:
+        selected = str(self._guided_start_open_results_path or "")
+        guided_viewer = getattr(self, "_guided_report_viewer", None)
+        loaded = bool(
+            selected
+            and guided_viewer is not None
+            and guided_viewer.load_report(
+                selected, review_overview=dict(overview)
+            )
+        )
+        if not loaded:
+            technical_reason = (
+                guided_viewer._status_label.text()
+                if guided_viewer is not None
+                else "Guided Review viewer is unavailable."
+            )
+            self._on_guided_start_open_results_failed(technical_reason)
+            return
+
+        self._current_run_dir = selected
+        self._accepted_completed_review_path = os.path.realpath(selected)
+        self._accepted_completed_review_overview = dict(overview)
+        self._guided_compact_review_defer_diagnostics = True
+        self._set_guided_start_open_results_loading(False)
+        self._set_guided_workflow_mode("open_results")
+        self._reach_guided_step("Review")
+        self._guided_workflow_stepper.setCurrentRow(
+            self._guided_step_index("Review")
+        )
+        self._refresh_guided_start_panel()
+        self._append_run_log(
+            f"Completed run opened through compact Review: {selected}"
+        )
+
+    def _on_guided_start_open_results_failed(self, message: str) -> None:
+        selected = str(
+            self._guided_start_open_results_path
+            or self._guided_start_open_results_selected_path
+            or ""
+        )
+        self._set_guided_start_open_results_loading(False)
+        self._append_run_log(
+            f"Compact completed-run open failed for {selected}: {message}"
+        )
+        self._set_guided_workflow_mode("start")
+        self._guided_compact_review_defer_diagnostics = False
+        self._guided_workflow_stepper.setCurrentRow(
+            self._guided_step_index("Start")
+        )
+        if hasattr(self, "_guided_start_open_status_label"):
+            self._guided_start_open_status_label.setText(
+                "This completed run could not be opened.\n"
+                f"{selected}\n"
+                "The run was not changed. Choose another completed run or "
+                "keep the folder available for troubleshooting."
+            )
+            self._guided_start_open_status_label.setToolTip(selected)
+
+    def _cleanup_guided_start_open_results_loader(self) -> None:
+        self._guided_start_open_results_thread = None
+        self._guided_start_open_results_worker = None
+        self._guided_start_open_results_path = ""
+
+    def _accepted_completed_review_for(
+        self, run_dir: str
+    ) -> dict[str, object] | None:
+        selected = os.path.realpath(str(run_dir or "").strip())
+        accepted = str(
+            getattr(self, "_accepted_completed_review_path", "") or ""
+        )
+        overview = getattr(self, "_accepted_completed_review_overview", None)
+        if selected and accepted == selected and isinstance(overview, dict):
+            return overview
+        if accepted and accepted != selected:
+            self._accepted_completed_review_path = ""
+            self._accepted_completed_review_overview = None
+            self._guided_compact_review_defer_diagnostics = False
+        return None
 
     def _on_guided_switch_to_new_analysis_setup(self) -> None:
         self._set_guided_workflow_mode("new_analysis")
@@ -4449,6 +4615,12 @@ class MainWindow(QMainWindow):
         if review_thread is not None and review_thread.isRunning():
             review_thread.quit()
             review_thread.wait()
+        start_results_thread = getattr(
+            self, "_guided_start_open_results_thread", None
+        )
+        if start_results_thread is not None and start_results_thread.isRunning():
+            start_results_thread.quit()
+            start_results_thread.wait()
         super().closeEvent(event)
 
     def _on_guided_recording_timing_user_edit(self, _text: str) -> None:
@@ -5753,14 +5925,21 @@ class MainWindow(QMainWindow):
         if getattr(self, "_guided_workflow_mode", "start") == "new_analysis":
             return {"status": "not_generated", "run_dir": "", "artifacts": []}
         run_dir = os.path.realpath((self._current_run_dir or "").strip())
-        has_loaded_results = (
-            hasattr(self, "_report_viewer")
-            and bool(self._report_viewer.has_loaded_results())
+        accepted_overview = self._accepted_completed_review_for(run_dir)
+        has_loaded_results = bool(
+            accepted_overview
+            or (
+                hasattr(self, "_report_viewer")
+                and self._report_viewer.has_loaded_results()
+            )
         )
         if not has_loaded_results or not run_dir or not os.path.isdir(run_dir):
             return {"status": "not_generated", "run_dir": "", "artifacts": []}
 
-        completed, evidence = is_successful_completed_run_dir(run_dir)
+        if accepted_overview is not None:
+            completed, evidence = True, "accepted compact Review overview"
+        else:
+            completed, evidence = is_successful_completed_run_dir(run_dir)
         if not completed:
             return {
                 "status": "unavailable",
@@ -8193,8 +8372,30 @@ class MainWindow(QMainWindow):
                 for category, name, path in artifacts:
                     lines.append(f"- {category}: {name} ({path})")
                 self._guided_diagnostics_completed_run_label.setText("\n".join(lines))
-        self._refresh_guided_correction_preview_panel(artifact_state)
-        self._refresh_guided_signal_f0_panel(artifact_state)
+        if getattr(self, "_guided_compact_review_defer_diagnostics", False):
+            with (
+                QSignalBlocker(self._guided_preview_roi_combo),
+                QSignalBlocker(self._guided_preview_chunk_combo),
+                QSignalBlocker(self._guided_signal_f0_roi_combo),
+                QSignalBlocker(self._guided_signal_f0_chunk_combo),
+            ):
+                self._guided_preview_roi_combo.clear()
+                self._guided_preview_chunk_combo.clear()
+                self._guided_signal_f0_roi_combo.clear()
+                self._guided_signal_f0_chunk_combo.clear()
+            self._guided_preview_source_ok = False
+            self._guided_signal_f0_source_ok = False
+            self._guided_preview_source_status_label.setText(
+                "Open Correction approach to choose completed-run diagnostic evidence."
+            )
+            self._guided_signal_f0_source_status_label.setText(
+                "Open Correction approach to choose completed-run diagnostic evidence."
+            )
+            self._refresh_guided_preview_enablement()
+            self._refresh_guided_signal_f0_enablement()
+        else:
+            self._refresh_guided_correction_preview_panel(artifact_state)
+            self._refresh_guided_signal_f0_panel(artifact_state)
         if new_analysis:
             for label_name in (
                 "_guided_preview_status_label",
@@ -10298,6 +10499,17 @@ class MainWindow(QMainWindow):
                                 "diagnostic cache; this is not final production "
                                 "analysis."
                             )
+        elif run_dir and getattr(
+            self, "_guided_compact_review_defer_diagnostics", False
+        ):
+            overview = self._accepted_completed_review_for(run_dir) or {}
+            rois = [
+                str(roi) for roi in overview.get("included_rois", ())
+            ]
+            reason = (
+                "Open Correction approach to choose completed-run strategy "
+                "evidence."
+            )
         elif run_dir:
             source = resolve_completed_run_preview_source(run_dir)
             if source.ok:
@@ -20622,7 +20834,16 @@ class MainWindow(QMainWindow):
             )
             self._refresh_dff_dayplot_rerender_availability()
             return
-        is_successful_complete, evidence = is_successful_completed_run_dir(run_dir)
+        accepted_overview = self._accepted_completed_review_for(run_dir)
+        if accepted_overview is not None:
+            is_successful_complete, evidence = (
+                True,
+                "accepted compact Review overview",
+            )
+        else:
+            is_successful_complete, evidence = is_successful_completed_run_dir(
+                run_dir
+            )
         if not is_successful_complete:
             reason = (
                 "Tuning unavailable: selected run directory is not confirmed as a successful completed run."
@@ -25989,7 +26210,11 @@ class MainWindow(QMainWindow):
         run_dir = (self._current_run_dir or "").strip()
         if not run_dir or not os.path.isdir(run_dir):
             return False, "No completed run directory is active."
-        ok, evidence = is_successful_completed_run_dir(run_dir)
+        accepted_overview = self._accepted_completed_review_for(run_dir)
+        if accepted_overview is not None:
+            ok, evidence = True, "accepted compact Review overview"
+        else:
+            ok, evidence = is_successful_completed_run_dir(run_dir)
         if not ok:
             return False, (
                 "Selected run directory is not confirmed as a successful completed run "
@@ -27639,7 +27864,14 @@ class MainWindow(QMainWindow):
         # Open Results is a browse action.  It should be available whenever
         # no validation/run subprocess is active, independent of current paths
         # or previous run state.
-        self._open_results_btn.setEnabled(bool(not running))
+        opening_results = bool(
+            getattr(self, "_guided_start_open_results_loading", False)
+        )
+        self._open_results_btn.setEnabled(bool(not running and not opening_results))
+        if hasattr(self, "_guided_start_open_results_btn"):
+            self._guided_start_open_results_btn.setEnabled(
+                bool(not running and not opening_results)
+            )
         self._batch_run_btn.setEnabled(bool(not running))
 
         # Open Run Folder: enabled when done and run_dir exists

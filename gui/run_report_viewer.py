@@ -577,8 +577,10 @@ class RunReportViewer(QWidget):
             self._region_combo.setCurrentIndex(0)
             self._on_region_changed(0)
         elif self._completed_review_overview:
+            self._region_combo.blockSignals(True)
             self._region_combo.insertItem(0, "Choose an ROI to inspect")
             self._region_combo.setCurrentIndex(0)
+            self._region_combo.blockSignals(False)
             self._show_no_image(
                 "Choose an ROI to inspect its available review images."
             )

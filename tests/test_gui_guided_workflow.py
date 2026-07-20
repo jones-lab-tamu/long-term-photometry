@@ -486,37 +486,44 @@ def test_guided_steps_one_through_four_use_reached_navigation_contract(
     )
 
 
-def test_guided_start_open_results_uses_shared_loader_and_navigates_to_diagnostics(
+def _wait_for_guided_results_open(window, timeout_ms=3000):
+    elapsed = 0
+    while window._guided_start_open_results_loading and elapsed < timeout_ms:
+        QTest.qWait(10)
+        elapsed += 10
+    assert window._guided_start_open_results_loading is False
+
+
+def test_guided_start_open_results_uses_compact_worker_and_navigates_to_review(
     window, tmp_path, monkeypatch
 ):
     run_dir = _make_preview_completed_run(tmp_path)
     raw_input = tmp_path / "raw_input"
     raw_input.mkdir()
     window._guided_input_dir_edit.setText(str(raw_input))
-    calls = {"open": 0}
-
-    def _fake_open(path):
-        calls["open"] += 1
-        assert path == str(run_dir)
-        window._current_run_dir = str(run_dir)
-        return True
-
     monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_args: str(run_dir))
-    monkeypatch.setattr(window, "_open_completed_results_dir", _fake_open)
+    monkeypatch.setattr(
+        window,
+        "_open_completed_results_dir",
+        lambda *_args: pytest.fail("Start-page open used the eager loader"),
+    )
 
     window._guided_workflow_stepper.setCurrentRow(0)
     window._guided_start_open_results_btn.click()
+    assert window._guided_start_open_results_loading is True
+    assert window._guided_start_open_results_btn.isEnabled() is False
+    _wait_for_guided_results_open(window)
 
-    assert calls["open"] == 1
     assert window._guided_workflow_mode == "open_results"
-    assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepCorrectionApproach"
+    assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepReview"
+    assert window._guided_report_viewer.has_loaded_results() is True
     assert window._guided_mode_banner_label.text().startswith("Mode: Open Results")
     assert "Raw input setup unchanged" in window._guided_mode_banner_label.text()
     assert window._guided_input_dir_edit.text() == str(raw_input)
     assert window._input_dir.text() == str(raw_input)
 
 
-def test_guided_start_open_results_populates_diagnostics_without_overloading_input(
+def test_guided_start_open_results_defers_diagnostic_cache_until_selected(
     window, tmp_path, monkeypatch
 ):
     run_dir = _make_preview_completed_run(tmp_path)
@@ -537,19 +544,21 @@ def test_guided_start_open_results_populates_diagnostics_without_overloading_inp
     )
 
     window._guided_start_open_results_btn.click()
+    _wait_for_guided_results_open(window)
 
-    assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepCorrectionApproach"
+    assert window._guided_workflow_stack.currentWidget().objectName() == "guidedStepReview"
     assert str(run_dir) in window._guided_diagnostics_completed_run_label.text()
-    assert [window._guided_preview_roi_combo.itemText(i) for i in range(window._guided_preview_roi_combo.count())] == [
-        "CH1",
-        "CH2",
-    ]
-    assert [window._guided_signal_f0_roi_combo.itemText(i) for i in range(window._guided_signal_f0_roi_combo.count())] == [
-        "CH1",
-        "CH2",
-    ]
-    assert window._guided_preview_generate_btn.isEnabled() is True
-    assert window._guided_signal_f0_generate_btn.isEnabled() is True
+    assert window._guided_preview_roi_combo.count() == 0
+    assert window._guided_signal_f0_roi_combo.count() == 0
+    assert window._guided_preview_generate_btn.isEnabled() is False
+    assert window._guided_signal_f0_generate_btn.isEnabled() is False
+    window._guided_workflow_stepper.setCurrentRow(
+        list(GUIDED_WORKFLOW_STEPS).index("Correction approach")
+    )
+    assert [
+        window._guided_preview_roi_combo.itemText(i)
+        for i in range(window._guided_preview_roi_combo.count())
+    ] == ["CH1", "CH2"]
     assert calls == {"preview": 0, "signal": 0}
     assert window._guided_workflow_mode == "open_results"
     assert window._guided_mode_banner_label.text().startswith("Mode: Open Results")
@@ -567,6 +576,7 @@ def test_guided_open_results_mode_marks_setup_steps_skipped_and_can_switch_back(
     monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_args: str(run_dir))
 
     window._guided_start_open_results_btn.click()
+    _wait_for_guided_results_open(window)
 
     for step_name, object_name in [
         ("Select data", "guidedStepSelectData"),

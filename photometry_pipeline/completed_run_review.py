@@ -1108,6 +1108,61 @@ def load_completed_review_overview(run_dir: str | Path) -> dict[str, Any]:
     completion = manifest.get("completion", {})
     status_completion = status.get("completion", {})
     report_completion = top_report.get("completion_contract", {})
+    declares_current_contract = bool(
+        status_completion.get("completion_contract_version")
+        or completion.get("completion_contract_version")
+        or report_completion.get("contract_version")
+    )
+    if not declares_current_contract:
+        classification = classify_run_terminal_state(str(resolved))
+        if not classification.is_success or not classification.is_legacy:
+            raise CompletedRunReviewError(
+                "This completed result could not be verified as a successful "
+                f"legacy run ({classification.reason})."
+            )
+        enabled = [
+            branch
+            for branch in ("tonic", "phasic")
+            if (
+                resolved
+                / "_analysis"
+                / f"{branch}_out"
+                / f"{branch}_trace_cache.h5"
+            ).is_file()
+        ]
+        included_rois = [
+            path.name
+            for path in sorted(resolved.iterdir(), key=lambda item: item.name)
+            if path.is_dir()
+            and path.name != "_analysis"
+            and any(
+                (path / child).is_dir()
+                for child in ("summary", "tables", "day_plots")
+            )
+        ]
+        if not enabled or not included_rois:
+            raise CompletedRunReviewError(
+                "This legacy completed result has no reviewable analysis "
+                "branch or ROI deliverables."
+            )
+        return {
+            "run_dir": str(resolved),
+            "terminal_state": classification.state,
+            "format": "",
+            "acquisition_mode": "",
+            "analysis_branches": enabled,
+            "included_rois": included_rois,
+            "excluded_rois": [],
+            "session_counts": {
+                "total": 0,
+                "processed": 0,
+                "missing": 0,
+                "excluded": 0,
+            },
+            "requested_by_roi": {},
+            "feature_settings_by_roi": {},
+            "full_resolution_traces_loaded": False,
+        }
     run_id = str(status.get("run_id", ""))
     manifest_run_id = str(completion.get("run_id", ""))
     report_run_id = str(report_completion.get("run_id", ""))
